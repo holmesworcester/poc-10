@@ -8,7 +8,7 @@ I want to rewrite topo with clarity on:
 * realms of responsibility
 * event-based networking
 
-UDPATED:
+UPDATED:
 
 - Inbound processing is a pure function chain; admission by event id happens before context loading.
 - Queue-like work is just module-owned table rows at wait/dedupe/retry/schedule/IO boundaries.
@@ -22,59 +22,7 @@ UDPATED:
 - Timely Dataflow and Differential Dataflow are a proposal and source of ideas for Rust architecture and performance: deltas, arrangements, consolidation, frontiers, compaction, and bounded work should inform experiments without committing the kernel to those runtimes.
 - Production may physically purge deleted or TTL-expired events and rows, but only after surviving facts, labels, summaries, or high-water marks preserve any semantic truth future projections need.
 
-# Documentation quality bar
-
-Write this plan, implementation docs, and significant inline comments in the style of high-quality systems documentation: concrete, narrow, and audit-friendly. The model to emulate is Stellar Core's documentation:
-
-- Overview and component map: https://github.com/stellar/stellar-core/blob/master/docs/readme.md
-- Process and network architecture: https://github.com/stellar/stellar-core/blob/master/docs/architecture.md
-- History system design and failure behavior: https://github.com/stellar/stellar-core/blob/master/docs/history.md
-- BucketList mental model, formal model, examples, and cost analysis: https://github.com/stellar/stellar-core/blob/master/src/bucket/BucketListBase.h
-- LedgerManager thread/data-flow diagram and invariant `LCL <= A <= Q <= H`: https://github.com/stellar/stellar-core/blob/master/src/ledger/LedgerManager.h
-- OverlayManager responsibility and message taxonomy: https://github.com/stellar/stellar-core/blob/master/src/overlay/OverlayManager.h
-- SCP/Herder separation between abstract protocol and application-specific driver: https://github.com/stellar/stellar-core/blob/master/src/scp/readme.md and https://github.com/stellar/stellar-core/blob/master/src/herder/readme.md
-
-For every important component, document the same surface:
-
-```
-Purpose
-Ownership / non-ownership
-Interfaces
-State
-Invariants
-Flow
-Failure / restart behavior
-Performance notes
-Testing hooks
-```
-
-Style rules:
-
-- Start with the component's responsibility, not implementation trivia.
-- Say what the component does not own.
-- Define vocabulary before relying on it.
-- Prefer data flow and lifecycle descriptions over architecture slogans.
-- State invariants explicitly, as small facts, formulas, or ordering rules.
-- Explain a mechanism first with the simplest mental model, then with the precise rule.
-- Use examples when a mechanism is subtle enough that the rule alone is easy to misread.
-- Include operational consequences: crash, restart, retry, slow peer, invalid input, and overload behavior.
-- Treat performance constraints as part of the design.
-- Link prose to concrete files, functions, tables, events, or interfaces.
-- Use inline comments only for non-obvious ownership, ordering, threading, safety, or performance rules.
-- Keep small components brief; let complexity earn length.
-
-Code-structure lessons from Stellar Core:
-
-- Source directories should mark semantic subsystem boundaries, as in Stellar's `scp`, `herder`, `overlay`, `ledger`, `bucket`, `history`, `work`, and `transactions` directories. Avoid generic dumping grounds.
-- Large runtime components should have a small public interface and a concrete implementation, following Stellar's `OverlayManager` / `OverlayManagerImpl`, `HistoryManager` / `HistoryManagerImpl`, and `Application` / `ApplicationImpl` pattern.
-- Abstract protocol machinery should be separated from application meaning. Stellar's `scp` is protocol-generic; `herder` maps slots and values onto ledgers and transaction sets. Here, negentropy is the generic comparison mechanism; sync event modules map it onto workspace roots, deps, have/need/send events, and outbox writes.
-- Managers own lifecycle, scheduling, and resource wiring. Helpers own algorithms. Do not let managers accumulate domain policy.
-- Long-running work should be represented explicitly, as Stellar does with `work/`, `catchup/*Work`, and `historywork/*Work`. Hidden background behavior should become a job, table row, or effect owner.
-- Data structures should encode workload assumptions. Stellar's BucketList is shaped around temporal churn, incremental hashing, and catchup. Here, dep-aware negentropy should be a projected incremental tree/cache, not a session-time rebuild.
-- Canonical encoding is a hard boundary. Stellar uses XDR for hashed, historical, and peer-message forms. Here, `codec.rs` produces canonical event bytes for ids, storage, projection, replay, and dedupe; connection wrapping is a separate transit layer.
-- Prefer immutable snapshots and stable ids at concurrency boundaries.
-- Keep the first concurrency model legible: one control-loop writer, one sender owner per connection, bounded work at explicit boundaries.
-- Failure behavior should be local: a failed send backs off one connection; a duplicate event is admitted once; a memory outbox can be regenerated; invalid bytes stop before event semantics.
+See appendix for documentation style rules and references.
 
 # Timely / Differential Proposal
 
@@ -136,11 +84,13 @@ src/event_modules/
     job_tick/
 ```
 
-**Per-file pattern, always.** Every event module is a directory with one file per concern (`codec.rs`, `projector.rs`, `commands.rs`, `queries.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a module is small enough that a single `.rs` file would suffice. The cost is some empty-ish files in tiny modules; the win is uniform shape across the surface, so the directories that accumulate too many files or oversized files immediately stand out as candidates for splitting or simplification. No collapsed single-file event modules.
+**Per-file pattern, always.** Every event module is a directory with one file per concern (`codec.rs`, `projector.rs`, `commands.rs`, `queries.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a module is small enough that a single `.rs` file would suffice. The cost is some empty-ish files in tiny modules; the win is that this is intentional friction. In a codebase where most code is assistant-generated, uniform shape across the surface makes accumulating logic easy to spot — files that grow disproportionately, or directories that sprout extra concerns, are the audit signal that something needs simplification or splitting. No collapsed single-file event modules.
 
-**networking** All complex networking behavior including bootstrap, connection, and sync is also implemented in event modules: commands (run by jobs) initiate activity, projectors respond to activity, and transit encryption is unwrapped into contained events. Connections are between two endpoints (daemons) and sync all data in all workspaces those two endpoints share. Each event carries its own `workspace_id`; a daemon hosts at most one instance of any given workspace, so `workspace_id` alone identifies the local processing scope and there is no separate "recorded_by".
+This rule is in conscious tension with "let complexity earn length" in the documentation quality bar (see appendix): that rule applies to *prose* in docs, this rule applies to *code structure* in event modules. Both stand.
 
-**event_pipeline** uses `event_modules` to process all Events (whether received locally-created) such that an Event set, processed in any order, results in the same State at a given time (some event types can expire).
+**networking** All complex networking behavior including bootstrap, connection, and sync is also implemented in event modules: commands (run by jobs) initiate activity, projectors respond to activity, and transit encryption is unwrapped into contained events. Connections are between two endpoints (daemons) and sync all data in all workspaces those two endpoints share. Every workspace-scoped event carries its own `workspace_id`; endpoint-scoped events (connection, intro, observed_address, self_address, prekey events) carry endpoint identity instead. A daemon hosts at most one instance of any given workspace, so for workspace-scoped events `workspace_id` alone identifies the local processing scope and there is no separate "recorded_by". See **Event Scopes** below for the full taxonomy.
+
+**event_pipeline** uses `event_modules` to process all Events (whether received or locally-created) such that an Event set, processed in any order, results in the same State at a given time (some event types can expire).
 
 **control_loop** is the single-writer runtime substrate. It claims bounded batches of table rows, dispatches to the owning event module or job module, applies returned state writes atomically, and runs external effects.
 
@@ -248,7 +198,7 @@ Traits are the module API; canonical bytes are event identity. Projectors that n
 
 **admit_event_id** consumes an event id and returns known or newly claimed. Known includes applied, blocked, rejected, and in-flight events. Duplicates record observations, call `suppress_received(id)` (see: Sync), and stop before context loading. Newly claimed ids become canonical event ids only after parse succeeds.
 
-**get_context** consumes a newly admitted Event and the relevant subset of the current State and returns a EventWithContext. A generically sufficient EventWithContext would be: 1. the Event 2. the other Events that are the consumed Event's immediate dependencies 3. every `label` for that event.
+**get_context** consumes a newly admitted Event and returns an EventWithContext. Context for `project` is just the event's declared dependencies, its labels, and network metadata (e.g. origin ip / port) — never bespoke per-event-type SQL queries against arbitrary state. A generically sufficient EventWithContext is: 1. the Event 2. the other Events that are the consumed Event's immediate dependencies 3. every `label` for that event. If a projector "needs more state," that state must arrive as a declared dependency or a label, not as an ad-hoc query. This contract is non-negotiable; see the Forking plan section for the rationale (it is the surface this fork is rejecting from poc-7).
 
 **labels** is a table whose rows are tuples of (event_id, label_type); adding a label can be a result of projection. Labels become part of context so there should be a bounded number of labels for a given event_id. "This event blocks others" can be a label. 
 
@@ -278,16 +228,27 @@ All events inserted into `events` have canonical bytes from a module `codec.rs`,
 
 ```
 durable event:
+  workspace_id: yes
   codec: yes
   signed: yes
   may be sent to peers: yes
 
+endpoint-scoped event:
+  workspace_id: NO  (carries endpoint identity instead)
+  codec: yes
+  signed: yes
+  may be sent to peers: yes
+  examples: connection, connection_prekey, connection_prekey_shared, intro,
+            observed_address, self_address
+
 endpoint-local event:
+  workspace_id: optional (e.g. negentropy/sync events name (connection_id, workspace_id))
   codec: yes
   signed: usually no
   may be sent to one endpoint/connection: yes
 
 local-only event:
+  workspace_id: usually yes
   codec: yes, if stored/projected/deduped
   signed: usually no
   may be sent to peers: no
@@ -467,7 +428,7 @@ What poc-9 throws out and replaces:
 
 Connection model follows poc-6's `events/network/` (`connection`, `connection_ack`, `intro`, `negentropy`, `self_address`, `sync_window`, etc. as canonical events). This is a **deliberate reversal** of poc-7's stance — poc-6's `SIMPLIFICATION_FOR_RUST_POC.md` §2 explicitly said "Connection/sync state is protocol/runtime state, not canonical events." poc-9 rejects that rule in favor of putting sync/connection facts through the same event pipeline as everything else.
 
-**Pipeline simplicity is non-negotiable.** Preserve the pipeline shape of this document: context for `project` is just the event's declared dependencies, its labels, and network metadata (e.g. origin ip / port) — not bespoke per-event-type SQL queries against arbitrary state. poc-7's projection-context-query adapters (one custom `context_loader` per event module) are the surface this fork is rejecting. In poc-9:
+**Pipeline simplicity is non-negotiable.** Preserve the pipeline shape of this document — see `get_context` in the Event Pipeline section for the strict contract. poc-7's projection-context-query adapters (one custom `context_loader` per event module) are the surface this fork is rejecting. To restate concretely, in poc-9:
 
 - dependencies come from schema metadata on flat fields (one mechanism for all event types),
 - labels are a small generic table `(event_id, label_type)` populated by projectors as the only cross-event signal,
@@ -669,3 +630,57 @@ Bootstrap and repair traffic uses `connection.wrap_bootstrap(remote_endpoint_id,
 If send fails, leave the `outbox` rows for retry and back off the connection sender. Dedupe remains `(connection_id, event_id)` based, not ciphertext based.
 
 The receiver still validates inner events normally after decrypting. Network sync messages can cause work to be attempted, but they cannot make invalid durable events valid.
+
+# Appendix: Documentation quality bar
+
+Write this plan, implementation docs, and significant inline comments in the style of high-quality systems documentation: concrete, narrow, and audit-friendly. The model to emulate is Stellar Core's documentation:
+
+- Overview and component map: https://github.com/stellar/stellar-core/blob/master/docs/readme.md
+- Process and network architecture: https://github.com/stellar/stellar-core/blob/master/docs/architecture.md
+- History system design and failure behavior: https://github.com/stellar/stellar-core/blob/master/docs/history.md
+- BucketList mental model, formal model, examples, and cost analysis: https://github.com/stellar/stellar-core/blob/master/src/bucket/BucketListBase.h
+- LedgerManager thread/data-flow diagram and invariant `LCL <= A <= Q <= H`: https://github.com/stellar/stellar-core/blob/master/src/ledger/LedgerManager.h
+- OverlayManager responsibility and message taxonomy: https://github.com/stellar/stellar-core/blob/master/src/overlay/OverlayManager.h
+- SCP/Herder separation between abstract protocol and application-specific driver: https://github.com/stellar/stellar-core/blob/master/src/scp/readme.md and https://github.com/stellar/stellar-core/blob/master/src/herder/readme.md
+
+For every important component, document the same surface:
+
+```
+Purpose
+Ownership / non-ownership
+Interfaces
+State
+Invariants
+Flow
+Failure / restart behavior
+Performance notes
+Testing hooks
+```
+
+Style rules:
+
+- Start with the component's responsibility, not implementation trivia.
+- Say what the component does not own.
+- Define vocabulary before relying on it.
+- Prefer data flow and lifecycle descriptions over architecture slogans.
+- State invariants explicitly, as small facts, formulas, or ordering rules.
+- Explain a mechanism first with the simplest mental model, then with the precise rule.
+- Use examples when a mechanism is subtle enough that the rule alone is easy to misread.
+- Include operational consequences: crash, restart, retry, slow peer, invalid input, and overload behavior.
+- Treat performance constraints as part of the design.
+- Link prose to concrete files, functions, tables, events, or interfaces.
+- Use inline comments only for non-obvious ownership, ordering, threading, safety, or performance rules.
+- Keep small components brief; let complexity earn length.
+
+Code-structure lessons from Stellar Core:
+
+- Source directories should mark semantic subsystem boundaries, as in Stellar's `scp`, `herder`, `overlay`, `ledger`, `bucket`, `history`, `work`, and `transactions` directories. Avoid generic dumping grounds.
+- Large runtime components should have a small public interface and a concrete implementation, following Stellar's `OverlayManager` / `OverlayManagerImpl`, `HistoryManager` / `HistoryManagerImpl`, and `Application` / `ApplicationImpl` pattern.
+- Abstract protocol machinery should be separated from application meaning. Stellar's `scp` is protocol-generic; `herder` maps slots and values onto ledgers and transaction sets. Here, negentropy is the generic comparison mechanism; sync event modules map it onto workspace roots, deps, have/need/send events, and outbox writes.
+- Managers own lifecycle, scheduling, and resource wiring. Helpers own algorithms. Do not let managers accumulate domain policy.
+- Long-running work should be represented explicitly, as Stellar does with `work/`, `catchup/*Work`, and `historywork/*Work`. Hidden background behavior should become a job, table row, or effect owner.
+- Data structures should encode workload assumptions. Stellar's BucketList is shaped around temporal churn, incremental hashing, and catchup. Here, dep-aware negentropy should be a projected incremental tree/cache, not a session-time rebuild.
+- Canonical encoding is a hard boundary. Stellar uses XDR for hashed, historical, and peer-message forms. Here, `codec.rs` produces canonical event bytes for ids, storage, projection, replay, and dedupe; connection wrapping is a separate transit layer.
+- Prefer immutable snapshots and stable ids at concurrency boundaries.
+- Keep the first concurrency model legible: one control-loop writer, one sender owner per connection, bounded work at explicit boundaries.
+- Failure behavior should be local: a failed send backs off one connection; a duplicate event is admitted once; a memory outbox can be regenerated; invalid bytes stop before event semantics.
