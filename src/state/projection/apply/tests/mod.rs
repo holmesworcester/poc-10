@@ -1,0 +1,701 @@
+use super::project_one::project_one;
+use crate::crypto::{event_id_from_base64, event_id_to_base64, hash_event, EventId};
+use crate::db::{
+    open_in_memory,
+    schema::create_tables,
+    store::{insert_event, insert_recorded_event, insert_shared_event_index_entry_if_shared},
+    timeline::EventTimeline,
+};
+use crate::event_modules::{
+    self as events, registry, EncryptedEvent, KeyRequestEvent, KeySecretEvent, KeySharedEvent,
+    MessageDeletionEvent, MessageEvent, ParsedEvent, ReactionEvent, WorkspaceEvent,
+    EVENT_TYPE_ENCRYPTED, EVENT_TYPE_MESSAGE, EVENT_TYPE_MESSAGE_DELETION, EVENT_TYPE_REACTION,
+};
+use crate::projection::decision::ProjectionDecision;
+use crate::projection::encrypted::encrypt_event_blob;
+use crate::projection::signer::sign_event_bytes;
+use crate::state::projection::create::{
+    create_event_staged, create_event_synchronous, create_signed_event_synchronous, project_event,
+    store_event_only,
+};
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use ed25519_dalek::SigningKey;
+use rusqlite::Connection;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// Wave 1: file_slice tests dropped along with the file/file_slice modules.
+// Plan.md "no scaffolding" cleanup: deletion-flow integration tests
+// removed — they validated bespoke ContextSnapshot fields (target_*,
+// deletion_intents) that no longer exist. The substrate covers the
+// new `deleted` label gate in `tests/inbound_chain_test.rs`.
+mod cascade;
+mod core_projection;
+mod encryption;
+mod identity;
+mod invite;
+mod removal_rotation;
+mod tenant;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+pub(super) fn signer_user_map() -> &'static Mutex<HashMap<EventId, EventId>> {
+    static MAP: OnceLock<Mutex<HashMap<EventId, EventId>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(super) fn register_signer_user(signer_eid: EventId, user_event_id: EventId) {
+    signer_user_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(signer_eid, user_event_id);
+}
+
+pub(super) fn user_for_signer(signer_eid: &EventId) -> EventId {
+    *signer_user_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(signer_eid)
+        .expect("missing signer->user mapping for test identity chain")
+}
+
+pub(super) const TEST_CONTENT_KEY_CREATED_AT_MS: u64 = 4242;
+
+pub(super) fn test_content_key_bytes() -> [u8; 32] {
+    [0xA5; 32]
+}
+
+pub(super) fn encrypt_test_content_blob(plaintext: &[u8]) -> ([u8; 12], Vec<u8>, [u8; 16]) {
+    let cipher = Aes256Gcm::new_from_slice(&test_content_key_bytes()).unwrap();
+    let event_hash = hash_event(plaintext);
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&event_hash[..12]);
+    let ciphertext_with_tag = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .unwrap();
+    let tag_start = ciphertext_with_tag.len() - 16;
+    let ciphertext = ciphertext_with_tag[..tag_start].to_vec();
+    let mut auth_tag = [0u8; 16];
+    auth_tag.copy_from_slice(&ciphertext_with_tag[tag_start..]);
+    (nonce, ciphertext, auth_tag)
+}
+
+pub(super) fn test_content_key_event() -> ParsedEvent {
+    ParsedEvent::KeySecret(KeySecretEvent {
+        created_at_ms: TEST_CONTENT_KEY_CREATED_AT_MS,
+        workspace_id: [0u8; 32],
+        key_bytes: test_content_key_bytes(),
+    })
+}
+
+pub(super) fn test_content_key_event_id() -> EventId {
+    hash_event(&events::encode_event(&test_content_key_event()).unwrap())
+}
+
+pub(super) fn ensure_test_content_key(conn: &Connection, recorded_by: &str) -> EventId {
+    let key_event_id = test_content_key_event_id();
+    let key_event_id_b64 = event_id_to_base64(&key_event_id);
+    let already_valid: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM valid_events WHERE peer_id = ?1 AND event_id = ?2",
+            rusqlite::params![recorded_by, &key_event_id_b64],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if already_valid {
+        return key_event_id;
+    }
+
+    let key_event = test_content_key_event();
+    let key_blob = events::encode_event(&key_event).unwrap();
+    let ts = now_ms() as i64;
+    insert_event(
+        conn,
+        &key_event_id,
+        "key_secret",
+        &key_blob,
+        crate::event_modules::ShareScope::Local,
+        key_event.created_at_ms() as i64,
+        ts,
+    )
+    .unwrap();
+    insert_recorded_event(conn, recorded_by, &key_event_id, ts, "test").unwrap();
+    let decision = project_one(conn, recorded_by, &key_event_id).unwrap();
+    assert_eq!(decision, ProjectionDecision::Valid);
+    key_event_id
+}
+
+pub(super) fn wrap_test_content_blob(conn: &Connection, recorded_by: &str, blob: &[u8]) -> Vec<u8> {
+    let type_code = match blob.first().copied() {
+        Some(type_code) => type_code,
+        None => return blob.to_vec(),
+    };
+    let Some(meta) = registry().lookup(type_code) else {
+        return blob.to_vec();
+    };
+    if meta.transport_privacy() != crate::event_modules::TransportPrivacy::RequireEncrypted {
+        return blob.to_vec();
+    }
+
+    let key_event_id = ensure_test_content_key(conn, recorded_by);
+    let (nonce, ciphertext, auth_tag) = encrypt_test_content_blob(blob);
+    let created_at_ms = events::parse_event(blob)
+        .map(|event| event.created_at_ms())
+        .unwrap_or_else(|_| now_ms());
+    let wrapper = ParsedEvent::Encrypted(EncryptedEvent {
+        created_at_ms,
+        key_event_id,
+        inner_type_code: type_code,
+        nonce,
+        ciphertext,
+        auth_tag,
+    });
+    events::encode_event(&wrapper).unwrap()
+}
+
+pub(super) fn canonical_test_event_id(
+    conn: &Connection,
+    recorded_by: &str,
+    blob: &[u8],
+) -> EventId {
+    hash_event(&wrap_test_content_blob(conn, recorded_by, blob))
+}
+
+/// Insert a blob into events + shared_event_index + recorded_events (simulating what
+/// batch_writer or create_event_synchronous does before calling project_one).
+pub(super) fn insert_event_raw(conn: &Connection, recorded_by: &str, blob: &[u8]) -> EventId {
+    let blob = wrap_test_content_blob(conn, recorded_by, blob);
+    let event_id = hash_event(&blob);
+    let ts = now_ms();
+    let type_code = blob[0];
+    let type_name = registry()
+        .lookup(type_code)
+        .map(|m| m.type_name)
+        .unwrap_or("unknown");
+
+    insert_event(
+        conn,
+        &event_id,
+        type_name,
+        &blob,
+        crate::event_modules::ShareScope::Shared,
+        ts as i64,
+        ts as i64,
+    )
+    .unwrap();
+    insert_shared_event_index_entry_if_shared(
+        conn,
+        crate::event_modules::ShareScope::Shared,
+        ts as i64,
+        &event_id,
+        "",
+    )
+    .unwrap();
+    insert_recorded_event(conn, recorded_by, &event_id, ts as i64, "test").unwrap();
+
+    event_id
+}
+
+pub(super) fn mark_valid_for_test(
+    conn: &Connection,
+    recorded_by: &str,
+    event_id: &EventId,
+    semantic_type_code: u8,
+) {
+    let eid_b64 = event_id_to_base64(event_id);
+    conn.execute(
+        "INSERT OR IGNORE INTO valid_events (peer_id, event_id, semantic_type_code)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![recorded_by, &eid_b64, i64::from(semantic_type_code)],
+    )
+    .unwrap();
+}
+
+use crate::event_modules::{
+    DeviceInviteEvent, InviteAcceptedEvent, PeerSharedEvent, TenantEvent, UserEvent,
+    UserInviteEvent,
+};
+
+/// Create a Workspace event, insert it, and mark it valid for this tenant.
+/// Returns the event_id suitable for tests that need an existing workspace row.
+pub(super) fn setup_workspace_event(conn: &Connection, recorded_by: &str) -> EventId {
+    let ws = ParsedEvent::Workspace(WorkspaceEvent {
+        created_at_ms: now_ms(),
+        workspace_id: [0xAA; 32],
+        public_key: [0xAA; 32],
+        name: "workspace".to_string(),
+    });
+    let blob = events::encode_event(&ws).unwrap();
+    let eid = insert_event_raw(conn, recorded_by, &blob);
+    mark_valid_for_test(conn, recorded_by, &eid, ws.event_type_code());
+    eid
+}
+
+pub(super) fn setup_tenant_event(conn: &Connection, recorded_by: &str) -> EventId {
+    // Stage 3.5 round-9 step 3: `tenants` is now keyed by `event_id` alone
+    // (endpoint singleton). For per-tenant test fixtures we still want each
+    // recorded_by to have its own tenant root, so dedupe via `valid_events`
+    // (recorded_by-keyed) rather than the `tenants` table itself.
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT t.event_id
+             FROM tenants t
+             JOIN valid_events ve ON ve.event_id = t.event_id
+             WHERE ve.peer_id = ?1
+             ORDER BY t.created_at ASC, t.event_id ASC
+             LIMIT 1",
+            rusqlite::params![recorded_by],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(eid_b64) = existing {
+        return event_id_from_base64(&eid_b64).expect("invalid tenants.event_id base64");
+    }
+
+    let mut rng = rand::thread_rng();
+    let peer_key = SigningKey::generate(&mut rng);
+    let tenant_event = ParsedEvent::Tenant(TenantEvent {
+        created_at_ms: now_ms(),
+        public_key: peer_key.verifying_key().to_bytes(),
+    });
+    create_event_synchronous(conn, recorded_by, &tenant_event).unwrap()
+}
+
+pub(super) fn append_invite_link_workspace_context(
+    conn: &Connection,
+    recorded_by: &str,
+    invite_event_id: EventId,
+    workspace_id: EventId,
+) {
+    let invite_event_id_b64 = event_id_to_base64(&invite_event_id);
+    let workspace_id_b64 = event_id_to_base64(&workspace_id);
+    crate::db::transport_trust::append_bootstrap_context(
+        conn,
+        recorded_by,
+        &invite_event_id_b64,
+        &workspace_id_b64,
+        "",
+        &[0xAB; 32],
+    )
+    .unwrap();
+}
+
+/// Create a minimal identity chain and return (peer_shared_event_id, signing_key).
+/// Uses the normal create helpers for the happy path so fixture signing and
+/// projection match production behavior.
+pub(super) fn make_identity_chain(conn: &Connection, recorded_by: &str) -> (EventId, SigningKey) {
+    let mut rng = rand::thread_rng();
+
+    // 1. Local tenant root
+    let tenant_eid = setup_tenant_event(conn, recorded_by);
+
+    // 2. Workspace
+    let workspace_key = SigningKey::generate(&mut rng);
+    let workspace_pub = workspace_key.verifying_key().to_bytes();
+    let net_event = ParsedEvent::Workspace(WorkspaceEvent {
+        created_at_ms: now_ms(),
+        workspace_id: workspace_pub,
+        public_key: workspace_pub,
+        name: "workspace".to_string(),
+    });
+    let net_eid = store_event_only(conn, recorded_by, &net_event).unwrap();
+
+    // 3. InviteAccepted (local, binds trust anchor)
+    let ia_event = ParsedEvent::InviteAccepted(InviteAcceptedEvent {
+        created_at_ms: now_ms(),
+        tenant_event_id: tenant_eid,
+        invite_event_id: net_eid,
+        workspace_id: net_eid,
+    });
+    create_event_synchronous(conn, recorded_by, &ia_event).unwrap();
+    project_event(conn, recorded_by, &net_eid).unwrap();
+    mark_valid_for_test(conn, recorded_by, &net_eid, net_event.event_type_code());
+
+    // 4. UserInvite (signed by workspace key)
+    let invite_key = SigningKey::generate(&mut rng);
+    let invite_pub = invite_key.verifying_key().to_bytes();
+    let uib = UserInviteEvent {
+        created_at_ms: now_ms(),
+        public_key: invite_pub,
+        workspace_id: net_eid,
+        authority_event_id: net_eid,
+        signed_by: net_eid,
+        signer_type: 1,
+        signature: [0u8; 64],
+    };
+    let uib_event = ParsedEvent::UserInvite(uib);
+    let uib_eid =
+        create_signed_event_synchronous(conn, recorded_by, &uib_event, &workspace_key).unwrap();
+
+    // 5. User (signed by invite key)
+    let user_key = SigningKey::generate(&mut rng);
+    let user_pub = user_key.verifying_key().to_bytes();
+    let ub = UserEvent {
+        created_at_ms: now_ms(),
+        workspace_id: net_eid,
+        public_key: user_pub,
+        username: "user".to_string(),
+        signed_by: uib_eid,
+        signer_type: 2,
+        signature: [0u8; 64],
+    };
+    let ub_event = ParsedEvent::User(ub);
+    let ub_eid =
+        create_signed_event_synchronous(conn, recorded_by, &ub_event, &invite_key).unwrap();
+
+    // 6. DeviceInvite (signed by user key)
+    let device_invite_key = SigningKey::generate(&mut rng);
+    let device_invite_pub = device_invite_key.verifying_key().to_bytes();
+    let dif = DeviceInviteEvent {
+        created_at_ms: now_ms(),
+        workspace_id: net_eid,
+        public_key: device_invite_pub,
+        authority_event_id: ub_eid,
+        signed_by: ub_eid,
+        signer_type: 4,
+        signature: [0u8; 64],
+    };
+    let dif_event = ParsedEvent::DeviceInvite(dif);
+    let dif_eid =
+        create_signed_event_synchronous(conn, recorded_by, &dif_event, &user_key).unwrap();
+
+    // 7. PeerShared (signed by device_invite key)
+    let peer_shared_key = SigningKey::generate(&mut rng);
+    let peer_shared_pub = peer_shared_key.verifying_key().to_bytes();
+    let psf = PeerSharedEvent {
+        created_at_ms: now_ms(),
+        workspace_id: net_eid,
+        public_key: peer_shared_pub,
+        user_event_id: ub_eid,
+        device_name: "device".to_string(),
+        signed_by: dif_eid,
+        signer_type: 3,
+        signature: [0u8; 64],
+    };
+    let psf_event = ParsedEvent::PeerShared(psf);
+    let psf_eid =
+        create_signed_event_synchronous(conn, recorded_by, &psf_event, &device_invite_key).unwrap();
+
+    register_signer_user(psf_eid, ub_eid);
+    (psf_eid, peer_shared_key)
+}
+
+/// Build a full identity chain WITHOUT inserting or projecting.
+/// Returns (signer_eid, signing_key, chain_blobs) where chain_blobs
+/// are in dependency order (Network, InviteAccepted, UserInvite, etc.).
+/// Caller must insert_event_raw + project_one each blob in order.
+/// This stays synthetic because the deferred/order tests need exact raw blobs
+/// before any create helper writes or retries projection.
+pub(super) fn build_identity_chain_deferred(
+    _recorded_by: &str,
+) -> (EventId, SigningKey, Vec<(EventId, Vec<u8>)>) {
+    let mut rng = rand::thread_rng();
+
+    // 1. Local tenant root
+    let peer_key = SigningKey::generate(&mut rng);
+    let tenant_event = ParsedEvent::Tenant(TenantEvent {
+        created_at_ms: now_ms(),
+        public_key: peer_key.verifying_key().to_bytes(),
+    });
+    let tenant_blob = events::encode_event(&tenant_event).unwrap();
+    let tenant_eid = hash_event(&tenant_blob);
+
+    // 2. Workspace
+    let workspace_key = SigningKey::generate(&mut rng);
+    let workspace_pub = workspace_key.verifying_key().to_bytes();
+    let net_event = ParsedEvent::Workspace(WorkspaceEvent {
+        created_at_ms: now_ms(),
+        workspace_id: workspace_pub,
+        public_key: workspace_pub,
+        name: "workspace".to_string(),
+    });
+    let net_blob = events::encode_event(&net_event).unwrap();
+    let net_eid = hash_event(&net_blob);
+
+    // 3. InviteAccepted
+    let ia_event = ParsedEvent::InviteAccepted(InviteAcceptedEvent {
+        created_at_ms: now_ms(),
+        tenant_event_id: tenant_eid,
+        invite_event_id: net_eid,
+        workspace_id: net_eid,
+    });
+    let ia_blob = events::encode_event(&ia_event).unwrap();
+    let ia_eid = hash_event(&ia_blob);
+
+    // 4. UserInvite (signed by workspace key)
+    let invite_key = SigningKey::generate(&mut rng);
+    let invite_pub = invite_key.verifying_key().to_bytes();
+    let uib = UserInviteEvent {
+        created_at_ms: now_ms(),
+        public_key: invite_pub,
+        workspace_id: net_eid,
+        authority_event_id: net_eid,
+        signed_by: net_eid,
+        signer_type: 1,
+        signature: [0u8; 64],
+    };
+    let uib_event = ParsedEvent::UserInvite(uib);
+    let mut uib_blob = events::encode_event(&uib_event).unwrap();
+    sign_blob(&workspace_key, &mut uib_blob);
+    let uib_eid = hash_event(&uib_blob);
+
+    // 5. User (signed by invite key)
+    let user_key = SigningKey::generate(&mut rng);
+    let user_pub = user_key.verifying_key().to_bytes();
+    let ub = UserEvent {
+        created_at_ms: now_ms(),
+        workspace_id: net_eid,
+        public_key: user_pub,
+        username: "user".to_string(),
+        signed_by: uib_eid,
+        signer_type: 2,
+        signature: [0u8; 64],
+    };
+    let ub_event = ParsedEvent::User(ub);
+    let mut ub_blob = events::encode_event(&ub_event).unwrap();
+    sign_blob(&invite_key, &mut ub_blob);
+    let ub_eid = hash_event(&ub_blob);
+
+    // 6. DeviceInvite (signed by user key)
+    let device_invite_key = SigningKey::generate(&mut rng);
+    let device_invite_pub = device_invite_key.verifying_key().to_bytes();
+    let dif = DeviceInviteEvent {
+        created_at_ms: now_ms(),
+        workspace_id: net_eid,
+        public_key: device_invite_pub,
+        authority_event_id: ub_eid,
+        signed_by: ub_eid,
+        signer_type: 4,
+        signature: [0u8; 64],
+    };
+    let dif_event = ParsedEvent::DeviceInvite(dif);
+    let mut dif_blob = events::encode_event(&dif_event).unwrap();
+    sign_blob(&user_key, &mut dif_blob);
+    let dif_eid = hash_event(&dif_blob);
+
+    // 7. PeerShared (signed by device_invite key)
+    let peer_shared_key = SigningKey::generate(&mut rng);
+    let peer_shared_pub = peer_shared_key.verifying_key().to_bytes();
+    let psf = PeerSharedEvent {
+        created_at_ms: now_ms(),
+        workspace_id: net_eid,
+        public_key: peer_shared_pub,
+        user_event_id: ub_eid,
+        device_name: "device".to_string(),
+        signed_by: dif_eid,
+        signer_type: 3,
+        signature: [0u8; 64],
+    };
+    let psf_event = ParsedEvent::PeerShared(psf);
+    let mut psf_blob = events::encode_event(&psf_event).unwrap();
+    sign_blob(&device_invite_key, &mut psf_blob);
+    let psf_eid = hash_event(&psf_blob);
+
+    register_signer_user(psf_eid, ub_eid);
+
+    // Return blobs in dependency order.
+    let chain_blobs = vec![
+        (tenant_eid, tenant_blob),
+        (ia_eid, ia_blob),
+        (net_eid, net_blob),
+        (uib_eid, uib_blob),
+        (ub_eid, ub_blob),
+        (dif_eid, dif_blob),
+        (psf_eid, psf_blob),
+    ];
+
+    (psf_eid, peer_shared_key, chain_blobs)
+}
+
+/// Insert and project all events from a deferred identity chain.
+pub(super) fn insert_and_project_identity_chain(
+    conn: &Connection,
+    recorded_by: &str,
+    chain_blobs: &[(EventId, Vec<u8>)],
+) {
+    for (eid, blob) in chain_blobs {
+        insert_event_raw(conn, recorded_by, blob);
+        project_one(conn, recorded_by, eid).unwrap();
+    }
+}
+
+/// Helper: sign a blob in-place (overwrite last 64 bytes with Ed25519 signature).
+pub(super) fn sign_blob(key: &SigningKey, blob: &mut Vec<u8>) {
+    let len = blob.len();
+    let sig = sign_event_bytes(key, &blob[..len - 64]);
+    blob[len - 64..].copy_from_slice(&sig);
+}
+
+fn make_message_signed(
+    signing_key: &SigningKey,
+    signer_eid: &EventId,
+    content: &str,
+) -> (ParsedEvent, Vec<u8>) {
+    let author_id = user_for_signer(signer_eid);
+    let msg = MessageEvent {
+        created_at_ms: now_ms(),
+        workspace_id: [1u8; 32],
+        author_id,
+        content: content.to_string(),
+        signed_by: *signer_eid,
+        signer_type: 5,
+        signature: [0u8; 64],
+    };
+    let event = ParsedEvent::Message(msg);
+    let mut blob = events::encode_event(&event).unwrap();
+    sign_blob(signing_key, &mut blob);
+    let parsed = events::parse_event(&blob).unwrap();
+    (parsed, blob)
+}
+
+/// Convenience: create identity chain + signed message in one call.
+pub(super) fn make_message(
+    conn: &Connection,
+    recorded_by: &str,
+    content: &str,
+) -> (ParsedEvent, Vec<u8>) {
+    let (signer_eid, signing_key) = make_identity_chain(conn, recorded_by);
+    make_message_signed(&signing_key, &signer_eid, content)
+}
+
+/// Create a signed reaction event blob.
+pub(super) fn make_reaction_signed(
+    signing_key: &SigningKey,
+    signer_eid: &EventId,
+    target: &EventId,
+    emoji: &str,
+) -> (ParsedEvent, Vec<u8>) {
+    let author_id = user_for_signer(signer_eid);
+    let rxn = ReactionEvent {
+        created_at_ms: now_ms(),
+        workspace_id: [0u8; 32],
+        target_event_id: *target,
+        author_id,
+        emoji: emoji.to_string(),
+        signed_by: *signer_eid,
+        signer_type: 5,
+        signature: [0u8; 64],
+    };
+    let event = ParsedEvent::Reaction(rxn);
+    let mut blob = events::encode_event(&event).unwrap();
+    sign_blob(signing_key, &mut blob);
+    let parsed = events::parse_event(&blob).unwrap();
+    (parsed, blob)
+}
+
+/// Convenience: create identity chain + signed reaction.
+pub(super) fn make_reaction(
+    conn: &Connection,
+    recorded_by: &str,
+    target: &EventId,
+    emoji: &str,
+) -> (ParsedEvent, Vec<u8>) {
+    let (signer_eid, signing_key) = make_identity_chain(conn, recorded_by);
+    make_reaction_signed(&signing_key, &signer_eid, target, emoji)
+}
+
+/// Create a signed deletion event blob.
+pub(super) fn make_deletion_signed(
+    signing_key: &SigningKey,
+    signer_eid: &EventId,
+    target: &EventId,
+    author_id: [u8; 32],
+) -> (ParsedEvent, Vec<u8>) {
+    let resolved_author_id = if author_id == [2u8; 32] {
+        user_for_signer(signer_eid)
+    } else {
+        author_id
+    };
+    let del = MessageDeletionEvent {
+        created_at_ms: now_ms(),
+        workspace_id: [0u8; 32],
+        target_event_id: *target,
+        author_id: resolved_author_id,
+        signed_by: *signer_eid,
+        signer_type: 5,
+        signature: [0u8; 64],
+    };
+    let event = ParsedEvent::MessageDeletion(del);
+    let mut blob = events::encode_event(&event).unwrap();
+    sign_blob(signing_key, &mut blob);
+    let parsed = events::parse_event(&blob).unwrap();
+    (parsed, blob)
+}
+
+pub(super) fn setup() -> Connection {
+    let conn = open_in_memory().unwrap();
+    create_tables(&conn).unwrap();
+    conn
+}
+
+// ===== Encrypted event helpers =====
+
+pub(super) fn make_key_secret(key_bytes: [u8; 32]) -> (ParsedEvent, Vec<u8>) {
+    let sk = ParsedEvent::KeySecret(KeySecretEvent {
+        created_at_ms: now_ms(),
+        workspace_id: [0u8; 32],
+        key_bytes,
+    });
+    let blob = events::encode_event(&sk).unwrap();
+    (sk, blob)
+}
+
+pub(super) fn make_encrypted_event(
+    key_bytes: &[u8; 32],
+    inner_blob: &[u8],
+    inner_type_code: u8,
+    key_event_id: &EventId,
+) -> (ParsedEvent, Vec<u8>) {
+    let (nonce, ciphertext, auth_tag) = encrypt_event_blob(key_bytes, inner_blob).unwrap();
+    let enc = ParsedEvent::Encrypted(EncryptedEvent {
+        created_at_ms: now_ms(),
+        key_event_id: *key_event_id,
+        inner_type_code,
+        nonce,
+        ciphertext,
+        auth_tag,
+    });
+    let blob = events::encode_event(&enc).unwrap();
+    (enc, blob)
+}
+
+// Wave 1: file attachment helpers (make_file_slice, make_file,
+// setup_descriptor_for_file, make_attachment_signed) dropped along with the
+// file/file_slice event modules.
+
+pub(super) fn assert_projection_rejection_contains(
+    conn: &Connection,
+    recorded_by: &str,
+    blob: &[u8],
+    expected_substring: &str,
+) {
+    let event_id = insert_event_raw(conn, recorded_by, blob);
+    let result = project_one(conn, recorded_by, &event_id).unwrap();
+    match result {
+        ProjectionDecision::Reject { reason } => {
+            assert!(
+                reason.contains(expected_substring),
+                "unexpected rejection reason: {}",
+                reason
+            );
+        }
+        other => panic!("expected Reject, got {:?}", other),
+    }
+
+    let event_id_b64 = event_id_to_base64(&event_id);
+    let rej_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM rejected_events WHERE peer_id = ?1 AND event_id = ?2",
+            rusqlite::params![recorded_by, &event_id_b64],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rej_count, 1, "rejected_events row must be recorded");
+}

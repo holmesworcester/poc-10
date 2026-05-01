@@ -1,0 +1,1821 @@
+//! RPC server: Unix domain socket listener that dispatches requests to service functions.
+//!
+//! Connection count is bounded by a semaphore to prevent local connection-flood
+//! pressure (feedback item 2).
+
+use std::collections::HashSet;
+use std::io::Write;
+use std::net::SocketAddr;
+use std::os::unix::net::UnixListener;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, RwLock};
+
+use serde::Serialize;
+use tokio::sync::Notify;
+use tracing::{info, warn};
+
+use crate::event_modules::{message, peer_shared, reaction, user, workspace};
+use crate::rpc::protocol::*;
+use crate::service;
+use crate::state::subscriptions;
+
+/// Runtime networking info reported by the substrate after listener bind.
+/// This is a thin DTO retained for the RPC `Status` surface; the legacy
+/// daemon binary that populated it is gone.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NodeRuntimeNetInfo {
+    pub listen_addr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upnp: Option<crate::runtime::upnp::UpnpMappingReport>,
+}
+
+/// Maximum concurrent RPC connections the server will handle.
+/// Additional connections block until a slot is freed.
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+
+#[derive(Debug, Clone)]
+struct TenantScope {
+    tenant_id: String,
+}
+
+fn discover_tenant_scopes(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<TenantScope>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT recorded_by
+         FROM invites_accepted
+         ORDER BY recorded_by",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(TenantScope {
+                tenant_id: row.get(0)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Daemon-wide shared state: tracks active peer and invite refs.
+pub struct DaemonState {
+    pub db_path: String,
+    pub active_peer: RwLock<Option<String>>,
+    /// Runtime lifecycle state.
+    pub runtime_state: RwLock<RuntimeState>,
+    /// Runtime networking info (listen addr, UPnP result). Set once the
+    /// QUIC endpoint is bound; UPnP result is populated while UPnP mode is enabled.
+    pub runtime_net: RwLock<Option<NodeRuntimeNetInfo>>,
+    /// The daemon's resolved bind address, set as soon as startup reserves the
+    /// UDP socket. This survives the idle-no-tenants phase before runtime
+    /// activation reports `runtime_net.listen_addr`.
+    pub resolved_bind_addr: RwLock<Option<SocketAddr>>,
+    /// Whether runtime-managed UPnP mode is enabled for this daemon session.
+    pub upnp_enabled: RwLock<bool>,
+    /// Last UPnP mapping report for the active runtime session.
+    pub upnp_result: RwLock<Option<crate::runtime::upnp::UpnpMappingReport>>,
+    /// Wake-up trigger for runtime state reevaluation after tenant-changing commands.
+    pub runtime_recheck: Notify,
+    /// Invite/link strings stored by number (index+1 = invite ref number).
+    pub invite_refs: RwLock<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeState {
+    IdleNoTenants,
+    Active,
+}
+
+impl RuntimeState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuntimeState::IdleNoTenants => "IdleNoTenants",
+            RuntimeState::Active => "Active",
+        }
+    }
+}
+
+impl DaemonState {
+    /// Create state with auto-selected peer if exactly one tenant exists.
+    pub fn new(db_path: &str) -> Self {
+        let active = match crate::db::open_connection(db_path) {
+            Ok(conn) => {
+                let _ = crate::db::schema::create_tables(&conn);
+                match discover_tenant_scopes(&conn) {
+                    Ok(tenants) if tenants.len() == 1 => Some(tenants[0].tenant_id.clone()),
+                    Ok(_) => None,
+                    Err(_) => None,
+                }
+            }
+            Err(_) => None,
+        };
+        DaemonState {
+            db_path: db_path.to_string(),
+            active_peer: RwLock::new(active),
+            // Runtime manager owns lifecycle transitions.
+            runtime_state: RwLock::new(RuntimeState::IdleNoTenants),
+            runtime_net: RwLock::new(None),
+            resolved_bind_addr: RwLock::new(None),
+            upnp_enabled: RwLock::new(false),
+            upnp_result: RwLock::new(None),
+            runtime_recheck: Notify::new(),
+            invite_refs: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn notify_runtime_recheck(&self) {
+        self.runtime_recheck.notify_waiters();
+    }
+
+    fn runtime_listen_addr(&self) -> Option<SocketAddr> {
+        self.runtime_net
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|info| info.listen_addr.parse::<SocketAddr>().ok())
+    }
+
+    fn effective_listen_addr(&self) -> Option<SocketAddr> {
+        self.runtime_listen_addr()
+            .or_else(|| *self.resolved_bind_addr.read().unwrap())
+    }
+
+    fn require_active_peer(&self) -> Result<String, String> {
+        let cached = self.active_peer.read().unwrap().clone();
+
+        // Discover current tenant scopes from invites_accepted projection state.
+        // This keeps control-plane tenant selection independent from transport creds.
+        let discovered = if let Ok(conn) = crate::db::open_connection(&self.db_path) {
+            let _ = crate::db::schema::create_tables(&conn);
+            discover_tenant_scopes(&conn).ok()
+        } else {
+            None
+        };
+
+        if let Some(peer_id) = cached {
+            match discovered.as_ref() {
+                Some(tenants) => {
+                    if tenants.iter().any(|t| t.tenant_id == peer_id) {
+                        return Ok(peer_id);
+                    }
+                    *self.active_peer.write().unwrap() = None;
+                }
+                None => {
+                    // Preserve previous behavior when discovery is unavailable.
+                    return Ok(peer_id);
+                }
+            }
+        }
+
+        if let Some(tenants) = discovered {
+            if tenants.len() == 1 {
+                let peer_id = tenants[0].tenant_id.clone();
+                *self.active_peer.write().unwrap() = Some(peer_id.clone());
+                return Ok(peer_id);
+            }
+        }
+
+        Err("no active tenant — run `topo tenant use <N>`".to_string())
+    }
+
+    /// Store an invite/link string and return its 1-based reference number.
+    pub fn add_invite_ref(&self, link: String) -> usize {
+        let mut refs = self.invite_refs.write().unwrap();
+        refs.push(link);
+        refs.len()
+    }
+
+    /// Resolve an invite ref: numeric string → stored link, otherwise passthrough.
+    pub fn resolve_invite_ref(&self, selector: &str) -> Result<String, String> {
+        if let Ok(num) = selector.parse::<usize>() {
+            let refs = self.invite_refs.read().unwrap();
+            if num >= 1 && num <= refs.len() {
+                return Ok(refs[num - 1].clone());
+            }
+            return Err(format!(
+                "invalid invite ref #{}; available: 1-{}",
+                num,
+                refs.len()
+            ));
+        }
+        // Passthrough: treat as a raw invite link
+        Ok(selector.to_string())
+    }
+}
+
+/// Helper: resolve active peer, open its DB, and pass `(peer_id, recorded_by, db)`
+/// to the closure. Returns the closure's `RpcResponse` on success, or an error
+/// response if the active peer is missing or the DB cannot be opened.
+fn with_active_peer_db<F>(state: &DaemonState, f: F) -> RpcResponse
+where
+    F: FnOnce(&str, &str, &rusqlite::Connection) -> RpcResponse,
+{
+    match state.require_active_peer() {
+        Ok(peer_id) => match service::open_db_for_peer(&state.db_path, &peer_id) {
+            Ok((recorded_by, db)) => f(&peer_id, &recorded_by, &db),
+            Err(e) => RpcResponse::error(e.to_string()),
+        },
+        Err(e) => RpcResponse::error(e),
+    }
+}
+
+/// Tenant info returned by the Tenants command.
+#[derive(Debug, Serialize)]
+struct TenantItem {
+    index: usize,
+    peer_id: String,
+    username: String,
+    workspace_id: String,
+    workspace_name: String,
+    active: bool,
+}
+
+/// Run the RPC server on a Unix socket, dispatching to service functions.
+/// Blocks the calling thread. Intended to be run in a background thread.
+pub fn run_rpc_server(
+    socket_path: &Path,
+    state: Arc<DaemonState>,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Remove stale socket file if it exists.
+    if socket_path.exists() {
+        std::fs::remove_file(socket_path)?;
+    }
+
+    // Ensure parent directory exists.
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let listener = UnixListener::bind(socket_path)?;
+    // Set non-blocking so we can check the shutdown flag periodically.
+    listener.set_nonblocking(true)?;
+
+    info!("RPC server listening on {}", socket_path.display());
+
+    // Bounded connection counter (poor-man's semaphore without extra deps).
+    let active = Arc::new(AtomicUsize::new(0));
+
+    while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                let current = active.load(AtomicOrdering::Relaxed);
+                if current >= MAX_CONCURRENT_CONNECTIONS {
+                    warn!(
+                        "RPC connection limit reached ({}), rejecting",
+                        MAX_CONCURRENT_CONNECTIONS
+                    );
+                    // Drop `stream` immediately — client gets connection-reset.
+                    drop(stream);
+                    continue;
+                }
+
+                let st = state.clone();
+                let active_clone = active.clone();
+                let shutdown_clone = shutdown.clone();
+                let notify_clone = shutdown_notify.clone();
+                active.fetch_add(1, AtomicOrdering::Relaxed);
+
+                std::thread::spawn(move || {
+                    if let Err(e) = handle_connection(stream, &st, &shutdown_clone, &notify_clone) {
+                        warn!("RPC connection error: {}", e);
+                    }
+                    active_clone.fetch_sub(1, AtomicOrdering::Relaxed);
+                });
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No pending connections — sleep briefly and check shutdown.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                warn!("RPC accept error: {}", e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    // Cleanup socket file.
+    let _ = std::fs::remove_file(socket_path);
+    info!("RPC server shut down");
+    Ok(())
+}
+
+fn handle_connection(
+    mut stream: std::os::unix::net::UnixStream,
+    state: &DaemonState,
+    shutdown: &std::sync::atomic::AtomicBool,
+    shutdown_notify: &tokio::sync::Notify,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Set blocking for this connection.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+
+    let req: RpcRequest = decode_frame(&mut stream)?;
+
+    if req.version != PROTOCOL_VERSION {
+        let resp = RpcResponse::error(format!(
+            "version mismatch: server={}, client={}",
+            PROTOCOL_VERSION, req.version
+        ));
+        let frame = encode_frame(&resp)?;
+        stream.write_all(&frame)?;
+        return Ok(());
+    }
+
+    let resp = dispatch(state, req.method, shutdown, shutdown_notify);
+    let frame = encode_frame(&resp)?;
+    stream.write_all(&frame)?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn resolve_bootstrap_from_upnp(
+    upnp: &crate::runtime::upnp::UpnpMappingReport,
+) -> Result<String, String> {
+    if upnp.status != crate::runtime::upnp::UpnpMappingStatus::Success {
+        let status = match &upnp.status {
+            crate::runtime::upnp::UpnpMappingStatus::Success => "success",
+            crate::runtime::upnp::UpnpMappingStatus::Failed => "failed",
+            crate::runtime::upnp::UpnpMappingStatus::NotAttempted => "not_attempted",
+        };
+        let reason = upnp.error.as_deref().unwrap_or("unknown");
+        return Err(format!(
+            "no bootstrap address — UPnP status is {} ({}) — provide --bootstrap or run `topo upnp` first",
+            status, reason
+        ));
+    }
+
+    let (ip, port) = match (upnp.external_ip.as_deref(), upnp.mapped_external_port) {
+        (Some(ip), Some(port)) => (ip, port),
+        _ => {
+            return Err(
+                "no bootstrap address — provide --bootstrap or run `topo upnp` first".to_string(),
+            )
+        }
+    };
+
+    let parsed_ip: std::net::IpAddr = ip.parse().map_err(|_| {
+        format!(
+            "UPnP external IP is malformed ({}) — provide --bootstrap explicitly",
+            ip
+        )
+    })?;
+    if !crate::runtime::upnp::is_public_internet_ip(parsed_ip) {
+        return Err(format!(
+            "UPnP external IP {} is not publicly routable — provide --bootstrap explicitly",
+            ip
+        ));
+    }
+
+    Ok(std::net::SocketAddr::new(parsed_ip, port).to_string())
+}
+
+fn upnp_response_data(
+    enabled: bool,
+    report: Option<&crate::runtime::upnp::UpnpMappingReport>,
+    fallback_error: &str,
+) -> serde_json::Value {
+    let mut data = serde_json::Map::new();
+    data.insert("enabled".into(), serde_json::Value::Bool(enabled));
+    if let Some(report) = report {
+        if let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(report) {
+            for (key, value) in fields {
+                data.insert(key, value);
+            }
+        }
+    } else {
+        data.insert("status".into(), serde_json::json!("not_attempted"));
+        data.insert("error".into(), serde_json::json!(fallback_error));
+    }
+    serde_json::Value::Object(data)
+}
+
+fn merge_upnp_bootstrap_addr(
+    mut addrs: Vec<crate::event_modules::workspace::invite_link::BootstrapAddress>,
+    upnp: Option<&crate::runtime::upnp::UpnpMappingReport>,
+) -> Vec<crate::event_modules::workspace::invite_link::BootstrapAddress> {
+    let mut seen: HashSet<String> = addrs
+        .iter()
+        .map(|addr| addr.to_bootstrap_addr_string())
+        .collect();
+    if let Some(report) = upnp {
+        match resolve_bootstrap_from_upnp(report) {
+            Ok(addr) => {
+                match crate::event_modules::workspace::invite_link::parse_bootstrap_address(&addr) {
+                    Ok(parsed) => {
+                        let key = parsed.to_bootstrap_addr_string();
+                        if seen.insert(key) {
+                            addrs.push(parsed);
+                        }
+                    }
+                    Err(e) => warn!("ignoring invalid UPnP bootstrap address {}: {}", addr, e),
+                }
+            }
+            Err(e) if report.status == crate::runtime::upnp::UpnpMappingStatus::Success => {
+                warn!("ignoring unusable UPnP mapping result: {}", e);
+            }
+            Err(_) => {}
+        }
+    }
+    addrs
+}
+
+fn autodetect_bootstrap_addrs(
+    state: &DaemonState,
+    listen_addr: SocketAddr,
+) -> Result<Vec<crate::event_modules::workspace::invite_link::BootstrapAddress>, String> {
+    let detected = if listen_addr.ip().is_unspecified() {
+        // Wildcard bind (0.0.0.0 / ::) — enumerate all non-loopback interfaces.
+        crate::event_modules::workspace::invite_link::detect_bootstrap_addrs(listen_addr.port())
+    } else {
+        // Specific bind — use only the address we're actually listening on.
+        let addr = match listen_addr.ip() {
+            std::net::IpAddr::V4(v4) => {
+                crate::event_modules::workspace::invite_link::BootstrapAddress::Ipv4 {
+                    ip: v4,
+                    port: listen_addr.port(),
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                crate::event_modules::workspace::invite_link::BootstrapAddress::Ipv6 {
+                    ip: v6,
+                    port: listen_addr.port(),
+                }
+            }
+        };
+        vec![addr]
+    };
+    let merged = merge_upnp_bootstrap_addr(detected, state.upnp_result.read().unwrap().as_ref());
+    if merged.is_empty() {
+        return Err(
+            "No non-loopback addresses detected and no active UPnP address available. Provide public_addr explicitly."
+                .to_string(),
+        );
+    }
+    Ok(merged)
+}
+
+/// Best-effort store of client_op_id → event_id mapping. Failures are logged but don't
+/// affect the RPC response since the event was already created successfully.
+fn store_client_op(
+    db_path: &str,
+    peer_id: &str,
+    client_op_id: Option<&str>,
+    event_id_hex: &str,
+    op_kind: &str,
+) {
+    let Some(cop_id) = client_op_id else { return };
+    let Ok(eid_bytes) = hex::decode(event_id_hex) else {
+        warn!("store_client_op: bad hex event_id");
+        return;
+    };
+    if eid_bytes.len() != 32 {
+        return;
+    }
+    let eid: [u8; 32] = eid_bytes.try_into().unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    if let Ok(conn) = crate::db::open_connection(db_path) {
+        let _ = crate::db::local_client_ops::insert(&conn, peer_id, cop_id, &eid, op_kind, now_ms);
+    }
+}
+
+/// Best-effort: inject created_events into an existing RpcResponse JSON.
+/// Takes hex event IDs, converts to base64, fetches EventListItems, and
+/// merges them into the response data under "created_events".
+fn inject_created_events(
+    resp: &mut RpcResponse,
+    db_path: &str,
+    peer_id: &str,
+    hex_event_ids: &[&str],
+) {
+    if hex_event_ids.is_empty() {
+        return;
+    }
+    // Convert hex event IDs to base64 (DB format).
+    let b64_ids: Vec<String> = hex_event_ids
+        .iter()
+        .filter_map(|hex_id| {
+            let bytes = hex::decode(hex_id).ok()?;
+            if bytes.len() != 32 {
+                return None;
+            }
+            let eid: [u8; 32] = bytes.try_into().ok()?;
+            Some(crate::crypto::event_id_to_base64(&eid))
+        })
+        .collect();
+    if b64_ids.is_empty() {
+        return;
+    }
+    let Ok((recorded_by, db)) = service::open_db_for_peer(db_path, peer_id) else {
+        return;
+    };
+    let Ok(list_resp) = service::svc_event_list_by_ids(&db, &recorded_by, &b64_ids) else {
+        return;
+    };
+    if let Some(ref mut data) = resp.data {
+        if let Ok(events_json) = serde_json::to_value(&list_resp.events) {
+            data["created_events"] = events_json;
+        }
+    }
+}
+
+fn dispatch(
+    state: &DaemonState,
+    method: RpcMethod,
+    shutdown: &std::sync::atomic::AtomicBool,
+    shutdown_notify: &tokio::sync::Notify,
+) -> RpcResponse {
+    let db_path = &state.db_path;
+
+    match method {
+        RpcMethod::Shutdown => {
+            shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            shutdown_notify.notify_waiters();
+            RpcResponse::success(serde_json::json!({"shutdown": true}))
+        }
+
+        // ----- Tenant management (daemon state) -----
+        RpcMethod::Tenants => match crate::db::open_connection(db_path) {
+            Ok(conn) => {
+                let _ = crate::db::schema::create_tables(&conn);
+                let active = state.active_peer.read().unwrap().clone();
+                match workspace::list_tenants_for_display(&conn, active.as_deref().unwrap_or("")) {
+                    Ok(tenants) => {
+                        let items: Vec<TenantItem> = tenants
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, tenant)| TenantItem {
+                                index: i + 1,
+                                peer_id: tenant.peer_id,
+                                username: tenant.username,
+                                workspace_id: tenant.workspace_id,
+                                workspace_name: tenant.workspace_name,
+                                active: tenant.active,
+                            })
+                            .collect();
+                        RpcResponse::success(serde_json::json!(items))
+                    }
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            }
+            Err(e) => RpcResponse::error(e.to_string()),
+        },
+
+        RpcMethod::UseTenant { index } => match crate::db::open_connection(db_path) {
+            Ok(conn) => {
+                let _ = crate::db::schema::create_tables(&conn);
+                let active = state.active_peer.read().unwrap().clone();
+                match workspace::list_tenants_for_display(&conn, active.as_deref().unwrap_or("")) {
+                    Ok(tenants) => {
+                        if index == 0 || index > tenants.len() {
+                            return RpcResponse::error(format!(
+                                "invalid tenant number {}; available: 1-{}",
+                                index,
+                                tenants.len()
+                            ));
+                        }
+                        let tenant = &tenants[index - 1];
+                        *state.active_peer.write().unwrap() = Some(tenant.peer_id.clone());
+                        RpcResponse::success(serde_json::json!({
+                            "peer_id": tenant.peer_id,
+                            "workspace_id": tenant.workspace_id,
+                            "workspace_name": tenant.workspace_name,
+                        }))
+                    }
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            }
+            Err(e) => RpcResponse::error(e.to_string()),
+        },
+
+        RpcMethod::ActiveTenant => {
+            let active = state.active_peer.read().unwrap().clone();
+            match active {
+                Some(peer_id) => RpcResponse::success(serde_json::json!({"peer_id": peer_id})),
+                None => RpcResponse::success(serde_json::json!({"peer_id": null})),
+            }
+        }
+
+        RpcMethod::CreateWorkspace {
+            workspace_name,
+            username,
+            device_name,
+        } => {
+            match workspace::commands::create_workspace_for_db(
+                db_path,
+                &workspace_name,
+                &username,
+                &device_name,
+            ) {
+                Ok(resp) => {
+                    // Creating a workspace establishes a new local tenant.
+                    // Make it active immediately so follow-up CLI commands
+                    // target the workspace the operator just created.
+                    *state.active_peer.write().unwrap() = Some(resp.peer_id.clone());
+                    state.notify_runtime_recheck();
+
+                    // Auto-create an invite with detected IPs
+                    let listen_addr = state.effective_listen_addr().unwrap_or_else(|| {
+                        SocketAddr::new(
+                            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                            crate::event_modules::workspace::invite_link::DEFAULT_PORT,
+                        )
+                    });
+                    let mut resp_json = serde_json::to_value(&resp).unwrap();
+                    let bootstrap_addrs = autodetect_bootstrap_addrs(state, listen_addr);
+                    match bootstrap_addrs.and_then(|addrs| {
+                        workspace::commands::create_invite_for_peer(
+                            db_path,
+                            &resp.peer_id,
+                            &addrs,
+                            listen_addr.port(),
+                            None,
+                        )
+                        .map_err(|e| e.to_string())
+                    }) {
+                        Ok(invite) => {
+                            if let Some(link) = serde_json::to_value(&invite)
+                                .ok()
+                                .and_then(|v| v["invite_link"].as_str().map(|s| s.to_string()))
+                            {
+                                let num = state.add_invite_ref(link);
+                                resp_json["invite_link"] = serde_json::json!(invite.invite_link);
+                                resp_json["invite_ref"] = serde_json::json!(num);
+                            }
+                        }
+                        Err(e) => {
+                            resp_json["invite_error"] = serde_json::json!(e);
+                        }
+                    }
+                    let mut rpc_resp = RpcResponse::success(resp_json);
+                    // Inject all created identity chain events for the new peer.
+                    if let Ok((recorded_by, db)) = service::open_db_for_peer(db_path, &resp.peer_id)
+                    {
+                        if let Ok(list_resp) = service::svc_event_list(&db, &recorded_by) {
+                            if let Some(ref mut data) = rpc_resp.data {
+                                if let Ok(events_json) = serde_json::to_value(&list_resp.events) {
+                                    data["created_events"] = events_json;
+                                }
+                            }
+                        }
+                    }
+                    rpc_resp
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            }
+        }
+
+        // ----- Commands that need active peer -----
+        RpcMethod::Send {
+            content,
+            client_op_id,
+        } => match state.require_active_peer() {
+            Ok(peer_id) => match message::send_for_peer(db_path, &peer_id, &content) {
+                Ok(data) => {
+                    store_client_op(
+                        db_path,
+                        &peer_id,
+                        client_op_id.as_deref(),
+                        &data.event_id,
+                        "message",
+                    );
+                    state.notify_runtime_recheck();
+                    let eid = data.event_id.clone();
+                    let mut resp = RpcResponse::success(data);
+                    inject_created_events(&mut resp, db_path, &peer_id, &[&eid]);
+                    resp
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+            Err(e) => RpcResponse::error(e),
+        },
+        RpcMethod::Generate {
+            count,
+            history_span,
+        } => match state.require_active_peer() {
+            Ok(peer_id) => {
+                match message::generate_for_peer(db_path, &peer_id, count, history_span.as_deref())
+                {
+                    Ok(data) => {
+                        state.notify_runtime_recheck();
+                        RpcResponse::success(data)
+                    }
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            }
+            Err(e) => RpcResponse::error(e),
+        },
+        RpcMethod::React {
+            target,
+            emoji,
+            client_op_id,
+        } => match state.require_active_peer() {
+            Ok(peer_id) => match reaction::react_for_peer(db_path, &peer_id, &target, &emoji) {
+                Ok(data) => {
+                    store_client_op(
+                        db_path,
+                        &peer_id,
+                        client_op_id.as_deref(),
+                        &data.event_id,
+                        "reaction",
+                    );
+                    state.notify_runtime_recheck();
+                    let eid = data.event_id.clone();
+                    let mut resp = RpcResponse::success(data);
+                    inject_created_events(&mut resp, db_path, &peer_id, &[&eid]);
+                    resp
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+            Err(e) => RpcResponse::error(e),
+        },
+        RpcMethod::DeleteMessage { target } => match state.require_active_peer() {
+            Ok(peer_id) => match message::delete_message_for_peer(db_path, &peer_id, &target) {
+                Ok(data) => {
+                    state.notify_runtime_recheck();
+                    RpcResponse::success(data)
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+            Err(e) => RpcResponse::error(e),
+        },
+
+        // ----- Read-only commands (call event modules directly) -----
+        RpcMethod::TransportKeys => match crate::db::open_connection(db_path) {
+            Ok(db) => {
+                if let Err(e) = crate::db::schema::create_tables(&db) {
+                    return RpcResponse::error(e.to_string());
+                }
+                match crate::state::db::transport_creds::list_local_peers_with_source(&db) {
+                    Ok(keys) => RpcResponse::success(serde_json::json!(keys)),
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            }
+            Err(e) => RpcResponse::error(e.to_string()),
+        },
+        RpcMethod::TransportAuth => with_active_peer_db(state, |_peer_id, recorded_by, db| {
+            match crate::state::db::transport_trust::list_authorized_transport_rows(db, recorded_by)
+            {
+                Ok(rows) => RpcResponse::success(serde_json::json!(rows)),
+                Err(e) => RpcResponse::error(e.to_string()),
+            }
+        }),
+        RpcMethod::Messages { limit } => with_active_peer_db(state, |_peer_id, recorded_by, db| {
+            match message::list(db, recorded_by, limit) {
+                Ok(data) => RpcResponse::success(data),
+                Err(e) => RpcResponse::error(e.to_string()),
+            }
+        }),
+        RpcMethod::Status => {
+            let with_runtime_state = |data: workspace::StatusResponse| {
+                let mut json = serde_json::to_value(data).unwrap_or(serde_json::Value::Null);
+                json["daemon_db_path"] = serde_json::json!(db_path);
+                json["runtime_state"] =
+                    serde_json::json!(state.runtime_state.read().unwrap().as_str());
+                if let Some(net_info) = state.runtime_net.read().unwrap().as_ref() {
+                    if let Ok(net_val) = serde_json::to_value(net_info) {
+                        json["runtime"] = net_val;
+                    }
+                }
+                let upnp_enabled = *state.upnp_enabled.read().unwrap();
+                // When the runtime isn't active, synthesize a minimal "runtime"
+                // block from early-bound listen addr and UPnP mode state so that
+                // `topo status` always shows networking info.
+                if json.get("runtime").is_none() {
+                    let resolved_bind = state.resolved_bind_addr.read().unwrap();
+                    let upnp = state.upnp_result.read().unwrap();
+                    if resolved_bind.is_some() || upnp.is_some() || upnp_enabled {
+                        let mut rt = serde_json::Map::new();
+                        if let Some(addr) = *resolved_bind {
+                            rt.insert(
+                                "listen_addr".into(),
+                                serde_json::Value::String(addr.to_string()),
+                            );
+                        }
+                        rt.insert("upnp_enabled".into(), serde_json::Value::Bool(upnp_enabled));
+                        if let Some(ref report) = *upnp {
+                            if let Ok(v) = serde_json::to_value(report) {
+                                rt.insert("upnp".into(), v);
+                            }
+                        }
+                        json["runtime"] = serde_json::Value::Object(rt);
+                    }
+                } else if let Some(rt) = json.get_mut("runtime") {
+                    rt["upnp_enabled"] = serde_json::Value::Bool(upnp_enabled);
+                    // Runtime is active but UPnP might only be in daemon-level state
+                    // (e.g. while a refresh task is still writing the latest report).
+                    // Only inject if the port matches the current listen address.
+                    if rt.get("upnp").is_none() {
+                        if let Some(ref report) = *state.upnp_result.read().unwrap() {
+                            let port_matches = rt["listen_addr"]
+                                .as_str()
+                                .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+                                .map(|a| a.port() == report.requested_external_port)
+                                .unwrap_or(false);
+                            if port_matches {
+                                if let Ok(v) = serde_json::to_value(report) {
+                                    rt["upnp"] = v;
+                                }
+                            }
+                        }
+                    }
+                }
+                RpcResponse {
+                    version: crate::rpc::protocol::PROTOCOL_VERSION,
+                    ok: true,
+                    error: None,
+                    data: Some(json),
+                }
+            };
+
+            match state.require_active_peer() {
+                Ok(peer_id) => match service::open_db_for_peer(db_path, &peer_id) {
+                    Ok((recorded_by, db)) => {
+                        let data = workspace::status(&db, &recorded_by);
+                        with_runtime_state(data)
+                    }
+                    Err(e) => RpcResponse::error(e.to_string()),
+                },
+                Err(no_active_err) => match crate::db::open_connection(db_path) {
+                    Ok(db) => {
+                        let _ = crate::db::schema::create_tables(&db);
+                        // Stage 3.5: count hosted workspaces; mirrors the legacy
+                        // "distinct recorded_by" semantics in the new vocabulary.
+                        let tenant_count: i64 = crate::db::transport_creds::list_hosted_workspaces(
+                            &db,
+                        )
+                        .map(|b| b.len() as i64)
+                        .unwrap_or(0);
+                        if tenant_count > 1 {
+                            // Multiple tenants, none selected — return error so
+                            // operators know to run `topo tenant use`.
+                            RpcResponse::error(no_active_err)
+                        } else {
+                            // Empty/pre-identity or single-tenant: return status
+                            // with zeroed counters so health probes work.
+                            let data = workspace::status(&db, "__idle__");
+                            with_runtime_state(data)
+                        }
+                    }
+                    Err(e) => RpcResponse::error(e.to_string()),
+                },
+            }
+        }
+        RpcMethod::AssertNow { predicate } => {
+            // Use active tenant if selected, otherwise fall back to
+            // transport-scope resolution so pre-workspace daemons work.
+            let resolve = match state.require_active_peer() {
+                Ok(peer_id) => service::open_db_for_peer(db_path, &peer_id),
+                Err(_) => service::open_db_load(db_path),
+            };
+            match resolve {
+                Ok((recorded_by, db)) => match crate::assert::parse_predicate(&predicate) {
+                    Ok((field, op, expected)) => {
+                        match crate::assert::query_field(&db, &field, &recorded_by) {
+                            Ok(actual) => RpcResponse::success(crate::assert::AssertResponse {
+                                pass: op.eval(actual, expected),
+                                field,
+                                actual,
+                                op: op.symbol().to_string(),
+                                expected,
+                                timed_out: false,
+                                debug: None,
+                            }),
+                            Err(e) => RpcResponse::error(e),
+                        }
+                    }
+                    Err(e) => RpcResponse::error(e),
+                },
+                Err(e) => RpcResponse::error(e.to_string()),
+            }
+        }
+        RpcMethod::AssertEventually {
+            predicate,
+            timeout_ms,
+            interval_ms,
+        } => {
+            // Use active tenant if selected, otherwise fall back to
+            // transport-scope resolution so pre-workspace daemons work.
+            match state.require_active_peer() {
+                Ok(peer_id) => match crate::assert::assert_eventually_for_peer(
+                    db_path,
+                    &peer_id,
+                    &predicate,
+                    timeout_ms,
+                    interval_ms,
+                ) {
+                    Ok(data) => RpcResponse::success(data),
+                    Err(e) => RpcResponse::error(e.to_string()),
+                },
+                Err(_) => {
+                    match crate::assert::assert_eventually(
+                        db_path,
+                        &predicate,
+                        timeout_ms,
+                        interval_ms,
+                    ) {
+                        Ok(data) => RpcResponse::success(data),
+                        Err(e) => RpcResponse::error(e.to_string()),
+                    }
+                }
+            }
+        }
+        RpcMethod::Reactions => with_active_peer_db(state, |_peer_id, recorded_by, db| {
+            match reaction::list(db, recorded_by) {
+                Ok(data) => RpcResponse::success(data),
+                Err(e) => RpcResponse::error(e.to_string()),
+            }
+        }),
+        RpcMethod::Users => with_active_peer_db(state, |_peer_id, recorded_by, db| {
+            match user::list_items(db, recorded_by) {
+                Ok(data) => RpcResponse::success(data),
+                Err(e) => RpcResponse::error(e.to_string()),
+            }
+        }),
+        RpcMethod::Keys { summary } => with_active_peer_db(state, |_peer_id, recorded_by, db| {
+            match workspace::keys(db, recorded_by, summary) {
+                Ok(data) => RpcResponse::success(data),
+                Err(e) => RpcResponse::error(e.to_string()),
+            }
+        }),
+        RpcMethod::ContentKeys { summary } => with_active_peer_db(
+            state,
+            |_peer_id, recorded_by, db| match workspace::content_keys(db, recorded_by, summary) {
+                Ok(data) => RpcResponse::success(data),
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+        ),
+        RpcMethod::Peers => {
+            with_active_peer_db(
+                state,
+                |_peer_id, recorded_by, db| match peer_shared::list_peers(db, recorded_by) {
+                    Ok(data) => RpcResponse::success(data),
+                    Err(e) => RpcResponse::error(e.to_string()),
+                },
+            )
+        }
+        RpcMethod::Workspaces => match crate::db::open_connection(db_path) {
+            Ok(db) => {
+                let _ = crate::db::schema::create_tables(&db);
+                match workspace::list_all_items(&db) {
+                    Ok(data) => RpcResponse::success(data),
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            }
+            Err(e) => RpcResponse::error(e.to_string()),
+        },
+        RpcMethod::IntroAttempts { peer } => {
+            with_active_peer_db(state, |_peer_id, recorded_by, db| {
+                match crate::db::intro::list_intro_attempts(db, recorded_by, peer.as_deref()) {
+                    Ok(rows) => {
+                        let items: Vec<service::IntroAttemptItem> = rows
+                            .into_iter()
+                            .map(|r| service::IntroAttemptItem {
+                                intro_id: hex::encode(&r.intro_id),
+                                other_peer_id: r.other_peer_id,
+                                introduced_by_peer_id: r.introduced_by_peer_id,
+                                origin_ip: r.origin_ip,
+                                origin_port: r.origin_port,
+                                status: r.status,
+                                error: r.error,
+                                created_at: r.created_at,
+                            })
+                            .collect();
+                        RpcResponse::success(items)
+                    }
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            })
+        }
+        RpcMethod::CreateInvite {
+            public_addr,
+            public_spki,
+        } => match state.require_active_peer() {
+            Ok(peer_id) => {
+                let listen_addr = state.effective_listen_addr().unwrap_or_else(|| {
+                    SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                        crate::event_modules::workspace::invite_link::DEFAULT_PORT,
+                    )
+                });
+                let explicit_addrs: Vec<
+                    crate::event_modules::workspace::invite_link::BootstrapAddress,
+                > = match public_addr {
+                    Some(ref addr) => {
+                        match crate::event_modules::workspace::invite_link::parse_bootstrap_address(
+                            addr,
+                        ) {
+                            Ok(a) => vec![a],
+                            Err(e) => {
+                                return RpcResponse::error(format!("invalid public_addr: {}", e));
+                            }
+                        }
+                    }
+                    None => vec![],
+                };
+                let bootstrap_addrs = if explicit_addrs.is_empty() {
+                    match autodetect_bootstrap_addrs(state, listen_addr) {
+                        Ok(addrs) => addrs,
+                        Err(e) => return RpcResponse::error(e),
+                    }
+                } else {
+                    explicit_addrs
+                };
+                let result: Result<
+                    workspace::commands::CreateInviteResponse,
+                    Box<dyn std::error::Error + Send + Sync>,
+                > = workspace::commands::create_invite_for_peer(
+                    db_path,
+                    &peer_id,
+                    &bootstrap_addrs,
+                    listen_addr.port(),
+                    public_spki.as_deref(),
+                );
+                match result {
+                    Ok(data) => {
+                        let invite_eid_b64 = data.invite_event_id.clone();
+                        let mut resp = if let Some(link) = serde_json::to_value(&data)
+                            .ok()
+                            .and_then(|v| v["invite_link"].as_str().map(|s| s.to_string()))
+                        {
+                            let num = state.add_invite_ref(link);
+                            let mut resp_data = serde_json::to_value(&data).unwrap();
+                            resp_data["invite_ref"] = serde_json::json!(num);
+                            RpcResponse::success(resp_data)
+                        } else {
+                            RpcResponse::success(data)
+                        };
+                        // Inject created_events for the invite event.
+                        if let Ok((rb, db)) = service::open_db_for_peer(db_path, &peer_id) {
+                            if let Ok(lr) =
+                                service::svc_event_list_by_ids(&db, &rb, &[invite_eid_b64])
+                            {
+                                if let Some(ref mut d) = resp.data {
+                                    if let Ok(v) = serde_json::to_value(&lr.events) {
+                                        d["created_events"] = v;
+                                    }
+                                }
+                            }
+                        }
+                        resp
+                    }
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            }
+            Err(e) => RpcResponse::error(e),
+        },
+        RpcMethod::RotateKey => match state.require_active_peer() {
+            Ok(peer_id) => match workspace::commands::rotate_key_for_peer(db_path, &peer_id) {
+                Ok(data) => {
+                    state.notify_runtime_recheck();
+                    RpcResponse::success(data)
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+            Err(e) => RpcResponse::error(e),
+        },
+        RpcMethod::Upnp { action } => match action {
+            UpnpAction::Disable => {
+                *state.upnp_enabled.write().unwrap() = false;
+                *state.upnp_result.write().unwrap() = None;
+                if let Some(ref mut info) = *state.runtime_net.write().unwrap() {
+                    info.upnp = None;
+                }
+                RpcResponse::success(upnp_response_data(false, None, "disabled"))
+            }
+            UpnpAction::Status => {
+                let enabled = *state.upnp_enabled.read().unwrap();
+                let report = state.upnp_result.read().unwrap().clone();
+                let fallback = if enabled {
+                    "runtime not active yet; mapping will be attempted when runtime starts"
+                } else {
+                    "disabled"
+                };
+                RpcResponse::success(upnp_response_data(enabled, report.as_ref(), fallback))
+            }
+            UpnpAction::Enable => {
+                *state.upnp_enabled.write().unwrap() = true;
+                let listen_addr = match state.runtime_net.read().unwrap().as_ref() {
+                    Some(info) => match info.listen_addr.parse::<std::net::SocketAddr>() {
+                        Ok(addr) => Some(addr),
+                        Err(e) => {
+                            return RpcResponse::error(format!("invalid listen addr: {}", e));
+                        }
+                    },
+                    None => None,
+                };
+                let Some(listen_addr) = listen_addr else {
+                    *state.upnp_result.write().unwrap() = None;
+                    return RpcResponse::success(upnp_response_data(
+                        true,
+                        None,
+                        "runtime not active yet; mapping will be attempted when runtime starts",
+                    ));
+                };
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => return RpcResponse::error(format!("failed to start runtime: {}", e)),
+                };
+                let report = rt.block_on(crate::runtime::upnp::attempt_udp_port_mapping(
+                    listen_addr,
+                    std::time::Duration::from_secs(10),
+                ));
+                *state.upnp_result.write().unwrap() = Some(report.clone());
+                if let Some(ref mut ni) = *state.runtime_net.write().unwrap() {
+                    let runtime_port = ni
+                        .listen_addr
+                        .parse::<std::net::SocketAddr>()
+                        .map(|a| a.port())
+                        .unwrap_or(0);
+                    if runtime_port == listen_addr.port() {
+                        ni.upnp = Some(report.clone());
+                    }
+                }
+                RpcResponse::success(upnp_response_data(true, Some(&report), "enabled"))
+            }
+        },
+        RpcMethod::CreateDeviceLink {
+            public_addr,
+            public_spki,
+        } => {
+            match state.require_active_peer() {
+                Ok(peer_id) => {
+                    let listen_addr = state.effective_listen_addr().unwrap_or_else(|| {
+                        SocketAddr::new(
+                            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                            crate::event_modules::workspace::invite_link::DEFAULT_PORT,
+                        )
+                    });
+                    let explicit_addrs: Vec<crate::event_modules::workspace::invite_link::BootstrapAddress> =
+                    match public_addr {
+                        Some(ref addr) => {
+                            match crate::event_modules::workspace::invite_link::parse_bootstrap_address(addr) {
+                                Ok(a) => vec![a],
+                                Err(e) => return RpcResponse::error(format!("invalid public_addr: {}", e)),
+                            }
+                        }
+                        None => vec![],
+                    };
+                    let bootstrap_addrs = if explicit_addrs.is_empty() {
+                        match autodetect_bootstrap_addrs(state, listen_addr) {
+                            Ok(addrs) => addrs,
+                            Err(e) => return RpcResponse::error(e),
+                        }
+                    } else {
+                        explicit_addrs
+                    };
+                    match workspace::commands::create_device_link_for_peer(
+                        db_path,
+                        &peer_id,
+                        &bootstrap_addrs,
+                        listen_addr.port(),
+                        public_spki.as_deref(),
+                    ) {
+                        Ok(data) => {
+                            let invite_eid_b64 = data.invite_event_id.clone();
+                            let mut resp = if let Some(link) = serde_json::to_value(&data)
+                                .ok()
+                                .and_then(|v| v["invite_link"].as_str().map(|s| s.to_string()))
+                            {
+                                let num = state.add_invite_ref(link);
+                                let mut resp_data = serde_json::to_value(&data).unwrap();
+                                resp_data["invite_ref"] = serde_json::json!(num);
+                                RpcResponse::success(resp_data)
+                            } else {
+                                RpcResponse::success(data)
+                            };
+                            if let Ok((rb, db)) = service::open_db_for_peer(db_path, &peer_id) {
+                                if let Ok(lr) =
+                                    service::svc_event_list_by_ids(&db, &rb, &[invite_eid_b64])
+                                {
+                                    if let Some(ref mut d) = resp.data {
+                                        if let Ok(v) = serde_json::to_value(&lr.events) {
+                                            d["created_events"] = v;
+                                        }
+                                    }
+                                }
+                            }
+                            resp
+                        }
+                        Err(e) => RpcResponse::error(e.to_string()),
+                    }
+                }
+                Err(e) => RpcResponse::error(e),
+            }
+        }
+        RpcMethod::AcceptLink { invite, devicename } => {
+            let resolved = match state.resolve_invite_ref(&invite) {
+                Ok(link) => link,
+                Err(e) => return RpcResponse::error(e),
+            };
+            match workspace::commands::accept_device_link(db_path, &resolved, &devicename) {
+                Ok(data) => {
+                    let pid = data.peer_id.clone();
+                    *state.active_peer.write().unwrap() = Some(pid.clone());
+                    state.notify_runtime_recheck();
+                    let mut resp = RpcResponse::success(data);
+                    if let Ok((recorded_by, db)) = service::open_db_for_peer(db_path, &pid) {
+                        if let Ok(list_resp) = service::svc_event_list(&db, &recorded_by) {
+                            if let Some(ref mut d) = resp.data {
+                                if let Ok(v) = serde_json::to_value(&list_resp.events) {
+                                    d["created_events"] = v;
+                                }
+                            }
+                        }
+                    }
+                    resp
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            }
+        }
+        RpcMethod::Identity => {
+            with_active_peer_db(
+                state,
+                |peer_id, _recorded_by, db| match peer_shared::identity(db, peer_id) {
+                    Ok(data) => RpcResponse::success(data),
+                    Err(e) => RpcResponse::error(e.to_string()),
+                },
+            )
+        }
+        RpcMethod::AcceptInvite {
+            invite,
+            username,
+            devicename,
+        } => match workspace::commands::accept_invite(db_path, &invite, &username, &devicename) {
+            Ok(data) => {
+                let pid = data.peer_id.clone();
+                *state.active_peer.write().unwrap() = Some(pid.clone());
+                state.notify_runtime_recheck();
+                let mut resp = RpcResponse::success(data);
+                if let Ok((recorded_by, db)) = service::open_db_for_peer(db_path, &pid) {
+                    if let Ok(list_resp) = service::svc_event_list(&db, &recorded_by) {
+                        if let Some(ref mut d) = resp.data {
+                            if let Ok(v) = serde_json::to_value(&list_resp.events) {
+                                d["created_events"] = v;
+                            }
+                        }
+                    }
+                }
+                resp
+            }
+            Err(e) => RpcResponse::error(e.to_string()),
+        },
+        RpcMethod::View { limit } => match state.require_active_peer() {
+            Ok(peer_id) => match workspace::view_for_peer(db_path, &peer_id, limit) {
+                Ok(data) => RpcResponse::success(data),
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+            Err(e) => RpcResponse::error(e),
+        },
+
+        RpcMethod::Forward { action } => {
+            use crate::state::live_hints;
+            match action {
+                ForwardAction::Enable => {
+                    live_hints::set_forward_on_have(true);
+                    RpcResponse::success(serde_json::json!({ "forward_on_have": true }))
+                }
+                ForwardAction::Disable => {
+                    live_hints::set_forward_on_have(false);
+                    RpcResponse::success(serde_json::json!({ "forward_on_have": false }))
+                }
+                ForwardAction::Status => {
+                    let enabled = live_hints::forward_on_have_enabled();
+                    RpcResponse::success(serde_json::json!({ "forward_on_have": enabled }))
+                }
+            }
+        }
+
+        RpcMethod::EventBlocked => match state.require_active_peer() {
+            Ok(peer_id) => match service::open_db_for_peer(db_path, &peer_id) {
+                Ok((recorded_by, db)) => {
+                    let mut stmt = db
+                        .prepare(
+                            "SELECT event_id, blocker_event_id, dep_relationship
+                             FROM blocked_event_deps
+                             WHERE peer_id = ?1
+                             ORDER BY event_id",
+                        )
+                        .unwrap();
+                    let rows = stmt
+                        .query_map(rusqlite::params![&recorded_by], |row| {
+                            Ok(serde_json::json!({
+                                "event_id": row.get::<_, String>(0)?,
+                                "blocker_event_id": row.get::<_, String>(1)?,
+                                "dep": row.get::<_, String>(2)?,
+                            }))
+                        })
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap_or_default();
+                    RpcResponse::success(rows)
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+            Err(e) => RpcResponse::error(e),
+        },
+
+        RpcMethod::EventTimeline { event_id } => match state.require_active_peer() {
+            Ok(peer_id) => match service::open_db_for_peer(db_path, &peer_id) {
+                Ok((_recorded_by, db)) => {
+                    let tl = crate::db::timeline::EventTimeline::new(&db);
+                    match tl.load(&event_id) {
+                        Ok(Some(row)) => RpcResponse::success(serde_json::json!({
+                            "event_id": row.event_id,
+                            "first_received_at_ms": row.first_received_at,
+                            "first_stored_at_ms": row.first_stored_at,
+                            "blocked_at_ms": row.blocked_at,
+                            "unblocked_at_ms": row.unblocked_at,
+                            "unblocked_by_event_id": row.unblocked_by_event_id,
+                            "projected_at_ms": row.projected_at,
+                        })),
+                        Ok(None) => {
+                            RpcResponse::error(format!("no timeline entry for event {}", event_id))
+                        }
+                        Err(e) => RpcResponse::error(e.to_string()),
+                    }
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+            Err(e) => RpcResponse::error(e),
+        },
+
+        RpcMethod::Stats => match state.require_active_peer() {
+            Ok(peer_id) => match service::open_db_for_peer(db_path, &peer_id) {
+                Ok((recorded_by, db)) => {
+                    let count = |sql: &str, param: &str| -> i64 {
+                        db.query_row(sql, rusqlite::params![param], |r| r.get(0))
+                            .unwrap_or(0)
+                    };
+                    let resp = serde_json::json!({
+                        "message_count": message::count(&db, &recorded_by).unwrap_or(0),
+                        "reaction_count": reaction::count(&db, &recorded_by).unwrap_or(0),
+                        "deleted_message_count": count("SELECT COUNT(*) FROM deleted_messages dm WHERE EXISTS (SELECT 1 FROM invites_accepted ia WHERE ia.recorded_by = ?1 AND ia.workspace_id = dm.workspace_id)", &recorded_by),
+                        "user_count": user::count(&db, &recorded_by).unwrap_or(0),
+                        "peer_count": peer_shared::count(&db, &recorded_by).unwrap_or(0),
+                        "admin_count": 0,
+                        // Plan.md Stage 2: workspaces is global; per-tenant count via invites_accepted.
+                        "workspace_count": count("SELECT COUNT(*) FROM workspaces w WHERE EXISTS (SELECT 1 FROM invites_accepted ia WHERE ia.recorded_by = ?1 AND ia.workspace_id = w.workspace_id)", &recorded_by),
+                        "user_invite_count": count("SELECT COUNT(*) FROM user_invites ui WHERE EXISTS (SELECT 1 FROM invites_accepted ia WHERE ia.recorded_by = ?1 AND ia.workspace_id = ui.workspace_id)", &recorded_by),
+                        "device_invite_count": count("SELECT COUNT(*) FROM device_invites di WHERE EXISTS (SELECT 1 FROM invites_accepted ia WHERE ia.recorded_by = ?1 AND ia.workspace_id = di.workspace_id)", &recorded_by),
+                        // Plan.md Stage 2: key_secrets PK is (workspace_id, event_id);
+                        // count via invites_accepted ↔ workspace_id join.
+                        "key_secret_count": count("SELECT COUNT(*) FROM key_secrets ks WHERE EXISTS (SELECT 1 FROM invites_accepted ia WHERE ia.recorded_by = ?1 AND ia.workspace_id = ks.workspace_id)", &recorded_by),
+                        "event_count": db.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0)).unwrap_or(0),
+                        "recorded_event_count": count("SELECT COUNT(*) FROM recorded_events WHERE peer_id = ?1", &recorded_by),
+                        "valid_event_count": count("SELECT COUNT(*) FROM valid_events WHERE peer_id = ?1", &recorded_by),
+                        "blocked_event_count": crate::db::health::blocked_event_count(&db, &recorded_by).unwrap_or(0),
+                        "rejected_event_count": count("SELECT COUNT(*) FROM rejected_events WHERE peer_id = ?1", &recorded_by),
+                        "endpoint_observation_count": count("SELECT COUNT(*) FROM peer_endpoint_observations WHERE recorded_by = ?1", &recorded_by),
+                    });
+                    RpcResponse::success(resp)
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+            Err(e) => RpcResponse::error(e),
+        },
+
+        RpcMethod::Replay { pass } => match state.require_active_peer() {
+            Ok(peer_id) => match service::open_db_for_peer(db_path, &peer_id) {
+                Ok((recorded_by, db)) => {
+                    let _ = (db, recorded_by, pass);
+                    RpcResponse::error("replay pass disabled: testutil module removed".to_string())
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+            Err(e) => RpcResponse::error(e),
+        },
+
+        RpcMethod::Connections => match state.require_active_peer() {
+            Ok(peer_id) => match service::open_db_for_peer(db_path, &peer_id) {
+                Ok((recorded_by, db)) => {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    match crate::db::health::list_live_endpoint_targets(&db, &recorded_by, now_ms) {
+                        Ok(targets) => {
+                            let items: Vec<serde_json::Value> = targets
+                                .into_iter()
+                                .map(|t| {
+                                    serde_json::json!({
+                                        "peer_id": t.via_peer_id,
+                                        "addr": format!("{}:{}", t.origin_ip, t.origin_port),
+                                    })
+                                })
+                                .collect();
+                            RpcResponse::success(items)
+                        }
+                        Err(e) => RpcResponse::error(e.to_string()),
+                    }
+                }
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+            Err(e) => RpcResponse::error(e),
+        },
+
+        #[cfg(feature = "discovery")]
+        RpcMethod::Discover { timeout_ms } => match state.require_active_peer() {
+            Ok(peer_id) => {
+                use crate::runtime::discovery::{local_non_loopback_ipv4, TenantDiscovery};
+                let advertise_ip = match local_non_loopback_ipv4() {
+                    Some(ip) => ip,
+                    None => return RpcResponse::error("no routable IP for mDNS"),
+                };
+                let local_ids: std::collections::HashSet<String> =
+                    [peer_id.clone()].into_iter().collect();
+                match TenantDiscovery::new(&peer_id, 1, local_ids, &advertise_ip) {
+                    Ok(disc) => match disc.browse() {
+                        Ok(rx) => {
+                            let deadline = std::time::Instant::now()
+                                + std::time::Duration::from_millis(timeout_ms);
+                            let mut results = Vec::new();
+                            let mut seen = std::collections::HashSet::new();
+                            while std::time::Instant::now() < deadline {
+                                match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                                    Ok(peer) => {
+                                        if seen.insert(peer.peer_id.clone()) {
+                                            results.push(serde_json::json!({
+                                                "peer_id": peer.peer_id,
+                                                "addr": peer.addr.ip().to_string(),
+                                                "port": peer.addr.port(),
+                                            }));
+                                        }
+                                    }
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                                    Err(_) => break,
+                                }
+                            }
+                            RpcResponse::success(results)
+                        }
+                        Err(e) => RpcResponse::error(format!("mDNS browse failed: {}", e)),
+                    },
+                    Err(e) => RpcResponse::error(format!("mDNS init failed: {}", e)),
+                }
+            }
+            Err(e) => RpcResponse::error(e),
+        },
+
+        RpcMethod::Intro {
+            peer_a,
+            peer_b,
+            ttl_ms,
+            attempt_window_ms,
+        } => match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                match handle.block_on(service::svc_intro(
+                    db_path,
+                    &peer_a,
+                    &peer_b,
+                    ttl_ms,
+                    attempt_window_ms,
+                )) {
+                    Ok(true) => RpcResponse::success(serde_json::json!({"sent_to_both": true})),
+                    Ok(false) => RpcResponse::error("partial send"),
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            }
+            Err(_) => RpcResponse::error("no tokio runtime available for async intro"),
+        },
+
+        RpcMethod::EventList => match crate::db::open_connection(db_path) {
+            Ok(db) => {
+                if let Err(e) = crate::db::schema::create_tables(&db) {
+                    return RpcResponse::error(e.to_string());
+                }
+                let scopes = match discover_tenant_scopes(&db) {
+                    Ok(s) => s,
+                    Err(e) => return RpcResponse::error(e.to_string()),
+                };
+                if scopes.is_empty() {
+                    return RpcResponse::success(service::EventListResponse { events: vec![] });
+                }
+                let recorded_by = match state.require_active_peer() {
+                    Ok(peer_id) => peer_id,
+                    Err(e) => return RpcResponse::error(e),
+                };
+                match service::svc_event_list(&db, &recorded_by) {
+                    Ok(data) => RpcResponse::success(data),
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            }
+            Err(e) => RpcResponse::error(e.to_string()),
+        },
+        RpcMethod::EventListByIds { ids } => {
+            with_active_peer_db(state, |_peer_id, recorded_by, db| {
+                match service::svc_event_list_by_ids(db, recorded_by, &ids) {
+                    Ok(data) => RpcResponse::success(data),
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            })
+        }
+        RpcMethod::EventShow { prefix } => with_active_peer_db(
+            state,
+            |_peer_id, recorded_by, db| match service::svc_event_show(db, recorded_by, &prefix) {
+                Ok(data) => RpcResponse::success(data),
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+        ),
+        RpcMethod::EventDeps { prefix, depth } => with_active_peer_db(
+            state,
+            |_peer_id, recorded_by, db| match service::svc_event_deps(
+                db,
+                recorded_by,
+                &prefix,
+                depth,
+            ) {
+                Ok(data) => RpcResponse::success(data),
+                Err(e) => RpcResponse::error(e.to_string()),
+            },
+        ),
+
+        // ----- Subscription commands -----
+        RpcMethod::SubCreate {
+            name,
+            event_type,
+            delivery_mode,
+            spec_json,
+        } => match state.require_active_peer() {
+            Ok(peer_id) => {
+                // P2: Reject unsupported event types early.
+                if !subscriptions::is_supported_event_type(&event_type) {
+                    return RpcResponse::error(format!(
+                        "unsupported event type '{}'; supported: {}",
+                        event_type,
+                        subscriptions::supported_event_types().join(", "),
+                    ));
+                }
+
+                let dm = match subscriptions::DeliveryMode::from_str(&delivery_mode) {
+                    Ok(d) => d,
+                    Err(e) => return RpcResponse::error(e),
+                };
+                let mut spec: subscriptions::SubscriptionSpec = if spec_json.is_empty() {
+                    subscriptions::SubscriptionSpec {
+                        event_type: event_type.clone(),
+                        since: None,
+                        filters: vec![],
+                    }
+                } else {
+                    match serde_json::from_str(&spec_json) {
+                        Ok(s) => s,
+                        Err(e) => return RpcResponse::error(format!("invalid spec: {}", e)),
+                    }
+                };
+
+                // Enforce spec.event_type matches the top-level event_type arg.
+                if spec.event_type != event_type {
+                    return RpcResponse::error(format!(
+                        "spec.event_type '{}' does not match event_type '{}'",
+                        spec.event_type, event_type,
+                    ));
+                }
+
+                // P2b: Validate filter fields and operators against the matcher.
+                if let Err(e) = subscriptions::validate_spec(&event_type, &spec) {
+                    return RpcResponse::error(format!("invalid spec: {}", e));
+                }
+
+                // Normalize since.event_id: accept hex (from CLI) and convert to base64
+                // (which is the internal storage format in the events table).
+                if let Some(ref mut since) = spec.since {
+                    if !since.event_id.is_empty() {
+                        // If it looks like hex (64 hex chars = 32 bytes), convert to base64.
+                        if since.event_id.len() == 64
+                            && since.event_id.chars().all(|c| c.is_ascii_hexdigit())
+                        {
+                            if let Some(eid) = crate::crypto::event_id_from_hex(&since.event_id) {
+                                since.event_id = crate::crypto::event_id_to_base64(&eid);
+                            }
+                        }
+                    }
+                }
+
+                // P1: Resolve since_event_id to its created_at_ms when not provided.
+                if let Some(ref mut since) = spec.since {
+                    if !since.event_id.is_empty() && since.created_at_ms == 0 {
+                        match service::open_db_for_peer(db_path, &peer_id) {
+                            Ok((_rb, ref db)) => {
+                                match subscriptions::resolve_event_created_at(db, &since.event_id) {
+                                    Ok(ts) => since.created_at_ms = ts,
+                                    Err(e) => {
+                                        return RpcResponse::error(format!(
+                                            "cannot resolve since_event_id '{}': {}",
+                                            since.event_id, e
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                return RpcResponse::error(format!(
+                                    "cannot resolve since_event_id: {}",
+                                    e
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                match service::open_db_for_peer(db_path, &peer_id) {
+                    Ok((recorded_by, db)) => {
+                        match subscriptions::create_subscription(
+                            &db,
+                            &recorded_by,
+                            &name,
+                            &event_type,
+                            dm,
+                            &spec,
+                        ) {
+                            Ok(sub) => RpcResponse::success(sub),
+                            Err(e) => RpcResponse::error(e),
+                        }
+                    }
+                    Err(e) => RpcResponse::error(e.to_string()),
+                }
+            }
+            Err(e) => RpcResponse::error(e),
+        },
+        RpcMethod::SubList => with_active_peer_db(state, |_peer_id, recorded_by, db| {
+            match subscriptions::list_subscriptions(db, recorded_by) {
+                Ok(subs) => RpcResponse::success(subs),
+                Err(e) => RpcResponse::error(e),
+            }
+        }),
+        RpcMethod::SubDisable { subscription_id } => with_active_peer_db(
+            state,
+            |_peer_id, recorded_by, db| match subscriptions::set_enabled(
+                db,
+                recorded_by,
+                &subscription_id,
+                false,
+            ) {
+                Ok(()) => RpcResponse::success(serde_json::json!({"disabled": true})),
+                Err(e) => RpcResponse::error(e),
+            },
+        ),
+        RpcMethod::SubEnable { subscription_id } => with_active_peer_db(
+            state,
+            |_peer_id, recorded_by, db| match subscriptions::set_enabled(
+                db,
+                recorded_by,
+                &subscription_id,
+                true,
+            ) {
+                Ok(()) => RpcResponse::success(serde_json::json!({"enabled": true})),
+                Err(e) => RpcResponse::error(e),
+            },
+        ),
+        RpcMethod::SubPoll {
+            subscription_id,
+            after_seq,
+            limit,
+        } => with_active_peer_db(
+            state,
+            |_peer_id, recorded_by, db| match subscriptions::poll_feed(
+                db,
+                recorded_by,
+                &subscription_id,
+                after_seq,
+                limit,
+            ) {
+                Ok(items) => RpcResponse::success(items),
+                Err(e) => RpcResponse::error(e),
+            },
+        ),
+        RpcMethod::SubAck {
+            subscription_id,
+            through_seq,
+        } => with_active_peer_db(
+            state,
+            |_peer_id, recorded_by, db| match subscriptions::ack_feed(
+                db,
+                recorded_by,
+                &subscription_id,
+                through_seq,
+            ) {
+                Ok(()) => RpcResponse::success(serde_json::json!({"acked": true})),
+                Err(e) => RpcResponse::error(e),
+            },
+        ),
+        RpcMethod::SubState { subscription_id } => with_active_peer_db(
+            state,
+            |_peer_id, recorded_by, db| match subscriptions::get_state(
+                db,
+                recorded_by,
+                &subscription_id,
+            ) {
+                Ok(state) => RpcResponse::success(state),
+                Err(e) => RpcResponse::error(e),
+            },
+        ),
+    }
+}
+
+/// Invoke the real RPC dispatch path in-process without Unix socket framing.
+///
+/// This is the seam used by virtual-daemon tests and simulator control code.
+pub fn dispatch_rpc_method(state: &DaemonState, method: RpcMethod) -> RpcResponse {
+    let shutdown = std::sync::atomic::AtomicBool::new(false);
+    let shutdown_notify = tokio::sync::Notify::new();
+    dispatch(state, method, &shutdown, &shutdown_notify)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_upnp_bootstrap_addr, resolve_bootstrap_from_upnp};
+    use crate::event_modules::workspace::invite_link::parse_bootstrap_address;
+    use crate::runtime::upnp::{UpnpMappingReport, UpnpMappingStatus};
+
+    fn mk_report(
+        status: UpnpMappingStatus,
+        external_ip: Option<&str>,
+        mapped_external_port: Option<u16>,
+        error: Option<&str>,
+    ) -> UpnpMappingReport {
+        UpnpMappingReport {
+            status,
+            protocol: "udp".to_string(),
+            local_addr: "192.168.1.20:4433".to_string(),
+            requested_external_port: 4433,
+            mapped_external_port,
+            external_ip: external_ip.map(|s| s.to_string()),
+            gateway: Some("192.168.1.1:1900".to_string()),
+            error: error.map(|s| s.to_string()),
+            double_nat: false,
+        }
+    }
+
+    #[test]
+    fn bootstrap_resolution_rejects_non_success_status() {
+        let report = mk_report(
+            UpnpMappingStatus::NotAttempted,
+            None,
+            None,
+            Some("listen address is loopback"),
+        );
+        let err = resolve_bootstrap_from_upnp(&report).unwrap_err();
+        assert!(err.contains("UPnP status is not_attempted"));
+    }
+
+    #[test]
+    fn bootstrap_resolution_formats_ipv6_with_brackets() {
+        let report = mk_report(
+            UpnpMappingStatus::Success,
+            Some("2001:4860:4860::8888"),
+            Some(4433),
+            None,
+        );
+        let addr = resolve_bootstrap_from_upnp(&report).unwrap();
+        assert_eq!(addr, "[2001:4860:4860::8888]:4433");
+    }
+
+    #[test]
+    fn bootstrap_resolution_rejects_non_public_ip() {
+        let report = mk_report(
+            UpnpMappingStatus::Success,
+            Some("10.0.0.8"),
+            Some(4433),
+            None,
+        );
+        let err = resolve_bootstrap_from_upnp(&report).unwrap_err();
+        assert!(err.contains("not publicly routable"));
+    }
+
+    #[test]
+    fn upnp_bootstrap_addr_is_appended_to_detected_addrs() {
+        let report = mk_report(
+            UpnpMappingStatus::Success,
+            Some("8.8.4.4"),
+            Some(55000),
+            None,
+        );
+        let detected = vec![parse_bootstrap_address("192.168.1.20:4433").unwrap()];
+        let merged = merge_upnp_bootstrap_addr(detected, Some(&report));
+        let addr_strings: Vec<String> = merged
+            .into_iter()
+            .map(|addr| addr.to_bootstrap_addr_string())
+            .collect();
+        assert_eq!(addr_strings, vec!["192.168.1.20", "8.8.4.4:55000"]);
+    }
+
+    #[test]
+    fn upnp_bootstrap_addr_is_deduplicated_against_detected_addrs() {
+        let report = mk_report(
+            UpnpMappingStatus::Success,
+            Some("8.8.4.4"),
+            Some(55000),
+            None,
+        );
+        let detected = vec![parse_bootstrap_address("8.8.4.4:55000").unwrap()];
+        let merged = merge_upnp_bootstrap_addr(detected, Some(&report));
+        assert_eq!(merged.len(), 1, "UPnP address should not be duplicated");
+    }
+}

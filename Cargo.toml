@@ -1,0 +1,64 @@
+[package]
+name = "topo"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "topo"
+path = "src/bin/topo/main.rs"
+
+[dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+blake2 = "0.10"
+blake3 = "1"
+bao = "0.13"
+base64 = "0.21"
+rcgen = "0.12"
+hex = "0.4"
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
+aes-gcm = "0.10"
+rand = "0.8"
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+thiserror = "1"
+negentropy = { path = "vendor/negentropy" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+x509-parser = "0.16"
+
+tempfile = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+mdns-sd = { version = "0.11", optional = true }
+igd-next = { version = "0.15", features = ["aio_tokio"] }
+if-addrs = "0.13"
+
+[features]
+default = ["discovery"]
+discovery = ["mdns-sd"]
+
+[dev-dependencies]
+
+# Crypto deps are orders of magnitude slower in debug mode; optimize them even in tests.
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.aes-gcm]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3

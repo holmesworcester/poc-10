@@ -1,0 +1,197 @@
+use crate::crypto::{self, b64_to_hex, event_id_from_base64, EventId};
+use crate::event_modules::reaction;
+use rusqlite::Connection;
+
+pub struct MessageRow {
+    pub message_id_b64: String,
+    pub message_id_hex: String,
+    pub author_id: String,
+    pub author_name: String,
+    pub content: String,
+    pub created_at: i64,
+}
+
+pub fn list_rows(
+    db: &Connection,
+    recorded_by: &str,
+    limit: usize,
+) -> Result<Vec<MessageRow>, rusqlite::Error> {
+    // When limit > 0, select the newest N messages (subquery picks newest,
+    // outer query re-sorts ascending for display order).
+    //
+    // messages PK is now (workspace_id, message_id) — the row's `recorded_by`
+    // shadow column reflects only the first-tenant writer (subsequent
+    // INSERT OR IGNORE writes don't replace it). Filter by the active
+    // tenant's accepted workspace via `invites_accepted` so non-first-writer
+    // tenants still see their workspace's messages. The `recorded_by` column
+    // itself is retained until Stage 3 drops it.
+    let query = if limit > 0 {
+        format!(
+            "SELECT * FROM (
+                SELECT m.message_id, m.author_id, m.content, m.created_at,
+                       COALESCE(u.username, '') as author_name
+                FROM messages m
+                LEFT JOIN users u ON m.author_id = u.event_id
+                WHERE EXISTS (
+                    SELECT 1 FROM invites_accepted ia
+                    WHERE ia.recorded_by = ?1
+                      AND ia.workspace_id = m.workspace_id
+                )
+                ORDER BY m.created_at DESC, m.message_id DESC
+                LIMIT {}
+            ) ORDER BY created_at ASC, message_id ASC",
+            limit
+        )
+    } else {
+        "SELECT m.message_id, m.author_id, m.content, m.created_at,
+                COALESCE(u.username, '') as author_name
+         FROM messages m
+         LEFT JOIN users u ON m.author_id = u.event_id
+         WHERE EXISTS (
+             SELECT 1 FROM invites_accepted ia
+             WHERE ia.recorded_by = ?1
+               AND ia.workspace_id = m.workspace_id
+         )
+         ORDER BY m.created_at ASC, m.message_id ASC"
+            .to_string()
+    };
+
+    let mut stmt = db.prepare(&query)?;
+    let rows = stmt
+        .query_map(rusqlite::params![recorded_by], |row| {
+            let msg_id_b64: String = row.get(0)?;
+            let msg_id_hex = b64_to_hex(&msg_id_b64);
+            Ok(MessageRow {
+                message_id_b64: msg_id_b64,
+                message_id_hex: msg_id_hex,
+                author_id: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
+                author_name: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn count(db: &Connection, recorded_by: &str) -> Result<i64, rusqlite::Error> {
+    // Scope via invites_accepted (workspace) since the messages
+    // recorded_by shadow column captures only the first-tenant writer.
+    db.query_row(
+        "SELECT COUNT(*) FROM messages m
+         WHERE EXISTS (
+             SELECT 1 FROM invites_accepted ia
+             WHERE ia.recorded_by = ?1
+               AND ia.workspace_id = m.workspace_id
+         )",
+        rusqlite::params![recorded_by],
+        |row| row.get(0),
+    )
+}
+
+pub fn resolve_number(db: &Connection, recorded_by: &str, num: usize) -> Result<EventId, String> {
+    if num == 0 {
+        return Err("message number must be >= 1".into());
+    }
+    let mut stmt = db
+        .prepare(
+            "SELECT m.message_id FROM messages m
+             WHERE EXISTS (
+                 SELECT 1 FROM invites_accepted ia
+                 WHERE ia.recorded_by = ?1
+                   AND ia.workspace_id = m.workspace_id
+             )
+             ORDER BY m.created_at ASC, m.rowid ASC LIMIT 1 OFFSET ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let msg_id_b64: Option<String> = stmt
+        .query_row(rusqlite::params![recorded_by, num - 1], |row| row.get(0))
+        .ok();
+    match msg_id_b64 {
+        Some(b64) => event_id_from_base64(&b64)
+            .ok_or_else(|| format!("invalid event ID for message {}", num)),
+        None => {
+            let total = count(db, recorded_by).map_err(|e| e.to_string())?;
+            Err(format!(
+                "invalid message number {}; available: 1-{}",
+                num, total
+            ))
+        }
+    }
+}
+
+pub fn resolve(db: &Connection, recorded_by: &str, selector: &str) -> Result<EventId, String> {
+    let stripped = selector.strip_prefix('#').unwrap_or(selector);
+    if let Ok(num) = stripped.parse::<usize>() {
+        resolve_number(db, recorded_by, num)
+    } else {
+        crypto::event_id_from_hex(selector)
+            .ok_or_else(|| format!("invalid hex event ID: {}", selector))
+    }
+}
+
+/// Assemble a MessagesResponse from the database.
+pub fn list(
+    db: &Connection,
+    recorded_by: &str,
+    limit: usize,
+) -> Result<super::MessagesResponse, rusqlite::Error> {
+    let rows = list_rows(db, recorded_by, limit)?;
+    let total = count(db, recorded_by)?;
+
+    // Load client_op_id mappings for annotation
+    let client_ops = crate::db::local_client_ops::all_mappings(db, recorded_by).unwrap_or_default();
+
+    let mut messages = Vec::with_capacity(rows.len());
+    for row in rows {
+        let reactions: Vec<super::ReactionSummary> =
+            reaction::list_for_message_with_authors(db, recorded_by, &row.message_id_b64)?
+                .into_iter()
+                .map(|r| super::ReactionSummary {
+                    emoji: r.emoji,
+                    reactor_name: r.reactor_name,
+                })
+                .collect();
+
+        let client_op_id = client_ops.get(&row.message_id_b64).cloned();
+
+        messages.push(super::MessageItem {
+            id: row.message_id_hex,
+            id_b64: row.message_id_b64,
+            author_id: row.author_id,
+            author_name: row.author_name,
+            content: row.content,
+            created_at: row.created_at,
+            reactions,
+            client_op_id,
+        });
+    }
+
+    Ok(super::MessagesResponse { messages, total })
+}
+
+// ---------------------------------------------------------------------------
+// Message deletion queries (moved from message_deletion/queries.rs)
+// ---------------------------------------------------------------------------
+
+pub fn list_deleted_ids(
+    db: &Connection,
+    recorded_by: &str,
+) -> Result<Vec<String>, rusqlite::Error> {
+    // deleted_messages PK is (workspace_id, message_id); recorded_by is a
+    // first-writer-wins shadow column. Scope via invites_accepted.
+    let mut stmt = db.prepare(
+        "SELECT dm.message_id FROM deleted_messages dm
+         WHERE EXISTS (
+             SELECT 1 FROM invites_accepted ia
+             WHERE ia.recorded_by = ?1
+               AND ia.workspace_id = dm.workspace_id
+         )",
+    )?;
+    let ids = stmt
+        .query_map(rusqlite::params![recorded_by], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
