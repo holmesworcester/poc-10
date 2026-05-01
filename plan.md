@@ -12,16 +12,104 @@ UDPATED:
 
 - Inbound processing is a pure function chain; admission by event id happens before context loading.
 - Queue-like work is just module-owned table rows at wait/dedupe/retry/schedule/IO boundaries.
-- `events` stores durable, local, and endpoint-local WireEvents; `outbox` stores only `(connection_id, event_id)`.
+- `events` stores durable, local, and endpoint-local canonical event bytes; `outbox` stores only `(connection_id, event_id)`.
 - Blocking uses `blocked_by_event(blocked_by_event_id, event_id)` pair rows and same-transaction unblocking.
 - Connection wrapping has two modes: endpoint-pubkey bootstrap/repair and connection-secret ordinary traffic.
 - Outgoing TCP flow has one send owner per connection: `outbox` is the deduped source, a bounded hot queue keeps bytes ready, and TCP writability is the backpressure signal.
+- Event modules own their canonical `codec.rs`; "wire" means transit bytes, not canonical event bytes.
+- `state` materializes table definitions from event-module declarations; it owns storage mechanics, not domain schema meaning.
+- Sync is an event-module family, not a separate sync engine.
+
+# Documentation quality bar
+
+Write this plan, implementation docs, and significant inline comments in the style of high-quality systems documentation: concrete, narrow, and audit-friendly. The model to emulate is Stellar Core's documentation:
+
+- Overview and component map: https://github.com/stellar/stellar-core/blob/master/docs/readme.md
+- Process and network architecture: https://github.com/stellar/stellar-core/blob/master/docs/architecture.md
+- History system design and failure behavior: https://github.com/stellar/stellar-core/blob/master/docs/history.md
+- BucketList mental model, formal model, examples, and cost analysis: https://github.com/stellar/stellar-core/blob/master/src/bucket/BucketListBase.h
+- LedgerManager thread/data-flow diagram and invariant `LCL <= A <= Q <= H`: https://github.com/stellar/stellar-core/blob/master/src/ledger/LedgerManager.h
+- OverlayManager responsibility and message taxonomy: https://github.com/stellar/stellar-core/blob/master/src/overlay/OverlayManager.h
+- SCP/Herder separation between abstract protocol and application-specific driver: https://github.com/stellar/stellar-core/blob/master/src/scp/readme.md and https://github.com/stellar/stellar-core/blob/master/src/herder/readme.md
+
+For every important component, document the same surface:
+
+```
+Purpose
+Ownership / non-ownership
+Interfaces
+State
+Invariants
+Flow
+Failure / restart behavior
+Performance notes
+Testing hooks
+```
+
+Style rules:
+
+- Start with the component's responsibility, not implementation trivia.
+- Say what the component does not own.
+- Define vocabulary before relying on it.
+- Prefer data flow and lifecycle descriptions over architecture slogans.
+- State invariants explicitly, as small facts, formulas, or ordering rules.
+- Explain a mechanism first with the simplest mental model, then with the precise rule.
+- Use examples when a mechanism is subtle enough that the rule alone is easy to misread.
+- Include operational consequences: crash, restart, retry, slow peer, invalid input, and overload behavior.
+- Treat performance constraints as part of the design.
+- Link prose to concrete files, functions, tables, events, or interfaces.
+- Use inline comments only for non-obvious ownership, ordering, threading, safety, or performance rules.
+- Keep small components brief; let complexity earn length.
+
+Code-structure lessons from Stellar Core:
+
+- Source directories should mark semantic subsystem boundaries, as in Stellar's `scp`, `herder`, `overlay`, `ledger`, `bucket`, `history`, `work`, and `transactions` directories. Avoid generic dumping grounds.
+- Large runtime components should have a small public interface and a concrete implementation, following Stellar's `OverlayManager` / `OverlayManagerImpl`, `HistoryManager` / `HistoryManagerImpl`, and `Application` / `ApplicationImpl` pattern.
+- Abstract protocol machinery should be separated from application meaning. Stellar's `scp` is protocol-generic; `herder` maps slots and values onto ledgers and transaction sets. Here, negentropy is the generic comparison mechanism; sync event modules map it onto workspace roots, deps, have/need/send events, and outbox writes.
+- Managers own lifecycle, scheduling, and resource wiring. Helpers own algorithms. Do not let managers accumulate domain policy.
+- Long-running work should be represented explicitly, as Stellar does with `work/`, `catchup/*Work`, and `historywork/*Work`. Hidden background behavior should become a job, table row, or effect owner.
+- Data structures should encode workload assumptions. Stellar's BucketList is shaped around temporal churn, incremental hashing, and catchup. Here, dep-aware negentropy should be a projected incremental tree/cache, not a session-time rebuild.
+- Canonical encoding is a hard boundary. Stellar uses XDR for hashed, historical, and peer-message forms. Here, `codec.rs` produces canonical event bytes for ids, storage, projection, replay, and dedupe; connection wrapping is a separate transit layer.
+- Prefer immutable snapshots and stable ids at concurrency boundaries.
+- Keep the first concurrency model legible: one control-loop writer, one sender owner per connection, bounded work at explicit boundaries.
+- Failure behavior should be local: a failed send backs off one connection; a duplicate event is admitted once; a memory outbox can be regenerated; invalid bytes stop before event semantics.
 
 # Components / Responsibility
 
-**event_modules/** includes submodules `encode`, `parse`, `project`, `subscribe`, `create`, and any other domain-specific submodules, for each event type. All domain-specific logic (e.g. messages, users, files) is contained in the related event modules.
+**event_modules/** contains every protocol or domain behavior that can be expressed as events, projectors, commands, jobs, and projected tables. This includes content, identity, auth, connection, sync, and local-only behavior.
 
-**Per-file pattern, always.** Every event module is a directory with one file per concern (`wire.rs`, `projector.rs`, `commands.rs`, `queries.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a module is small enough that a single `.rs` file would suffice. The cost is some empty-ish files in tiny modules; the win is uniform shape across the surface, so the directories that accumulate too many files or oversized files immediately stand out as candidates for splitting or simplification. No collapsed single-file event modules.
+Suggested organization:
+
+```
+src/event_modules/
+  content/
+    message/
+    reaction/
+    file/
+  identity/
+    workspace/
+    user/
+    peer/
+  auth/
+    invite/
+    key/
+    removal/
+  connection/
+    connection/
+    connection_secret/
+    observed_address/
+  sync/
+    compare/
+    have/
+    need/
+    negentropy_tree/
+    dep_cache/
+  local/
+    local_secret/
+    job_tick/
+```
+
+**Per-file pattern, always.** Every event module is a directory with one file per concern (`codec.rs`, `projector.rs`, `commands.rs`, `queries.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a module is small enough that a single `.rs` file would suffice. The cost is some empty-ish files in tiny modules; the win is uniform shape across the surface, so the directories that accumulate too many files or oversized files immediately stand out as candidates for splitting or simplification. No collapsed single-file event modules.
 
 **networking** All complex networking behavior including bootstrap, connection, and sync is also implemented in event modules: commands (run by jobs) initiate activity, projectors respond to activity, and transit encryption is unwrapped into contained events. Connections are between two endpoints (daemons) and sync all data in all workspaces those two endpoints share. Each event carries its own `workspace_id`; a daemon hosts at most one instance of any given workspace, so `workspace_id` alone identifies the local processing scope and there is no separate "recorded_by".
 
@@ -29,19 +117,107 @@ UDPATED:
 
 **control_loop** is the single-writer runtime substrate. It claims bounded batches of table rows, dispatches to the owning event module or job module, applies returned state writes atomically, and runs external effects.
 
-**state** is a sorted list of Tables, each of which is a sorted lists of Rows, which can be a database in production or an in-memory store in testing and simulation. Event modules declare their tables and storage class: `durable`, `memory`, or `temp`.
+**state** is the explicit table-shaped substrate that projectors and jobs observe. It is materialized from event-module table declarations and can be a database in production or an in-memory store in testing and simulation.
 
 **network** is a TCP-only network interface that `connection`-related jobs and bootstrap jobs can use to send transmission-safe frames: endpoint-pubkey bootstrap wraps and connection-secret wraps carrying inner events.
 
 **jobs** is a set of event-module commands that run at a regular cadence; each can query state to decide whether it runs and what other commands it calls.  
 
+The substrate pieces outside `event_modules` are deliberately narrow:
+
+```
+control_loop/   // dispatch, transactions, bounded batches, effect execution
+state/          // catalog materialization, storage, migrations, snapshots
+network/        // TCP bytes and socket ownership
+sender/         // outbox -> connection wrap -> TCP write
+```
+
+If behavior is protocol semantics expressible as events/projectors/commands/tables, it belongs under `event_modules`. If it owns process execution, IO, storage mechanics, or scheduling, it belongs outside.
+
+## State and Registry
+
+State is the set of declared tables the control loop can read and update atomically:
+
+```
+State_t =
+  events
+  + module-owned projection tables
+  + boundary/work tables
+  + declared caches
+```
+
+Processing has the shape:
+
+```
+Event + Context(State_t) -> StateUpdates
+State_{t+1} = apply(State_t, StateUpdates)
+```
+
+`state` does not centrally know the domain schema. Each event module declares its schema and behavior:
+
+```
+module id
+event types
+tables it owns
+indexes
+storage class: durable | memory | temp
+migrations / schema version
+projectors
+commands / jobs
+```
+
+Those declarations form the runtime catalog:
+
+```
+event_modules/*/registry_meta.rs
+  -> ModuleRegistry
+  -> StateCatalog
+  -> database / memory store schema
+```
+
+The event module owns semantic meaning: what a row means, which projection writes it, which indexes are required, and whether it may be rebuilt. `state` owns mechanics: creating tables, applying migrations, opening transactions, inserting NewRows, deleting Purges, querying declared indexes, resetting transient rows on startup, and choosing durable vs memory storage.
+
+Boundary tables should follow the same rule where possible. `outbox` can be declared by the sender-facing module, `blocked_by_event` by the pipeline module, `job_schedules` by the jobs module, and sync caches by the sync modules. The fewer central special tables, the better.
+
 ## Event Pipeline
 
-**encode** encodes an Event to a canonicalized WireEvent, returning a BLAKE3 hash id, usually used by `create` or other domain-specific functions.
+**codec** is canonical event encoding and parsing. It is not necessarily network wire. A module's `codec.rs` defines `Event <-> CanonicalEventBytes`, the event type tag, field layout, dependency field declarations, signature and signer-family rules, and deterministic id rules.
 
-**parse** consumes WireEvent and returns a Event, which includes all event values, its BLAKE3 hash id, its WireEvent, and the `workspace_id` it belongs to, or throws an error if the WireEvent is invalid.
+**encode** encodes an Event to `CanonicalEventBytes`, returning a BLAKE3 event id, usually used by `create` or other domain-specific functions.
 
-**wire-event processing** hashes the WireEvent, checks admission before loading context, parses only newly admitted events, and then runs context/project/apply as one chained step unless the event blocks.
+**parse** consumes `CanonicalEventBytes` and returns an Event, which includes all event values, its BLAKE3 hash id, its canonical bytes, and the `workspace_id` it belongs to, or throws an error if the bytes are invalid.
+
+**canonical-event processing** hashes the canonical bytes, checks admission before loading context, parses only newly admitted events, and then runs context/project/apply as one chained step unless the event blocks.
+
+Typed Rust event values are the in-process semantic representation. They should not carry canonical bytes as ordinary fields. Canonical bytes and ids are boundary artifacts:
+
+```
+Event type     = semantic fields
+EncodedEvent   = event_id + event_type + CanonicalEventBytes
+ParsedEvent<E> = E + EncodedEvent
+```
+
+For locally created events:
+
+```
+E
+  -> encode(E)
+  -> EncodedEvent
+  -> insert/project/outbox
+```
+
+For inbound events:
+
+```
+CanonicalEventBytes
+  -> event_id = BLAKE3(CanonicalEventBytes)
+  -> admit_event_id(event_id)
+  -> parse(CanonicalEventBytes)
+  -> ParsedEvent<E>
+  -> project
+```
+
+Traits are the module API; canonical bytes are event identity. Projectors that need the id or original bytes receive them through `ParsedEvent<E>`, not because every event struct embeds them. This prevents typed values and encoded bytes from silently diverging.
 
 **admit_event_id** consumes an event id and returns known or newly claimed. Known includes applied, blocked, rejected, and in-flight events. Duplicates record observations, call `suppress_received(id)` (see: Sync), and stop before context loading. Newly claimed ids become canonical event ids only after parse succeeds.
 
@@ -62,6 +238,32 @@ UDPATED:
 **NewRows** is a list of tuples (table, row) for adding new rows to sorted tables in State, e.g. in SQLite with INSERT OR IGNORE. All NewRows are indexed by (event_id, workspace_id) and adding a NewRow with the same index must be idempotent.
 
 Queue-like work is represented as ordinary NewRows into module-owned tables. Boundary tables are used only at wait, dedupe, retry, schedule, and IO boundaries.
+
+## Event Scopes
+
+All events inserted into `events` have canonical bytes from a module `codec.rs`, even if they are never sent over the network. Canonical bytes provide the event id, dedupe key, replay form, dependency reference, and projector input.
+
+```
+durable event:
+  codec: yes
+  signed: yes
+  may be sent to peers: yes
+
+endpoint-local event:
+  codec: yes
+  signed: usually no
+  may be sent to one endpoint/connection: yes
+
+local-only event:
+  codec: yes, if stored/projected/deduped
+  signed: usually no
+  may be sent to peers: no
+
+work item:
+  codec: no, unless promoted into events
+```
+
+Examples of work items that do not need codecs are timer-fired, socket-writable, CLI-command-entered, and internal-wakeup notifications. Once something is inserted into `events`, referenced by id, deduped, blocked, replayed, or projected like an event, it needs canonical bytes.
 
 ## Control Loop
 
@@ -104,10 +306,10 @@ Normal inbound processing is a pure chain inside the `InboundBytes` step:
 ```
 InboundBytes
   -> connection.unwrap / raw frame parse
-  -> WireEvent
-  -> event_id = BLAKE3(WireEvent)
+  -> CanonicalEventBytes
+  -> event_id = BLAKE3(CanonicalEventBytes)
   -> admit_event_id(event_id)
-  -> parse(WireEvent)
+  -> parse(CanonicalEventBytes)
   -> get_context(Event)
   -> project(EventWithContext)
   -> apply(StateUpdates)
@@ -131,18 +333,18 @@ Core boundary tables:
 
 ```
 inbound_bytes       // transport ingress, dedupe by wire_id
-events              // canonical WireEvents plus status; ready rows are claimable
+events              // canonical event bytes plus status; ready rows are claimable
 blocked_by_event    // dependency wait edges, not a job queue
 outbox              // connection_id + event_id, dedupe by unique pair
 job_schedules       // time enters the system
 ```
 
-`events` stores every canonical sendable WireEvent:
+`events` stores every canonical event byte string that can be projected, replayed, referenced by id, or sent:
 
 ```
 events:
   event_id primary key
-  wire_event
+  canonical_event_bytes
   scope        // durable | local | endpoint_local
   status       // processing | ready | blocked | applied | rejected
   created_at_ms
@@ -182,7 +384,7 @@ ConnectionSender:
   present: set<event_id>
 ```
 
-`hot_queue` is bounded by estimated bytes, not only event count. When it drops below a low-water mark, the sender refills from pending `outbox` rows for that connection, skipping ids already in `present`. It batch-loads `events.wire_event`, wraps with `connection.wrap_bootstrap` or `connection.wrap`, and writes complete frames to TCP. After a complete frame is accepted by the socket, it deletes the corresponding `outbox` rows and removes those ids from `present`. On send failure it removes ids from `present`, leaves `outbox` rows pending, and backs off. No database transaction is held while writing to the socket.
+`hot_queue` is bounded by estimated bytes, not only event count. When it drops below a low-water mark, the sender refills from pending `outbox` rows for that connection, skipping ids already in `present`. It batch-loads `events.canonical_event_bytes`, wraps with `connection.wrap_bootstrap` or `connection.wrap`, and writes complete frames to TCP. After a complete frame is accepted by the socket, it deletes the corresponding `outbox` rows and removes those ids from `present`. On send failure it removes ids from `present`, leaves `outbox` rows pending, and backs off. No database transaction is held while writing to the socket.
 
 The control loop commits `StateUpdates` in one transaction, then runs `Effects`. Effects may write new rows but do not directly project events.
 
@@ -198,13 +400,13 @@ The control loop has no sync, bootstrap, auth, connection, dependency, or event-
 
 **connection** is an event module. A connection event references two endpoints and carries `shared_workspaces`. Each workspace entry's authority is established by the connection event's own dependencies and signature: deps point at the capability events (workspace-membership grant, invite, peer_shared, etc.) that authorize the signer to bind that workspace to that connection, and the pipeline's standard signature/dep validation is what makes the entry trustworthy. Rotation, revocation, and expiry are further connection-related events with their own deps/sigs. The same module owns `connection_secrets`: globally-unique `connection_secret_id` → `(key, direction, connection_id, ttl)`, with separate inbound and outbound secrets per connection, each known only to the two endpoints.
 
-The connection module also owns the wire envelope as plain functions, not as an event type (mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`):
+The connection module also owns the transit envelope as plain functions, not as an event type (mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`):
 
 - `connection.wrap_bootstrap(remote_endpoint_id, inner_events) -> OutboundFrame`: encrypts to the endpoint public key. Used for connection establishment and connection-secret repair.
 - `connection.wrap(connection_id, inner_events) -> OutboundFrame`: looks up the outbound secret for the connection, asserts every inner event's `workspace_id ∈ shared_workspaces(connection_id)`, pads to a size bucket, encrypts. Used for ordinary sync/control/event traffic.
-- `connection.unwrap(bytes) -> Vec<InnerWireEvent>`: a parse-stage transform run by the pipeline on every inbound frame. Unwraps either endpoint-pubkey bootstrap frames or connection-secret frames. Connection-secret frames recover `connection_id`, drop any inner event whose `workspace_id ∉ shared_workspaces(connection_id)`, and pass the surviving inner WireEvents into wire-event processing.
+- `connection.unwrap(bytes) -> Vec<CanonicalEventBytes>`: a parse-stage transform run by the pipeline on every inbound frame. Unwraps either endpoint-pubkey bootstrap frames or connection-secret frames. Connection-secret frames recover `connection_id`, drop any inner event whose `workspace_id ∉ shared_workspaces(connection_id)`, and pass the surviving canonical event bytes into canonical-event processing.
 
-Wrapped bytes are never canonical events. They have no event id, no dependencies, and no labels — they are an opaque transit form. Only the inner events are ids in the event store.
+Wrapped bytes are never canonical events. They have no event id, no dependencies, and no labels — they are an opaque transit form. Only inner canonical event bytes are ids in the event store.
 
 *Invariants: `shared_workspaces` is authoritative because the connection event's deps + signature have already been validated by the standard pipeline — the connection does not authorize itself, its dependencies do; a valid unwrap under one of our inbound secrets is by construction proof that the sender is the remote endpoint of that connection; every wrap is bound to exactly one connection; wrap and unwrap both enforce workspace ↔ connection alignment.*
 
@@ -293,7 +495,7 @@ Translation note: in poc-6 these were workspace-scoped; in poc-9 connections are
 - `sync_window`: keep as the per-workspace range/window selector; same `(connection_id, workspace_id)` scoping.
 - `server_connection`: defer until we add cloud-relay / always-on server endpoints.
 
-The wire envelope is *not* an event type in poc-9. It is `connection.wrap` / `connection.unwrap` — plain functions on the connection module, mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`. The encrypted bytes are opaque transit form with no id, no deps, no labels; only the inner events are canonical. See the Network section above. Every connection-related event listed here travels *inside* a wrapped frame.
+The transit envelope is *not* an event type in poc-9. It is `connection.wrap` / `connection.unwrap` — plain functions on the connection module, mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`. The encrypted bytes are opaque transit form with no id, no deps, no labels; only the inner canonical event bytes are events. See the Network section above. Every connection-related event listed here travels *inside* a wrapped frame.
 
 # Appendix: Negentropy, dependencies, and dedupe
 
@@ -412,9 +614,9 @@ inbound_observations:
   seen_count
 ```
 
-The incoming buffer is idempotent by `wire_id`. Source observations are tracked separately so address changes are diagnostics and dialing hints, not event semantics. Inner events unwrapped by `connection.unwrap` re-enter the same inbound processing path and dedupe again by their own canonical bytes.
+The incoming buffer is idempotent by `wire_id`. Source observations are tracked separately so address changes are diagnostics and dialing hints, not event semantics. Inner canonical event bytes unwrapped by `connection.unwrap` re-enter the same inbound processing path and dedupe again by their own canonical bytes.
 
-Wire-event processing only calls sync suppression after parse succeeds and the canonical event id is known. Invalid bytes may be deduped as bytes, but they are not event ids.
+Canonical-event processing only calls sync suppression after parse succeeds and the canonical event id is known. Invalid bytes may be deduped as bytes, but they are not event ids.
 
 ## Transit wrapping
 
@@ -423,7 +625,7 @@ Dedupe semantic work before transit wrapping.
 ```
 outbox(connection_id, event_id)
   -> ConnectionSender.hot_queue
-  -> batch-load events.wire_event
+  -> batch-load events.canonical_event_bytes
   -> connection.wrap(connection_id, inner_events)
   -> TCP write
   -> delete sent outbox rows
