@@ -19,6 +19,8 @@ UDPATED:
 - Event modules own their canonical `codec.rs`; "wire" means transit bytes, not canonical event bytes.
 - `state` materializes table definitions from event-module declarations; it owns storage mechanics, not domain schema meaning.
 - Sync is an event-module family, not a separate sync engine.
+- Timely Dataflow and Differential Dataflow are a proposal and source of ideas for Rust architecture and performance: deltas, arrangements, consolidation, frontiers, compaction, and bounded work should inform experiments without committing the kernel to those runtimes.
+- Production may physically purge deleted or TTL-expired events and rows, but only after surviving facts, labels, summaries, or high-water marks preserve any semantic truth future projections need.
 
 # Documentation quality bar
 
@@ -73,6 +75,31 @@ Code-structure lessons from Stellar Core:
 - Prefer immutable snapshots and stable ids at concurrency boundaries.
 - Keep the first concurrency model legible: one control-loop writer, one sender owner per connection, bounded work at explicit boundaries.
 - Failure behavior should be local: a failed send backs off one connection; a duplicate event is admitted once; a memory outbox can be regenerated; invalid bytes stop before event semantics.
+
+# Timely / Differential Proposal
+
+Timely Dataflow and Differential Dataflow are a proposal and source of ideas, not a settled dependency choice or required kernel architecture. They are useful local references for Rust performance work because they make deltas, indexed arrangements, logical progress, compaction, and bounded work explicit.
+
+The design should borrow ideas that simplify this kernel. It should not import their full model unless doing so clearly reduces code and operational complexity. A good outcome is that selected projector families could later be lowered into Differential-style dataflows, while the default kernel remains small and auditable.
+
+Ideas to test:
+
+- Facts/events are base collections.
+- Projectors are incremental transformations from input deltas and indexed context to output deltas.
+- Module table declarations include the keys and indexes needed to maintain reusable arrangements.
+- Dedupe is consolidation by deterministic key: event id, wire id, `(connection_id, event_id)`, or module-owned fact key.
+- Joins, semijoins, antijoins, distincts, counts, and reductions should be expressed structurally in module declarations when possible, not hidden behind opaque context scans.
+- Large cascades become bounded obligations with fuel/batch limits; the control loop reactivates them rather than recursively draining them.
+- Logical truth and physical storage are separate: deletion, expiry, revocation, and supersession are facts; purge and merge are physical compaction of data whose semantic replacement is already represented.
+- Pure deterministic work such as parse, signature verify, decrypt, hash, and canonical encode may run inline or as jobs, but its results are facts. External IO remains an effect boundary.
+
+Performance rules from these systems:
+
+- Do work proportional to input deltas and affected arrangements, not total stored facts.
+- Maintain hot indexes incrementally; do not rebuild negentropy trees, dependency caches, or unblock state at session time.
+- Batch where throughput matters, especially inbound admission, projection apply, outbox refill, and socket writes.
+- Bound every unit of runtime work by records, bytes, or time.
+- Keep compaction explicit and tunable so simulation can disable purge while production can merge or discard physical detail that is no longer semantically required.
 
 # Components / Responsibility
 
@@ -236,6 +263,12 @@ Traits are the module API; canonical bytes are event identity. Projectors that n
 **Purges** is a list of event id's for `apply` to purge.
 
 **NewRows** is a list of tuples (table, row) for adding new rows to sorted tables in State, e.g. in SQLite with INSERT OR IGNORE. All NewRows are indexed by (event_id, workspace_id) and adding a NewRow with the same index must be idempotent.
+
+Semantic removal is expressed by durable facts or labels, not by the absence of old rows. Examples include `deleted:message_id`, `expired:event_id`, `removed:user_id`, `revoked:key_id`, and `superseded:invite_id`. A projector may remove visible projection rows immediately, but future correctness must come from the surviving fact, label, summary, or high-water mark.
+
+`Purges` are physical compaction. In trace, simulation, and audit modes, time-based purge should be disabled so facts remain monotonic and replayable. In app/production mode, events and projection rows may be purged for deletion or TTL once no future projector needs their bytes or rows as the only evidence of what happened.
+
+Invariant: purging may remove physical evidence, but it must not be the only representation of a semantic change. If future behavior depends on knowing that something was deleted, expired, revoked, removed, or superseded, some surviving row must say so after purge.
 
 Queue-like work is represented as ordinary NewRows into module-owned tables. Boundary tables are used only at wait, dedupe, retry, schedule, and IO boundaries.
 
