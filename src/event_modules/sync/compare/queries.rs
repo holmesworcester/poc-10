@@ -5,10 +5,10 @@ use super::types::{BucketSummary, BUCKETS};
 pub fn summary(store: &Store) -> Result<[BucketSummary; BUCKETS], String> {
     let mut summary = [BucketSummary::default(); BUCKETS];
     for header in store
-        .headers()
+        .event_index_entries()
         .map_err(|err| format!("load event headers: {err}"))?
     {
-        let bucket = &mut summary[usize::from(header.bucket)];
+        let bucket = &mut summary[usize::from(header.partition)];
         bucket.count += 1;
         xor_into(&mut bucket.fingerprint, &fingerprint_id(&header.event_id));
     }
@@ -17,7 +17,7 @@ pub fn summary(store: &Store) -> Result<[BucketSummary; BUCKETS], String> {
 
 pub fn ids_in_bucket(store: &Store, bucket: u8) -> Result<Vec<EventId>, String> {
     store
-        .ids_in_bucket(bucket)
+        .event_ids_in_partition(bucket)
         .map_err(|err| format!("load bucket ids: {err}"))
 }
 

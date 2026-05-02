@@ -67,7 +67,7 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     let decoded = decode(&bytes)?;
     Ok(EventRecord {
         timestamp: decoded.timestamp,
-        payload_len: PAYLOAD_BYTES,
+        body_len: PAYLOAD_BYTES,
         canonical_bytes: bytes,
         dependencies: decoded.dependencies,
     })

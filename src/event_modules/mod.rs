@@ -12,12 +12,26 @@ use crate::store::Store;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameMetadata {
+    pub origin: SocketAddr,
+    pub remember_origin: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModuleSyncReport {
+pub struct ModuleFrameReport {
     pub outgoing: Vec<Vec<u8>>,
+    pub established_routes: usize,
     pub sent_events: usize,
     pub received_events: usize,
     pub received_event_bytes: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundSync {
+    pub target: SocketAddr,
+    pub outgoing: Vec<Vec<u8>>,
+    pub sent_events: usize,
 }
 
 impl Modules {
@@ -54,46 +68,90 @@ impl Modules {
         connection::connection_request::commands::create(store, invite)
     }
 
-    pub fn unwrap_transit(
+    pub fn ingest_frame(
         &self,
         store: &Store,
-        bytes: &[u8],
-    ) -> Result<connection::transit::projector::UnwrappedTransit, String> {
-        connection::transit::projector::unwrap(store, bytes)
-    }
-
-    pub fn is_connection_event(&self, bytes: &[u8]) -> bool {
-        connection::connection_record::types::is_connection_event(bytes)
-    }
-
-    pub fn accept_connection_event(
-        &self,
-        store: &Store,
+        origin: SocketAddr,
+        remember_origin: bool,
         bytes: Vec<u8>,
-    ) -> Result<connection::connection_record::types::InboundConnection, String> {
-        if connection::connection_request::codec::is_request(&bytes) {
-            connection::connection_request::commands::accept(store, bytes)
-        } else if connection::connection_ack::codec::is_ack(&bytes) {
-            connection::connection_ack::commands::accept(store, bytes)
-        } else {
-            Err("unknown connection event".to_string())
+    ) -> Result<ModuleFrameReport, String> {
+        let metadata = FrameMetadata {
+            origin,
+            remember_origin,
+        };
+        let transit = connection::transit::projector::unwrap(store, &bytes)?;
+        if connection::connection_record::types::is_connection_event(&transit.inner) {
+            return self.ingest_connection_frame(store, metadata, transit.inner);
         }
+        let connection_id = transit
+            .connection_id
+            .ok_or_else(|| "sync frame requires connection transit".to_string())?;
+        self.ingest_sync_frame(store, connection_id, &transit.inner)
     }
 
-    pub fn record_transport_target(
+    fn ingest_connection_frame(
         &self,
         store: &Store,
-        connection_id: connection::connection_record::types::ConnectionId,
-        addr: SocketAddr,
+        metadata: FrameMetadata,
+        bytes: Vec<u8>,
+    ) -> Result<ModuleFrameReport, String> {
+        let mut result = ModuleFrameReport::default();
+        if connection::connection_request::codec::is_request(&bytes) {
+            let connection = connection::connection_request::commands::accept(store, bytes)?;
+            self.apply_connection_result(store, metadata, connection, &mut result)?;
+        } else if connection::connection_ack::codec::is_ack(&bytes) {
+            let connection = connection::connection_ack::commands::accept(store, bytes)?;
+            self.apply_connection_result(store, metadata, connection, &mut result)?;
+        } else {
+            return Err("unknown connection event".to_string());
+        }
+        Ok(result)
+    }
+
+    fn apply_connection_result(
+        &self,
+        store: &Store,
+        metadata: FrameMetadata,
+        connection: connection::connection_record::types::InboundConnection,
+        result: &mut ModuleFrameReport,
     ) -> Result<(), String> {
-        connection::transport_target::commands::record(store, connection_id, addr)
+        if let Some(bytes) = connection.response {
+            result.outgoing.push(bytes);
+        }
+        if let Some(connection_id) = connection.connection_id {
+            if metadata.remember_origin {
+                connection::transport_target::commands::record(
+                    store,
+                    connection_id,
+                    metadata.origin,
+                )?;
+            }
+            result.established_routes += 1;
+        }
+        Ok(())
     }
 
-    pub fn transport_routes(
-        &self,
-        store: &Store,
-    ) -> Result<Vec<connection::transport_target::types::TransportRoute>, String> {
-        connection::transport_target::queries::routes(store)
+    pub fn sync_outbound(&self, store: &Store) -> Result<Vec<OutboundSync>, String> {
+        let mut outbound = Vec::new();
+        for route in connection::transport_target::queries::routes(store)? {
+            let mut result = ModuleFrameReport::default();
+            let report = sync::compare::commands::start(store, route.connection_id, |bytes| {
+                result
+                    .outgoing
+                    .push(connection::transit::commands::create_connection(
+                        store,
+                        route.connection_id,
+                        bytes,
+                    )?);
+                Ok(())
+            })?;
+            outbound.push(OutboundSync {
+                target: route.addr,
+                outgoing: result.outgoing,
+                sent_events: report.sent_events,
+            });
+        }
+        Ok(outbound)
     }
 
     pub fn connection_count(&self, store: &Store) -> Result<usize, String> {
@@ -104,34 +162,13 @@ impl Modules {
         connection::connection_record::queries::connection_event_count(store)
     }
 
-    pub fn start_sync(
-        &self,
-        store: &Store,
-        route: connection::transport_target::types::TransportRoute,
-    ) -> Result<ModuleSyncReport, String> {
-        let mut result = ModuleSyncReport::default();
-        let report = sync::compare::commands::start(store, route.connection_id, |bytes| {
-            result
-                .outgoing
-                .push(connection::transit::commands::create_connection(
-                    store,
-                    route.connection_id,
-                    bytes,
-                )?);
-            Ok(())
-        })?;
-        result.sent_events += report.sent_events;
-        result.received_events += report.received_events;
-        Ok(result)
-    }
-
-    pub fn ingest_sync_frame(
+    fn ingest_sync_frame(
         &self,
         store: &Store,
         connection_id: connection::connection_record::types::ConnectionId,
         bytes: &[u8],
-    ) -> Result<ModuleSyncReport, String> {
-        let mut result = ModuleSyncReport::default();
+    ) -> Result<ModuleFrameReport, String> {
+        let mut result = ModuleFrameReport::default();
         let report = sync::compare::commands::ingest_frame(store, connection_id, bytes, |bytes| {
             result
                 .outgoing

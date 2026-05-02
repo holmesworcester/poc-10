@@ -1,10 +1,11 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::Type, Connection, OptionalExtension};
+use std::io;
 use std::path::Path;
 
 pub type EventId = [u8; 32];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleRow {
+pub struct TableRow {
     pub table: &'static str,
     pub key: Vec<u8>,
     pub value: Vec<u8>,
@@ -13,15 +14,15 @@ pub struct ModuleRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
     pub timestamp: u64,
-    pub payload_len: usize,
+    pub body_len: usize,
     pub canonical_bytes: Vec<u8>,
     pub dependencies: Vec<EventId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventHeader {
+pub struct EventIndexEntry {
     pub event_id: EventId,
-    pub bucket: u8,
+    pub partition: u8,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -64,13 +65,13 @@ impl Store {
         Ok(store)
     }
 
-    pub fn insert_module_rows(&self, rows: Vec<ModuleRow>) -> rusqlite::Result<usize> {
+    pub fn insert_table_rows(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             let mut inserted = 0;
             for row in rows {
                 inserted += self.conn.execute(
-                    "INSERT OR IGNORE INTO module_rows
+                    "INSERT OR IGNORE INTO table_rows
                         (table_name, row_key, row_value)
                      VALUES (?1, ?2, ?3)",
                     params![row.table, row.key, row.value],
@@ -91,10 +92,10 @@ impl Store {
         }
     }
 
-    pub fn module_row(&self, table: &'static str, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
+    pub fn table_row(&self, table: &'static str, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
         self.conn
             .query_row(
-                "SELECT row_value FROM module_rows
+                "SELECT row_value FROM table_rows
                  WHERE table_name = ?1 AND row_key = ?2",
                 params![table, key],
                 |row| row.get(0),
@@ -102,19 +103,19 @@ impl Store {
             .optional()
     }
 
-    pub fn module_row_count(&self, table: &'static str) -> rusqlite::Result<usize> {
+    pub fn table_row_count(&self, table: &'static str) -> rusqlite::Result<usize> {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM module_rows WHERE table_name = ?1",
+                "SELECT COUNT(*) FROM table_rows WHERE table_name = ?1",
                 params![table],
                 |row| row.get::<_, i64>(0),
             )
             .map(|count| count as usize)
     }
 
-    pub fn module_rows(&self, table: &'static str) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    pub fn table_rows(&self, table: &'static str) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT row_key, row_value FROM module_rows
+            "SELECT row_key, row_value FROM table_rows
              WHERE table_name = ?1
              ORDER BY row_key",
         )?;
@@ -140,20 +141,16 @@ impl Store {
         }
     }
 
-    pub fn insert_event_row(
-        &self,
-        event: &EventRecord,
-        status: EventStatus,
-    ) -> rusqlite::Result<bool> {
+    pub fn insert_event(&self, event: &EventRecord, status: EventStatus) -> rusqlite::Result<bool> {
         let event_id = event_id(&event.canonical_bytes);
         let inserted = self.conn.execute(
             "INSERT OR IGNORE INTO events
-                (event_id, timestamp, payload_len, bucket, status, canonical_bytes)
+                (event_id, timestamp, body_len, event_partition, status, canonical_bytes)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 event_id.to_vec(),
                 event.timestamp as i64,
-                event.payload_len as i64,
+                event.body_len as i64,
                 i64::from(event_id[0]),
                 status.as_str(),
                 &event.canonical_bytes,
@@ -162,7 +159,7 @@ impl Store {
         Ok(inserted > 0)
     }
 
-    pub fn is_applied(&self, event_id: &EventId) -> rusqlite::Result<bool> {
+    pub fn event_is_applied(&self, event_id: &EventId) -> rusqlite::Result<bool> {
         self.conn
             .query_row(
                 "SELECT 1 FROM events
@@ -174,7 +171,7 @@ impl Store {
             .map(|row| row.is_some())
     }
 
-    pub fn insert_blocker_edge(
+    pub fn insert_dependency_wait(
         &self,
         blocked_by_event_id: &EventId,
         event_id: &EventId,
@@ -189,7 +186,7 @@ impl Store {
             .map(|changed| changed > 0)
     }
 
-    pub fn next_ready_event_id(&self) -> rusqlite::Result<Option<EventId>> {
+    pub fn next_ready_event(&self) -> rusqlite::Result<Option<EventId>> {
         self.conn
             .query_row(
                 "SELECT event_id FROM events
@@ -199,7 +196,7 @@ impl Store {
                 params![EventStatus::Ready.as_str()],
                 |row| {
                     let id: Vec<u8> = row.get(0)?;
-                    Ok(vec_to_id(id))
+                    vec_to_id(id)
                 },
             )
             .optional()
@@ -221,7 +218,7 @@ impl Store {
             .map(|changed| changed > 0)
     }
 
-    pub fn delete_blocker_edges_for(
+    pub fn delete_dependency_waits_for(
         &self,
         blocked_by_event_id: &EventId,
     ) -> rusqlite::Result<usize> {
@@ -232,7 +229,7 @@ impl Store {
         )
     }
 
-    pub fn dependents_blocked_by(
+    pub fn events_waiting_on(
         &self,
         blocked_by_event_id: &EventId,
     ) -> rusqlite::Result<Vec<EventId>> {
@@ -243,12 +240,12 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![blocked_by_event_id.to_vec()], |row| {
             let id: Vec<u8> = row.get(0)?;
-            Ok(vec_to_id(id))
+            vec_to_id(id)
         })?;
         rows.collect()
     }
 
-    pub fn has_blockers(&self, event_id: &EventId) -> rusqlite::Result<bool> {
+    pub fn event_has_dependency_waits(&self, event_id: &EventId) -> rusqlite::Result<bool> {
         self.conn
             .query_row(
                 "SELECT 1 FROM blocked_by_event
@@ -308,37 +305,35 @@ impl Store {
             .map(|count| count as usize)
     }
 
-    pub fn payload_bytes(&self) -> rusqlite::Result<usize> {
+    pub fn body_bytes(&self) -> rusqlite::Result<usize> {
         self.conn
-            .query_row(
-                "SELECT COALESCE(SUM(payload_len), 0) FROM events",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
+            .query_row("SELECT COALESCE(SUM(body_len), 0) FROM events", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .map(|count| count as usize)
     }
 
-    pub fn headers(&self) -> rusqlite::Result<Vec<EventHeader>> {
+    pub fn event_index_entries(&self) -> rusqlite::Result<Vec<EventIndexEntry>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT event_id, bucket FROM events ORDER BY event_id")?;
+            .prepare("SELECT event_id, event_partition FROM events ORDER BY event_id")?;
         let rows = stmt.query_map([], |row| {
             let id: Vec<u8> = row.get(0)?;
-            Ok(EventHeader {
-                event_id: vec_to_id(id),
-                bucket: row.get::<_, i64>(1)? as u8,
+            Ok(EventIndexEntry {
+                event_id: vec_to_id(id)?,
+                partition: row.get::<_, i64>(1)? as u8,
             })
         })?;
         rows.collect()
     }
 
-    pub fn ids_in_bucket(&self, bucket: u8) -> rusqlite::Result<Vec<EventId>> {
+    pub fn event_ids_in_partition(&self, partition: u8) -> rusqlite::Result<Vec<EventId>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT event_id FROM events WHERE bucket = ?1 ORDER BY event_id")?;
-        let rows = stmt.query_map(params![i64::from(bucket)], |row| {
+            .prepare("SELECT event_id FROM events WHERE event_partition = ?1 ORDER BY event_id")?;
+        let rows = stmt.query_map(params![i64::from(partition)], |row| {
             let id: Vec<u8> = row.get(0)?;
-            Ok(vec_to_id(id))
+            vec_to_id(id)
         })?;
         rows.collect()
     }
@@ -370,13 +365,13 @@ impl Store {
             CREATE TABLE IF NOT EXISTS events (
                 event_id BLOB PRIMARY KEY NOT NULL,
                 timestamp INTEGER NOT NULL,
-                payload_len INTEGER NOT NULL,
-                bucket INTEGER NOT NULL,
+                body_len INTEGER NOT NULL,
+                event_partition INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 canonical_bytes BLOB NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_events_bucket
-                ON events(bucket, event_id);
+            CREATE INDEX IF NOT EXISTS idx_events_partition
+                ON events(event_partition, event_id);
             CREATE INDEX IF NOT EXISTS idx_events_status
                 ON events(status, timestamp, event_id);
             CREATE TABLE IF NOT EXISTS blocked_by_event (
@@ -387,7 +382,7 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_blocked_by_event_event
                 ON blocked_by_event(event_id, blocked_by_event_id);
 
-            CREATE TABLE IF NOT EXISTS module_rows (
+            CREATE TABLE IF NOT EXISTS table_rows (
                 table_name TEXT NOT NULL,
                 row_key BLOB NOT NULL,
                 row_value BLOB NOT NULL,
@@ -402,8 +397,15 @@ pub fn event_id(bytes: &[u8]) -> EventId {
     *blake3::hash(bytes).as_bytes()
 }
 
-fn vec_to_id(bytes: Vec<u8>) -> EventId {
-    let mut id = [0; 32];
-    id.copy_from_slice(&bytes);
-    id
+fn vec_to_id(bytes: Vec<u8>) -> rusqlite::Result<EventId> {
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            Type::Blob,
+            Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected 32-byte event id, got {}", bytes.len()),
+            )),
+        )
+    })
 }

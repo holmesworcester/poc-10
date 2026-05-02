@@ -8,7 +8,7 @@ pub fn drain_ready(store: &Store, limit: usize) -> Result<ApplyReadyReport, Stri
         .write_transaction(|store| {
             let mut total = ApplyReadyReport::default();
             while total.applied_events < limit {
-                let Some(event_id) = store.next_ready_event_id()? else {
+                let Some(event_id) = store.next_ready_event()? else {
                     break;
                 };
                 let report = pipeline::apply_ready_event_in_tx(store, &event_id)?;

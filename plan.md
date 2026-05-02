@@ -54,7 +54,7 @@ Performance rules from these systems:
 
 **event_modules/** contains every protocol or domain behavior that can be expressed as events, projectors, commands, jobs, and projected tables. This includes content, identity, auth, connection, sync, and local-only behavior.
 
-Core imports `event_modules::Modules` only. `event_modules/mod.rs` is the single composition point that imports concrete module families and exposes the narrow registry surface used by the pipeline, control loop, CLI, and tests. Kernel files call methods on `Modules`; they do not import `connection`, `sync`, `content`, or `identity` directly.
+Core imports `event_modules::Modules` only. `event_modules/mod.rs` is the single composition point that imports concrete module families and exposes the narrow registry surface used by the pipeline, control loop, CLI, and tests. Kernel files call methods on `Modules`; they do not import `connection`, `sync`, `content`, or `identity` directly. The pipeline does not branch on connection, transit, or sync protocol shape; `Modules` interprets framed bytes and returns canonical event bytes plus outgoing effects for the generic pipeline to admit or hand back to transport.
 
 Suggested organization:
 

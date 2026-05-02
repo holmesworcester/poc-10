@@ -8,10 +8,10 @@ use super::{projector, tables};
 
 pub fn ensure_local_keypair(store: &Store) -> Result<EndpointKeypair, String> {
     let secret = store
-        .module_row(tables::LOCAL_ENDPOINT_SECRET, b"local")
+        .table_row(tables::LOCAL_ENDPOINT_SECRET, b"local")
         .map_err(|err| format!("load local endpoint secret: {err}"))?;
     let endpoint = store
-        .module_row(tables::LOCAL_ENDPOINT, b"local")
+        .table_row(tables::LOCAL_ENDPOINT, b"local")
         .map_err(|err| format!("load local endpoint: {err}"))?;
 
     match (secret, endpoint) {
@@ -29,7 +29,7 @@ pub fn ensure_local_keypair(store: &Store) -> Result<EndpointKeypair, String> {
             let endpoint = PublicKey::from(&secret).to_bytes();
             let secret = secret.to_bytes();
             store
-                .insert_module_rows(projector::local_endpoint(endpoint, secret))
+                .insert_table_rows(projector::local_endpoint(endpoint, secret))
                 .map_err(|err| format!("store local endpoint: {err}"))?;
             Ok(EndpointKeypair { endpoint, secret })
         }

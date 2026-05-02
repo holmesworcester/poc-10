@@ -1,29 +1,26 @@
 use crate::event_modules::identity::endpoint::types::EndpointId;
-use crate::store::{EventId, ModuleRow};
+use crate::store::{EventId, TableRow};
 
 use super::tables;
 use super::types::ConnectionId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
-    pub rows: Vec<ModuleRow>,
+    pub rows: Vec<TableRow>,
     pub response: Option<Vec<u8>>,
     pub connection_id: Option<ConnectionId>,
 }
 
-pub(crate) fn connection_event_row(event_id: EventId, bytes: Vec<u8>) -> ModuleRow {
-    ModuleRow {
+pub(crate) fn connection_event_row(event_id: EventId, bytes: Vec<u8>) -> TableRow {
+    TableRow {
         table: tables::CONNECTION_EVENTS,
         key: event_id.to_vec(),
         value: bytes,
     }
 }
 
-pub(crate) fn connection_row(
-    connection_id: ConnectionId,
-    remote_endpoint: EndpointId,
-) -> ModuleRow {
-    ModuleRow {
+pub(crate) fn connection_row(connection_id: ConnectionId, remote_endpoint: EndpointId) -> TableRow {
+    TableRow {
         table: tables::CONNECTIONS,
         key: connection_id.to_vec(),
         value: remote_endpoint.to_vec(),

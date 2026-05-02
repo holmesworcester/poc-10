@@ -154,6 +154,40 @@ fn core_imports_only_the_modules_registry() {
 }
 
 #[test]
+fn pipeline_has_no_protocol_branching_vocabulary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = [root.join("src/pipeline.rs")];
+    let forbidden = [
+        "connection",
+        "sync",
+        "transit",
+        "response",
+        "record_transport",
+        "is_connection_event",
+        "ingest_sync",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "pipeline is generic admission/apply plumbing; protocol branching belongs in event_modules::Modules:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn store_uses_generic_storage_vocabulary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = [root.join("src/store.rs")];
+    let forbidden = ["bucket", "module_rows", "payload_len"];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "store owns generic mechanics, not sync buckets, module-row escape hatches, or payload semantics:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn sync_event_module_does_not_own_transport_or_frame_io() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sync_root = root.join("src/event_modules/sync");

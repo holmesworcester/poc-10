@@ -55,6 +55,16 @@ The kernel may call methods on `Modules`, pass `Modules` into pipeline/control
 loop functions, and move returned bytes/effects. It must not import concrete
 module namespaces to get work done.
 
+`pipeline.rs` is generic admission/apply plumbing. It must not branch on
+connection, transit, sync, response, or transport-target details. The module
+registry interprets framed bytes and returns canonical event bytes plus outgoing
+bytes/effects.
+
+`store.rs` is generic storage mechanics. It should expose table rows, event
+status, dependency waits, and generic event-id partitions. It must not expose
+sync buckets, connection/bootstrap schema, or content payload semantics as
+storage concepts.
+
 ## Event Writes Return Event IDs
 
 The substrate should expose an event writer API that returns the event id from

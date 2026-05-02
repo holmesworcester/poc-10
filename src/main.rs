@@ -77,7 +77,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 .event_count()
                 .map_err(|err| format!("count events: {err}"))?;
             let bytes = store
-                .payload_bytes()
+                .body_bytes()
                 .map_err(|err| format!("count bytes: {err}"))?;
             println!("events: {count}");
             println!("payload_bytes: {bytes}");
@@ -257,9 +257,9 @@ fn connect(store: &Store, modules: &Modules, invite: &str) -> Result<SocketAddr,
         store,
         modules,
         &mut stream,
-        addr,
-        pipeline::IngestOptions {
-            record_transport_target: true,
+        pipeline::FrameMetadata {
+            origin: addr,
+            remember_origin: true,
         },
         None,
     )?;
@@ -286,9 +286,9 @@ fn serve(
             store,
             modules,
             &mut stream,
-            peer_addr,
-            pipeline::IngestOptions {
-                record_transport_target: false,
+            pipeline::FrameMetadata {
+                origin: peer_addr,
+                remember_origin: false,
             },
             Some(first_frame),
         )?;
@@ -302,19 +302,18 @@ fn sync_routes(store: &Store, modules: &Modules) -> Result<CliSyncReport, String
     control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
         .map_err(|err| format!("drain ready events before sync: {err}"))?;
     let mut report = CliSyncReport::default();
-    for route in modules.transport_routes(store)? {
+    for outbound in modules.sync_outbound(store)? {
         let mut stream =
-            network::connect(route.addr).map_err(|err| format!("open tcp stream: {err}"))?;
-        let start = modules.start_sync(store, route)?;
-        report.sent_events += start.sent_events;
-        network::write_frames(&mut stream, start.outgoing)?;
+            network::connect(outbound.target).map_err(|err| format!("open tcp stream: {err}"))?;
+        report.sent_events += outbound.sent_events;
+        network::write_frames(&mut stream, outbound.outgoing)?;
         let stream_report = drive_stream(
             store,
             modules,
             &mut stream,
-            route.addr,
-            pipeline::IngestOptions {
-                record_transport_target: false,
+            pipeline::FrameMetadata {
+                origin: outbound.target,
+                remember_origin: false,
             },
             None,
         )?;
@@ -336,13 +335,12 @@ fn drive_stream(
     store: &Store,
     modules: &Modules,
     stream: &mut TcpStream,
-    origin: SocketAddr,
-    options: pipeline::IngestOptions,
+    metadata: pipeline::FrameMetadata,
     first_frame: Option<Vec<u8>>,
 ) -> Result<StreamReport, String> {
     let mut report = StreamReport::default();
     if let Some(bytes) = first_frame {
-        let result = pipeline::ingest_frame(store, modules, origin, bytes, options)?;
+        let result = pipeline::ingest_frame(store, modules, metadata, bytes)?;
         control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
             .map_err(|err| format!("drain ready events: {err}"))?;
         apply_stream_result(stream, &mut report, result)?;
@@ -350,7 +348,7 @@ fn drive_stream(
     loop {
         match network::read_frame(stream) {
             Ok(bytes) => {
-                let result = pipeline::ingest_frame(store, modules, origin, bytes, options)?;
+                let result = pipeline::ingest_frame(store, modules, metadata, bytes)?;
                 control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
                     .map_err(|err| format!("drain ready events: {err}"))?;
                 apply_stream_result(stream, &mut report, result)?;
@@ -368,7 +366,7 @@ fn apply_stream_result(
     report: &mut StreamReport,
     result: pipeline::IngestResult,
 ) -> Result<(), String> {
-    report.established_connections += result.established_connections;
+    report.established_connections += result.established_routes;
     report.sent_events += result.sent_events;
     report.received_events += result.received_events;
     let has_outgoing = !result.outgoing.is_empty();

@@ -23,7 +23,7 @@ pub fn create(store: &Store, public_addr: SocketAddr) -> Result<String, String> 
     let bootstrap_secret = nonce32();
     let workspace_id = nonce32();
     store
-        .insert_module_rows(projector::invite_secret(
+        .insert_table_rows(projector::invite_secret(
             secret_hash(&bootstrap_secret),
             bootstrap_secret,
         ))
@@ -103,7 +103,7 @@ pub fn bootstrap_hash_is_authorized(
     bootstrap_hash: &[u8; 32],
 ) -> Result<bool, String> {
     store
-        .module_row(tables::INVITE_SECRETS, bootstrap_hash)
+        .table_row(tables::INVITE_SECRETS, bootstrap_hash)
         .map(|row| row.is_some())
         .map_err(|err| format!("load invite secret: {err}"))
 }

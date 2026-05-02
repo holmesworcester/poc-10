@@ -8,7 +8,7 @@ use super::types::TransportRoute;
 
 pub fn routes(store: &Store) -> Result<Vec<TransportRoute>, String> {
     let rows = store
-        .module_rows(tables::TRANSPORT_TARGETS)
+        .table_rows(tables::TRANSPORT_TARGETS)
         .map_err(|err| format!("load transport targets: {err}"))?;
     rows.into_iter()
         .map(|(key, value)| {
