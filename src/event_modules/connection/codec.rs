@@ -1,153 +1,221 @@
-//! Encode/parse for the `Connection` event.
-//!
-//! Field-spec wire layout:
-//! ```text
-//! type_code(1)
-//! created_at_ms(8)
-//! endpoint_a(32)
-//! endpoint_b(32)
-//! signed_at_ms(8)
-//! shared_workspaces_count(2 BE)
-//! shared_workspaces([32; N], deterministic sorted)
-//! signer(32)
-//! signature(64)
-//! ```
-//!
-//! TODO(plan.md): once the layout/field_spec system is extended for
-//! variable-length lists, port this to use the same `FieldSpec` machinery
-//! the other event modules use. Phase 1 hand-rolls a small encoder/decoder
-//! to keep the connection module compilable without growing the
-//! `field_spec` system.
+use crate::store::EventId;
+use crate::wire::{Reader, Writer};
 
-use std::collections::BTreeSet;
+pub type EndpointId = [u8; 32];
+pub type ConnectionId = [u8; 32];
+pub type TransitNonce = [u8; 24];
 
-use crate::runtime::control_loop::work_item::{EndpointId, WorkspaceId};
+const MAGIC: &[u8; 10] = b"TOPOCONN1\0";
+const TAG_REQUEST: u8 = 1;
+const TAG_ACK: u8 = 2;
 
-use super::event::{Connection, CONNECTION_TYPE_CODE};
+const TRANSIT_MAGIC: &[u8; 10] = b"TOPOTRANS1";
+const TAG_BOOTSTRAP_TRANSIT: u8 = 1;
+const TAG_CONNECTION_TRANSIT: u8 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionEvent {
+    Request {
+        from_endpoint: EndpointId,
+        nonce: [u8; 32],
+        bootstrap_hash: [u8; 32],
+    },
+    Ack {
+        from_endpoint: EndpointId,
+        to_endpoint: EndpointId,
+        request_id: EventId,
+        connection_id: ConnectionId,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConnectionWireError {
-    Truncated,
-    WrongType(u8),
-    BadShape(&'static str),
+pub enum TransitEnvelope {
+    Bootstrap {
+        sender_endpoint: EndpointId,
+        recipient_endpoint: EndpointId,
+        nonce: TransitNonce,
+        ciphertext: Vec<u8>,
+    },
+    Connection {
+        connection_id: ConnectionId,
+        sender_endpoint: EndpointId,
+        recipient_endpoint: EndpointId,
+        nonce: TransitNonce,
+        ciphertext: Vec<u8>,
+    },
 }
 
-impl std::fmt::Display for ConnectionWireError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConnectionWireError::Truncated => write!(f, "connection event truncated"),
-            ConnectionWireError::WrongType(t) => write!(f, "wrong type code: {}", t),
-            ConnectionWireError::BadShape(s) => write!(f, "bad shape: {}", s),
+pub fn bootstrap_hash(token: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"topo-bootstrap-token-v1");
+    hasher.update(token.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+pub fn connection_id(request_id: &EventId, from_endpoint: &EndpointId) -> ConnectionId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"topo-connection-v1");
+    hasher.update(request_id);
+    hasher.update(from_endpoint);
+    *hasher.finalize().as_bytes()
+}
+
+pub fn event_id(bytes: &[u8]) -> EventId {
+    *blake3::hash(bytes).as_bytes()
+}
+
+pub fn is_connection_event(bytes: &[u8]) -> bool {
+    bytes.starts_with(MAGIC)
+}
+
+pub fn encode(event: &ConnectionEvent) -> Vec<u8> {
+    let mut out = Writer::with_capacity(10 + 1 + 32 * 4);
+    out.raw(MAGIC);
+    match event {
+        ConnectionEvent::Request {
+            from_endpoint,
+            nonce,
+            bootstrap_hash,
+        } => {
+            out.u8(TAG_REQUEST);
+            out.id(from_endpoint);
+            out.id(nonce);
+            out.id(bootstrap_hash);
+        }
+        ConnectionEvent::Ack {
+            from_endpoint,
+            to_endpoint,
+            request_id,
+            connection_id,
+        } => {
+            out.u8(TAG_ACK);
+            out.id(from_endpoint);
+            out.id(to_endpoint);
+            out.id(request_id);
+            out.id(connection_id);
         }
     }
+    out.finish()
 }
 
-impl std::error::Error for ConnectionWireError {}
-
-pub fn encode_connection(c: &Connection) -> Vec<u8> {
-    let n = c.shared_workspaces.len();
-    let cap = 1 + 8 + 32 + 32 + 8 + 2 + n * 32 + 32 + 64;
-    let mut out = Vec::with_capacity(cap);
-    out.push(CONNECTION_TYPE_CODE);
-    out.extend_from_slice(&c.created_at_ms.to_be_bytes());
-    out.extend_from_slice(&c.endpoint_a);
-    out.extend_from_slice(&c.endpoint_b);
-    out.extend_from_slice(&c.signed_at_ms.to_be_bytes());
-    out.extend_from_slice(&(n as u16).to_be_bytes());
-    for ws in &c.shared_workspaces {
-        out.extend_from_slice(ws);
+pub fn decode(bytes: &[u8]) -> Result<ConnectionEvent, String> {
+    if !bytes.starts_with(MAGIC) {
+        return Err("not a connection event".to_string());
     }
-    out.extend_from_slice(&c.signer);
-    out.extend_from_slice(&c.signature);
-    out
-}
-
-pub fn parse_connection(blob: &[u8]) -> Result<Connection, ConnectionWireError> {
-    if blob.is_empty() {
-        return Err(ConnectionWireError::Truncated);
-    }
-    if blob[0] != CONNECTION_TYPE_CODE {
-        return Err(ConnectionWireError::WrongType(blob[0]));
-    }
-    let mut pos = 1;
-    let need = |p: usize, n: usize| {
-        if blob.len() < p + n {
-            Err(ConnectionWireError::Truncated)
-        } else {
-            Ok(())
-        }
+    let mut reader = Reader::new(&bytes[MAGIC.len()..], "connection event");
+    let tag = reader.u8()?;
+    let event = match tag {
+        TAG_REQUEST => ConnectionEvent::Request {
+            from_endpoint: reader.id()?,
+            nonce: reader.id()?,
+            bootstrap_hash: reader.id()?,
+        },
+        TAG_ACK => ConnectionEvent::Ack {
+            from_endpoint: reader.id()?,
+            to_endpoint: reader.id()?,
+            request_id: reader.id()?,
+            connection_id: reader.id()?,
+        },
+        other => return Err(format!("unknown connection event tag {other}")),
     };
-    need(pos, 8)?;
-    let created_at_ms = u64::from_be_bytes(blob[pos..pos + 8].try_into().unwrap());
-    pos += 8;
-    need(pos, 32)?;
-    let mut endpoint_a: EndpointId = [0u8; 32];
-    endpoint_a.copy_from_slice(&blob[pos..pos + 32]);
-    pos += 32;
-    need(pos, 32)?;
-    let mut endpoint_b: EndpointId = [0u8; 32];
-    endpoint_b.copy_from_slice(&blob[pos..pos + 32]);
-    pos += 32;
-    need(pos, 8)?;
-    let signed_at_ms = u64::from_be_bytes(blob[pos..pos + 8].try_into().unwrap());
-    pos += 8;
-    need(pos, 2)?;
-    let n = u16::from_be_bytes(blob[pos..pos + 2].try_into().unwrap()) as usize;
-    pos += 2;
-    let mut shared = BTreeSet::new();
-    for _ in 0..n {
-        need(pos, 32)?;
-        let mut ws: WorkspaceId = [0u8; 32];
-        ws.copy_from_slice(&blob[pos..pos + 32]);
-        pos += 32;
-        if !shared.insert(ws) {
-            return Err(ConnectionWireError::BadShape(
-                "duplicate workspace id in shared_workspaces",
-            ));
-        }
-    }
-    need(pos, 32)?;
-    let mut signer = [0u8; 32];
-    signer.copy_from_slice(&blob[pos..pos + 32]);
-    pos += 32;
-    need(pos, 64)?;
-    let mut signature = [0u8; 64];
-    signature.copy_from_slice(&blob[pos..pos + 64]);
-    pos += 64;
-    if blob.len() != pos {
-        return Err(ConnectionWireError::BadShape("trailing bytes"));
-    }
-    Ok(Connection {
-        created_at_ms,
-        endpoint_a,
-        endpoint_b,
-        shared_workspaces: shared,
-        signed_at_ms,
-        signer,
-        signature,
-    })
+    reader.finish()?;
+    Ok(event)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn round_trip() {
-        let mut shared = BTreeSet::new();
-        shared.insert([1u8; 32]);
-        shared.insert([2u8; 32]);
-        let c = Connection {
-            created_at_ms: 100,
-            endpoint_a: [10u8; 32],
-            endpoint_b: [20u8; 32],
-            shared_workspaces: shared.clone(),
-            signed_at_ms: 100,
-            signer: [10u8; 32],
-            signature: [9u8; 64],
-        };
-        let blob = encode_connection(&c);
-        let parsed = parse_connection(&blob).unwrap();
-        assert_eq!(parsed, c);
+pub fn transit_associated_data(envelope: &TransitEnvelope) -> Vec<u8> {
+    let mut out = Writer::new();
+    out.raw(TRANSIT_MAGIC);
+    match envelope {
+        TransitEnvelope::Bootstrap {
+            sender_endpoint,
+            recipient_endpoint,
+            nonce,
+            ciphertext: _,
+        } => {
+            out.u8(TAG_BOOTSTRAP_TRANSIT);
+            out.id(sender_endpoint);
+            out.id(recipient_endpoint);
+            out.raw(nonce);
+        }
+        TransitEnvelope::Connection {
+            connection_id,
+            sender_endpoint,
+            recipient_endpoint,
+            nonce,
+            ciphertext: _,
+        } => {
+            out.u8(TAG_CONNECTION_TRANSIT);
+            out.id(connection_id);
+            out.id(sender_endpoint);
+            out.id(recipient_endpoint);
+            out.raw(nonce);
+        }
     }
+    out.finish()
+}
+
+pub fn encode_transit(envelope: &TransitEnvelope) -> Vec<u8> {
+    let mut out = Writer::new();
+    out.raw(TRANSIT_MAGIC);
+    match envelope {
+        TransitEnvelope::Bootstrap {
+            sender_endpoint,
+            recipient_endpoint,
+            nonce,
+            ciphertext,
+        } => {
+            out.u8(TAG_BOOTSTRAP_TRANSIT);
+            out.id(sender_endpoint);
+            out.id(recipient_endpoint);
+            out.raw(nonce);
+            out.sized_bytes(ciphertext);
+        }
+        TransitEnvelope::Connection {
+            connection_id,
+            sender_endpoint,
+            recipient_endpoint,
+            nonce,
+            ciphertext,
+        } => {
+            out.u8(TAG_CONNECTION_TRANSIT);
+            out.id(connection_id);
+            out.id(sender_endpoint);
+            out.id(recipient_endpoint);
+            out.raw(nonce);
+            out.sized_bytes(ciphertext);
+        }
+    }
+    out.finish()
+}
+
+pub fn decode_transit(bytes: &[u8]) -> Result<TransitEnvelope, String> {
+    if !bytes.starts_with(TRANSIT_MAGIC) {
+        return Err("not a transit envelope".to_string());
+    }
+    let mut reader = Reader::new(&bytes[TRANSIT_MAGIC.len()..], "transit envelope");
+    let envelope = match reader.u8()? {
+        TAG_BOOTSTRAP_TRANSIT => TransitEnvelope::Bootstrap {
+            sender_endpoint: reader.id()?,
+            recipient_endpoint: reader.id()?,
+            nonce: nonce24(&mut reader)?,
+            ciphertext: reader.sized_bytes()?,
+        },
+        TAG_CONNECTION_TRANSIT => TransitEnvelope::Connection {
+            connection_id: reader.id()?,
+            sender_endpoint: reader.id()?,
+            recipient_endpoint: reader.id()?,
+            nonce: nonce24(&mut reader)?,
+            ciphertext: reader.sized_bytes()?,
+        },
+        other => return Err(format!("unknown transit envelope tag {other}")),
+    };
+    reader.finish()?;
+    Ok(envelope)
+}
+
+fn nonce24(reader: &mut Reader<'_>) -> Result<TransitNonce, String> {
+    let bytes = reader.bytes(24)?;
+    let mut nonce = [0; 24];
+    nonce.copy_from_slice(&bytes);
+    Ok(nonce)
 }

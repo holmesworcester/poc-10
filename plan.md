@@ -12,10 +12,11 @@ UPDATED:
 
 - Inbound processing is a pure function chain; admission by event id happens before context loading.
 - Queue-like work is just module-owned table rows at wait/dedupe/retry/schedule/IO boundaries.
-- `events` stores durable, local, and endpoint-local canonical event bytes; `outbox` stores only `(connection_id, event_id)`.
+- Canonical events have scopes: shared, local-only, endpoint-scoped, or connection-scoped. The normal event id is always `BLAKE3(canonical_event_bytes)`; connection-scoped events include `connection_id` in their canonical bytes so their ids are naturally connection-local.
+- Durable shared data events live in durable event storage. Connection-scoped protocol events may live in transient storage, but still use normal canonical bytes and event ids. `outbox` stores only `(connection_id, event_id)`.
 - Blocking uses `blocked_by_event(blocked_by_event_id, event_id)` pair rows and same-transaction unblocking.
-- Connection wrapping has two modes: endpoint-pubkey bootstrap/repair and connection-secret ordinary traffic.
-- Outgoing TCP flow has one send owner per connection: `outbox` is the deduped source, a bounded hot queue keeps bytes ready, and TCP writability is the backpressure signal.
+- Connection/transit modules create transit blobs. The kernel never creates transit blobs; it only packs module-produced bytes into TCP frames and writes them to transport targets.
+- Outgoing flow dedupes deterministic connection-scoped events before transit wrapping. TCP writability and socket backpressure are transport mechanics, not sync or connection semantics.
 - Event modules own their canonical `codec.rs`; "wire" means transit bytes, not canonical event bytes.
 - `state` materializes table definitions from event-module declarations; it owns storage mechanics, not domain schema meaning.
 - Sync is an event-module family, not a separate sync engine.
@@ -88,7 +89,7 @@ src/event_modules/
 
 This rule is in conscious tension with "let complexity earn length" in the documentation quality bar (see appendix): that rule applies to *prose* in docs, this rule applies to *code structure* in event modules. Both stand.
 
-**networking** All complex networking behavior including bootstrap, connection, and sync is also implemented in event modules: commands (run by jobs) initiate activity, projectors respond to activity, and transit encryption is unwrapped into contained events. Connections are between two endpoints (daemons) and sync all data in all workspaces those two endpoints share. Every workspace-scoped event carries its own `workspace_id`; endpoint-scoped events (connection, intro, observed_address, self_address, prekey events) carry endpoint identity instead. A daemon hosts at most one instance of any given workspace, so for workspace-scoped events `workspace_id` alone identifies the local processing scope and there is no separate "recorded_by". See **Event Scopes** below for the full taxonomy.
+**networking** All complex networking behavior including bootstrap, connection, transit, and sync is implemented in event modules: commands (run by jobs) initiate activity, projectors respond to activity, and connection/transit modules wrap and unwrap transit blobs. The kernel network layer only frames and moves bytes to concrete transport targets. Connections are between two endpoints (daemons) and sync all data in all workspaces those two endpoints share. Every workspace-scoped event carries its own `workspace_id`; endpoint-scoped events (connection, intro, observed_address, self_address, prekey events) carry endpoint identity instead. A daemon hosts at most one instance of any given workspace, so for workspace-scoped events `workspace_id` alone identifies the local processing scope and there is no separate "recorded_by". See **Event Scopes** below for the full taxonomy.
 
 **event_pipeline** uses `event_modules` to process all Events (whether received or locally-created) such that an Event set, processed in any order, results in the same State at a given time (some event types can expire).
 
@@ -96,7 +97,7 @@ This rule is in conscious tension with "let complexity earn length" in the docum
 
 **state** is the explicit table-shaped substrate that projectors and jobs observe. It is materialized from event-module table declarations and can be a database in production or an in-memory store in testing and simulation.
 
-**network** is a TCP-only network interface that `connection`-related jobs and bootstrap jobs can use to send transmission-safe frames: endpoint-pubkey bootstrap wraps and connection-secret wraps carrying inner events.
+**network** is a TCP-only byte interface. It accepts module-produced `TransportSend { target, bytes }` effects, packs `bytes` into length-prefixed TCP frames, writes sockets, and records inbound bytes with origin metadata. It does not create or interpret transit blobs.
 
 **jobs** is a set of event-module commands that run at a regular cadence; each can query state to decide whether it runs and what other commands it calls.  
 
@@ -106,7 +107,7 @@ The substrate pieces outside `event_modules` are deliberately narrow:
 control_loop/   // dispatch, transactions, bounded batches, effect execution
 state/          // catalog materialization, storage, migrations, snapshots
 network/        // TCP bytes and socket ownership
-sender/         // outbox -> connection wrap -> TCP write
+sender/         // TransportSend effects -> TCP frame/write
 ```
 
 If behavior is protocol semantics expressible as events/projectors/commands/tables, it belongs under `event_modules`. If it owns process execution, IO, storage mechanics, or scheduling, it belongs outside.
@@ -158,7 +159,7 @@ Boundary tables should follow the same rule where possible. `outbox` can be decl
 
 ## Event Pipeline
 
-**codec** is canonical event encoding and parsing. It is not necessarily network wire. A module's `codec.rs` defines `Event <-> CanonicalEventBytes`, the event type tag, field layout, dependency field declarations, signature and signer-family rules, and deterministic id rules.
+**codec** is canonical event encoding and parsing. It is not necessarily network wire. A module's `codec.rs` defines `Event <-> CanonicalEventBytes`, the event type tag, field layout, dependency field declarations, signature and signer-family rules, and deterministic id rules. Canonical event layout is fixed-width per event type: once the type tag is known, the field layout and canonical byte length are known, though different event types may have different fixed lengths. Shared binary utilities handle primitive reads/writes, fixed-size ids, truncation checks, and trailing-byte checks so codecs read as format descriptions.
 
 **encode** encodes an Event to `CanonicalEventBytes`, returning a BLAKE3 event id, usually used by `create` or other domain-specific functions.
 
@@ -180,8 +181,10 @@ For locally created events:
 E
   -> encode(E)
   -> EncodedEvent
-  -> insert/project/outbox
+  -> insert/project
 ```
+
+Local creation does not enqueue durable data for peers. Durable data transfer is driven by negentropy: compare events discover differences, have/need events identify missing ids, and only a `NeedId` response queues the requested durable event id to `outbox`.
 
 For inbound events:
 
@@ -247,6 +250,16 @@ endpoint-local event:
   signed: usually no
   may be sent to one endpoint/connection: yes
 
+connection-scoped event:
+  connection_id: yes
+  workspace_id: optional, when the event concerns a workspace over the connection
+  codec: yes
+  signed: usually no
+  storage: transient by default
+  may be sent only on that connection
+  id: BLAKE3(canonical bytes), with connection_id inside the bytes
+  examples: sync_compare, sync_have_id, sync_need_id
+
 local-only event:
   workspace_id: usually yes
   codec: yes, if stored/projected/deduped
@@ -311,6 +324,8 @@ InboundBytes
 
 Admission happens before parse context. Known event ids stop at `admit_event_id`. Parse failures mark the inbound bytes invalid and release the event claim. Blocked events write `blocked_by_event` rows and stop.
 
+The first POC kernel may run this inbound chain directly from the socket reader without first durably queuing `InboundBytes`. That is still a kernel pipeline boundary: the socket reader only passes `(origin, bytes)` into `pipeline.ingest_frame`, and event modules decide meaning and emit follow-on bytes. A durable `inbound_bytes` table is added when we need crash replay, fairness across many sockets, leases, or independent retry.
+
 Boundary tables that need claim/retry ownership are ordinary module-owned tables with status metadata:
 
 ```
@@ -359,7 +374,7 @@ When event `D` becomes applied, the same transaction deletes `blocked_by_event_i
 
 Unblocking never recursively processes dependents in the same call. `events.status = ready` is the unblocked-events queue; the control loop later claims a bounded batch of ready events.
 
-`outbox` stores only event ids to send on a connection:
+`outbox` stores only deterministic event ids to process for a connection:
 
 ```
 outbox:
@@ -369,20 +384,20 @@ outbox:
   primary key(connection_id, event_id)
 ```
 
-`outbox` is memory by default and has no per-row claim, lease, or retry status. Each active connection has exactly one send owner:
+`outbox` is memory by default and has no per-row claim, lease, or retry status. Each active connection has exactly one connection/transit job owner:
 
 ```
-ConnectionSender:
+ConnectionTransitJob:
   connection_id
   hot_queue: bounded deque<event_id>
   present: set<event_id>
 ```
 
-`hot_queue` is bounded by estimated bytes, not only event count. When it drops below a low-water mark, the sender refills from pending `outbox` rows for that connection, skipping ids already in `present`. It batch-loads `events.canonical_event_bytes`, wraps with `connection.wrap_bootstrap` or `connection.wrap`, and writes complete frames to TCP. After a complete frame is accepted by the socket, it deletes the corresponding `outbox` rows and removes those ids from `present`. On send failure it removes ids from `present`, leaves `outbox` rows pending, and backs off. No database transaction is held while writing to the socket.
+`hot_queue` is bounded by estimated bytes, not only event count. When it drops below a low-water mark, the connection/transit job refills from pending `outbox` rows for that connection, skipping ids already in `present`. For each deterministic send event, the module loads the referenced canonical bytes, checks connection/workspace authority, resolves the current transport target, creates a transit blob, and returns `TransportSend { target, bytes }`. The kernel network effect runner packs those bytes into TCP frames and writes the socket. After the socket accepts a complete frame, the control loop deletes the corresponding `outbox` rows and removes those ids from `present`. On send failure it removes ids from `present`, leaves `outbox` rows pending, and backs off. No database transaction is held while writing to the socket.
 
 The control loop commits `StateUpdates` in one transaction, then runs `Effects`. Effects may write new rows but do not directly project events.
 
-The first implementation has one process-wide control-loop writer. Failed claim/retry work remains in its table with status, attempts, and last_error until its owning module marks it pending, rejected, blocked, expired, or dead. Send failure is connection-level backoff: `outbox` rows stay present. On startup, transient statuses are reset: `events.processing -> ready` and `inbound_bytes.processing -> pending`. Memory `outbox` starts empty; sync and jobs recreate missing send work.
+The first implementation has one process-wide control-loop writer. Failed claim/retry work remains in its table with status, attempts, and last_error until its owning module marks it pending, rejected, blocked, expired, or dead. Send failure is connection-level backoff: `outbox` rows stay present. On startup, transient statuses are reset: `events.processing -> ready` and `inbound_bytes.processing -> pending`. Memory `outbox` starts empty; sync jobs recreate root compare work, and any durable data sends are recreated only by later `NeedId` responses.
 
 Modules may run pure helper transforms inline until they reach a queue, state, or effect boundary. Modules do not recursively drain queues and do not perform transport IO inline.
 
@@ -390,21 +405,21 @@ The control loop has no sync, bootstrap, auth, connection, dependency, or event-
 
 ## Network
 
-**transport** owns TCP byte I/O between endpoints (listener on the daemon's `endpoint_id`, socket cache, `[u32 length][bytes]` framing, addresses learned from invite/`observed_address`/incoming connections). `send(remote_endpoint_id, OutboundFrame)` is the only egress; inbound bytes land on the inbound-bytes buffer with origin (remote_endpoint_id, ip, port). *Invariant: transport produces and interprets no bytes; if you can call `send` you are holding an `OutboundFrame` minted by `connection.wrap_bootstrap` or `connection.wrap`.*
+**transport** owns TCP byte I/O between network routes (listeners, socket cache, `[u32 length][bytes]` framing, addresses learned from invite/`observed_address`/incoming connections). `TransportSend { target, bytes }` is the only egress, where `target` is a concrete route such as `(ip, port)` or an existing socket id, not a `connection_id`. Inbound bytes enter the kernel pipeline with origin `(ip, port, socket_id, observed endpoint if known)`; a durable inbound-bytes buffer is optional until replay/fairness requirements justify it. *Invariant: transport produces and interprets no transit bytes; if it sends bytes, those bytes were produced by an event module.*
 
-**connection** is an event module. A connection event references two endpoints and carries `shared_workspaces`. Each workspace entry's authority is established by the connection event's own dependencies and signature: deps point at the capability events (workspace-membership grant, invite, peer_shared, etc.) that authorize the signer to bind that workspace to that connection, and the pipeline's standard signature/dep validation is what makes the entry trustworthy. Rotation, revocation, and expiry are further connection-related events with their own deps/sigs. The same module owns `connection_secrets`: globally-unique `connection_secret_id` → `(key, direction, connection_id, ttl)`, with separate inbound and outbound secrets per connection, each known only to the two endpoints.
+**connection** is an event module. A connection event references two endpoints and carries `shared_workspaces`. Each workspace entry's authority is established by the connection event's own dependencies and signature: deps point at endpoint/bootstrap authorization plus workspace capability events (workspace-membership grant, invite, etc.) that authorize the signer to bind that workspace to that connection, and the pipeline's standard signature/dep validation is what makes the entry trustworthy. Rotation, revocation, and expiry are further connection-related events with their own deps/sigs. The same module owns `connection_secrets`: globally-unique `connection_secret_id` → `(key, direction, connection_id, ttl)`, with separate inbound and outbound secrets per connection, each known only to the two endpoints.
 
-The connection module also owns the transit envelope as plain functions, not as an event type (mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`):
+The connection module also owns the transit envelope as plain functions, not as a kernel concern (mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`):
 
-- `connection.wrap_bootstrap(remote_endpoint_id, inner_events) -> OutboundFrame`: encrypts to the endpoint public key. Used for connection establishment and connection-secret repair.
-- `connection.wrap(connection_id, inner_events) -> OutboundFrame`: looks up the outbound secret for the connection, asserts every inner event's `workspace_id ∈ shared_workspaces(connection_id)`, pads to a size bucket, encrypts. Used for ordinary sync/control/event traffic.
+- `connection.wrap_bootstrap(remote_endpoint_id, inner_events) -> TransitBlob`: encrypts to the endpoint public key. Used for connection establishment and connection-secret repair.
+- `connection.wrap(connection_id, inner_events) -> TransitBlob`: looks up the outbound secret for the connection, asserts every inner event's `workspace_id ∈ shared_workspaces(connection_id)`, pads to a size bucket, encrypts. Used for ordinary sync/control/event traffic.
 - `connection.unwrap(bytes) -> Vec<CanonicalEventBytes>`: a parse-stage transform run by the pipeline on every inbound frame. Unwraps either endpoint-pubkey bootstrap frames or connection-secret frames. Connection-secret frames recover `connection_id`, drop any inner event whose `workspace_id ∉ shared_workspaces(connection_id)`, and pass the surviving canonical event bytes into canonical-event processing.
 
 Wrapped bytes are never canonical events. They have no event id, no dependencies, and no labels — they are an opaque transit form. Only inner canonical event bytes are ids in the event store.
 
 *Invariants: `shared_workspaces` is authoritative because the connection event's deps + signature have already been validated by the standard pipeline — the connection does not authorize itself, its dependencies do; a valid unwrap under one of our inbound secrets is by construction proof that the sender is the remote endpoint of that connection; every wrap is bound to exactly one connection; wrap and unwrap both enforce workspace ↔ connection alignment.*
 
-**Outbox.** No event module calls `transport.send` directly. A projector that wants to send something — e.g. `needid.project` responding to a request from connection C with the requested event E — writes `outbox(connection_id=C, event_id=E)`, and only after checking *at projection time* that C is the connection the inbound trigger arrived on and that E's workspace_id is in `shared_workspaces(C)`. One `ConnectionSender` per active connection keeps a bounded byte-sized hot queue full from that connection's `outbox` rows, calls `connection.wrap`, and hands complete `OutboundFrame`s to TCP. A slow peer fills only its own hot queue and pauses only its own refill; other connection senders continue. *Invariant: every ordinary byte on the wire is the product of two independent workspace-membership checks (projector outbox write + `connection.wrap`) plus a third symmetric check on the receiving side (`connection.unwrap`).*
+**Outbox.** No event module calls `transport.send` directly. A projector that wants to send a durable event — e.g. `needid.project` responding to a request from connection C with requested event E — emits deterministic `SendEvent(connection_id=C, inner_event_id=E)` and queues that send event id in `outbox`. The connection/transit module owns `SendEvent.project`: it checks that C is the triggering connection, verifies that E's `workspace_id` is in `shared_workspaces(C)`, resolves C to a current transport target, creates a transit blob, and returns `TransportSend { target, bytes }`. The kernel network effect runner packs those bytes into TCP frames and writes sockets. A slow route backs off its own target; other transport targets continue. *Invariant: every ordinary byte on the wire is the product of two independent workspace-membership checks (SendEvent projection + `connection.wrap`) plus a third symmetric check on the receiving side (`connection.unwrap`).*
 
 # Forking plan
 
@@ -438,24 +453,6 @@ Connection model follows poc-6's `events/network/` (`connection`, `connection_ac
 
 The bar is alignment, not progress. A commit that lands more code while leaving plan.md violated by an extra abstraction layer or a duplicate path is a regression.
 
-**Source of truth: black-box CLI tests.** The completion bar is poc-7's black-box test surface (subprocess `topo` binary, assertions on CLI output and observable side effects). In-process tests, synthetic perf numbers with hand-installed connection state, and substrate-only smoke tests are *useful* but they do not prove the work is done. The black-box tests measure what a user actually does.
-
-Core flows that MUST pass black-box (not skippable):
-
-- **invite** — create-invite + accept-invite across two daemons.
-- **bootstrap** — connection establishment from an invite blob alone, no pre-installed secrets, no hand-populated `connection_secrets`/`connection_endpoints`.
-- **multi-peer messaging** — Daemon A authors, Daemon B converges via real negentropy negotiation (`compare` → `have` → `need` → event flow).
-- **files** — `FileEvent` + `FileSliceEvent` upload, slice transfer with bao verification, save on the receiving daemon.
-- **offline** — daemon stop/restart with state preserved; sync resumes from where it left off.
-- **rejoin** — peer that disappeared reconnects; missing events sync without manual intervention.
-
-Skippable as out-of-scope (`#[ignore]` with comment):
-
-- mDNS / network discovery — deferred to multi-daemon convergence rebuild.
-- NAT hole-punch — deferred.
-- TLS-specific cert error tests — new substrate is TCP without TLS by design.
-- Tests for dropped Wave-1 features (admin, etc.).
-
 **Pipeline simplicity is non-negotiable.** Preserve the pipeline shape of this document — see `get_context` in the Event Pipeline section for the strict contract. poc-7's projection-context-query adapters (one custom `context_loader` per event module) are the surface this fork is rejecting. To restate concretely, in poc-9:
 
 - dependencies come from schema metadata on flat fields (one mechanism for all event types),
@@ -481,7 +478,7 @@ We can in principle bring over every event module from poc-7 at `c6f142e9` (`src
 
 - `workspace` — workspace identity / metadata root
 - `user` — user identity bound to a workspace
-- `peer_secret` / `peer_shared` — per-device identity (the new "endpoint identity" lives in connection events; `peer_*` stays the workspace-scoped device principal)
+- `peer_secret` / `peer_shared` — legacy workspace-scoped device principal if retained from poc-7; endpoint identity lives in connection events and is what gates bootstrap/transport acceptance
 - `user_invite_shared` / `peer_invite_shared` — invite events for joining a workspace and linking a device
 - `invite_secret` — invite local secret (issuer side)
 - `invite_accepted` — accepted-workspace binding
@@ -539,9 +536,9 @@ compare.project:
   if remote_fingerprint == F_v:
     emit nothing
   else if v is splittable:
-    create endpoint-local compare events for each child and queue them in outbox
+    create connection-scoped compare events for each child and queue them in outbox
   else:
-    create endpoint-local have-id events for the ids in R_v and queue them in outbox
+    create connection-scoped have-id events for the ids in R_v and queue them in outbox
 ```
 
 There is no protocol session id required for correctness. Duplicate compares are harmless because the compare answer is a pure function of projected state. Jobs decide when to begin a root compare for a connection, and should avoid starting new compares while that connection has recent sync or bulk-transfer activity.
@@ -589,34 +586,55 @@ When an event `d` becomes present, update the present-external-dep contribution 
 
 This is the same dep-aware comparison computed by poc-7's session code, but materialized as projected state instead of rebuilt as an on-demand session snapshot.
 
-## Endpoint-local sync events and outbox
+## Connection-scoped sync events and outbox
 
-Sync protocol messages are endpoint-local events. They are not durable shared events and do not need signatures. The connection already authenticates the endpoint pair; the messages are only hints:
+Sync protocol messages are connection-scoped events. They are not durable shared events and do not need signatures. The connection already authenticates the endpoint pair; the messages are only hints:
 
 ```
 compare this node
 I have these ids
 I need these ids
-send these event blobs
 ```
 
-Projectors do not write to sockets. They create deterministic endpoint-local events and add their ids to `outbox`:
+They still use the normal event model: a module `codec.rs` defines canonical bytes, and `event_id = BLAKE3(canonical_event_bytes)`. `connection_id` is part of the canonical sync event, so ids for otherwise identical sync messages do not overlap across connections.
+
+Plain sync events are fixed-shape:
 
 ```
-Have(id)    -> events(scope=endpoint_local), outbox(connection_id, event_id)
-Need(id)    -> events(scope=endpoint_local), outbox(connection_id, event_id)
-Compare(v)  -> events(scope=endpoint_local), outbox(connection_id, event_id)
+SyncCompare(connection_id, workspace_id, node, count, fingerprint)
+SyncHaveId(connection_id, workspace_id, node, event_id)
+SyncNeedId(connection_id, workspace_id, event_id)
 ```
 
-Need is the only mechanism that places a durable event id into `outbox`: the side that holds the event responds to `Need(id)` from the peer by writing `outbox(connection_id, durable_event_id)`. There is no on-apply push — the Compare → Have → Need fold is the sole convergence path.
+Projectors do not write to sockets. They create deterministic connection-scoped events and add their ids to `outbox`:
 
-Duplicate projector output collapses because endpoint-local sync event bytes are deterministic and `outbox` is unique on `(connection_id, event_id)`.
+```
+Have(id)    -> connection_events(scope=connection), outbox(connection_id, event_id)
+Need(id)    -> connection_events(scope=connection), outbox(connection_id, event_id)
+Compare(v)  -> connection_events(scope=connection), outbox(connection_id, event_id)
+Send(id)    -> connection_events(SendEvent(connection_id, inner_event_id)),
+               outbox(connection_id, send_event_id)
+```
+
+Duplicate projector output collapses because connection-scoped sync event bytes are deterministic and `outbox` is unique on `(connection_id, event_id)`.
+
+For the first implementation, this can be two storage classes rather than one clever table:
+
+```
+durable_events(event_id, canonical_event_bytes, ...)
+connection_events(connection_id, event_id, canonical_event_bytes, expires_at)
+outbox(connection_id, event_id)
+```
+
+The connection/transit job resolves an outbox `event_id` from transient connection-event storage. For sync control events, it wraps their canonical bytes. For `SendEvent`, it loads the referenced durable event, checks authority, creates a transit blob, and emits `TransportSend { target, bytes }`. Sync modules do not batch ids into transport frames and do not create transit blobs.
 
 Outgoing dedupe belongs at the `outbox` boundary and the per-connection hot queue, not in every projector's context. Projectors should not need `recently_sent` sets. If suppression beyond pending-buffer dedupe is needed later, keep sent rows in `outbox` with a TTL.
 
 ## Incoming buffer dedupe
 
 Transport remains byte-only. On receive, the buffer hashes bytes before parsing:
+
+For the minimal reactive POC this buffer can be memory-only or skipped: the socket reader calls the kernel pipeline immediately, and recurring sync can recreate transient control traffic after a crash. When durable ingress is enabled, use the shape below.
 
 ```
 wire_id = BLAKE3(bytes)
@@ -643,14 +661,16 @@ Canonical-event processing only calls sync suppression after parse succeeds and 
 
 ## Transit wrapping
 
-Dedupe semantic work before transit wrapping.
+Dedupe deterministic send intent before transit wrapping.
 
 ```
-outbox(connection_id, event_id)
-  -> ConnectionSender.hot_queue
-  -> batch-load events.canonical_event_bytes
-  -> connection.wrap(connection_id, inner_events)
-  -> TCP write
+NeedId
+  -> SendEvent(connection_id, inner_event_id)
+  -> outbox(connection_id, send_event_id)
+  -> connection/transit job
+  -> connection.wrap(connection_id, inner_event)
+  -> TransportSend { target: ip/port or socket_id, bytes: transit_blob }
+  -> kernel TCP frame/write
   -> delete sent outbox rows
 ```
 
@@ -709,7 +729,7 @@ Code-structure lessons from Stellar Core:
 - Managers own lifecycle, scheduling, and resource wiring. Helpers own algorithms. Do not let managers accumulate domain policy.
 - Long-running work should be represented explicitly, as Stellar does with `work/`, `catchup/*Work`, and `historywork/*Work`. Hidden background behavior should become a job, table row, or effect owner.
 - Data structures should encode workload assumptions. Stellar's BucketList is shaped around temporal churn, incremental hashing, and catchup. Here, dep-aware negentropy should be a projected incremental tree/cache, not a session-time rebuild.
-- Canonical encoding is a hard boundary. Stellar uses XDR for hashed, historical, and peer-message forms. Here, `codec.rs` produces canonical event bytes for ids, storage, projection, replay, and dedupe; connection wrapping is a separate transit layer.
+- Canonical encoding is a hard boundary. Stellar uses XDR for hashed, historical, and peer-message forms. Here, `codec.rs` produces canonical event bytes for ids, storage, projection, replay, and dedupe; connection wrapping is a separate transit layer. The codec should name the fixed-per-event-type format; shared utilities should do the repetitive binary lifting.
 - Prefer immutable snapshots and stable ids at concurrency boundaries.
 - Keep the first concurrency model legible: one control-loop writer, one sender owner per connection, bounded work at explicit boundaries.
 - Failure behavior should be local: a failed send backs off one connection; a duplicate event is admitted once; a memory outbox can be regenerated; invalid bytes stop before event semantics.

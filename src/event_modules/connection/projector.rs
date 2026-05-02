@@ -1,110 +1,159 @@
-//! `Connection` projector.
-//!
-//! The pipeline-facing pure projector lives in `registry_meta.rs`. This
-//! module retains the legacy direct-DB `project` entrypoint (used by the
-//! Phase 1 wrap/unwrap surfaces) and the schema setup. Both paths now do
-//! real ed25519 signature verification before writing.
+use std::net::SocketAddr;
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use rusqlite::{params, Connection as SqlConnection};
+use crate::store::{EventId, ModuleRow};
 
-use super::event::Connection;
+use super::codec::{self, ConnectionEvent, ConnectionId, EndpointId};
+use super::tables;
 
-#[derive(Debug)]
-pub enum ConnectionProjectError {
-    Sqlite(rusqlite::Error),
-    BadSigner,
-    BadSignature,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Projection {
+    pub rows: Vec<ModuleRow>,
+    pub response: Option<Vec<u8>>,
+    pub connection_id: Option<ConnectionId>,
 }
 
-impl std::fmt::Display for ConnectionProjectError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Sqlite(e) => write!(f, "sqlite error: {}", e),
-            Self::BadSigner => write!(f, "connection signer is not a valid ed25519 verifying key"),
-            Self::BadSignature => write!(f, "connection signature did not verify"),
-        }
-    }
-}
-
-impl std::error::Error for ConnectionProjectError {}
-
-impl From<rusqlite::Error> for ConnectionProjectError {
-    fn from(e: rusqlite::Error) -> Self {
-        ConnectionProjectError::Sqlite(e)
-    }
-}
-
-/// Insert / refresh the `connections` row plus the
-/// `connection_shared_workspaces` rows so `wrap`/`unwrap` can read them
-/// back. Verifies the signer's ed25519 signature against
-/// `Connection::signing_bytes()` before any write.
-pub fn project(db: &SqlConnection, ev: &Connection) -> Result<(), ConnectionProjectError> {
-    ensure_schema(db)?;
-    verify_signature(ev)?;
-
-    db.execute(
-        "INSERT OR REPLACE INTO connections
-            (endpoint_a, endpoint_b, signed_at_ms, signer, signature, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            ev.endpoint_a.to_vec(),
-            ev.endpoint_b.to_vec(),
-            ev.signed_at_ms as i64,
-            ev.signer.to_vec(),
-            ev.signature.to_vec(),
-            ev.created_at_ms as i64,
+pub fn project_local_endpoint(endpoint: EndpointId, secret: [u8; 32]) -> Projection {
+    Projection {
+        rows: vec![
+            ModuleRow {
+                table: tables::LOCAL_ENDPOINT,
+                key: b"local".to_vec(),
+                value: endpoint.to_vec(),
+            },
+            ModuleRow {
+                table: tables::LOCAL_ENDPOINT_SECRET,
+                key: b"local".to_vec(),
+                value: secret.to_vec(),
+            },
         ],
-    )?;
-
-    // Canonical event id (Blake2b-256 of the full canonical wire bytes,
-    // including the signature). This is the value other tables use to
-    // reference this Connection event (events_canonical, blocked_by_event,
-    // outbox, connection_shared_workspaces). Two Connection events with the
-    // same (endpoint_a, endpoint_b, signed_at_ms) but different signatures
-    // therefore get distinct connection_ids — they are distinct events.
-    let connection_id = ev.canonical_event_id();
-    db.execute(
-        "DELETE FROM connection_shared_workspaces WHERE connection_id = ?1",
-        params![connection_id.to_vec()],
-    )?;
-    let mut stmt = db.prepare(
-        "INSERT OR IGNORE INTO connection_shared_workspaces (connection_id, workspace_id)
-         VALUES (?1, ?2)",
-    )?;
-    for ws in &ev.shared_workspaces {
-        stmt.execute(params![connection_id.to_vec(), ws.to_vec()])?;
+        response: None,
+        connection_id: None,
     }
-    Ok(())
 }
 
-/// Verify the signer's ed25519 signature over `Connection::signing_bytes()`.
-pub fn verify_signature(ev: &Connection) -> Result<(), ConnectionProjectError> {
-    let vk = VerifyingKey::from_bytes(&ev.signer)
-        .map_err(|_| ConnectionProjectError::BadSigner)?;
-    let sig = Signature::from_bytes(&ev.signature);
-    vk.verify(&ev.signing_bytes(), &sig)
-        .map_err(|_| ConnectionProjectError::BadSignature)
+pub fn project_outbound_request(bytes: Vec<u8>) -> Result<Projection, String> {
+    let event = codec::decode(&bytes)?;
+    let ConnectionEvent::Request { .. } = event else {
+        return Err("outbound connection projection requires request".to_string());
+    };
+    let request_id = codec::event_id(&bytes);
+    Ok(Projection {
+        rows: vec![connection_event_row(request_id, bytes)],
+        response: None,
+        connection_id: None,
+    })
 }
 
-pub fn ensure_schema(conn: &SqlConnection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS connections (
-            endpoint_a    BLOB NOT NULL,
-            endpoint_b    BLOB NOT NULL,
-            signed_at_ms  INTEGER NOT NULL,
-            signer        BLOB NOT NULL,
-            signature     BLOB NOT NULL,
-            created_at_ms INTEGER NOT NULL,
-            PRIMARY KEY (endpoint_a, endpoint_b, signed_at_ms)
-        );
-        CREATE TABLE IF NOT EXISTS connection_shared_workspaces (
-            connection_id BLOB NOT NULL,
-            workspace_id  BLOB NOT NULL,
-            PRIMARY KEY (connection_id, workspace_id)
-        );
-        ",
-    )?;
-    Ok(())
+pub fn project_invite_secret(bootstrap_hash: [u8; 32], private_key: [u8; 32]) -> Projection {
+    Projection {
+        rows: vec![ModuleRow {
+            table: tables::INVITE_SECRETS,
+            key: bootstrap_hash.to_vec(),
+            value: private_key.to_vec(),
+        }],
+        response: None,
+        connection_id: None,
+    }
+}
+
+pub fn project_inbound_request(
+    bytes: Vec<u8>,
+    local_endpoint: EndpointId,
+    expected_bootstrap_hash: [u8; 32],
+) -> Result<Projection, String> {
+    let event = codec::decode(&bytes)?;
+    let ConnectionEvent::Request {
+        from_endpoint,
+        bootstrap_hash,
+        ..
+    } = event
+    else {
+        return Err("expected connection request".to_string());
+    };
+    if bootstrap_hash != expected_bootstrap_hash {
+        return Err("bootstrap hash rejected".to_string());
+    }
+
+    let request_id = codec::event_id(&bytes);
+    let connection_id = codec::connection_id(&request_id, &local_endpoint);
+    let ack = ConnectionEvent::Ack {
+        from_endpoint: local_endpoint,
+        to_endpoint: from_endpoint,
+        request_id,
+        connection_id,
+    };
+    let ack_bytes = codec::encode(&ack);
+
+    Ok(Projection {
+        rows: vec![
+            connection_event_row(request_id, bytes),
+            connection_event_row(codec::event_id(&ack_bytes), ack_bytes.clone()),
+            connection_row(connection_id, from_endpoint),
+        ],
+        response: Some(ack_bytes),
+        connection_id: Some(connection_id),
+    })
+}
+
+pub fn project_inbound_ack(
+    bytes: Vec<u8>,
+    local_endpoint: EndpointId,
+    expected_request_id: EventId,
+) -> Result<Projection, String> {
+    let event = codec::decode(&bytes)?;
+    let ConnectionEvent::Ack {
+        from_endpoint,
+        to_endpoint,
+        request_id,
+        connection_id,
+    } = event
+    else {
+        return Err("expected connection ack".to_string());
+    };
+    if to_endpoint != local_endpoint {
+        return Err("connection ack addressed to a different endpoint".to_string());
+    }
+    if request_id != expected_request_id {
+        return Err("connection ack references a different request".to_string());
+    }
+    let expected_connection_id = codec::connection_id(&request_id, &from_endpoint);
+    if connection_id != expected_connection_id {
+        return Err("connection ack has an invalid connection id".to_string());
+    }
+    Ok(Projection {
+        rows: vec![
+            connection_event_row(codec::event_id(&bytes), bytes),
+            connection_row(connection_id, from_endpoint),
+        ],
+        response: None,
+        connection_id: Some(connection_id),
+    })
+}
+
+pub fn project_transport_target(connection_id: ConnectionId, addr: SocketAddr) -> Projection {
+    Projection {
+        rows: vec![ModuleRow {
+            table: tables::TRANSPORT_TARGETS,
+            key: connection_id.to_vec(),
+            value: addr.to_string().into_bytes(),
+        }],
+        response: None,
+        connection_id: Some(connection_id),
+    }
+}
+
+fn connection_event_row(event_id: EventId, bytes: Vec<u8>) -> ModuleRow {
+    ModuleRow {
+        table: tables::CONNECTION_EVENTS,
+        key: event_id.to_vec(),
+        value: bytes,
+    }
+}
+
+fn connection_row(connection_id: ConnectionId, remote_endpoint: EndpointId) -> ModuleRow {
+    ModuleRow {
+        table: tables::CONNECTIONS,
+        key: connection_id.to_vec(),
+        value: remote_endpoint.to_vec(),
+    }
 }
