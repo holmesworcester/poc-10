@@ -18,13 +18,42 @@ event_modules/<domain>/<module>/commands.rs
 event_modules/<domain>/<module>/codec.rs
   Event <-> CanonicalEventBytes
 
+event_modules/<domain>/<module>/types.rs
+  Event type and semantic constants
+
 event_modules/<domain>/<module>/projector.rs
   EventWithContext -> Projection
 ```
 
 Do not create `event.rs` files in event modules. The typed event struct belongs
-in `codec.rs` with the canonical encode/decode logic. Commands belong in
+in `types.rs`. `codec.rs` is only for canonical format tags, field order,
+encode/decode, and event-specific parse validation. Commands belong in
 `commands.rs`.
+
+## Core Imports One Module Registry
+
+Core code imports `event_modules::Modules`, not individual domain modules.
+`event_modules/mod.rs` is the only composition point that knows the concrete
+module list.
+
+Allowed in core:
+
+```text
+use crate::event_modules::Modules;
+use topo::event_modules::Modules;
+```
+
+Not allowed in core:
+
+```text
+use crate::event_modules::{connection, sync};
+use topo::event_modules::{connection, content, identity};
+crate::event_modules::connection::...
+```
+
+The kernel may call methods on `Modules`, pass `Modules` into pipeline/control
+loop functions, and move returned bytes/effects. It must not import concrete
+module namespaces to get work done.
 
 ## Event Writes Return Event IDs
 
@@ -419,6 +448,7 @@ Event modules stay directory-shaped:
 ```text
 event_modules/<name>/commands.rs
 event_modules/<name>/codec.rs
+event_modules/<name>/types.rs
 event_modules/<name>/projector.rs
 event_modules/<name>/queries.rs   # only when needed
 event_modules/<name>/mod.rs

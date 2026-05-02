@@ -3,7 +3,7 @@ use std::io::Write;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 
-use topo::event_modules::{connection, content, identity};
+use topo::event_modules::Modules;
 use topo::store::Store;
 use topo::{control_loop, network, pipeline};
 
@@ -17,14 +17,17 @@ fn main() {
 fn run(args: Vec<String>) -> Result<(), String> {
     let (db_path, command) = parse_args(args)?;
     let store = Store::open(db_path).map_err(|err| format!("open store: {err}"))?;
+    let modules = Modules::new();
 
     match command {
         Command::Connect { invite } => {
-            let addr = connect(&store, &invite).map_err(|err| format!("connect: {err}"))?;
+            let addr =
+                connect(&store, &modules, &invite).map_err(|err| format!("connect: {err}"))?;
             println!("connected: {addr}");
         }
         Command::Invite { public_addr } => {
-            let invite = identity::invite::commands::create(&store, public_addr)
+            let invite = modules
+                .create_invite(&store, public_addr)
                 .map_err(|err| format!("invite: {err}"))?;
             println!("{invite}");
         }
@@ -32,7 +35,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
             num_events,
             event_size,
         } => {
-            let report = content::content_event::commands::generate(&store, num_events, event_size)
+            let report = modules
+                .generate_content(&store, num_events, event_size)
                 .map_err(|err| format!("generate: {err}"))?;
             let admitted = pipeline::admit_records(&store, report.records)
                 .map_err(|err| format!("admit generated events: {err}"))?;
@@ -57,13 +61,12 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 std::io::stdout()
                     .flush()
                     .map_err(|err| format!("flush stdout: {err}"))?;
-                let report =
-                    serve(&store, listener, accept_count).map_err(|err| format!("serve: {err}"))?;
+                let report = serve(&store, &modules, listener, accept_count)
+                    .map_err(|err| format!("serve: {err}"))?;
                 println!("accepted_connections: {}", report.accepted_connections);
                 println!("received_events: {}", report.received_events);
             } else {
-                let routes = connection::transport_target::queries::routes(&store)?;
-                let report = sync_routes(&store, routes).map_err(|err| format!("sync: {err}"))?;
+                let report = sync_routes(&store, &modules).map_err(|err| format!("sync: {err}"))?;
                 println!("routes_synced: {}", report.routes_synced);
                 println!("sent_events: {}", report.sent_events);
                 println!("received_events: {}", report.received_events);
@@ -78,13 +81,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 .map_err(|err| format!("count bytes: {err}"))?;
             println!("events: {count}");
             println!("payload_bytes: {bytes}");
-            println!(
-                "connections: {}",
-                connection::connection_record::queries::connection_count(&store)?
-            );
+            println!("connections: {}", modules.connection_count(&store)?);
             println!(
                 "connection_events: {}",
-                connection::connection_record::queries::connection_event_count(&store)?
+                modules.connection_event_count(&store)?
             );
             let statuses = store
                 .status_counts()
@@ -248,13 +248,14 @@ struct CliSyncReport {
     received_events: usize,
 }
 
-fn connect(store: &Store, invite: &str) -> Result<SocketAddr, String> {
-    let addr = identity::invite::commands::addr(invite)?;
+fn connect(store: &Store, modules: &Modules, invite: &str) -> Result<SocketAddr, String> {
+    let addr = modules.invite_addr(invite)?;
     let mut stream = network::connect(addr).map_err(|err| format!("open tcp stream: {err}"))?;
-    let request = connection::connection_request::commands::create(store, invite)?;
+    let request = modules.create_connection_request(store, invite)?;
     network::write_frames(&mut stream, vec![request.bytes])?;
     let report = drive_stream(
         store,
+        modules,
         &mut stream,
         addr,
         pipeline::IngestOptions {
@@ -268,7 +269,12 @@ fn connect(store: &Store, invite: &str) -> Result<SocketAddr, String> {
     Ok(request.addr)
 }
 
-fn serve(store: &Store, listener: TcpListener, accept_count: usize) -> Result<ServeReport, String> {
+fn serve(
+    store: &Store,
+    modules: &Modules,
+    listener: TcpListener,
+    accept_count: usize,
+) -> Result<ServeReport, String> {
     let mut report = ServeReport::default();
     for _ in 0..accept_count {
         let (mut stream, peer_addr) = listener
@@ -278,6 +284,7 @@ fn serve(store: &Store, listener: TcpListener, accept_count: usize) -> Result<Se
             network::read_frame(&mut stream).map_err(|err| format!("read first frame: {err}"))?;
         let stream_report = drive_stream(
             store,
+            modules,
             &mut stream,
             peer_addr,
             pipeline::IngestOptions {
@@ -291,46 +298,30 @@ fn serve(store: &Store, listener: TcpListener, accept_count: usize) -> Result<Se
     Ok(report)
 }
 
-fn sync_routes(
-    store: &Store,
-    routes: Vec<connection::transport_target::types::TransportRoute>,
-) -> Result<CliSyncReport, String> {
+fn sync_routes(store: &Store, modules: &Modules) -> Result<CliSyncReport, String> {
     control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
         .map_err(|err| format!("drain ready events before sync: {err}"))?;
     let mut report = CliSyncReport::default();
-    for route in routes {
-        let route_report = sync_route(store, route)?;
+    for route in modules.transport_routes(store)? {
+        let mut stream =
+            network::connect(route.addr).map_err(|err| format!("open tcp stream: {err}"))?;
+        let start = modules.start_sync(store, route)?;
+        report.sent_events += start.sent_events;
+        network::write_frames(&mut stream, start.outgoing)?;
+        let stream_report = drive_stream(
+            store,
+            modules,
+            &mut stream,
+            route.addr,
+            pipeline::IngestOptions {
+                record_transport_target: false,
+            },
+            None,
+        )?;
         report.routes_synced += 1;
-        report.sent_events += route_report.sent_events;
-        report.received_events += route_report.received_events;
+        report.sent_events += stream_report.sent_events;
+        report.received_events += stream_report.received_events;
     }
-    Ok(report)
-}
-
-fn sync_route(
-    store: &Store,
-    route: connection::transport_target::types::TransportRoute,
-) -> Result<CliSyncReport, String> {
-    let mut stream =
-        network::connect(route.addr).map_err(|err| format!("open tcp stream: {err}"))?;
-    let mut report = CliSyncReport {
-        routes_synced: 1,
-        ..CliSyncReport::default()
-    };
-    let start = pipeline::start_sync(store, route)?;
-    report.sent_events += start.sent_events;
-    network::write_frames(&mut stream, start.outgoing)?;
-    let stream_report = drive_stream(
-        store,
-        &mut stream,
-        route.addr,
-        pipeline::IngestOptions {
-            record_transport_target: false,
-        },
-        None,
-    )?;
-    report.sent_events += stream_report.sent_events;
-    report.received_events += stream_report.received_events;
     Ok(report)
 }
 
@@ -343,6 +334,7 @@ struct StreamReport {
 
 fn drive_stream(
     store: &Store,
+    modules: &Modules,
     stream: &mut TcpStream,
     origin: SocketAddr,
     options: pipeline::IngestOptions,
@@ -350,7 +342,7 @@ fn drive_stream(
 ) -> Result<StreamReport, String> {
     let mut report = StreamReport::default();
     if let Some(bytes) = first_frame {
-        let result = pipeline::ingest_frame(store, origin, bytes, options)?;
+        let result = pipeline::ingest_frame(store, modules, origin, bytes, options)?;
         control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
             .map_err(|err| format!("drain ready events: {err}"))?;
         apply_stream_result(stream, &mut report, result)?;
@@ -358,7 +350,7 @@ fn drive_stream(
     loop {
         match network::read_frame(stream) {
             Ok(bytes) => {
-                let result = pipeline::ingest_frame(store, origin, bytes, options)?;
+                let result = pipeline::ingest_frame(store, modules, origin, bytes, options)?;
                 control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
                     .map_err(|err| format!("drain ready events: {err}"))?;
                 apply_stream_result(stream, &mut report, result)?;

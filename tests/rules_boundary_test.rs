@@ -122,6 +122,38 @@ fn codec_modules_have_type_files() {
 }
 
 #[test]
+fn core_imports_only_the_modules_registry() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let core_files = [
+        "src/main.rs",
+        "src/pipeline.rs",
+        "src/control_loop.rs",
+        "src/store.rs",
+        "src/network.rs",
+        "src/blocking.rs",
+    ];
+    let mut violations = Vec::new();
+
+    for file in core_files {
+        let text = std::fs::read_to_string(root.join(file)).expect("read core file");
+        for (line_idx, line) in text.lines().enumerate() {
+            if line.contains("event_modules::")
+                && !line.contains("event_modules::Modules")
+                && !line.contains("event_modules::{Modules")
+            {
+                violations.push(format!("{file}:{}: {line}", line_idx + 1));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "core imports the Modules registry only; concrete event modules are composed in event_modules/mod.rs:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn sync_event_module_does_not_own_transport_or_frame_io() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sync_root = root.join("src/event_modules/sync");

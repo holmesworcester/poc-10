@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use crate::blocking;
-use crate::event_modules::{connection, sync};
+use crate::event_modules::Modules;
 use crate::store::{event_id, EventId, EventRecord, EventStatus, Store};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -80,97 +80,61 @@ pub fn apply_ready_event_in_tx(
     Ok(report)
 }
 
-pub fn start_sync(
+pub fn ingest_frame(
     store: &Store,
-    route: connection::transport_target::types::TransportRoute,
+    modules: &Modules,
+    origin: SocketAddr,
+    bytes: Vec<u8>,
+    options: IngestOptions,
 ) -> Result<IngestResult, String> {
+    let transit = modules.unwrap_transit(store, &bytes)?;
+    if modules.is_connection_event(&transit.inner) {
+        return ingest_connection_frame(store, modules, origin, transit.inner, options);
+    }
+    let connection_id = transit
+        .connection_id
+        .ok_or_else(|| "sync frame requires connection transit".to_string())?;
     let mut result = IngestResult::default();
-    let report = sync::compare::commands::start(store, route.connection_id, |bytes| {
-        result
-            .outgoing
-            .push(connection::transit::commands::create_connection(
-                store,
-                route.connection_id,
-                bytes,
-            )?);
-        Ok(())
-    })?;
+    let report = modules.ingest_sync_frame(store, connection_id, &transit.inner)?;
+    admit_received_event_bytes(store, modules, report.received_event_bytes)?;
+    result.outgoing = report.outgoing;
     result.sent_events += report.sent_events;
     result.received_events += report.received_events;
     Ok(result)
 }
 
-pub fn ingest_frame(
-    store: &Store,
-    origin: SocketAddr,
-    bytes: Vec<u8>,
-    options: IngestOptions,
-) -> Result<IngestResult, String> {
-    let transit = connection::transit::projector::unwrap(store, &bytes)?;
-    if connection::connection_record::types::is_connection_event(&transit.inner) {
-        return ingest_connection_frame(store, origin, transit.inner, options);
-    }
-    let connection_id = transit
-        .connection_id
-        .ok_or_else(|| "sync frame requires connection transit".to_string())?;
-    ingest_sync_frame(store, connection_id, &transit.inner)
-}
-
 fn ingest_connection_frame(
     store: &Store,
+    modules: &Modules,
     origin: SocketAddr,
     bytes: Vec<u8>,
     options: IngestOptions,
 ) -> Result<IngestResult, String> {
     let mut result = IngestResult::default();
-    let connection = if connection::connection_request::codec::is_request(&bytes) {
-        connection::connection_request::commands::accept(store, bytes)?
-    } else if connection::connection_ack::codec::is_ack(&bytes) {
-        connection::connection_ack::commands::accept(store, bytes)?
-    } else {
-        return Err("unknown connection event".to_string());
-    };
+    let connection = modules.accept_connection_event(store, bytes)?;
     if let Some(bytes) = connection.response {
         result.outgoing.push(bytes);
     }
     if let Some(connection_id) = connection.connection_id {
         if options.record_transport_target {
-            connection::transport_target::commands::record(store, connection_id, origin)?;
+            modules.record_transport_target(store, connection_id, origin)?;
         }
         result.established_connections += 1;
     }
     Ok(result)
 }
 
-fn ingest_sync_frame(
+fn admit_received_event_bytes(
     store: &Store,
-    connection_id: connection::connection_record::types::ConnectionId,
-    bytes: &[u8],
-) -> Result<IngestResult, String> {
-    let mut result = IngestResult::default();
-    let report = sync::compare::commands::ingest_frame(store, connection_id, bytes, |bytes| {
-        result
-            .outgoing
-            .push(connection::transit::commands::create_connection(
-                store,
-                connection_id,
-                bytes,
-            )?);
-        Ok(())
-    })?;
-    admit_received_event_bytes(store, report.received_event_bytes)?;
-    result.sent_events += report.sent_events;
-    result.received_events += report.received_events;
-    Ok(result)
-}
-
-fn admit_received_event_bytes(store: &Store, events: Vec<Vec<u8>>) -> Result<(), String> {
+    modules: &Modules,
+    events: Vec<Vec<u8>>,
+) -> Result<(), String> {
     if events.is_empty() {
         return Ok(());
     }
     let mut records = Vec::with_capacity(events.len());
     for bytes in events {
-        records.push(crate::event_modules::record_from_bytes(bytes)?);
+        records.push(modules.record_from_bytes(bytes)?);
     }
     admit_records(store, records)?;
     Ok(())

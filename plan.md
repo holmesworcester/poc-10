@@ -54,6 +54,8 @@ Performance rules from these systems:
 
 **event_modules/** contains every protocol or domain behavior that can be expressed as events, projectors, commands, jobs, and projected tables. This includes content, identity, auth, connection, sync, and local-only behavior.
 
+Core imports `event_modules::Modules` only. `event_modules/mod.rs` is the single composition point that imports concrete module families and exposes the narrow registry surface used by the pipeline, control loop, CLI, and tests. Kernel files call methods on `Modules`; they do not import `connection`, `sync`, `content`, or `identity` directly.
+
 Suggested organization:
 
 ```
@@ -85,7 +87,7 @@ src/event_modules/
     job_tick/
 ```
 
-**Per-file pattern, always.** Every event module is a directory with one file per concern (`codec.rs`, `projector.rs`, `commands.rs`, `queries.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a module is small enough that a single `.rs` file would suffice. The cost is some empty-ish files in tiny modules; the win is that this is intentional friction. In a codebase where most code is assistant-generated, uniform shape across the surface makes accumulating logic easy to spot — files that grow disproportionately, or directories that sprout extra concerns, are the audit signal that something needs simplification or splitting. No collapsed single-file event modules.
+**Per-file pattern, always.** Every event module is a directory with one file per concern (`types.rs`, `codec.rs`, `projector.rs`, `commands.rs`, `queries.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a module is small enough that a single `.rs` file would suffice. The cost is some empty-ish files in tiny modules; the win is that this is intentional friction. In a codebase where most code is assistant-generated, uniform shape across the surface makes accumulating logic easy to spot — files that grow disproportionately, or directories that sprout extra concerns, are the audit signal that something needs simplification or splitting. No collapsed single-file event modules.
 
 This rule is in conscious tension with "let complexity earn length" in the documentation quality bar (see appendix): that rule applies to *prose* in docs, this rule applies to *code structure* in event modules. Both stand.
 
