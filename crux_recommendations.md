@@ -146,7 +146,77 @@ Crux messages can carry canonical bytes or event ids, but canonical events
 should not become Crux messages. Otherwise the app loop turns into a giant
 protocol dispatcher and Crux starts owning the domain vocabulary.
 
-### 5. Model Sync And Connection As Pure State Machines
+### 5. Make Sync Responses Normal Projector Output
+
+Sync protocol handling should also fit the normal projector contract. The
+projector should receive a typed sync event plus a plain context object. It
+should not receive `Store`, perform SQLite queries, or write TCP frames.
+
+```rust
+enum SyncEvent {
+    Compare(CompareEvent),
+    HaveId(HaveIdEvent),
+    NeedId(NeedIdEvent),
+    Data(DataEvent),
+}
+
+struct SyncProjectorContext {
+    connection: ConnectionView,
+    negentropy: NegentropyView,
+    local_events: LocalEventView,
+}
+
+struct NegentropyView {
+    summary: [BucketSummary; 256],
+    ids_by_requested_bucket: Vec<(u8, Vec<EventId>)>,
+}
+
+struct LocalEventView {
+    presence: Vec<(EventId, bool)>,
+    bytes: Vec<(EventId, Vec<u8>)>,
+}
+```
+
+The negentropy tree, summary, bucket index, or cache is part of projector
+context. It should be a module-owned projected read model maintained when
+durable data events apply. Sync projectors read a snapshot of that structure
+through context and return declarative output.
+
+The clean shape is two-stage:
+
+```rust
+fn context_requirements(event: &SyncEvent) -> SyncContextRequest;
+
+fn project(event: SyncEvent, ctx: SyncProjectorContext) -> Projection;
+```
+
+Examples:
+
+```text
+Compare(remote summary)
+  + local negentropy summary / ids for differing buckets
+  -> emitted HaveId events
+  -> optional session rows
+
+HaveId(id)
+  + local presence(id)
+  -> emitted NeedId if missing
+
+NeedId(id)
+  + local bytes(id)
+  -> emitted Data event if present
+
+Data(bytes)
+  -> admitted durable event bytes
+  -> optional session rows / labels
+```
+
+If sync responses are canonical events, they belong in `emitted_events`. If
+something is ready to send on a connection, it belongs in `outbox` or in a
+transit event that later projects to `outbox`. That keeps compare/have/need/data
+as normal event processing instead of a bespoke callback loop.
+
+### 6. Model Sync And Connection Session Flow Explicitly
 
 The sync and connection modules should expose transition functions like:
 
@@ -158,6 +228,12 @@ Crux should map `SyncAction::SendFrame` into a `NetworkOperation`; the state
 machine should not write TCP frames itself. This fits the current rule that the
 network layer owns framing and transport mechanics, while protocol semantics
 belong below the kernel.
+
+Do not force every sync helper into a state machine. Set reconciliation helpers
+such as "which buckets differ?" or "which ids are missing?" should stay as plain
+pure functions. The state-machine shape is for session memory and phase logic:
+handshake state, current connection id, pending requested ids, frames in flight,
+retry counters, `more` frames, close behavior, and drain completion.
 
 ## Migration Plan
 
