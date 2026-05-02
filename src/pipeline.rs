@@ -1,6 +1,8 @@
 use crate::blocking;
 use crate::event_modules::Modules;
-use crate::store::{event_id, EventId, EventRecord, EventStatus, Store};
+use crate::store::{
+    event_id, CommandOutput, EventId, EventRecord, EventStatus, StateChanges, Store,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameMetadata {
@@ -30,16 +32,26 @@ pub struct ApplyReadyReport {
     pub unblocked_events: usize,
 }
 
-pub fn admit_records(store: &Store, records: Vec<EventRecord>) -> Result<AdmitReport, String> {
+pub fn apply_changes(store: &Store, changes: StateChanges) -> Result<AdmitReport, String> {
     store
         .write_transaction(|store| {
             let mut report = AdmitReport::default();
-            for record in records {
+            store.insert_table_rows_in_tx(changes.rows)?;
+            for record in changes.events {
                 admit_record_in_tx(store, &record, &mut report)?;
             }
             Ok(report)
         })
-        .map_err(|err| format!("admit events: {err}"))
+        .map_err(|err| format!("apply state changes: {err}"))
+}
+
+pub fn run_command<T>(store: &Store, output: CommandOutput<T>) -> Result<(T, AdmitReport), String> {
+    let report = apply_changes(store, output.changes)?;
+    Ok((output.value, report))
+}
+
+pub fn admit_records(store: &Store, records: Vec<EventRecord>) -> Result<AdmitReport, String> {
+    apply_changes(store, StateChanges::events(records))
 }
 
 fn admit_record_in_tx(
@@ -85,8 +97,13 @@ pub fn ingest_frame(
     metadata: FrameMetadata,
     bytes: Vec<u8>,
 ) -> Result<IngestResult, String> {
-    let report = modules.ingest_frame(store, metadata.origin, metadata.remember_origin, bytes)?;
-    admit_received_event_bytes(store, modules, report.received_event_bytes)?;
+    let mut report =
+        modules.ingest_frame(store, metadata.origin, metadata.remember_origin, bytes)?;
+    report.changes.append(received_event_changes(
+        modules,
+        report.received_event_bytes,
+    )?);
+    apply_changes(store, report.changes)?;
     Ok(IngestResult {
         outgoing: report.outgoing,
         established_routes: report.established_routes,
@@ -95,18 +112,13 @@ pub fn ingest_frame(
     })
 }
 
-fn admit_received_event_bytes(
-    store: &Store,
-    modules: &Modules,
-    events: Vec<Vec<u8>>,
-) -> Result<(), String> {
+fn received_event_changes(modules: &Modules, events: Vec<Vec<u8>>) -> Result<StateChanges, String> {
     if events.is_empty() {
-        return Ok(());
+        return Ok(StateChanges::default());
     }
     let mut records = Vec::with_capacity(events.len());
     for bytes in events {
         records.push(modules.record_from_bytes(bytes)?);
     }
-    admit_records(store, records)?;
-    Ok(())
+    Ok(StateChanges::events(records))
 }

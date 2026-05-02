@@ -1,4 +1,4 @@
-use crate::store::{EventId, Store};
+use crate::store::EventId;
 
 use super::super::data::types::DataEvent;
 use super::super::frame::codec as frame_codec;
@@ -21,21 +21,21 @@ pub struct SyncReport {
 }
 
 pub fn start(
-    store: &Store,
+    context: &impl queries::ReadContext,
     connection_id: EventId,
     mut emit: impl FnMut(Vec<u8>) -> Result<(), String>,
 ) -> Result<SyncReport, String> {
     let mut items = vec![SyncItem::Compare(CompareEvent {
         connection_id,
-        summary: queries::summary(store)?,
+        summary: context.summary()?,
     })];
-    items.extend(all_have_items(store, connection_id)?);
+    items.extend(all_have_items(context, connection_id)?);
     emit_items(items, &mut emit)?;
     Ok(SyncReport::default())
 }
 
 pub fn ingest_frame(
-    store: &Store,
+    context: &impl queries::ReadContext,
     expected_connection_id: EventId,
     bytes: &[u8],
     mut emit: impl FnMut(Vec<u8>) -> Result<(), String>,
@@ -51,10 +51,10 @@ pub fn ingest_frame(
         match item {
             SyncItem::Compare(event) => {
                 observe_connection(&mut frame_connection_id, event.connection_id)?;
-                let local = queries::summary(store)?;
+                let local = context.summary()?;
                 if local != event.summary {
                     response_items.extend(have_items_for_compare(
-                        store,
+                        context,
                         event.connection_id,
                         local,
                         event.summary,
@@ -63,7 +63,7 @@ pub fn ingest_frame(
             }
             SyncItem::HaveId(event) => {
                 observe_connection(&mut frame_connection_id, event.connection_id)?;
-                if !queries::has_event(store, &event.id)? {
+                if !context.has_event(&event.id)? {
                     response_items.push(SyncItem::NeedId(NeedIdEvent {
                         connection_id: event.connection_id,
                         id: event.id,
@@ -89,7 +89,7 @@ pub fn ingest_frame(
         return Err("sync frame used a different connection id".to_string());
     }
     let sent_events = emit_control_and_requested_data(
-        store,
+        context,
         connection_id,
         response_items,
         &requested_ids,
@@ -117,10 +117,13 @@ fn observe_connection(
     Ok(())
 }
 
-fn all_have_items(store: &Store, connection_id: EventId) -> Result<Vec<SyncItem>, String> {
+fn all_have_items(
+    context: &impl queries::ReadContext,
+    connection_id: EventId,
+) -> Result<Vec<SyncItem>, String> {
     let mut items = Vec::new();
     for bucket in 0..BUCKETS {
-        let ids = queries::ids_in_bucket(store, bucket as u8)?;
+        let ids = context.ids_in_bucket(bucket as u8)?;
         for id in ids {
             items.push(SyncItem::HaveId(HaveIdEvent {
                 connection_id,
@@ -133,14 +136,14 @@ fn all_have_items(store: &Store, connection_id: EventId) -> Result<Vec<SyncItem>
 }
 
 fn have_items_for_compare(
-    store: &Store,
+    context: &impl queries::ReadContext,
     connection_id: EventId,
     local: [BucketSummary; BUCKETS],
     remote: [BucketSummary; BUCKETS],
 ) -> Result<Vec<SyncItem>, String> {
     let mut items = Vec::new();
     for bucket in projector::differing_buckets(&local, &remote) {
-        let ids = queries::ids_in_bucket(store, bucket)?;
+        let ids = context.ids_in_bucket(bucket)?;
         for id in ids {
             items.push(SyncItem::HaveId(HaveIdEvent {
                 connection_id,
@@ -153,7 +156,7 @@ fn have_items_for_compare(
 }
 
 fn emit_control_and_requested_data(
-    store: &Store,
+    context: &impl queries::ReadContext,
     connection_id: EventId,
     control_items: Vec<SyncItem>,
     requested_ids: &[EventId],
@@ -174,7 +177,7 @@ fn emit_control_and_requested_data(
     let mut encoded_len = FRAME_HEADER_BYTES + DATA_ITEM_HEADER_BYTES;
 
     for id in ids {
-        let Some(item) = queries::event_byte(store, &id)? else {
+        let Some(item) = context.event_byte(&id)? else {
             continue;
         };
         let entry_len = DATA_ENTRY_BYTES + item.len();

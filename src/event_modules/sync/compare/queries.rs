@@ -2,6 +2,31 @@ use crate::store::{EventId, Store};
 
 use super::types::{BucketSummary, BUCKETS};
 
+pub trait ReadContext {
+    fn summary(&self) -> Result<[BucketSummary; BUCKETS], String>;
+    fn ids_in_bucket(&self, bucket: u8) -> Result<Vec<EventId>, String>;
+    fn has_event(&self, event_id: &EventId) -> Result<bool, String>;
+    fn event_byte(&self, id: &EventId) -> Result<Option<Vec<u8>>, String>;
+}
+
+impl ReadContext for Store {
+    fn summary(&self) -> Result<[BucketSummary; BUCKETS], String> {
+        summary(self)
+    }
+
+    fn ids_in_bucket(&self, bucket: u8) -> Result<Vec<EventId>, String> {
+        ids_in_bucket(self, bucket)
+    }
+
+    fn has_event(&self, event_id: &EventId) -> Result<bool, String> {
+        has_event(self, event_id)
+    }
+
+    fn event_byte(&self, id: &EventId) -> Result<Option<Vec<u8>>, String> {
+        event_byte(self, id)
+    }
+}
+
 pub fn summary(store: &Store) -> Result<[BucketSummary; BUCKETS], String> {
     let mut summary = [BucketSummary::default(); BUCKETS];
     for header in store

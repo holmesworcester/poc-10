@@ -2,11 +2,11 @@ use std::{net::SocketAddr, str::FromStr};
 
 use rand_core::{OsRng, RngCore};
 
-use crate::store::Store;
+use crate::store::{CommandOutput, StateChanges};
 
 use super::super::endpoint;
+use super::projector;
 use super::types::Invite;
-use super::{projector, tables};
 
 const INVITE_PREFIX: &str = "topo://invite/";
 const INVITE_VERSION: &str = "v6";
@@ -17,25 +17,25 @@ const LABEL_WORKSPACE: &str = "WORKSPACE";
 const LABEL_ENDPOINT_ID: &str = "ENDPOINT_ID";
 const LABEL_ADDRESS: &str = "ADDRESS";
 
-pub fn create(store: &Store, public_addr: SocketAddr) -> Result<String, String> {
-    let local = endpoint::commands::ensure_local_keypair(store)?;
+pub fn create(
+    local: endpoint::types::EndpointKeypair,
+    public_addr: SocketAddr,
+) -> CommandOutput<String> {
     let invite_event_id = nonce32();
     let bootstrap_secret = nonce32();
     let workspace_id = nonce32();
-    store
-        .insert_table_rows(projector::invite_secret(
-            secret_hash(&bootstrap_secret),
-            bootstrap_secret,
-        ))
-        .map_err(|err| format!("store invite secret: {err}"))?;
-    Ok(format!(
+    let changes = StateChanges::rows(projector::invite_secret(
+        secret_hash(&bootstrap_secret),
+        bootstrap_secret,
+    ));
+    CommandOutput::with_changes(format!(
         "{INVITE_PREFIX}{INVITE_VERSION}/{INVITE_KIND}/{LABEL_INVITE_ID}.{invite_id}/{LABEL_INVITE_PRIVKEY}.{invite_secret}/{LABEL_WORKSPACE}.{workspace}/{LABEL_ENDPOINT_ID}.{endpoint}/{LABEL_ADDRESS}.{address}",
         invite_id = encode_hex(&invite_event_id),
         invite_secret = encode_hex(&bootstrap_secret),
         workspace = encode_hex(&workspace_id),
         endpoint = encode_hex(&local.endpoint),
         address = encode_address(public_addr),
-    ))
+    ), changes)
 }
 
 pub fn addr(invite: &str) -> Result<SocketAddr, String> {
@@ -96,16 +96,6 @@ pub fn secret_hash(secret: &[u8; 32]) -> [u8; 32] {
     hasher.update(b"topo-bootstrap-token-v1");
     hasher.update(encode_hex(secret).as_bytes());
     *hasher.finalize().as_bytes()
-}
-
-pub fn bootstrap_hash_is_authorized(
-    store: &Store,
-    bootstrap_hash: &[u8; 32],
-) -> Result<bool, String> {
-    store
-        .table_row(tables::INVITE_SECRETS, bootstrap_hash)
-        .map(|row| row.is_some())
-        .map_err(|err| format!("load invite secret: {err}"))
 }
 
 pub fn encode_hex(bytes: &[u8; 32]) -> String {

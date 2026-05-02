@@ -1,39 +1,36 @@
-use crate::store::{EventRecord, Store};
+use crate::store::{CommandOutput, StateChanges};
 
 use super::codec;
 use super::types::ContentEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerateReport {
-    pub records: Vec<EventRecord>,
     pub first_timestamp: u64,
     pub last_timestamp: u64,
 }
 
 pub fn generate(
-    store: &Store,
+    start_timestamp: u64,
     num_events: usize,
     event_size: usize,
-) -> Result<GenerateReport, String> {
-    let start = store
-        .max_timestamp()
-        .map_err(|err| format!("load max timestamp: {err}"))?
-        .saturating_add(1);
+) -> Result<CommandOutput<GenerateReport>, String> {
     let mut records = Vec::with_capacity(num_events);
 
     for offset in 0..num_events {
-        let timestamp = start + offset as u64;
+        let timestamp = start_timestamp + offset as u64;
         let payload = payload(timestamp, event_size);
         let bytes = codec::encode(&ContentEvent { timestamp, payload });
         let record = codec::record_from_bytes(bytes)?;
         records.push(record);
     }
 
-    Ok(GenerateReport {
-        records,
-        first_timestamp: start,
-        last_timestamp: start + num_events as u64 - 1,
-    })
+    Ok(CommandOutput::with_changes(
+        GenerateReport {
+            first_timestamp: start_timestamp,
+            last_timestamp: start_timestamp + num_events as u64 - 1,
+        },
+        StateChanges::events(records),
+    ))
 }
 
 fn payload(timestamp: u64, size: usize) -> Vec<u8> {

@@ -1,7 +1,4 @@
-use crate::event_modules::identity::endpoint::commands::ensure_local_keypair;
-use crate::store::Store;
-
-use super::super::connection_record::queries;
+use super::super::super::identity::endpoint::types::{EndpointId, EndpointKeypair};
 use super::super::connection_record::types::ConnectionId;
 use super::codec;
 use super::crypto;
@@ -13,8 +10,11 @@ pub struct UnwrappedTransit {
     pub connection_id: Option<ConnectionId>,
 }
 
-pub fn unwrap(store: &Store, bytes: &[u8]) -> Result<UnwrappedTransit, String> {
-    let local = ensure_local_keypair(store)?;
+pub fn unwrap(
+    local: EndpointKeypair,
+    bytes: &[u8],
+    remote_endpoint: impl FnOnce(&ConnectionId) -> Result<EndpointId, String>,
+) -> Result<UnwrappedTransit, String> {
     match codec::decode(bytes)? {
         TransitEnvelope::Bootstrap {
             sender_endpoint,
@@ -54,7 +54,7 @@ pub fn unwrap(store: &Store, bytes: &[u8]) -> Result<UnwrappedTransit, String> {
             if recipient_endpoint != local.endpoint {
                 return Err("connection transit addressed to a different endpoint".to_string());
             }
-            let remote = queries::remote_endpoint(store, &connection_id)?;
+            let remote = remote_endpoint(&connection_id)?;
             if sender_endpoint != remote {
                 return Err("connection transit sender does not match connection".to_string());
             }

@@ -7,7 +7,7 @@ pub const EVENT_MAGIC: &[u8; 10] = b"TOPOCONN1\0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundConnection {
-    pub response: Option<Vec<u8>>,
+    pub outgoing: Vec<Vec<u8>>,
     pub connection_id: Option<ConnectionId>,
 }
 

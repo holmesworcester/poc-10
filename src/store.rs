@@ -19,6 +19,52 @@ pub struct EventRecord {
     pub dependencies: Vec<EventId>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StateChanges {
+    pub rows: Vec<TableRow>,
+    pub events: Vec<EventRecord>,
+}
+
+impl StateChanges {
+    pub fn rows(rows: Vec<TableRow>) -> Self {
+        Self {
+            rows,
+            events: Vec::new(),
+        }
+    }
+
+    pub fn events(events: Vec<EventRecord>) -> Self {
+        Self {
+            rows: Vec::new(),
+            events,
+        }
+    }
+
+    pub fn append(&mut self, mut other: Self) {
+        self.rows.append(&mut other.rows);
+        self.events.append(&mut other.events);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutput<T> {
+    pub value: T,
+    pub changes: StateChanges,
+}
+
+impl<T> CommandOutput<T> {
+    pub fn new(value: T) -> Self {
+        Self {
+            value,
+            changes: StateChanges::default(),
+        }
+    }
+
+    pub fn with_changes(value: T, changes: StateChanges) -> Self {
+        Self { value, changes }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventIndexEntry {
     pub event_id: EventId,
@@ -66,30 +112,20 @@ impl Store {
     }
 
     pub fn insert_table_rows(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| {
-            let mut inserted = 0;
-            for row in rows {
-                inserted += self.conn.execute(
-                    "INSERT OR IGNORE INTO table_rows
-                        (table_name, row_key, row_value)
-                     VALUES (?1, ?2, ?3)",
-                    params![row.table, row.key, row.value],
-                )?;
-            }
-            Ok::<usize, rusqlite::Error>(inserted)
-        })();
+        self.write_transaction(|store| store.insert_table_rows_in_tx(rows))
+    }
 
-        match result {
-            Ok(inserted) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(inserted)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
+    pub fn insert_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
+        let mut inserted = 0;
+        for row in rows {
+            inserted += self.conn.execute(
+                "INSERT OR IGNORE INTO table_rows
+                    (table_name, row_key, row_value)
+                 VALUES (?1, ?2, ?3)",
+                params![row.table, row.key, row.value],
+            )?;
         }
+        Ok(inserted)
     }
 
     pub fn table_row(&self, table: &'static str, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {

@@ -1,9 +1,9 @@
 use rand_core::RngCore;
 
 use crate::event_modules::identity::{endpoint, invite};
-use crate::store::{EventId, Store};
+use crate::store::{CommandOutput, EventId};
 
-use super::super::connection_record::{commands as record_commands, types};
+use super::super::connection_record::types;
 use super::super::transit;
 use super::types::RequestEvent;
 use super::{codec, projector};
@@ -16,9 +16,11 @@ pub struct OutboundRequest {
     pub addr: std::net::SocketAddr,
 }
 
-pub fn create(store: &Store, invite_link: &str) -> Result<OutboundRequest, String> {
+pub fn create(
+    local: endpoint::types::EndpointKeypair,
+    invite_link: &str,
+) -> Result<CommandOutput<OutboundRequest>, String> {
     let invite = invite::commands::parse(invite_link)?;
-    let local = endpoint::commands::ensure_local_keypair(store)?;
     let event = RequestEvent {
         from_endpoint: local.endpoint,
         nonce: nonce32(),
@@ -26,34 +28,41 @@ pub fn create(store: &Store, invite_link: &str) -> Result<OutboundRequest, Strin
     };
     let inner = codec::encode(&event);
     let request_id = types::event_id(&inner);
-    record_commands::apply(store, projector::outbound(inner.clone())?)?;
-    Ok(OutboundRequest {
-        bytes: transit::commands::create_bootstrap(store, invite.endpoint, &inner)?,
-        request_id,
-        local_endpoint: local.endpoint,
-        addr: invite.addr,
-    })
+    let projection = projector::outbound(inner.clone())?;
+    Ok(CommandOutput::with_changes(
+        OutboundRequest {
+            bytes: transit::commands::create_bootstrap(&local, invite.endpoint, &inner)?,
+            request_id,
+            local_endpoint: local.endpoint,
+            addr: invite.addr,
+        },
+        projection.changes,
+    ))
 }
 
-pub fn accept(store: &Store, bytes: Vec<u8>) -> Result<types::InboundConnection, String> {
-    let local = endpoint::commands::ensure_local_keypair(store)?;
+pub fn accept(
+    local: endpoint::types::EndpointKeypair,
+    bootstrap_hash_is_authorized: bool,
+    bytes: Vec<u8>,
+) -> Result<CommandOutput<types::InboundConnection>, String> {
     let event = codec::decode(&bytes)?;
-    if !invite::commands::bootstrap_hash_is_authorized(store, &event.bootstrap_hash)? {
+    if !bootstrap_hash_is_authorized {
         return Err("invite private key rejected".to_string());
     }
 
     let projection = projector::inbound(bytes, local.endpoint, event.bootstrap_hash)?;
-    let response = projection
-        .response
-        .as_ref()
-        .map(|bytes| transit::commands::create_bootstrap(store, event.from_endpoint, bytes))
-        .transpose()?;
-    let connection_id = projection.connection_id;
-    record_commands::apply(store, projection)?;
-    Ok(types::InboundConnection {
-        response,
-        connection_id,
-    })
+    let outgoing = projection
+        .emitted_events
+        .iter()
+        .map(|bytes| transit::commands::create_bootstrap(&local, event.from_endpoint, bytes))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CommandOutput::with_changes(
+        types::InboundConnection {
+            outgoing,
+            connection_id: projection.connection_id,
+        },
+        projection.changes,
+    ))
 }
 
 fn nonce32() -> [u8; 32] {

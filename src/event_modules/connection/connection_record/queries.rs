@@ -1,4 +1,4 @@
-use crate::event_modules::identity::endpoint::commands::endpoint_id;
+use crate::event_modules::identity::endpoint::queries::endpoint_id;
 use crate::event_modules::identity::endpoint::types::EndpointId;
 use crate::store::Store;
 

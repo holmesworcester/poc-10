@@ -9,6 +9,11 @@ CLI, RPC, jobs, and other adapters should dispatch into module commands instead
 of constructing canonical event bytes directly. Adapters own input/output shape;
 event modules own protocol and domain semantics.
 
+Commands receive explicit input values plus narrow read context values. They do
+not mutate SQLite, open transactions, drain queues, or call broad apply loops.
+They return `CommandOutput`/`StateChanges`; the pipeline/store layer is the
+only place that commits those rows or events.
+
 The intended shape is:
 
 ```text

@@ -1,19 +1,16 @@
-use crate::event_modules::identity::endpoint::commands::ensure_local_keypair;
 use crate::event_modules::identity::endpoint::types::EndpointId;
-use crate::store::Store;
+use crate::event_modules::identity::endpoint::types::EndpointKeypair;
 
-use super::super::connection_record::queries;
 use super::super::connection_record::types::ConnectionId;
 use super::codec;
 use super::crypto;
 use super::types::TransitEnvelope;
 
 pub fn create_bootstrap(
-    store: &Store,
+    local: &EndpointKeypair,
     recipient_endpoint: EndpointId,
     inner: &[u8],
 ) -> Result<Vec<u8>, String> {
-    let local = ensure_local_keypair(store)?;
     let nonce = crypto::nonce();
     let envelope = TransitEnvelope::Bootstrap {
         sender_endpoint: local.endpoint,
@@ -38,12 +35,11 @@ pub fn create_bootstrap(
 }
 
 pub fn create_connection(
-    store: &Store,
+    local: &EndpointKeypair,
+    recipient_endpoint: EndpointId,
     connection_id: ConnectionId,
     inner: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
-    let local = ensure_local_keypair(store)?;
-    let recipient_endpoint = queries::remote_endpoint(store, &connection_id)?;
     let nonce = crypto::nonce();
     let envelope = TransitEnvelope::Connection {
         connection_id,

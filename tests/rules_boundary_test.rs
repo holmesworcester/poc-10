@@ -208,6 +208,62 @@ fn sync_event_module_does_not_own_transport_or_frame_io() {
 }
 
 #[test]
+fn event_module_commands_do_not_mutate_storage_directly() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "commands.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "use crate::store::Store",
+        "&Store",
+        "Store,",
+        "Store)",
+        "write_transaction",
+        "insert_table_rows",
+        "insert_event(",
+        "set_event_status",
+        "delete_dependency_wait",
+        "drain_until_idle",
+        "rusqlite",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "commands receive explicit context and return CommandOutput/StateChanges; pipeline/store own writes:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn event_module_projectors_do_not_query_storage_directly() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "projector.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "use crate::store::Store",
+        "&Store",
+        "Store,",
+        "Store)",
+        "table_row",
+        "event_bytes",
+        "has_event",
+        "write_transaction",
+        "rusqlite",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "projectors are pure transforms over event plus explicit context; queries belong outside projector.rs:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn sync_event_module_does_not_use_session_message_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sync_root = root.join("src/event_modules/sync");

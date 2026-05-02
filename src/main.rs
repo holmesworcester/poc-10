@@ -26,20 +26,27 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("connected: {addr}");
         }
         Command::Invite { public_addr } => {
-            let invite = modules
-                .create_invite(&store, public_addr)
-                .map_err(|err| format!("invite: {err}"))?;
+            let invite = pipeline::run_command(
+                &store,
+                modules
+                    .create_invite(&store, public_addr)
+                    .map_err(|err| format!("invite: {err}"))?,
+            )
+            .map_err(|err| format!("apply invite: {err}"))?
+            .0;
             println!("{invite}");
         }
         Command::Generate {
             num_events,
             event_size,
         } => {
-            let report = modules
-                .generate_content(&store, num_events, event_size)
-                .map_err(|err| format!("generate: {err}"))?;
-            let admitted = pipeline::admit_records(&store, report.records)
-                .map_err(|err| format!("admit generated events: {err}"))?;
+            let (report, admitted) = pipeline::run_command(
+                &store,
+                modules
+                    .generate_content(&store, num_events, event_size)
+                    .map_err(|err| format!("generate: {err}"))?,
+            )
+            .map_err(|err| format!("admit generated events: {err}"))?;
             let applied = control_loop::drain_until_idle(&store, control_loop::DEFAULT_READY_BATCH)
                 .map_err(|err| format!("drain generated events: {err}"))?;
             println!("generated_events: {}", admitted.inserted_events);
@@ -251,7 +258,9 @@ struct CliSyncReport {
 fn connect(store: &Store, modules: &Modules, invite: &str) -> Result<SocketAddr, String> {
     let addr = modules.invite_addr(invite)?;
     let mut stream = network::connect(addr).map_err(|err| format!("open tcp stream: {err}"))?;
-    let request = modules.create_connection_request(store, invite)?;
+    let request = pipeline::run_command(store, modules.create_connection_request(store, invite)?)
+        .map_err(|err| format!("record connection request: {err}"))?
+        .0;
     network::write_frames(&mut stream, vec![request.bytes])?;
     let report = drive_stream(
         store,

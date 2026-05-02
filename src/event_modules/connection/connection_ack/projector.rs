@@ -1,4 +1,5 @@
 use crate::store::EventId;
+use crate::store::StateChanges;
 
 use super::super::connection_record::projector::{self as projection, Projection};
 use super::super::connection_record::types;
@@ -22,11 +23,11 @@ pub fn inbound(
         return Err("connection ack has an invalid connection id".to_string());
     }
     Ok(Projection {
-        rows: vec![
+        changes: StateChanges::rows(vec![
             projection::connection_event_row(types::event_id(&bytes), bytes),
             projection::connection_row(event.connection_id, event.from_endpoint),
-        ],
-        response: None,
+        ]),
+        emitted_events: Vec::new(),
         connection_id: Some(event.connection_id),
     })
 }

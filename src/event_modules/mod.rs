@@ -6,8 +6,7 @@ pub mod test_events;
 
 use std::net::SocketAddr;
 
-use crate::store::EventRecord;
-use crate::store::Store;
+use crate::store::{CommandOutput, EventRecord, StateChanges, Store};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules;
@@ -20,6 +19,7 @@ struct FrameMetadata {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleFrameReport {
+    pub changes: StateChanges,
     pub outgoing: Vec<Vec<u8>>,
     pub established_routes: usize,
     pub sent_events: usize,
@@ -43,8 +43,14 @@ impl Modules {
         record_from_bytes(bytes)
     }
 
-    pub fn create_invite(&self, store: &Store, public_addr: SocketAddr) -> Result<String, String> {
-        identity::invite::commands::create(store, public_addr)
+    pub fn create_invite(
+        &self,
+        store: &Store,
+        public_addr: SocketAddr,
+    ) -> Result<CommandOutput<String>, String> {
+        let local = self.local_keypair(store)?;
+        let invite = identity::invite::commands::create(local.value, public_addr);
+        Ok(merge_outputs(local.changes, invite))
     }
 
     pub fn invite_addr(&self, invite: &str) -> Result<SocketAddr, String> {
@@ -56,16 +62,23 @@ impl Modules {
         store: &Store,
         num_events: usize,
         event_size: usize,
-    ) -> Result<content::content_event::commands::GenerateReport, String> {
-        content::content_event::commands::generate(store, num_events, event_size)
+    ) -> Result<CommandOutput<content::content_event::commands::GenerateReport>, String> {
+        let start = store
+            .max_timestamp()
+            .map_err(|err| format!("load max timestamp: {err}"))?
+            .saturating_add(1);
+        content::content_event::commands::generate(start, num_events, event_size)
     }
 
     pub fn create_connection_request(
         &self,
         store: &Store,
         invite: &str,
-    ) -> Result<connection::connection_request::commands::OutboundRequest, String> {
-        connection::connection_request::commands::create(store, invite)
+    ) -> Result<CommandOutput<connection::connection_request::commands::OutboundRequest>, String>
+    {
+        let local = self.local_keypair(store)?;
+        let request = connection::connection_request::commands::create(local.value, invite)?;
+        Ok(merge_outputs(local.changes, request))
     }
 
     pub fn ingest_frame(
@@ -79,7 +92,10 @@ impl Modules {
             origin,
             remember_origin,
         };
-        let transit = connection::transit::projector::unwrap(store, &bytes)?;
+        let local = self.existing_local_keypair(store)?;
+        let transit = connection::transit::projector::unwrap(local, &bytes, |connection_id| {
+            connection::connection_record::queries::remote_endpoint(store, connection_id)
+        })?;
         if connection::connection_record::types::is_connection_event(&transit.inner) {
             return self.ingest_connection_frame(store, metadata, transit.inner);
         }
@@ -97,11 +113,26 @@ impl Modules {
     ) -> Result<ModuleFrameReport, String> {
         let mut result = ModuleFrameReport::default();
         if connection::connection_request::codec::is_request(&bytes) {
-            let connection = connection::connection_request::commands::accept(store, bytes)?;
-            self.apply_connection_result(store, metadata, connection, &mut result)?;
+            let event = connection::connection_request::codec::decode(&bytes)?;
+            let authorized = identity::invite::queries::bootstrap_hash_is_authorized(
+                store,
+                &event.bootstrap_hash,
+            )?;
+            let local = self.local_keypair(store)?;
+            let connection =
+                connection::connection_request::commands::accept(local.value, authorized, bytes)?;
+            let connection = merge_outputs(local.changes, connection);
+            self.apply_connection_result(metadata, connection, &mut result);
         } else if connection::connection_ack::codec::is_ack(&bytes) {
-            let connection = connection::connection_ack::commands::accept(store, bytes)?;
-            self.apply_connection_result(store, metadata, connection, &mut result)?;
+            let event = connection::connection_ack::codec::decode(&bytes)?;
+            let request_bytes =
+                connection::connection_record::queries::event_bytes(store, &event.request_id)?
+                    .ok_or_else(|| "connection ack references unknown request".to_string())?;
+            let local = self.local_keypair(store)?;
+            let connection =
+                connection::connection_ack::commands::accept(local.value, request_bytes, bytes)?;
+            let connection = merge_outputs(local.changes, connection);
+            self.apply_connection_result(metadata, connection, &mut result);
         } else {
             return Err("unknown connection event".to_string());
         }
@@ -110,36 +141,44 @@ impl Modules {
 
     fn apply_connection_result(
         &self,
-        store: &Store,
         metadata: FrameMetadata,
-        connection: connection::connection_record::types::InboundConnection,
+        connection: CommandOutput<connection::connection_record::types::InboundConnection>,
         result: &mut ModuleFrameReport,
-    ) -> Result<(), String> {
-        if let Some(bytes) = connection.response {
-            result.outgoing.push(bytes);
-        }
-        if let Some(connection_id) = connection.connection_id {
+    ) {
+        result.changes.append(connection.changes);
+        result.outgoing.extend(connection.value.outgoing);
+        if let Some(connection_id) = connection.value.connection_id {
             if metadata.remember_origin {
-                connection::transport_target::commands::record(
-                    store,
-                    connection_id,
-                    metadata.origin,
-                )?;
+                result
+                    .changes
+                    .append(connection::transport_target::commands::record(
+                        connection_id,
+                        metadata.origin,
+                    ));
             }
             result.established_routes += 1;
         }
-        Ok(())
     }
 
     pub fn sync_outbound(&self, store: &Store) -> Result<Vec<OutboundSync>, String> {
         let mut outbound = Vec::new();
-        for route in connection::transport_target::queries::routes(store)? {
+        let routes = connection::transport_target::queries::routes(store)?;
+        if routes.is_empty() {
+            return Ok(outbound);
+        }
+        let local = self.existing_local_keypair(store)?;
+        for route in routes {
+            let remote = connection::connection_record::queries::remote_endpoint(
+                store,
+                &route.connection_id,
+            )?;
             let mut result = ModuleFrameReport::default();
             let report = sync::compare::commands::start(store, route.connection_id, |bytes| {
                 result
                     .outgoing
                     .push(connection::transit::commands::create_connection(
-                        store,
+                        &local,
+                        remote,
                         route.connection_id,
                         bytes,
                     )?);
@@ -169,11 +208,15 @@ impl Modules {
         bytes: &[u8],
     ) -> Result<ModuleFrameReport, String> {
         let mut result = ModuleFrameReport::default();
+        let local = self.existing_local_keypair(store)?;
+        let remote =
+            connection::connection_record::queries::remote_endpoint(store, &connection_id)?;
         let report = sync::compare::commands::ingest_frame(store, connection_id, bytes, |bytes| {
             result
                 .outgoing
                 .push(connection::transit::commands::create_connection(
-                    store,
+                    &local,
+                    remote,
                     connection_id,
                     bytes,
                 )?);
@@ -184,6 +227,30 @@ impl Modules {
         result.received_event_bytes = report.received_event_bytes;
         Ok(result)
     }
+
+    fn local_keypair(
+        &self,
+        store: &Store,
+    ) -> Result<CommandOutput<identity::endpoint::types::EndpointKeypair>, String> {
+        match identity::endpoint::queries::local_keypair(store)? {
+            Some(local) => Ok(CommandOutput::new(local)),
+            None => Ok(identity::endpoint::commands::create_local_keypair()),
+        }
+    }
+
+    fn existing_local_keypair(
+        &self,
+        store: &Store,
+    ) -> Result<identity::endpoint::types::EndpointKeypair, String> {
+        identity::endpoint::queries::local_keypair(store)?
+            .ok_or_else(|| "local endpoint is missing".to_string())
+    }
+}
+
+fn merge_outputs<T>(mut changes: StateChanges, mut output: CommandOutput<T>) -> CommandOutput<T> {
+    changes.append(output.changes);
+    output.changes = changes;
+    output
 }
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {

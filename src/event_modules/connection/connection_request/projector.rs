@@ -4,13 +4,14 @@ use super::super::connection_record::types;
 use super::codec;
 use crate::event_modules::connection::connection_ack::types::AckEvent;
 use crate::event_modules::identity::endpoint::types::EndpointId;
+use crate::store::StateChanges;
 
 pub fn outbound(bytes: Vec<u8>) -> Result<Projection, String> {
     codec::decode(&bytes)?;
     let request_id = types::event_id(&bytes);
     Ok(Projection {
-        rows: vec![projection::connection_event_row(request_id, bytes)],
-        response: None,
+        changes: StateChanges::rows(vec![projection::connection_event_row(request_id, bytes)]),
+        emitted_events: Vec::new(),
         connection_id: None,
     })
 }
@@ -36,12 +37,12 @@ pub fn inbound(
     let ack_bytes = connection_ack::codec::encode(&ack);
 
     Ok(Projection {
-        rows: vec![
+        changes: StateChanges::rows(vec![
             projection::connection_event_row(request_id, bytes),
             projection::connection_event_row(types::event_id(&ack_bytes), ack_bytes.clone()),
             projection::connection_row(connection_id, event.from_endpoint),
-        ],
-        response: Some(ack_bytes),
+        ]),
+        emitted_events: vec![ack_bytes],
         connection_id: Some(connection_id),
     })
 }
