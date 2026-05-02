@@ -1,3 +1,6 @@
+mod blocking;
+mod cascade_bench;
+mod control_loop;
 mod event_modules;
 mod network;
 mod pipeline;
@@ -9,7 +12,7 @@ use std::io::Write;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 
-use event_modules::{connection, content};
+use event_modules::{bench_dep, connection, content};
 use store::Store;
 
 fn main() {
@@ -39,10 +42,42 @@ fn run(args: Vec<String>) -> Result<(), String> {
         } => {
             let report = content::commands::generate(&store, num_events, event_size)
                 .map_err(|err| format!("generate: {err}"))?;
-            println!("generated_events: {}", report.inserted_events);
+            let admitted = pipeline::admit_records(&store, report.records)
+                .map_err(|err| format!("admit generated events: {err}"))?;
+            let applied = control_loop::drain_until_idle(&store, control_loop::DEFAULT_READY_BATCH)
+                .map_err(|err| format!("drain generated events: {err}"))?;
+            println!("generated_events: {}", admitted.inserted_events);
+            println!("applied_events: {}", applied.applied_events);
             println!("event_size_bytes: {event_size}");
             println!("first_timestamp: {}", report.first_timestamp);
             println!("last_timestamp: {}", report.last_timestamp);
+        }
+        Command::Cascade {
+            num_events,
+            deps_per_event,
+            batch_size,
+        } => {
+            let report = cascade_bench::run(&store, num_events, deps_per_event, batch_size)
+                .map_err(|err| format!("cascade: {err}"))?;
+            let seconds = (report.cascade_ms as f64 / 1000.0).max(0.001);
+            let cascade_rate = report.applied_events as f64 / seconds;
+            println!("cascade_events: {}", report.events);
+            println!("deps_per_event: {}", report.deps_per_event);
+            println!("dep_edges: {}", report.dep_edges);
+            println!("blocked_after_reverse: {}", report.blocked_after_reverse);
+            println!("applied_events: {}", report.applied_events);
+            println!("unblocked_events: {}", report.unblocked_events);
+            println!("ready_events_remaining: {}", report.final_counts.ready);
+            println!("blocked_events_remaining: {}", report.final_counts.blocked);
+            println!(
+                "blocked_edges_remaining: {}",
+                report.final_counts.blocked_edges
+            );
+            println!("setup_ms: {}", report.setup_ms);
+            println!("blocking_ms: {}", report.blocking_ms);
+            println!("cascade_ms: {}", report.cascade_ms);
+            println!("total_ms: {}", report.total_ms);
+            println!("cascade_events_per_s: {cascade_rate:.0}");
         }
         Command::Sync {
             listen,
@@ -86,6 +121,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 "connection_events: {}",
                 connection::commands::connection_event_count(&store)?
             );
+            let statuses = store
+                .status_counts()
+                .map_err(|err| format!("count event statuses: {err}"))?;
+            println!("ready_events: {}", statuses.ready);
+            println!("blocked_events: {}", statuses.blocked);
+            println!("applied_events: {}", statuses.applied);
+            println!("rejected_events: {}", statuses.rejected);
+            println!("blocked_edges: {}", statuses.blocked_edges);
         }
     }
 
@@ -103,6 +146,11 @@ enum Command {
     Generate {
         num_events: usize,
         event_size: usize,
+    },
+    Cascade {
+        num_events: usize,
+        deps_per_event: usize,
+        batch_size: usize,
     },
     Sync {
         listen: Option<SocketAddr>,
@@ -167,6 +215,32 @@ fn parse_args(args: Vec<String>) -> Result<(PathBuf, Command), String> {
                 event_size,
             }
         }
+        "cascade" => {
+            let num_events = parse_usize(rest.get(1), "cascade requires NUM_EVENTS")?;
+            let mut deps_per_event = bench_dep::codec::MAX_DEPS;
+            let mut batch_size = control_loop::DEFAULT_READY_BATCH;
+            let mut idx = 2;
+            while idx < rest.len() {
+                match rest[idx].as_str() {
+                    "--deps" => {
+                        deps_per_event =
+                            parse_usize(rest.get(idx + 1), "cascade --deps requires a number")?;
+                        idx += 2;
+                    }
+                    "--batch" => {
+                        batch_size =
+                            parse_usize(rest.get(idx + 1), "cascade --batch requires a number")?;
+                        idx += 2;
+                    }
+                    other => return Err(usage(&format!("unknown cascade option `{other}`"))),
+                }
+            }
+            Command::Cascade {
+                num_events,
+                deps_per_event,
+                batch_size,
+            }
+        }
         "sync" => {
             let mut listen = None;
             let mut accept_count = 1usize;
@@ -223,7 +297,7 @@ fn parse_usize(value: Option<&String>, message: &str) -> Result<usize, String> {
 
 fn usage(message: &str) -> String {
     format!(
-        "{message}\nusage:\n  topo --db PATH invite --public-addr ADDR\n  topo --db PATH connect INVITE_LINK\n  topo --db PATH generate NUM_EVENTS EVENT_SIZE_BYTES\n  topo --db PATH sync [--listen IP PORT --accept N]\n  topo --db PATH count"
+        "{message}\nusage:\n  topo --db PATH invite --public-addr ADDR\n  topo --db PATH connect INVITE_LINK\n  topo --db PATH generate NUM_EVENTS EVENT_SIZE_BYTES\n  topo --db PATH cascade NUM_EVENTS [--deps N] [--batch N]\n  topo --db PATH sync [--listen IP PORT --accept N]\n  topo --db PATH count"
     )
 }
 
@@ -287,6 +361,8 @@ fn sync_routes(
     store: &Store,
     routes: Vec<connection::commands::TransportRoute>,
 ) -> Result<CliSyncReport, String> {
+    control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
+        .map_err(|err| format!("drain ready events before sync: {err}"))?;
     let mut report = CliSyncReport::default();
     for route in routes {
         let route_report = sync_route(store, route)?;
@@ -341,12 +417,16 @@ fn drive_stream(
     let mut report = StreamReport::default();
     if let Some(bytes) = first_frame {
         let result = pipeline::ingest_frame(store, origin, bytes, options)?;
+        control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
+            .map_err(|err| format!("drain ready events: {err}"))?;
         apply_stream_result(stream, &mut report, result)?;
     }
     loop {
         match network::read_frame(stream) {
             Ok(bytes) => {
                 let result = pipeline::ingest_frame(store, origin, bytes, options)?;
+                control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
+                    .map_err(|err| format!("drain ready events: {err}"))?;
                 apply_stream_result(stream, &mut report, result)?;
             }
             Err(err) if is_stream_closed(&err) => break,

@@ -1,4 +1,3 @@
-use crate::event_modules::content;
 use crate::store::{EventId, Store};
 
 use super::codec::{BucketSummary, BUCKETS};
@@ -32,16 +31,6 @@ pub fn event_byte(store: &Store, id: &EventId) -> Result<Option<Vec<u8>>, String
     store
         .event_bytes(id)
         .map_err(|err| format!("load event bytes: {err}"))
-}
-
-pub fn insert_events(store: &Store, events: Vec<Vec<u8>>) -> Result<usize, String> {
-    let mut records = Vec::with_capacity(events.len());
-    for bytes in events {
-        records.push(content::codec::record_from_bytes(bytes)?);
-    }
-    store
-        .insert_events(records)
-        .map_err(|err| format!("insert received events: {err}"))
 }
 
 fn fingerprint_id(id: &EventId) -> [u8; 32] {

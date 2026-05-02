@@ -8,10 +8,11 @@ const FRAME_HEADER_BYTES: usize = 14;
 const DATA_ITEM_HEADER_BYTES: usize = 1 + 32 + 4;
 const DATA_ENTRY_BYTES: usize = 4;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncReport {
     pub sent_events: usize,
     pub received_events: usize,
+    pub received_event_bytes: Vec<Vec<u8>>,
 }
 
 pub fn start(
@@ -39,6 +40,7 @@ pub fn ingest_frame(
     let mut response_items = Vec::new();
     let mut requested_ids = Vec::new();
     let mut received_events = 0;
+    let mut received_event_bytes = Vec::new();
 
     for item in frame.items {
         match item {
@@ -73,10 +75,11 @@ pub fn ingest_frame(
             }
             SyncItem::Data {
                 connection_id,
-                items,
+                mut items,
             } => {
                 observe_connection(&mut frame_connection_id, connection_id)?;
-                received_events += queries::insert_events(store, items)?;
+                received_events += items.len();
+                received_event_bytes.append(&mut items);
             }
         }
     }
@@ -98,6 +101,7 @@ pub fn ingest_frame(
     Ok(SyncReport {
         sent_events,
         received_events,
+        received_event_bytes,
     })
 }
 

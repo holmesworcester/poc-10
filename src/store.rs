@@ -15,6 +15,7 @@ pub struct EventRecord {
     pub timestamp: u64,
     pub payload_len: usize,
     pub canonical_bytes: Vec<u8>,
+    pub dependencies: Vec<EventId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,8 +24,36 @@ pub struct EventHeader {
     pub bucket: u8,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventStatusCounts {
+    pub ready: usize,
+    pub blocked: usize,
+    pub applied: usize,
+    pub rejected: usize,
+    pub blocked_edges: usize,
+}
+
 pub struct Store {
     conn: Connection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventStatus {
+    Ready,
+    Blocked,
+    Applied,
+    Rejected,
+}
+
+impl EventStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Blocked => "blocked",
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
+        }
+    }
 }
 
 impl Store {
@@ -93,22 +122,16 @@ impl Store {
         rows.collect()
     }
 
-    pub fn insert_events(&self, events: Vec<EventRecord>) -> rusqlite::Result<usize> {
+    pub fn write_transaction<T>(
+        &self,
+        apply: impl FnOnce(&Store) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| {
-            let mut inserted = 0;
-            for event in events {
-                if self.insert_event_row(event)? {
-                    inserted += 1;
-                }
-            }
-            Ok::<usize, rusqlite::Error>(inserted)
-        })();
-
+        let result = apply(self);
         match result {
-            Ok(inserted) => {
+            Ok(value) => {
                 self.conn.execute_batch("COMMIT")?;
-                Ok(inserted)
+                Ok(value)
             }
             Err(err) => {
                 let _ = self.conn.execute_batch("ROLLBACK");
@@ -117,21 +140,125 @@ impl Store {
         }
     }
 
-    fn insert_event_row(&self, event: EventRecord) -> rusqlite::Result<bool> {
+    pub fn insert_event_row(
+        &self,
+        event: &EventRecord,
+        status: EventStatus,
+    ) -> rusqlite::Result<bool> {
         let event_id = event_id(&event.canonical_bytes);
         let inserted = self.conn.execute(
             "INSERT OR IGNORE INTO events
-                (event_id, timestamp, payload_len, bucket, canonical_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                (event_id, timestamp, payload_len, bucket, status, canonical_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 event_id.to_vec(),
                 event.timestamp as i64,
                 event.payload_len as i64,
                 i64::from(event_id[0]),
-                event.canonical_bytes,
+                status.as_str(),
+                &event.canonical_bytes,
             ],
         )?;
         Ok(inserted > 0)
+    }
+
+    pub fn is_applied(&self, event_id: &EventId) -> rusqlite::Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM events
+                 WHERE event_id = ?1 AND status = ?2",
+                params![event_id.to_vec(), EventStatus::Applied.as_str()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+    }
+
+    pub fn insert_blocker_edge(
+        &self,
+        blocked_by_event_id: &EventId,
+        event_id: &EventId,
+    ) -> rusqlite::Result<bool> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO blocked_by_event
+                    (blocked_by_event_id, event_id)
+                 VALUES (?1, ?2)",
+                params![blocked_by_event_id.to_vec(), event_id.to_vec()],
+            )
+            .map(|changed| changed > 0)
+    }
+
+    pub fn next_ready_event_id(&self) -> rusqlite::Result<Option<EventId>> {
+        self.conn
+            .query_row(
+                "SELECT event_id FROM events
+                 WHERE status = ?1
+                 ORDER BY timestamp, event_id
+                 LIMIT 1",
+                params![EventStatus::Ready.as_str()],
+                |row| {
+                    let id: Vec<u8> = row.get(0)?;
+                    Ok(vec_to_id(id))
+                },
+            )
+            .optional()
+    }
+
+    pub fn set_event_status(
+        &self,
+        event_id: &EventId,
+        from: EventStatus,
+        to: EventStatus,
+    ) -> rusqlite::Result<bool> {
+        self.conn
+            .execute(
+                "UPDATE events
+                 SET status = ?2
+                 WHERE event_id = ?1 AND status = ?3",
+                params![event_id.to_vec(), to.as_str(), from.as_str()],
+            )
+            .map(|changed| changed > 0)
+    }
+
+    pub fn delete_blocker_edges_for(
+        &self,
+        blocked_by_event_id: &EventId,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM blocked_by_event
+             WHERE blocked_by_event_id = ?1",
+            params![blocked_by_event_id.to_vec()],
+        )
+    }
+
+    pub fn dependents_blocked_by(
+        &self,
+        blocked_by_event_id: &EventId,
+    ) -> rusqlite::Result<Vec<EventId>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id FROM blocked_by_event
+             WHERE blocked_by_event_id = ?1
+             ORDER BY event_id",
+        )?;
+        let rows = stmt.query_map(params![blocked_by_event_id.to_vec()], |row| {
+            let id: Vec<u8> = row.get(0)?;
+            Ok(vec_to_id(id))
+        })?;
+        rows.collect()
+    }
+
+    pub fn has_blockers(&self, event_id: &EventId) -> rusqlite::Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM blocked_by_event
+                 WHERE event_id = ?1
+                 LIMIT 1",
+                params![event_id.to_vec()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
     }
 
     pub fn max_timestamp(&self) -> rusqlite::Result<u64> {
@@ -149,6 +276,35 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM events", [], |row| {
                 row.get::<_, i64>(0)
             })
+            .map(|count| count as usize)
+    }
+
+    pub fn status_counts(&self) -> rusqlite::Result<EventStatusCounts> {
+        let ready = self.status_count(EventStatus::Ready)?;
+        let blocked = self.status_count(EventStatus::Blocked)?;
+        let applied = self.status_count(EventStatus::Applied)?;
+        let rejected = self.status_count(EventStatus::Rejected)?;
+        let blocked_edges =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM blocked_by_event", [], |row| {
+                    row.get::<_, i64>(0)
+                })? as usize;
+        Ok(EventStatusCounts {
+            ready,
+            blocked,
+            applied,
+            rejected,
+            blocked_edges,
+        })
+    }
+
+    fn status_count(&self, status: EventStatus) -> rusqlite::Result<usize> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE status = ?1",
+                params![status.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
             .map(|count| count as usize)
     }
 
@@ -216,10 +372,20 @@ impl Store {
                 timestamp INTEGER NOT NULL,
                 payload_len INTEGER NOT NULL,
                 bucket INTEGER NOT NULL,
+                status TEXT NOT NULL,
                 canonical_bytes BLOB NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_events_bucket
                 ON events(bucket, event_id);
+            CREATE INDEX IF NOT EXISTS idx_events_status
+                ON events(status, timestamp, event_id);
+            CREATE TABLE IF NOT EXISTS blocked_by_event (
+                blocked_by_event_id BLOB NOT NULL,
+                event_id BLOB NOT NULL,
+                PRIMARY KEY (blocked_by_event_id, event_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_blocked_by_event_event
+                ON blocked_by_event(event_id, blocked_by_event_id);
 
             CREATE TABLE IF NOT EXISTS module_rows (
                 table_name TEXT NOT NULL,

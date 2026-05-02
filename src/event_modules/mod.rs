@@ -1,3 +1,17 @@
+pub mod bench_dep;
 pub mod connection;
 pub mod content;
 pub mod sync;
+
+use crate::store::EventRecord;
+
+pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
+    let tag = bytes
+        .first()
+        .ok_or_else(|| "empty event bytes".to_string())?;
+    match *tag {
+        content::codec::TYPE_CONTENT => content::codec::record_from_bytes(bytes),
+        bench_dep::codec::TYPE_BENCH_DEP => bench_dep::codec::record_from_bytes(bytes),
+        other => Err(format!("unknown event type {other}")),
+    }
+}

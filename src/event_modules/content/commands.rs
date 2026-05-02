@@ -1,11 +1,10 @@
-use crate::store::Store;
+use crate::store::{EventRecord, Store};
 
 use super::codec::{self, ContentEvent};
-use super::projector;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerateReport {
-    pub inserted_events: usize,
+    pub records: Vec<EventRecord>,
     pub first_timestamp: u64,
     pub last_timestamp: u64,
 }
@@ -29,11 +28,8 @@ pub fn generate(
         records.push(record);
     }
 
-    let inserted_events =
-        projector::insert_many(store, records).map_err(|err| format!("insert events: {err}"))?;
-
     Ok(GenerateReport {
-        inserted_events,
+        records,
         first_timestamp: start,
         last_timestamp: start + num_events as u64 - 1,
     })

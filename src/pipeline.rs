@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
 
+use crate::blocking;
 use crate::event_modules::{connection, sync};
-use crate::store::Store;
+use crate::store::{event_id, EventId, EventRecord, EventStatus, Store};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IngestOptions {
@@ -14,6 +15,69 @@ pub struct IngestResult {
     pub established_connections: usize,
     pub sent_events: usize,
     pub received_events: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdmitReport {
+    pub inserted_events: usize,
+    pub ready_events: usize,
+    pub blocked_events: usize,
+    pub blocked_edges: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApplyReadyReport {
+    pub applied_events: usize,
+    pub unblocked_events: usize,
+}
+
+pub fn admit_records(store: &Store, records: Vec<EventRecord>) -> Result<AdmitReport, String> {
+    store
+        .write_transaction(|store| {
+            let mut report = AdmitReport::default();
+            for record in records {
+                admit_record_in_tx(store, &record, &mut report)?;
+            }
+            Ok(report)
+        })
+        .map_err(|err| format!("admit events: {err}"))
+}
+
+fn admit_record_in_tx(
+    store: &Store,
+    record: &EventRecord,
+    report: &mut AdmitReport,
+) -> rusqlite::Result<()> {
+    let id = event_id(&record.canonical_bytes);
+    let missing = blocking::missing_dependencies(store, &record.dependencies)?;
+    let status = if missing.is_empty() {
+        EventStatus::Ready
+    } else {
+        EventStatus::Blocked
+    };
+
+    if store.insert_event_row(record, status)? {
+        report.inserted_events += 1;
+        if missing.is_empty() {
+            report.ready_events += 1;
+        } else {
+            report.blocked_events += 1;
+            report.blocked_edges += blocking::write_blockers(store, &id, &missing)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn apply_ready_event_in_tx(
+    store: &Store,
+    event_id: &EventId,
+) -> rusqlite::Result<ApplyReadyReport> {
+    let mut report = ApplyReadyReport::default();
+    if store.set_event_status(event_id, EventStatus::Ready, EventStatus::Applied)? {
+        report.applied_events = 1;
+        report.unblocked_events = blocking::unblock_dependents(store, event_id)?;
+    }
+    Ok(report)
 }
 
 pub fn start_sync(
@@ -84,7 +148,20 @@ fn ingest_sync_frame(
         )?);
         Ok(())
     })?;
+    admit_received_event_bytes(store, report.received_event_bytes)?;
     result.sent_events += report.sent_events;
     result.received_events += report.received_events;
     Ok(result)
+}
+
+fn admit_received_event_bytes(store: &Store, events: Vec<Vec<u8>>) -> Result<(), String> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut records = Vec::with_capacity(events.len());
+    for bytes in events {
+        records.push(crate::event_modules::record_from_bytes(bytes)?);
+    }
+    admit_records(store, records)?;
+    Ok(())
 }

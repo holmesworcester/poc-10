@@ -49,5 +49,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         timestamp: decoded.timestamp,
         payload_len: decoded.payload.len(),
         canonical_bytes: bytes,
+        dependencies: Vec::new(),
     })
 }
