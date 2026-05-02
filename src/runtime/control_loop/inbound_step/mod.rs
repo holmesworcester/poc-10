@@ -118,6 +118,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::event_modules::connection::local_signing_key;
 use crate::event_modules::connection::wrap::{unwrap, UnwrapResult};
 use crate::event_modules::parse_event;
 use crate::state::events_canonical::{set_status, EventStatus};
@@ -284,8 +285,24 @@ fn process_inbound_bytes_after_dedupe(
     observation_added: bool,
 ) -> Result<InboundOutcome, ChainError> {
     // Step 2: connection.unwrap (or raw frame parse for bootstrap frames).
-    let local_endpoint_id = origin.remote_endpoint_id.unwrap_or([0u8; 32]);
-    let unwrap_res = unwrap(bytes, local_endpoint_id, db);
+    //
+    // ECDH bootstrap-key derivation needs the daemon's PRIVATE signing
+    // key, not just `local_endpoint_id`. We resolve it from the
+    // sidecar `.<dbname>.signkey` file (same one the binary entry
+    // point writes via `api::ensure_signing_key`) and cache it
+    // process-wide in `local_signing_key::for_db`. This is the SOLE
+    // kernel touch needed for real ECDH — we don't plumb the key
+    // through the dispatcher / bridge / runtime; that would balloon
+    // the substrate touch into half a dozen files.
+    //
+    // `origin.remote_endpoint_id` retains its original meaning (the
+    // peer endpoint id, when known); it's no longer overloaded as
+    // "the local endpoint id" the way the previous blake3-only
+    // bootstrap key derivation needed. It's kept on the function
+    // signature so the bridge / dispatcher don't have to change.
+    let _ = origin;
+    let local_signing = local_signing_key::for_db(db);
+    let unwrap_res = unwrap(bytes, &local_signing, db);
     let unwrapped: UnwrapResult = match unwrap_res {
         Ok(u) => u,
         Err(e) => {
@@ -300,6 +317,34 @@ fn process_inbound_bytes_after_dedupe(
             });
         }
     };
+
+    // Round-state quiet detector: bump last_inbound for this
+    // connection so the periodic round-driver tick (run from the
+    // sync event-module) suppresses fresh root Compares while
+    // traffic is flowing. Bootstrap frames have no connection_id
+    // yet — no-op for those, the post_apply path will create the
+    // round_state row on first Connection apply.
+    if let Some(cid) = unwrapped.connection_id {
+        let _ = crate::event_modules::sync::round_state::mark_inbound(db, &cid, now_ms);
+    }
+
+    // Bootstrap-mode frames carry the sender's listen addr in the
+    // clear so the responder can dial back. Promote that hint into
+    // `endpoint_addresses` immediately, before we touch the chain.
+    // Best-effort — failures don't block the chain.
+    if let (Some(sender), Some(addr_str)) = (
+        unwrapped.sender_endpoint_id,
+        unwrapped.sender_listen_addr.clone(),
+    ) {
+        if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+            let _ =
+                crate::runtime::transport_v2::upsert_endpoint_address(db, &sender, &addr);
+            // Also seed the in-memory book so the resolution is hot.
+            if let Some(ctx) = crate::runtime::control_loop::OutboxWakeContext::current() {
+                ctx.address_book.insert(sender, addr);
+            }
+        }
+    }
 
     if unwrapped.inner_events.is_empty() {
         db.execute(
@@ -472,8 +517,10 @@ impl std::error::Error for ChainError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event_modules::connection::local_signing_key;
     use crate::event_modules::connection::wrap::{wrap_bootstrap, InnerCanonicalEvent};
     use crate::state::db::control_loop_tables::ensure_schema as ensure_substrate_schema;
+    use ed25519_dalek::SigningKey;
 
     fn open() -> Connection {
         let c = Connection::open_in_memory().unwrap();
@@ -492,15 +539,17 @@ mod tests {
         crate::event_modules::encode_event(&ParsedEvent::Tenant(e)).unwrap()
     }
 
-    fn wrap_bootstrap_payload(blob: Vec<u8>) -> (Vec<u8>, BlakeId) {
+    fn wrap_bootstrap_payload(
+        blob: Vec<u8>,
+        sender_sk: &SigningKey,
+        recipient_eid: EndpointId,
+    ) -> (Vec<u8>, BlakeId) {
         // Use bootstrap-mode wrap so connection_secrets aren't required.
-        let sender: EndpointId = [11u8; 32];
-        let recipient: EndpointId = [22u8; 32];
         let inner = vec![InnerCanonicalEvent {
             workspace_id: [0u8; 32],
             bytes: blob,
         }];
-        let frame = wrap_bootstrap(sender, recipient, &inner).unwrap();
+        let frame = wrap_bootstrap(sender_sk, recipient_eid, &inner).unwrap();
         let bytes = frame.as_bytes().to_vec();
         let mut id = [0u8; 32];
         id.copy_from_slice(blake3::hash(&bytes).as_bytes());
@@ -510,9 +559,16 @@ mod tests {
     #[test]
     fn dedupes_by_wire_id() {
         let c = open();
-        let (frame, _wire_id) = wrap_bootstrap_payload(tenant_blob());
+        let sender_sk = SigningKey::from_bytes(&[0x11; 32]);
+        let recipient_sk = SigningKey::from_bytes(&[0x22; 32]);
+        let recipient_eid = recipient_sk.verifying_key().to_bytes();
+        // Install the recipient's signing key for this in-memory db so
+        // the inbound chain's unwrap can do real ECDH.
+        let path = c.path().unwrap_or("").to_string();
+        local_signing_key::install_for_path(&path, recipient_sk.clone());
+        let (frame, _wire_id) = wrap_bootstrap_payload(tenant_blob(), &sender_sk, recipient_eid);
         let origin = InboundOrigin {
-            remote_endpoint_id: Some([22u8; 32]),
+            remote_endpoint_id: Some(sender_sk.verifying_key().to_bytes()),
             ..Default::default()
         };
         // First call: full chain.

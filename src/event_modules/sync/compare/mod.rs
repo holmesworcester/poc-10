@@ -14,5 +14,5 @@ pub mod registry_meta;
 
 pub use codec::{encode, parse, CompareWireError};
 pub use event::{CompareEvent, COMPARE_TYPE_CODE};
-pub use projector::{ensure_schema, project};
+pub use projector::{compute_writes, ensure_schema, project};
 pub use registry_meta::{project_pure, COMPARE_META};

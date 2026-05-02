@@ -42,8 +42,6 @@ pub fn project_pure(
         _ => return ProjectorResult::reject("not a message_deletion event".to_string()),
     };
 
-    let recorded_by_sentinel = crate::projection::apply::dispatch::current_recorded_by()
-        .unwrap_or_else(|| "__chain__".to_string());
     let workspace_id_b64 = event_id_to_base64(&del.workspace_id);
     let target_b64 = event_id_to_base64(&del.target_event_id);
     let del_author_b64 = event_id_to_base64(&del.author_id);
@@ -94,7 +92,6 @@ pub fn project_pure(
         WriteOp::InsertOrIgnore {
             table: "deleted_messages",
             columns: vec![
-                "recorded_by",
                 "workspace_id",
                 "message_id",
                 "deletion_event_id",
@@ -102,7 +99,6 @@ pub fn project_pure(
                 "deleted_at",
             ],
             values: vec![
-                SqlVal::Text(recorded_by_sentinel.clone()),
                 SqlVal::Text(workspace_id_b64.clone()),
                 SqlVal::Text(target_b64.clone()),
                 SqlVal::Text(event_id_b64.to_string()),
@@ -114,14 +110,14 @@ pub fn project_pure(
         WriteOp::Delete {
             table: "messages",
             where_clause: vec![
-                ("recorded_by", SqlVal::Text(recorded_by_sentinel.clone())),
+                ("workspace_id", SqlVal::Text(workspace_id_b64.clone())),
                 ("message_id", SqlVal::Text(target_b64.clone())),
             ],
         },
         WriteOp::Delete {
             table: "reactions",
             where_clause: vec![
-                ("recorded_by", SqlVal::Text(recorded_by_sentinel)),
+                ("workspace_id", SqlVal::Text(workspace_id_b64.clone())),
                 ("target_event_id", SqlVal::Text(target_b64.clone())),
             ],
         },

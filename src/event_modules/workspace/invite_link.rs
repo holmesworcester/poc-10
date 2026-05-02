@@ -1,7 +1,6 @@
 use ed25519_dalek::SigningKey;
 use std::net::SocketAddr;
 
-use super::identity_ops::{InviteData, InviteType};
 use crate::crypto::EventId;
 
 // Re-export BootstrapAddress and associated items from the dedicated module
@@ -10,6 +9,27 @@ pub use super::bootstrap_address::{
     detect_bootstrap_addrs, parse_bootstrap_address, BootstrapAddress, BootstrapAddressError,
     DEFAULT_PORT,
 };
+
+/// Data carried by a `topo://invite` / `topo://link` URL.
+///
+/// Encoded into the link by [`encode_invite_link`] and recovered by
+/// [`parse_invite_link`]. The legacy authoring path that produced these
+/// links was retired; [`InviteData`] persists because [`encode_invite_link`]
+/// and the parser are still exposed (the substrate uses the binary
+/// `Command::EstablishConnection` flow instead).
+#[derive(Clone)]
+pub struct InviteData {
+    pub invite_event_id: EventId,
+    pub invite_key: SigningKey,
+    pub workspace_id: EventId,
+    pub invite_type: InviteType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InviteType {
+    User,
+    DeviceLink { user_event_id: EventId },
+}
 
 const INVITE_PREFIX: &str = "topo://invite/";
 const LINK_PREFIX: &str = "topo://link/";

@@ -20,15 +20,13 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
+use ed25519_dalek::SigningKey;
 use topo::event_modules::connection::wrap::{wrap_bootstrap, InnerCanonicalEvent};
 use topo::event_modules::{encode_event, ParsedEvent, TenantEvent};
-use topo::runtime::control_loop::work_item::{BlakeId, EndpointId};
+use topo::runtime::control_loop::work_item::BlakeId;
 use topo::runtime::control_loop::ControlLoopRuntime;
 use topo::runtime::transport_v2::{send as transport_send, AddressBook, SocketCache};
 use topo::state::events_canonical::{get as get_event, EventStatus};
-
-const SENDER_ENDPOINT: EndpointId = [11u8; 32];
-const RECIPIENT_ENDPOINT: EndpointId = [22u8; 32];
 
 fn tenant_blob() -> Vec<u8> {
     let e = TenantEvent {
@@ -46,12 +44,33 @@ fn blake3_id(bytes: &[u8]) -> BlakeId {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transport_to_inbound_chain_end_to_end() {
+    // Real Ed25519 keypairs for both sides — required because the
+    // bootstrap unwrap path now does X25519 ECDH against the recipient's
+    // private key.
+    let sender_sk = SigningKey::from_bytes(&[0x11u8; 32]);
+    let recipient_sk = SigningKey::from_bytes(&[0x22u8; 32]);
+    let sender_eid = sender_sk.verifying_key().to_bytes();
+    let recipient_eid = recipient_sk.verifying_key().to_bytes();
+
     // Receiver side ("daemon B"): start a full ControlLoopRuntime so
     // the dispatcher loop drains inbound_bytes the bridge writes.
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("transport_chain.db");
+    // Persist the recipient's signing key in the same sidecar file the
+    // production binary writes — the inbound chain reads it on demand.
+    let signkey_path = {
+        let mut p = db_path.clone();
+        let stem = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "topo.db".to_string());
+        p.set_file_name(format!(".{}.signkey", stem));
+        p
+    };
+    std::fs::write(&signkey_path, recipient_sk.to_bytes()).expect("write signkey");
+
     let bind: SocketAddr = SocketAddr::from_str("127.0.0.1:0").unwrap();
-    let handles = ControlLoopRuntime::start(bind, RECIPIENT_ENDPOINT, &db_path)
+    let handles = ControlLoopRuntime::start(bind, recipient_eid, &db_path)
         .await
         .expect("runtime start");
     let recipient_addr = handles.runtime.listen_addr;
@@ -65,17 +84,17 @@ async fn transport_to_inbound_chain_end_to_end() {
         workspace_id: [0u8; 32],
         bytes: blob,
     }];
-    let frame = wrap_bootstrap(SENDER_ENDPOINT, RECIPIENT_ENDPOINT, &inner)
+    let frame = wrap_bootstrap(&sender_sk, recipient_eid, &inner)
         .expect("wrap_bootstrap");
 
     let book = AddressBook::new();
-    book.insert(RECIPIENT_ENDPOINT, recipient_addr);
+    book.insert(recipient_eid, recipient_addr);
     let cache = SocketCache::new();
     transport_send(
         &cache,
         &book,
-        SENDER_ENDPOINT,
-        RECIPIENT_ENDPOINT,
+        sender_eid,
+        recipient_eid,
         frame,
     )
     .await

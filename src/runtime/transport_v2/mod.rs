@@ -81,6 +81,9 @@ pub mod addrs;
 pub mod outbound_frame;
 pub mod tcp;
 
-pub use addrs::{AddressBook, AddressResolver};
+pub use addrs::{
+    ensure_schema as ensure_endpoint_addresses_schema, upsert_endpoint_address, AddressBook,
+    AddressResolver,
+};
 pub use outbound_frame::OutboundFrame;
 pub use tcp::{accept_loop, send, InboundDelivery, SocketCache, TransportError};

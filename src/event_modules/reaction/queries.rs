@@ -8,21 +8,14 @@ pub struct ReactionRow {
     pub emoji: String,
 }
 
-pub fn list_rows(db: &Connection, recorded_by: &str) -> Result<Vec<ReactionRow>, rusqlite::Error> {
-    // reactions PK is (workspace_id, event_id) — recorded_by reflects only
-    // the first-tenant writer. Scope via invites_accepted to surface the
-    // active tenant's accepted-workspace rows.
+pub fn list_rows(db: &Connection, workspace_id: &str) -> Result<Vec<ReactionRow>, rusqlite::Error> {
     let mut stmt = db.prepare(
-        "SELECT r.event_id, r.target_event_id, r.emoji
-         FROM reactions r
-         WHERE EXISTS (
-             SELECT 1 FROM invites_accepted ia
-             WHERE ia.recorded_by = ?1
-               AND ia.workspace_id = r.workspace_id
-         )",
+        "SELECT event_id, target_event_id, emoji
+         FROM reactions
+         WHERE workspace_id = ?1",
     )?;
     let rows = stmt
-        .query_map(rusqlite::params![recorded_by], |row| {
+        .query_map(rusqlite::params![workspace_id], |row| {
             Ok(ReactionRow {
                 event_id: row.get(0)?,
                 target_event_id: row.get(1)?,
@@ -35,37 +28,29 @@ pub fn list_rows(db: &Connection, recorded_by: &str) -> Result<Vec<ReactionRow>,
 
 pub fn list_for_message(
     db: &Connection,
-    recorded_by: &str,
+    workspace_id: &str,
     target_event_id_b64: &str,
 ) -> Result<Vec<String>, rusqlite::Error> {
     let mut stmt = db.prepare(
-        "SELECT r.emoji FROM reactions r
-         WHERE r.target_event_id = ?2
-           AND EXISTS (
-               SELECT 1 FROM invites_accepted ia
-               WHERE ia.recorded_by = ?1
-                 AND ia.workspace_id = r.workspace_id
-           )
-         GROUP BY r.author_id, r.emoji
-         ORDER BY MIN(r.created_at) ASC",
+        "SELECT emoji FROM reactions
+         WHERE workspace_id = ?1
+           AND target_event_id = ?2
+         GROUP BY author_id, emoji
+         ORDER BY MIN(created_at) ASC",
     )?;
     let emojis = stmt
-        .query_map(rusqlite::params![recorded_by, target_event_id_b64], |row| {
-            row.get::<_, String>(0)
-        })?
+        .query_map(
+            rusqlite::params![workspace_id, target_event_id_b64],
+            |row| row.get::<_, String>(0),
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(emojis)
 }
 
-pub fn count(db: &Connection, recorded_by: &str) -> Result<i64, rusqlite::Error> {
+pub fn count(db: &Connection, workspace_id: &str) -> Result<i64, rusqlite::Error> {
     db.query_row(
-        "SELECT COUNT(*) FROM reactions r
-         WHERE EXISTS (
-             SELECT 1 FROM invites_accepted ia
-             WHERE ia.recorded_by = ?1
-               AND ia.workspace_id = r.workspace_id
-         )",
-        rusqlite::params![recorded_by],
+        "SELECT COUNT(*) FROM reactions WHERE workspace_id = ?1",
+        rusqlite::params![workspace_id],
         |row| row.get(0),
     )
 }
@@ -78,8 +63,8 @@ pub struct ReactionItem {
 }
 
 /// Assemble a list of ReactionItems from the database.
-pub fn list(db: &Connection, recorded_by: &str) -> Result<Vec<ReactionItem>, rusqlite::Error> {
-    let rows = list_rows(db, recorded_by)?;
+pub fn list(db: &Connection, workspace_id: &str) -> Result<Vec<ReactionItem>, rusqlite::Error> {
+    let rows = list_rows(db, workspace_id)?;
     Ok(rows
         .into_iter()
         .map(|row| ReactionItem {
@@ -98,29 +83,28 @@ pub struct ReactionWithAuthor {
 /// List reactions for a specific message, including reactor username.
 pub fn list_for_message_with_authors(
     db: &Connection,
-    recorded_by: &str,
+    workspace_id: &str,
     target_event_id_b64: &str,
 ) -> Result<Vec<ReactionWithAuthor>, rusqlite::Error> {
     let mut stmt = db.prepare(
         "SELECT r.emoji, COALESCE(u.username, '') as reactor_name
          FROM reactions r
          LEFT JOIN users u ON r.author_id = u.event_id
-         WHERE r.target_event_id = ?1
-           AND EXISTS (
-               SELECT 1 FROM invites_accepted ia
-               WHERE ia.recorded_by = ?2
-                 AND ia.workspace_id = r.workspace_id
-           )
+         WHERE r.workspace_id = ?1
+           AND r.target_event_id = ?2
          GROUP BY r.author_id, r.emoji
          ORDER BY MIN(r.created_at) ASC",
     )?;
     let rows = stmt
-        .query_map(rusqlite::params![target_event_id_b64, recorded_by], |row| {
-            Ok(ReactionWithAuthor {
-                emoji: row.get(0)?,
-                reactor_name: row.get(1)?,
-            })
-        })?
+        .query_map(
+            rusqlite::params![workspace_id, target_event_id_b64],
+            |row| {
+                Ok(ReactionWithAuthor {
+                    emoji: row.get(0)?,
+                    reactor_name: row.get(1)?,
+                })
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }

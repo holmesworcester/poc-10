@@ -92,8 +92,17 @@ impl Connection {
     /// signed by different keys (or with otherwise distinct signature
     /// bytes) produce DIFFERENT `connection_id`s.
     pub fn canonical_event_id(&self) -> [u8; 32] {
+        // BLAKE3(canonical_bytes) — the same hash the substrate's
+        // inbound chain assigns via `inbound_step::blake3_id` (and the
+        // local-intent emit path's id via `local_intents::blake3_id`).
+        // Earlier this used `crypto::hash_event` (BLAKE2b) which split
+        // the namespace between projector tables and the canonical
+        // event id stored in `events_canonical`.
         let blob = super::codec::encode_connection(self);
-        crate::crypto::hash_event(&blob)
+        let h = blake3::hash(&blob);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(h.as_bytes());
+        out
     }
 }
 

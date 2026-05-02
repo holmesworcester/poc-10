@@ -164,10 +164,8 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     // Each event module's schema is now declared on its `EventTypeMeta` and
     // installed by `ensure_all_module_schemas`. The legacy umbrella stays
     // for callers that historically invoked it (the wave-1 `create_tables`
-    // bootstrap path) and additionally installs `subscriptions`, which is
-    // owned by `state::subscriptions`, not by any event module.
+    // bootstrap path).
     ensure_all_module_schemas(conn)?;
-    crate::state::subscriptions::ensure_schema(conn)?;
     Ok(())
 }
 
@@ -638,14 +636,6 @@ pub fn encode_event(event: &ParsedEvent) -> Result<Vec<u8>, EventError> {
     (meta.encode)(event)
 }
 
-/// Generic post-projection-drain hooks.
-pub fn post_drain_hooks(
-    _conn: &rusqlite::Connection,
-    _recorded_by: &str,
-) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,8 +960,14 @@ mod tests {
         // The pipeline computes the canonical event id from the encoded
         // blob; pass that exact id in here so the projector keys
         // `connection_shared_workspaces` rows the same way the runtime
-        // would.
-        let canonical_id = crate::crypto::hash_event(&blob);
+        // would. Connection ids are blake3 of canonical bytes (same as
+        // every other event in the substrate's inbound chain).
+        let canonical_id = {
+            let h = blake3::hash(&blob);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(h.as_bytes());
+            out
+        };
         let canonical_id_b64 = crate::crypto::event_id_to_base64(&canonical_id);
         let result = (meta.projector)(
             &canonical_id_b64,
@@ -992,7 +988,7 @@ mod tests {
         assert_eq!(conn_count, 1);
 
         // The `connection_shared_workspaces` row must be keyed by the
-        // canonical event id (same value `hash_event(&blob)` produces).
+        // canonical event id (blake3 of the canonical bytes).
         let ws_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM connection_shared_workspaces \
@@ -1077,7 +1073,19 @@ mod tests {
         // And the canonical id must match the standard pipeline derivation.
         let blob1 = encode_event(&ParsedEvent::Connection(ev1.clone())).unwrap();
         let blob2 = encode_event(&ParsedEvent::Connection(ev2.clone())).unwrap();
-        assert_eq!(crate::crypto::hash_event(&blob1), id1);
-        assert_eq!(crate::crypto::hash_event(&blob2), id2);
+        let h1 = {
+            let h = blake3::hash(&blob1);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(h.as_bytes());
+            out
+        };
+        let h2 = {
+            let h = blake3::hash(&blob2);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(h.as_bytes());
+            out
+        };
+        assert_eq!(h1, id1);
+        assert_eq!(h2, id2);
     }
 }

@@ -1,22 +1,16 @@
-pub mod authoring;
 pub mod bootstrap_address;
-pub mod commands;
-mod commands_api;
-pub mod identity_ops;
 pub mod invite_link;
 pub mod projector;
 pub mod queries;
 pub mod codec;
-pub mod uniqueness;
 
 // Re-export stable public API so callers import from `event_modules::workspace`.
-pub use authoring::{load_local_authoring_context, LocalAuthoringContext};
 pub use projector::project_pure;
 pub use queries::{
     content_keys, keys, list, list_all_items, list_items, list_tenants_for_display, name,
-    resolve_workspace_for_peer, status, view, view_for_peer, ContentKeysResponse, KeysResponse,
-    StatusResponse, ViewFileSummary, ViewMessage, ViewReaction, ViewResponse, ViewTenant,
-    WorkspaceItem, WorkspaceRow,
+    resolve_workspace_for_peer, status, view, view_for_workspace, ContentKeysResponse,
+    KeysResponse, StatusResponse, ViewFileSummary, ViewMessage, ViewReaction, ViewResponse,
+    ViewTenant, WorkspaceItem, WorkspaceRow,
 };
 pub use codec::{
     encode_workspace, parse_workspace, WorkspaceEvent, WORKSPACE_META, WORKSPACE_WIRE_SIZE,

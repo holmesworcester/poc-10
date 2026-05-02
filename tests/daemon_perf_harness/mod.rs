@@ -465,19 +465,14 @@ fn start_perf_daemon(
     )
 }
 
-fn create_workspace_direct(db: &str, username: &str, device_name: &str) {
-    topo::event_modules::workspace::commands::create_workspace_for_db(
-        db,
-        "workspace",
-        username,
-        device_name,
-    )
-    .expect("create_workspace_for_db");
+fn create_workspace_direct(_db: &str, _username: &str, _device_name: &str) {
+    // Legacy authoring helper retired in the recorded_by sweep. Callers
+    // are inside `#[ignore]`'d perf tests.
+    panic!("create_workspace_direct is retired in the substrate-only daemon");
 }
 
-fn accept_invite_direct(db: &str, invite_link: &str, username: &str, device_name: &str) {
-    topo::event_modules::workspace::commands::accept_invite(db, invite_link, username, device_name)
-        .expect("accept_invite");
+fn accept_invite_direct(_db: &str, _invite_link: &str, _username: &str, _device_name: &str) {
+    panic!("accept_invite_direct is retired in the substrate-only daemon");
 }
 
 fn wait_for_message_count(db: &str, expected: i64, timeout: Duration) {

@@ -477,7 +477,24 @@ fn drain_jobs(conn: &Connection, max: usize) -> bool {
         return false;
     }
     for (job_name, every_ms) in due {
-        // JobTick handler is a stub today; we only bump the schedule.
+        // Dispatch by job_name into event-module job bodies. The
+        // kernel keeps zero policy here — it just routes a name to
+        // the registered handler in the event module. The job body
+        // and schedule cadence are owned by the event module that
+        // registers the schedule row at startup.
+        //
+        // Each job is run in its own short transaction so a failure
+        // in one job doesn't roll back unrelated state. Schedule
+        // bumping happens after the body runs (either way), so a
+        // crashing job doesn't pin the schedule and starve others.
+        if conn.execute("BEGIN IMMEDIATE", []).is_ok() {
+            let body_ok = run_job_body(conn, &job_name, now);
+            if body_ok {
+                let _ = conn.execute("COMMIT", []);
+            } else {
+                let _ = conn.execute("ROLLBACK", []);
+            }
+        }
         if let Err(e) = bump_schedule(conn, &job_name, now, every_ms) {
             tracing::warn!(
                 target: "control_loop::dispatcher",
@@ -488,6 +505,37 @@ fn drain_jobs(conn: &Connection, max: usize) -> bool {
         }
     }
     true
+}
+
+/// Route a fired `(job_name, now_ms)` to the event-module-owned job
+/// body. Returns `true` if the body completed without error so the
+/// caller can commit; `false` otherwise.
+///
+/// The kernel's only role here is name → module dispatch; it owns no
+/// job logic. New jobs add a name match and a call into their event
+/// module.
+fn run_job_body(conn: &Connection, job_name: &str, now_ms: i64) -> bool {
+    match job_name {
+        crate::event_modules::sync::job::SYNC_ROOT_COMPARE_JOB_NAME => {
+            match crate::event_modules::sync::job::tick(conn, now_ms) {
+                Ok(_report) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "control_loop::dispatcher",
+                        job_name = %job_name,
+                        error = %e,
+                        "sync_root_compare tick failed"
+                    );
+                    false
+                }
+            }
+        }
+        _ => {
+            // Unknown job: treat as no-op success so the schedule
+            // bumps and we don't busy-loop on a stale name.
+            true
+        }
+    }
 }
 
 fn due_jobs(conn: &Connection, now_ms: i64, max: usize) -> rusqlite::Result<Vec<(String, i64)>> {

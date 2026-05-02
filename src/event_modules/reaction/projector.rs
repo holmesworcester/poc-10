@@ -26,8 +26,6 @@ pub fn project_pure(
         return ProjectorResult::reject("reaction content must not be empty".to_string());
     }
 
-    let recorded_by_sentinel = crate::projection::apply::dispatch::current_recorded_by()
-        .unwrap_or_else(|| "__chain__".to_string());
     let workspace_id_b64 = event_id_to_base64(&rxn.workspace_id);
 
     // Label-based gate (plan.md §164-170): refuse to project if the signer or
@@ -78,7 +76,6 @@ pub fn project_pure(
             "author_id",
             "emoji",
             "created_at",
-            "recorded_by",
         ],
         values: vec![
             SqlVal::Text(event_id_b64.to_string()),
@@ -87,7 +84,6 @@ pub fn project_pure(
             SqlVal::Text(author_id_b64),
             SqlVal::Text(rxn.emoji.clone()),
             SqlVal::Int(rxn.created_at_ms as i64),
-            SqlVal::Text(recorded_by_sentinel),
         ],
     }];
     ProjectorResult::valid(ops)

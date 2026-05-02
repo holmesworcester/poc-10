@@ -21,11 +21,15 @@ pub enum RpcMethod {
     Status,
     Messages {
         limit: usize,
+        #[serde(default)]
+        workspace_id: Option<String>,
     },
     Send {
         content: String,
         #[serde(default)]
         client_op_id: Option<String>,
+        #[serde(default)]
+        workspace_id: Option<String>,
     },
     Generate {
         count: usize,
@@ -34,11 +38,15 @@ pub enum RpcMethod {
     },
     AssertNow {
         predicate: String,
+        #[serde(default)]
+        workspace_id: Option<String>,
     },
     AssertEventually {
         predicate: String,
         timeout_ms: u64,
         interval_ms: u64,
+        #[serde(default)]
+        workspace_id: Option<String>,
     },
     TransportKeys,
     TransportAuth,
@@ -52,7 +60,10 @@ pub enum RpcMethod {
         target: String,
     },
     Reactions,
-    Users,
+    Users {
+        #[serde(default)]
+        workspace_id: Option<String>,
+    },
     Keys {
         summary: bool,
     },
@@ -108,7 +119,10 @@ pub enum RpcMethod {
         device_name: String,
     },
     /// List all known peers with local/remote status and endpoint info.
-    Peers,
+    Peers {
+        #[serde(default)]
+        workspace_id: Option<String>,
+    },
     /// Enable, disable, or inspect runtime-managed UPnP port mapping.
     Upnp {
         #[serde(default = "default_upnp_action")]

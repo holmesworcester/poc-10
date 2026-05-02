@@ -14,16 +14,10 @@ use rusqlite::Connection;
 pub enum TransportIdentitySpec {
     /// Install bootstrap transport identity from locally projected invite_secret
     /// key material for a specific invite event.
-    InstallBootstrapIdentityFromInviteSecret {
-        recorded_by: String,
-        invite_event_id: [u8; 32],
-    },
+    InstallBootstrapIdentityFromInviteSecret { invite_event_id: [u8; 32] },
     /// Install a deterministic transport cert derived from the PeerShared
     /// signing key, replacing any prior identity (random or invite-derived).
-    InstallPeerSharedIdentityFromSigner {
-        recorded_by: String,
-        signer_event_id: [u8; 32],
-    },
+    InstallPeerSharedIdentityFromSigner { signer_event_id: [u8; 32] },
 }
 
 /// Typed errors from materializer operations.
@@ -33,15 +27,10 @@ pub enum TransportIdentityError {
     InstallFailed(String),
     #[error("bootstrap transport identity install denied after peershared identity is active")]
     BootstrapAfterPeerSharedDenied,
-    #[error(
-        "invite secret not found for recorded_by={recorded_by}, invite_event_id={invite_event_id}"
-    )]
-    InviteSecretNotFound {
-        recorded_by: String,
-        invite_event_id: String,
-    },
-    #[error("signer key not found for recorded_by={recorded_by}")]
-    SignerKeyNotFound { recorded_by: String },
+    #[error("invite secret not found for invite_event_id={invite_event_id}")]
+    InviteSecretNotFound { invite_event_id: String },
+    #[error("signer key not found for signer_event_id={signer_event_id}")]
+    SignerKeyNotFound { signer_event_id: String },
     #[error("invalid key material: {0}")]
     InvalidKeyMaterial(String),
 }

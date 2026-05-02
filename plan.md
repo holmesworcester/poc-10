@@ -428,6 +428,34 @@ What poc-9 throws out and replaces:
 
 Connection model follows poc-6's `events/network/` (`connection`, `connection_ack`, `intro`, `negentropy`, `self_address`, `sync_window`, etc. as canonical events). This is a **deliberate reversal** of poc-7's stance — poc-6's `SIMPLIFICATION_FOR_RUST_POC.md` §2 explicitly said "Connection/sync state is protocol/runtime state, not canonical events." poc-9 rejects that rule in favor of putting sync/connection facts through the same event pipeline as everything else.
 
+**Each step must align 100% to plan.md. No duplication of logic.** Every migration of a poc-7 surface — a projector, a state table, a runtime path, an RPC, a test — has to land at the principles described in this document, not somewhere halfway. Specifically:
+
+- **No two implementations of the same concern.** Connection / transit / sync are event-based via `event_modules/connection/` and `event_modules/sync/` — there is no parallel session/round/open machinery, no second transport, no parallel sync engine. If a poc-7 module is brought over, the legacy machinery it depended on must be retired in the same commit, not left to coexist as a "transitional path."
+- **No bespoke per-event-type loaders.** `get_context` returns `{event, deps, labels}` and nothing else. There is exactly one context loader. If a projector needs additional state, declare it as a dependency or write it as a label upstream — do not introduce a second loader.
+- **No legacy compatibility scaffolding.** This is a POC. Canonical event ids and wire layouts are not load-bearing across deployments — change them whenever the new model needs a field. Do not preserve old hashes via shadow columns, sentinel strings, thread-local bridges, or "still-needed" parallel tables. If the legacy reader is still around, retire the reader.
+- **No duplication via vocabulary drift.** "Session", "round", "open", "tenant" (as a per-row scope key), "recorded_by" (as anything other than a transient diagnostic) are forbidden in active code. Substrate-level work is queue-driven and event-driven; reads scope by `workspace_id` (or `endpoint_id` for endpoint-scoped events). One word per concept.
+- **Each step ends green.** A migration that compiles by leaving partial scaffolding in place is not done. The build, the substrate test bar, and the relevant CLI tests must all pass at the end of each step. Half-done work is rolled back, not left to a future agent.
+
+The bar is alignment, not progress. A commit that lands more code while leaving plan.md violated by an extra abstraction layer or a duplicate path is a regression.
+
+**Source of truth: black-box CLI tests.** The completion bar is poc-7's black-box test surface (subprocess `topo` binary, assertions on CLI output and observable side effects). In-process tests, synthetic perf numbers with hand-installed connection state, and substrate-only smoke tests are *useful* but they do not prove the work is done. The black-box tests measure what a user actually does.
+
+Core flows that MUST pass black-box (not skippable):
+
+- **invite** — create-invite + accept-invite across two daemons.
+- **bootstrap** — connection establishment from an invite blob alone, no pre-installed secrets, no hand-populated `connection_secrets`/`connection_endpoints`.
+- **multi-peer messaging** — Daemon A authors, Daemon B converges via real negentropy negotiation (`compare` → `have` → `need` → event flow).
+- **files** — `FileEvent` + `FileSliceEvent` upload, slice transfer with bao verification, save on the receiving daemon.
+- **offline** — daemon stop/restart with state preserved; sync resumes from where it left off.
+- **rejoin** — peer that disappeared reconnects; missing events sync without manual intervention.
+
+Skippable as out-of-scope (`#[ignore]` with comment):
+
+- mDNS / network discovery — deferred to multi-daemon convergence rebuild.
+- NAT hole-punch — deferred.
+- TLS-specific cert error tests — new substrate is TCP without TLS by design.
+- Tests for dropped Wave-1 features (admin, etc.).
+
 **Pipeline simplicity is non-negotiable.** Preserve the pipeline shape of this document — see `get_context` in the Event Pipeline section for the strict contract. poc-7's projection-context-query adapters (one custom `context_loader` per event module) are the surface this fork is rejecting. To restate concretely, in poc-9:
 
 - dependencies come from schema metadata on flat fields (one mechanism for all event types),
@@ -577,9 +605,10 @@ Projectors do not write to sockets. They create deterministic endpoint-local eve
 ```
 Have(id)    -> events(scope=endpoint_local), outbox(connection_id, event_id)
 Need(id)    -> events(scope=endpoint_local), outbox(connection_id, event_id)
-Send(id)    -> outbox(connection_id, durable_event_id)
 Compare(v)  -> events(scope=endpoint_local), outbox(connection_id, event_id)
 ```
+
+Need is the only mechanism that places a durable event id into `outbox`: the side that holds the event responds to `Need(id)` from the peer by writing `outbox(connection_id, durable_event_id)`. There is no on-apply push — the Compare → Have → Need fold is the sole convergence path.
 
 Duplicate projector output collapses because endpoint-local sync event bytes are deterministic and `outbox` is unique on `(connection_id, event_id)`.
 

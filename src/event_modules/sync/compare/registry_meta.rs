@@ -116,9 +116,57 @@ pub fn project_pure(
     let now_ms = ev.created_at_ms as i64;
     let mut ops: Vec<WriteOp> = Vec::new();
 
-    // Splittable? Children populated by the loader from
-    // negentropy_root_membership rows, each paired with the child's local
-    // fingerprint `F_child`.
+    // Per plan.md lines 308-316:
+    //   if v is splittable: emit per-child Compares
+    //   else (leaf):        emit Have(event_id) for each id in R_v
+    //
+    // PLUS — and this is the asymmetric-tree fix — we always emit a
+    // reciprocal `Compare(v, F_local)` when the local fingerprint
+    // disagrees with the remote's. The recursive fold only converges
+    // if BOTH sides enumerate their children at every disagreeing
+    // node. Without the reciprocal echo, the responder side (the one
+    // that didn't kick off the round) only ever drills nodes where it
+    // already has membership — so any subtree where only the peer has
+    // events is invisible to the local recursion, and the local side
+    // never gets a chance to fan out child compares for the prefixes
+    // it actually owns.
+    //
+    // The reciprocal echo is byte-deterministic: every replay of the
+    // same `(connection_id, workspace_id, node_id, F_local,
+    // created_at_ms)` produces the same canonical bytes, so SQLite's
+    // `INSERT OR IGNORE` on `events_canonical.event_id`
+    // (= blake3(bytes)) drops duplicates — including the case where
+    // the echo we'd emit is byte-identical to the Compare the local
+    // side originally sent. That's what makes the fold terminate
+    // instead of storming.
+    //
+    // Three sub-cases for the local enumeration:
+    //
+    //   - splittable: emit per-child Compares (the drill).
+    //   - leaf with members: emit Have(id) for each member.
+    //   - completely empty under v: echo alone is enough — it tells
+    //     the populated peer "I have nothing here, descend on your
+    //     side". This is the original asymmetric drill case.
+    //
+    // The reciprocal `Compare(v, F_local)` is emitted in EVERY
+    // mismatched-fingerprint case so the peer always has the signal
+    // to drill on its side.
+    let echo = CompareEvent {
+        connection_id: ev.connection_id,
+        workspace_id: ev.workspace_id,
+        node_id: ev.node_id.clone(),
+        fingerprint: local_fp,
+        created_at_ms: ev.created_at_ms,
+    };
+    let echo_blob = super::codec::encode(&echo);
+    let (_echo_id, echo_pair) = upsert_endpoint_local_event_ops(
+        echo_blob,
+        &ev.connection_id,
+        &ev.workspace_id,
+        now_ms,
+    );
+    ops.extend(echo_pair);
+
     if !ctx.local_sync_node_children.is_empty() {
         for (child_path, child_fp) in &ctx.local_sync_node_children {
             let child_ev = CompareEvent {
@@ -137,25 +185,23 @@ pub fn project_pure(
             );
             ops.extend(pair);
         }
-        return ProjectorResult::valid(ops);
-    }
-
-    // Leaf: emit one Have(event_id) per id in R_v.
-    for member in &ctx.local_sync_node_members {
-        let have = HaveEvent {
-            connection_id: ev.connection_id,
-            workspace_id: ev.workspace_id,
-            event_id: *member,
-            created_at_ms: ev.created_at_ms,
-        };
-        let blob = have_codec::encode(&have);
-        let (_id, pair) = upsert_endpoint_local_event_ops(
-            blob,
-            &ev.connection_id,
-            &ev.workspace_id,
-            now_ms,
-        );
-        ops.extend(pair);
+    } else if !ctx.local_sync_node_members.is_empty() {
+        for member in &ctx.local_sync_node_members {
+            let have = HaveEvent {
+                connection_id: ev.connection_id,
+                workspace_id: ev.workspace_id,
+                event_id: *member,
+                created_at_ms: ev.created_at_ms,
+            };
+            let blob = have_codec::encode(&have);
+            let (_id, pair) = upsert_endpoint_local_event_ops(
+                blob,
+                &ev.connection_id,
+                &ev.workspace_id,
+                now_ms,
+            );
+            ops.extend(pair);
+        }
     }
     ProjectorResult::valid(ops)
 }

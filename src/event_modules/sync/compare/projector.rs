@@ -49,9 +49,14 @@ use crate::projection::contract::{SqlVal, WriteOp};
 use crate::runtime::control_loop::work_item::{BlakeId, WorkspaceId};
 use crate::state::events_canonical::{EventScope, EventStatus};
 
-/// Diagnostic table for tests/observability. The pure-projector dispatch path
-/// (`registry_meta::project_pure`) writes a single row here to record receipt;
-/// the real algorithm lives in `compute_writes` and is invoked via `project`.
+/// Diagnostic table for tests/observability plus the underlying
+/// `negentropy_tree` and `dep_cache` schemas the compare path reads.
+/// The pure-projector dispatch path (`registry_meta::project_pure`)
+/// writes a single row into `sync_compares_seen` to record receipt; the
+/// real algorithm lives in `compute_writes` and is invoked via
+/// `project`. The generic-context loader queries
+/// `negentropy_root_membership` + `negentropy_node_hash` directly, so
+/// those tables must be ready by the time any inbound chain runs.
 pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "
@@ -65,6 +70,9 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
         ",
     )?;
+    crate::event_modules::sync::negentropy_tree::ensure_schema(conn)?;
+    crate::event_modules::sync::dep_cache::ensure_schema(conn)?;
+    crate::event_modules::sync::round_state::ensure_schema(conn)?;
     Ok(())
 }
 
@@ -178,6 +186,12 @@ fn upsert_endpoint_local_event_ops(
 ///
 /// Reads the local negentropy_tree state; emits no DB writes itself —
 /// only returns `Vec<WriteOp>` for the apply stage.
+///
+/// Mirrors `registry_meta::project_pure`: on every mismatch we emit a
+/// reciprocal `Compare(v, F_local)` so the peer drills on its side too,
+/// followed by per-child Compares (interior) or per-member Haves (leaf).
+/// See the doc-comment on `project_pure` for the asymmetric-tree
+/// rationale.
 pub fn compute_writes(db: &Connection, ev: &CompareEvent) -> rusqlite::Result<Vec<WriteOp>> {
     // F_v == remote? -> emit nothing.
     let local_fp = node_fingerprint(db, &ev.workspace_id, &ev.node_id)?;
@@ -189,6 +203,25 @@ pub fn compute_writes(db: &Connection, ev: &CompareEvent) -> rusqlite::Result<Ve
     let children = children_of(db, &ev.workspace_id, &ev.node_id)?;
     let now_ms = ev.created_at_ms as i64;
     let mut ops: Vec<WriteOp> = Vec::new();
+
+    // Reciprocal echo so the peer drills on its side at the same
+    // node. Byte-identical to the peer's prior emission when the
+    // peer originated this Compare, so `INSERT OR IGNORE` dedupes.
+    let echo = CompareEvent {
+        connection_id: ev.connection_id,
+        workspace_id: ev.workspace_id,
+        node_id: ev.node_id.clone(),
+        fingerprint: local_fp,
+        created_at_ms: ev.created_at_ms,
+    };
+    let echo_blob = super::codec::encode(&echo);
+    let (_echo_id, echo_pair) = upsert_endpoint_local_event_ops(
+        echo_blob,
+        &ev.connection_id,
+        &ev.workspace_id,
+        now_ms,
+    );
+    ops.extend(echo_pair);
 
     if !children.is_empty() {
         for child in children {

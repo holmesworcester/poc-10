@@ -262,6 +262,22 @@ pub(super) fn project_and_apply(
             // on the events.status=ready queue.
             let _newly_ready =
                 unblock_dependents(db, event_id).map_err(ChainError::Db)?;
+            // Connection-event post-apply: derive secrets + endpoints +
+            // bootstrap a Compare. This runs inside the same transaction
+            // as the apply so the rows commit atomically with the event.
+            if let ParsedEvent::Connection(c) = parsed {
+                let now_ms_local = c.created_at_ms as i64;
+                let local_endpoint_id = crate::runtime::control_loop::OutboxWakeContext::current()
+                    .map(|ctx| ctx.local_endpoint_id)
+                    .unwrap_or([0u8; 32]);
+                crate::event_modules::connection::post_apply::apply_connection_post(
+                    db,
+                    c,
+                    &local_endpoint_id,
+                    now_ms_local,
+                )
+                .map_err(ChainError::Db)?;
+            }
             // Phase: incremental sync-state maintenance. Only durable rows
             // participate in the negentropy/dep-cache fingerprint — local
             // and endpoint-local rows are not part of the durable graph

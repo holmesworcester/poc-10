@@ -18,9 +18,11 @@
 //!    → wrap → transport_v2 send → B's transport_bridge → inbound chain.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
+use ed25519_dalek::SigningKey;
 use rusqlite::params;
 
 use topo::event_modules::connection::secrets::{
@@ -37,8 +39,32 @@ use topo::runtime::transport_v2::{send as transport_send, AddressBook, SocketCac
 use topo::state::events_canonical::{self, EventRow, EventScope, EventStatus};
 use topo::state::outbox;
 
-const SENDER_ENDPOINT: EndpointId = [11u8; 32];
-const RECIPIENT_ENDPOINT: EndpointId = [22u8; 32];
+fn sender_sk() -> SigningKey {
+    SigningKey::from_bytes(&[0x11u8; 32])
+}
+fn recipient_sk() -> SigningKey {
+    SigningKey::from_bytes(&[0x22u8; 32])
+}
+fn sender_endpoint() -> EndpointId {
+    sender_sk().verifying_key().to_bytes()
+}
+fn recipient_endpoint() -> EndpointId {
+    recipient_sk().verifying_key().to_bytes()
+}
+
+/// Persist `key` next to `db_path` in the `.<dbname>.signkey` sidecar
+/// file the production daemon writes via
+/// `runtime::control::api::ensure_signing_key`. The inbound chain
+/// loads this on demand for ECDH.
+fn install_signkey_sidecar(db_path: &Path, key: &SigningKey) {
+    let mut p = db_path.to_path_buf();
+    let stem = p
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "topo.db".to_string());
+    p.set_file_name(format!(".{}.signkey", stem));
+    std::fs::write(&p, key.to_bytes()).expect("write signkey sidecar");
+}
 
 fn tmpdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
@@ -63,8 +89,9 @@ async fn runtime_starts_and_shuts_down_cleanly() {
     let dir = tmpdir();
     let db_path = dir.path().join("control_loop.db");
     let bind: SocketAddr = SocketAddr::from_str("127.0.0.1:0").unwrap();
+    install_signkey_sidecar(&db_path, &recipient_sk());
 
-    let handles = ControlLoopRuntime::start(bind, RECIPIENT_ENDPOINT, &db_path)
+    let handles = ControlLoopRuntime::start(bind, recipient_endpoint(), &db_path)
         .await
         .expect("runtime start");
 
@@ -86,8 +113,9 @@ async fn runtime_processes_inbound_frame_end_to_end() {
     let dir = tmpdir();
     let db_path = dir.path().join("control_loop.db");
     let bind: SocketAddr = SocketAddr::from_str("127.0.0.1:0").unwrap();
+    install_signkey_sidecar(&db_path, &recipient_sk());
 
-    let handles = ControlLoopRuntime::start(bind, RECIPIENT_ENDPOINT, &db_path)
+    let handles = ControlLoopRuntime::start(bind, recipient_endpoint(), &db_path)
         .await
         .expect("runtime start");
     let recipient_addr = handles.runtime.listen_addr;
@@ -106,14 +134,14 @@ async fn runtime_processes_inbound_frame_end_to_end() {
         workspace_id: [0u8; 32],
         bytes: blob,
     }];
-    let frame = wrap_bootstrap(SENDER_ENDPOINT, RECIPIENT_ENDPOINT, &inner)
+    let frame = wrap_bootstrap(&sender_sk(), recipient_endpoint(), &inner)
         .expect("wrap_bootstrap");
 
     // Sender side: vanilla transport_v2 send.
     let book = AddressBook::new();
-    book.insert(RECIPIENT_ENDPOINT, recipient_addr);
+    book.insert(recipient_endpoint(), recipient_addr);
     let cache = SocketCache::new();
-    transport_send(&cache, &book, SENDER_ENDPOINT, RECIPIENT_ENDPOINT, frame)
+    transport_send(&cache, &book, sender_endpoint(), recipient_endpoint(), frame)
         .await
         .expect("transport_send");
 
@@ -168,8 +196,9 @@ async fn runtime_processes_workspace_event_via_new_chain() {
     let dir = tmpdir();
     let db_path = dir.path().join("control_loop.db");
     let bind: SocketAddr = SocketAddr::from_str("127.0.0.1:0").unwrap();
+    install_signkey_sidecar(&db_path, &recipient_sk());
 
-    let handles = ControlLoopRuntime::start(bind, RECIPIENT_ENDPOINT, &db_path)
+    let handles = ControlLoopRuntime::start(bind, recipient_endpoint(), &db_path)
         .await
         .expect("runtime start");
     let recipient_addr = handles.runtime.listen_addr;
@@ -190,13 +219,13 @@ async fn runtime_processes_workspace_event_via_new_chain() {
         workspace_id: workspace_pub,
         bytes: blob,
     }];
-    let frame = wrap_bootstrap(SENDER_ENDPOINT, RECIPIENT_ENDPOINT, &inner)
+    let frame = wrap_bootstrap(&sender_sk(), recipient_endpoint(), &inner)
         .expect("wrap_bootstrap");
 
     let book = AddressBook::new();
-    book.insert(RECIPIENT_ENDPOINT, recipient_addr);
+    book.insert(recipient_endpoint(), recipient_addr);
     let cache = SocketCache::new();
-    transport_send(&cache, &book, SENDER_ENDPOINT, RECIPIENT_ENDPOINT, frame)
+    transport_send(&cache, &book, sender_endpoint(), recipient_endpoint(), frame)
         .await
         .expect("transport_send");
 
@@ -268,9 +297,12 @@ async fn runtime_drains_outbox_to_peer() {
     // ---- B (receiver) ----
     let dir_b = tmpdir();
     let db_b_path = dir_b.path().join("control_loop_b.db");
-    // Use distinct endpoint ids per test so a process-shared
-    // OutboxWakeContext (OnceLock) can't collide across runs.
-    let endpoint_b: EndpointId = [0xB1; 32];
+    // Distinct real Ed25519 keypairs per side. Their pubkeys serve as
+    // endpoint ids; the sidecar files give the inbound chain the
+    // matching private key for ECDH.
+    let sk_b = SigningKey::from_bytes(&[0xB1u8; 32]);
+    let endpoint_b: EndpointId = sk_b.verifying_key().to_bytes();
+    install_signkey_sidecar(&db_b_path, &sk_b);
     let bind_b: SocketAddr = SocketAddr::from_str("127.0.0.1:0").unwrap();
     let handles_b = ControlLoopRuntime::start(bind_b, endpoint_b, &db_b_path)
         .await
@@ -281,7 +313,9 @@ async fn runtime_drains_outbox_to_peer() {
     // ---- A (sender) ----
     let dir_a = tmpdir();
     let db_a_path = dir_a.path().join("control_loop_a.db");
-    let endpoint_a: EndpointId = [0xA1; 32];
+    let sk_a = SigningKey::from_bytes(&[0xA1u8; 32]);
+    let endpoint_a: EndpointId = sk_a.verifying_key().to_bytes();
+    install_signkey_sidecar(&db_a_path, &sk_a);
     let bind_a: SocketAddr = SocketAddr::from_str("127.0.0.1:0").unwrap();
     let handles_a = ControlLoopRuntime::start(bind_a, endpoint_a, &db_a_path)
         .await

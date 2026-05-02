@@ -424,11 +424,8 @@ pub struct EndpointIdentity {
 /// A workspace this daemon hosts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceBinding {
+    /// Base64-encoded `workspace_id`.
     pub workspace_id: String,
-    /// The recorded_by value used by the legacy projector path; identical to
-    /// the workspace's primary peer until tenant rows are deleted entirely.
-    /// Callers in the new substrate should ignore this field.
-    pub legacy_peer_id: String,
 }
 
 /// Load the singleton local endpoint identity used by the daemon's
@@ -463,74 +460,32 @@ pub fn list_hosted_workspaces(
     conn: &Connection,
 ) -> Result<Vec<WorkspaceBinding>, Box<dyn std::error::Error + Send + Sync>> {
     let mut stmt = conn.prepare(
-        "SELECT workspace_id, recorded_by
+        "SELECT DISTINCT workspace_id
          FROM invites_accepted
-         WHERE event_id = (
-             SELECT i2.event_id
-             FROM invites_accepted i2
-             WHERE i2.workspace_id = invites_accepted.workspace_id
-             ORDER BY i2.created_at ASC, i2.event_id ASC
-             LIMIT 1
-         )
          ORDER BY workspace_id ASC",
     )?;
     let rows = stmt
         .query_map([], |row| {
             Ok(WorkspaceBinding {
                 workspace_id: row.get(0)?,
-                legacy_peer_id: row.get(1)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut seen = std::collections::HashSet::new();
-    Ok(rows
-        .into_iter()
-        .filter(|b| seen.insert(b.workspace_id.clone()))
-        .collect())
+    Ok(rows)
 }
 
+// `discover_local_tenants` was retired in the recorded_by sweep — it joined
+// `invites_accepted` on the legacy `recorded_by` shadow column. The
+// substrate's tenant-discovery surface is `list_hosted_workspaces` plus
+// `list_local_peers`/`load_local_endpoint`.
+//
+// This stub is retained so legacy `#[ignore]`'d tests in `tests/rpc_test.rs`
+// and `tests/cli_harness/mod.rs` continue to compile; it always returns an
+// empty list.
 pub fn discover_local_tenants(
-    conn: &Connection,
+    _conn: &Connection,
 ) -> Result<Vec<TenantInfo>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut stmt = conn.prepare(
-        "SELECT
-             t.tenant_id,
-             i.workspace_id,
-             t.transport_peer_id,
-             c.cert_der,
-             c.key_der
-         FROM local_transport_targets t
-         JOIN local_transport_creds c
-           ON c.peer_id = t.transport_peer_id
-         JOIN invites_accepted i
-           ON i.recorded_by = t.tenant_id
-          AND i.event_id = (
-              SELECT i2.event_id
-              FROM invites_accepted i2
-              WHERE i2.recorded_by = t.tenant_id
-              ORDER BY i2.created_at DESC, i2.event_id DESC
-              LIMIT 1
-          )
-         ORDER BY i.created_at ASC, i.event_id ASC",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(TenantInfo {
-            peer_id: row.get(0)?,
-            workspace_id: row.get(1)?,
-            transport_peer_id: row.get(2)?,
-            cert_der: row.get(3)?,
-            key_der: row.get(4)?,
-        })
-    })?;
-    let mut tenants = Vec::new();
-    let mut seen_tenants = std::collections::HashSet::new();
-    for row in rows {
-        let tenant = row?;
-        if seen_tenants.insert(tenant.peer_id.clone()) {
-            tenants.push(tenant);
-        }
-    }
-    Ok(tenants)
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -572,21 +527,20 @@ mod tests {
 
         assert!(list_hosted_workspaces(&conn).unwrap().is_empty());
 
-        // Two accepted invites for ws-1 (from different recorded_by values),
-        // one accepted invite for ws-2.
+        // One accepted invite per workspace.
         conn.execute(
-            "INSERT INTO invites_accepted (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('peer-a', 'ia-a1', 't-a1', 'inv-a1', 'ws-1', 1)",
+            "INSERT INTO invites_accepted (workspace_id, event_id, tenant_event_id, invite_event_id, created_at)
+             VALUES ('ws-1', 'ia-a1', 't-a1', 'inv-a1', 1)",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO invites_accepted (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('peer-b', 'ia-b1', 't-b1', 'inv-b1', 'ws-1', 2)",
+            "INSERT INTO invites_accepted (workspace_id, event_id, tenant_event_id, invite_event_id, created_at)
+             VALUES ('ws-1', 'ia-b1', 't-b1', 'inv-b1', 2)",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO invites_accepted (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('peer-a', 'ia-a2', 't-a2', 'inv-a2', 'ws-2', 3)",
+            "INSERT INTO invites_accepted (workspace_id, event_id, tenant_event_id, invite_event_id, created_at)
+             VALUES ('ws-2', 'ia-a2', 't-a2', 'inv-a2', 3)",
             [],
         ).unwrap();
 
@@ -676,45 +630,6 @@ mod tests {
         assert_eq!(k, b"new_key");
 
         assert_eq!(list_local_peers(&conn).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn test_discover_local_tenants() {
-        let conn = open_in_memory().unwrap();
-        create_tables(&conn).unwrap();
-
-        // No tenants yet
-        assert!(discover_local_tenants(&conn).unwrap().is_empty());
-
-        // Add an accepted-workspace binding, matching creds, and target mapping.
-        conn.execute(
-            "INSERT INTO invites_accepted (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('peer1', 'ia1', 't1', 'inv1', 'ws1', 1)",
-            [],
-        )
-        .unwrap();
-        store_local_creds(&conn, "peer1", b"cert1", b"key1").unwrap();
-        set_local_transport_target(&conn, "peer1", "peer1", CRED_SOURCE_PEER_SHARED).unwrap();
-
-        let tenants = discover_local_tenants(&conn).unwrap();
-        assert_eq!(tenants.len(), 1);
-        assert_eq!(tenants[0].peer_id, "peer1");
-        assert_eq!(tenants[0].workspace_id, "ws1");
-        assert_eq!(tenants[0].transport_peer_id, "peer1");
-
-        // Accepted binding without creds should not appear
-        conn.execute(
-            "INSERT INTO invites_accepted (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('peer2', 'ia2', 't2', 'inv2', 'ws2', 2)",
-            [],
-        )
-        .unwrap();
-        assert_eq!(discover_local_tenants(&conn).unwrap().len(), 1);
-
-        // Add creds and a target mapping for peer2.
-        store_local_creds(&conn, "peer2", b"cert2", b"key2").unwrap();
-        set_local_transport_target(&conn, "peer2", "peer2", CRED_SOURCE_PEER_SHARED).unwrap();
-        assert_eq!(discover_local_tenants(&conn).unwrap().len(), 2);
     }
 
     #[test]
@@ -866,304 +781,4 @@ mod tests {
         assert!(peer_has_creds_with_source(&conn, "peer2", CRED_SOURCE_PEER_SHARED).unwrap());
     }
 
-    #[test]
-    fn test_discover_local_tenants_uses_explicit_target_mapping() {
-        let conn = open_in_memory().unwrap();
-        create_tables(&conn).unwrap();
-
-        // Tenant A is fully converged.
-        conn.execute(
-            "INSERT INTO invites_accepted (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('tenant_a', 'ia_a', 't_a', 'inv_a', 'ws_a', 1)",
-            [],
-        )
-        .unwrap();
-        store_local_creds_with_source(
-            &conn,
-            "tenant_a",
-            b"cert_a",
-            b"key_a",
-            CRED_SOURCE_PEER_SHARED,
-        )
-        .unwrap();
-        set_local_transport_target(&conn, "tenant_a", "tenant_a", CRED_SOURCE_PEER_SHARED).unwrap();
-
-        // Tenant B is transitional: accepted invite + bootstrap creds + explicit target mapping.
-        conn.execute(
-            "INSERT INTO invites_accepted (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('tenant_b', 'ia_b', 't_b', 'inv_b', 'ws_b', 2)",
-            [],
-        )
-        .unwrap();
-        let bootstrap_peer_id = "bootstrap_peer_id".to_string();
-        store_local_creds_with_source(
-            &conn,
-            &bootstrap_peer_id,
-            b"cert_b",
-            b"key_b",
-            CRED_SOURCE_BOOTSTRAP,
-        )
-        .unwrap();
-        set_local_transport_target(&conn, "tenant_b", &bootstrap_peer_id, CRED_SOURCE_BOOTSTRAP)
-            .unwrap();
-
-        let tenants = discover_local_tenants(&conn).unwrap();
-        assert_eq!(tenants.len(), 2);
-        let a = tenants
-            .iter()
-            .find(|t| t.peer_id == "tenant_a")
-            .expect("tenant_a");
-        assert_eq!(a.transport_peer_id, "tenant_a");
-        let b = tenants
-            .iter()
-            .find(|t| t.peer_id == "tenant_b")
-            .expect("tenant_b");
-        assert_eq!(b.transport_peer_id, bootstrap_peer_id);
-    }
-
-    #[test]
-    fn test_discover_local_tenants_ignores_unmapped_transitional_creds() {
-        let conn = open_in_memory().unwrap();
-        create_tables(&conn).unwrap();
-
-        conn.execute(
-            "INSERT INTO invites_accepted (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('tenant_a', 'ia_a', 't_a', 'inv_a', 'ws_a', 1)",
-            [],
-        )
-        .unwrap();
-        store_local_creds_with_source(
-            &conn,
-            "bootstrap_only",
-            b"cert_a",
-            b"key_a",
-            CRED_SOURCE_BOOTSTRAP,
-        )
-        .unwrap();
-
-        let tenants = discover_local_tenants(&conn).unwrap();
-        assert!(
-            tenants.is_empty(),
-            "startup discovery must not infer tenant ownership from unmapped transitional creds"
-        );
-    }
-
-    /// Direct-match inference regression test: creds present where peer_id == tenant_id,
-    /// but no local_transport_targets row — discovery must still return empty.
-    ///
-    /// The old two-phase discovery would find this via the direct JOIN
-    /// `invites_accepted.recorded_by = local_transport_creds.peer_id`. That path
-    /// is removed; this test proves it cannot be silently reintroduced.
-    #[test]
-    fn test_discover_local_tenants_rejects_direct_peer_id_match_without_target_mapping() {
-        let conn = open_in_memory().unwrap();
-        create_tables(&conn).unwrap();
-
-        // recorded_by == peer_id — this was the pattern the old direct-match inferred.
-        conn.execute(
-            "INSERT INTO invites_accepted (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('tenant_a', 'ia_a', 't_a', 'inv_a', 'ws_a', 1)",
-            [],
-        )
-        .unwrap();
-        store_local_creds_with_source(
-            &conn,
-            "tenant_a", // peer_id == tenant_id — was the old inference trigger
-            b"cert_a",
-            b"key_a",
-            CRED_SOURCE_PEER_SHARED,
-        )
-        .unwrap();
-        // Deliberately no set_local_transport_target call.
-
-        let tenants = discover_local_tenants(&conn).unwrap();
-        assert!(
-            tenants.is_empty(),
-            "creds with peer_id == tenant_id must not be discovered without explicit target mapping"
-        );
-    }
-
-    #[test]
-    fn test_ensure_schema_adds_source_column_for_legacy_table_shape() {
-        let conn = open_in_memory().unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE local_transport_creds (
-                peer_id TEXT PRIMARY KEY,
-                cert_der BLOB NOT NULL,
-                key_der BLOB NOT NULL,
-                created_at INTEGER NOT NULL
-            );
-            ",
-        )
-        .unwrap();
-
-        ensure_schema(&conn).unwrap();
-
-        let mut stmt = conn
-            .prepare("PRAGMA table_info(local_transport_creds)")
-            .unwrap();
-        let mut rows = stmt.query([]).unwrap();
-        let mut has_source = false;
-        while let Some(row) = rows.next().unwrap() {
-            let name: String = row.get(1).unwrap();
-            if name == "source" {
-                has_source = true;
-                break;
-            }
-        }
-        assert!(has_source, "ensure_schema should add source column");
-    }
-
-    /// Replay test: wipe derived transport tables and rebuild from the same
-    /// state that the projection pipeline would produce. Confirms that
-    /// discover_local_tenants produces identical output before and after.
-    #[test]
-    fn test_discover_local_tenants_survives_replay_of_derived_tables() {
-        let conn = open_in_memory().unwrap();
-        create_tables(&conn).unwrap();
-
-        // Seed the projection-derived state that write_exec produces.
-        conn.execute(
-            "INSERT INTO invites_accepted
-             (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('tenant-a', 'ia-a', 't-a', 'inv-a', 'ws-a', 1)",
-            [],
-        )
-        .unwrap();
-        store_local_creds_with_source(
-            &conn,
-            "peer-a",
-            b"cert-a",
-            b"key-a",
-            CRED_SOURCE_PEER_SHARED,
-        )
-        .unwrap();
-        set_local_transport_target(&conn, "tenant-a", "peer-a", CRED_SOURCE_PEER_SHARED).unwrap();
-
-        let before = discover_local_tenants(&conn).unwrap();
-        assert_eq!(before.len(), 1);
-        assert_eq!(before[0].peer_id, "tenant-a");
-        assert_eq!(before[0].transport_peer_id, "peer-a");
-
-        // Simulate replay: wipe derived transport tables, then re-apply.
-        conn.execute_batch(
-            "DELETE FROM local_transport_creds;
-             DELETE FROM local_transport_targets;",
-        )
-        .unwrap();
-
-        let empty = discover_local_tenants(&conn).unwrap();
-        assert!(
-            empty.is_empty(),
-            "after wipe, discover must return empty (no inference)"
-        );
-
-        // Re-apply what the projection pipeline would produce on replay.
-        store_local_creds_with_source(
-            &conn,
-            "peer-a",
-            b"cert-a",
-            b"key-a",
-            CRED_SOURCE_PEER_SHARED,
-        )
-        .unwrap();
-        set_local_transport_target(&conn, "tenant-a", "peer-a", CRED_SOURCE_PEER_SHARED).unwrap();
-
-        let after = discover_local_tenants(&conn).unwrap();
-        assert_eq!(after.len(), 1, "after replay, tenant must be rediscovered");
-        assert_eq!(after[0].peer_id, "tenant-a");
-        assert_eq!(after[0].transport_peer_id, "peer-a");
-        assert_eq!(before[0].workspace_id, after[0].workspace_id);
-    }
-
-    /// Bootstrap-to-peershared handoff replay: the most likely regression after
-    /// removing two-phase discovery. Verifies that replaying bootstrap then
-    /// upgrading to peershared produces the correct final state.
-    #[test]
-    fn test_discover_local_tenants_bootstrap_to_peershared_replay() {
-        let conn = open_in_memory().unwrap();
-        create_tables(&conn).unwrap();
-
-        conn.execute(
-            "INSERT INTO invites_accepted (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES ('tenant-b', 'ia-b', 't-b', 'inv-b', 'ws-b', 1)",
-            [],
-        )
-        .unwrap();
-
-        // Phase 1: bootstrap identity installed first.
-        store_local_creds_with_source(
-            &conn,
-            "bootstrap-peer",
-            b"bootstrap-cert",
-            b"bootstrap-key",
-            CRED_SOURCE_BOOTSTRAP,
-        )
-        .unwrap();
-        set_local_transport_target(&conn, "tenant-b", "bootstrap-peer", CRED_SOURCE_BOOTSTRAP)
-            .unwrap();
-
-        let bootstrap_state = discover_local_tenants(&conn).unwrap();
-        assert_eq!(bootstrap_state.len(), 1);
-        assert_eq!(bootstrap_state[0].transport_peer_id, "bootstrap-peer");
-
-        // Phase 2: peershared identity materializes, target updated.
-        store_local_creds_with_source(
-            &conn,
-            "final-peer",
-            b"final-cert",
-            b"final-key",
-            CRED_SOURCE_PEER_SHARED,
-        )
-        .unwrap();
-        set_local_transport_target(&conn, "tenant-b", "final-peer", CRED_SOURCE_PEER_SHARED)
-            .unwrap();
-
-        let final_state = discover_local_tenants(&conn).unwrap();
-        assert_eq!(final_state.len(), 1);
-        assert_eq!(
-            final_state[0].transport_peer_id, "final-peer",
-            "after peershared upgrade, transport_peer_id must point to peershared identity"
-        );
-
-        // Replay: wipe and rebuild both phases in order.
-        conn.execute_batch(
-            "DELETE FROM local_transport_creds;
-             DELETE FROM local_transport_targets;",
-        )
-        .unwrap();
-
-        // Bootstrap phase replay.
-        store_local_creds_with_source(
-            &conn,
-            "bootstrap-peer",
-            b"bootstrap-cert",
-            b"bootstrap-key",
-            CRED_SOURCE_BOOTSTRAP,
-        )
-        .unwrap();
-        set_local_transport_target(&conn, "tenant-b", "bootstrap-peer", CRED_SOURCE_BOOTSTRAP)
-            .unwrap();
-
-        // Peershared upgrade replay.
-        store_local_creds_with_source(
-            &conn,
-            "final-peer",
-            b"final-cert",
-            b"final-key",
-            CRED_SOURCE_PEER_SHARED,
-        )
-        .unwrap();
-        set_local_transport_target(&conn, "tenant-b", "final-peer", CRED_SOURCE_PEER_SHARED)
-            .unwrap();
-
-        let replayed = discover_local_tenants(&conn).unwrap();
-        assert_eq!(replayed.len(), 1, "replay must restore exactly one tenant");
-        assert_eq!(
-            replayed[0].transport_peer_id, "final-peer",
-            "replayed state must converge to peershared identity, not stale bootstrap"
-        );
-        assert_eq!(replayed[0].workspace_id, final_state[0].workspace_id);
-    }
 }

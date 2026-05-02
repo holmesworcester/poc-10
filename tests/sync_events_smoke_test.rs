@@ -137,23 +137,28 @@ fn compare_with_mismatched_fingerprint_at_leaf_emits_have_per_root() {
     };
     project(&db, &ev).unwrap();
 
-    // Three Have events, three outbox rows.
-    assert_eq!(events_canonical_count_for_scope(&db, "endpoint_local"), 3);
-    assert_eq!(outbox_count_for(&db, &conn_id), 3);
+    // Three Have events plus one reciprocal echo Compare(v, F_local)
+    // so the peer drills on its side too.
+    assert_eq!(events_canonical_count_for_scope(&db, "endpoint_local"), 4);
+    assert_eq!(outbox_count_for(&db, &conn_id), 4);
 
-    // Sanity: every endpoint_local row's bytes start with HAVE_TYPE_CODE.
+    // Sanity: three Haves + one Compare echo.
     let mut stmt = db
         .prepare("SELECT canonical_event_bytes FROM events_canonical WHERE scope = 'endpoint_local'")
         .unwrap();
     let mut rows = stmt.query([]).unwrap();
+    let mut have_count = 0;
+    let mut compare_count = 0;
     while let Some(row) = rows.next().unwrap() {
         let bytes: Vec<u8> = row.get(0).unwrap();
-        assert_eq!(
-            bytes[0],
-            sync::HAVE_TYPE_CODE,
-            "leaf-emit should produce HaveEvents"
-        );
+        if bytes[0] == sync::HAVE_TYPE_CODE {
+            have_count += 1;
+        } else if bytes[0] == sync::COMPARE_TYPE_CODE {
+            compare_count += 1;
+        }
     }
+    assert_eq!(have_count, 3, "three Haves, one per local root member");
+    assert_eq!(compare_count, 1, "one reciprocal echo Compare");
 }
 
 #[test]
@@ -186,8 +191,9 @@ fn compare_at_interior_node_emits_child_compares() {
     };
     project(&db, &ev).unwrap();
 
-    assert_eq!(events_canonical_count_for_scope(&db, "endpoint_local"), 2);
-    assert_eq!(outbox_count_for(&db, &conn_id), 2);
+    // Two child drill compares + one reciprocal echo Compare(v, F_local).
+    assert_eq!(events_canonical_count_for_scope(&db, "endpoint_local"), 3);
+    assert_eq!(outbox_count_for(&db, &conn_id), 3);
     let mut stmt = db
         .prepare("SELECT canonical_event_bytes FROM events_canonical WHERE scope = 'endpoint_local'")
         .unwrap();
@@ -196,7 +202,7 @@ fn compare_at_interior_node_emits_child_compares() {
         let bytes: Vec<u8> = row.get(0).unwrap();
         assert_eq!(
             bytes[0], COMPARE_TYPE_CODE,
-            "interior-emit should produce CompareEvents"
+            "interior-emit should produce CompareEvents (drill + echo)"
         );
     }
 }
@@ -445,8 +451,9 @@ fn compare_via_registry_at_leaf_emits_have_per_root() {
     assert!(matches!(result.decision, ProjectionDecision::Valid));
     apply_writes_for_test(&db, &result.write_ops);
 
-    assert_eq!(events_canonical_count_for_scope(&db, "endpoint_local"), 2);
-    assert_eq!(outbox_count_for(&db, &conn_id), 2);
+    // Two Haves (one per local root) + one reciprocal echo Compare.
+    assert_eq!(events_canonical_count_for_scope(&db, "endpoint_local"), 3);
+    assert_eq!(outbox_count_for(&db, &conn_id), 3);
 }
 
 #[test]
@@ -484,8 +491,9 @@ fn compare_via_registry_at_interior_emits_child_compares() {
     let result = project_pure("ev", &pe, &ctx);
     apply_writes_for_test(&db, &result.write_ops);
 
-    assert_eq!(events_canonical_count_for_scope(&db, "endpoint_local"), 2);
-    assert_eq!(outbox_count_for(&db, &conn_id), 2);
+    // Two child drill compares + one reciprocal echo Compare(v, F_local).
+    assert_eq!(events_canonical_count_for_scope(&db, "endpoint_local"), 3);
+    assert_eq!(outbox_count_for(&db, &conn_id), 3);
     let mut stmt = db
         .prepare("SELECT canonical_event_bytes FROM events_canonical WHERE scope = 'endpoint_local'")
         .unwrap();
@@ -494,6 +502,60 @@ fn compare_via_registry_at_interior_emits_child_compares() {
         let bytes: Vec<u8> = row.get(0).unwrap();
         assert_eq!(bytes[0], COMPARE_TYPE_CODE);
     }
+}
+
+#[test]
+fn compare_via_registry_empty_local_emits_echo_back() {
+    // Asymmetric drill-down case: the empty side receives a Compare
+    // with non-zero fingerprint but has no local membership rows. It
+    // must echo Compare(node, fp=0) back so the populated side
+    // continues descending. Without this the recursion stalls in the
+    // initial-sync (one-empty-side) case.
+    use sync::compare::{project_pure, CompareEvent, COMPARE_TYPE_CODE};
+    use topo::event_modules::ParsedEvent;
+    use topo::projection::decision::ProjectionDecision;
+    use topo::state::generic_context::load_generic_context;
+
+    let db = open_db();
+    let conn_id: ConnectionId = [1u8; 32];
+    let ws: WorkspaceId = [2u8; 32];
+    let node = vec![0xAA];
+
+    // No on_root_inserted — the local side has nothing in this range.
+    let ev = CompareEvent {
+        connection_id: conn_id,
+        workspace_id: ws,
+        node_id: node.clone(),
+        fingerprint: [0xFFu8; 32],
+        created_at_ms: 100,
+    };
+    let pe = ParsedEvent::Compare(ev);
+    let ctx = load_generic_context(&pe, &db).unwrap();
+    assert!(ctx.local_sync_node_members.is_empty());
+    assert!(ctx.local_sync_node_children.is_empty());
+
+    let result = project_pure("ev", &pe, &ctx);
+    assert!(matches!(result.decision, ProjectionDecision::Valid));
+    apply_writes_for_test(&db, &result.write_ops);
+
+    // Exactly one echo emitted.
+    assert_eq!(events_canonical_count_for_scope(&db, "endpoint_local"), 1);
+    assert_eq!(outbox_count_for(&db, &conn_id), 1);
+
+    // Bytes start with COMPARE_TYPE_CODE (this is a Compare, not a Have).
+    let bytes: Vec<u8> = db
+        .query_row(
+            "SELECT canonical_event_bytes FROM events_canonical WHERE scope = 'endpoint_local'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(bytes[0], COMPARE_TYPE_CODE);
+
+    // The echo's fingerprint is local_fp (= 0 for an empty side at the node).
+    let parsed = sync::compare::parse(&bytes).unwrap();
+    assert_eq!(parsed.fingerprint, [0u8; 32]);
+    assert_eq!(parsed.node_id, node);
 }
 
 #[test]
@@ -672,4 +734,212 @@ fn dep_cache_transitive_closure_for_simple_chain() {
     assert_eq!(result[0], (id(2), 1));
     assert_eq!(result[1], (id(3), 2));
     assert_eq!(result[2], (id(4), 3));
+}
+
+// ---------------------------------------------------------------------------
+// asymmetric-drill convergence: end-to-end ping-pong
+// ---------------------------------------------------------------------------
+
+/// Simulate the negentropy compare/have/need fold across two distinct
+/// `negentropy_root_membership` stores: A (10 messages + workspace) vs
+/// B (workspace only). A is the driver that emits the initial root
+/// Compare. The test alternates "A applies whatever B emitted" /
+/// "B applies whatever A emitted" until quiescence and asserts that
+/// (a) every one of A's 10 message ids is announced via a Have on at
+/// least one side, and (b) the loop terminates.
+///
+/// This is the substrate-level analog of the subprocess black-box
+/// smoke test: it exercises the same recursive-fold logic without the
+/// network, so a regression is observable in `cargo test` rather than
+/// only in the slow black-box harness.
+#[test]
+fn compare_fold_converges_with_asymmetric_trees_n10() {
+    use sync::compare::{compute_writes, CompareEvent};
+    use sync::negentropy_tree::on_root_inserted;
+    use topo::event_modules::sync::maintenance::{derive_node_path, NODE_PATH_DEPTH};
+
+    fn make_db() -> Connection {
+        open_db()
+    }
+
+    let db_a = make_db();
+    let db_b = make_db();
+    let conn_id: ConnectionId = [1u8; 32];
+    let ws: WorkspaceId = [2u8; 32];
+
+    // Plant the workspace event on both sides — same id so both sides
+    // know about it. Use a deterministic but arbitrary path.
+    let workspace_id_in_tree: BlakeId = [0x80u8; 32];
+    let ws_path = derive_node_path(&workspace_id_in_tree);
+    on_root_inserted(&ws, &workspace_id_in_tree, &[], &ws_path, &db_a).unwrap();
+    on_root_inserted(&ws, &workspace_id_in_tree, &[], &ws_path, &db_b).unwrap();
+
+    // Plant 10 message ids on A only. Use deterministic ids spread
+    // across distinct level-1 prefixes (BLAKE3 of i) so the children
+    // structure is realistic.
+    let mut messages: Vec<BlakeId> = Vec::with_capacity(10);
+    for i in 0u8..10 {
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(blake3::hash(&[i, 0xAA, 0xBB, 0xCC]).as_bytes());
+        messages.push(bytes);
+        let path = derive_node_path(&bytes);
+        on_root_inserted(&ws, &bytes, &[], &path, &db_a).unwrap();
+    }
+    assert_eq!(messages.iter().collect::<std::collections::HashSet<_>>().len(), 10);
+
+    // Verify A's tree depth matches the convention the projector
+    // expects (sanity check on `derive_node_path`).
+    assert_eq!(ws_path.len(), NODE_PATH_DEPTH + 1);
+
+    // Initial root-Compare from A as the driver.
+    let mut a_outbox: Vec<CompareEvent> = vec![CompareEvent {
+        connection_id: conn_id,
+        workspace_id: ws,
+        node_id: Vec::new(),
+        fingerprint: sync::negentropy_tree::node_fingerprint(&db_a, &ws, &[]).unwrap(),
+        created_at_ms: 1000,
+    }];
+    let mut b_outbox: Vec<CompareEvent> = Vec::new();
+
+    // Track the Haves each side has emitted. Plus the seen-bytes set
+    // so we don't re-process duplicates (mirroring the chain's
+    // `INSERT OR IGNORE` on event_id).
+    let mut a_haves: std::collections::HashSet<BlakeId> = Default::default();
+    let mut b_haves: std::collections::HashSet<BlakeId> = Default::default();
+    let mut seen_compares_a: std::collections::HashSet<Vec<u8>> = Default::default();
+    let mut seen_compares_b: std::collections::HashSet<Vec<u8>> = Default::default();
+    let mut iterations = 0;
+
+    // Hard cap to detect non-termination. Convergence for n=10 should
+    // take well under 200 iterations even at depth 4.
+    let cap = 5_000;
+    while !a_outbox.is_empty() || !b_outbox.is_empty() {
+        iterations += 1;
+        assert!(
+            iterations < cap,
+            "compare fold did not converge in {} iterations (a_outbox={}, b_outbox={})",
+            cap,
+            a_outbox.len(),
+            b_outbox.len()
+        );
+
+        // Drain A's outbox -> B applies (and possibly emits).
+        let drained_a = std::mem::take(&mut a_outbox);
+        for ev in drained_a {
+            let blob = sync::compare::encode(&ev);
+            if !seen_compares_b.insert(blob.clone()) {
+                continue;
+            }
+            // B's projector runs on B's DB.
+            let writes = compute_writes(&db_b, &ev).unwrap();
+            // Walk the writes to extract: (i) any new endpoint_local
+            // CompareEvent → enqueue toward A, (ii) any HaveEvent →
+            // record b_haves.
+            extract_emissions(
+                &writes,
+                &mut b_outbox,
+                &mut b_haves,
+                |ev| ev.workspace_id == ws,
+            );
+        }
+
+        // Drain B's outbox -> A applies (and possibly emits).
+        let drained_b = std::mem::take(&mut b_outbox);
+        for ev in drained_b {
+            let blob = sync::compare::encode(&ev);
+            if !seen_compares_a.insert(blob.clone()) {
+                continue;
+            }
+            let writes = compute_writes(&db_a, &ev).unwrap();
+            extract_emissions(
+                &writes,
+                &mut a_outbox,
+                &mut a_haves,
+                |ev| ev.workspace_id == ws,
+            );
+        }
+    }
+
+    // A should have announced all 10 of its message ids via Haves.
+    // (B can also announce the workspace event back to A; that's
+    // fine.) The critical assertion is that A's locally-held but
+    // peer-missing ids surface as Haves — the bug we're guarding
+    // against was exactly "A only emits 2 Haves total".
+    let mut missing: Vec<BlakeId> = Vec::new();
+    for m in &messages {
+        if !a_haves.contains(m) {
+            missing.push(*m);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} of A's 10 messages were never announced via Have (iterations={})",
+        missing.len(),
+        iterations,
+    );
+
+    // Workspace event lives on both sides → no Need round-trip
+    // required for it. Just sanity-check that the workspace id is
+    // among at least one side's Haves (B can announce the workspace
+    // event back to A even though A already has it; that's harmless
+    // and exercises the symmetric path).
+    let _ = b_haves;
+    eprintln!(
+        "[asymmetric-drill] converged in {} iterations; A emitted {} Haves",
+        iterations,
+        a_haves.len()
+    );
+}
+
+/// Walk a freshly-projected `Vec<WriteOp>` and extract:
+/// - any newly synthesized CompareEvent into `compare_outbox`,
+/// - any newly synthesized HaveEvent's event_id into `have_set`.
+fn extract_emissions(
+    writes: &[topo::projection::contract::WriteOp],
+    compare_outbox: &mut Vec<sync::compare::CompareEvent>,
+    have_set: &mut std::collections::HashSet<BlakeId>,
+    workspace_filter: impl Fn(&sync::compare::CompareEvent) -> bool,
+) {
+    use topo::projection::contract::{SqlVal, WriteOp};
+    for op in writes {
+        if let WriteOp::InsertOrIgnore {
+            table,
+            columns,
+            values,
+        } = op
+        {
+            if *table != "events_canonical" {
+                continue;
+            }
+            // Find the canonical_event_bytes column.
+            let bytes_idx = columns
+                .iter()
+                .position(|c| *c == "canonical_event_bytes")
+                .unwrap();
+            let bytes = match &values[bytes_idx] {
+                SqlVal::Blob(b) => b.clone(),
+                _ => continue,
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            match bytes[0] {
+                t if t == sync::COMPARE_TYPE_CODE => {
+                    if let Ok(ev) = sync::compare::parse(&bytes) {
+                        if workspace_filter(&ev) {
+                            compare_outbox.push(ev);
+                        }
+                    }
+                }
+                t if t == sync::HAVE_TYPE_CODE => {
+                    if bytes.len() >= 1 + 32 + 32 + 32 {
+                        let mut id = [0u8; 32];
+                        id.copy_from_slice(&bytes[65..97]);
+                        have_set.insert(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }

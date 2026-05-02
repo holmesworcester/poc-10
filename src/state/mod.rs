@@ -1,14 +1,10 @@
 pub mod admission;
 pub mod db;
-pub mod dependency_fetch;
 pub mod events_canonical;
 pub mod generic_context;
 pub mod labels;
 pub mod live_hints;
 pub mod outbox;
 pub mod outgoing_intents;
-pub mod pipeline;
 pub mod projection;
-pub(crate) mod shared_workspace_fanout;
 pub mod startup_recovery;
-pub mod subscriptions;

@@ -94,13 +94,6 @@ pub fn project_pure(
         &public_key,
     ));
 
-    // Stage 3.5 hold-over: the transport identity adapter still takes a
-    // `recorded_by` field today; keep the legacy bridge value in the
-    // emit command until the adapter signature is migrated. Chain-only
-    // callers fall back to a sentinel.
-    let recorded_by_sentinel = crate::projection::apply::dispatch::current_recorded_by()
-        .unwrap_or_else(|| "__chain__".to_string());
-
     ProjectorResult::valid_with_commands(
         vec![WriteOp::InsertOrIgnore {
             table: "peer_secrets",
@@ -123,7 +116,6 @@ pub fn project_pure(
         }],
         vec![EmitCommand::MaterializeTransportIdentity {
             spec: TransportIdentitySpec::InstallPeerSharedIdentityFromSigner {
-                recorded_by: recorded_by_sentinel,
                 signer_event_id: e.signer_event_id,
             },
         }],

@@ -1,15 +1,9 @@
-pub mod commands;
 pub mod layout;
 pub mod projector;
 pub mod queries;
-pub mod subscription_filter;
 pub mod codec;
 
 // Re-export stable public API so callers import from `event_modules::message`.
-pub use commands::{
-    create, create_deletion, delete_message, delete_message_for_peer, generate_for_peer, send,
-    send_for_peer, CreateMessageCmd, CreateMessageDeletionCmd, DeleteResponse, GenerateResponse,
-};
 pub use projector::project_pure;
 pub use queries::{count, list, list_deleted_ids, list_rows, resolve, resolve_number, MessageRow};
 pub use codec::{encode_message, parse_message, MessageEvent, MESSAGE_META, MESSAGE_WIRE_SIZE};

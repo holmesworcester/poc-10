@@ -1,8 +1,6 @@
 pub mod control_loop_tables;
 pub mod daemon_identity;
 pub mod event_display;
-pub mod health;
-pub mod intro;
 pub mod local_client_ops;
 pub mod need_queue;
 pub mod project_queue;
@@ -11,7 +9,6 @@ pub mod schema;
 pub mod store;
 pub mod timeline;
 pub mod transport_creds;
-pub mod transport_trust;
 
 use rusqlite::{Connection, Result as SqliteResult};
 use std::path::Path;
@@ -110,14 +107,10 @@ pub fn ensure_infra_schema(conn: &Connection) -> SqliteResult<()> {
     daemon_identity::ensure_schema(conn)?;
     event_display::ensure_schema(conn)?;
     project_queue::ensure_schema(conn)?;
-    health::ensure_schema(conn)?;
-    intro::ensure_schema(conn)?;
     timeline::ensure_schema(conn)?;
-    transport_trust::ensure_schema(conn)?;
     transport_creds::ensure_schema(conn)?;
     need_queue::ensure_schema(conn)?;
     local_client_ops::ensure_schema(conn)?;
-    crate::state::shared_workspace_fanout::ensure_schema(conn)?;
     control_loop_tables::ensure_schema(conn)?;
     // Domain schema is registry-driven: walk every event module's
     // `EventTypeMeta::ensure_schema` so `state/db` does not centrally know

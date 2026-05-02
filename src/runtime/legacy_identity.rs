@@ -221,15 +221,11 @@ impl TransportIdentityMaterializer for ConcreteTransportIdentityMaterializer {
     ) -> Result<String, TransportIdentityError> {
         match spec {
             TransportIdentitySpec::InstallBootstrapIdentityFromInviteSecret {
-                recorded_by,
                 invite_event_id,
             } => {
                 let invite_eid_b64 = crate::crypto::event_id_to_base64(&invite_event_id);
-                // Plan.md Stage 3.5 step 5B: `invite_secrets.recorded_by`
-                // dropped. `invite_event_id` is globally unique (it's the
-                // invite event's own id), so the original `(recorded_by,
-                // invite_event_id)` filter collapses to just the invite
-                // event id.
+                // `invite_event_id` is globally unique (it's the invite
+                // event's own id), so the lookup is keyed on it alone.
                 let key_bytes: Option<Vec<u8>> = conn
                     .query_row(
                         "SELECT private_key FROM invite_secrets
@@ -245,7 +241,6 @@ impl TransportIdentityMaterializer for ConcreteTransportIdentityMaterializer {
 
                 let key_bytes =
                     key_bytes.ok_or_else(|| TransportIdentityError::InviteSecretNotFound {
-                        recorded_by: recorded_by.clone(),
                         invite_event_id: invite_eid_b64.clone(),
                     })?;
                 let signing_key = parse_signing_key(key_bytes)?;
@@ -253,10 +248,7 @@ impl TransportIdentityMaterializer for ConcreteTransportIdentityMaterializer {
                     .map_err(|e| TransportIdentityError::InstallFailed(e.to_string()))?;
                 Ok(peer_id)
             }
-            TransportIdentitySpec::InstallPeerSharedIdentityFromSigner {
-                recorded_by,
-                signer_event_id,
-            } => {
+            TransportIdentitySpec::InstallPeerSharedIdentityFromSigner { signer_event_id } => {
                 let signer_eid_b64 = crate::crypto::event_id_to_base64(&signer_event_id);
                 let key_bytes: Option<Vec<u8>> = conn
                     .query_row(
@@ -273,7 +265,7 @@ impl TransportIdentityMaterializer for ConcreteTransportIdentityMaterializer {
 
                 let key_bytes =
                     key_bytes.ok_or_else(|| TransportIdentityError::SignerKeyNotFound {
-                        recorded_by: recorded_by.clone(),
+                        signer_event_id: signer_eid_b64.clone(),
                     })?;
 
                 let signing_key = parse_signing_key(key_bytes)?;

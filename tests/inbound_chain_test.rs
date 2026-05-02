@@ -13,7 +13,9 @@
 //! 6. atomicity: a midway failure rolls back every write inside the
 //!    chain transaction.
 
+use ed25519_dalek::SigningKey;
 use rusqlite::{params, Connection};
+use topo::event_modules::connection::local_signing_key;
 use topo::event_modules::connection::wrap::{wrap_bootstrap, InnerCanonicalEvent};
 use topo::event_modules::{
     encode_event, DeviceInviteEvent, InviteAcceptedEvent, InviteSecretEvent, KeyRequestEvent,
@@ -31,14 +33,35 @@ use topo::state::events_canonical::{
     add_blockers, get as get_event, set_status, upsert_event, EventRow, EventScope, EventStatus,
 };
 
-const SENDER: EndpointId = [11u8; 32];
-const RECIPIENT: EndpointId = [22u8; 32];
+fn sender_sk() -> SigningKey {
+    SigningKey::from_bytes(&[0x11u8; 32])
+}
+
+fn recipient_sk() -> SigningKey {
+    SigningKey::from_bytes(&[0x22u8; 32])
+}
+
+fn sender_eid() -> EndpointId {
+    sender_sk().verifying_key().to_bytes()
+}
+
+fn recipient_eid() -> EndpointId {
+    recipient_sk().verifying_key().to_bytes()
+}
 
 fn open_db() -> Connection {
     let c = Connection::open_in_memory().unwrap();
     ensure_substrate_schema(&c).unwrap();
-    // Tenant projector schema (the test event type).
-    topo::event_modules::tenant::ensure_schema(&c).unwrap();
+    // Registry-driven module schema bring-up: every event module's
+    // `ensure_schema` runs in one pass, including sync's
+    // `connection_round_state` and connection's
+    // `connection_shared_workspaces`. The test fixture mirrors the
+    // production boot path (`state::db::ensure_infra_schema`).
+    topo::event_modules::ensure_all_module_schemas(&c).unwrap();
+    // Install the recipient's signing key for this in-memory db so the
+    // ECDH-based bootstrap unwrap can recover the AEAD key.
+    let path = c.path().unwrap_or("").to_string();
+    local_signing_key::install_for_path(&path, recipient_sk());
     c
 }
 
@@ -69,7 +92,7 @@ fn wrap_one(blob: Vec<u8>) -> Vec<u8> {
         workspace_id: [0u8; 32],
         bytes: blob,
     }];
-    let frame = wrap_bootstrap(SENDER, RECIPIENT, &inner).unwrap();
+    let frame = wrap_bootstrap(&sender_sk(), recipient_eid(), &inner).unwrap();
     frame.as_bytes().to_vec()
 }
 
@@ -83,7 +106,7 @@ fn wrap_one_with_ws(blob: Vec<u8>, ws: [u8; 32]) -> Vec<u8> {
         workspace_id: ws,
         bytes: blob,
     }];
-    let frame = wrap_bootstrap(SENDER, RECIPIENT, &inner).unwrap();
+    let frame = wrap_bootstrap(&sender_sk(), recipient_eid(), &inner).unwrap();
     frame.as_bytes().to_vec()
 }
 
@@ -95,7 +118,7 @@ fn blake3_id(bytes: &[u8]) -> BlakeId {
 
 fn origin() -> InboundOrigin {
     InboundOrigin {
-        remote_endpoint_id: Some(RECIPIENT),
+        remote_endpoint_id: Some(sender_eid()),
         ip: Some("127.0.0.1".to_string()),
         port: Some(4242),
     }
@@ -407,7 +430,7 @@ fn parse_failure_rejects_inner_event_and_releases_admission_claim() {
         workspace_id: [0u8; 32],
         bytes: bad_inner.clone(),
     }];
-    let frame = wrap_bootstrap(SENDER, RECIPIENT, &inner)
+    let frame = wrap_bootstrap(&sender_sk(), recipient_eid(), &inner)
         .unwrap()
         .as_bytes()
         .to_vec();

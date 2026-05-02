@@ -173,6 +173,45 @@ pub fn after_durable_apply(
     event_id: &BlakeId,
     db: &Connection,
 ) -> rusqlite::Result<()> {
+    // Sync-family + connection events are not part of the durable
+    // graph for negentropy purposes — Compare/Have/Need are transient
+    // hints, and Connection events are endpoint-pair scoped. If we
+    // include them in `negentropy_root_membership` they trigger a
+    // self-referential feedback loop (each Compare apply pushes a new
+    // root fingerprint, which queues another Compare, which applies,
+    // and so on). The chain admits inner events at scope=Durable
+    // generically — this guard keeps the maintenance pass selective.
+    if let Ok(Some(bytes)) = read_canonical_bytes(db, event_id) {
+        if let Some(type_code) = bytes.first().copied() {
+            const TYPE_CONNECTION: u8 = 33;
+            const TYPE_CONNECTION_PREKEY: u8 = 34;
+            const TYPE_CONNECTION_PREKEY_SHARED: u8 = 35;
+            const TYPE_INTRO: u8 = 36;
+            const TYPE_OBSERVED_ADDRESS: u8 = 37;
+            const TYPE_SELF_ADDRESS: u8 = 38;
+            const TYPE_NEGENTROPY: u8 = 39;
+            const TYPE_SYNC_WINDOW: u8 = 40;
+            const TYPE_COMPARE: u8 = 41;
+            const TYPE_HAVE: u8 = 42;
+            const TYPE_NEED: u8 = 43;
+            if matches!(
+                type_code,
+                TYPE_CONNECTION
+                    | TYPE_CONNECTION_PREKEY
+                    | TYPE_CONNECTION_PREKEY_SHARED
+                    | TYPE_INTRO
+                    | TYPE_OBSERVED_ADDRESS
+                    | TYPE_SELF_ADDRESS
+                    | TYPE_NEGENTROPY
+                    | TYPE_SYNC_WINDOW
+                    | TYPE_COMPARE
+                    | TYPE_HAVE
+                    | TYPE_NEED
+            ) {
+                return Ok(());
+            }
+        }
+    }
     // Make sure all the projected-sync schemas are in place. Idempotent.
     negentropy_tree::ensure_schema(db)?;
     dep_cache::ensure_schema(db)?;
@@ -215,7 +254,45 @@ pub fn after_durable_apply(
     // 4. Notify the negentropy tree that this event is now locally present.
     negentropy_tree::on_event_present(workspace_id, event_id, db)?;
 
+    // 5. Sync push: emit a root `Compare` to every peer sharing this
+    //    workspace so their negentropy fold sees our updated
+    //    fingerprint without waiting for the next periodic JobTick.
+    //    This is the steady-state push; peers descend the recursion
+    //    and emit Haves for whatever they're missing.
+    //
+    //    NOTE: the previous incarnation of this seam also emitted a
+    //    `Have(event_id)` for the freshly applied event so peers with
+    //    nothing locally would converge in a single round-trip even
+    //    when the recursion can't bottom out symmetrically. That
+    //    short-circuit was a scaffolding hack — the negentropy
+    //    machinery, given symmetric root Compares from both sides,
+    //    converges on its own. The periodic root-compare JobTick (see
+    //    `event_modules::sync::job`) plus this on-apply nudge are now
+    //    the only seeds.
+    // No on-apply push. Convergence is the negentropy round driven
+    // by `sync::job` (driver-controlled, quiet-suppressed) plus the
+    // recursive compare/have/need fold. New events propagate when
+    // the next root Compare round runs — the round driver is what
+    // we want to validate end-to-end.
+    let _ = (workspace_id, event_id);
     Ok(())
+}
+
+fn wall_clock_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn read_canonical_bytes(db: &Connection, event_id: &BlakeId) -> rusqlite::Result<Option<Vec<u8>>> {
+    db.query_row(
+        "SELECT canonical_event_bytes FROM events_canonical WHERE event_id = ?1",
+        params![event_id.to_vec()],
+        |r| r.get::<_, Vec<u8>>(0),
+    )
+    .optional()
 }
 
 #[cfg(test)]

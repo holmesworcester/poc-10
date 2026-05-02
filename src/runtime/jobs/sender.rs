@@ -619,8 +619,13 @@ fn load_inner_event_with_cache(
 
 /// Pure cache-fed workspace recovery for an `events_canonical` row.
 /// Takes the cached shared-workspaces slice for the connection.
-///   - EndpointLocal scope: pull workspace from `[envelope][workspace_id]`
-///     prefix.
+///   - EndpointLocal scope: dispatch on the wire `type_code` byte. The
+///     legacy `outgoing_intents` shim used the layout
+///     `[envelope_byte][workspace_id_32][...]`, so bytes `[1..33]` were
+///     the workspace_id. The sync event-module family
+///     (compare/have/need) has its own wire layout with `connection_id`
+///     at `[1..33]` and `workspace_id` at `[33..65]`. We dispatch on the
+///     leading type-code byte so both layouts work.
 ///   - Otherwise: exactly-one-shared-workspace → return it; zero or more
 ///     than one → return None so the caller refuses to send.
 fn recover_workspace_id_cached(
@@ -628,10 +633,27 @@ fn recover_workspace_id_cached(
     canonical_event_bytes: &[u8],
     shared_workspaces: &[WorkspaceId],
 ) -> Option<WorkspaceId> {
-    if matches!(scope, EventScope::EndpointLocal) && canonical_event_bytes.len() >= 1 + 32 {
-        let mut ws = [0u8; 32];
-        ws.copy_from_slice(&canonical_event_bytes[1..33]);
-        return Some(ws);
+    if matches!(scope, EventScope::EndpointLocal) && !canonical_event_bytes.is_empty() {
+        let type_code = canonical_event_bytes[0];
+        // sync family: [type_code][connection_id 32][workspace_id 32]...
+        const SYNC_TYPE_COMPARE: u8 = 41;
+        const SYNC_TYPE_HAVE: u8 = 42;
+        const SYNC_TYPE_NEED: u8 = 43;
+        if matches!(
+            type_code,
+            SYNC_TYPE_COMPARE | SYNC_TYPE_HAVE | SYNC_TYPE_NEED
+        ) {
+            if canonical_event_bytes.len() >= 1 + 32 + 32 {
+                let mut ws = [0u8; 32];
+                ws.copy_from_slice(&canonical_event_bytes[33..65]);
+                return Some(ws);
+            }
+        } else if canonical_event_bytes.len() >= 1 + 32 {
+            // Legacy intent envelope: [envelope][workspace_id_32][...].
+            let mut ws = [0u8; 32];
+            ws.copy_from_slice(&canonical_event_bytes[1..33]);
+            return Some(ws);
+        }
     }
     if shared_workspaces.len() == 1 {
         Some(shared_workspaces[0])

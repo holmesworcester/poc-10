@@ -18,7 +18,9 @@
 //!    NEVER added to `negentropy_root_membership` even after its row
 //!    transitions to `applied`.
 
+use ed25519_dalek::SigningKey;
 use rusqlite::{params, Connection};
+use topo::event_modules::connection::local_signing_key;
 use topo::event_modules::connection::wrap::{wrap_bootstrap, InnerCanonicalEvent};
 use topo::event_modules::sync::dep_cache;
 use topo::event_modules::sync::maintenance::{
@@ -31,20 +33,27 @@ use topo::runtime::control_loop::{handle_inbound_bytes, InboundOrigin, InboundOu
 use topo::state::db::control_loop_tables::ensure_schema as ensure_substrate_schema;
 use topo::state::events_canonical::{upsert_event, EventRow, EventScope, EventStatus};
 
-const SENDER: EndpointId = [11u8; 32];
-const RECIPIENT: EndpointId = [22u8; 32];
+fn sender_sk() -> SigningKey {
+    SigningKey::from_bytes(&[0x11u8; 32])
+}
+fn recipient_sk() -> SigningKey {
+    SigningKey::from_bytes(&[0x22u8; 32])
+}
+fn sender_eid() -> EndpointId {
+    sender_sk().verifying_key().to_bytes()
+}
+fn recipient_eid() -> EndpointId {
+    recipient_sk().verifying_key().to_bytes()
+}
 const TEST_WORKSPACE: WorkspaceId = [0xAAu8; 32];
 
 fn open_db() -> Connection {
     let c = Connection::open_in_memory().unwrap();
     ensure_substrate_schema(&c).unwrap();
-    // Tenant projector schema (for the simple Applied path).
-    topo::event_modules::tenant::ensure_schema(&c).unwrap();
-    // Negentropy / dep_cache schema is set up lazily by the maintenance
-    // helper, but ensure it here so the assertions can read the tables
-    // even if no maintenance has yet run.
-    negentropy_tree::ensure_schema(&c).unwrap();
-    dep_cache::ensure_schema(&c).unwrap();
+    // Registry-driven module schema bring-up.
+    topo::event_modules::ensure_all_module_schemas(&c).unwrap();
+    let path = c.path().unwrap_or("").to_string();
+    local_signing_key::install_for_path(&path, recipient_sk());
     c
 }
 
@@ -61,7 +70,7 @@ fn wrap_one(workspace_id: WorkspaceId, blob: Vec<u8>) -> Vec<u8> {
         workspace_id,
         bytes: blob,
     }];
-    let frame = wrap_bootstrap(SENDER, RECIPIENT, &inner).unwrap();
+    let frame = wrap_bootstrap(&sender_sk(), recipient_eid(), &inner).unwrap();
     frame.as_bytes().to_vec()
 }
 
@@ -73,7 +82,7 @@ fn blake3_id(bytes: &[u8]) -> BlakeId {
 
 fn origin() -> InboundOrigin {
     InboundOrigin {
-        remote_endpoint_id: Some(RECIPIENT),
+        remote_endpoint_id: Some(sender_eid()),
         ip: Some("127.0.0.1".to_string()),
         port: Some(4242),
     }

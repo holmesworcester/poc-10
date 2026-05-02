@@ -214,6 +214,21 @@ fn drain_until_empty_or_failed(
         if res.send_failed {
             return DrainOutcome::SendFailed;
         }
+
+        // Round-state quiet detector: stamp last_outbound so the
+        // round-driver tick knows traffic is in-flight on this
+        // connection. Best-effort — failure here doesn't break the
+        // sender drain.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let _ = crate::event_modules::sync::round_state::mark_outbound(
+            db,
+            &connection_id,
+            now_ms,
+        );
+
         // Successful drain — loop and try again in case more rows
         // landed in the outbox while we were sending.
     }

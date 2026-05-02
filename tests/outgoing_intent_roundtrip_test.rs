@@ -209,7 +209,8 @@ async fn intent_to_wire_via_tcp_loopback_round_trip() {
     assert!(!bytes.is_empty(), "Bob's inbound buffer must contain wire bytes");
 
     // Bob unwraps and recovers the event blob.
-    let res = connection_unwrap(&bytes, [0u8; 32], &c).expect("unwrap");
+    let dummy_sk = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
+    let res = connection_unwrap(&bytes, &dummy_sk, &c).expect("unwrap");
     assert_eq!(res.kind, UnwrapKind::ConnectionSecret);
     assert_eq!(res.connection_id, Some(conn_id));
     assert_eq!(res.inner_events.len(), 1);
@@ -253,7 +254,8 @@ fn intent_to_wire_direct_unwrap_round_trip() {
     )
     .unwrap();
 
-    let res = connection_unwrap(frame.as_bytes(), [0u8; 32], &c).unwrap();
+    let dummy_sk2 = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
+    let res = connection_unwrap(frame.as_bytes(), &dummy_sk2, &c).unwrap();
     assert_eq!(res.kind, UnwrapKind::ConnectionSecret);
     assert_eq!(res.connection_id, Some(conn_id));
     assert_eq!(res.inner_events.len(), 1);

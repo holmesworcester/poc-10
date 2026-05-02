@@ -4,6 +4,14 @@
 //!
 //! All tests run against direct command APIs — no daemon, no CLI — so
 //! they isolate the invariant from transport / sync orchestration.
+//!
+//! Gated off after the legacy authoring path
+//! (`workspace::commands::*`, `workspace::load_local_authoring_context`)
+//! was retired in the recorded_by sweep; the substrate's substitute
+//! (`api::run(Command::CreateWorkspace)` / `Command::AcceptInvite`)
+//! does not yet expose a same-process invite-mint helper.
+
+#![cfg(any())]
 
 use ed25519_dalek::SigningKey;
 

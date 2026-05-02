@@ -28,9 +28,11 @@
 pub mod compare;
 pub mod dep_cache;
 pub mod have;
+pub mod job;
 pub mod maintenance;
 pub mod need;
 pub mod negentropy_tree;
+pub mod round_state;
 
 pub use compare::{CompareEvent, COMPARE_TYPE_CODE};
 pub use have::{HaveEvent, HAVE_TYPE_CODE};
@@ -46,5 +48,6 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     need::ensure_schema(conn)?;
     negentropy_tree::ensure_schema(conn)?;
     dep_cache::ensure_schema(conn)?;
+    round_state::ensure_schema(conn)?;
     Ok(())
 }

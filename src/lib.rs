@@ -3,12 +3,11 @@ pub mod runtime;
 pub mod shared;
 pub mod state;
 
-pub use runtime::control::{assert, display, local_intents, rpc, service};
+pub use runtime::control::{api, assert, rpc, service};
 pub use runtime::control_loop;
 pub use runtime::transport_v2;
 pub use shared::{contracts, crypto, protocol, tuning};
 pub use state::db;
-pub use state::pipeline as event_pipeline;
 pub use state::projection;
 
 #[cfg(test)]

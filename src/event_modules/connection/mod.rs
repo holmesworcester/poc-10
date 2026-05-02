@@ -111,6 +111,8 @@
 //! per `plan.md` lines 204-218.
 
 pub mod event;
+pub mod local_signing_key;
+pub mod post_apply;
 pub mod projector;
 pub mod registry_meta;
 pub mod secrets;

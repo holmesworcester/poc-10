@@ -7,7 +7,12 @@ use crate::crypto::{event_id_from_base64, EventId};
 use crate::event_modules::{parse_event, ParsedEvent};
 
 // ---------------------------------------------------------------------------
-// Identity helpers (moved from service.rs)
+// Identity helpers
+//
+// These helpers retain a peer_id-shaped scope ("the workspace's primary
+// peer") for legacy authoring paths. The substrate-facing query helpers
+// below (count, list_event_ids, list_peers, ...) take a workspace_id
+// directly — `recorded_by` retired (poc-9 plan).
 // ---------------------------------------------------------------------------
 
 fn decode_signing_key(key_bytes: Vec<u8>) -> Result<SigningKey, String> {
@@ -17,25 +22,17 @@ fn decode_signing_key(key_bytes: Vec<u8>) -> Result<SigningKey, String> {
     Ok(SigningKey::from_bytes(&key_arr))
 }
 
-fn has_accepted_workspace_binding(
-    db: &Connection,
-    recorded_by: &str,
-) -> Result<bool, rusqlite::Error> {
+fn has_any_workspace_binding(db: &Connection) -> Result<bool, rusqlite::Error> {
     db.query_row(
-        "SELECT EXISTS(
-             SELECT 1
-             FROM invites_accepted
-             WHERE recorded_by = ?1
-             LIMIT 1
-         )",
-        rusqlite::params![recorded_by],
+        "SELECT EXISTS(SELECT 1 FROM invites_accepted LIMIT 1)",
+        [],
         |row| row.get(0),
     )
 }
 
 fn load_local_peer_signer_from_recorded_event(
     db: &Connection,
-    recorded_by: &str,
+    peer_id: &str,
 ) -> Result<Option<(EventId, SigningKey)>, Box<dyn std::error::Error + Send + Sync>> {
     let blob: Option<Vec<u8>> = db
         .query_row(
@@ -46,7 +43,7 @@ fn load_local_peer_signer_from_recorded_event(
                AND e.event_type = 'peer_secret'
              ORDER BY re.recorded_at DESC, re.id DESC
              LIMIT 1",
-            rusqlite::params![recorded_by],
+            rusqlite::params![peer_id],
             |row| row.get(0),
         )
         .optional()?;
@@ -66,13 +63,11 @@ fn load_local_peer_signer_from_recorded_event(
 
 /// Load the local peer signer from peer_secrets.
 ///
-/// Plan.md round-9 step 4: `peer_secrets` is keyed by `(workspace_id,
-/// peer_id)`. The caller passes the local peer_id (transport
-/// fingerprint hex), which is the per-tenant scope used everywhere
-/// else.
+/// `peer_id` is the workspace's primary peer fingerprint (hex). This is the
+/// legacy CLI authoring entry point — the substrate kernel never calls it.
 pub fn load_local_peer_signer(
     db: &Connection,
-    recorded_by: &str,
+    peer_id: &str,
 ) -> Result<Option<(EventId, SigningKey)>, Box<dyn std::error::Error + Send + Sync>> {
     if let Some((eid_b64, key_bytes)) = db
         .query_row(
@@ -81,7 +76,7 @@ pub fn load_local_peer_signer(
              WHERE peer_id = ?1
              ORDER BY created_at DESC, secret_event_id DESC
              LIMIT 1",
-            rusqlite::params![recorded_by],
+            rusqlite::params![peer_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )
         .optional()?
@@ -91,7 +86,7 @@ pub fn load_local_peer_signer(
             .ok_or_else(|| "bad local peer signer event_id".to_string())?;
         return Ok(Some((eid, signing_key)));
     }
-    if let Some(signer) = load_local_peer_signer_from_recorded_event(db, recorded_by)? {
+    if let Some(signer) = load_local_peer_signer_from_recorded_event(db, peer_id)? {
         return Ok(Some(signer));
     }
     Ok(None)
@@ -100,15 +95,15 @@ pub fn load_local_peer_signer(
 /// Like `load_local_peer_signer` but returns an error if no signer is found.
 pub fn load_local_peer_signer_required(
     db: &Connection,
-    recorded_by: &str,
+    peer_id: &str,
 ) -> Result<(EventId, SigningKey), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(signer) = load_local_peer_signer(db, recorded_by)? {
+    if let Some(signer) = load_local_peer_signer(db, peer_id)? {
         return Ok(signer);
     }
 
-    if has_accepted_workspace_binding(db, recorded_by)? {
+    if has_any_workspace_binding(db)? {
         return Err(
-            "workspace has not completed initial sync yet — invite accepted for this tenant, but the local peer identity is not available yet"
+            "workspace has not completed initial sync yet — invite accepted, but the local peer identity is not available yet"
                 .into(),
         );
     }
@@ -117,12 +112,9 @@ pub fn load_local_peer_signer_required(
 }
 
 /// Resolve the user_event_id for a specific signer from the peers_shared table.
-///
-/// Plan.md Stage 2: peers_shared is keyed on (workspace_id, event_id). The
-/// signer_eid alone is enough to locate the row globally.
 pub fn resolve_user_event_id(
     db: &Connection,
-    recorded_by: &str,
+    _workspace_id: &str,
     signer_eid: &EventId,
 ) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
     let signer_b64 = crate::crypto::event_id_to_base64(signer_eid);
@@ -138,8 +130,7 @@ pub fn resolve_user_event_id(
             .ok_or_else(|| "invalid user_event_id in peers_shared".into());
     }
 
-    // Fallback: parse the signer event blob directly. This supports local-first
-    // flows where peer signer material exists before peers_shared projects.
+    // Fallback: parse the signer event blob directly.
     let signer_blob: Vec<u8> = db
         .query_row(
             "SELECT blob FROM events WHERE event_id = ?1 LIMIT 1",
@@ -157,87 +148,62 @@ pub fn resolve_user_event_id(
     if let crate::event_modules::ParsedEvent::PeerShared(ps) = parsed {
         Ok(ps.user_event_id)
     } else {
-        let _ = recorded_by;
         Err("signer event is not peer_shared".into())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Projection queries
+// Projection queries (workspace-scoped)
 // ---------------------------------------------------------------------------
 
-/// Plan.md Stage 2: peers_shared is now keyed by (workspace_id, event_id).
-/// Per-tenant scoping is done via invites_accepted (still recorded_by-keyed).
-pub fn count(db: &Connection, recorded_by: &str) -> Result<i64, rusqlite::Error> {
+pub fn count(db: &Connection, workspace_id: &str) -> Result<i64, rusqlite::Error> {
     db.query_row(
-        "SELECT COUNT(*) FROM peers_shared ps
-         WHERE EXISTS (
-             SELECT 1 FROM invites_accepted ia
-             WHERE ia.recorded_by = ?1
-               AND ia.workspace_id = ps.workspace_id
-         )",
-        rusqlite::params![recorded_by],
+        "SELECT COUNT(*) FROM peers_shared WHERE workspace_id = ?1",
+        rusqlite::params![workspace_id],
         |row| row.get(0),
     )
 }
 
-/// List event_ids for all peer_shared rows.
-pub fn list_event_ids(db: &Connection, recorded_by: &str) -> Result<Vec<String>, rusqlite::Error> {
+/// List event_ids for all peer_shared rows in a workspace.
+pub fn list_event_ids(db: &Connection, workspace_id: &str) -> Result<Vec<String>, rusqlite::Error> {
     let mut stmt = db.prepare(
-        "SELECT ps.event_id FROM peers_shared ps
-         WHERE EXISTS (
-             SELECT 1 FROM invites_accepted ia
-             WHERE ia.recorded_by = ?1
-               AND ia.workspace_id = ps.workspace_id
-         )",
+        "SELECT event_id FROM peers_shared WHERE workspace_id = ?1",
     )?;
     let rows = stmt
-        .query_map(rusqlite::params![recorded_by], |row| {
+        .query_map(rusqlite::params![workspace_id], |row| {
             row.get::<_, String>(0)
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
-/// Return the first peer_shared event_id, if any.
+/// Return the first peer_shared event_id for a workspace, if any.
 pub fn first_event_id(
     db: &Connection,
-    recorded_by: &str,
+    workspace_id: &str,
 ) -> Result<Option<String>, rusqlite::Error> {
     use rusqlite::OptionalExtension;
     db.query_row(
-        "SELECT ps.event_id FROM peers_shared ps
-         WHERE EXISTS (
-             SELECT 1 FROM invites_accepted ia
-             WHERE ia.recorded_by = ?1
-               AND ia.workspace_id = ps.workspace_id
-         )
-         LIMIT 1",
-        rusqlite::params![recorded_by],
+        "SELECT event_id FROM peers_shared WHERE workspace_id = ?1 LIMIT 1",
+        rusqlite::params![workspace_id],
         |row| row.get::<_, String>(0),
     )
     .optional()
 }
 
 /// Resolve a projected peer_shared event_id by transport fingerprint.
-///
-/// Plan.md round-9 step 5A: peers_shared no longer has a `recorded_by`
-/// shadow column. Per-tenant scoping resolves the caller's workspace_id
-/// from `invites_accepted` and filters peers_shared by `workspace_id`.
 pub fn resolve_event_id_by_transport_fingerprint(
     db: &Connection,
-    recorded_by: &str,
+    workspace_id: &str,
     transport_fingerprint: &[u8; 32],
 ) -> Result<Option<String>, rusqlite::Error> {
     db.query_row(
-        "SELECT ps.event_id
-         FROM peers_shared ps
-         JOIN invites_accepted ia
-           ON ia.workspace_id = ps.workspace_id
-         WHERE ia.recorded_by = ?1
-           AND ps.transport_fingerprint = ?2
+        "SELECT event_id
+         FROM peers_shared
+         WHERE workspace_id = ?1
+           AND transport_fingerprint = ?2
          LIMIT 1",
-        rusqlite::params![recorded_by, transport_fingerprint.as_slice()],
+        rusqlite::params![workspace_id, transport_fingerprint.as_slice()],
         |row| row.get::<_, String>(0),
     )
     .optional()
@@ -251,20 +217,19 @@ pub struct TenantRow {
 }
 
 /// List peer tenants with joined username from users table.
-pub fn list_tenants(db: &Connection, recorded_by: &str) -> Result<Vec<TenantRow>, rusqlite::Error> {
+pub fn list_tenants(
+    db: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<TenantRow>, rusqlite::Error> {
     let mut stmt = db.prepare(
         "SELECT ps.event_id, COALESCE(ps.device_name, ''), COALESCE(ps.user_event_id, ''),
                 COALESCE(u.username, '')
          FROM peers_shared ps
          LEFT JOIN users u ON ps.user_event_id = u.event_id
-         WHERE EXISTS (
-             SELECT 1 FROM invites_accepted ia
-             WHERE ia.recorded_by = ?1
-               AND ia.workspace_id = ps.workspace_id
-         )",
+         WHERE ps.workspace_id = ?1",
     )?;
     let rows = stmt
-        .query_map(rusqlite::params![recorded_by], |row| {
+        .query_map(rusqlite::params![workspace_id], |row| {
             Ok(TenantRow {
                 event_id: row.get(0)?,
                 device_name: row.get(1)?,
@@ -291,9 +256,9 @@ pub struct TenantItem {
 /// List tenant items (response type) from the database.
 pub fn list_tenant_items(
     db: &Connection,
-    recorded_by: &str,
+    workspace_id: &str,
 ) -> Result<Vec<TenantItem>, rusqlite::Error> {
-    let rows = list_tenants(db, recorded_by)?;
+    let rows = list_tenants(db, workspace_id)?;
     Ok(rows
         .into_iter()
         .map(|row| TenantItem {
@@ -321,12 +286,8 @@ pub struct PeerItem {
     pub endpoint: Option<String>,
 }
 
-/// List all known peers with local/remote status and last-observed endpoint.
-///
-/// Joins `peers_shared` → `users` for display names, checks
-/// `local_transport_creds` for local flag, and picks the most recent
-/// non-expired `peer_endpoint_observations` row for endpoint info.
-pub fn list_peers(db: &Connection, recorded_by: &str) -> Result<Vec<PeerItem>, rusqlite::Error> {
+/// List all known peers in a workspace with local/remote status and last-observed endpoint.
+pub fn list_peers(db: &Connection, workspace_id: &str) -> Result<Vec<PeerItem>, rusqlite::Error> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -344,8 +305,7 @@ pub fn list_peers(db: &Connection, recorded_by: &str) -> Result<Vec<PeerItem>, r
             (
                 SELECT e.origin_ip || ':' || e.origin_port
                 FROM peer_endpoint_observations e
-                WHERE e.recorded_by = ?1
-                  AND e.via_peer_id = lower(hex(ps.transport_fingerprint))
+                WHERE e.via_peer_id = lower(hex(ps.transport_fingerprint))
                   AND e.expires_at > ?2
                 ORDER BY e.observed_at DESC
                 LIMIT 1
@@ -353,15 +313,11 @@ pub fn list_peers(db: &Connection, recorded_by: &str) -> Result<Vec<PeerItem>, r
          FROM peers_shared ps
          LEFT JOIN users u
            ON ps.user_event_id = u.event_id
-         WHERE EXISTS (
-             SELECT 1 FROM invites_accepted ia
-             WHERE ia.recorded_by = ?1
-               AND ia.workspace_id = ps.workspace_id
-         )
+         WHERE ps.workspace_id = ?1
          ORDER BY is_local DESC, ps.event_id",
     )?;
     let rows = stmt
-        .query_map(rusqlite::params![recorded_by, now_ms], |row| {
+        .query_map(rusqlite::params![workspace_id, now_ms], |row| {
             Ok(PeerItem {
                 peer_id: row.get(0)?,
                 device_name: row.get(1)?,
@@ -382,17 +338,12 @@ pub struct IdentityResponse {
     pub peer_shared_event_id: Option<String>,
 }
 
-/// Get combined identity info for a specific peer.
-///
-/// Finds the local peer's own peers_shared entry by matching
-/// transport_fingerprint to the recorded_by peer_id, then resolves
-/// the user via that entry's user_event_id.
-pub fn identity(db: &Connection, recorded_by: &str) -> Result<IdentityResponse, rusqlite::Error> {
+/// Get combined identity info for a specific peer (legacy CLI-shaped).
+pub fn identity(db: &Connection, peer_id: &str) -> Result<IdentityResponse, rusqlite::Error> {
     use rusqlite::OptionalExtension;
 
-    // Find the peers_shared row whose transport fingerprint matches recorded_by
-    // (the local peer's own entry, scoped via local_transport_creds and via
-    // the workspace this tenant has accepted into).
+    // Find the peers_shared row whose transport fingerprint matches the
+    // given peer_id (legacy hex SPKI fingerprint).
     let own_peer: Option<(String, Option<String>)> = db
         .query_row(
             "SELECT ps.event_id, ps.user_event_id
@@ -400,13 +351,8 @@ pub fn identity(db: &Connection, recorded_by: &str) -> Result<IdentityResponse, 
              JOIN local_transport_creds c
                ON c.peer_id = lower(hex(ps.transport_fingerprint))
               AND c.peer_id = ?1
-             WHERE EXISTS (
-                 SELECT 1 FROM invites_accepted ia
-                 WHERE ia.recorded_by = ?1
-                   AND ia.workspace_id = ps.workspace_id
-             )
              LIMIT 1",
-            rusqlite::params![recorded_by],
+            rusqlite::params![peer_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()?;
@@ -417,302 +363,8 @@ pub fn identity(db: &Connection, recorded_by: &str) -> Result<IdentityResponse, 
     };
 
     Ok(IdentityResponse {
-        transport_fingerprint: recorded_by.to_string(),
+        transport_fingerprint: peer_id.to_string(),
         user_event_id,
         peer_shared_event_id,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::crypto::event_id_to_base64;
-    use crate::crypto::spki_fingerprint_from_ed25519_pubkey;
-    use crate::db::{open_in_memory, schema::create_tables};
-    use crate::event_modules::ShareScope;
-    use crate::event_modules::{encode_event, PeerSecretEvent};
-    use crate::state::db::store::{insert_event, insert_recorded_event};
-
-    fn insert_invite_accepted(conn: &Connection, recorded_by: &str, workspace_id: &str) {
-        conn.execute(
-            "INSERT INTO invites_accepted
-             (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                recorded_by,
-                format!("ia-{}-{}", recorded_by, workspace_id),
-                format!("tenant-{}", recorded_by),
-                format!("invite-{}", workspace_id),
-                workspace_id,
-                1i64
-            ],
-        )
-        .expect("insert invites_accepted");
-    }
-
-    #[test]
-    fn resolve_event_id_by_transport_fingerprint_uses_projected_index() {
-        let conn = open_in_memory().expect("open in-memory db");
-        create_tables(&conn).expect("create tables");
-
-        let recorded_by = "tenant-a";
-        let event_id = "ps-event-1";
-        let public_key: [u8; 32] = [0x11; 32];
-        let transport_fingerprint = spki_fingerprint_from_ed25519_pubkey(&public_key);
-
-        conn.execute(
-            "INSERT INTO peers_shared
-             (recorded_by, event_id, workspace_id, public_key, transport_fingerprint)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                recorded_by,
-                event_id,
-                "ws-x",
-                public_key.as_slice(),
-                transport_fingerprint.as_slice(),
-            ],
-        )
-        .expect("insert peers_shared row");
-
-        let resolved =
-            resolve_event_id_by_transport_fingerprint(&conn, recorded_by, &transport_fingerprint)
-                .expect("resolve event id");
-        assert_eq!(resolved.as_deref(), Some(event_id));
-    }
-
-    #[test]
-    fn list_peers_returns_local_and_remote() {
-        let conn = open_in_memory().expect("open in-memory db");
-        create_tables(&conn).expect("create tables");
-
-        let recorded_by = "tenant-a";
-        let workspace_id = "ws-1";
-        insert_invite_accepted(&conn, recorded_by, workspace_id);
-
-        // Insert a local peer (has local_transport_creds matched via transport_fingerprint)
-        let local_tf: [u8; 32] = [0x11; 32];
-        let local_tf_hex = hex::encode(local_tf);
-        conn.execute(
-            "INSERT INTO peers_shared (recorded_by, event_id, workspace_id, public_key, transport_fingerprint, device_name, user_event_id)
-             VALUES (?1, 'local-peer', ?2, X'1111111111111111111111111111111111111111111111111111111111111111', ?3, 'my-laptop', 'user-1')",
-            rusqlite::params![recorded_by, workspace_id, local_tf.as_slice()],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO local_transport_creds (peer_id, cert_der, key_der, created_at, source)
-             VALUES (?1, X'AA', X'BB', 1000, 'random')",
-            rusqlite::params![local_tf_hex],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO users (recorded_by, event_id, workspace_id, public_key, username)
-             VALUES (?1, 'user-1', ?2, X'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'alice')",
-            rusqlite::params![recorded_by, workspace_id],
-        ).unwrap();
-
-        // Insert a remote peer (no local creds)
-        conn.execute(
-            "INSERT INTO peers_shared (recorded_by, event_id, workspace_id, public_key, device_name, user_event_id)
-             VALUES (?1, 'remote-peer', ?2, X'2222222222222222222222222222222222222222222222222222222222222222', 'bobs-phone', 'user-2')",
-            rusqlite::params![recorded_by, workspace_id],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO users (recorded_by, event_id, workspace_id, public_key, username)
-             VALUES (?1, 'user-2', ?2, X'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', 'bob')",
-            rusqlite::params![recorded_by, workspace_id],
-        ).unwrap();
-
-        let peers = list_peers(&conn, recorded_by).unwrap();
-        assert_eq!(peers.len(), 2);
-
-        // Local peer should come first (ORDER BY is_local DESC)
-        assert_eq!(peers[0].peer_id, "local-peer");
-        assert!(peers[0].local);
-        assert_eq!(peers[0].username, "alice");
-        assert_eq!(peers[0].device_name, "my-laptop");
-        assert!(peers[0].endpoint.is_none());
-
-        assert_eq!(peers[1].peer_id, "remote-peer");
-        assert!(!peers[1].local);
-        assert_eq!(peers[1].username, "bob");
-        assert_eq!(peers[1].device_name, "bobs-phone");
-    }
-
-    #[test]
-    fn list_peers_includes_endpoint_observations() {
-        let conn = open_in_memory().expect("open in-memory db");
-        create_tables(&conn).expect("create tables");
-
-        let recorded_by = "tenant-a";
-        let workspace_id = "ws-1";
-        insert_invite_accepted(&conn, recorded_by, workspace_id);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-
-        // transport_fingerprint blob whose hex is used as via_peer_id
-        let tf: [u8; 32] = [0x33; 32];
-        let tf_hex = hex::encode(tf);
-
-        conn.execute(
-            "INSERT INTO peers_shared (recorded_by, event_id, workspace_id, public_key, transport_fingerprint, device_name)
-             VALUES (?1, 'peer-x', ?2, X'3333333333333333333333333333333333333333333333333333333333333333', ?3, 'device-x')",
-            rusqlite::params![recorded_by, workspace_id, tf.as_slice()],
-        ).unwrap();
-
-        // Endpoint observation uses hex(transport_fingerprint) as via_peer_id
-        conn.execute(
-            "INSERT INTO peer_endpoint_observations
-             (recorded_by, via_peer_id, origin_ip, origin_port, observed_at, expires_at)
-             VALUES (?1, ?2, '10.0.0.5', 4433, ?3, ?4)",
-            rusqlite::params![recorded_by, tf_hex, now_ms - 1000, now_ms + 86400000],
-        )
-        .unwrap();
-
-        let peers = list_peers(&conn, recorded_by).unwrap();
-        assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].endpoint.as_deref(), Some("10.0.0.5:4433"));
-    }
-
-    #[test]
-    fn list_peers_excludes_expired_endpoints() {
-        let conn = open_in_memory().expect("open in-memory db");
-        create_tables(&conn).expect("create tables");
-
-        let recorded_by = "tenant-a";
-        let workspace_id = "ws-1";
-        insert_invite_accepted(&conn, recorded_by, workspace_id);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-
-        let tf: [u8; 32] = [0x44; 32];
-        let tf_hex = hex::encode(tf);
-
-        conn.execute(
-            "INSERT INTO peers_shared (recorded_by, event_id, workspace_id, public_key, transport_fingerprint, device_name)
-             VALUES (?1, 'peer-y', ?2, X'4444444444444444444444444444444444444444444444444444444444444444', ?3, 'device-y')",
-            rusqlite::params![recorded_by, workspace_id, tf.as_slice()],
-        ).unwrap();
-
-        // Add an expired endpoint observation
-        conn.execute(
-            "INSERT INTO peer_endpoint_observations
-             (recorded_by, via_peer_id, origin_ip, origin_port, observed_at, expires_at)
-             VALUES (?1, ?2, '10.0.0.6', 5555, ?3, ?4)",
-            rusqlite::params![recorded_by, tf_hex, now_ms - 100000, now_ms - 1000],
-        )
-        .unwrap();
-
-        let peers = list_peers(&conn, recorded_by).unwrap();
-        assert_eq!(peers.len(), 1);
-        assert!(
-            peers[0].endpoint.is_none(),
-            "expired endpoint should not appear"
-        );
-    }
-
-    #[test]
-    fn list_peers_empty_db() {
-        let conn = open_in_memory().expect("open in-memory db");
-        create_tables(&conn).expect("create tables");
-        let peers = list_peers(&conn, "no-such-tenant").unwrap();
-        assert!(peers.is_empty());
-    }
-
-    #[test]
-    fn load_local_peer_signer_required_reports_no_identity_for_fresh_db() {
-        let conn = open_in_memory().expect("open in-memory db");
-        create_tables(&conn).expect("create tables");
-
-        let err = load_local_peer_signer_required(&conn, "fresh-tenant")
-            .expect_err("fresh db should not have a local peer signer");
-        assert!(
-            err.to_string()
-                .contains("no identity — run `topo create-workspace` first"),
-            "unexpected error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn load_local_peer_signer_required_reports_initial_sync_for_partial_join() {
-        let conn = open_in_memory().expect("open in-memory db");
-        create_tables(&conn).expect("create tables");
-
-        conn.execute(
-            "INSERT INTO invites_accepted
-             (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                "pending-tenant",
-                "ia-1",
-                "tenant-evt-1",
-                "invite-evt-1",
-                event_id_to_base64(&[0x55; 32]),
-                1i64
-            ],
-        )
-        .expect("insert invite_accepted");
-
-        let err = load_local_peer_signer_required(&conn, "pending-tenant")
-            .expect_err("partial join should not have a local peer signer yet");
-        assert!(
-            err.to_string()
-                .contains("workspace has not completed initial sync yet"),
-            "unexpected error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn load_local_peer_signer_uses_recorded_peer_secret_during_initial_sync() {
-        let conn = open_in_memory().expect("open in-memory db");
-        create_tables(&conn).expect("create tables");
-
-        conn.execute(
-            "INSERT INTO invites_accepted
-             (recorded_by, event_id, tenant_event_id, invite_event_id, workspace_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                "pending-tenant",
-                "ia-1",
-                "tenant-evt-1",
-                "invite-evt-1",
-                event_id_to_base64(&[0x55; 32]),
-                1i64
-            ],
-        )
-        .expect("insert invite_accepted");
-
-        let signer_event_id = [0x33; 32];
-        let private_key_bytes = [0x44; 32];
-        let event = ParsedEvent::PeerSecret(PeerSecretEvent {
-            created_at_ms: 2,
-            workspace_id: [0x55; 32],
-            signer_event_id,
-            private_key_bytes,
-        });
-        let blob = encode_event(&event).expect("encode peer_secret");
-        let event_id = [0x66; 32];
-        insert_event(
-            &conn,
-            &event_id,
-            "peer_secret",
-            &blob,
-            ShareScope::Local,
-            2,
-            2,
-        )
-        .expect("insert event");
-        insert_recorded_event(&conn, "pending-tenant", &event_id, 2, "local")
-            .expect("insert recorded event");
-
-        let (loaded_signer_event_id, signing_key) =
-            load_local_peer_signer_required(&conn, "pending-tenant")
-                .expect("recorded peer_secret should satisfy bootstrap auth");
-        assert_eq!(loaded_signer_event_id, signer_event_id);
-        assert_eq!(signing_key.to_bytes(), private_key_bytes);
-    }
 }

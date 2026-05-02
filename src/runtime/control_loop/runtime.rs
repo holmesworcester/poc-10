@@ -143,6 +143,18 @@ impl ControlLoopRuntime {
         // 3. Recovery.
         let _report = recover_on_startup(&conn).map_err(RuntimeError::Schema)?;
 
+        // 3b. Register periodic event-module jobs. Each event module
+        //     that wants its own JobTick cadence calls `ensure_schedule`
+        //     here. The kernel doesn't own job names or cadence — it
+        //     just runs the named job's body when its schedule fires
+        //     (see `dispatcher_loop::run_job_body`).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        crate::event_modules::sync::job::ensure_schedule(&conn, now)
+            .map_err(RuntimeError::Schema)?;
+
         let db = Arc::new(Mutex::new(conn));
 
         // 4. Default handlers (kept for OutboxWake dispatcher tests).

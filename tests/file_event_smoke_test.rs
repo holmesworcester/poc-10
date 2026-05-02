@@ -12,8 +12,10 @@
 //!  3. file_slice_verifies_against_file_outboard
 //!  4. file_slice_with_invalid_hash_rejects
 
+use ed25519_dalek::SigningKey;
 use rusqlite::{params, Connection};
 use topo::crypto::bao_verify;
+use topo::event_modules::connection::local_signing_key;
 use topo::event_modules::{
     encode_event, file::FileEvent, file_slice::FileSliceEvent, ParsedEvent,
 };
@@ -25,22 +27,35 @@ use topo::event_modules::connection::wrap::{wrap_bootstrap, InnerCanonicalEvent}
 use topo::state::db::control_loop_tables::ensure_schema as ensure_substrate_schema;
 use topo::state::events_canonical::{upsert_event, EventRow, EventScope, EventStatus};
 
-const SENDER: EndpointId = [11u8; 32];
-const RECIPIENT: EndpointId = [22u8; 32];
+fn sender_sk() -> SigningKey {
+    SigningKey::from_bytes(&[0x11u8; 32])
+}
+fn recipient_sk() -> SigningKey {
+    SigningKey::from_bytes(&[0x22u8; 32])
+}
+fn sender_eid() -> EndpointId {
+    sender_sk().verifying_key().to_bytes()
+}
+fn recipient_eid() -> EndpointId {
+    recipient_sk().verifying_key().to_bytes()
+}
+
 const TEST_WORKSPACE_ID: [u8; 32] = [0x77u8; 32];
 const TEST_SIGNER_ID: [u8; 32] = [0x88u8; 32];
 
 fn open_db() -> Connection {
     let c = Connection::open_in_memory().unwrap();
     ensure_substrate_schema(&c).unwrap();
-    topo::event_modules::file::ensure_schema(&c).unwrap();
-    topo::event_modules::file_slice::ensure_schema(&c).unwrap();
+    // Registry-driven module schema bring-up.
+    topo::event_modules::ensure_all_module_schemas(&c).unwrap();
+    let path = c.path().unwrap_or("").to_string();
+    local_signing_key::install_for_path(&path, recipient_sk());
     c
 }
 
 fn origin() -> InboundOrigin {
     InboundOrigin {
-        remote_endpoint_id: Some(RECIPIENT),
+        remote_endpoint_id: Some(sender_eid()),
         ip: Some("127.0.0.1".to_string()),
         port: Some(4242),
     }
@@ -51,7 +66,7 @@ fn wrap_one_with_ws(blob: Vec<u8>, ws: [u8; 32]) -> Vec<u8> {
         workspace_id: ws,
         bytes: blob,
     }];
-    let frame = wrap_bootstrap(SENDER, RECIPIENT, &inner).unwrap();
+    let frame = wrap_bootstrap(&sender_sk(), recipient_eid(), &inner).unwrap();
     frame.as_bytes().to_vec()
 }
 
