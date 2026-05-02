@@ -82,15 +82,17 @@ pub fn apply_ready_event_in_tx(
 
 pub fn start_sync(
     store: &Store,
-    route: connection::commands::TransportRoute,
+    route: connection::request::commands::TransportRoute,
 ) -> Result<IngestResult, String> {
     let mut result = IngestResult::default();
-    let report = sync::commands::start(store, route.connection_id, |bytes| {
-        result.outgoing.push(connection::commands::wrap_connection(
-            store,
-            route.connection_id,
-            bytes,
-        )?);
+    let report = sync::compare::commands::start(store, route.connection_id, |bytes| {
+        result
+            .outgoing
+            .push(connection::request::commands::wrap_connection(
+                store,
+                route.connection_id,
+                bytes,
+            )?);
         Ok(())
     })?;
     result.sent_events += report.sent_events;
@@ -104,8 +106,8 @@ pub fn ingest_frame(
     bytes: Vec<u8>,
     options: IngestOptions,
 ) -> Result<IngestResult, String> {
-    let transit = connection::commands::unwrap_transit(store, &bytes)?;
-    if connection::commands::is_connection_event(&transit.inner) {
+    let transit = connection::request::commands::unwrap_transit(store, &bytes)?;
+    if connection::request::commands::is_connection_event(&transit.inner) {
         return ingest_connection_frame(store, origin, transit.inner, options);
     }
     let connection_id = transit
@@ -121,13 +123,13 @@ fn ingest_connection_frame(
     options: IngestOptions,
 ) -> Result<IngestResult, String> {
     let mut result = IngestResult::default();
-    let connection = connection::commands::ingest_inner(store, bytes)?;
+    let connection = connection::request::commands::ingest_inner(store, bytes)?;
     if let Some(bytes) = connection.response {
         result.outgoing.push(bytes);
     }
     if let Some(connection_id) = connection.connection_id {
         if options.record_transport_target {
-            connection::commands::record_transport_target(store, connection_id, origin)?;
+            connection::request::commands::record_transport_target(store, connection_id, origin)?;
         }
         result.established_connections += 1;
     }
@@ -136,16 +138,18 @@ fn ingest_connection_frame(
 
 fn ingest_sync_frame(
     store: &Store,
-    connection_id: connection::types::ConnectionId,
+    connection_id: connection::shared::types::ConnectionId,
     bytes: &[u8],
 ) -> Result<IngestResult, String> {
     let mut result = IngestResult::default();
-    let report = sync::commands::ingest_frame(store, connection_id, bytes, |bytes| {
-        result.outgoing.push(connection::commands::wrap_connection(
-            store,
-            connection_id,
-            bytes,
-        )?);
+    let report = sync::compare::commands::ingest_frame(store, connection_id, bytes, |bytes| {
+        result
+            .outgoing
+            .push(connection::request::commands::wrap_connection(
+                store,
+                connection_id,
+                bytes,
+            )?);
         Ok(())
     })?;
     admit_received_event_bytes(store, report.received_event_bytes)?;

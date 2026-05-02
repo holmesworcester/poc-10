@@ -1,6 +1,6 @@
 use crate::store::{EventRecord, Store};
 
-use super::content_event::codec::{self, ContentEvent};
+use super::codec::{self, ContentEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerateReport {

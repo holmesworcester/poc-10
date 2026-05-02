@@ -1,7 +1,7 @@
 use crate::store::EventId;
 
-use super::super::projection::{self, Projection};
-use super::super::types::{self, EndpointId};
+use super::super::shared::projection::{self, Projection};
+use super::super::shared::types::{self, EndpointId};
 use super::codec;
 
 pub fn inbound(

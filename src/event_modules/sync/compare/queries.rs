@@ -1,6 +1,6 @@
 use crate::store::{EventId, Store};
 
-use super::compare::codec::{BucketSummary, BUCKETS};
+use super::codec::{BucketSummary, BUCKETS};
 
 pub fn summary(store: &Store) -> Result<[BucketSummary; BUCKETS], String> {
     let mut summary = [BucketSummary::default(); BUCKETS];

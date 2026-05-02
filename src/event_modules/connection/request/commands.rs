@@ -9,10 +9,10 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::store::{EventId, Store};
 
-use super::tables;
-use super::transit::codec::TransitEnvelope;
-use super::types::{self, ConnectionId, EndpointId, TransitNonce};
-use super::{ack, projection, request, transit};
+use super::super::shared::{projection, tables, types};
+use super::super::transit::codec::TransitEnvelope;
+use super::super::{ack, request, transit};
+use types::{ConnectionId, EndpointId, TransitNonce};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invite {

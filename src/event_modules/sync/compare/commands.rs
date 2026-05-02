@@ -1,11 +1,11 @@
 use crate::store::{EventId, Store};
 
-use super::compare::codec::{BucketSummary, CompareEvent, BUCKETS};
-use super::data::codec::DataEvent;
-use super::frame::codec::{self as frame_codec, Frame, SyncItem};
-use super::have_id::codec::HaveIdEvent;
-use super::need_id::codec::NeedIdEvent;
-use super::{compare, queries};
+use super::super::data::codec::DataEvent;
+use super::super::frame::codec::{self as frame_codec, Frame, SyncItem};
+use super::super::have_id::codec::HaveIdEvent;
+use super::super::need_id::codec::NeedIdEvent;
+use super::codec::{BucketSummary, CompareEvent, BUCKETS};
+use super::{projector, queries};
 
 const FRAME_TARGET_BYTES: usize = 32 * 1024 * 1024;
 const FRAME_HEADER_BYTES: usize = 14;
@@ -138,7 +138,7 @@ fn have_items_for_compare(
     remote: [BucketSummary; BUCKETS],
 ) -> Result<Vec<SyncItem>, String> {
     let mut items = Vec::new();
-    for bucket in compare::projector::differing_buckets(&local, &remote) {
+    for bucket in projector::differing_buckets(&local, &remote) {
         let ids = queries::ids_in_bucket(store, bucket)?;
         for id in ids {
             items.push(SyncItem::HaveId(HaveIdEvent {

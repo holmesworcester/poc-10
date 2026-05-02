@@ -60,7 +60,7 @@ fn event_modules_are_directories() {
 }
 
 #[test]
-fn domain_modules_do_not_hide_event_type_codecs_or_projectors() {
+fn domain_modules_contain_only_child_modules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_modules");
     let mut offenders = Vec::new();
     for domain in std::fs::read_dir(&root).expect("read event modules") {
@@ -68,9 +68,9 @@ fn domain_modules_do_not_hide_event_type_codecs_or_projectors() {
         if !path.is_dir() {
             continue;
         }
-        for forbidden in ["codec.rs", "projector.rs"] {
-            let candidate = path.join(forbidden);
-            if candidate.exists() {
+        for entry in std::fs::read_dir(&path).expect("read domain module") {
+            let candidate = entry.expect("dir entry").path();
+            if candidate.is_file() && !candidate.file_name().is_some_and(|name| name == "mod.rs") {
                 offenders.push(candidate.strip_prefix(&root).unwrap().display().to_string());
             }
         }
@@ -78,7 +78,7 @@ fn domain_modules_do_not_hide_event_type_codecs_or_projectors() {
 
     assert!(
         offenders.is_empty(),
-        "domain modules may have commands/queries/tables, but event codecs/projectors must be nested by event type:\n{}",
+        "domain folders are namespaces only; put commands/codecs/projectors/tables in the most relevant child module:\n{}",
         offenders.join("\n")
     );
 }

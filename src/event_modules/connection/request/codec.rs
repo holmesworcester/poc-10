@@ -1,6 +1,6 @@
 use crate::wire::{Reader, Writer};
 
-use super::super::types::{EndpointId, EVENT_MAGIC};
+use super::super::shared::types::{EndpointId, EVENT_MAGIC};
 
 pub const TAG: u8 = 1;
 

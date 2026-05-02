@@ -1,6 +1,6 @@
 use crate::wire::{Reader, Writer};
 
-use super::super::types::{ConnectionId, EndpointId, TransitNonce};
+use super::super::shared::types::{ConnectionId, EndpointId, TransitNonce};
 
 const MAGIC: &[u8; 10] = b"TOPOTRANS1";
 const TAG_BOOTSTRAP: u8 = 1;

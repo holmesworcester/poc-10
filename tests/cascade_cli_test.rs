@@ -35,7 +35,11 @@ fn run_cascade(
         .max_timestamp()
         .map_err(|err| format!("load max timestamp: {err}"))?
         .saturating_add(1);
-    let records = bench_dep::commands::build_records(events, deps_per_event, start_timestamp)?;
+    let records = bench_dep::dependent_event::commands::build_records(
+        events,
+        deps_per_event,
+        start_timestamp,
+    )?;
     let dep_edges = records.iter().map(|record| record.dependencies.len()).sum();
     let setup_ms = setup_start.elapsed().as_millis();
 

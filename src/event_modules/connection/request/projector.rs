@@ -1,6 +1,6 @@
 use super::super::ack;
-use super::super::projection::{self, Projection};
-use super::super::types;
+use super::super::shared::projection::{self, Projection};
+use super::super::shared::types;
 use super::codec;
 
 pub fn outbound(bytes: Vec<u8>) -> Result<Projection, String> {
