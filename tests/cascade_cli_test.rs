@@ -1,48 +1,131 @@
-mod cli_harness;
+use std::time::Instant;
 
-use cli_harness::*;
+use topo::event_modules::bench_dep;
+use topo::store::{EventStatusCounts, Store};
+use topo::{control_loop, pipeline};
+
+#[derive(Debug, Clone, PartialEq)]
+struct CascadeReport {
+    events: usize,
+    deps_per_event: usize,
+    dep_edges: usize,
+    setup_ms: u128,
+    blocking_ms: u128,
+    cascade_ms: u128,
+    total_ms: u128,
+    blocked_after_reverse: usize,
+    applied_events: usize,
+    unblocked_events: usize,
+    final_counts: EventStatusCounts,
+}
+
+fn run_cascade(
+    store: &Store,
+    events: usize,
+    deps_per_event: usize,
+    batch_size: usize,
+) -> Result<CascadeReport, String> {
+    if events == 0 {
+        return Err("cascade requires at least one event".to_string());
+    }
+
+    let total_start = Instant::now();
+    let setup_start = Instant::now();
+    let start_timestamp = store
+        .max_timestamp()
+        .map_err(|err| format!("load max timestamp: {err}"))?
+        .saturating_add(1);
+    let records = bench_dep::commands::build_records(events, deps_per_event, start_timestamp)?;
+    let dep_edges = records.iter().map(|record| record.dependencies.len()).sum();
+    let setup_ms = setup_start.elapsed().as_millis();
+
+    let root_count = events.min(deps_per_event);
+    let blocking_start = Instant::now();
+    let reverse_records = records[root_count..].iter().rev().cloned().collect();
+    pipeline::admit_records(store, reverse_records)
+        .map_err(|err| format!("insert reverse dependent events: {err}"))?;
+    let blocked_after_reverse = store
+        .status_counts()
+        .map_err(|err| format!("count blocked events: {err}"))?
+        .blocked;
+    let blocking_ms = blocking_start.elapsed().as_millis();
+
+    let cascade_start = Instant::now();
+    pipeline::admit_records(store, records[..root_count].to_vec())
+        .map_err(|err| format!("insert root events: {err}"))?;
+    let drain = control_loop::drain_until_idle(store, batch_size)?;
+    let cascade_ms = cascade_start.elapsed().as_millis();
+    let final_counts = store
+        .status_counts()
+        .map_err(|err| format!("count final event status: {err}"))?;
+
+    Ok(CascadeReport {
+        events,
+        deps_per_event,
+        dep_edges,
+        setup_ms,
+        blocking_ms,
+        cascade_ms,
+        total_ms: total_start.elapsed().as_millis(),
+        blocked_after_reverse,
+        applied_events: drain.applied_events,
+        unblocked_events: drain.unblocked_events,
+        final_counts,
+    })
+}
 
 #[test]
-fn cascade_cli_blocks_then_unblocks_10k() {
+fn cascade_bench_blocks_then_unblocks_10k() {
     let tmp = tempfile::tempdir().unwrap();
-    let db = temp_db(&tmp, "cascade.db");
-    let out = assert_success(topo(&db, &["cascade", "10000", "--batch", "4096"]));
+    let store = Store::open(tmp.path().join("cascade.db")).unwrap();
+    let report = run_cascade(
+        &store,
+        10_000,
+        bench_dep::dependent_event::codec::MAX_DEPS,
+        control_loop::DEFAULT_READY_BATCH,
+    )
+    .unwrap();
 
-    assert_eq!(line_value(&out, "cascade_events"), "10000");
-    assert_eq!(line_value(&out, "deps_per_event"), "10");
-    assert_eq!(line_value(&out, "blocked_after_reverse"), "9990");
-    assert_eq!(line_value(&out, "applied_events"), "10000");
-    assert_eq!(line_value(&out, "ready_events_remaining"), "0");
-    assert_eq!(line_value(&out, "blocked_events_remaining"), "0");
-    assert_eq!(line_value(&out, "blocked_edges_remaining"), "0");
+    assert_eq!(report.events, 10_000);
+    assert_eq!(report.deps_per_event, 10);
+    assert_eq!(report.blocked_after_reverse, 9_990);
+    assert_eq!(report.applied_events, 10_000);
+    assert_eq!(report.final_counts.ready, 0);
+    assert_eq!(report.final_counts.blocked, 0);
+    assert_eq!(report.final_counts.blocked_edges, 0);
 
-    let rate = line_value(&out, "cascade_events_per_s")
-        .parse::<f64>()
-        .expect("parse cascade rate");
+    let seconds = (report.cascade_ms as f64 / 1000.0).max(0.001);
+    let rate = report.applied_events as f64 / seconds;
     eprintln!("black_box_cascade_10k events_per_s={rate:.0}");
     assert!(rate.is_finite() && rate > 0.0);
 
-    let count_out = assert_success(topo(&db, &["count"]));
-    assert_eq!(line_value(&count_out, "events"), "10000");
-    assert_eq!(line_value(&count_out, "applied_events"), "10000");
-    assert_eq!(line_value(&count_out, "blocked_events"), "0");
-    assert_eq!(line_value(&count_out, "blocked_edges"), "0");
+    let counts = store.status_counts().unwrap();
+    assert_eq!(store.event_count().unwrap(), 10_000);
+    assert_eq!(counts.applied, 10_000);
+    assert_eq!(counts.blocked, 0);
+    assert_eq!(counts.blocked_edges, 0);
 }
 
 #[test]
 #[ignore]
-fn cascade_cli_blocks_then_unblocks_50k() {
+fn cascade_bench_blocks_then_unblocks_50k() {
     let tmp = tempfile::tempdir().unwrap();
-    let db = temp_db(&tmp, "cascade-50k.db");
-    let out = assert_success(topo(&db, &["cascade", "50000", "--batch", "4096"]));
-
-    assert_eq!(line_value(&out, "cascade_events"), "50000");
-    assert_eq!(line_value(&out, "blocked_after_reverse"), "49990");
-    assert_eq!(line_value(&out, "applied_events"), "50000");
-    assert_eq!(line_value(&out, "blocked_events_remaining"), "0");
-    assert_eq!(line_value(&out, "blocked_edges_remaining"), "0");
-    eprintln!(
-        "black_box_cascade_50k events_per_s={}",
-        line_value(&out, "cascade_events_per_s")
+    let store = Store::open(tmp.path().join("cascade-50k.db")).unwrap();
+    let report = run_cascade(
+        &store,
+        50_000,
+        bench_dep::dependent_event::codec::MAX_DEPS,
+        control_loop::DEFAULT_READY_BATCH,
     );
+
+    let report = report.unwrap();
+    assert_eq!(report.events, 50_000);
+    assert_eq!(report.blocked_after_reverse, 49_990);
+    assert_eq!(report.applied_events, 50_000);
+    assert_eq!(report.final_counts.blocked, 0);
+    assert_eq!(report.final_counts.blocked_edges, 0);
+
+    let seconds = (report.cascade_ms as f64 / 1000.0).max(0.001);
+    let rate = report.applied_events as f64 / seconds;
+    eprintln!("black_box_cascade_50k events_per_s={rate:.0}");
 }

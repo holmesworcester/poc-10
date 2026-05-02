@@ -136,7 +136,7 @@ fn ingest_connection_frame(
 
 fn ingest_sync_frame(
     store: &Store,
-    connection_id: connection::codec::ConnectionId,
+    connection_id: connection::types::ConnectionId,
     bytes: &[u8],
 ) -> Result<IngestResult, String> {
     let mut result = IngestResult::default();

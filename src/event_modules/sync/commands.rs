@@ -1,7 +1,11 @@
 use crate::store::{EventId, Store};
 
-use super::codec::{self, Frame, SyncItem};
-use super::{projector, queries};
+use super::compare::codec::{BucketSummary, CompareEvent, BUCKETS};
+use super::data::codec::DataEvent;
+use super::frame::codec::{self as frame_codec, Frame, SyncItem};
+use super::have_id::codec::HaveIdEvent;
+use super::need_id::codec::NeedIdEvent;
+use super::{compare, queries};
 
 const FRAME_TARGET_BYTES: usize = 32 * 1024 * 1024;
 const FRAME_HEADER_BYTES: usize = 14;
@@ -20,10 +24,10 @@ pub fn start(
     connection_id: EventId,
     mut emit: impl FnMut(Vec<u8>) -> Result<(), String>,
 ) -> Result<SyncReport, String> {
-    let mut items = vec![SyncItem::Compare {
+    let mut items = vec![SyncItem::Compare(CompareEvent {
         connection_id,
         summary: queries::summary(store)?,
-    }];
+    })];
     items.extend(all_have_items(store, connection_id)?);
     emit_items(items, &mut emit)?;
     Ok(SyncReport::default())
@@ -35,7 +39,7 @@ pub fn ingest_frame(
     bytes: &[u8],
     mut emit: impl FnMut(Vec<u8>) -> Result<(), String>,
 ) -> Result<SyncReport, String> {
-    let frame = codec::decode(bytes)?;
+    let frame = frame_codec::decode(bytes)?;
     let mut frame_connection_id = None;
     let mut response_items = Vec::new();
     let mut requested_ids = Vec::new();
@@ -44,42 +48,35 @@ pub fn ingest_frame(
 
     for item in frame.items {
         match item {
-            SyncItem::Compare {
-                connection_id,
-                summary,
-            } => {
-                observe_connection(&mut frame_connection_id, connection_id)?;
+            SyncItem::Compare(event) => {
+                observe_connection(&mut frame_connection_id, event.connection_id)?;
                 let local = queries::summary(store)?;
-                if local != summary {
+                if local != event.summary {
                     response_items.extend(have_items_for_compare(
                         store,
-                        connection_id,
+                        event.connection_id,
                         local,
-                        summary,
+                        event.summary,
                     )?);
                 }
             }
-            SyncItem::HaveId {
-                connection_id,
-                bucket: _,
-                id,
-            } => {
-                observe_connection(&mut frame_connection_id, connection_id)?;
-                if !queries::has_event(store, &id)? {
-                    response_items.push(SyncItem::NeedId { connection_id, id });
+            SyncItem::HaveId(event) => {
+                observe_connection(&mut frame_connection_id, event.connection_id)?;
+                if !queries::has_event(store, &event.id)? {
+                    response_items.push(SyncItem::NeedId(NeedIdEvent {
+                        connection_id: event.connection_id,
+                        id: event.id,
+                    }));
                 }
             }
-            SyncItem::NeedId { connection_id, id } => {
-                observe_connection(&mut frame_connection_id, connection_id)?;
-                requested_ids.push(id);
+            SyncItem::NeedId(event) => {
+                observe_connection(&mut frame_connection_id, event.connection_id)?;
+                requested_ids.push(event.id);
             }
-            SyncItem::Data {
-                connection_id,
-                mut items,
-            } => {
-                observe_connection(&mut frame_connection_id, connection_id)?;
-                received_events += items.len();
-                received_event_bytes.append(&mut items);
+            SyncItem::Data(mut event) => {
+                observe_connection(&mut frame_connection_id, event.connection_id)?;
+                received_events += event.items.len();
+                received_event_bytes.append(&mut event.items);
             }
         }
     }
@@ -121,14 +118,14 @@ fn observe_connection(
 
 fn all_have_items(store: &Store, connection_id: EventId) -> Result<Vec<SyncItem>, String> {
     let mut items = Vec::new();
-    for bucket in 0..codec::BUCKETS {
+    for bucket in 0..BUCKETS {
         let ids = queries::ids_in_bucket(store, bucket as u8)?;
         for id in ids {
-            items.push(SyncItem::HaveId {
+            items.push(SyncItem::HaveId(HaveIdEvent {
                 connection_id,
                 bucket: bucket as u8,
                 id,
-            });
+            }));
         }
     }
     Ok(items)
@@ -137,18 +134,18 @@ fn all_have_items(store: &Store, connection_id: EventId) -> Result<Vec<SyncItem>
 fn have_items_for_compare(
     store: &Store,
     connection_id: EventId,
-    local: [codec::BucketSummary; codec::BUCKETS],
-    remote: [codec::BucketSummary; codec::BUCKETS],
+    local: [BucketSummary; BUCKETS],
+    remote: [BucketSummary; BUCKETS],
 ) -> Result<Vec<SyncItem>, String> {
     let mut items = Vec::new();
-    for bucket in projector::differing_buckets(&local, &remote) {
+    for bucket in compare::projector::differing_buckets(&local, &remote) {
         let ids = queries::ids_in_bucket(store, bucket)?;
         for id in ids {
-            items.push(SyncItem::HaveId {
+            items.push(SyncItem::HaveId(HaveIdEvent {
                 connection_id,
                 bucket,
                 id,
-            });
+            }));
         }
     }
     Ok(items)
@@ -215,7 +212,7 @@ fn emit_items(
     if items.is_empty() {
         return Ok(());
     }
-    emit(codec::encode(&Frame { more: false, items }))
+    emit(frame_codec::encode(&Frame { more: false, items }))
 }
 
 fn emit_frame(
@@ -227,10 +224,10 @@ fn emit_frame(
 ) -> Result<usize, String> {
     let sent = data_items.len();
     let mut items = control_items;
-    items.push(SyncItem::Data {
+    items.push(SyncItem::Data(DataEvent {
         connection_id,
         items: data_items,
-    });
-    emit(codec::encode(&Frame { more, items }))?;
+    }));
+    emit(frame_codec::encode(&Frame { more, items }))?;
     Ok(sent)
 }

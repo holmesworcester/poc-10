@@ -9,11 +9,10 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::store::{EventId, Store};
 
-use super::codec::{
-    self, ConnectionEvent, ConnectionId, EndpointId, TransitEnvelope, TransitNonce,
-};
-use super::projector;
 use super::tables;
+use super::transit::codec::TransitEnvelope;
+use super::types::{self, ConnectionId, EndpointId, TransitNonce};
+use super::{ack, projection, request, transit};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invite {
@@ -72,7 +71,7 @@ pub fn create_invite(store: &Store, public_addr: SocketAddr) -> Result<String, S
     let workspace_id = nonce32();
     apply(
         store,
-        projector::project_invite_secret(invite_secret_hash(&bootstrap_secret), bootstrap_secret),
+        projection::invite_secret(invite_secret_hash(&bootstrap_secret), bootstrap_secret),
     )?;
     Ok(format!(
         "{INVITE_PREFIX}{INVITE_VERSION}/{INVITE_KIND}/{LABEL_INVITE_ID}.{invite_id}/{LABEL_INVITE_PRIVKEY}.{invite_secret}/{LABEL_WORKSPACE}.{workspace}/{LABEL_ENDPOINT_ID}.{endpoint}/{LABEL_ADDRESS}.{address}",
@@ -91,14 +90,14 @@ pub fn invite_addr(invite: &str) -> Result<SocketAddr, String> {
 pub fn create_request(store: &Store, invite: &str) -> Result<OutboundRequest, String> {
     let invite = parse_invite(invite)?;
     let local = ensure_local_keypair(store)?;
-    let request = ConnectionEvent::Request {
+    let request = request::codec::RequestEvent {
         from_endpoint: local.endpoint,
         nonce: nonce32(),
         bootstrap_hash: invite_secret_hash(&invite.bootstrap_secret),
     };
-    let inner = codec::encode(&request);
-    let request_id = codec::event_id(&inner);
-    apply(store, projector::project_outbound_request(inner.clone())?)?;
+    let inner = request::codec::encode(&request);
+    let request_id = types::event_id(&inner);
+    apply(store, request::projector::outbound(inner.clone())?)?;
     Ok(OutboundRequest {
         bytes: encrypt_bootstrap(&local, invite.endpoint, &inner)?,
         request_id,
@@ -108,31 +107,26 @@ pub fn create_request(store: &Store, invite: &str) -> Result<OutboundRequest, St
 }
 
 pub fn ingest_inner(store: &Store, bytes: Vec<u8>) -> Result<InboundResult, String> {
-    match codec::decode(&bytes)? {
-        ConnectionEvent::Request { .. } => accept_request(store, bytes),
-        ConnectionEvent::Ack { .. } => accept_ack(store, bytes),
+    if request::codec::is_request(&bytes) {
+        accept_request(store, bytes)
+    } else if ack::codec::is_ack(&bytes) {
+        accept_ack(store, bytes)
+    } else {
+        Err("unknown connection event".to_string())
     }
 }
 
 pub fn accept_request(store: &Store, bytes: Vec<u8>) -> Result<InboundResult, String> {
     let local = ensure_local_keypair(store)?;
-    let request = codec::decode(&bytes)?;
-    let ConnectionEvent::Request {
-        from_endpoint,
-        bootstrap_hash,
-        ..
-    } = request
-    else {
-        return Err("expected connection request".to_string());
-    };
-    if !bootstrap_hash_is_authorized(store, &bootstrap_hash)? {
+    let event = request::codec::decode(&bytes)?;
+    if !bootstrap_hash_is_authorized(store, &event.bootstrap_hash)? {
         return Err("invite private key rejected".to_string());
     }
-    let projection = projector::project_inbound_request(bytes, local.endpoint, bootstrap_hash)?;
+    let projection = request::projector::inbound(bytes, local.endpoint, event.bootstrap_hash)?;
     let response = projection
         .response
         .as_ref()
-        .map(|bytes| encrypt_bootstrap(&local, from_endpoint, bytes))
+        .map(|bytes| encrypt_bootstrap(&local, event.from_endpoint, bytes))
         .transpose()?;
     let connection_id = projection.connection_id;
     apply(store, projection)?;
@@ -144,23 +138,18 @@ pub fn accept_request(store: &Store, bytes: Vec<u8>) -> Result<InboundResult, St
 
 pub fn accept_ack(store: &Store, bytes: Vec<u8>) -> Result<InboundResult, String> {
     let local = ensure_local_keypair(store)?;
-    let event = codec::decode(&bytes)?;
-    let ConnectionEvent::Ack { request_id, .. } = event else {
-        return Err("expected connection ack".to_string());
-    };
+    let event = ack::codec::decode(&bytes)?;
     let request_bytes = store
-        .module_row(tables::CONNECTION_EVENTS, &request_id)
+        .module_row(tables::CONNECTION_EVENTS, &event.request_id)
         .map_err(|err| format!("load connection request: {err}"))?
         .ok_or_else(|| "connection ack references an unknown request".to_string())?;
-    let request = codec::decode(&request_bytes)?;
-    let ConnectionEvent::Request { from_endpoint, .. } = request else {
-        return Err("connection ack references a non-request event".to_string());
-    };
-    if from_endpoint != local.endpoint {
+    let request = request::codec::decode(&request_bytes)
+        .map_err(|_| "connection ack references a non-request event".to_string())?;
+    if request.from_endpoint != local.endpoint {
         return Err("connection ack references another endpoint's request".to_string());
     }
 
-    let projection = projector::project_inbound_ack(bytes, local.endpoint, request_id)?;
+    let projection = ack::projector::inbound(bytes, local.endpoint, event.request_id)?;
     let connection_id = projection.connection_id;
     apply(store, projection)?;
     Ok(InboundResult {
@@ -170,7 +159,7 @@ pub fn accept_ack(store: &Store, bytes: Vec<u8>) -> Result<InboundResult, String
 }
 
 pub fn is_connection_event(bytes: &[u8]) -> bool {
-    codec::is_connection_event(bytes)
+    types::is_connection_event(bytes)
 }
 
 pub fn wrap_connection(
@@ -185,7 +174,7 @@ pub fn wrap_connection(
 
 pub fn unwrap_transit(store: &Store, bytes: &[u8]) -> Result<UnwrappedTransit, String> {
     let local = ensure_local_keypair(store)?;
-    match codec::decode_transit(bytes)? {
+    match transit::codec::decode(bytes)? {
         TransitEnvelope::Bootstrap {
             sender_endpoint,
             recipient_endpoint,
@@ -205,7 +194,7 @@ pub fn unwrap_transit(store: &Store, bytes: &[u8]) -> Result<UnwrappedTransit, S
                 &local.secret,
                 &sender_endpoint,
                 b"topo-bootstrap-transit-v1",
-                &codec::transit_associated_data(&envelope),
+                &transit::codec::associated_data(&envelope),
                 &nonce,
                 &ciphertext,
             )?;
@@ -239,7 +228,7 @@ pub fn unwrap_transit(store: &Store, bytes: &[u8]) -> Result<UnwrappedTransit, S
                 &local.secret,
                 &sender_endpoint,
                 b"topo-connection-transit-v1",
-                &codec::transit_associated_data(&envelope),
+                &transit::codec::associated_data(&envelope),
                 &nonce,
                 &ciphertext,
             )?;
@@ -268,10 +257,7 @@ pub fn record_transport_target(
     connection_id: ConnectionId,
     addr: SocketAddr,
 ) -> Result<(), String> {
-    apply(
-        store,
-        projector::project_transport_target(connection_id, addr),
-    )
+    apply(store, projection::transport_target(connection_id, addr))
 }
 
 pub fn transport_routes(store: &Store) -> Result<Vec<TransportRoute>, String> {
@@ -309,11 +295,11 @@ fn encrypt_bootstrap(
         &local.secret,
         &recipient_endpoint,
         b"topo-bootstrap-transit-v1",
-        &codec::transit_associated_data(&envelope),
+        &transit::codec::associated_data(&envelope),
         &nonce,
         inner,
     )?;
-    Ok(codec::encode_transit(&TransitEnvelope::Bootstrap {
+    Ok(transit::codec::encode(&TransitEnvelope::Bootstrap {
         sender_endpoint: local.endpoint,
         recipient_endpoint,
         nonce,
@@ -339,11 +325,11 @@ fn encrypt_connection(
         &local.secret,
         &recipient_endpoint,
         b"topo-connection-transit-v1",
-        &codec::transit_associated_data(&envelope),
+        &transit::codec::associated_data(&envelope),
         &nonce,
         inner,
     )?;
-    Ok(codec::encode_transit(&TransitEnvelope::Connection {
+    Ok(transit::codec::encode(&TransitEnvelope::Connection {
         connection_id,
         sender_endpoint: local.endpoint,
         recipient_endpoint,
@@ -431,7 +417,7 @@ fn ensure_local_keypair(store: &Store) -> Result<EndpointKeypair, String> {
             let secret = StaticSecret::random_from_rng(OsRng);
             let endpoint = PublicKey::from(&secret).to_bytes();
             let secret = secret.to_bytes();
-            apply(store, projector::project_local_endpoint(endpoint, secret))?;
+            apply(store, projection::local_endpoint(endpoint, secret))?;
             Ok(EndpointKeypair { endpoint, secret })
         }
         (None, Some(_)) => Err("local endpoint secret is missing".to_string()),
@@ -447,7 +433,7 @@ fn remote_endpoint(store: &Store, connection_id: &ConnectionId) -> Result<Endpoi
     bytes_to_id(&bytes)
 }
 
-fn apply(store: &Store, projection: projector::Projection) -> Result<(), String> {
+fn apply(store: &Store, projection: projection::Projection) -> Result<(), String> {
     store
         .insert_module_rows(projection.rows)
         .map(|_| ())
@@ -514,7 +500,7 @@ fn encode_hex(bytes: &[u8; 32]) -> String {
 }
 
 fn invite_secret_hash(secret: &[u8; 32]) -> [u8; 32] {
-    codec::bootstrap_hash(&encode_hex(secret))
+    types::bootstrap_hash(&encode_hex(secret))
 }
 
 fn bootstrap_hash_is_authorized(store: &Store, bootstrap_hash: &[u8; 32]) -> Result<bool, String> {

@@ -7,13 +7,13 @@ pub const PAYLOAD_BYTES: usize = 16;
 pub const ENCODED_BYTES: usize = 1 + 8 + 1 + (MAX_DEPS * 32) + PAYLOAD_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BenchDepEvent {
+pub struct DependentEvent {
     pub timestamp: u64,
     pub dependencies: Vec<EventId>,
     pub payload: [u8; PAYLOAD_BYTES],
 }
 
-pub fn encode(event: &BenchDepEvent) -> Vec<u8> {
+pub fn encode(event: &DependentEvent) -> Vec<u8> {
     assert!(
         event.dependencies.len() <= MAX_DEPS,
         "bench_dep dependencies exceed fixed field count"
@@ -33,7 +33,7 @@ pub fn encode(event: &BenchDepEvent) -> Vec<u8> {
     out.finish()
 }
 
-pub fn decode(bytes: &[u8]) -> Result<BenchDepEvent, String> {
+pub fn decode(bytes: &[u8]) -> Result<DependentEvent, String> {
     if bytes.len() != ENCODED_BYTES {
         return Err("bench_dep event length mismatch".to_string());
     }
@@ -63,7 +63,7 @@ pub fn decode(bytes: &[u8]) -> Result<BenchDepEvent, String> {
     let mut fixed_payload = [0; PAYLOAD_BYTES];
     fixed_payload.copy_from_slice(&payload);
 
-    Ok(BenchDepEvent {
+    Ok(DependentEvent {
         timestamp,
         dependencies,
         payload: fixed_payload,

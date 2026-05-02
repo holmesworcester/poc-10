@@ -60,6 +60,30 @@ fn event_modules_are_directories() {
 }
 
 #[test]
+fn domain_modules_do_not_hide_event_type_codecs_or_projectors() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_modules");
+    let mut offenders = Vec::new();
+    for domain in std::fs::read_dir(&root).expect("read event modules") {
+        let path = domain.expect("dir entry").path();
+        if !path.is_dir() {
+            continue;
+        }
+        for forbidden in ["codec.rs", "projector.rs"] {
+            let candidate = path.join(forbidden);
+            if candidate.exists() {
+                offenders.push(candidate.strip_prefix(&root).unwrap().display().to_string());
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "domain modules may have commands/queries/tables, but event codecs/projectors must be nested by event type:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn sync_event_module_does_not_own_transport_or_frame_io() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sync_root = root.join("src/event_modules/sync");

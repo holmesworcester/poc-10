@@ -1,6 +1,6 @@
 use crate::store::{EventId, EventRecord};
 
-use super::codec::{self, BenchDepEvent, MAX_DEPS, PAYLOAD_BYTES};
+use super::dependent_event::codec::{self, DependentEvent, MAX_DEPS, PAYLOAD_BYTES};
 
 pub fn build_records(
     events: usize,
@@ -16,7 +16,7 @@ pub fn build_records(
     for idx in 0..events {
         let dep_count = idx.min(deps_per_event);
         let dependencies = event_ids[idx - dep_count..idx].to_vec();
-        let event = BenchDepEvent {
+        let event = DependentEvent {
             timestamp: start_timestamp + idx as u64,
             dependencies,
             payload: payload(idx),
