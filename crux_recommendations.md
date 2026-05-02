@@ -130,6 +130,52 @@ These are the rules the codebase should enforce once Crux is introduced.
 - Emitted facts are normal facts: canonical bytes, normal fact ids, admission,
   dependency checks, and projection.
 
+### Scheduler And Job Rules
+
+- Jobs are not background threads that call modules directly. They are Crux
+  events plus typed store/network/clock effects.
+- The kernel should run a bounded rotating scheduler over work lanes such as
+  `ReadyFacts`, `Outbox`, `InboundBytes`, `Timers`, and `ModuleJobs`.
+- A `Tick` Crux event advances the scheduler cursor and asks the shell to claim
+  bounded work from one lane:
+
+```rust
+enum WorkLane {
+    ReadyFacts,
+    Outbox,
+    InboundBytes,
+    Timers,
+    ModuleJobs,
+}
+
+enum StoreOperation {
+    ClaimWork { lane: WorkLane, limit: usize },
+}
+```
+
+- The store shell owns atomic claim, lease, retry, backoff, and mark-done
+  mechanics.
+- The Crux model owns fairness cursor, per-lane budgets, and whether to schedule
+  another tick.
+- Fact modules own module-job meaning. A module job should be a registered
+  planner that returns intents, facts, projections, outbox work, or a reschedule
+  request.
+- Do not write an unbounded `while queues_not_empty { drain_everything(); }`
+  loop. Every unit of work must be bounded by rows, bytes, or time and must
+  return control to the Crux app.
+
+The intended flow is:
+
+```text
+Crux Event::Tick
+  -> StoreEffect::ClaimWork(lane, limit)
+  -> Crux Event::StoreReply(ClaimedWork)
+  -> dispatch claimed work through fact registry
+  -> Store/Network/Clock/Rng effects
+  -> mark done/retry/reschedule
+  -> optional follow-up Tick
+```
+
 ### Testing Rules
 
 - Pure module tests should assert intent-to-facts and fact-to-projection behavior
