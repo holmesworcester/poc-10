@@ -15,6 +15,7 @@ UPDATED:
 - Canonical events have scopes: shared, local-only, endpoint-scoped, or connection-scoped. The normal event id is always `BLAKE3(canonical_event_bytes)`; connection-scoped events include `connection_id` in their canonical bytes so their ids are naturally connection-local.
 - Durable shared data events live in durable event storage. Connection-scoped protocol events may live in transient storage, but still use normal canonical bytes and event ids. `outbox` stores only `(connection_id, event_id)`.
 - Blocking uses `blocked_by_event(blocked_by_event_id, event_id)` pair rows and same-transaction unblocking.
+- Projectors receive a core default context of immediate dependency events, labels, and origin metadata. Modules may define custom typed context only for module-owned read models that cannot be represented as bounded deps or labels; negentropy responders are the known case because compare/have/need answers depend on indexed summaries, bucket ids, and event-byte lookups.
 - Connection/transit modules create transit blobs. The kernel never creates transit blobs; it only packs module-produced bytes into TCP frames and writes them to transport targets.
 - Outgoing flow dedupes deterministic connection-scoped events before transit wrapping. TCP writability and socket backpressure are transport mechanics, not sync or connection semantics.
 - Event modules own their canonical `codec.rs`; "wire" means transit bytes, not canonical event bytes.
@@ -203,7 +204,45 @@ Traits are the module API; canonical bytes are event identity. Projectors that n
 
 **admit_event_id** consumes an event id and returns known or newly claimed. Known includes applied, blocked, rejected, and in-flight events. Duplicates record observations, call `suppress_received(id)` (see: Sync), and stop before context loading. Newly claimed ids become canonical event ids only after parse succeeds.
 
-**get_context** consumes a newly admitted Event and returns an EventWithContext. Context for `project` is just the event's declared dependencies, its labels, and network metadata (e.g. origin ip / port) — never bespoke per-event-type SQL queries against arbitrary state. A generically sufficient EventWithContext is: 1. the Event 2. the other Events that are the consumed Event's immediate dependencies 3. every `label` for that event. If a projector "needs more state," that state must arrive as a declared dependency or a label, not as an ad-hoc query. This contract is non-negotiable; see the Forking plan section for the rationale (it is the surface this fork is rejecting from poc-7).
+**get_context** consumes a newly admitted Event and returns an EventWithContext.
+The core-owned default context for `project` is:
+
+1. the parsed Event,
+2. the other Events that the consumed Event names as immediate dependencies,
+3. every `label` for that event,
+4. generic origin metadata such as source socket address or received transport id.
+
+This default should be sufficient for most projectors. If a projector needs more
+state, first try to make that state an explicit dependency or a bounded label.
+We can always add more dependency fields, and labels are the right substrate for
+small derived facts such as authorization, trust-anchor, route, expiry,
+supersession, or "this event blocks others." Do not introduce bespoke
+per-event-type SQL queries against arbitrary state just because a dependency or
+label is missing.
+
+Custom typed context is allowed only for module-owned read models that are too
+large or index-shaped to fit the default context. The module owns the context
+request type, the context result type, and the semantics of the read model; the
+core only routes the request/result and never inspects module-specific fields.
+The known required case is negentropy response projection: compare/have/need
+responders need indexed summaries, bucket ids, presence checks, and event bytes
+from module-owned sync/negentropy tables. That is context for the sync module,
+not sync vocabulary in the core.
+
+Connection and bootstrap projectors should not need custom context in the first
+cut. Model their checks as first-level dependencies and labels:
+
+- a connection request depends on the invite, peer-shared signer, or other
+  signer/prekey facts needed to verify it;
+- a connection ack depends on the request it acknowledges;
+- invite acceptance creates or labels local trust anchors and route hints rather
+  than reaching through custom context;
+- observed/self address and route facts are labels or module rows consumed by
+  sender/outbox jobs, not projector-only hidden queries.
+
+If a future connection or bootstrap behavior appears to need custom context,
+the burden is to prove that extra dependencies or labels cannot express it
+boundedly.
 
 **labels** is a table whose rows are tuples of (event_id, label_type); adding a label can be a result of projection. Labels become part of context so there should be a bounded number of labels for a given event_id. "This event blocks others" can be a label. 
 
@@ -441,26 +480,27 @@ What poc-9 throws out and replaces:
 - `runtime/sync_engine/` range-owned session machinery, multi-source partition scheduler, receive/suppression plumbing
 - `runtime/peering/` shared-daemon-connection orchestration
 - the heavy `verus-proofs/` real-proof tree (not landed at fork point)
-- per-event-type custom context-query adapters (see below)
+- ad-hoc per-event-type context-query adapters (see below)
 
 Connection model follows poc-6's `events/network/` (`connection`, `connection_ack`, `intro`, `negentropy`, `self_address`, `sync_window`, etc. as canonical events). This is a **deliberate reversal** of poc-7's stance — poc-6's `SIMPLIFICATION_FOR_RUST_POC.md` §2 explicitly said "Connection/sync state is protocol/runtime state, not canonical events." poc-9 rejects that rule in favor of putting sync/connection facts through the same event pipeline as everything else.
 
 **Each step must align 100% to plan.md. No duplication of logic.** Every migration of a poc-7 surface — a projector, a state table, a runtime path, an RPC, a test — has to land at the principles described in this document, not somewhere halfway. Specifically:
 
 - **No two implementations of the same concern.** Connection / transit / sync are event-based via `event_modules/connection/` and `event_modules/sync/` — there is no parallel session/round/open machinery, no second transport, no parallel sync engine. If a poc-7 module is brought over, the legacy machinery it depended on must be retired in the same commit, not left to coexist as a "transitional path."
-- **No bespoke per-event-type loaders.** `get_context` returns `{event, deps, labels}` and nothing else. There is exactly one context loader. If a projector needs additional state, declare it as a dependency or write it as a label upstream — do not introduce a second loader.
+- **No ad-hoc per-event-type loaders.** `get_context` returns the core default context: `{event, deps, labels, origin}`. There is one generic context-loading path. If a projector needs additional state, first declare it as a dependency or write it as a label upstream. Custom module context is allowed only through a declared module-owned context request/result for indexed read models such as negentropy response state; the core routes that opaque request/result and does not learn sync-specific fields.
 - **No legacy compatibility scaffolding.** This is a POC. Canonical event ids and wire layouts are not load-bearing across deployments — change them whenever the new model needs a field. Do not preserve old hashes via shadow columns, sentinel strings, thread-local bridges, or "still-needed" parallel tables. If the legacy reader is still around, retire the reader.
 - **No duplication via vocabulary drift.** "Session", "round", "open", "tenant" (as a per-row scope key), "recorded_by" (as anything other than a transient diagnostic) are forbidden in active code. Substrate-level work is queue-driven and event-driven; reads scope by `workspace_id` (or `endpoint_id` for endpoint-scoped events). One word per concept.
 - **Each step ends green.** A migration that compiles by leaving partial scaffolding in place is not done. The build, the substrate test bar, and the relevant CLI tests must all pass at the end of each step. Half-done work is rolled back, not left to a future agent.
 
 The bar is alignment, not progress. A commit that lands more code while leaving plan.md violated by an extra abstraction layer or a duplicate path is a regression.
 
-**Pipeline simplicity is non-negotiable.** Preserve the pipeline shape of this document — see `get_context` in the Event Pipeline section for the strict contract. poc-7's projection-context-query adapters (one custom `context_loader` per event module) are the surface this fork is rejecting. To restate concretely, in poc-9:
+**Pipeline simplicity is non-negotiable.** Preserve the pipeline shape of this document — see `get_context` in the Event Pipeline section for the strict contract. poc-7's projection-context-query adapters (one custom `context_loader` per event module) are the surface this fork is rejecting. The exception is a declared module context request/result for large module-owned indexes such as negentropy; that request is part of the module API, not a second core loader. To restate concretely, in poc-9:
 
 - dependencies come from schema metadata on flat fields (one mechanism for all event types),
 - labels are a small generic table `(event_id, label_type)` populated by projectors as the only cross-event signal,
-- `get_context(event)` returns `{event, deps, labels}` and nothing else,
-- if a projector "needs more state," that state must arrive as a declared dependency or a label, not as an ad-hoc query.
+- `get_context(event)` always starts with `{event, deps, labels, origin}`,
+- if a projector "needs more state," that state should arrive as a declared dependency or a label unless it is a module-owned index that requires a declared custom context request,
+- custom context is justified for negentropy responders because the answer depends on summaries, bucket ids, presence checks, and event-byte lookup; it is not justified for ordinary connection/bootstrap validation.
 
 Note: in poc-9, labels replace custom gates for deletes, user/peer removal, and bootstrap-anchor events. poc-7 handles these with bespoke projector logic that queries side tables (deletion tombstones, removal sets, `invite_bootstrap_trust` / `pending_invite_bootstrap_trust`). poc-9 uses one uniform pattern instead:
 
@@ -468,9 +508,9 @@ Note: in poc-9, labels replace custom gates for deletes, user/peer removal, and 
 2. write a single label of the appropriate type (e.g. `deleted:X`, `removed_by:U`, `superseded:I`) so the gate is reified as one durable label row,
 3. for any *future* incoming event that would otherwise match, the projector reads the same `labels` set already in its context and rejects / blocks / no-ops.
 
-No per-event-type gate query, no "two-stage deletion" projector branch, no bootstrap-trust side tables consulted out-of-band — one mechanism (labels) carries every "this thing has been retired / superseded / revoked" signal, and projectors see it through the same `{event, deps, labels}` context.
+No per-event-type gate query, no "two-stage deletion" projector branch, no bootstrap-trust side tables consulted out-of-band — one mechanism (labels) carries every "this thing has been retired / superseded / revoked" signal, and projectors see it through the same default context.
 
-This keeps one control loop, one projector contract, one dependency mechanism, and one set of correctness invariants for everything in the system — including connections and sync.
+This keeps one control loop, one projector contract, one dependency mechanism, and one set of correctness invariants for everything in the system. Sync may add module-owned context for negentropy indexes, but connection and bootstrap should stay on first-level deps, labels, and origin metadata unless a future design proves those are insufficient.
 
 ## Event types brought over
 
