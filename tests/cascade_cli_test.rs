@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use topo::event_modules::bench_dep;
+use topo::event_modules::test_events;
 use topo::store::{EventStatusCounts, Store};
 use topo::{control_loop, pipeline};
 
@@ -35,7 +35,7 @@ fn run_cascade(
         .max_timestamp()
         .map_err(|err| format!("load max timestamp: {err}"))?
         .saturating_add(1);
-    let records = bench_dep::dependent_event::commands::build_records(
+    let records = test_events::dependent_event::commands::build_records(
         events,
         deps_per_event,
         start_timestamp,
@@ -85,7 +85,7 @@ fn cascade_bench_blocks_then_unblocks_10k() {
     let report = run_cascade(
         &store,
         10_000,
-        bench_dep::dependent_event::codec::MAX_DEPS,
+        test_events::dependent_event::codec::MAX_DEPS,
         control_loop::DEFAULT_READY_BATCH,
     )
     .unwrap();
@@ -118,7 +118,7 @@ fn cascade_bench_blocks_then_unblocks_50k() {
     let report = run_cascade(
         &store,
         50_000,
-        bench_dep::dependent_event::codec::MAX_DEPS,
+        test_events::dependent_event::codec::MAX_DEPS,
         control_loop::DEFAULT_READY_BATCH,
     );
 
