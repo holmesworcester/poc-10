@@ -1,5 +1,6 @@
 pub mod connection;
 pub mod content;
+pub mod identity;
 pub mod sync;
 pub mod test_events;
 

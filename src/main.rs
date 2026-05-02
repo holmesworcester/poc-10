@@ -3,7 +3,7 @@ use std::io::Write;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 
-use topo::event_modules::{connection, content};
+use topo::event_modules::{connection, content, identity};
 use topo::store::Store;
 use topo::{control_loop, network, pipeline};
 
@@ -24,7 +24,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("connected: {addr}");
         }
         Command::Invite { public_addr } => {
-            let invite = connection::request::commands::create_invite(&store, public_addr)
+            let invite = identity::invite::commands::create(&store, public_addr)
                 .map_err(|err| format!("invite: {err}"))?;
             println!("{invite}");
         }
@@ -62,7 +62,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 println!("accepted_connections: {}", report.accepted_connections);
                 println!("received_events: {}", report.received_events);
             } else {
-                let routes = connection::request::commands::transport_routes(&store)?;
+                let routes = connection::transport_target::queries::routes(&store)?;
                 let report = sync_routes(&store, routes).map_err(|err| format!("sync: {err}"))?;
                 println!("routes_synced: {}", report.routes_synced);
                 println!("sent_events: {}", report.sent_events);
@@ -80,11 +80,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("payload_bytes: {bytes}");
             println!(
                 "connections: {}",
-                connection::request::commands::connection_count(&store)?
+                connection::connection_record::queries::connection_count(&store)?
             );
             println!(
                 "connection_events: {}",
-                connection::request::commands::connection_event_count(&store)?
+                connection::connection_record::queries::connection_event_count(&store)?
             );
             let statuses = store
                 .status_counts()
@@ -249,9 +249,9 @@ struct CliSyncReport {
 }
 
 fn connect(store: &Store, invite: &str) -> Result<SocketAddr, String> {
-    let addr = connection::request::commands::invite_addr(invite)?;
+    let addr = identity::invite::commands::addr(invite)?;
     let mut stream = network::connect(addr).map_err(|err| format!("open tcp stream: {err}"))?;
-    let request = connection::request::commands::create_request(store, invite)?;
+    let request = connection::connection_request::commands::create(store, invite)?;
     network::write_frames(&mut stream, vec![request.bytes])?;
     let report = drive_stream(
         store,
@@ -293,7 +293,7 @@ fn serve(store: &Store, listener: TcpListener, accept_count: usize) -> Result<Se
 
 fn sync_routes(
     store: &Store,
-    routes: Vec<connection::request::commands::TransportRoute>,
+    routes: Vec<connection::transport_target::types::TransportRoute>,
 ) -> Result<CliSyncReport, String> {
     control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
         .map_err(|err| format!("drain ready events before sync: {err}"))?;
@@ -309,7 +309,7 @@ fn sync_routes(
 
 fn sync_route(
     store: &Store,
-    route: connection::request::commands::TransportRoute,
+    route: connection::transport_target::types::TransportRoute,
 ) -> Result<CliSyncReport, String> {
     let mut stream =
         network::connect(route.addr).map_err(|err| format!("open tcp stream: {err}"))?;

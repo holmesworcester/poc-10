@@ -1,7 +1,8 @@
 use crate::store::EventId;
 use crate::wire::{Reader, Writer};
 
-use super::super::shared::types::{ConnectionId, EndpointId, EVENT_MAGIC};
+use super::super::connection_record::types::{ConnectionId, EVENT_MAGIC};
+use crate::event_modules::identity::endpoint::types::EndpointId;
 
 pub const TAG: u8 = 2;
 

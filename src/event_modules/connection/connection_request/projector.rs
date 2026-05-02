@@ -1,7 +1,8 @@
-use super::super::ack;
-use super::super::shared::projection::{self, Projection};
-use super::super::shared::types;
+use super::super::connection_ack;
+use super::super::connection_record::projector::{self as projection, Projection};
+use super::super::connection_record::types;
 use super::codec;
+use crate::event_modules::identity::endpoint::types::EndpointId;
 
 pub fn outbound(bytes: Vec<u8>) -> Result<Projection, String> {
     codec::decode(&bytes)?;
@@ -15,7 +16,7 @@ pub fn outbound(bytes: Vec<u8>) -> Result<Projection, String> {
 
 pub fn inbound(
     bytes: Vec<u8>,
-    local_endpoint: types::EndpointId,
+    local_endpoint: EndpointId,
     expected_bootstrap_hash: [u8; 32],
 ) -> Result<Projection, String> {
     let event = codec::decode(&bytes)?;
@@ -25,13 +26,13 @@ pub fn inbound(
 
     let request_id = types::event_id(&bytes);
     let connection_id = types::connection_id(&request_id, &local_endpoint);
-    let ack = ack::codec::AckEvent {
+    let ack = connection_ack::codec::AckEvent {
         from_endpoint: local_endpoint,
         to_endpoint: event.from_endpoint,
         request_id,
         connection_id,
     };
-    let ack_bytes = ack::codec::encode(&ack);
+    let ack_bytes = connection_ack::codec::encode(&ack);
 
     Ok(Projection {
         rows: vec![

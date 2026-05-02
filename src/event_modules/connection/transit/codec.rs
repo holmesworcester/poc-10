@@ -1,6 +1,9 @@
 use crate::wire::{Reader, Writer};
 
-use super::super::shared::types::{ConnectionId, EndpointId, TransitNonce};
+use super::super::connection_record::types::ConnectionId;
+use crate::event_modules::identity::endpoint::types::EndpointId;
+
+pub type TransitNonce = [u8; 24];
 
 const MAGIC: &[u8; 10] = b"TOPOTRANS1";
 const TAG_BOOTSTRAP: u8 = 1;

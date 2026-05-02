@@ -114,7 +114,7 @@ pub fn invite_with_addr(db: &str, addr: &str) -> String {
 
 pub fn connect_with_retry(db: &str, invite: &str) -> String {
     let mut last = String::new();
-    for _ in 0..50 {
+    for _ in 0..200 {
         let output = connect_with_invite(db, invite);
         if output.status.success() {
             return stdout(&output);
@@ -131,7 +131,7 @@ pub fn connect_with_invite(db: &str, invite: &str) -> Output {
 
 pub fn connect_with_invite_after_listener(db: &str, invite: &str) -> Output {
     let mut last = None;
-    for _ in 0..50 {
+    for _ in 0..200 {
         let output = connect_with_invite(db, invite);
         if output.status.success() || !stderr(&output).contains("open tcp stream") {
             return output;

@@ -1,8 +1,9 @@
 use crate::store::EventId;
 
-use super::super::shared::projection::{self, Projection};
-use super::super::shared::types::{self, EndpointId};
+use super::super::connection_record::projector::{self as projection, Projection};
+use super::super::connection_record::types;
 use super::codec;
+use crate::event_modules::identity::endpoint::types::EndpointId;
 
 pub fn inbound(
     bytes: Vec<u8>,

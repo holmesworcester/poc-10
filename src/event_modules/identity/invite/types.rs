@@ -1,0 +1,14 @@
+use std::net::SocketAddr;
+
+use crate::store::EventId;
+
+use super::super::endpoint::types::EndpointId;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invite {
+    pub endpoint: EndpointId,
+    pub bootstrap_secret: [u8; 32],
+    pub addr: SocketAddr,
+    pub invite_event_id: EventId,
+    pub workspace_id: EventId,
+}
