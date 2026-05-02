@@ -4,10 +4,9 @@
 
 The best fit is to put Crux around the kernel control loop, then split the
 current pipeline into pure planners plus explicit shell effects. Do not make
-each event module its own Crux app, and do not turn canonical protocol events
-into Crux events. In Crux terms, `Event` should mean "message into the kernel
-loop"; poc canonical events should remain domain facts with canonical bytes and
-event ids.
+each fact module its own Crux app, and do not turn canonical protocol facts into
+Crux events. In Crux terms, `Event` should mean the input to `App::update`;
+Topo's canonical, content-addressed records should be called facts.
 
 Recommended shape:
 
@@ -26,6 +25,134 @@ The immediate value is not that Crux provides a magic scheduler. The value is
 that it gives a typed `Message -> Command<Effect, Message>` boundary. That
 boundary makes IO visible, testable, and hard to accidentally smuggle into
 domain modules.
+
+## Terminology
+
+Use Crux's vocabulary for Crux concepts:
+
+- **Crux App**: the `crux_core::App` implementation around the kernel loop.
+- **Crux Event**: the input message passed to `App::update`.
+- **Crux Command**: the value returned by `update` to drive follow-up work.
+- **Crux Effect**: a shell operation requested by a Crux command.
+- **Crux Model**: the state owned by the Crux app.
+
+Use Topo vocabulary for the event-sourced substrate:
+
+- **Topo Intent**: a domain request from CLI, jobs, or projection output that
+  decides one or more facts. This replaces the overloaded "Topo command" term.
+- **Topo Fact**: a canonical, content-addressed domain/protocol record. This is
+  what older docs and code call an event.
+- **FactId**: `BLAKE3(canonical_fact_bytes)`.
+- **CanonicalFactBytes**: the canonical bytes hashed into a `FactId`.
+- **FactModule**: a module that owns fact codecs, intent deciders, projectors,
+  tables, and queries.
+- **FactProjector**: a deterministic transform from fact plus context to
+  projection output.
+- **Projection**: rows, labels, emitted facts, outbox intents, and purges.
+
+The intended flow is:
+
+```text
+Crux Event
+  -> Topo Intent
+  -> Topo Facts
+  -> Fact admission/projection
+  -> Projection
+  -> Crux Effects
+```
+
+Avoid bare `Command` in Topo APIs. Reserve `Command` for Crux and use `Intent`
+for Topo domain requests.
+
+## Post-Crux Rules
+
+These are the rules the codebase should enforce once Crux is introduced.
+
+### Naming Rules
+
+- Use Crux names only for Crux concepts: `App`, `Event`, `Command`, `Effect`,
+  `Model`, and `Operation`.
+- Use Topo names for the substrate: `Intent`, `Fact`, `FactId`,
+  `CanonicalFactBytes`, `FactRecord`, `FactModule`, and `FactProjector`.
+- Do not introduce new bare `EventRecord`, `Command`, or `Operation` types in
+  Topo modules. If an old name remains during migration, document it as a
+  compatibility alias and remove it quickly.
+
+### Boundary Rules
+
+- `main.rs` is shell glue only: parse CLI, dispatch Crux events, interpret
+  effects, print output, and set process exit status.
+- `network.rs` owns TCP mechanics only: connect, listen, frame, read, write,
+  buffering, and backpressure.
+- `store.rs` owns storage mechanics only: transactions, table access,
+  migrations, and effect interpretation.
+- The Crux app owns runtime orchestration: ordering, continuations, bounded
+  drains, shell replies, and follow-up Crux events.
+- Fact modules own protocol/domain semantics: codecs, intent deciders,
+  dependency declarations, projector logic, table declarations, and module-owned
+  context request semantics.
+- Core/kernel code may route through a module registry, but must not import
+  concrete connection, sync, content, or identity modules directly.
+
+### IO Rules
+
+- Pure planners, intent deciders, and fact projectors must not open SQLite,
+  read/write sockets, call RNG, read clocks, print, or spawn tasks.
+- Any required IO must be represented as a typed Crux effect.
+- Use `Command::request_from_shell` when later work depends on the shell reply.
+- Use `Command::notify_shell` only for fire-and-forget effects where failure
+  does not affect correctness.
+- Shell interpreters must feed replies back as Crux events; they must not call
+  fact module logic directly.
+
+### Context Rules
+
+- Every projector receives a core default context: parsed fact, immediate
+  dependency facts, labels, and generic origin metadata.
+- If more state is needed, first add explicit dependency fields or labels.
+- Custom typed context is allowed only for module-owned read models that are too
+  large or index-shaped for bounded deps/labels.
+- Negentropy responders are the known custom-context case: compare/have/need
+  responses need summaries, bucket ids, presence checks, and event bytes.
+- Connection and bootstrap validation should use first-level deps, labels, and
+  origin metadata unless a future design proves those are insufficient.
+- The core may route custom context requests/results, but it must not inspect
+  module-specific fields.
+
+### Projection Rules
+
+- Fact projection returns declarative output only: rows, labels, emitted facts,
+  outbox intents, and purges.
+- Projectors do not write transport bytes. Sending happens through outbox or
+  transit facts interpreted by shell/network effects.
+- Projectors do not recursively drain ready work. The Crux app/control loop owns
+  bounded drain scheduling.
+- Emitted facts are normal facts: canonical bytes, normal fact ids, admission,
+  dependency checks, and projection.
+
+### Testing Rules
+
+- Pure module tests should assert intent-to-facts and fact-to-projection behavior
+  without constructing a real store or socket.
+- Crux transcript tests should drive Crux events, inspect emitted effects,
+  resolve shell requests with fake replies, and assert the exact continuation
+  sequence.
+- Boundary tests should fail if `main.rs` imports store, pipeline, control-loop,
+  network protocol, or concrete fact modules.
+- Guardrail searches should check that fact projectors and planners do not use
+  `rusqlite`, `TcpStream`, `TcpListener`, RNG, clock, or stdout directly.
+- Existing black-box CLI/network tests remain the proof that the real shell
+  interpreters still work end to end.
+
+### Migration Rules
+
+- Migrate one public workflow at a time behind Crux, starting with `generate`.
+- The facade step may wrap old behavior, but every follow-up step should remove
+  ambient `Store` and network access from planners and modules.
+- A migration step is incomplete without realistic tests for the new boundary.
+- Do not leave parallel old/new implementations of the same concern. Retire the
+  old path in the same commit that proves the new path.
+- Treat compile-only scaffolding as unfinished work.
 
 ## What The Prototypes Showed
 
