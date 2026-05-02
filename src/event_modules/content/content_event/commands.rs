@@ -1,4 +1,4 @@
-use crate::store::{CommandOutput, StateChanges};
+use crate::store::CommandOutput;
 
 use super::codec;
 use super::types::ContentEvent;
@@ -24,12 +24,12 @@ pub fn generate(
         records.push(record);
     }
 
-    Ok(CommandOutput::with_changes(
+    Ok(CommandOutput::with_events(
         GenerateReport {
             first_timestamp: start_timestamp,
             last_timestamp: start_timestamp + num_events as u64 - 1,
         },
-        StateChanges::events(records),
+        records,
     ))
 }
 

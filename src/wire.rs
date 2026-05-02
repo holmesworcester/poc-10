@@ -21,6 +21,10 @@ impl Writer {
         self.bytes.push(value);
     }
 
+    pub fn u16(&mut self, value: u16) {
+        self.bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
     pub fn u32(&mut self, value: usize) {
         let value = u32::try_from(value).expect("value too large for wire u32");
         self.bytes.extend_from_slice(&value.to_be_bytes());
@@ -71,6 +75,16 @@ impl<'a> Reader<'a> {
         bytes.copy_from_slice(&self.rest[..4]);
         self.rest = &self.rest[4..];
         Ok(u32::from_be_bytes(bytes))
+    }
+
+    pub fn u16(&mut self) -> Result<u16, String> {
+        if self.rest.len() < 2 {
+            return Err(format!("truncated {}", self.label));
+        }
+        let mut bytes = [0; 2];
+        bytes.copy_from_slice(&self.rest[..2]);
+        self.rest = &self.rest[2..];
+        Ok(u16::from_be_bytes(bytes))
     }
 
     pub fn u64(&mut self) -> Result<u64, String> {

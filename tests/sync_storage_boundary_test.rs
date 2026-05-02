@@ -14,6 +14,7 @@ fn connect_handshake_does_not_create_durable_events() {
     let bob = temp_db(&tmp, "bob.db");
     let port = free_port();
     let bob_invite = invite(&bob, port);
+    assert_eq!(count(&bob), 0, "invite facts must be local-only events");
 
     let listener = start_listener(&bob, port, 1);
     let connected = connect_with_retry(&alice, &bob_invite);

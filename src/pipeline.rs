@@ -24,6 +24,7 @@ pub struct AdmitReport {
     pub ready_events: usize,
     pub blocked_events: usize,
     pub blocked_edges: usize,
+    pub applied_events: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -32,33 +33,80 @@ pub struct ApplyReadyReport {
     pub unblocked_events: usize,
 }
 
-pub fn apply_changes(store: &Store, changes: StateChanges) -> Result<AdmitReport, String> {
+pub fn apply_changes(
+    store: &Store,
+    modules: &Modules,
+    changes: StateChanges,
+) -> Result<AdmitReport, String> {
     store
         .write_transaction(|store| {
             let mut report = AdmitReport::default();
-            store.insert_table_rows_in_tx(changes.rows)?;
-            for record in changes.events {
-                admit_record_in_tx(store, &record, &mut report)?;
-            }
+            apply_changes_in_tx(store, modules, changes, &mut report)?;
             Ok(report)
         })
         .map_err(|err| format!("apply state changes: {err}"))
 }
 
-pub fn run_command<T>(store: &Store, output: CommandOutput<T>) -> Result<(T, AdmitReport), String> {
-    let report = apply_changes(store, output.changes)?;
+pub fn run_command<T>(
+    store: &Store,
+    modules: &Modules,
+    output: CommandOutput<T>,
+) -> Result<(T, AdmitReport), String> {
+    let report = apply_changes(store, modules, StateChanges::events(output.events))?;
     Ok((output.value, report))
 }
 
 pub fn admit_records(store: &Store, records: Vec<EventRecord>) -> Result<AdmitReport, String> {
-    apply_changes(store, StateChanges::events(records))
+    store
+        .write_transaction(|store| {
+            let mut report = AdmitReport::default();
+            for record in records {
+                admit_record_in_tx(store, &record, &mut report)?;
+            }
+            Ok(report)
+        })
+        .map_err(|err| format!("admit events: {err}"))
+}
+
+fn apply_changes_in_tx(
+    store: &Store,
+    modules: &Modules,
+    changes: StateChanges,
+    report: &mut AdmitReport,
+) -> rusqlite::Result<()> {
+    store.insert_table_rows_in_tx(changes.rows)?;
+    for record in changes.events {
+        admit_and_apply_record_in_tx(store, modules, &record, report)?;
+    }
+    Ok(())
+}
+
+fn admit_and_apply_record_in_tx(
+    store: &Store,
+    modules: &Modules,
+    record: &EventRecord,
+    report: &mut AdmitReport,
+) -> rusqlite::Result<()> {
+    let admitted = admit_record_in_tx(store, record, report)?;
+    if admitted.inserted && admitted.ready {
+        let apply = apply_ready_event_in_tx(store, modules, &admitted.event_id)?;
+        report.applied_events += apply.applied_events;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Admission {
+    event_id: EventId,
+    inserted: bool,
+    ready: bool,
 }
 
 fn admit_record_in_tx(
     store: &Store,
     record: &EventRecord,
     report: &mut AdmitReport,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<Admission> {
     let id = event_id(&record.canonical_bytes);
     let missing = blocking::missing_dependencies(store, &record.dependencies)?;
     let status = if missing.is_empty() {
@@ -67,7 +115,8 @@ fn admit_record_in_tx(
         EventStatus::Blocked
     };
 
-    if store.insert_event(record, status)? {
+    let inserted = store.insert_event(record, status)?;
+    if inserted {
         report.inserted_events += 1;
         if missing.is_empty() {
             report.ready_events += 1;
@@ -76,15 +125,29 @@ fn admit_record_in_tx(
             report.blocked_edges += blocking::write_blockers(store, &id, &missing)?;
         }
     }
-    Ok(())
+    Ok(Admission {
+        event_id: id,
+        inserted,
+        ready: missing.is_empty(),
+    })
 }
 
 pub fn apply_ready_event_in_tx(
     store: &Store,
+    modules: &Modules,
     event_id: &EventId,
 ) -> rusqlite::Result<ApplyReadyReport> {
     let mut report = ApplyReadyReport::default();
     if store.set_event_status(event_id, EventStatus::Ready, EventStatus::Applied)? {
+        let bytes = store
+            .event_bytes(event_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let record = modules.record_from_bytes(bytes).map_err(module_error)?;
+        let changes = modules
+            .project_record(store, &record)
+            .map_err(module_error)?;
+        let mut admitted = AdmitReport::default();
+        apply_changes_in_tx(store, modules, changes, &mut admitted)?;
         report.applied_events = 1;
         report.unblocked_events = blocking::unblock_dependents(store, event_id)?;
     }
@@ -99,11 +162,11 @@ pub fn ingest_frame(
 ) -> Result<IngestResult, String> {
     let mut report =
         modules.ingest_frame(store, metadata.origin, metadata.remember_origin, bytes)?;
-    report.changes.append(received_event_changes(
+    report.events.extend(received_event_records(
         modules,
         report.received_event_bytes,
     )?);
-    apply_changes(store, report.changes)?;
+    apply_changes(store, modules, StateChanges::events(report.events))?;
     Ok(IngestResult {
         outgoing: report.outgoing,
         established_routes: report.established_routes,
@@ -112,13 +175,20 @@ pub fn ingest_frame(
     })
 }
 
-fn received_event_changes(modules: &Modules, events: Vec<Vec<u8>>) -> Result<StateChanges, String> {
+fn received_event_records(
+    modules: &Modules,
+    events: Vec<Vec<u8>>,
+) -> Result<Vec<EventRecord>, String> {
     if events.is_empty() {
-        return Ok(StateChanges::default());
+        return Ok(Vec::new());
     }
     let mut records = Vec::with_capacity(events.len());
     for bytes in events {
         records.push(modules.record_from_bytes(bytes)?);
     }
-    Ok(StateChanges::events(records))
+    Ok(records)
+}
+
+fn module_error(err: String) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(err)
 }

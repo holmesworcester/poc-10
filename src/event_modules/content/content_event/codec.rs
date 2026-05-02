@@ -1,4 +1,4 @@
-use crate::store::EventRecord;
+use crate::store::{EventRecord, EventScope};
 
 use super::types::ContentEvent;
 
@@ -45,5 +45,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         body_len: decoded.payload.len(),
         canonical_bytes: bytes,
         dependencies: Vec::new(),
+        scope: EventScope::Shared,
     })
 }

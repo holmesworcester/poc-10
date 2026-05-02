@@ -12,3 +12,9 @@ pub struct Invite {
     pub invite_event_id: EventId,
     pub workspace_id: EventId,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InviteSecretEvent {
+    pub bootstrap_hash: [u8; 32],
+    pub bootstrap_secret: [u8; 32],
+}

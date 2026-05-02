@@ -5,8 +5,8 @@ use crate::store::{CommandOutput, EventId};
 
 use super::super::connection_record::types;
 use super::super::transit;
+use super::codec;
 use super::types::RequestEvent;
-use super::{codec, projector};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundRequest {
@@ -28,15 +28,15 @@ pub fn create(
     };
     let inner = codec::encode(&event);
     let request_id = types::event_id(&inner);
-    let projection = projector::outbound(inner.clone())?;
-    Ok(CommandOutput::with_changes(
+    let record = codec::record_from_bytes(inner.clone())?;
+    Ok(CommandOutput::with_events(
         OutboundRequest {
             bytes: transit::commands::create_bootstrap(&local, invite.endpoint, &inner)?,
             request_id,
             local_endpoint: local.endpoint,
             addr: invite.addr,
         },
-        projection.changes,
+        vec![record],
     ))
 }
 
@@ -50,18 +50,27 @@ pub fn accept(
         return Err("invite private key rejected".to_string());
     }
 
-    let projection = projector::inbound(bytes, local.endpoint, event.bootstrap_hash)?;
-    let outgoing = projection
-        .emitted_events
-        .iter()
-        .map(|bytes| transit::commands::create_bootstrap(&local, event.from_endpoint, bytes))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(CommandOutput::with_changes(
+    let request_id = types::event_id(&bytes);
+    let connection_id = types::connection_id(&request_id, &local.endpoint);
+    let ack = super::super::connection_ack::types::AckEvent {
+        from_endpoint: local.endpoint,
+        to_endpoint: event.from_endpoint,
+        request_id,
+        connection_id,
+    };
+    let ack_bytes = super::super::connection_ack::codec::encode(&ack);
+    let outgoing = vec![transit::commands::create_bootstrap(
+        &local,
+        event.from_endpoint,
+        &ack_bytes,
+    )?];
+    let ack_record = super::super::connection_ack::codec::record_from_bytes(ack_bytes)?;
+    Ok(CommandOutput::with_events(
         types::InboundConnection {
             outgoing,
-            connection_id: projection.connection_id,
+            connection_id: Some(connection_id),
         },
-        projection.changes,
+        vec![ack_record],
     ))
 }
 

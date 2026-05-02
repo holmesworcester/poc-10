@@ -6,6 +6,15 @@ use crate::event_modules::connection::connection_ack::types::AckEvent;
 use crate::event_modules::identity::endpoint::types::EndpointId;
 use crate::store::StateChanges;
 
+pub fn project(bytes: Vec<u8>, local_endpoint: EndpointId) -> Result<Projection, String> {
+    let event = codec::decode(&bytes)?;
+    if event.from_endpoint == local_endpoint {
+        outbound(bytes)
+    } else {
+        inbound(bytes, local_endpoint, event.bootstrap_hash)
+    }
+}
+
 pub fn outbound(bytes: Vec<u8>) -> Result<Projection, String> {
     codec::decode(&bytes)?;
     let request_id = types::event_id(&bytes);

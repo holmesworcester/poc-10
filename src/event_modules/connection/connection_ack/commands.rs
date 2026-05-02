@@ -3,7 +3,7 @@ use crate::store::CommandOutput;
 
 use super::super::connection_record::types;
 use super::super::connection_request;
-use super::{codec, projector};
+use super::codec;
 
 pub fn accept(
     local: endpoint::types::EndpointKeypair,
@@ -16,13 +16,19 @@ pub fn accept(
     if request.from_endpoint != local.endpoint {
         return Err("connection ack references another endpoint's request".to_string());
     }
+    if event.to_endpoint != local.endpoint {
+        return Err("connection ack addressed to a different endpoint".to_string());
+    }
+    let expected_connection_id = types::connection_id(&event.request_id, &event.from_endpoint);
+    if event.connection_id != expected_connection_id {
+        return Err("connection ack has an invalid connection id".to_string());
+    }
 
-    let projection = projector::inbound(bytes, local.endpoint, event.request_id)?;
-    Ok(CommandOutput::with_changes(
+    Ok(CommandOutput::with_events(
         types::InboundConnection {
             outgoing: Vec::new(),
-            connection_id: projection.connection_id,
+            connection_id: Some(event.connection_id),
         },
-        projection.changes,
+        Vec::new(),
     ))
 }

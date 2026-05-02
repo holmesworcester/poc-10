@@ -17,6 +17,24 @@ pub struct EventRecord {
     pub body_len: usize,
     pub canonical_bytes: Vec<u8>,
     pub dependencies: Vec<EventId>,
+    pub scope: EventScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventScope {
+    Shared,
+    Local,
+    Connection,
+}
+
+impl EventScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Local => "local",
+            Self::Connection => "connection",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,19 +67,19 @@ impl StateChanges {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput<T> {
     pub value: T,
-    pub changes: StateChanges,
+    pub events: Vec<EventRecord>,
 }
 
 impl<T> CommandOutput<T> {
     pub fn new(value: T) -> Self {
         Self {
             value,
-            changes: StateChanges::default(),
+            events: Vec::new(),
         }
     }
 
-    pub fn with_changes(value: T, changes: StateChanges) -> Self {
-        Self { value, changes }
+    pub fn with_events(value: T, events: Vec<EventRecord>) -> Self {
+        Self { value, events }
     }
 }
 
@@ -181,13 +199,14 @@ impl Store {
         let event_id = event_id(&event.canonical_bytes);
         let inserted = self.conn.execute(
             "INSERT OR IGNORE INTO events
-                (event_id, timestamp, body_len, event_partition, status, canonical_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (event_id, timestamp, body_len, event_partition, event_scope, status, canonical_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 event_id.to_vec(),
                 event.timestamp as i64,
                 event.body_len as i64,
                 i64::from(event_id[0]),
+                event.scope.as_str(),
                 status.as_str(),
                 &event.canonical_bytes,
             ],
@@ -297,18 +316,22 @@ impl Store {
     pub fn max_timestamp(&self) -> rusqlite::Result<u64> {
         let value = self
             .conn
-            .query_row("SELECT MAX(timestamp) FROM events", [], |row| {
-                row.get::<_, Option<i64>>(0)
-            })?
+            .query_row(
+                "SELECT MAX(timestamp) FROM events WHERE event_scope = ?1",
+                params![EventScope::Shared.as_str()],
+                |row| row.get::<_, Option<i64>>(0),
+            )?
             .unwrap_or(0);
         Ok(value.max(0) as u64)
     }
 
     pub fn event_count(&self) -> rusqlite::Result<usize> {
         self.conn
-            .query_row("SELECT COUNT(*) FROM events", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_scope = ?1",
+                params![EventScope::Shared.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
             .map(|count| count as usize)
     }
 
@@ -334,8 +357,9 @@ impl Store {
     fn status_count(&self, status: EventStatus) -> rusqlite::Result<usize> {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM events WHERE status = ?1",
-                params![status.as_str()],
+                "SELECT COUNT(*) FROM events
+                 WHERE status = ?1 AND event_scope = ?2",
+                params![status.as_str(), EventScope::Shared.as_str()],
                 |row| row.get::<_, i64>(0),
             )
             .map(|count| count as usize)
@@ -343,17 +367,22 @@ impl Store {
 
     pub fn body_bytes(&self) -> rusqlite::Result<usize> {
         self.conn
-            .query_row("SELECT COALESCE(SUM(body_len), 0) FROM events", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COALESCE(SUM(body_len), 0) FROM events
+                 WHERE event_scope = ?1",
+                params![EventScope::Shared.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
             .map(|count| count as usize)
     }
 
     pub fn event_index_entries(&self) -> rusqlite::Result<Vec<EventIndexEntry>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT event_id, event_partition FROM events ORDER BY event_id")?;
-        let rows = stmt.query_map([], |row| {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, event_partition FROM events
+             WHERE event_scope = ?1
+             ORDER BY event_id",
+        )?;
+        let rows = stmt.query_map(params![EventScope::Shared.as_str()], |row| {
             let id: Vec<u8> = row.get(0)?;
             Ok(EventIndexEntry {
                 event_id: vec_to_id(id)?,
@@ -364,13 +393,18 @@ impl Store {
     }
 
     pub fn event_ids_in_partition(&self, partition: u8) -> rusqlite::Result<Vec<EventId>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT event_id FROM events WHERE event_partition = ?1 ORDER BY event_id")?;
-        let rows = stmt.query_map(params![i64::from(partition)], |row| {
-            let id: Vec<u8> = row.get(0)?;
-            vec_to_id(id)
-        })?;
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id FROM events
+             WHERE event_partition = ?1 AND event_scope = ?2
+             ORDER BY event_id",
+        )?;
+        let rows = stmt.query_map(
+            params![i64::from(partition), EventScope::Shared.as_str()],
+            |row| {
+                let id: Vec<u8> = row.get(0)?;
+                vec_to_id(id)
+            },
+        )?;
         rows.collect()
     }
 
@@ -379,6 +413,18 @@ impl Store {
             .query_row(
                 "SELECT 1 FROM events WHERE event_id = ?1",
                 params![event_id.to_vec()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+    }
+
+    pub fn has_shared_event(&self, event_id: &EventId) -> rusqlite::Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM events
+                 WHERE event_id = ?1 AND event_scope = ?2",
+                params![event_id.to_vec(), EventScope::Shared.as_str()],
                 |_| Ok(()),
             )
             .optional()
@@ -395,6 +441,17 @@ impl Store {
             .optional()
     }
 
+    pub fn shared_event_bytes(&self, event_id: &EventId) -> rusqlite::Result<Option<Vec<u8>>> {
+        self.conn
+            .query_row(
+                "SELECT canonical_bytes FROM events
+                 WHERE event_id = ?1 AND event_scope = ?2",
+                params![event_id.to_vec(), EventScope::Shared.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
     fn ensure_schema(&self) -> rusqlite::Result<()> {
         self.conn.execute_batch(
             "
@@ -403,6 +460,7 @@ impl Store {
                 timestamp INTEGER NOT NULL,
                 body_len INTEGER NOT NULL,
                 event_partition INTEGER NOT NULL,
+                event_scope TEXT NOT NULL DEFAULT 'shared',
                 status TEXT NOT NULL,
                 canonical_bytes BLOB NOT NULL
             );
@@ -425,7 +483,21 @@ impl Store {
                 PRIMARY KEY (table_name, row_key)
             );
             ",
-        )
+        )?;
+        self.ensure_event_scope_column()
+    }
+
+    fn ensure_event_scope_column(&self) -> rusqlite::Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(events)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !columns.iter().any(|column| column == "event_scope") {
+            self.conn.execute_batch(
+                "ALTER TABLE events ADD COLUMN event_scope TEXT NOT NULL DEFAULT 'shared';",
+            )?;
+        }
+        Ok(())
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::store::EventRecord;
+use crate::store::{EventRecord, EventScope};
 use crate::wire::{Reader, Writer};
 
 use super::types::{DependentEvent, MAX_DEPS, PAYLOAD_BYTES};
@@ -70,5 +70,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         body_len: PAYLOAD_BYTES,
         canonical_bytes: bytes,
         dependencies: decoded.dependencies,
+        scope: EventScope::Shared,
     })
 }

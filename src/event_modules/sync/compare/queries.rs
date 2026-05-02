@@ -48,13 +48,13 @@ pub fn ids_in_bucket(store: &Store, bucket: u8) -> Result<Vec<EventId>, String> 
 
 pub fn has_event(store: &Store, event_id: &EventId) -> Result<bool, String> {
     store
-        .has_event(event_id)
+        .has_shared_event(event_id)
         .map_err(|err| format!("check event presence: {err}"))
 }
 
 pub fn event_byte(store: &Store, id: &EventId) -> Result<Option<Vec<u8>>, String> {
     store
-        .event_bytes(id)
+        .shared_event_bytes(id)
         .map_err(|err| format!("load event bytes: {err}"))
 }
 

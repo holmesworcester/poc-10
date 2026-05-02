@@ -1,3 +1,4 @@
+use crate::store::{EventRecord, EventScope};
 use crate::wire::{Reader, Writer};
 
 use super::super::connection_record::types::EVENT_MAGIC;
@@ -37,4 +38,15 @@ pub fn decode(bytes: &[u8]) -> Result<AckEvent, String> {
 
 pub fn is_ack(bytes: &[u8]) -> bool {
     bytes.starts_with(EVENT_MAGIC) && bytes.get(EVENT_MAGIC.len()) == Some(&TAG)
+}
+
+pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
+    decode(&bytes)?;
+    Ok(EventRecord {
+        timestamp: 0,
+        body_len: 0,
+        canonical_bytes: bytes,
+        dependencies: Vec::new(),
+        scope: EventScope::Connection,
+    })
 }

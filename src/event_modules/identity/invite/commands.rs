@@ -2,11 +2,11 @@ use std::{net::SocketAddr, str::FromStr};
 
 use rand_core::{OsRng, RngCore};
 
-use crate::store::{CommandOutput, StateChanges};
+use crate::store::CommandOutput;
 
 use super::super::endpoint;
-use super::projector;
-use super::types::Invite;
+use super::codec;
+use super::types::{Invite, InviteSecretEvent};
 
 const INVITE_PREFIX: &str = "topo://invite/";
 const INVITE_VERSION: &str = "v6";
@@ -24,18 +24,22 @@ pub fn create(
     let invite_event_id = nonce32();
     let bootstrap_secret = nonce32();
     let workspace_id = nonce32();
-    let changes = StateChanges::rows(projector::invite_secret(
-        secret_hash(&bootstrap_secret),
+    let secret_event = InviteSecretEvent {
+        bootstrap_hash: secret_hash(&bootstrap_secret),
         bootstrap_secret,
-    ));
-    CommandOutput::with_changes(format!(
-        "{INVITE_PREFIX}{INVITE_VERSION}/{INVITE_KIND}/{LABEL_INVITE_ID}.{invite_id}/{LABEL_INVITE_PRIVKEY}.{invite_secret}/{LABEL_WORKSPACE}.{workspace}/{LABEL_ENDPOINT_ID}.{endpoint}/{LABEL_ADDRESS}.{address}",
-        invite_id = encode_hex(&invite_event_id),
-        invite_secret = encode_hex(&bootstrap_secret),
-        workspace = encode_hex(&workspace_id),
-        endpoint = encode_hex(&local.endpoint),
-        address = encode_address(public_addr),
-    ), changes)
+    };
+    let bytes = codec::encode(&secret_event);
+    CommandOutput::with_events(
+        format!(
+            "{INVITE_PREFIX}{INVITE_VERSION}/{INVITE_KIND}/{LABEL_INVITE_ID}.{invite_id}/{LABEL_INVITE_PRIVKEY}.{invite_secret}/{LABEL_WORKSPACE}.{workspace}/{LABEL_ENDPOINT_ID}.{endpoint}/{LABEL_ADDRESS}.{address}",
+            invite_id = encode_hex(&invite_event_id),
+            invite_secret = encode_hex(&bootstrap_secret),
+            workspace = encode_hex(&workspace_id),
+            endpoint = encode_hex(&local.endpoint),
+            address = encode_address(public_addr),
+        ),
+        vec![codec::record_from_bytes(bytes).expect("encoded invite secret is valid")],
+    )
 }
 
 pub fn addr(invite: &str) -> Result<SocketAddr, String> {

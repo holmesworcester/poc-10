@@ -28,6 +28,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Command::Invite { public_addr } => {
             let invite = pipeline::run_command(
                 &store,
+                &modules,
                 modules
                     .create_invite(&store, public_addr)
                     .map_err(|err| format!("invite: {err}"))?,
@@ -42,15 +43,20 @@ fn run(args: Vec<String>) -> Result<(), String> {
         } => {
             let (report, admitted) = pipeline::run_command(
                 &store,
+                &modules,
                 modules
                     .generate_content(&store, num_events, event_size)
                     .map_err(|err| format!("generate: {err}"))?,
             )
             .map_err(|err| format!("admit generated events: {err}"))?;
-            let applied = control_loop::drain_until_idle(&store, control_loop::DEFAULT_READY_BATCH)
-                .map_err(|err| format!("drain generated events: {err}"))?;
+            let applied =
+                control_loop::drain_until_idle(&store, &modules, control_loop::DEFAULT_READY_BATCH)
+                    .map_err(|err| format!("drain generated events: {err}"))?;
             println!("generated_events: {}", admitted.inserted_events);
-            println!("applied_events: {}", applied.applied_events);
+            println!(
+                "applied_events: {}",
+                admitted.applied_events + applied.applied_events
+            );
             println!("event_size_bytes: {event_size}");
             println!("first_timestamp: {}", report.first_timestamp);
             println!("last_timestamp: {}", report.last_timestamp);
@@ -258,9 +264,13 @@ struct CliSyncReport {
 fn connect(store: &Store, modules: &Modules, invite: &str) -> Result<SocketAddr, String> {
     let addr = modules.invite_addr(invite)?;
     let mut stream = network::connect(addr).map_err(|err| format!("open tcp stream: {err}"))?;
-    let request = pipeline::run_command(store, modules.create_connection_request(store, invite)?)
-        .map_err(|err| format!("record connection request: {err}"))?
-        .0;
+    let request = pipeline::run_command(
+        store,
+        modules,
+        modules.create_connection_request(store, invite)?,
+    )
+    .map_err(|err| format!("record connection request: {err}"))?
+    .0;
     network::write_frames(&mut stream, vec![request.bytes])?;
     let report = drive_stream(
         store,
@@ -308,7 +318,7 @@ fn serve(
 }
 
 fn sync_routes(store: &Store, modules: &Modules) -> Result<CliSyncReport, String> {
-    control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
+    control_loop::drain_until_idle(store, modules, control_loop::DEFAULT_READY_BATCH)
         .map_err(|err| format!("drain ready events before sync: {err}"))?;
     let mut report = CliSyncReport::default();
     for outbound in modules.sync_outbound(store)? {
@@ -350,7 +360,7 @@ fn drive_stream(
     let mut report = StreamReport::default();
     if let Some(bytes) = first_frame {
         let result = pipeline::ingest_frame(store, modules, metadata, bytes)?;
-        control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
+        control_loop::drain_until_idle(store, modules, control_loop::DEFAULT_READY_BATCH)
             .map_err(|err| format!("drain ready events: {err}"))?;
         apply_stream_result(stream, &mut report, result)?;
     }
@@ -358,7 +368,7 @@ fn drive_stream(
         match network::read_frame(stream) {
             Ok(bytes) => {
                 let result = pipeline::ingest_frame(store, modules, metadata, bytes)?;
-                control_loop::drain_until_idle(store, control_loop::DEFAULT_READY_BATCH)
+                control_loop::drain_until_idle(store, modules, control_loop::DEFAULT_READY_BATCH)
                     .map_err(|err| format!("drain ready events: {err}"))?;
                 apply_stream_result(stream, &mut report, result)?;
             }

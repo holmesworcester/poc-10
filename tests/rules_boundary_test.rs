@@ -220,6 +220,10 @@ fn event_module_commands_do_not_mutate_storage_directly() {
         "&Store",
         "Store,",
         "Store)",
+        "StateChanges",
+        "TableRow",
+        "with_changes",
+        ".rows",
         "write_transaction",
         "insert_table_rows",
         "insert_event(",
@@ -231,7 +235,7 @@ fn event_module_commands_do_not_mutate_storage_directly() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "commands receive explicit context and return CommandOutput/StateChanges; pipeline/store own writes:\n{}",
+        "commands receive explicit context and return CommandOutput events only; projectors/pipeline/store own rows and writes:\n{}",
         violations.join("\n")
     );
 }
@@ -260,6 +264,20 @@ fn event_module_projectors_do_not_query_storage_directly() {
         violations.is_empty(),
         "projectors are pure transforms over event plus explicit context; queries belong outside projector.rs:\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn command_output_contains_events_not_state_changes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(root.join("src/store.rs")).expect("read store");
+    let start = text
+        .find("pub struct CommandOutput")
+        .expect("CommandOutput");
+    let body = &text[start..text[start..].find("impl<T> CommandOutput").unwrap() + start];
+    assert!(
+        body.contains("pub events: Vec<EventRecord>") && !body.contains("StateChanges"),
+        "CommandOutput is command-facing and must carry events only, not projector rows"
     );
 }
 

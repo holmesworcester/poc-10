@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use topo::event_modules::test_events;
+use topo::event_modules::{test_events, Modules};
 use topo::store::{EventStatusCounts, Store};
 use topo::{control_loop, pipeline};
 
@@ -57,7 +57,8 @@ fn run_cascade(
     let cascade_start = Instant::now();
     pipeline::admit_records(store, records[..root_count].to_vec())
         .map_err(|err| format!("insert root events: {err}"))?;
-    let drain = control_loop::drain_until_idle(store, batch_size)?;
+    let modules = Modules::new();
+    let drain = control_loop::drain_until_idle(store, &modules, batch_size)?;
     let cascade_ms = cascade_start.elapsed().as_millis();
     let final_counts = store
         .status_counts()

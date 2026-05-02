@@ -19,7 +19,7 @@ struct FrameMetadata {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleFrameReport {
-    pub changes: StateChanges,
+    pub events: Vec<EventRecord>,
     pub outgoing: Vec<Vec<u8>>,
     pub established_routes: usize,
     pub sent_events: usize,
@@ -50,7 +50,7 @@ impl Modules {
     ) -> Result<CommandOutput<String>, String> {
         let local = self.local_keypair(store)?;
         let invite = identity::invite::commands::create(local.value, public_addr);
-        Ok(merge_outputs(local.changes, invite))
+        Ok(merge_outputs(local.events, invite))
     }
 
     pub fn invite_addr(&self, invite: &str) -> Result<SocketAddr, String> {
@@ -78,7 +78,7 @@ impl Modules {
     {
         let local = self.local_keypair(store)?;
         let request = connection::connection_request::commands::create(local.value, invite)?;
-        Ok(merge_outputs(local.changes, request))
+        Ok(merge_outputs(local.events, request))
     }
 
     pub fn ingest_frame(
@@ -113,6 +113,11 @@ impl Modules {
     ) -> Result<ModuleFrameReport, String> {
         let mut result = ModuleFrameReport::default();
         if connection::connection_request::codec::is_request(&bytes) {
+            result
+                .events
+                .push(connection::connection_request::codec::record_from_bytes(
+                    bytes.clone(),
+                )?);
             let event = connection::connection_request::codec::decode(&bytes)?;
             let authorized = identity::invite::queries::bootstrap_hash_is_authorized(
                 store,
@@ -121,9 +126,14 @@ impl Modules {
             let local = self.local_keypair(store)?;
             let connection =
                 connection::connection_request::commands::accept(local.value, authorized, bytes)?;
-            let connection = merge_outputs(local.changes, connection);
+            let connection = merge_outputs(local.events, connection);
             self.apply_connection_result(metadata, connection, &mut result);
         } else if connection::connection_ack::codec::is_ack(&bytes) {
+            result
+                .events
+                .push(connection::connection_ack::codec::record_from_bytes(
+                    bytes.clone(),
+                )?);
             let event = connection::connection_ack::codec::decode(&bytes)?;
             let request_bytes =
                 connection::connection_record::queries::event_bytes(store, &event.request_id)?
@@ -131,7 +141,7 @@ impl Modules {
             let local = self.local_keypair(store)?;
             let connection =
                 connection::connection_ack::commands::accept(local.value, request_bytes, bytes)?;
-            let connection = merge_outputs(local.changes, connection);
+            let connection = merge_outputs(local.events, connection);
             self.apply_connection_result(metadata, connection, &mut result);
         } else {
             return Err("unknown connection event".to_string());
@@ -145,13 +155,13 @@ impl Modules {
         connection: CommandOutput<connection::connection_record::types::InboundConnection>,
         result: &mut ModuleFrameReport,
     ) {
-        result.changes.append(connection.changes);
+        result.events.extend(connection.events);
         result.outgoing.extend(connection.value.outgoing);
         if let Some(connection_id) = connection.value.connection_id {
             if metadata.remember_origin {
                 result
-                    .changes
-                    .append(connection::transport_target::commands::record(
+                    .events
+                    .push(connection::transport_target::commands::record(
                         connection_id,
                         metadata.origin,
                     ));
@@ -238,6 +248,59 @@ impl Modules {
         }
     }
 
+    pub fn project_record(
+        &self,
+        store: &Store,
+        record: &EventRecord,
+    ) -> Result<StateChanges, String> {
+        let bytes = &record.canonical_bytes;
+        if connection::connection_request::codec::is_request(bytes) {
+            let local = self.existing_local_keypair(store)?;
+            return Ok(connection::connection_request::projector::project(
+                bytes.clone(),
+                local.endpoint,
+            )?
+            .changes);
+        }
+        if connection::connection_ack::codec::is_ack(bytes) {
+            let local = self.existing_local_keypair(store)?;
+            let event = connection::connection_ack::codec::decode(bytes)?;
+            let projection = if event.from_endpoint == local.endpoint {
+                connection::connection_ack::projector::outbound(bytes.clone(), local.endpoint)?
+            } else {
+                let request_bytes =
+                    connection::connection_record::queries::event_bytes(store, &event.request_id)?
+                        .ok_or_else(|| "connection ack references unknown request".to_string())?;
+                connection::connection_ack::projector::inbound(
+                    bytes.clone(),
+                    local.endpoint,
+                    request_bytes,
+                )?
+            };
+            return Ok(projection.changes);
+        }
+
+        let tag = bytes
+            .first()
+            .ok_or_else(|| "empty event bytes".to_string())?;
+        match *tag {
+            identity::endpoint::codec::TYPE_LOCAL_ENDPOINT => Ok(StateChanges::rows(
+                identity::endpoint::projector::project(bytes)?,
+            )),
+            identity::invite::codec::TYPE_INVITE_SECRET => Ok(StateChanges::rows(
+                identity::invite::projector::project(bytes)?,
+            )),
+            connection::transport_target::codec::TYPE_TRANSPORT_TARGET => Ok(StateChanges::rows(
+                connection::transport_target::projector::project(bytes)?,
+            )),
+            content::content_event::codec::TYPE_CONTENT
+            | test_events::dependent_event::codec::TYPE_DEPENDENT_EVENT => {
+                Ok(StateChanges::default())
+            }
+            other => Err(format!("unknown event type {other}")),
+        }
+    }
+
     fn existing_local_keypair(
         &self,
         store: &Store,
@@ -247,17 +310,35 @@ impl Modules {
     }
 }
 
-fn merge_outputs<T>(mut changes: StateChanges, mut output: CommandOutput<T>) -> CommandOutput<T> {
-    changes.append(output.changes);
-    output.changes = changes;
+fn merge_outputs<T>(
+    mut events: Vec<EventRecord>,
+    mut output: CommandOutput<T>,
+) -> CommandOutput<T> {
+    events.append(&mut output.events);
+    output.events = events;
     output
 }
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
+    if connection::connection_request::codec::is_request(&bytes) {
+        return connection::connection_request::codec::record_from_bytes(bytes);
+    }
+    if connection::connection_ack::codec::is_ack(&bytes) {
+        return connection::connection_ack::codec::record_from_bytes(bytes);
+    }
     let tag = bytes
         .first()
         .ok_or_else(|| "empty event bytes".to_string())?;
     match *tag {
+        identity::endpoint::codec::TYPE_LOCAL_ENDPOINT => {
+            identity::endpoint::codec::record_from_bytes(bytes)
+        }
+        identity::invite::codec::TYPE_INVITE_SECRET => {
+            identity::invite::codec::record_from_bytes(bytes)
+        }
+        connection::transport_target::codec::TYPE_TRANSPORT_TARGET => {
+            connection::transport_target::codec::record_from_bytes(bytes)
+        }
         content::content_event::codec::TYPE_CONTENT => {
             content::content_event::codec::record_from_bytes(bytes)
         }

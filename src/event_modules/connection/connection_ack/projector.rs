@@ -1,22 +1,42 @@
-use crate::store::EventId;
 use crate::store::StateChanges;
 
 use super::super::connection_record::projector::{self as projection, Projection};
 use super::super::connection_record::types;
+use super::super::connection_request;
 use super::codec;
 use crate::event_modules::identity::endpoint::types::EndpointId;
+
+pub fn outbound(bytes: Vec<u8>, local_endpoint: EndpointId) -> Result<Projection, String> {
+    let event = codec::decode(&bytes)?;
+    if event.from_endpoint != local_endpoint {
+        return Err("connection ack was not created by this endpoint".to_string());
+    }
+    Ok(Projection {
+        changes: StateChanges::rows(vec![projection::connection_event_row(
+            types::event_id(&bytes),
+            bytes,
+        )]),
+        emitted_events: Vec::new(),
+        connection_id: None,
+    })
+}
 
 pub fn inbound(
     bytes: Vec<u8>,
     local_endpoint: EndpointId,
-    expected_request_id: EventId,
+    request_bytes: Vec<u8>,
 ) -> Result<Projection, String> {
     let event = codec::decode(&bytes)?;
+    let request = connection_request::codec::decode(&request_bytes)
+        .map_err(|_| "connection ack references a non-request event".to_string())?;
+    if request.from_endpoint != local_endpoint {
+        return Err("connection ack references another endpoint's request".to_string());
+    }
+    if event.request_id != types::event_id(&request_bytes) {
+        return Err("connection ack references a different request".to_string());
+    }
     if event.to_endpoint != local_endpoint {
         return Err("connection ack addressed to a different endpoint".to_string());
-    }
-    if event.request_id != expected_request_id {
-        return Err("connection ack references a different request".to_string());
     }
     let expected_connection_id = types::connection_id(&event.request_id, &event.from_endpoint);
     if event.connection_id != expected_connection_id {

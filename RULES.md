@@ -11,14 +11,15 @@ event modules own protocol and domain semantics.
 
 Commands receive explicit input values plus narrow read context values. They do
 not mutate SQLite, open transactions, drain queues, or call broad apply loops.
-They return `CommandOutput`/`StateChanges`; the pipeline/store layer is the
-only place that commits those rows or events.
+They return `CommandOutput` with canonical events only. Commands must not return
+rows. Projectors return `StateChanges`; the pipeline/store layer is the only
+place that commits those rows or events.
 
 The intended shape is:
 
 ```text
 event_modules/<domain>/<module>/commands.rs
-  command(ctx, input, writer) -> CommandOutput
+  command(ctx, input) -> CommandOutput { value, events }
 
 event_modules/<domain>/<module>/codec.rs
   Event <-> CanonicalEventBytes
