@@ -85,7 +85,7 @@ fn cascade_bench_blocks_then_unblocks_10k() {
     let report = run_cascade(
         &store,
         10_000,
-        test_events::dependent_event::codec::MAX_DEPS,
+        test_events::dependent_event::types::MAX_DEPS,
         control_loop::DEFAULT_READY_BATCH,
     )
     .unwrap();
@@ -118,7 +118,7 @@ fn cascade_bench_blocks_then_unblocks_50k() {
     let report = run_cascade(
         &store,
         50_000,
-        test_events::dependent_event::codec::MAX_DEPS,
+        test_events::dependent_event::types::MAX_DEPS,
         control_loop::DEFAULT_READY_BATCH,
     );
 

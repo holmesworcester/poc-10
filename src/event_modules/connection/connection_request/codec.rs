@@ -1,16 +1,9 @@
 use crate::wire::{Reader, Writer};
 
 use super::super::connection_record::types::EVENT_MAGIC;
-use crate::event_modules::identity::endpoint::types::EndpointId;
+use super::types::RequestEvent;
 
 pub const TAG: u8 = 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequestEvent {
-    pub from_endpoint: EndpointId,
-    pub nonce: [u8; 32],
-    pub bootstrap_hash: [u8; 32],
-}
 
 pub fn encode(event: &RequestEvent) -> Vec<u8> {
     let mut out = Writer::with_capacity(10 + 1 + 32 * 3);

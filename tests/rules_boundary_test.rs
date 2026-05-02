@@ -84,6 +84,44 @@ fn domain_modules_contain_only_child_modules() {
 }
 
 #[test]
+fn codec_files_do_not_define_public_types() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "codec.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = ["pub struct ", "pub enum ", "pub type "];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "event module semantic types belong in types.rs; codec.rs is encode/decode only:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn codec_modules_have_type_files() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_modules");
+    let mut offenders = Vec::new();
+    for codec in rust_files(&root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "codec.rs"))
+    {
+        let types = codec.with_file_name("types.rs");
+        if !types.exists() {
+            offenders.push(codec.strip_prefix(&root).unwrap().display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "modules with codec.rs must define semantic shapes in sibling types.rs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn sync_event_module_does_not_own_transport_or_frame_io() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sync_root = root.join("src/event_modules/sync");

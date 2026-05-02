@@ -1,22 +1,9 @@
 use crate::wire::{Reader, Writer};
 
 use super::super::{compare, data, have_id, need_id};
+use super::types::{Frame, SyncItem};
 
 const MAGIC: &[u8; 9] = b"TOPOSYNC1";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Frame {
-    pub more: bool,
-    pub items: Vec<SyncItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SyncItem {
-    Compare(compare::codec::CompareEvent),
-    HaveId(have_id::codec::HaveIdEvent),
-    NeedId(need_id::codec::NeedIdEvent),
-    Data(data::codec::DataEvent),
-}
 
 pub fn encode(frame: &Frame) -> Vec<u8> {
     let mut out = Writer::new();

@@ -1,18 +1,9 @@
-use crate::store::EventId;
 use crate::wire::{Reader, Writer};
 
-use super::super::connection_record::types::{ConnectionId, EVENT_MAGIC};
-use crate::event_modules::identity::endpoint::types::EndpointId;
+use super::super::connection_record::types::EVENT_MAGIC;
+use super::types::AckEvent;
 
 pub const TAG: u8 = 2;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AckEvent {
-    pub from_endpoint: EndpointId,
-    pub to_endpoint: EndpointId,
-    pub request_id: EventId,
-    pub connection_id: ConnectionId,
-}
 
 pub fn encode(event: &AckEvent) -> Vec<u8> {
     let mut out = Writer::with_capacity(10 + 1 + 32 * 4);

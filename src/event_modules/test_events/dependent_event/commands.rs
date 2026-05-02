@@ -1,6 +1,7 @@
 use crate::store::{EventId, EventRecord};
 
-use super::codec::{self, DependentEvent, MAX_DEPS, PAYLOAD_BYTES};
+use super::codec;
+use super::types::{DependentEvent, MAX_DEPS, PAYLOAD_BYTES};
 
 pub fn build_records(
     events: usize,

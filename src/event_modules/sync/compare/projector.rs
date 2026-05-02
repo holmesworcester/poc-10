@@ -1,4 +1,4 @@
-use super::codec::{BucketSummary, BUCKETS};
+use super::types::{BucketSummary, BUCKETS};
 
 pub fn differing_buckets(
     local: &[BucketSummary; BUCKETS],

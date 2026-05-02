@@ -1,14 +1,8 @@
-use crate::store::EventId;
 use crate::wire::{Reader, Writer};
 
+use super::types::NeedIdEvent;
+
 pub const TAG: u8 = 3;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NeedIdEvent {
-    pub connection_id: EventId,
-    pub id: EventId,
-}
-
 pub fn encode(event: &NeedIdEvent, out: &mut Writer) {
     out.u8(TAG);
     out.id(&event.connection_id);

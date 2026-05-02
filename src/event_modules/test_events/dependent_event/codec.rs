@@ -1,17 +1,10 @@
-use crate::store::{EventId, EventRecord};
+use crate::store::EventRecord;
 use crate::wire::{Reader, Writer};
 
-pub const TYPE_DEPENDENT_EVENT: u8 = 2;
-pub const MAX_DEPS: usize = 10;
-pub const PAYLOAD_BYTES: usize = 16;
-pub const ENCODED_BYTES: usize = 1 + 8 + 1 + (MAX_DEPS * 32) + PAYLOAD_BYTES;
+use super::types::{DependentEvent, MAX_DEPS, PAYLOAD_BYTES};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DependentEvent {
-    pub timestamp: u64,
-    pub dependencies: Vec<EventId>,
-    pub payload: [u8; PAYLOAD_BYTES],
-}
+pub const TYPE_DEPENDENT_EVENT: u8 = 2;
+pub const ENCODED_BYTES: usize = 1 + 8 + 1 + (MAX_DEPS * 32) + PAYLOAD_BYTES;
 
 pub fn encode(event: &DependentEvent) -> Vec<u8> {
     assert!(

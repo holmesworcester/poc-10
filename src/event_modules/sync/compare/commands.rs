@@ -1,10 +1,11 @@
 use crate::store::{EventId, Store};
 
-use super::super::data::codec::DataEvent;
-use super::super::frame::codec::{self as frame_codec, Frame, SyncItem};
-use super::super::have_id::codec::HaveIdEvent;
-use super::super::need_id::codec::NeedIdEvent;
-use super::codec::{BucketSummary, CompareEvent, BUCKETS};
+use super::super::data::types::DataEvent;
+use super::super::frame::codec as frame_codec;
+use super::super::frame::types::{Frame, SyncItem};
+use super::super::have_id::types::HaveIdEvent;
+use super::super::need_id::types::NeedIdEvent;
+use super::types::{BucketSummary, CompareEvent, BUCKETS};
 use super::{projector, queries};
 
 const FRAME_TARGET_BYTES: usize = 32 * 1024 * 1024;

@@ -1,29 +1,8 @@
-use crate::store::EventId;
 use crate::wire::{Reader, Writer};
 
+use super::types::{BucketSummary, CompareEvent, BUCKETS};
+
 pub const TAG: u8 = 1;
-pub const BUCKETS: usize = 256;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BucketSummary {
-    pub count: u64,
-    pub fingerprint: [u8; 32],
-}
-
-impl Default for BucketSummary {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            fingerprint: [0; 32],
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompareEvent {
-    pub connection_id: EventId,
-    pub summary: [BucketSummary; BUCKETS],
-}
 
 pub fn encode(event: &CompareEvent, out: &mut Writer) {
     out.u8(TAG);

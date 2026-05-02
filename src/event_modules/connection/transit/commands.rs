@@ -4,8 +4,9 @@ use crate::store::Store;
 
 use super::super::connection_record::queries;
 use super::super::connection_record::types::ConnectionId;
-use super::codec::{self, TransitEnvelope};
+use super::codec;
 use super::crypto;
+use super::types::TransitEnvelope;
 
 pub fn create_bootstrap(
     store: &Store,

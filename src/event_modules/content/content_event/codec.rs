@@ -1,13 +1,8 @@
 use crate::store::EventRecord;
 
+use super::types::ContentEvent;
+
 pub const TYPE_CONTENT: u8 = 1;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContentEvent {
-    pub timestamp: u64,
-    pub payload: Vec<u8>,
-}
-
 pub fn encode(event: &ContentEvent) -> Vec<u8> {
     let len = u32::try_from(event.payload.len()).expect("content payload too large");
     let mut out = Vec::with_capacity(1 + 8 + 4 + event.payload.len());

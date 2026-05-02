@@ -2,6 +2,7 @@ use super::super::connection_ack;
 use super::super::connection_record::projector::{self as projection, Projection};
 use super::super::connection_record::types;
 use super::codec;
+use crate::event_modules::connection::connection_ack::types::AckEvent;
 use crate::event_modules::identity::endpoint::types::EndpointId;
 
 pub fn outbound(bytes: Vec<u8>) -> Result<Projection, String> {
@@ -26,7 +27,7 @@ pub fn inbound(
 
     let request_id = types::event_id(&bytes);
     let connection_id = types::connection_id(&request_id, &local_endpoint);
-    let ack = connection_ack::codec::AckEvent {
+    let ack = AckEvent {
         from_endpoint: local_endpoint,
         to_endpoint: event.from_endpoint,
         request_id,

@@ -7,7 +7,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::event_modules::identity::endpoint::types::EndpointId;
 
-use super::codec::TransitNonce;
+use super::types::TransitNonce;
 
 pub const BOOTSTRAP_PURPOSE: &[u8] = b"topo-bootstrap-transit-v1";
 pub const CONNECTION_PURPOSE: &[u8] = b"topo-connection-transit-v1";

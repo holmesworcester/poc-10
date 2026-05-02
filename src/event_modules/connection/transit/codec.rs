@@ -1,30 +1,10 @@
 use crate::wire::{Reader, Writer};
 
-use super::super::connection_record::types::ConnectionId;
-use crate::event_modules::identity::endpoint::types::EndpointId;
-
-pub type TransitNonce = [u8; 24];
+use super::types::{TransitEnvelope, TransitNonce};
 
 const MAGIC: &[u8; 10] = b"TOPOTRANS1";
 const TAG_BOOTSTRAP: u8 = 1;
 const TAG_CONNECTION: u8 = 2;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransitEnvelope {
-    Bootstrap {
-        sender_endpoint: EndpointId,
-        recipient_endpoint: EndpointId,
-        nonce: TransitNonce,
-        ciphertext: Vec<u8>,
-    },
-    Connection {
-        connection_id: ConnectionId,
-        sender_endpoint: EndpointId,
-        recipient_endpoint: EndpointId,
-        nonce: TransitNonce,
-        ciphertext: Vec<u8>,
-    },
-}
 
 pub fn associated_data(envelope: &TransitEnvelope) -> Vec<u8> {
     let mut out = Writer::new();

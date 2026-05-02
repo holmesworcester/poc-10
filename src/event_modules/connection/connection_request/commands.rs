@@ -5,6 +5,7 @@ use crate::store::{EventId, Store};
 
 use super::super::connection_record::{commands as record_commands, types};
 use super::super::transit;
+use super::types::RequestEvent;
 use super::{codec, projector};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +19,7 @@ pub struct OutboundRequest {
 pub fn create(store: &Store, invite_link: &str) -> Result<OutboundRequest, String> {
     let invite = invite::commands::parse(invite_link)?;
     let local = endpoint::commands::ensure_local_keypair(store)?;
-    let event = codec::RequestEvent {
+    let event = RequestEvent {
         from_endpoint: local.endpoint,
         nonce: nonce32(),
         bootstrap_hash: invite::commands::secret_hash(&invite.bootstrap_secret),
