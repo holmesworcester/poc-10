@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 
 use crux_core::{App, Command};
 
@@ -9,8 +9,8 @@ use crate::{control_loop, pipeline};
 
 use super::app::{
     ConnectionRequest, CountSummary, DrainReadyReport, FrameIngest, GeneratedContent, KernelApp,
-    KernelEffect, KernelModel, KernelMsg, NetworkOp, NetworkReply, StdoutOp, StdoutReply, StoreOp,
-    StoreReply,
+    KernelEffect, KernelModel, KernelMsg, NetworkOp, NetworkReply, OutboundSyncWork, StdoutOp,
+    StdoutReply, StoreOp, StoreReply, SyncRoutesStart,
 };
 
 pub fn run_invite(
@@ -20,13 +20,7 @@ pub fn run_invite(
 ) -> Result<Vec<String>, String> {
     let app = KernelApp;
     let mut model = KernelModel::default();
-    let mut shell = RealShell {
-        store,
-        modules,
-        streams: HashMap::new(),
-        next_stream_id: 1,
-        stdout: Vec::new(),
-    };
+    let mut shell = RealShell::new(store, modules);
     shell.run(&app, &mut model, KernelMsg::Invite { public_addr })?;
     Ok(shell.stdout)
 }
@@ -38,14 +32,42 @@ pub fn run_connect(
 ) -> Result<Vec<String>, String> {
     let app = KernelApp;
     let mut model = KernelModel::default();
-    let mut shell = RealShell {
-        store,
-        modules,
-        streams: HashMap::new(),
-        next_stream_id: 1,
-        stdout: Vec::new(),
-    };
+    let mut shell = RealShell::new(store, modules);
     shell.run(&app, &mut model, KernelMsg::Connect { invite })?;
+    if let Some(message) = model.last_error {
+        return Err(message);
+    }
+    Ok(shell.stdout)
+}
+
+pub fn run_sync_routes(store: &Store, modules: &Modules) -> Result<Vec<String>, String> {
+    let app = KernelApp;
+    let mut model = KernelModel::default();
+    let mut shell = RealShell::new(store, modules);
+    shell.run(&app, &mut model, KernelMsg::SyncRoutes)?;
+    if let Some(message) = model.last_error {
+        return Err(message);
+    }
+    Ok(shell.stdout)
+}
+
+pub fn run_serve(
+    store: &Store,
+    modules: &Modules,
+    listen: SocketAddr,
+    accept_count: usize,
+) -> Result<Vec<String>, String> {
+    let app = KernelApp;
+    let mut model = KernelModel::default();
+    let mut shell = RealShell::new(store, modules);
+    shell.run(
+        &app,
+        &mut model,
+        KernelMsg::Serve {
+            listen,
+            accept_count,
+        },
+    )?;
     if let Some(message) = model.last_error {
         return Err(message);
     }
@@ -60,13 +82,7 @@ pub fn run_generate(
 ) -> Result<Vec<String>, String> {
     let app = KernelApp;
     let mut model = KernelModel::default();
-    let mut shell = RealShell {
-        store,
-        modules,
-        streams: HashMap::new(),
-        next_stream_id: 1,
-        stdout: Vec::new(),
-    };
+    let mut shell = RealShell::new(store, modules);
     shell.run(
         &app,
         &mut model,
@@ -81,13 +97,7 @@ pub fn run_generate(
 pub fn run_count(store: &Store, modules: &Modules) -> Result<Vec<String>, String> {
     let app = KernelApp;
     let mut model = KernelModel::default();
-    let mut shell = RealShell {
-        store,
-        modules,
-        streams: HashMap::new(),
-        next_stream_id: 1,
-        stdout: Vec::new(),
-    };
+    let mut shell = RealShell::new(store, modules);
     shell.run(&app, &mut model, KernelMsg::Count)?;
     Ok(shell.stdout)
 }
@@ -95,12 +105,26 @@ pub fn run_count(store: &Store, modules: &Modules) -> Result<Vec<String>, String
 struct RealShell<'a> {
     store: &'a Store,
     modules: &'a Modules,
+    listeners: HashMap<u64, TcpListener>,
     streams: HashMap<u64, TcpStream>,
+    next_listener_id: u64,
     next_stream_id: u64,
     stdout: Vec<String>,
 }
 
-impl RealShell<'_> {
+impl<'a> RealShell<'a> {
+    fn new(store: &'a Store, modules: &'a Modules) -> Self {
+        Self {
+            store,
+            modules,
+            listeners: HashMap::new(),
+            streams: HashMap::new(),
+            next_listener_id: 1,
+            next_stream_id: 1,
+            stdout: Vec::new(),
+        }
+    }
+
     fn run(
         &mut self,
         app: &KernelApp,
@@ -238,6 +262,37 @@ impl RealShell<'_> {
                     unblocked_events: report.unblocked_events,
                 }))
             }
+            StoreOp::StartSyncRoutes => {
+                control_loop::drain_until_idle(
+                    self.store,
+                    self.modules,
+                    control_loop::DEFAULT_READY_BATCH,
+                )
+                .map_err(|err| format!("drain ready events before sync: {err}"))?;
+
+                let start = self
+                    .modules
+                    .start_sync(self.store)
+                    .map_err(|err| format!("start sync: {err}"))?;
+                let (started, _) = pipeline::run_command(self.store, self.modules, start)
+                    .map_err(|err| format!("record sync frames: {err}"))?;
+                let outbound = self
+                    .modules
+                    .drain_outbox_routes(self.store)
+                    .map_err(|err| format!("drain sync outbox: {err}"))?
+                    .into_iter()
+                    .map(|outbound| OutboundSyncWork {
+                        target: outbound.target,
+                        outgoing: outbound.outgoing,
+                        sent_outbox: outbound.sent_outbox,
+                        sent_events: outbound.sent_events,
+                    })
+                    .collect();
+                Ok(StoreReply::SyncStarted(SyncRoutesStart {
+                    outbound,
+                    sent_events: started.sent_events,
+                }))
+            }
             StoreOp::CountStatus => {
                 let events = self
                     .store
@@ -276,6 +331,38 @@ impl RealShell<'_> {
 
     fn handle_network(&mut self, operation: NetworkOp) -> Result<NetworkReply, String> {
         match operation {
+            NetworkOp::BindListener { addr } => {
+                let listener = TcpListener::bind(addr).map_err(|err| format!("listen: {err}"))?;
+                let local_addr = listener
+                    .local_addr()
+                    .map_err(|err| format!("listener local addr: {err}"))?;
+                let listener_id = self.next_listener_id;
+                self.next_listener_id = self.next_listener_id.saturating_add(1);
+                self.listeners.insert(listener_id, listener);
+                Ok(NetworkReply::ListenerBound {
+                    listener_id,
+                    local_addr,
+                })
+            }
+            NetworkOp::AcceptStream { listener_id } => {
+                let listener = self
+                    .listeners
+                    .get(&listener_id)
+                    .ok_or_else(|| format!("unknown listener id {listener_id}"))?;
+                let (stream, peer_addr) = listener
+                    .accept()
+                    .map_err(|err| format!("accept tcp stream: {err}"))?;
+                stream
+                    .set_nodelay(true)
+                    .map_err(|err| format!("set stream nodelay: {err}"))?;
+                let stream_id = self.next_stream_id;
+                self.next_stream_id = self.next_stream_id.saturating_add(1);
+                self.streams.insert(stream_id, stream);
+                Ok(NetworkReply::StreamAccepted {
+                    stream_id,
+                    peer_addr,
+                })
+            }
             NetworkOp::OpenStream { addr } => {
                 let stream = crate::network::connect(addr)
                     .map_err(|err| format!("open tcp stream: {err}"))?;
@@ -290,10 +377,16 @@ impl RealShell<'_> {
                 Ok(NetworkReply::FramesWritten)
             }
             NetworkOp::ReadFrame { stream_id } => {
-                let stream = self.stream(stream_id)?;
-                match crate::network::read_frame(stream) {
+                let read = {
+                    let stream = self.stream(stream_id)?;
+                    crate::network::read_frame(stream)
+                };
+                match read {
                     Ok(bytes) => Ok(NetworkReply::FrameRead(bytes)),
-                    Err(err) if is_stream_closed(&err) => Ok(NetworkReply::StreamClosed),
+                    Err(err) if is_stream_closed(&err) => {
+                        self.streams.remove(&stream_id);
+                        Ok(NetworkReply::StreamClosed)
+                    }
                     Err(err) => Err(format!("read frame: {err}")),
                 }
             }
