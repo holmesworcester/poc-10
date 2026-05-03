@@ -32,7 +32,13 @@ fn topo_bin() -> &'static Path {
     TOPO_BIN.get_or_init(|| {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let target_dir = manifest_dir.join("target").join("cli-black-box");
-        let status = Command::new("cargo")
+        let profile = std::env::var("TOPO_CLI_PROFILE").unwrap_or_else(|_| "release".to_string());
+        assert!(
+            profile == "release" || profile == "debug",
+            "TOPO_CLI_PROFILE must be `release` or `debug`"
+        );
+        let mut build = Command::new("cargo");
+        build
             .arg("build")
             .arg("--quiet")
             .arg("--bin")
@@ -40,11 +46,13 @@ fn topo_bin() -> &'static Path {
             .arg("--manifest-path")
             .arg(manifest_dir.join("Cargo.toml"))
             .arg("--target-dir")
-            .arg(&target_dir)
-            .status()
-            .expect("build topo binary");
+            .arg(&target_dir);
+        if profile == "release" {
+            build.arg("--release");
+        }
+        let status = build.status().expect("build topo binary");
         assert!(status.success(), "build topo binary");
-        target_dir.join("debug").join("topo")
+        target_dir.join(profile).join("topo")
     })
 }
 

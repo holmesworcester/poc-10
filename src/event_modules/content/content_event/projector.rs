@@ -3,6 +3,6 @@ use crate::store::ProjectionOutput;
 use super::codec;
 
 pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
-    codec::decode(bytes)?;
+    codec::validate(bytes)?;
     Ok(ProjectionOutput::default())
 }

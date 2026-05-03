@@ -108,17 +108,26 @@ impl<'a> Reader<'a> {
     }
 
     pub fn bytes(&mut self, len: usize) -> Result<Vec<u8>, String> {
+        Ok(self.slice(len)?.to_vec())
+    }
+
+    pub fn slice(&mut self, len: usize) -> Result<&'a [u8], String> {
         if self.rest.len() < len {
             return Err(format!("truncated {}", self.label));
         }
         let (head, tail) = self.rest.split_at(len);
         self.rest = tail;
-        Ok(head.to_vec())
+        Ok(head)
     }
 
     pub fn sized_bytes(&mut self) -> Result<Vec<u8>, String> {
         let len = self.u32()? as usize;
         self.bytes(len)
+    }
+
+    pub fn sized_slice(&mut self) -> Result<&'a [u8], String> {
+        let len = self.u32()? as usize;
+        self.slice(len)
     }
 
     pub fn finish(&self) -> Result<(), String> {

@@ -3,6 +3,13 @@ use crate::store::{EventRecord, EventScope};
 use super::types::ContentEvent;
 
 pub const TYPE_CONTENT: u8 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContentMetadata {
+    timestamp: u64,
+    payload_len: usize,
+}
+
 pub fn encode(event: &ContentEvent) -> Vec<u8> {
     let len = u32::try_from(event.payload.len()).expect("content payload too large");
     let mut out = Vec::with_capacity(1 + 8 + 4 + event.payload.len());
@@ -14,6 +21,18 @@ pub fn encode(event: &ContentEvent) -> Vec<u8> {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<ContentEvent, String> {
+    let metadata = metadata(bytes)?;
+    Ok(ContentEvent {
+        timestamp: metadata.timestamp,
+        payload: bytes[13..].to_vec(),
+    })
+}
+
+pub fn validate(bytes: &[u8]) -> Result<(), String> {
+    metadata(bytes).map(|_| ())
+}
+
+fn metadata(bytes: &[u8]) -> Result<ContentMetadata, String> {
     if bytes.len() < 13 {
         return Err("content event is truncated".to_string());
     }
@@ -32,17 +51,17 @@ pub fn decode(bytes: &[u8]) -> Result<ContentEvent, String> {
         return Err("content event length mismatch".to_string());
     }
 
-    Ok(ContentEvent {
+    Ok(ContentMetadata {
         timestamp,
-        payload: bytes[13..].to_vec(),
+        payload_len: len,
     })
 }
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
-    let decoded = decode(&bytes)?;
+    let metadata = metadata(&bytes)?;
     Ok(EventRecord {
-        timestamp: decoded.timestamp,
-        body_len: decoded.payload.len(),
+        timestamp: metadata.timestamp,
+        body_len: metadata.payload_len,
         canonical_bytes: bytes,
         dependencies: Vec::new(),
         scope: EventScope::Shared,
