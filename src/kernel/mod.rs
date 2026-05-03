@@ -1,4 +1,6 @@
 mod app;
+#[cfg(test)]
+mod app_tests;
 mod shell;
 
 pub use app::{
