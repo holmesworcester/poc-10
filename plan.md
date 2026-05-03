@@ -360,12 +360,24 @@ InboundBytes
   -> parse(CanonicalEventBytes)
   -> get_context(Event)
   -> project(EventWithContext)
-  -> apply(StateUpdates)
+  -> apply(ProjectorRows)
 ```
 
 Admission happens before parse context. Known event ids stop at `admit_event_id`. Parse failures mark the inbound bytes invalid and release the event claim. Blocked events write `blocked_by_event` rows and stop.
 
-The first POC kernel may run this inbound chain directly from the socket reader without first durably queuing `InboundBytes`. That is still a kernel pipeline boundary: the socket reader only passes `(origin, bytes)` into `pipeline.ingest_frame`, and event modules decide meaning and emit follow-on bytes. A durable `inbound_bytes` table is added when we need crash replay, fairness across many sockets, leases, or independent retry.
+Projectors only write rows. They cannot emit follow-on events. If projection
+discovers work, it writes a module-owned queue row; a job reads bounded queue
+rows, queries its context, calls module commands, and sends the proposed
+canonical events back through the pipeline. Commands may also return wire bytes
+for transport-only boundaries such as transit wrapping; the caller owns whether
+those bytes are admitted as events or sent to transport.
+
+Jobs are the actors. Projectors can only change rows, especially queue rows.
+Commands are pure construction/query helpers. Jobs are the only event-module
+surface that can return IO effects; the kernel runner executes those effects
+without knowing protocol meaning.
+
+The first POC kernel may run this inbound chain directly from the socket reader without first durably queuing `InboundBytes`. That is still a kernel pipeline boundary: the socket reader only passes `(origin, bytes)` into `pipeline.ingest_frame`, and event modules decide meaning and queue follow-on work. A durable `inbound_bytes` table is added when we need crash replay, fairness across many sockets, leases, or independent retry.
 
 Boundary tables that need claim/retry ownership are ordinary module-owned tables with status metadata:
 
@@ -460,7 +472,20 @@ Wrapped bytes are never canonical events. They have no event id, no dependencies
 
 *Invariants: `shared_workspaces` is authoritative because the connection event's deps + signature have already been validated by the standard pipeline — the connection does not authorize itself, its dependencies do; a valid unwrap under one of our inbound secrets is by construction proof that the sender is the remote endpoint of that connection; every wrap is bound to exactly one connection; wrap and unwrap both enforce workspace ↔ connection alignment.*
 
-**Outbox.** No event module calls `transport.send` directly. A projector that wants to send a durable event — e.g. `needid.project` responding to a request from connection C with requested event E — emits deterministic `SendEvent(connection_id=C, inner_event_id=E)` and queues that send event id in `outbox`. The connection/transit module owns `SendEvent.project`: it checks that C is the triggering connection, verifies that E's `workspace_id` is in `shared_workspaces(C)`, resolves C to a current transport target, creates a transit blob, and returns `TransportSend { target, bytes }`. The kernel network effect runner packs those bytes into TCP frames and writes sockets. A slow route backs off its own target; other transport targets continue. *Invariant: every ordinary byte on the wire is the product of two independent workspace-membership checks (SendEvent projection + `connection.wrap`) plus a third symmetric check on the receiving side (`connection.unwrap`).*
+**Outbox.** No projector calls `transport.send` or emits a `SendEvent`.
+Projectors write rows to module-owned queues. A sync job that wants to send a
+durable event — e.g. after reading a queued need from connection C for event E —
+calls a command that creates deterministic `SendEvent(connection_id=C,
+inner_event_id=E)` and admits it through the pipeline. The `SendEvent`
+projector only writes `outbox(connection_id, send_event_id)`. A
+connection/transit job claims outbox rows, checks that E's `workspace_id` is in
+`shared_workspaces(C)`, resolves C to a current transport target, calls the
+transit wrap command, and returns `TransportSend { target, bytes }`. The kernel
+network effect runner packs those bytes into TCP frames and writes sockets. A
+slow route backs off its own target; other transport targets continue.
+*Invariant: every ordinary byte on the wire is the product of two independent
+workspace-membership checks (SendEvent projection + `connection.wrap`) plus a
+third symmetric check on the receiving side (`connection.unwrap`).*
 
 # Forking plan
 
@@ -648,17 +673,31 @@ SyncHaveId(connection_id, workspace_id, node, event_id)
 SyncNeedId(connection_id, workspace_id, event_id)
 ```
 
-Projectors do not write to sockets. They create deterministic connection-scoped events and add their ids to `outbox`:
+Projectors do not write to sockets and do not emit events. They only maintain
+sync/outbox queue rows. Commands and jobs create deterministic
+connection-scoped events, and the API running those commands admits the proposed
+events through the pipeline so it gets back their event ids:
 
 ```
-Have(id)    -> connection_events(scope=connection), outbox(connection_id, event_id)
-Need(id)    -> connection_events(scope=connection), outbox(connection_id, event_id)
-Compare(v)  -> connection_events(scope=connection), outbox(connection_id, event_id)
-Send(id)    -> connection_events(SendEvent(connection_id, inner_event_id)),
-               outbox(connection_id, send_event_id)
+Durable event projected
+  -> negentropy_new_event_queue(event_id, timestamp)
+
+SyncCompare / SyncHaveId / SyncNeedId projected
+  -> negentropy_request_queue(connection_id, workspace_id, node/event_id)
+
+NegentropyJob
+  -> reads bounded queue rows and sync indexes
+  -> command(ctx, params) -> proposed SyncCompare / SyncHaveId / SyncNeedId / SendEvent
+  -> pipeline.admit(proposed events) -> event_ids
+
+ConnectionTransitJob
+  -> reads outbox(connection_id, event_id)
+  -> transit_wrap command returns transit bytes
+  -> returns TransportSend effects for those bytes
 ```
 
-Duplicate projector output collapses because connection-scoped sync event bytes are deterministic and `outbox` is unique on `(connection_id, event_id)`.
+Duplicate job output collapses because connection-scoped sync event bytes are
+deterministic and `outbox` is unique on `(connection_id, event_id)`.
 
 For the first implementation, this can be two storage classes rather than one clever table:
 

@@ -282,6 +282,22 @@ fn command_output_contains_events_not_state_changes() {
 }
 
 #[test]
+fn projection_output_contains_rows_not_events() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(root.join("src/store.rs")).expect("read store");
+    let start = text
+        .find("pub struct ProjectionOutput")
+        .expect("ProjectionOutput");
+    let body = &text[start..text[start..].find("impl ProjectionOutput").unwrap() + start];
+    assert!(
+        body.contains("pub rows: Vec<TableRow>")
+            && !body.contains("EventRecord")
+            && !body.contains("events"),
+        "ProjectionOutput is projector-facing and must carry rows only, not events"
+    );
+}
+
+#[test]
 fn sync_event_module_does_not_use_session_message_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sync_root = root.join("src/event_modules/sync");

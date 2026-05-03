@@ -12,8 +12,20 @@ event modules own protocol and domain semantics.
 Commands receive explicit input values plus narrow read context values. They do
 not mutate SQLite, open transactions, drain queues, or call broad apply loops.
 They return `CommandOutput` with canonical events only. Commands must not return
-rows. Projectors return `ProjectionOutput`; the pipeline/store layer is the only
-place that commits those rows or events.
+rows or effects. The API that runs a command is responsible for admitting those
+proposed events through the pipeline; admission returns the event ids for
+chaining.
+
+Projectors return `ProjectionOutput` with table rows only. They cannot emit
+events. If projection discovers follow-on work, it writes a module-owned queue
+row; a job reads that queue, queries context, runs a command, and sends the
+command's proposed events back through the pipeline.
+
+Jobs are the actor boundary. Projectors do not perform IO or emit effects.
+Event-module commands do not perform IO either; they construct canonical events
+or transport bytes from explicit input and context. Jobs own dequeueing,
+fairness, bounded work, retries, calling commands, admitting proposed events,
+and returning IO effects for the kernel runner.
 
 The intended shape is:
 
@@ -28,7 +40,7 @@ event_modules/<domain>/<module>/types.rs
   Event type and semantic constants
 
 event_modules/<domain>/<module>/projector.rs
-  EventWithContext -> Projection
+  EventWithContext -> ProjectionOutput { rows }
 ```
 
 Do not create `event.rs` files in event modules. The typed event struct belongs
@@ -194,8 +206,10 @@ Event modules may:
   `temp`)
 - query through a narrow read context
 - append events through a narrow writer from commands
-- return declarative projector output: rows, labels, outbox operations,
-  emitted events, and purges
+- return declarative projector output: rows, labels, queue rows, outbox rows,
+  and purges
+- implement jobs that claim queue rows, call commands, and return bounded IO
+  effects
 
 `codec.rs` describes the module's canonical/wire format: tags, field order,
 and event-specific validation. Shared binary mechanics such as integer
@@ -249,7 +263,7 @@ The kernel may:
 - apply pure projector output
 - enqueue outbox rows
 - receive framed transit bytes
-- execute `TransportSend { target, bytes }` effects by packing
+- execute job-produced `TransportSend { target, bytes }` effects by packing
   module-produced bytes into TCP frames and writing sockets
 - schedule bounded work
 
@@ -296,9 +310,10 @@ again.
 
 Durable data events are not pushed to peers on creation. Durable data transfer
 is queued only through deterministic connection-scoped protocol events, usually
-emitted in response to sync comparison or need events. The outbox dedupes these
-events by `(connection_id, event_id)`. The connection/transit module drains the
-outbox and creates transit blobs; the kernel only frames and writes those bytes.
+created by a sync job after projectors write compare/need/range queue rows. The
+outbox dedupes these events by `(connection_id, event_id)`. The
+connection/transit module drains the outbox and creates transit blobs; the
+kernel only frames and writes those bytes.
 
 `TransportSend.target` is a transport route, not a semantic connection id. Use
 an address or socket target such as `(ip, port)` or `socket_id`. If a module

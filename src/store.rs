@@ -40,27 +40,15 @@ impl EventScope {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionOutput {
     pub rows: Vec<TableRow>,
-    pub events: Vec<EventRecord>,
 }
 
 impl ProjectionOutput {
     pub fn rows(rows: Vec<TableRow>) -> Self {
-        Self {
-            rows,
-            events: Vec::new(),
-        }
-    }
-
-    pub fn events(events: Vec<EventRecord>) -> Self {
-        Self {
-            rows: Vec::new(),
-            events,
-        }
+        Self { rows }
     }
 
     pub fn append(&mut self, mut other: Self) {
         self.rows.append(&mut other.rows);
-        self.events.append(&mut other.events);
     }
 }
 

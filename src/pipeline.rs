@@ -19,8 +19,9 @@ pub struct IngestResult {
     pub received_events: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdmitReport {
+    pub event_ids: Vec<EventId>,
     pub inserted_events: usize,
     pub ready_events: usize,
     pub blocked_events: usize,
@@ -34,17 +35,9 @@ pub struct ApplyReadyReport {
     pub unblocked_events: usize,
 }
 
-pub fn apply_changes(
-    store: &Store,
-    modules: &Modules,
-    changes: ProjectionOutput,
-) -> Result<AdmitReport, String> {
+pub fn apply_changes(store: &Store, changes: ProjectionOutput) -> Result<usize, String> {
     store
-        .write_transaction(|store| {
-            let mut report = AdmitReport::default();
-            apply_changes_in_tx(store, modules, changes, &mut report)?;
-            Ok(report)
-        })
+        .write_transaction(|store| apply_changes_in_tx(store, changes))
         .map_err(|err| format!("apply state changes: {err}"))
 }
 
@@ -53,18 +46,35 @@ pub fn run_command<T>(
     modules: &Modules,
     output: CommandOutput<T>,
 ) -> Result<(T, AdmitReport), String> {
-    let report = apply_changes(store, modules, ProjectionOutput::events(output.events))?;
+    let report = admit_records(store, modules, output.events)?;
     Ok((output.value, report))
 }
 
-fn apply_changes_in_tx(
+pub fn admit_records(
     store: &Store,
     modules: &Modules,
-    changes: ProjectionOutput,
+    records: Vec<EventRecord>,
+) -> Result<AdmitReport, String> {
+    store
+        .write_transaction(|store| {
+            let mut report = AdmitReport::default();
+            admit_records_in_tx(store, modules, records, &mut report)?;
+            Ok(report)
+        })
+        .map_err(|err| format!("admit events: {err}"))
+}
+
+fn apply_changes_in_tx(store: &Store, changes: ProjectionOutput) -> rusqlite::Result<usize> {
+    store.insert_table_rows_in_tx(changes.rows)
+}
+
+fn admit_records_in_tx(
+    store: &Store,
+    modules: &Modules,
+    records: Vec<EventRecord>,
     report: &mut AdmitReport,
 ) -> rusqlite::Result<()> {
-    store.insert_table_rows_in_tx(changes.rows)?;
-    for record in changes.events {
+    for record in records {
         admit_and_apply_record_in_tx(store, modules, &record, report)?;
     }
     Ok(())
@@ -76,6 +86,7 @@ fn admit_and_apply_record_in_tx(
     record: &EventRecord,
     report: &mut AdmitReport,
 ) -> rusqlite::Result<()> {
+    report.event_ids.push(event_id(&record.canonical_bytes));
     if record.scope == EventScope::Connection {
         if !record.dependencies.is_empty() {
             return Err(module_error(
@@ -85,7 +96,7 @@ fn admit_and_apply_record_in_tx(
         let changes = modules
             .project_record(store, record)
             .map_err(module_error)?;
-        apply_changes_in_tx(store, modules, changes, report)?;
+        apply_changes_in_tx(store, changes)?;
         report.applied_events += 1;
         return Ok(());
     }
@@ -149,8 +160,7 @@ pub fn apply_ready_event_in_tx(
         let changes = modules
             .project_record(store, &record)
             .map_err(module_error)?;
-        let mut admitted = AdmitReport::default();
-        apply_changes_in_tx(store, modules, changes, &mut admitted)?;
+        apply_changes_in_tx(store, changes)?;
         report.applied_events = 1;
         report.unblocked_events = blocking::unblock_dependents(store, event_id)?;
     }
@@ -170,7 +180,7 @@ pub fn ingest_frame(
         report.received_event_bytes,
     )?);
     let outbox = report.drain_outbox_for;
-    apply_changes(store, modules, ProjectionOutput::events(report.events))?;
+    admit_records(store, modules, report.events)?;
     let mut outgoing = report.outgoing;
     let mut sent_outbox = Vec::new();
     if let Some(route_id) = outbox {
