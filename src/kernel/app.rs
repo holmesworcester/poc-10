@@ -9,24 +9,33 @@ pub struct KernelApp;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelModel {
+    pub last_error: Option<String>,
     pub last_invite: Option<String>,
+    pub last_connect: Option<ConnectSummary>,
     pub last_generate: Option<GenerateSummary>,
     pub last_count: Option<CountSummary>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelView {
+    pub last_error: Option<String>,
     pub last_invite: Option<String>,
+    pub last_connect: Option<ConnectSummary>,
     pub last_generate: Option<GenerateSummary>,
     pub last_count: Option<CountSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelMsg {
+    Failed(String),
     Invite {
         public_addr: SocketAddr,
     },
     InviteFinished(String),
+    Connect {
+        invite: String,
+    },
+    ConnectFinished(ConnectSummary),
     Generate {
         num_events: usize,
         event_size: usize,
@@ -39,6 +48,7 @@ pub enum KernelMsg {
 #[derive(Debug)]
 pub enum KernelEffect {
     Store(Request<StoreOp>),
+    Network(Request<NetworkOp>),
     Stdout(Request<StdoutOp>),
 }
 
@@ -47,6 +57,12 @@ impl crux_core::Effect for KernelEffect {}
 impl From<Request<StoreOp>> for KernelEffect {
     fn from(request: Request<StoreOp>) -> Self {
         Self::Store(request)
+    }
+}
+
+impl From<Request<NetworkOp>> for KernelEffect {
+    fn from(request: Request<NetworkOp>) -> Self {
+        Self::Network(request)
     }
 }
 
@@ -60,6 +76,17 @@ impl From<Request<StdoutOp>> for KernelEffect {
 pub enum StoreOp {
     CreateInvite {
         public_addr: SocketAddr,
+    },
+    CreateConnectionRequest {
+        invite: String,
+    },
+    IngestFrame {
+        origin: SocketAddr,
+        remember_origin: bool,
+        bytes: Vec<u8>,
+    },
+    MarkOutboxSent {
+        sent_outbox: Vec<Vec<u8>>,
     },
     GenerateContent {
         num_events: usize,
@@ -78,9 +105,57 @@ impl Operation for StoreOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreReply {
     InviteCreated { link: String },
+    ConnectionRequestCreated(ConnectionRequest),
+    FrameIngested(FrameIngest),
+    OutboxMarked,
     Generated(GeneratedContent),
     Drained(DrainReadyReport),
     Counted(CountSummary),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkOp {
+    OpenStream {
+        addr: SocketAddr,
+    },
+    WriteFrames {
+        stream_id: u64,
+        frames: Vec<Vec<u8>>,
+    },
+    ReadFrame {
+        stream_id: u64,
+    },
+    ShutdownWrite {
+        stream_id: u64,
+    },
+}
+
+impl Operation for NetworkOp {
+    type Output = NetworkReply;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkReply {
+    StreamOpened { stream_id: u64 },
+    FramesWritten,
+    FrameRead(Vec<u8>),
+    StreamClosed,
+    WriteShutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionRequest {
+    pub addr: SocketAddr,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameIngest {
+    pub outgoing: Vec<Vec<u8>>,
+    pub sent_outbox: Vec<Vec<u8>>,
+    pub established_routes: usize,
+    pub sent_events: usize,
+    pub received_events: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +194,12 @@ pub struct GenerateSummary {
     pub event_size: usize,
     pub first_timestamp: u64,
     pub last_timestamp: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectSummary {
+    pub addr: SocketAddr,
+    pub established_routes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,9 +255,18 @@ impl App for KernelApp {
         model: &mut Self::Model,
     ) -> Command<Self::Effect, Self::Event> {
         match event {
+            KernelMsg::Failed(message) => {
+                model.last_error = Some(message);
+                Command::done()
+            }
             KernelMsg::Invite { public_addr } => invite(public_addr),
             KernelMsg::InviteFinished(link) => {
                 model.last_invite = Some(link);
+                Command::done()
+            }
+            KernelMsg::Connect { invite } => connect(invite),
+            KernelMsg::ConnectFinished(summary) => {
+                model.last_connect = Some(summary);
                 Command::done()
             }
             KernelMsg::Generate {
@@ -197,7 +287,9 @@ impl App for KernelApp {
 
     fn view(&self, model: &Self::Model) -> Self::ViewModel {
         KernelView {
+            last_error: model.last_error.clone(),
             last_invite: model.last_invite.clone(),
+            last_connect: model.last_connect.clone(),
             last_generate: model.last_generate.clone(),
             last_count: model.last_count.clone(),
         }
@@ -224,6 +316,123 @@ fn invite(public_addr: SocketAddr) -> Command<KernelEffect, KernelMsg> {
         }
 
         ctx.send_event(KernelMsg::InviteFinished(link));
+    })
+}
+
+fn connect(invite: String) -> Command<KernelEffect, KernelMsg> {
+    Command::new(|ctx| async move {
+        let request = match ctx
+            .request_from_shell(StoreOp::CreateConnectionRequest { invite })
+            .await
+        {
+            StoreReply::ConnectionRequestCreated(request) => request,
+            _ => panic!("connect received non-connection-request store reply"),
+        };
+
+        let stream_id = match ctx
+            .request_from_shell(NetworkOp::OpenStream { addr: request.addr })
+            .await
+        {
+            NetworkReply::StreamOpened { stream_id } => stream_id,
+            _ => panic!("open stream returned non-open reply"),
+        };
+
+        match ctx
+            .request_from_shell(NetworkOp::WriteFrames {
+                stream_id,
+                frames: vec![request.bytes],
+            })
+            .await
+        {
+            NetworkReply::FramesWritten => {}
+            _ => panic!("write frames returned non-write reply"),
+        }
+
+        let mut established_routes = 0;
+        loop {
+            let bytes = match ctx
+                .request_from_shell(NetworkOp::ReadFrame { stream_id })
+                .await
+            {
+                NetworkReply::FrameRead(bytes) => bytes,
+                NetworkReply::StreamClosed => break,
+                _ => panic!("read frame returned non-read reply"),
+            };
+
+            let ingest = match ctx
+                .request_from_shell(StoreOp::IngestFrame {
+                    origin: request.addr,
+                    remember_origin: true,
+                    bytes,
+                })
+                .await
+            {
+                StoreReply::FrameIngested(ingest) => ingest,
+                _ => panic!("ingest frame returned non-ingest reply"),
+            };
+            established_routes += ingest.established_routes;
+
+            match ctx
+                .request_from_shell(StoreOp::DrainReadyUntilIdle {
+                    batch_size: control_loop::DEFAULT_READY_BATCH,
+                })
+                .await
+            {
+                StoreReply::Drained(_) => {}
+                _ => panic!("connect drain returned non-drain reply"),
+            }
+
+            if ingest.outgoing.is_empty() {
+                match ctx
+                    .request_from_shell(NetworkOp::ShutdownWrite { stream_id })
+                    .await
+                {
+                    NetworkReply::WriteShutdown => {}
+                    _ => panic!("shutdown write returned non-shutdown reply"),
+                }
+            } else {
+                match ctx
+                    .request_from_shell(NetworkOp::WriteFrames {
+                        stream_id,
+                        frames: ingest.outgoing,
+                    })
+                    .await
+                {
+                    NetworkReply::FramesWritten => {}
+                    _ => panic!("write response frames returned non-write reply"),
+                }
+                match ctx
+                    .request_from_shell(StoreOp::MarkOutboxSent {
+                        sent_outbox: ingest.sent_outbox,
+                    })
+                    .await
+                {
+                    StoreReply::OutboxMarked => {}
+                    _ => panic!("mark outbox returned non-mark reply"),
+                }
+            }
+        }
+
+        if established_routes == 0 {
+            ctx.send_event(KernelMsg::Failed(
+                "connection was not established".to_string(),
+            ));
+            return;
+        }
+
+        let summary = ConnectSummary {
+            addr: request.addr,
+            established_routes,
+        };
+        match ctx
+            .request_from_shell(StdoutOp::PrintLines {
+                lines: vec![format!("connected: {}", summary.addr)],
+            })
+            .await
+        {
+            StdoutReply::Written => {}
+        }
+        ctx.send_event(KernelMsg::ConnectFinished(summary));
     })
 }
 
@@ -304,6 +513,36 @@ mod tests {
         InviteReplied {
             link: String,
         },
+        ConnectionRequestCreated {
+            invite: String,
+        },
+        OpenStream {
+            addr: SocketAddr,
+        },
+        StreamOpened {
+            stream_id: u64,
+        },
+        WriteFrames {
+            stream_id: u64,
+            frame_count: usize,
+        },
+        FramesWritten,
+        ReadFrame {
+            stream_id: u64,
+        },
+        FrameRead {
+            bytes: Vec<u8>,
+        },
+        FrameIngested {
+            established_routes: usize,
+        },
+        ShutdownWrite {
+            stream_id: u64,
+        },
+        WriteShutdown,
+        StreamClosed {
+            stream_id: u64,
+        },
         GenerateRequested {
             num_events: usize,
             event_size: usize,
@@ -331,6 +570,8 @@ mod tests {
     struct FakeShell {
         transcript: Vec<TranscriptEntry>,
         stdout: Vec<String>,
+        frames_to_read: VecDeque<Vec<u8>>,
+        read_closed: bool,
     }
 
     impl FakeShell {
@@ -376,6 +617,36 @@ mod tests {
                         request
                             .resolve(StoreReply::InviteCreated { link })
                             .expect("invite request should resolve");
+                    }
+                    StoreOp::CreateConnectionRequest { invite } => {
+                        self.transcript
+                            .push(TranscriptEntry::ConnectionRequestCreated { invite });
+                        request
+                            .resolve(StoreReply::ConnectionRequestCreated(ConnectionRequest {
+                                addr: "127.0.0.1:7000".parse().unwrap(),
+                                bytes: b"request".to_vec(),
+                            }))
+                            .expect("connection request should resolve");
+                    }
+                    StoreOp::IngestFrame { bytes, .. } => {
+                        assert_eq!(bytes, b"ack".to_vec());
+                        self.transcript.push(TranscriptEntry::FrameIngested {
+                            established_routes: 1,
+                        });
+                        request
+                            .resolve(StoreReply::FrameIngested(FrameIngest {
+                                outgoing: Vec::new(),
+                                sent_outbox: Vec::new(),
+                                established_routes: 1,
+                                sent_events: 0,
+                                received_events: 0,
+                            }))
+                            .expect("ingest frame should resolve");
+                    }
+                    StoreOp::MarkOutboxSent { .. } => {
+                        request
+                            .resolve(StoreReply::OutboxMarked)
+                            .expect("mark outbox should resolve");
                     }
                     StoreOp::GenerateContent {
                         num_events,
@@ -427,6 +698,54 @@ mod tests {
                                 blocked_edges: 3,
                             }))
                             .expect("count request should resolve");
+                    }
+                },
+                KernelEffect::Network(mut request) => match request.operation.clone() {
+                    NetworkOp::OpenStream { addr } => {
+                        self.transcript.push(TranscriptEntry::OpenStream { addr });
+                        self.transcript
+                            .push(TranscriptEntry::StreamOpened { stream_id: 42 });
+                        request
+                            .resolve(NetworkReply::StreamOpened { stream_id: 42 })
+                            .expect("open stream should resolve");
+                    }
+                    NetworkOp::WriteFrames { stream_id, frames } => {
+                        self.transcript.push(TranscriptEntry::WriteFrames {
+                            stream_id,
+                            frame_count: frames.len(),
+                        });
+                        self.transcript.push(TranscriptEntry::FramesWritten);
+                        request
+                            .resolve(NetworkReply::FramesWritten)
+                            .expect("write frames should resolve");
+                    }
+                    NetworkOp::ReadFrame { stream_id } => {
+                        self.transcript
+                            .push(TranscriptEntry::ReadFrame { stream_id });
+                        if let Some(bytes) = self.frames_to_read.pop_front() {
+                            self.transcript.push(TranscriptEntry::FrameRead {
+                                bytes: bytes.clone(),
+                            });
+                            request
+                                .resolve(NetworkReply::FrameRead(bytes))
+                                .expect("read frame should resolve");
+                        } else {
+                            assert!(!self.read_closed, "fake stream read after close");
+                            self.read_closed = true;
+                            self.transcript
+                                .push(TranscriptEntry::StreamClosed { stream_id });
+                            request
+                                .resolve(NetworkReply::StreamClosed)
+                                .expect("stream close should resolve");
+                        }
+                    }
+                    NetworkOp::ShutdownWrite { stream_id } => {
+                        self.transcript
+                            .push(TranscriptEntry::ShutdownWrite { stream_id });
+                        self.transcript.push(TranscriptEntry::WriteShutdown);
+                        request
+                            .resolve(NetworkReply::WriteShutdown)
+                            .expect("shutdown write should resolve");
                     }
                 },
                 KernelEffect::Stdout(mut request) => match request.operation.clone() {
@@ -521,6 +840,68 @@ mod tests {
         );
         assert_eq!(shell.stdout, vec![link.clone()]);
         assert_eq!(app.view(&model).last_invite, Some(link));
+    }
+
+    #[test]
+    fn connect_opens_stream_exchanges_frames_and_prints_result() {
+        let app = KernelApp;
+        let mut model = KernelModel::default();
+        let mut shell = FakeShell {
+            frames_to_read: VecDeque::from([b"ack".to_vec()]),
+            ..FakeShell::default()
+        };
+
+        shell.run(
+            &app,
+            &mut model,
+            KernelMsg::Connect {
+                invite: "topo://invite/demo".to_string(),
+            },
+        );
+
+        let addr = "127.0.0.1:7000".parse().unwrap();
+        assert_eq!(
+            shell.transcript,
+            vec![
+                TranscriptEntry::ConnectionRequestCreated {
+                    invite: "topo://invite/demo".to_string(),
+                },
+                TranscriptEntry::OpenStream { addr },
+                TranscriptEntry::StreamOpened { stream_id: 42 },
+                TranscriptEntry::WriteFrames {
+                    stream_id: 42,
+                    frame_count: 1,
+                },
+                TranscriptEntry::FramesWritten,
+                TranscriptEntry::ReadFrame { stream_id: 42 },
+                TranscriptEntry::FrameRead {
+                    bytes: b"ack".to_vec(),
+                },
+                TranscriptEntry::FrameIngested {
+                    established_routes: 1,
+                },
+                TranscriptEntry::DrainRequested {
+                    batch_size: control_loop::DEFAULT_READY_BATCH,
+                },
+                TranscriptEntry::DrainReplied { applied_events: 3 },
+                TranscriptEntry::ShutdownWrite { stream_id: 42 },
+                TranscriptEntry::WriteShutdown,
+                TranscriptEntry::ReadFrame { stream_id: 42 },
+                TranscriptEntry::StreamClosed { stream_id: 42 },
+                TranscriptEntry::PrintRequested {
+                    lines: vec!["connected: 127.0.0.1:7000".to_string()],
+                },
+                TranscriptEntry::PrintReplied,
+            ]
+        );
+        assert_eq!(shell.stdout, vec!["connected: 127.0.0.1:7000".to_string()]);
+        assert_eq!(
+            app.view(&model).last_connect,
+            Some(ConnectSummary {
+                addr,
+                established_routes: 1,
+            })
+        );
     }
 
     #[test]

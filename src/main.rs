@@ -21,9 +21,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
     match command {
         Command::Connect { invite } => {
-            let addr =
-                connect(&store, &modules, &invite).map_err(|err| format!("connect: {err}"))?;
-            println!("connected: {addr}");
+            let lines = kernel::run_connect(&store, &modules, invite)
+                .map_err(|err| format!("connect: {err}"))?;
+            for line in lines {
+                println!("{line}");
+            }
         }
         Command::Invite { public_addr } => {
             let lines = kernel::run_invite(&store, &modules, public_addr)
@@ -224,33 +226,6 @@ struct CliSyncReport {
     routes_synced: usize,
     sent_events: usize,
     received_events: usize,
-}
-
-fn connect(store: &Store, modules: &Modules, invite: &str) -> Result<SocketAddr, String> {
-    let addr = modules.invite_addr(invite)?;
-    let mut stream = network::connect(addr).map_err(|err| format!("open tcp stream: {err}"))?;
-    let request = pipeline::run_command(
-        store,
-        modules,
-        modules.create_connection_request(store, invite)?,
-    )
-    .map_err(|err| format!("record connection request: {err}"))?
-    .0;
-    network::write_frames(&mut stream, vec![request.bytes])?;
-    let report = drive_stream(
-        store,
-        modules,
-        &mut stream,
-        pipeline::FrameMetadata {
-            origin: addr,
-            remember_origin: true,
-        },
-        None,
-    )?;
-    if report.established_connections == 0 {
-        return Err("connection was not established".to_string());
-    }
-    Ok(request.addr)
 }
 
 fn serve(

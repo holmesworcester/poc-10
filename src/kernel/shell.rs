@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::net::{Shutdown, TcpStream};
 
 use crux_core::{App, Command};
 
@@ -7,8 +8,9 @@ use crate::store::Store;
 use crate::{control_loop, pipeline};
 
 use super::app::{
-    CountSummary, DrainReadyReport, GeneratedContent, KernelApp, KernelEffect, KernelModel,
-    KernelMsg, StdoutOp, StdoutReply, StoreOp, StoreReply,
+    ConnectionRequest, CountSummary, DrainReadyReport, FrameIngest, GeneratedContent, KernelApp,
+    KernelEffect, KernelModel, KernelMsg, NetworkOp, NetworkReply, StdoutOp, StdoutReply, StoreOp,
+    StoreReply,
 };
 
 pub fn run_invite(
@@ -21,9 +23,32 @@ pub fn run_invite(
     let mut shell = RealShell {
         store,
         modules,
+        streams: HashMap::new(),
+        next_stream_id: 1,
         stdout: Vec::new(),
     };
     shell.run(&app, &mut model, KernelMsg::Invite { public_addr })?;
+    Ok(shell.stdout)
+}
+
+pub fn run_connect(
+    store: &Store,
+    modules: &Modules,
+    invite: String,
+) -> Result<Vec<String>, String> {
+    let app = KernelApp;
+    let mut model = KernelModel::default();
+    let mut shell = RealShell {
+        store,
+        modules,
+        streams: HashMap::new(),
+        next_stream_id: 1,
+        stdout: Vec::new(),
+    };
+    shell.run(&app, &mut model, KernelMsg::Connect { invite })?;
+    if let Some(message) = model.last_error {
+        return Err(message);
+    }
     Ok(shell.stdout)
 }
 
@@ -38,6 +63,8 @@ pub fn run_generate(
     let mut shell = RealShell {
         store,
         modules,
+        streams: HashMap::new(),
+        next_stream_id: 1,
         stdout: Vec::new(),
     };
     shell.run(
@@ -57,6 +84,8 @@ pub fn run_count(store: &Store, modules: &Modules) -> Result<Vec<String>, String
     let mut shell = RealShell {
         store,
         modules,
+        streams: HashMap::new(),
+        next_stream_id: 1,
         stdout: Vec::new(),
     };
     shell.run(&app, &mut model, KernelMsg::Count)?;
@@ -66,6 +95,8 @@ pub fn run_count(store: &Store, modules: &Modules) -> Result<Vec<String>, String
 struct RealShell<'a> {
     store: &'a Store,
     modules: &'a Modules,
+    streams: HashMap<u64, TcpStream>,
+    next_stream_id: u64,
     stdout: Vec<String>,
 }
 
@@ -116,6 +147,12 @@ impl RealShell<'_> {
                     .resolve(reply)
                     .map_err(|_| "store request was already resolved".to_string())
             }
+            KernelEffect::Network(mut request) => {
+                let reply = self.handle_network(request.operation.clone())?;
+                request
+                    .resolve(reply)
+                    .map_err(|_| "network request was already resolved".to_string())
+            }
             KernelEffect::Stdout(mut request) => {
                 self.handle_stdout(request.operation.clone());
                 request
@@ -135,6 +172,45 @@ impl RealShell<'_> {
                 let (link, _) = pipeline::run_command(self.store, self.modules, output)
                     .map_err(|err| format!("apply invite: {err}"))?;
                 Ok(StoreReply::InviteCreated { link })
+            }
+            StoreOp::CreateConnectionRequest { invite } => {
+                let addr = self.modules.invite_addr(&invite)?;
+                let output = self
+                    .modules
+                    .create_connection_request(self.store, &invite)?;
+                let request = pipeline::run_command(self.store, self.modules, output)
+                    .map_err(|err| format!("record connection request: {err}"))?
+                    .0;
+                Ok(StoreReply::ConnectionRequestCreated(ConnectionRequest {
+                    addr,
+                    bytes: request.bytes,
+                }))
+            }
+            StoreOp::IngestFrame {
+                origin,
+                remember_origin,
+                bytes,
+            } => {
+                let result = pipeline::ingest_frame(
+                    self.store,
+                    self.modules,
+                    pipeline::FrameMetadata {
+                        origin,
+                        remember_origin,
+                    },
+                    bytes,
+                )?;
+                Ok(StoreReply::FrameIngested(FrameIngest {
+                    outgoing: result.outgoing,
+                    sent_outbox: result.sent_outbox,
+                    established_routes: result.established_routes,
+                    sent_events: result.sent_events,
+                    received_events: result.received_events,
+                }))
+            }
+            StoreOp::MarkOutboxSent { sent_outbox } => {
+                self.modules.mark_outbox_sent(self.store, sent_outbox)?;
+                Ok(StoreReply::OutboxMarked)
             }
             StoreOp::GenerateContent {
                 num_events,
@@ -197,4 +273,52 @@ impl RealShell<'_> {
             StdoutOp::PrintLines { lines } => self.stdout.extend(lines),
         }
     }
+
+    fn handle_network(&mut self, operation: NetworkOp) -> Result<NetworkReply, String> {
+        match operation {
+            NetworkOp::OpenStream { addr } => {
+                let stream = crate::network::connect(addr)
+                    .map_err(|err| format!("open tcp stream: {err}"))?;
+                let stream_id = self.next_stream_id;
+                self.next_stream_id = self.next_stream_id.saturating_add(1);
+                self.streams.insert(stream_id, stream);
+                Ok(NetworkReply::StreamOpened { stream_id })
+            }
+            NetworkOp::WriteFrames { stream_id, frames } => {
+                let stream = self.stream(stream_id)?;
+                crate::network::write_frames(stream, frames)?;
+                Ok(NetworkReply::FramesWritten)
+            }
+            NetworkOp::ReadFrame { stream_id } => {
+                let stream = self.stream(stream_id)?;
+                match crate::network::read_frame(stream) {
+                    Ok(bytes) => Ok(NetworkReply::FrameRead(bytes)),
+                    Err(err) if is_stream_closed(&err) => Ok(NetworkReply::StreamClosed),
+                    Err(err) => Err(format!("read frame: {err}")),
+                }
+            }
+            NetworkOp::ShutdownWrite { stream_id } => {
+                let stream = self.stream(stream_id)?;
+                stream
+                    .shutdown(Shutdown::Write)
+                    .map_err(|err| format!("shutdown stream write: {err}"))?;
+                Ok(NetworkReply::WriteShutdown)
+            }
+        }
+    }
+
+    fn stream(&mut self, stream_id: u64) -> Result<&mut TcpStream, String> {
+        self.streams
+            .get_mut(&stream_id)
+            .ok_or_else(|| format!("unknown stream id {stream_id}"))
+    }
+}
+
+fn is_stream_closed(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::BrokenPipe
+    )
 }
