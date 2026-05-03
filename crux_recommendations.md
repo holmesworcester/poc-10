@@ -112,12 +112,14 @@ These are the rules the codebase should enforce once Crux is introduced.
 - If more state is needed, first add explicit dependency fields or labels.
 - Custom typed context is allowed only for module-owned read models that are too
   large or index-shaped for bounded deps/labels.
-- Negentropy responders are the known custom-context case: compare/have/need
-  responses need summaries, bucket ids, presence checks, and event bytes.
+- Prefer custom job context over custom projector context for large indexed
+  responders. Negentropy compare/have/need response generation should be a sync
+  job because it needs summaries, bucket ids, presence checks, event bytes,
+  batching, and backpressure.
 - Connection and bootstrap validation should use first-level deps, labels, and
   origin metadata unless a future design proves those are insufficient.
-- The core may route custom context requests/results, but it must not inspect
-  module-specific fields.
+- The core may route custom projector/job context requests/results, but it must
+  not inspect module-specific fields.
 
 ### Projection Rules
 
@@ -136,8 +138,9 @@ These are the rules the codebase should enforce once Crux is introduced.
   events plus typed store/network/clock effects.
 - The kernel should run a bounded rotating scheduler over work lanes such as
   `ReadyFacts`, `Outbox`, `InboundBytes`, `Timers`, and `ModuleJobs`.
-- A `Tick` Crux event advances the scheduler cursor and asks the shell to claim
-  bounded work from one lane:
+- A `SchedulerWake` Crux event advances the scheduler cursor and asks the shell
+  to claim bounded work from one lane. Reserve `TimerFired` for actual
+  wall-clock timers:
 
 ```rust
 enum WorkLane {
@@ -146,6 +149,8 @@ enum WorkLane {
     InboundBytes,
     Timers,
     ModuleJobs,
+    SyncIndexCatchup,
+    SyncResponders,
 }
 
 enum StoreOperation {
@@ -160,6 +165,8 @@ enum StoreOperation {
 - Fact modules own module-job meaning. A module job should be a registered
   planner that returns intents, facts, projections, outbox work, or a reschedule
   request.
+- Indexed responder work, such as negentropy compare/have/need responses, should
+  be processed as module jobs rather than inside fact projectors.
 - Do not write an unbounded `while queues_not_empty { drain_everything(); }`
   loop. Every unit of work must be bounded by rows, bytes, or time and must
   return control to the Crux app.
@@ -167,13 +174,13 @@ enum StoreOperation {
 The intended flow is:
 
 ```text
-Crux Event::Tick
+Crux Event::SchedulerWake
   -> StoreEffect::ClaimWork(lane, limit)
   -> Crux Event::StoreReply(ClaimedWork)
   -> dispatch claimed work through fact registry
   -> Store/Network/Clock/Rng effects
   -> mark done/retry/reschedule
-  -> optional follow-up Tick
+  -> optional follow-up SchedulerWake
 ```
 
 ### Testing Rules
@@ -189,6 +196,8 @@ Crux Event::Tick
   `rusqlite`, `TcpStream`, `TcpListener`, RNG, clock, or stdout directly.
 - Existing black-box CLI/network tests remain the proof that the real shell
   interpreters still work end to end.
+- Sync tests should assert that responder work is deferred while the negentropy
+  cursor is behind, then processed after `SyncIndexCatchup` advances it.
 
 ### Migration Rules
 
@@ -319,75 +328,110 @@ Crux messages can carry canonical bytes or event ids, but canonical events
 should not become Crux messages. Otherwise the app loop turns into a giant
 protocol dispatcher and Crux starts owning the domain vocabulary.
 
-### 5. Make Sync Responses Normal Projector Output
+### 5. Use Cursor-Driven Negentropy Jobs
 
-Sync protocol handling should also fit the normal projector contract. The
-projector should receive a typed sync event plus a plain context object. It
-should not receive `Store`, perform SQLite queries, or write TCP frames.
+Negentropy should be a module-owned derived index over applied shared facts, not
+state that every shared-fact projector updates directly. Shared fact projectors
+should not know that negentropy exists.
 
-```rust
-enum SyncEvent {
-    Compare(CompareEvent),
-    HaveId(HaveIdEvent),
-    NeedId(NeedIdEvent),
-    Data(DataEvent),
-}
-
-struct SyncProjectorContext {
-    connection: ConnectionView,
-    negentropy: NegentropyView,
-    local_events: LocalEventView,
-}
-
-struct NegentropyView {
-    summary: [BucketSummary; 256],
-    ids_by_requested_bucket: Vec<(u8, Vec<EventId>)>,
-}
-
-struct LocalEventView {
-    presence: Vec<(EventId, bool)>,
-    bytes: Vec<(EventId, Vec<u8>)>,
-}
-```
-
-The negentropy tree, summary, bucket index, or cache is part of projector
-context. It should be a module-owned projected read model maintained when
-durable data events apply. Sync projectors read a snapshot of that structure
-through context and return declarative output.
-
-The clean shape is two-stage:
-
-```rust
-fn context_requirements(event: &SyncEvent) -> SyncContextRequest;
-
-fn project(event: SyncEvent, ctx: SyncProjectorContext) -> Projection;
-```
-
-Examples:
+The recommended flow is:
 
 ```text
-Compare(remote summary)
-  + local negentropy summary / ids for differing buckets
-  -> emitted HaveId events
-  -> optional session rows
+shared Topo Fact applied
+  -> facts table records apply_seq
 
-HaveId(id)
-  + local presence(id)
-  -> emitted NeedId if missing
+sync index catch-up job
+  -> reads applied shared facts where apply_seq > cursor
+  -> updates sync/negentropy index rows
+  -> advances cursor in the same transaction
 
-NeedId(id)
-  + local bytes(id)
-  -> emitted Data event if present
+compare/have/need fact projected
+  -> validates default deps, labels, origin, and connection shape
+  -> writes deterministic sync_work row with required_index_seq
 
-Data(bytes)
-  -> admitted durable event bytes
-  -> optional session rows / labels
+sync responder job
+  -> waits until negentropy cursor >= required_index_seq
+  -> queries sync/negentropy indexes with bounded budget
+  -> emits response facts and/or outbox intents
+  -> marks sync_work done/retry/reschedule
 ```
 
-If sync responses are canonical events, they belong in `emitted_events`. If
-something is ready to send on a connection, it belongs in `outbox` or in a
-transit event that later projects to `outbox`. That keeps compare/have/need/data
-as normal event processing instead of a bespoke callback loop.
+The generic pipeline only needs to assign an apply order and expose applied
+shared facts to module jobs. It must not know buckets, summaries, or negentropy
+math.
+
+```rust
+struct AppliedSharedFact {
+    apply_seq: u64,
+    fact_id: FactId,
+    scope: FactScope,
+    workspace_id: Option<WorkspaceId>,
+    canonical_len: usize,
+    bucket: u8,
+    fingerprint: [u8; 32],
+}
+
+struct NegentropyCursor {
+    scope_key: SyncScopeKey,
+    last_indexed_apply_seq: u64,
+}
+```
+
+Sync work rows are module-owned queue rows:
+
+```rust
+enum SyncWorkKind {
+    CompareResponse { remote_summary: Summary },
+    HaveResponse { ids: Vec<FactId> },
+    NeedResponse { ids: Vec<FactId> },
+}
+
+struct SyncWork {
+    work_id: WorkId,
+    trigger_fact_id: FactId,
+    connection_id: ConnectionId,
+    required_index_seq: u64,
+    kind: SyncWorkKind,
+    status: WorkStatus,
+}
+```
+
+The sync responder job receives custom job context, not custom projector context:
+
+```rust
+enum SyncWorkContext {
+    CompareResponse {
+        local_summary: Summary,
+        ids_by_differing_bucket: Vec<(BucketId, Vec<FactId>)>,
+        connection_scope: ConnectionScope,
+    },
+    HaveResponse {
+        presence: Vec<(FactId, bool)>,
+        connection_scope: ConnectionScope,
+    },
+    NeedResponse {
+        fact_bytes: Vec<(FactId, CanonicalFactBytes)>,
+        unavailable: Vec<FactId>,
+        connection_scope: ConnectionScope,
+    },
+}
+```
+
+Important invariants:
+
+- Use `apply_seq`, not timestamps, for negentropy cursor order.
+- Advance negentropy index rows and cursor in one transaction.
+- Make index updates idempotent, e.g. unique `(scope_key, fact_id)` rows.
+- Do not process `sync_work` until the relevant cursor has reached
+  `required_index_seq`.
+- Recheck connection/workspace authorization before returning bytes for
+  `NeedResponse`.
+- Prefer per-workspace indexes and aggregate for a connection's allowed scopes,
+  rather than maintaining per-connection indexes.
+
+This replaces the earlier custom-projector-context idea for negentropy
+responders. The custom context still exists, but at the job boundary where large
+indexed reads, batching, retries, and backpressure belong.
 
 ### 6. Model Sync And Connection Session Flow Explicitly
 
@@ -432,7 +476,12 @@ retry counters, `more` frames, close behavior, and drain completion.
 6. Move connection and sync flow control into pure state machines. Crux remains
    the outer orchestrator; the state machines own protocol transition logic.
 
-7. Add guardrail tests before broad migration. Include transcript tests for
+7. Implement sync/negentropy as cursor-driven module jobs: apply shared facts
+   with `apply_seq`, run `SyncIndexCatchup`, then process compare/have/need
+   responder work only once the cursor reaches each work row's required
+   frontier.
+
+8. Add guardrail tests before broad migration. Include transcript tests for
    effects, boundary tests that fail if `main.rs` imports kernel internals, and
    dependency-drain invariant tests.
 
