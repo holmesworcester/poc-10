@@ -1,14 +1,17 @@
 use std::net::SocketAddr;
 
-use crate::store::TableRow;
+use crate::store::{ProjectionOutput, TableRow};
 
 use super::super::connection_record::types::ConnectionId;
 use super::codec;
 use super::tables;
 
-pub fn project(bytes: &[u8]) -> Result<Vec<TableRow>, String> {
+pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
     let event = codec::decode(bytes)?;
-    Ok(transport_target(event.connection_id, event.addr))
+    Ok(ProjectionOutput::rows(transport_target(
+        event.connection_id,
+        event.addr,
+    )))
 }
 
 pub fn transport_target(connection_id: ConnectionId, addr: SocketAddr) -> Vec<TableRow> {

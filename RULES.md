@@ -12,7 +12,7 @@ event modules own protocol and domain semantics.
 Commands receive explicit input values plus narrow read context values. They do
 not mutate SQLite, open transactions, drain queues, or call broad apply loops.
 They return `CommandOutput` with canonical events only. Commands must not return
-rows. Projectors return `StateChanges`; the pipeline/store layer is the only
+rows. Projectors return `ProjectionOutput`; the pipeline/store layer is the only
 place that commits those rows or events.
 
 The intended shape is:
@@ -277,18 +277,28 @@ receiving, buffering, and backpressure to concrete targets such as `(ip, port)`
 or socket ids. It does not own sync, connection, transit wrapping, or
 authorization semantics.
 
-Connection-scoped protocol events are real canonical events. Their
-`connection_id` must be inside their canonical bytes, and their id is the normal
-`BLAKE3(canonical_event_bytes)`. They may be transient, but they still use the
-same codec/projector/outbox rules as other events.
+Events declare scope explicitly:
+
+- `Shared`: durable data that participates in sync summaries and dependency
+  checks.
+- `Local`: durable private facts such as endpoint keys, invites, and route
+  observations.
+- `Connection`: transient canonical protocol events for exactly one established
+  connection.
+
+Connection-scoped protocol events are real canonical events. Their route or
+connection id must be inside their canonical bytes, and their id is the normal
+`BLAKE3(canonical_event_bytes)`. They are not durable event-set truth: the
+pipeline applies their projector output immediately, and their outbox row may
+carry the canonical bytes until transport confirms send. After send, the outbox
+row can be deleted; a future identical connection-scoped event may be projected
+again.
 
 Durable data events are not pushed to peers on creation. Durable data transfer
-is queued only through deterministic connection-scoped send intent, e.g.
-`SendEvent(connection_id, inner_event_id)`, usually emitted in response to a
-`NeedId` event. The outbox dedupes this deterministic intent by
-`(connection_id, send_event_id)`. The connection/transit module projects that
-intent into a transit blob and returns a `TransportSend { target, bytes }`
-effect; the kernel only frames and writes those bytes.
+is queued only through deterministic connection-scoped protocol events, usually
+emitted in response to sync comparison or need events. The outbox dedupes these
+events by `(connection_id, event_id)`. The connection/transit module drains the
+outbox and creates transit blobs; the kernel only frames and writes those bytes.
 
 `TransportSend.target` is a transport route, not a semantic connection id. Use
 an address or socket target such as `(ip, port)` or `socket_id`. If a module

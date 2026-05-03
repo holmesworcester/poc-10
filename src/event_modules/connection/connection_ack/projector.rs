@@ -1,31 +1,26 @@
-use crate::store::StateChanges;
+use crate::store::ProjectionOutput;
 
-use super::super::connection_record::projector::{self as projection, Projection};
+use super::super::connection_record::projector as projection;
 use super::super::connection_record::types;
 use super::super::connection_request;
 use super::codec;
 use crate::event_modules::identity::endpoint::types::EndpointId;
 
-pub fn outbound(bytes: Vec<u8>, local_endpoint: EndpointId) -> Result<Projection, String> {
+pub fn outbound(bytes: Vec<u8>, local_endpoint: EndpointId) -> Result<ProjectionOutput, String> {
     let event = codec::decode(&bytes)?;
     if event.from_endpoint != local_endpoint {
         return Err("connection ack was not created by this endpoint".to_string());
     }
-    Ok(Projection {
-        changes: StateChanges::rows(vec![projection::connection_event_row(
-            types::event_id(&bytes),
-            bytes,
-        )]),
-        emitted_events: Vec::new(),
-        connection_id: None,
-    })
+    Ok(ProjectionOutput::rows(vec![
+        projection::connection_event_row(types::event_id(&bytes), bytes),
+    ]))
 }
 
 pub fn inbound(
     bytes: Vec<u8>,
     local_endpoint: EndpointId,
     request_bytes: Vec<u8>,
-) -> Result<Projection, String> {
+) -> Result<ProjectionOutput, String> {
     let event = codec::decode(&bytes)?;
     let request = connection_request::codec::decode(&request_bytes)
         .map_err(|_| "connection ack references a non-request event".to_string())?;
@@ -42,12 +37,8 @@ pub fn inbound(
     if event.connection_id != expected_connection_id {
         return Err("connection ack has an invalid connection id".to_string());
     }
-    Ok(Projection {
-        changes: StateChanges::rows(vec![
-            projection::connection_event_row(types::event_id(&bytes), bytes),
-            projection::connection_row(event.connection_id, event.from_endpoint),
-        ]),
-        emitted_events: Vec::new(),
-        connection_id: Some(event.connection_id),
-    })
+    Ok(ProjectionOutput::rows(vec![
+        projection::connection_event_row(types::event_id(&bytes), bytes),
+        projection::connection_row(event.connection_id, event.from_endpoint),
+    ]))
 }

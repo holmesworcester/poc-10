@@ -38,12 +38,12 @@ impl EventScope {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StateChanges {
+pub struct ProjectionOutput {
     pub rows: Vec<TableRow>,
     pub events: Vec<EventRecord>,
 }
 
-impl StateChanges {
+impl ProjectionOutput {
     pub fn rows(rows: Vec<TableRow>) -> Self {
         Self {
             rows,
@@ -144,6 +144,24 @@ impl Store {
             )?;
         }
         Ok(inserted)
+    }
+
+    pub fn delete_table_rows(
+        &self,
+        table: &'static str,
+        keys: Vec<Vec<u8>>,
+    ) -> rusqlite::Result<usize> {
+        self.write_transaction(|store| {
+            let mut deleted = 0;
+            for key in keys {
+                deleted += store.conn.execute(
+                    "DELETE FROM table_rows
+                     WHERE table_name = ?1 AND row_key = ?2",
+                    params![table, key],
+                )?;
+            }
+            Ok(deleted)
+        })
     }
 
     pub fn table_row(&self, table: &'static str, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {

@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use topo::event_modules::{test_events, Modules};
-use topo::store::{EventStatusCounts, Store};
+use topo::store::{CommandOutput, EventStatusCounts, Store};
 use topo::{control_loop, pipeline};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,10 +44,15 @@ fn run_cascade(
     let setup_ms = setup_start.elapsed().as_millis();
 
     let root_count = events.min(deps_per_event);
+    let modules = Modules::new();
     let blocking_start = Instant::now();
     let reverse_records = records[root_count..].iter().rev().cloned().collect();
-    pipeline::admit_records(store, reverse_records)
-        .map_err(|err| format!("insert reverse dependent events: {err}"))?;
+    pipeline::run_command(
+        store,
+        &modules,
+        CommandOutput::with_events((), reverse_records),
+    )
+    .map_err(|err| format!("insert reverse dependent events: {err}"))?;
     let blocked_after_reverse = store
         .status_counts()
         .map_err(|err| format!("count blocked events: {err}"))?
@@ -55,9 +60,12 @@ fn run_cascade(
     let blocking_ms = blocking_start.elapsed().as_millis();
 
     let cascade_start = Instant::now();
-    pipeline::admit_records(store, records[..root_count].to_vec())
-        .map_err(|err| format!("insert root events: {err}"))?;
-    let modules = Modules::new();
+    let (_, root_report) = pipeline::run_command(
+        store,
+        &modules,
+        CommandOutput::with_events((), records[..root_count].to_vec()),
+    )
+    .map_err(|err| format!("insert root events: {err}"))?;
     let drain = control_loop::drain_until_idle(store, &modules, batch_size)?;
     let cascade_ms = cascade_start.elapsed().as_millis();
     let final_counts = store
@@ -73,7 +81,7 @@ fn run_cascade(
         cascade_ms,
         total_ms: total_start.elapsed().as_millis(),
         blocked_after_reverse,
-        applied_events: drain.applied_events,
+        applied_events: root_report.applied_events + drain.applied_events,
         unblocked_events: drain.unblocked_events,
         final_counts,
     })

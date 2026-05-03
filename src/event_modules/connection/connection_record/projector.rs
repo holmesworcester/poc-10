@@ -1,15 +1,8 @@
 use crate::event_modules::identity::endpoint::types::EndpointId;
-use crate::store::{EventId, StateChanges, TableRow};
+use crate::store::{EventId, TableRow};
 
 use super::tables;
 use super::types::ConnectionId;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Projection {
-    pub changes: StateChanges,
-    pub emitted_events: Vec<Vec<u8>>,
-    pub connection_id: Option<ConnectionId>,
-}
 
 pub(crate) fn connection_event_row(event_id: EventId, bytes: Vec<u8>) -> TableRow {
     TableRow {

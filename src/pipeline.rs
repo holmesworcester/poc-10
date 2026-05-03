@@ -1,7 +1,7 @@
 use crate::blocking;
 use crate::event_modules::Modules;
 use crate::store::{
-    event_id, CommandOutput, EventId, EventRecord, EventStatus, StateChanges, Store,
+    event_id, CommandOutput, EventId, EventRecord, EventScope, EventStatus, ProjectionOutput, Store,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +13,7 @@ pub struct FrameMetadata {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestResult {
     pub outgoing: Vec<Vec<u8>>,
+    pub sent_outbox: Vec<Vec<u8>>,
     pub established_routes: usize,
     pub sent_events: usize,
     pub received_events: usize,
@@ -36,7 +37,7 @@ pub struct ApplyReadyReport {
 pub fn apply_changes(
     store: &Store,
     modules: &Modules,
-    changes: StateChanges,
+    changes: ProjectionOutput,
 ) -> Result<AdmitReport, String> {
     store
         .write_transaction(|store| {
@@ -52,26 +53,14 @@ pub fn run_command<T>(
     modules: &Modules,
     output: CommandOutput<T>,
 ) -> Result<(T, AdmitReport), String> {
-    let report = apply_changes(store, modules, StateChanges::events(output.events))?;
+    let report = apply_changes(store, modules, ProjectionOutput::events(output.events))?;
     Ok((output.value, report))
-}
-
-pub fn admit_records(store: &Store, records: Vec<EventRecord>) -> Result<AdmitReport, String> {
-    store
-        .write_transaction(|store| {
-            let mut report = AdmitReport::default();
-            for record in records {
-                admit_record_in_tx(store, &record, &mut report)?;
-            }
-            Ok(report)
-        })
-        .map_err(|err| format!("admit events: {err}"))
 }
 
 fn apply_changes_in_tx(
     store: &Store,
     modules: &Modules,
-    changes: StateChanges,
+    changes: ProjectionOutput,
     report: &mut AdmitReport,
 ) -> rusqlite::Result<()> {
     store.insert_table_rows_in_tx(changes.rows)?;
@@ -87,6 +76,20 @@ fn admit_and_apply_record_in_tx(
     record: &EventRecord,
     report: &mut AdmitReport,
 ) -> rusqlite::Result<()> {
+    if record.scope == EventScope::Connection {
+        if !record.dependencies.is_empty() {
+            return Err(module_error(
+                "transient events cannot wait on durable dependencies".to_string(),
+            ));
+        }
+        let changes = modules
+            .project_record(store, record)
+            .map_err(module_error)?;
+        apply_changes_in_tx(store, modules, changes, report)?;
+        report.applied_events += 1;
+        return Ok(());
+    }
+
     let admitted = admit_record_in_tx(store, record, report)?;
     if admitted.inserted && admitted.ready {
         let apply = apply_ready_event_in_tx(store, modules, &admitted.event_id)?;
@@ -166,9 +169,18 @@ pub fn ingest_frame(
         modules,
         report.received_event_bytes,
     )?);
-    apply_changes(store, modules, StateChanges::events(report.events))?;
+    let outbox = report.drain_outbox_for;
+    apply_changes(store, modules, ProjectionOutput::events(report.events))?;
+    let mut outgoing = report.outgoing;
+    let mut sent_outbox = Vec::new();
+    if let Some(route_id) = outbox {
+        let drained = modules.drain_outbox_for_route(store, route_id)?;
+        outgoing.extend(drained.outgoing);
+        sent_outbox.extend(drained.sent_outbox);
+    }
     Ok(IngestResult {
-        outgoing: report.outgoing,
+        outgoing,
+        sent_outbox,
         established_routes: report.established_routes,
         sent_events: report.sent_events,
         received_events: report.received_events,

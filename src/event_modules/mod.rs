@@ -6,7 +6,7 @@ pub mod test_events;
 
 use std::net::SocketAddr;
 
-use crate::store::{CommandOutput, EventRecord, StateChanges, Store};
+use crate::store::{CommandOutput, EventRecord, ProjectionOutput, Store};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules;
@@ -21,6 +21,7 @@ struct FrameMetadata {
 pub struct ModuleFrameReport {
     pub events: Vec<EventRecord>,
     pub outgoing: Vec<Vec<u8>>,
+    pub drain_outbox_for: Option<connection::connection_record::types::ConnectionId>,
     pub established_routes: usize,
     pub sent_events: usize,
     pub received_events: usize,
@@ -31,6 +32,18 @@ pub struct ModuleFrameReport {
 pub struct OutboundSync {
     pub target: SocketAddr,
     pub outgoing: Vec<Vec<u8>>,
+    pub sent_outbox: Vec<Vec<u8>>,
+    pub sent_events: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DrainedOutbox {
+    pub outgoing: Vec<Vec<u8>>,
+    pub sent_outbox: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SyncStartReport {
     pub sent_events: usize,
 }
 
@@ -170,37 +183,78 @@ impl Modules {
         }
     }
 
-    pub fn sync_outbound(&self, store: &Store) -> Result<Vec<OutboundSync>, String> {
-        let mut outbound = Vec::new();
+    pub fn start_sync(&self, store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
         let routes = connection::transport_target::queries::routes(store)?;
         if routes.is_empty() {
-            return Ok(outbound);
+            return Ok(CommandOutput::new(SyncStartReport::default()));
         }
-        let local = self.existing_local_keypair(store)?;
+        let mut events = Vec::new();
+        let mut sent_events = 0;
         for route in routes {
-            let remote = connection::connection_record::queries::remote_endpoint(
-                store,
-                &route.connection_id,
-            )?;
-            let mut result = ModuleFrameReport::default();
             let report = sync::compare::commands::start(store, route.connection_id, |bytes| {
-                result
-                    .outgoing
-                    .push(connection::transit::commands::create_connection(
-                        &local,
-                        remote,
-                        route.connection_id,
-                        bytes,
-                    )?);
+                events.push(sync::frame::codec::record_from_bytes(bytes)?);
                 Ok(())
             })?;
+            sent_events += report.sent_events;
+        }
+        Ok(CommandOutput::with_events(
+            SyncStartReport { sent_events },
+            events,
+        ))
+    }
+
+    pub fn drain_outbox_routes(&self, store: &Store) -> Result<Vec<OutboundSync>, String> {
+        let routes = connection::transport_target::queries::routes(store)?;
+        let mut outbound = Vec::new();
+        for route in routes {
+            let drained = self.drain_outbox_for_route(store, route.connection_id)?;
+            if drained.outgoing.is_empty() {
+                continue;
+            }
             outbound.push(OutboundSync {
                 target: route.addr,
-                outgoing: result.outgoing,
-                sent_events: report.sent_events,
+                outgoing: drained.outgoing,
+                sent_outbox: drained.sent_outbox,
+                sent_events: 0,
             });
         }
         Ok(outbound)
+    }
+
+    pub fn drain_outbox_for_route(
+        &self,
+        store: &Store,
+        connection_id: connection::connection_record::types::ConnectionId,
+    ) -> Result<DrainedOutbox, String> {
+        let items = connection::outbox::queries::items_for_connection(store, connection_id)?;
+        if items.is_empty() {
+            return Ok(DrainedOutbox::default());
+        }
+        let local = self.existing_local_keypair(store)?;
+        let remote =
+            connection::connection_record::queries::remote_endpoint(store, &connection_id)?;
+        let mut outgoing = Vec::with_capacity(items.len());
+        let mut sent_outbox = Vec::with_capacity(items.len());
+        for item in items {
+            outgoing.push(connection::transit::commands::create_connection(
+                &local,
+                remote,
+                connection_id,
+                item.event_bytes,
+            )?);
+            sent_outbox.push(item.key.to_bytes());
+        }
+        Ok(DrainedOutbox {
+            outgoing,
+            sent_outbox,
+        })
+    }
+
+    pub fn mark_outbox_sent(&self, store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {
+        if sent_outbox.is_empty() {
+            return Ok(());
+        }
+        connection::outbox::queries::delete_encoded(store, sent_outbox)
     }
 
     pub fn connection_count(&self, store: &Store) -> Result<usize, String> {
@@ -218,20 +272,13 @@ impl Modules {
         bytes: &[u8],
     ) -> Result<ModuleFrameReport, String> {
         let mut result = ModuleFrameReport::default();
-        let local = self.existing_local_keypair(store)?;
-        let remote =
-            connection::connection_record::queries::remote_endpoint(store, &connection_id)?;
         let report = sync::compare::commands::ingest_frame(store, connection_id, bytes, |bytes| {
             result
-                .outgoing
-                .push(connection::transit::commands::create_connection(
-                    &local,
-                    remote,
-                    connection_id,
-                    bytes,
-                )?);
+                .events
+                .push(sync::frame::codec::record_from_bytes(bytes)?);
             Ok(())
         })?;
+        result.drain_outbox_for = Some(connection_id);
         result.sent_events += report.sent_events;
         result.received_events += report.received_events;
         result.received_event_bytes = report.received_event_bytes;
@@ -252,53 +299,26 @@ impl Modules {
         &self,
         store: &Store,
         record: &EventRecord,
-    ) -> Result<StateChanges, String> {
+    ) -> Result<ProjectionOutput, String> {
         let bytes = &record.canonical_bytes;
-        if connection::connection_request::codec::is_request(bytes) {
+        if let Some(output) = identity::project_record(bytes)? {
+            return Ok(output);
+        }
+        if connection::is_projection_record(bytes) {
             let local = self.existing_local_keypair(store)?;
-            return Ok(connection::connection_request::projector::project(
-                bytes.clone(),
-                local.endpoint,
-            )?
-            .changes);
+            return connection::project_record(store, bytes, local.endpoint);
         }
-        if connection::connection_ack::codec::is_ack(bytes) {
-            let local = self.existing_local_keypair(store)?;
-            let event = connection::connection_ack::codec::decode(bytes)?;
-            let projection = if event.from_endpoint == local.endpoint {
-                connection::connection_ack::projector::outbound(bytes.clone(), local.endpoint)?
-            } else {
-                let request_bytes =
-                    connection::connection_record::queries::event_bytes(store, &event.request_id)?
-                        .ok_or_else(|| "connection ack references unknown request".to_string())?;
-                connection::connection_ack::projector::inbound(
-                    bytes.clone(),
-                    local.endpoint,
-                    request_bytes,
-                )?
-            };
-            return Ok(projection.changes);
+        if let Some(output) = sync::project_record(bytes)? {
+            return Ok(output);
         }
-
-        let tag = bytes
-            .first()
-            .ok_or_else(|| "empty event bytes".to_string())?;
-        match *tag {
-            identity::endpoint::codec::TYPE_LOCAL_ENDPOINT => Ok(StateChanges::rows(
-                identity::endpoint::projector::project(bytes)?,
-            )),
-            identity::invite::codec::TYPE_INVITE_SECRET => Ok(StateChanges::rows(
-                identity::invite::projector::project(bytes)?,
-            )),
-            connection::transport_target::codec::TYPE_TRANSPORT_TARGET => Ok(StateChanges::rows(
-                connection::transport_target::projector::project(bytes)?,
-            )),
-            content::content_event::codec::TYPE_CONTENT
-            | test_events::dependent_event::codec::TYPE_DEPENDENT_EVENT => {
-                Ok(StateChanges::default())
-            }
-            other => Err(format!("unknown event type {other}")),
+        if let Some(output) = content::project_record(bytes)? {
+            return Ok(output);
         }
+        if let Some(output) = test_events::project_record(bytes)? {
+            return Ok(output);
+        }
+        let tag = bytes.first().copied().unwrap_or_default();
+        Err(format!("unknown event type {tag}"))
     }
 
     fn existing_local_keypair(
@@ -325,6 +345,9 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     }
     if connection::connection_ack::codec::is_ack(&bytes) {
         return connection::connection_ack::codec::record_from_bytes(bytes);
+    }
+    if sync::frame::codec::is_frame(&bytes) {
+        return sync::frame::codec::record_from_bytes(bytes);
     }
     let tag = bytes
         .first()

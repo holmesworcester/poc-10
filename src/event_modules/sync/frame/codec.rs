@@ -1,3 +1,4 @@
+use crate::store::{EventRecord, EventScope};
 use crate::wire::{Reader, Writer};
 
 use super::super::{compare, data, have_id, need_id};
@@ -45,4 +46,40 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
     }
     reader.finish()?;
     Ok(Frame { more, items })
+}
+
+pub fn is_frame(bytes: &[u8]) -> bool {
+    bytes.starts_with(MAGIC)
+}
+
+pub fn connection_id(bytes: &[u8]) -> Result<crate::store::EventId, String> {
+    let frame = decode(bytes)?;
+    let mut connection_id = None;
+    for item in frame.items {
+        let item_connection_id = match item {
+            SyncItem::Compare(event) => event.connection_id,
+            SyncItem::HaveId(event) => event.connection_id,
+            SyncItem::NeedId(event) => event.connection_id,
+            SyncItem::Data(event) => event.connection_id,
+        };
+        if let Some(existing) = connection_id {
+            if existing != item_connection_id {
+                return Err("sync frame mixed connection ids".to_string());
+            }
+        } else {
+            connection_id = Some(item_connection_id);
+        }
+    }
+    connection_id.ok_or_else(|| "sync frame has no items".to_string())
+}
+
+pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
+    connection_id(&bytes)?;
+    Ok(EventRecord {
+        timestamp: 0,
+        body_len: 0,
+        canonical_bytes: bytes,
+        dependencies: Vec::new(),
+        scope: EventScope::Connection,
+    })
 }

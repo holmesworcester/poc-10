@@ -78,6 +78,29 @@ fn sync_perf_reports_10k_event_rate_from_sync_start_to_all_counted() {
 }
 
 #[test]
+fn repeated_sync_reuses_connection_scoped_events_without_durable_deduping() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let port = free_port();
+    let bob_invite = invite(&bob, port);
+
+    let listener = start_listener(&bob, port, 3);
+    connect_with_retry(&alice, &bob_invite);
+
+    generate(&alice, 32, 256);
+    let first_sync = sync(&alice);
+    assert!(first_sync.contains("routes_synced: 1"), "{first_sync}");
+    assert_eventually_count(&bob, 32, Duration::from_secs(5));
+
+    generate(&bob, 17, 256);
+    let second_sync = sync(&alice);
+    assert!(second_sync.contains("routes_synced: 1"), "{second_sync}");
+    wait_success(listener, "repeated sync listener");
+    assert_eventually_count(&alice, 49, Duration::from_secs(5));
+}
+
+#[test]
 fn sync_splits_large_payloads_into_transport_sized_frames() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");

@@ -220,7 +220,7 @@ fn event_module_commands_do_not_mutate_storage_directly() {
         "&Store",
         "Store,",
         "Store)",
-        "StateChanges",
+        "ProjectionOutput",
         "TableRow",
         "with_changes",
         ".rows",
@@ -276,7 +276,7 @@ fn command_output_contains_events_not_state_changes() {
         .expect("CommandOutput");
     let body = &text[start..text[start..].find("impl<T> CommandOutput").unwrap() + start];
     assert!(
-        body.contains("pub events: Vec<EventRecord>") && !body.contains("StateChanges"),
+        body.contains("pub events: Vec<EventRecord>") && !body.contains("ProjectionOutput"),
         "CommandOutput is command-facing and must carry events only, not projector rows"
     );
 }

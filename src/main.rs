@@ -321,11 +321,16 @@ fn sync_routes(store: &Store, modules: &Modules) -> Result<CliSyncReport, String
     control_loop::drain_until_idle(store, modules, control_loop::DEFAULT_READY_BATCH)
         .map_err(|err| format!("drain ready events before sync: {err}"))?;
     let mut report = CliSyncReport::default();
-    for outbound in modules.sync_outbound(store)? {
+    let start = modules.start_sync(store)?;
+    let (started, _) = pipeline::run_command(store, modules, start)
+        .map_err(|err| format!("record sync frames: {err}"))?;
+    report.sent_events += started.sent_events;
+    for outbound in modules.drain_outbox_routes(store)? {
         let mut stream =
             network::connect(outbound.target).map_err(|err| format!("open tcp stream: {err}"))?;
         report.sent_events += outbound.sent_events;
         network::write_frames(&mut stream, outbound.outgoing)?;
+        modules.mark_outbox_sent(store, outbound.sent_outbox)?;
         let stream_report = drive_stream(
             store,
             modules,
@@ -362,7 +367,7 @@ fn drive_stream(
         let result = pipeline::ingest_frame(store, modules, metadata, bytes)?;
         control_loop::drain_until_idle(store, modules, control_loop::DEFAULT_READY_BATCH)
             .map_err(|err| format!("drain ready events: {err}"))?;
-        apply_stream_result(stream, &mut report, result)?;
+        apply_stream_result(store, modules, stream, &mut report, result)?;
     }
     loop {
         match network::read_frame(stream) {
@@ -370,7 +375,7 @@ fn drive_stream(
                 let result = pipeline::ingest_frame(store, modules, metadata, bytes)?;
                 control_loop::drain_until_idle(store, modules, control_loop::DEFAULT_READY_BATCH)
                     .map_err(|err| format!("drain ready events: {err}"))?;
-                apply_stream_result(stream, &mut report, result)?;
+                apply_stream_result(store, modules, stream, &mut report, result)?;
             }
             Err(err) if is_stream_closed(&err) => break,
             Err(err) => return Err(format!("read frame: {err}")),
@@ -381,6 +386,8 @@ fn drive_stream(
 }
 
 fn apply_stream_result(
+    store: &Store,
+    modules: &Modules,
     stream: &mut TcpStream,
     report: &mut StreamReport,
     result: pipeline::IngestResult,
@@ -390,6 +397,7 @@ fn apply_stream_result(
     report.received_events += result.received_events;
     let has_outgoing = !result.outgoing.is_empty();
     network::write_frames(stream, result.outgoing)?;
+    modules.mark_outbox_sent(store, result.sent_outbox)?;
     if !has_outgoing {
         let _ = stream.shutdown(Shutdown::Write);
     }

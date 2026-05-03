@@ -1,1 +1,8 @@
-// Bench dependency events currently project only through generic event status.
+use crate::store::ProjectionOutput;
+
+use super::codec;
+
+pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
+    codec::decode(bytes)?;
+    Ok(ProjectionOutput::default())
+}
