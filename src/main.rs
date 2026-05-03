@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use topo::event_modules::Modules;
 use topo::store::Store;
-use topo::{control_loop, network, pipeline};
+use topo::{control_loop, kernel, network, pipeline};
 
 fn main() {
     if let Err(err) = run(env::args().skip(1).collect()) {
@@ -26,40 +26,21 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("connected: {addr}");
         }
         Command::Invite { public_addr } => {
-            let invite = pipeline::run_command(
-                &store,
-                &modules,
-                modules
-                    .create_invite(&store, public_addr)
-                    .map_err(|err| format!("invite: {err}"))?,
-            )
-            .map_err(|err| format!("apply invite: {err}"))?
-            .0;
-            println!("{invite}");
+            let lines = kernel::run_invite(&store, &modules, public_addr)
+                .map_err(|err| format!("invite: {err}"))?;
+            for line in lines {
+                println!("{line}");
+            }
         }
         Command::Generate {
             num_events,
             event_size,
         } => {
-            let (report, admitted) = pipeline::run_command(
-                &store,
-                &modules,
-                modules
-                    .generate_content(&store, num_events, event_size)
-                    .map_err(|err| format!("generate: {err}"))?,
-            )
-            .map_err(|err| format!("admit generated events: {err}"))?;
-            let applied =
-                control_loop::drain_until_idle(&store, &modules, control_loop::DEFAULT_READY_BATCH)
-                    .map_err(|err| format!("drain generated events: {err}"))?;
-            println!("generated_events: {}", admitted.inserted_events);
-            println!(
-                "applied_events: {}",
-                admitted.applied_events + applied.applied_events
-            );
-            println!("event_size_bytes: {event_size}");
-            println!("first_timestamp: {}", report.first_timestamp);
-            println!("last_timestamp: {}", report.last_timestamp);
+            let lines = kernel::run_generate(&store, &modules, num_events, event_size)
+                .map_err(|err| format!("generate: {err}"))?;
+            for line in lines {
+                println!("{line}");
+            }
         }
         Command::Sync {
             listen,
@@ -86,27 +67,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
             }
         }
         Command::Count => {
-            let count = store
-                .event_count()
-                .map_err(|err| format!("count events: {err}"))?;
-            let bytes = store
-                .body_bytes()
-                .map_err(|err| format!("count bytes: {err}"))?;
-            println!("events: {count}");
-            println!("payload_bytes: {bytes}");
-            println!("connections: {}", modules.connection_count(&store)?);
-            println!(
-                "connection_events: {}",
-                modules.connection_event_count(&store)?
-            );
-            let statuses = store
-                .status_counts()
-                .map_err(|err| format!("count event statuses: {err}"))?;
-            println!("ready_events: {}", statuses.ready);
-            println!("blocked_events: {}", statuses.blocked);
-            println!("applied_events: {}", statuses.applied);
-            println!("rejected_events: {}", statuses.rejected);
-            println!("blocked_edges: {}", statuses.blocked_edges);
+            let lines =
+                kernel::run_count(&store, &modules).map_err(|err| format!("count: {err}"))?;
+            for line in lines {
+                println!("{line}");
+            }
         }
     }
 
