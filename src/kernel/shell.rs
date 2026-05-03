@@ -7,7 +7,7 @@ use crate::event_modules::Modules;
 use crate::store::Store;
 use crate::{control_loop, pipeline};
 
-use super::app::{
+use super::{
     ConnectionRequest, CountSummary, DependentReplaySummary, DependentStageSummary,
     DrainReadyReport, FrameIngest, GeneratedContent, KernelApp, KernelEffect, KernelModel,
     KernelMsg, NetworkOp, NetworkReply, OutboundSyncWork, StdoutOp, StdoutReply, StoreOp,

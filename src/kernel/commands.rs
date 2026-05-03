@@ -4,10 +4,11 @@ use crux_core::{command::CommandContext, Command};
 
 use crate::control_loop;
 
-use super::app::{
-    ConnectSummary, GenerateSummary, KernelEffect, KernelMsg, NetworkOp, NetworkReply,
-    ServeSummary, StdoutOp, StdoutReply, StoreOp, StoreReply, StreamSummary, SyncSummary,
+use super::effects::{
+    KernelEffect, NetworkOp, NetworkReply, StdoutOp, StdoutReply, StoreOp, StoreReply,
 };
+use super::model::KernelMsg;
+use super::summaries::{ConnectSummary, GenerateSummary, ServeSummary, StreamSummary, SyncSummary};
 
 pub(super) fn invite(public_addr: SocketAddr) -> Command<KernelEffect, KernelMsg> {
     Command::new(|ctx| async move {

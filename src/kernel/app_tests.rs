@@ -2,7 +2,7 @@ use std::{collections::VecDeque, net::SocketAddr};
 
 use crux_core::{App, Command};
 
-use super::app::*;
+use super::*;
 use crate::control_loop;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
