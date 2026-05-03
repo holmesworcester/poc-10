@@ -8,9 +8,10 @@ use crate::store::Store;
 use crate::{control_loop, pipeline};
 
 use super::app::{
-    ConnectionRequest, CountSummary, DrainReadyReport, FrameIngest, GeneratedContent, KernelApp,
-    KernelEffect, KernelModel, KernelMsg, NetworkOp, NetworkReply, OutboundSyncWork, StdoutOp,
-    StdoutReply, StoreOp, StoreReply, SyncRoutesStart,
+    ConnectionRequest, CountSummary, DependentReplaySummary, DependentStageSummary,
+    DrainReadyReport, FrameIngest, GeneratedContent, KernelApp, KernelEffect, KernelModel,
+    KernelMsg, NetworkOp, NetworkReply, OutboundSyncWork, StdoutOp, StdoutReply, StoreOp,
+    StoreReply, SyncRoutesStart,
 };
 
 pub fn run_invite(
@@ -91,6 +92,37 @@ pub fn run_generate(
             event_size,
         },
     )?;
+    Ok(shell.stdout)
+}
+
+pub fn run_generate_dependent_events(
+    store: &Store,
+    modules: &Modules,
+    num_events: usize,
+    deps_per_event: usize,
+) -> Result<Vec<String>, String> {
+    let app = KernelApp;
+    let mut model = KernelModel::default();
+    let mut shell = RealShell::new(store, modules);
+    shell.run(
+        &app,
+        &mut model,
+        KernelMsg::GenerateDependentEvents {
+            num_events,
+            deps_per_event,
+        },
+    )?;
+    Ok(shell.stdout)
+}
+
+pub fn run_replay_dependent_events_reverse(
+    store: &Store,
+    modules: &Modules,
+) -> Result<Vec<String>, String> {
+    let app = KernelApp;
+    let mut model = KernelModel::default();
+    let mut shell = RealShell::new(store, modules);
+    shell.run(&app, &mut model, KernelMsg::ReplayDependentEventsReverse)?;
     Ok(shell.stdout)
 }
 
@@ -253,6 +285,84 @@ impl<'a> RealShell<'a> {
                     first_timestamp: report.first_timestamp,
                     last_timestamp: report.last_timestamp,
                 }))
+            }
+            StoreOp::StageDependentEvents {
+                num_events,
+                deps_per_event,
+            } => {
+                let output = self
+                    .modules
+                    .stage_dependent_events(self.store, num_events, deps_per_event)
+                    .map_err(|err| format!("stage dependent events: {err}"))?;
+                let (report, _) = pipeline::run_command(self.store, self.modules, output)
+                    .map_err(|err| format!("admit staged dependent events: {err}"))?;
+                Ok(StoreReply::DependentEventsStaged(DependentStageSummary {
+                    staged_events: report.staged_events,
+                    deps_per_event: report.deps_per_event,
+                    dep_edges: report.dep_edges,
+                    first_timestamp: report.first_timestamp,
+                    last_timestamp: report.last_timestamp,
+                }))
+            }
+            StoreOp::ReplayDependentEventsReverse => {
+                let records = self
+                    .modules
+                    .staged_dependent_records(self.store)
+                    .map_err(|err| format!("load staged dependent events: {err}"))?;
+                if records.is_empty() {
+                    return Err("no staged dependent events to replay".to_string());
+                }
+
+                let max_deps = records
+                    .iter()
+                    .map(|record| record.dependencies.len())
+                    .max()
+                    .unwrap_or(0);
+                let root_count = records.len().min(max_deps.max(1));
+                let reverse_non_roots = records[root_count..].iter().rev().cloned().collect();
+                let (_, reverse_report) = pipeline::run_command(
+                    self.store,
+                    self.modules,
+                    crate::store::CommandOutput::with_events((), reverse_non_roots),
+                )
+                .map_err(|err| format!("admit reverse dependent events: {err}"))?;
+
+                let blocked_after_reverse = self
+                    .store
+                    .status_counts()
+                    .map_err(|err| format!("count blocked reverse events: {err}"))?
+                    .blocked;
+
+                let roots = records[..root_count].to_vec();
+                let (_, root_report) = pipeline::run_command(
+                    self.store,
+                    self.modules,
+                    crate::store::CommandOutput::with_events((), roots),
+                )
+                .map_err(|err| format!("admit dependent roots: {err}"))?;
+                let drain = control_loop::drain_until_idle(
+                    self.store,
+                    self.modules,
+                    control_loop::DEFAULT_READY_BATCH,
+                )
+                .map_err(|err| format!("drain dependent replay: {err}"))?;
+                let final_counts = self
+                    .store
+                    .status_counts()
+                    .map_err(|err| format!("count dependent replay statuses: {err}"))?;
+
+                Ok(StoreReply::DependentEventsReplayed(
+                    DependentReplaySummary {
+                        replayed_events: records.len(),
+                        blocked_after_reverse,
+                        applied_events: reverse_report.applied_events
+                            + root_report.applied_events
+                            + drain.applied_events,
+                        ready_events: final_counts.ready,
+                        blocked_events: final_counts.blocked,
+                        blocked_edges: final_counts.blocked_edges,
+                    },
+                ))
             }
             StoreOp::DrainReadyUntilIdle { batch_size } => {
                 let report = control_loop::drain_until_idle(self.store, self.modules, batch_size)

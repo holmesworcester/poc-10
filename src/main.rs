@@ -43,6 +43,24 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 println!("{line}");
             }
         }
+        Command::GenerateDeps {
+            num_events,
+            deps_per_event,
+        } => {
+            let lines =
+                kernel::run_generate_dependent_events(&store, &modules, num_events, deps_per_event)
+                    .map_err(|err| format!("generate-deps: {err}"))?;
+            for line in lines {
+                println!("{line}");
+            }
+        }
+        Command::ReplayDepsReverse => {
+            let lines = kernel::run_replay_dependent_events_reverse(&store, &modules)
+                .map_err(|err| format!("replay-deps-reverse: {err}"))?;
+            for line in lines {
+                println!("{line}");
+            }
+        }
         Command::Sync {
             listen,
             accept_count,
@@ -85,6 +103,11 @@ enum Command {
         num_events: usize,
         event_size: usize,
     },
+    GenerateDeps {
+        num_events: usize,
+        deps_per_event: usize,
+    },
+    ReplayDepsReverse,
     Sync {
         listen: Option<SocketAddr>,
         accept_count: usize,
@@ -148,6 +171,26 @@ fn parse_args(args: Vec<String>) -> Result<(PathBuf, Command), String> {
                 event_size,
             }
         }
+        "generate-deps" => {
+            let num_events = parse_usize(
+                rest.get(1),
+                "generate-deps requires NUM_EVENTS DEPS_PER_EVENT",
+            )?;
+            let deps_per_event = parse_usize(
+                rest.get(2),
+                "generate-deps requires NUM_EVENTS DEPS_PER_EVENT",
+            )?;
+            Command::GenerateDeps {
+                num_events,
+                deps_per_event,
+            }
+        }
+        "replay-deps-reverse" => {
+            if rest.len() != 1 {
+                return Err(usage("replay-deps-reverse takes no arguments"));
+            }
+            Command::ReplayDepsReverse
+        }
         "sync" => {
             let mut listen = None;
             let mut accept_count = 1usize;
@@ -204,6 +247,6 @@ fn parse_usize(value: Option<&String>, message: &str) -> Result<usize, String> {
 
 fn usage(message: &str) -> String {
     format!(
-        "{message}\nusage:\n  topo --db PATH invite --public-addr ADDR\n  topo --db PATH connect INVITE_LINK\n  topo --db PATH generate NUM_EVENTS EVENT_SIZE_BYTES\n  topo --db PATH sync [--listen IP PORT --accept N]\n  topo --db PATH count"
+        "{message}\nusage:\n  topo --db PATH invite --public-addr ADDR\n  topo --db PATH connect INVITE_LINK\n  topo --db PATH generate NUM_EVENTS EVENT_SIZE_BYTES\n  topo --db PATH generate-deps NUM_EVENTS DEPS_PER_EVENT\n  topo --db PATH replay-deps-reverse\n  topo --db PATH sync [--listen IP PORT --accept N]\n  topo --db PATH count"
     )
 }

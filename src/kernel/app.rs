@@ -15,6 +15,8 @@ pub struct KernelModel {
     pub last_sync: Option<SyncSummary>,
     pub last_serve: Option<ServeSummary>,
     pub last_generate: Option<GenerateSummary>,
+    pub last_dependent_stage: Option<DependentStageSummary>,
+    pub last_dependent_replay: Option<DependentReplaySummary>,
     pub last_count: Option<CountSummary>,
 }
 
@@ -26,6 +28,8 @@ pub struct KernelView {
     pub last_sync: Option<SyncSummary>,
     pub last_serve: Option<ServeSummary>,
     pub last_generate: Option<GenerateSummary>,
+    pub last_dependent_stage: Option<DependentStageSummary>,
+    pub last_dependent_replay: Option<DependentReplaySummary>,
     pub last_count: Option<CountSummary>,
 }
 
@@ -52,6 +56,13 @@ pub enum KernelMsg {
         event_size: usize,
     },
     GenerateFinished(GenerateSummary),
+    GenerateDependentEvents {
+        num_events: usize,
+        deps_per_event: usize,
+    },
+    GenerateDependentEventsFinished(DependentStageSummary),
+    ReplayDependentEventsReverse,
+    ReplayDependentEventsReverseFinished(DependentReplaySummary),
     Count,
     CountFinished(CountSummary),
 }
@@ -103,6 +114,11 @@ pub enum StoreOp {
         num_events: usize,
         event_size: usize,
     },
+    StageDependentEvents {
+        num_events: usize,
+        deps_per_event: usize,
+    },
+    ReplayDependentEventsReverse,
     DrainReadyUntilIdle {
         batch_size: usize,
     },
@@ -121,6 +137,8 @@ pub enum StoreReply {
     FrameIngested(FrameIngest),
     OutboxMarked,
     Generated(GeneratedContent),
+    DependentEventsStaged(DependentStageSummary),
+    DependentEventsReplayed(DependentReplaySummary),
     Drained(DrainReadyReport),
     SyncStarted(SyncRoutesStart),
     Counted(CountSummary),
@@ -269,6 +287,50 @@ impl SyncSummary {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependentStageSummary {
+    pub staged_events: usize,
+    pub deps_per_event: usize,
+    pub dep_edges: usize,
+    pub first_timestamp: u64,
+    pub last_timestamp: u64,
+}
+
+impl DependentStageSummary {
+    pub fn lines(&self) -> Vec<String> {
+        vec![
+            format!("staged_events: {}", self.staged_events),
+            format!("deps_per_event: {}", self.deps_per_event),
+            format!("dep_edges: {}", self.dep_edges),
+            format!("first_timestamp: {}", self.first_timestamp),
+            format!("last_timestamp: {}", self.last_timestamp),
+        ]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependentReplaySummary {
+    pub replayed_events: usize,
+    pub blocked_after_reverse: usize,
+    pub applied_events: usize,
+    pub ready_events: usize,
+    pub blocked_events: usize,
+    pub blocked_edges: usize,
+}
+
+impl DependentReplaySummary {
+    pub fn lines(&self) -> Vec<String> {
+        vec![
+            format!("replayed_events: {}", self.replayed_events),
+            format!("blocked_after_reverse: {}", self.blocked_after_reverse),
+            format!("applied_events: {}", self.applied_events),
+            format!("ready_events: {}", self.ready_events),
+            format!("blocked_events: {}", self.blocked_events),
+            format!("blocked_edges: {}", self.blocked_edges),
+        ]
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServeSummary {
     pub accepted_connections: usize,
@@ -372,6 +434,19 @@ impl App for KernelApp {
                 model.last_generate = Some(summary);
                 Command::done()
             }
+            KernelMsg::GenerateDependentEvents {
+                num_events,
+                deps_per_event,
+            } => generate_dependent_events(num_events, deps_per_event),
+            KernelMsg::GenerateDependentEventsFinished(summary) => {
+                model.last_dependent_stage = Some(summary);
+                Command::done()
+            }
+            KernelMsg::ReplayDependentEventsReverse => replay_dependent_events_reverse(),
+            KernelMsg::ReplayDependentEventsReverseFinished(summary) => {
+                model.last_dependent_replay = Some(summary);
+                Command::done()
+            }
             KernelMsg::Count => count(),
             KernelMsg::CountFinished(summary) => {
                 model.last_count = Some(summary);
@@ -388,6 +463,8 @@ impl App for KernelApp {
             last_sync: model.last_sync.clone(),
             last_serve: model.last_serve.clone(),
             last_generate: model.last_generate.clone(),
+            last_dependent_stage: model.last_dependent_stage.clone(),
+            last_dependent_replay: model.last_dependent_replay.clone(),
             last_count: model.last_count.clone(),
         }
     }
@@ -706,6 +783,58 @@ fn generate(num_events: usize, event_size: usize) -> Command<KernelEffect, Kerne
     })
 }
 
+fn generate_dependent_events(
+    num_events: usize,
+    deps_per_event: usize,
+) -> Command<KernelEffect, KernelMsg> {
+    Command::new(|ctx| async move {
+        let summary = match ctx
+            .request_from_shell(StoreOp::StageDependentEvents {
+                num_events,
+                deps_per_event,
+            })
+            .await
+        {
+            StoreReply::DependentEventsStaged(summary) => summary,
+            _ => panic!("generate deps received non-stage store reply"),
+        };
+
+        match ctx
+            .request_from_shell(StdoutOp::PrintLines {
+                lines: summary.lines(),
+            })
+            .await
+        {
+            StdoutReply::Written => {}
+        }
+
+        ctx.send_event(KernelMsg::GenerateDependentEventsFinished(summary));
+    })
+}
+
+fn replay_dependent_events_reverse() -> Command<KernelEffect, KernelMsg> {
+    Command::new(|ctx| async move {
+        let summary = match ctx
+            .request_from_shell(StoreOp::ReplayDependentEventsReverse)
+            .await
+        {
+            StoreReply::DependentEventsReplayed(summary) => summary,
+            _ => panic!("replay deps received non-replay store reply"),
+        };
+
+        match ctx
+            .request_from_shell(StdoutOp::PrintLines {
+                lines: summary.lines(),
+            })
+            .await
+        {
+            StdoutReply::Written => {}
+        }
+
+        ctx.send_event(KernelMsg::ReplayDependentEventsReverseFinished(summary));
+    })
+}
+
 fn count() -> Command<KernelEffect, KernelMsg> {
     Command::new(|ctx| async move {
         let summary = match ctx.request_from_shell(StoreOp::CountStatus).await {
@@ -798,6 +927,17 @@ mod tests {
         },
         GenerateReplied {
             inserted_events: usize,
+        },
+        StageDependentRequested {
+            num_events: usize,
+            deps_per_event: usize,
+        },
+        StageDependentReplied {
+            staged_events: usize,
+        },
+        ReplayDependentRequested,
+        ReplayDependentReplied {
+            replayed_events: usize,
         },
         DrainRequested {
             batch_size: usize,
@@ -939,6 +1079,49 @@ mod tests {
                                 last_timestamp: 8 + num_events as u64 - 1,
                             }))
                             .expect("generate request should resolve");
+                    }
+                    StoreOp::StageDependentEvents {
+                        num_events,
+                        deps_per_event,
+                    } => {
+                        self.transcript
+                            .push(TranscriptEntry::StageDependentRequested {
+                                num_events,
+                                deps_per_event,
+                            });
+                        self.transcript
+                            .push(TranscriptEntry::StageDependentReplied {
+                                staged_events: num_events,
+                            });
+                        request
+                            .resolve(StoreReply::DependentEventsStaged(DependentStageSummary {
+                                staged_events: num_events,
+                                deps_per_event,
+                                dep_edges: 17,
+                                first_timestamp: 8,
+                                last_timestamp: 8 + num_events as u64 - 1,
+                            }))
+                            .expect("stage dependent events should resolve");
+                    }
+                    StoreOp::ReplayDependentEventsReverse => {
+                        self.transcript
+                            .push(TranscriptEntry::ReplayDependentRequested);
+                        self.transcript
+                            .push(TranscriptEntry::ReplayDependentReplied {
+                                replayed_events: 12,
+                            });
+                        request
+                            .resolve(StoreReply::DependentEventsReplayed(
+                                DependentReplaySummary {
+                                    replayed_events: 12,
+                                    blocked_after_reverse: 9,
+                                    applied_events: 12,
+                                    ready_events: 0,
+                                    blocked_events: 0,
+                                    blocked_edges: 0,
+                                },
+                            ))
+                            .expect("replay dependent events should resolve");
                     }
                     StoreOp::DrainReadyUntilIdle { batch_size } => {
                         self.transcript
@@ -1133,6 +1316,79 @@ mod tests {
                 last_timestamp: 11,
             })
         );
+    }
+
+    #[test]
+    fn generate_deps_requests_store_then_prints_summary() {
+        let app = KernelApp;
+        let mut model = KernelModel::default();
+        let mut shell = FakeShell::default();
+
+        shell.run(
+            &app,
+            &mut model,
+            KernelMsg::GenerateDependentEvents {
+                num_events: 12,
+                deps_per_event: 3,
+            },
+        );
+
+        let expected = DependentStageSummary {
+            staged_events: 12,
+            deps_per_event: 3,
+            dep_edges: 17,
+            first_timestamp: 8,
+            last_timestamp: 19,
+        };
+        assert_eq!(
+            shell.transcript,
+            vec![
+                TranscriptEntry::StageDependentRequested {
+                    num_events: 12,
+                    deps_per_event: 3,
+                },
+                TranscriptEntry::StageDependentReplied { staged_events: 12 },
+                TranscriptEntry::PrintRequested {
+                    lines: expected.lines(),
+                },
+                TranscriptEntry::PrintReplied,
+            ]
+        );
+        assert_eq!(shell.stdout, expected.lines());
+        assert_eq!(app.view(&model).last_dependent_stage, Some(expected));
+    }
+
+    #[test]
+    fn replay_deps_reverse_requests_store_then_prints_summary() {
+        let app = KernelApp;
+        let mut model = KernelModel::default();
+        let mut shell = FakeShell::default();
+
+        shell.run(&app, &mut model, KernelMsg::ReplayDependentEventsReverse);
+
+        let expected = DependentReplaySummary {
+            replayed_events: 12,
+            blocked_after_reverse: 9,
+            applied_events: 12,
+            ready_events: 0,
+            blocked_events: 0,
+            blocked_edges: 0,
+        };
+        assert_eq!(
+            shell.transcript,
+            vec![
+                TranscriptEntry::ReplayDependentRequested,
+                TranscriptEntry::ReplayDependentReplied {
+                    replayed_events: 12,
+                },
+                TranscriptEntry::PrintRequested {
+                    lines: expected.lines(),
+                },
+                TranscriptEntry::PrintReplied,
+            ]
+        );
+        assert_eq!(shell.stdout, expected.lines());
+        assert_eq!(app.view(&model).last_dependent_replay, Some(expected));
     }
 
     #[test]

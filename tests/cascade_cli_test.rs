@@ -1,144 +1,63 @@
+mod cli_harness;
+
 use std::time::Instant;
 
-use topo::event_modules::{test_events, Modules};
-use topo::store::{CommandOutput, EventStatusCounts, Store};
-use topo::{control_loop, pipeline};
-
-#[derive(Debug, Clone, PartialEq)]
-struct CascadeReport {
-    events: usize,
-    deps_per_event: usize,
-    dep_edges: usize,
-    setup_ms: u128,
-    blocking_ms: u128,
-    cascade_ms: u128,
-    total_ms: u128,
-    blocked_after_reverse: usize,
-    applied_events: usize,
-    unblocked_events: usize,
-    final_counts: EventStatusCounts,
-}
-
-fn run_cascade(
-    store: &Store,
-    events: usize,
-    deps_per_event: usize,
-    batch_size: usize,
-) -> Result<CascadeReport, String> {
-    if events == 0 {
-        return Err("cascade requires at least one event".to_string());
-    }
-
-    let total_start = Instant::now();
-    let setup_start = Instant::now();
-    let start_timestamp = store
-        .max_timestamp()
-        .map_err(|err| format!("load max timestamp: {err}"))?
-        .saturating_add(1);
-    let records = test_events::dependent_event::commands::build_records(
-        events,
-        deps_per_event,
-        start_timestamp,
-    )?;
-    let dep_edges = records.iter().map(|record| record.dependencies.len()).sum();
-    let setup_ms = setup_start.elapsed().as_millis();
-
-    let root_count = events.min(deps_per_event);
-    let modules = Modules::new();
-    let blocking_start = Instant::now();
-    let reverse_records = records[root_count..].iter().rev().cloned().collect();
-    pipeline::run_command(
-        store,
-        &modules,
-        CommandOutput::with_events((), reverse_records),
-    )
-    .map_err(|err| format!("insert reverse dependent events: {err}"))?;
-    let blocked_after_reverse = store
-        .status_counts()
-        .map_err(|err| format!("count blocked events: {err}"))?
-        .blocked;
-    let blocking_ms = blocking_start.elapsed().as_millis();
-
-    let cascade_start = Instant::now();
-    let (_, root_report) = pipeline::run_command(
-        store,
-        &modules,
-        CommandOutput::with_events((), records[..root_count].to_vec()),
-    )
-    .map_err(|err| format!("insert root events: {err}"))?;
-    let drain = control_loop::drain_until_idle(store, &modules, batch_size)?;
-    let cascade_ms = cascade_start.elapsed().as_millis();
-    let final_counts = store
-        .status_counts()
-        .map_err(|err| format!("count final event status: {err}"))?;
-
-    Ok(CascadeReport {
-        events,
-        deps_per_event,
-        dep_edges,
-        setup_ms,
-        blocking_ms,
-        cascade_ms,
-        total_ms: total_start.elapsed().as_millis(),
-        blocked_after_reverse,
-        applied_events: root_report.applied_events + drain.applied_events,
-        unblocked_events: drain.unblocked_events,
-        final_counts,
-    })
-}
+use cli_harness::*;
 
 #[test]
-fn cascade_bench_blocks_then_unblocks_10k() {
+fn cascade_cli_blocks_then_unblocks_10k_over_real_commands() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("cascade.db")).unwrap();
-    let report = run_cascade(
-        &store,
-        10_000,
-        test_events::dependent_event::types::MAX_DEPS,
-        control_loop::DEFAULT_READY_BATCH,
-    )
-    .unwrap();
+    let db = temp_db(&tmp, "cascade.db");
 
-    assert_eq!(report.events, 10_000);
-    assert_eq!(report.deps_per_event, 10);
-    assert_eq!(report.blocked_after_reverse, 9_990);
-    assert_eq!(report.applied_events, 10_000);
-    assert_eq!(report.final_counts.ready, 0);
-    assert_eq!(report.final_counts.blocked, 0);
-    assert_eq!(report.final_counts.blocked_edges, 0);
+    let staged = assert_success(topo(&db, &["generate-deps", "10000", "10"]));
+    assert_eq!(line_value(&staged, "staged_events"), "10000");
+    assert_eq!(line_value(&staged, "deps_per_event"), "10");
+    assert_eq!(line_value(&staged, "dep_edges"), "99945");
+    assert_eq!(count(&db), 0, "staged fixtures must be local-only");
 
-    let seconds = (report.cascade_ms as f64 / 1000.0).max(0.001);
-    let rate = report.applied_events as f64 / seconds;
+    let started = Instant::now();
+    let replayed = assert_success(topo(&db, &["replay-deps-reverse"]));
+    let elapsed = started.elapsed();
+
+    assert_eq!(line_value(&replayed, "replayed_events"), "10000");
+    assert_eq!(line_value(&replayed, "blocked_after_reverse"), "9990");
+    assert_eq!(line_value(&replayed, "applied_events"), "10000");
+    assert_eq!(line_value(&replayed, "ready_events"), "0");
+    assert_eq!(line_value(&replayed, "blocked_events"), "0");
+    assert_eq!(line_value(&replayed, "blocked_edges"), "0");
+
+    let status = assert_success(topo(&db, &["count"]));
+    assert_eq!(line_value(&status, "events"), "10000");
+    assert_eq!(line_value(&status, "applied_events"), "10000");
+    assert_eq!(line_value(&status, "blocked_events"), "0");
+    assert_eq!(line_value(&status, "blocked_edges"), "0");
+
+    let seconds = elapsed.as_secs_f64().max(0.001);
+    let rate = 10_000f64 / seconds;
     eprintln!("black_box_cascade_10k events_per_s={rate:.0}");
     assert!(rate.is_finite() && rate > 0.0);
-
-    let counts = store.status_counts().unwrap();
-    assert_eq!(store.event_count().unwrap(), 10_000);
-    assert_eq!(counts.applied, 10_000);
-    assert_eq!(counts.blocked, 0);
-    assert_eq!(counts.blocked_edges, 0);
 }
 
 #[test]
 #[ignore]
-fn cascade_bench_blocks_then_unblocks_50k() {
+fn cascade_cli_blocks_then_unblocks_50k_over_real_commands() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("cascade-50k.db")).unwrap();
-    let report = run_cascade(
-        &store,
-        50_000,
-        test_events::dependent_event::types::MAX_DEPS,
-        control_loop::DEFAULT_READY_BATCH,
-    );
+    let db = temp_db(&tmp, "cascade-50k.db");
 
-    let report = report.unwrap();
-    assert_eq!(report.events, 50_000);
-    assert_eq!(report.blocked_after_reverse, 49_990);
-    assert_eq!(report.applied_events, 50_000);
-    assert_eq!(report.final_counts.blocked, 0);
-    assert_eq!(report.final_counts.blocked_edges, 0);
+    let staged = assert_success(topo(&db, &["generate-deps", "50000", "10"]));
+    assert_eq!(line_value(&staged, "staged_events"), "50000");
 
-    let seconds = (report.cascade_ms as f64 / 1000.0).max(0.001);
-    let rate = report.applied_events as f64 / seconds;
+    let started = Instant::now();
+    let replayed = assert_success(topo(&db, &["replay-deps-reverse"]));
+    let elapsed = started.elapsed();
+
+    assert_eq!(line_value(&replayed, "replayed_events"), "50000");
+    assert_eq!(line_value(&replayed, "blocked_after_reverse"), "49990");
+    assert_eq!(line_value(&replayed, "applied_events"), "50000");
+    assert_eq!(line_value(&replayed, "blocked_events"), "0");
+    assert_eq!(line_value(&replayed, "blocked_edges"), "0");
+
+    let seconds = elapsed.as_secs_f64().max(0.001);
+    let rate = 50_000f64 / seconds;
     eprintln!("black_box_cascade_50k events_per_s={rate:.0}");
 }

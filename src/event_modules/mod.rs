@@ -83,6 +83,23 @@ impl Modules {
         content::content_event::commands::generate(start, num_events, event_size)
     }
 
+    pub fn stage_dependent_events(
+        &self,
+        store: &Store,
+        events: usize,
+        deps_per_event: usize,
+    ) -> Result<CommandOutput<test_events::dependent_event::commands::StageReport>, String> {
+        let start = store
+            .max_timestamp()
+            .map_err(|err| format!("load max timestamp: {err}"))?
+            .saturating_add(1);
+        test_events::dependent_event::commands::stage(events, deps_per_event, start)
+    }
+
+    pub fn staged_dependent_records(&self, store: &Store) -> Result<Vec<EventRecord>, String> {
+        test_events::dependent_event::queries::staged_records(store)
+    }
+
     pub fn create_connection_request(
         &self,
         store: &Store,
@@ -367,6 +384,9 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         }
         test_events::dependent_event::codec::TYPE_DEPENDENT_EVENT => {
             test_events::dependent_event::codec::record_from_bytes(bytes)
+        }
+        test_events::dependent_event::codec::TYPE_STAGED_DEPENDENT_EVENT => {
+            test_events::dependent_event::codec::staged_record_from_bytes(bytes)
         }
         other => Err(format!("unknown event type {other}")),
     }

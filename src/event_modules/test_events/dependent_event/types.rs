@@ -9,3 +9,9 @@ pub struct DependentEvent {
     pub dependencies: Vec<EventId>,
     pub payload: [u8; PAYLOAD_BYTES],
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedDependentEvent {
+    pub index: u64,
+    pub dependent_bytes: Vec<u8>,
+}
