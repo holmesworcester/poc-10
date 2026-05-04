@@ -7,6 +7,7 @@ I want to rewrite topo with clarity on:
 * decoupling
 * realms of responsibility (and *non* responsibility)
 * event-based networking
+* what crucial design decisions contributors and agents must take not to break 
 
 See appendix for documentation style rules and references.
 
