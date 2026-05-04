@@ -21,7 +21,7 @@ UPDATED:
 - Event modules own their canonical `codec.rs`; "wire" means transit bytes, not canonical event bytes.
 - `state` materializes table definitions from event-module declarations; it owns storage mechanics, not domain schema meaning.
 - Sync is an event-module family, not a separate sync engine.
-- The kernel is only a run-loop scheduler plus IO adapters. It does not own a protocol flow; ready-event processing is just the default run loop over module-owned event/projector contracts.
+- The kernel is only an actor scheduler plus IO adapters. It does not own a protocol flow; ready-event processing is just the default actor over module-owned event/projector contracts.
 - Timely Dataflow and Differential Dataflow are a proposal and source of ideas for Rust architecture and performance: deltas, arrangements, consolidation, frontiers, compaction, and bounded work should inform experiments without committing the kernel to those runtimes.
 - Production may physically purge deleted or TTL-expired events and rows, but only after surviving facts, labels, summaries, or high-water marks preserve any semantic truth future projections need.
 
@@ -42,7 +42,7 @@ Ideas to test:
 - Joins, semijoins, antijoins, distincts, counts, and reductions should be expressed structurally in module declarations when possible, not hidden behind opaque context scans.
 - Large cascades become bounded obligations with fuel/batch limits; the control loop reactivates them rather than recursively draining them.
 - Logical truth and physical storage are separate: deletion, expiry, revocation, and supersession are facts; purge and merge are physical compaction of data whose semantic replacement is already represented.
-- Pure deterministic work such as parse, signature verify, decrypt, hash, and canonical encode may run inline or as module run loops, but its results are facts. External IO remains an effect boundary.
+- Pure deterministic work such as parse, signature verify, decrypt, hash, and canonical encode may run inline or as module actors, but its results are facts. External IO remains an effect boundary.
 
 Performance rules from these systems:
 
@@ -55,15 +55,24 @@ Performance rules from these systems:
 # Components / Responsibility
 
 **event_modules/** contains every protocol or domain behavior that can be
-expressed as events, projectors, commands, module-owned tables, and module run
-loops. This includes content, identity, auth, connection, sync, and local-only
+expressed as events, projectors, commands, module-owned tables, and module
+actors. This includes content, identity, auth, connection, sync, and local-only
 behavior. A built-out module owns its schema/read model next to its event type:
 this is the poc-7 `message` / `reaction` pattern and the poc-6
 `message.py` + `message.sql` pattern. Do not split "event type" and "tables"
 into separate conceptual homes; tables live with the module that owns the
-projection or queue.
+projection or queue. A family of event modules may also own shared tables and
+actors at the family root when those tables coordinate several leaf event
+modules.
 
-Core imports `event_modules::Modules` only. `event_modules/mod.rs` is the single composition point that imports concrete module families and exposes the narrow registry surface used by the control loop, CLI, and tests. Kernel files call methods on `Modules`; they do not import `connection`, `sync`, `content`, or `identity` directly. The kernel does not own protocol flows. It wakes and runs loops, commits returned rows, admits returned events, and executes returned effects. Module loops interpret framed bytes, canonical events, queues, and route state.
+Core imports `event_modules::Modules` only. `event_modules/mod.rs` is the
+single composition point that imports concrete module families and exposes the
+narrow registry surface used by the control loop, CLI, and tests. Kernel files
+call methods on `Modules`; they do not import `connection`, `sync`, `content`,
+or `identity` directly. The kernel does not own protocol flows. It wakes and
+runs actors, commits returned rows, admits returned events, and executes
+returned effects. Module actors interpret framed bytes, canonical events,
+queues, and route state.
 
 Suggested organization:
 
@@ -90,31 +99,37 @@ src/event_modules/
     key/
     removal/
   connection/
+    actor.rs
+    tables.rs
+    queries.rs
     connection/
     connection_secret/
     observed_address/
   sync/
+    actor.rs
+    tables.rs
+    queries.rs
+    types.rs
     compare/
     have/
     need/
-    negentropy_index/
-      tables.rs
-      queries.rs
-      run.rs
     dep_cache/
   local/
     local_secret/
     clock_wake/
 ```
 
-**Per-file pattern, always.** Every event module is a directory with one file
-per concern (`types.rs`, `codec.rs`, `projector.rs`, `commands.rs`,
+**Per-file pattern, always.** Every leaf event module is a directory with one
+file per concern (`types.rs`, `codec.rs`, `projector.rs`, `commands.rs`,
 `tables.rs`, `queries.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a
 module is small enough that a single `.rs` file would suffice. `tables.rs` is
 where the module declares its projection tables, indexes, queues, cursors, and
-storage class. `run.rs` is optional and exists only when the module owns queued
-or cursor state that needs active work. There is no generic `jobs/` dumping
-ground; run code is colocated with the table or cursor whose invariant it owns.
+storage class. A family root may also contain `tables.rs`, `queries.rs`,
+`types.rs`, and `actor.rs` when it owns shared tables or an actor coordinating
+several leaf event modules. There is no generic `jobs/` dumping ground and no
+fake event module for an algorithm: `sync/actor.rs` may run negentropy over
+`sync/tables.rs`; `negentropy/` is only a child module if it defines an actual
+event type. `actor` is the component noun; `run` is the method verb.
 The cost is some empty-ish files in tiny modules; the win is that this is
 intentional friction. In a codebase where most code is assistant-generated,
 uniform shape across the surface makes accumulating logic easy to spot — files
@@ -126,7 +141,7 @@ This rule is in conscious tension with "let complexity earn length" in the docum
 
 **networking** All complex networking behavior including bootstrap,
 connection, transit, and sync is implemented in event modules: commands propose
-events, projectors write rows, module run loops decide what to run next, and
+events, projectors write rows, module actors decide what to run next, and
 connection/transit modules wrap and unwrap transit blobs. Kernel IO modules
 only frame and move bytes to concrete transport targets. Connections are
 between two endpoints (daemons) and sync all data in all workspaces those two
@@ -137,11 +152,14 @@ instance of any given workspace, so for workspace-scoped events `workspace_id`
 alone identifies the local processing scope and there is no separate
 "recorded_by". See **Event Scopes** below for the full taxonomy.
 
-**ready_event_loop** is not a kernel subsystem. It is the default run loop: admit facts, load context, call the owning module's projector, and apply rows. Most event modules use only this generic loop. Modules with richer state, such as sync, add their own module-owned run loops over module-owned queues.
+**ready_event_loop** is not a protocol subsystem. It is the default actor:
+admit facts, load context, call the owning module's projector, and apply rows.
+Most event modules use only this generic actor. Families with richer state,
+such as sync, add family-owned actors over family-owned queues and cursors.
 
-**control_loop** is the single-writer run-loop scheduler. It claims bounded batches of table rows, dispatches to the owning module loop, applies returned state writes atomically, admits returned events through the generic ready-event loop, and runs external effects.
+**control_loop** is the single-writer actor scheduler. It claims bounded batches of table rows, dispatches to the owning actor, applies returned state writes atomically, admits returned events through the generic ready-event actor, and runs external effects.
 
-**state** is the explicit table-shaped substrate that projectors and module run loops observe. It is materialized from event-module table declarations and can be a database in production or an in-memory store in testing and simulation.
+**state** is the explicit table-shaped substrate that projectors and actors observe. It is materialized from event-module table declarations and can be a database in production or an in-memory store in testing and simulation.
 
 **kernel_io/** contains protocol-agnostic IO modules such as TCP listener,
 reader, writer, and timer modules. IO modules create and drain IO queues; they
@@ -155,10 +173,11 @@ backoff state.
 TCP frames, writes sockets, and records inbound bytes with origin metadata. It
 does not create or interpret transit blobs.
 
-**module run loops** are event-module actors woken by queue rows, timers, IO
-readiness, or explicit CLI requests. A run loop can query state, decide whether
-it is ready to run, call commands, admit proposed events, update/delete queue
-rows, and return effects. Use `wake` for scheduling and `run` for execution.
+**actors** are module-owned active components woken by queue rows, timers, IO
+readiness, or explicit CLI requests. An actor declares its wake sources, read
+set, and write set. The kernel uses those declarations to load bounded context
+and commit output; the actor owns the semantic decision. Use `wake` for
+scheduling and `run` for execution.
 
 The substrate pieces outside `event_modules` are deliberately narrow:
 
@@ -170,7 +189,10 @@ network/        // TCP bytes and socket ownership, under kernel_io
 sender/         // TransportSend effects -> TCP frame/write, under kernel_io
 ```
 
-If behavior is protocol semantics expressible as events/projectors/commands/tables, it belongs under `event_modules`. If it owns process execution, IO, storage mechanics, or scheduling, it belongs outside.
+If behavior is protocol semantics expressible as
+events/projectors/commands/tables/actors, it belongs under `event_modules`. If
+it owns process execution, IO, storage mechanics, or scheduling, it belongs
+outside.
 
 ## State and Registry
 
@@ -201,7 +223,7 @@ indexes
 storage class: durable | memory | temp
 migrations / schema version
 projectors
-commands / run loops
+commands / actors
 ```
 
 Those declarations form the runtime catalog:
@@ -209,11 +231,19 @@ Those declarations form the runtime catalog:
 ```
 event_modules/*/registry_meta.rs
   -> ModuleRegistry
+  -> ActorRegistry
   -> StateCatalog
   -> database / memory store schema
 ```
 
-The event module owns semantic meaning: what a row means, which projection writes it, which indexes are required, and whether it may be rebuilt. `state` owns mechanics: creating tables, applying migrations, opening transactions, inserting NewRows, deleting Purges, querying declared indexes, resetting transient rows on startup, and choosing durable vs memory storage.
+The event family owns semantic meaning: what a row means, which projection
+writes it, which indexes are required, which actors consume it, and whether it
+may be rebuilt. A leaf event module owns one event type's codec, dependencies,
+commands, projector, and leaf projection tables. A family root owns shared
+tables and actors that coordinate several leaves. `state` owns mechanics:
+creating tables, applying migrations, opening transactions, inserting NewRows,
+deleting Purges, querying declared indexes, resetting transient rows on
+startup, and choosing durable vs memory storage.
 
 Boundary tables should follow the same rule where possible. `outbox` can be declared by the sender-facing module, `blocked_by_event` by the ready-event loop, schedule rows by the owning module or `kernel_io/timers`, and sync caches by the sync modules. The fewer central special tables, the better.
 
@@ -295,7 +325,7 @@ cut. Model their checks as first-level dependencies and labels:
 - invite acceptance creates or labels local trust anchors and route hints rather
   than reaching through custom context;
 - observed/self address and route facts are labels or module rows consumed by
-  sender/outbox run loops, not projector-only hidden queries.
+  sender/outbox actors, not projector-only hidden queries.
 
 If a future connection or bootstrap behavior appears to need custom context,
 the burden is to prove that extra dependencies or labels cannot express it
@@ -382,8 +412,8 @@ The control loop is the only always-running runtime. It owns:
 - effect runners for TCP and local IO.
 
 All domain behavior lives above the control loop in event modules and their
-colocated run loops. The control loop is protocol-agnostic for a given IO
-surface: it sees queue rows, ready events, run results, and effects, not sync
+colocated actors. The control loop is protocol-agnostic for a given IO
+surface: it sees queue rows, ready events, actor output, and effects, not sync
 ranges, connection handshakes, or content semantics.
 
 Queued work is typed:
@@ -393,16 +423,44 @@ WorkItem =
   InboundBytes
   ReadyEvent
   OutboxWake(connection_id)
-  RunWake(module, runner)
+  ActorWake(actor_id)
 ```
 
-Each queue item has exactly one owning module. The control loop calls one function:
+Each queue item has exactly one owning actor. The control loop calls one function:
 
 ```
-run(work_item, context) -> RunResult
+actor.run(wake, context) -> ActorOutput
 ```
 
-`RunResult` contains:
+Mathematically:
+
+```
+Actor_i : Wake_i x Read_i(State) -> Delta_i(State) x Events x Effects
+```
+
+The module registry gives the kernel an actor catalog:
+
+```
+ActorSpec:
+  actor_id
+  wake_sources
+  read_set       // declared tables/indexes this actor can read
+  write_set      // declared tables this actor can update
+  run
+```
+
+The kernel owns the mechanical sequence:
+
+```
+select wake
+lookup ActorSpec
+load declared context from read_set
+actor.run(wake, context)
+commit returned rows/events against write_set
+run effects after commit
+```
+
+`ActorOutput` contains:
 
 ```
 StateUpdates   // includes NewRows into ordinary tables and boundary tables
@@ -427,18 +485,23 @@ InboundBytes
 Admission happens before parse context. Known event ids stop at `admit_event_id`. Parse failures mark the inbound bytes invalid and release the event claim. Blocked events write `blocked_by_event` rows and stop.
 
 Projectors only write rows. They cannot emit follow-on events. If projection
-discovers work, it writes a module-owned queue row; a run loop reads bounded
-queue rows, queries its context, calls module commands, and sends the proposed
-canonical events back to the control loop for admission. Commands may also return wire bytes
-for transport-only boundaries such as transit wrapping; the caller owns whether
-those bytes are admitted as events or sent to transport.
+discovers work, it writes a module-owned queue row; an actor reads bounded queue
+rows, queries its declared context, calls module commands, and sends the
+proposed canonical events back to the control loop for admission. Commands may
+also return wire bytes for transport-only boundaries such as transit wrapping;
+the caller owns whether those bytes are admitted as events or sent to transport.
 
-Module run loops are the actors. Projectors can only change rows, especially
-queue rows. Commands are pure construction/query helpers. Run loops are the
-only event-module surface that can return IO effects; the kernel runner
-executes those effects without knowing protocol meaning.
+Actors are the active boundary. Projectors can only change rows, especially
+queue rows. Commands are pure construction/query helpers. Actors are the only
+event-module surface that can return IO effects; the kernel runner executes
+those effects without knowing protocol meaning.
 
-The first POC kernel may run this inbound chain directly from the socket reader without first durably queuing `InboundBytes`. That is still a loop boundary: the socket reader only passes `(origin, bytes)` into the inbound run loop, and event modules decide meaning and queue follow-on work. A durable `inbound_bytes` table is added when we need crash replay, fairness across many sockets, leases, or independent retry.
+The first POC kernel may run this inbound chain directly from the socket reader
+without first durably queuing `InboundBytes`. That is still an actor boundary:
+the socket reader only passes `(origin, bytes)` into the inbound actor, and
+event modules decide meaning and queue follow-on work. A durable
+`inbound_bytes` table is added when we need crash replay, fairness across many
+sockets, leases, or independent retry.
 
 Boundary tables that need claim/retry ownership are ordinary module-owned tables with status metadata:
 
@@ -498,20 +561,40 @@ outbox:
   primary key(connection_id, event_id)
 ```
 
-`outbox` is memory by default and has no per-row claim, lease, or retry status. Each active connection has exactly one `connection/outbox::run` owner:
+`outbox` is memory by default and has no per-row claim, lease, or retry status.
+Each active connection has exactly one `connection/actor.rs` owner for outbox
+drain work:
 
 ```
-connection/outbox::run:
+connection::actor.run:
   connection_id
   hot_queue: bounded deque<event_id>
   present: set<event_id>
 ```
 
-`hot_queue` is bounded by estimated bytes, not only event count. When it drops below a low-water mark, `connection/outbox::run` refills from pending `outbox` rows for that connection, skipping ids already in `present`. For each deterministic send event, the module loads the referenced canonical bytes, checks connection/workspace authority, resolves C to a current transport target, calls the transit wrap command, and returns `TransportSend { target, bytes }`. The kernel IO sender module packs those bytes into TCP frames and writes the socket. After the socket accepts a complete frame, the control loop deletes the corresponding `outbox` rows and removes those ids from `present`. On send failure it removes ids from `present`, leaves `outbox` rows pending, and backs off. No database transaction is held while writing to the socket.
+`hot_queue` is bounded by estimated bytes, not only event count. When it drops
+below a low-water mark, `connection::actor.run` refills from pending `outbox`
+rows for that connection, skipping ids already in `present`. For each
+deterministic send event, the module loads the referenced canonical bytes,
+checks connection/workspace authority, resolves C to a current transport
+target, calls the transit wrap command, and returns
+`TransportSend { target, bytes }`. The kernel IO sender module packs those
+bytes into TCP frames and writes the socket. After the socket accepts a complete
+frame, the control loop deletes the corresponding `outbox` rows and removes
+those ids from `present`. On send failure it removes ids from `present`, leaves
+`outbox` rows pending, and backs off. No database transaction is held while
+writing to the socket.
 
 The control loop commits `StateUpdates` in one transaction, then runs `Effects`. Effects may write new rows but do not directly project events.
 
-The first implementation has one process-wide control-loop writer. Failed claim/retry work remains in its table with status, attempts, and last_error until its owning module marks it pending, rejected, blocked, expired, or dead. Send failure is connection-level backoff: `outbox` rows stay present. On startup, transient statuses are reset: `events.processing -> ready` and `inbound_bytes.processing -> pending`. Memory `outbox` starts empty; recurring sync run loops recreate root compare work, and any durable data sends are recreated only by later `NeedId` responses.
+The first implementation has one process-wide control-loop writer. Failed
+claim/retry work remains in its table with status, attempts, and last_error
+until its owning module marks it pending, rejected, blocked, expired, or dead.
+Send failure is connection-level backoff: `outbox` rows stay present. On
+startup, transient statuses are reset: `events.processing -> ready` and
+`inbound_bytes.processing -> pending`. Memory `outbox` starts empty; recurring
+sync actors recreate root compare work, and any durable data sends are
+recreated only by later `NeedId` responses.
 
 Modules may run pure helper transforms inline until they reach a queue, state, or effect boundary. Modules do not recursively drain queues and do not perform transport IO inline.
 
@@ -534,12 +617,12 @@ Wrapped bytes are never canonical events. They have no event id, no dependencies
 *Invariants: `shared_workspaces` is authoritative because the connection event's deps + signature have already been validated by the standard ready-event loop — the connection does not authorize itself, its dependencies do; a valid unwrap under one of our inbound secrets is by construction proof that the sender is the remote endpoint of that connection; every wrap is bound to exactly one connection; wrap and unwrap both enforce workspace ↔ connection alignment.*
 
 **Outbox.** No projector calls `transport.send` or emits a `SendEvent`.
-Projectors write rows to module-owned queues. A sync run loop that wants to send a
+Projectors write rows to module-owned queues. A sync actor that wants to send a
 durable event — e.g. after reading a queued need from connection C for event E —
 calls a command that creates deterministic `SendEvent(connection_id=C,
 inner_event_id=E)` and admits it through the control loop. The `SendEvent`
-projector only writes `outbox(connection_id, send_event_id)`. A
-`connection/outbox::run` claims outbox rows, checks that E's `workspace_id` is in
+projector only writes `outbox(connection_id, send_event_id)`.
+`connection/actor.rs` claims outbox rows, checks that E's `workspace_id` is in
 `shared_workspaces(C)`, resolves C to a current transport target, calls the
 transit wrap command, and returns `TransportSend { target, bytes }`. The kernel
 IO sender module packs those bytes into TCP frames and writes sockets. A
@@ -673,8 +756,8 @@ compare(v, remote_count, remote_fingerprint):
 
 There is no protocol session id required for correctness. Duplicate compares
 are harmless because the compare answer is a pure function of projected state.
-The top-level compare starts a round of work for a connection. The sync run
-loop should avoid creating a new root compare while that connection has recent
+The top-level compare starts a round of work for a connection. The sync actor
+should avoid creating a new root compare while that connection has recent
 sync or bulk-transfer activity.
 
 ## Dep-aware negentropy
@@ -741,7 +824,7 @@ SyncNeedId(connection_id, workspace_id, event_id)
 ```
 
 Projectors do not write to sockets and do not emit events. They only maintain
-sync/outbox queue rows. Commands and module run loops create deterministic
+sync/outbox queue rows. Commands and module actors create deterministic
 connection-scoped events, and the API running those commands admits the proposed
 events through the control loop so it gets back their event ids.
 
@@ -749,9 +832,9 @@ There is no distinct `SyncStartRequested` event in the base design. Manual sync
 starts by creating a root `SyncCompare`. If the negentropy index is maintained
 synchronously by projection, the CLI command can create the root compare
 directly from command context. If index catch-up is batched through
-`sync.new_events`, the `sync/negentropy_index` run loop first drains that queue
-and then calls the same root-compare command. Either way, the first protocol
-event is still `SyncCompare(root)`.
+`sync.new_events`, `sync/actor.rs` first drains that queue and then calls the
+same root-compare command. Either way, the first protocol event is still
+`SyncCompare(root)`.
 
 ```
 topo sync connection_id
@@ -768,7 +851,7 @@ Durable event projected
 Inbound SyncCompare / SyncHaveId / SyncNeedId projected
   -> sync.work(Inbound { connection_id, required_frontier, payload })
 
-sync/negentropy_index::run
+sync::actor.run
   -> first drains sync.new_events into sync.negentropy.index
   -> advances sync.negentropy.cursor
   -> then reads ready sync.work rows
@@ -776,17 +859,16 @@ sync/negentropy_index::run
   -> command(ctx, params) -> proposed SyncCompare / SyncHaveId / SyncNeedId / SendEvent
   -> admit(proposed events) -> event_ids
 
-connection/outbox::run
+connection::actor.run
   -> reads outbox(connection_id, event_id)
   -> transit_wrap command returns transit bytes
   -> returns TransportSend effects for those bytes
 ```
 
-The sync run loop's invariant is: never answer sync work against a stale
-negentropy index. It must cover `sync.new_events` before responding to
-`sync.work`.
+The sync actor's invariant is: never answer sync work against a stale negentropy
+index. It must cover `sync.new_events` before responding to `sync.work`.
 
-Duplicate run output collapses because connection-scoped sync event bytes are
+Duplicate actor output collapses because connection-scoped sync event bytes are
 deterministic and `outbox` is unique on `(connection_id, event_id)`.
 
 For the first implementation, this can be two storage classes rather than one clever table:
@@ -797,7 +879,7 @@ connection_events(connection_id, event_id, canonical_event_bytes, expires_at)
 outbox(connection_id, event_id)
 ```
 
-`connection/outbox::run` resolves an outbox `event_id` from transient connection-event storage. For sync control events, it wraps their canonical bytes. For `SendEvent`, it loads the referenced durable event, checks authority, creates a transit blob, and emits `TransportSend { target, bytes }`. Sync modules do not batch ids into transport frames and do not create transit blobs.
+`connection/actor.rs` resolves an outbox `event_id` from transient connection-event storage. For sync control events, it wraps their canonical bytes. For `SendEvent`, it loads the referenced durable event, checks authority, creates a transit blob, and emits `TransportSend { target, bytes }`. Sync modules do not batch ids into transport frames and do not create transit blobs.
 
 Outgoing dedupe belongs at the `outbox` boundary and the per-connection hot queue, not in every projector's context. Projectors should not need `recently_sent` sets. If suppression beyond pending-buffer dedupe is needed later, keep sent rows in `outbox` with a TTL.
 
@@ -838,7 +920,7 @@ Dedupe deterministic send intent before transit wrapping.
 NeedId
   -> SendEvent(connection_id, inner_event_id)
   -> outbox(connection_id, send_event_id)
-  -> connection/outbox::run
+  -> connection::actor.run
   -> connection.wrap(connection_id, inner_event)
   -> TransportSend { target: ip/port or socket_id, bytes: transit_blob }
   -> kernel_io TCP frame/write
@@ -898,7 +980,7 @@ Code-structure lessons from Stellar Core:
 - Large runtime components should have a small public interface and a concrete implementation, following Stellar's `OverlayManager` / `OverlayManagerImpl`, `HistoryManager` / `HistoryManagerImpl`, and `Application` / `ApplicationImpl` pattern.
 - Abstract protocol machinery should be separated from application meaning. Stellar's `scp` is protocol-generic; `herder` maps slots and values onto ledgers and transaction sets. Here, negentropy is the generic comparison mechanism; sync event modules map it onto workspace roots, deps, have/need/send events, and outbox writes.
 - Managers own lifecycle, scheduling, and resource wiring. Helpers own algorithms. Do not let managers accumulate domain policy.
-- Long-running work should be represented explicitly, as Stellar does with `work/`, `catchup/*Work`, and `historywork/*Work`. Hidden background behavior should become a run loop, table row, or effect owner.
+- Long-running work should be represented explicitly, as Stellar does with `work/`, `catchup/*Work`, and `historywork/*Work`. Hidden background behavior should become an actor, table row, or effect owner.
 - Data structures should encode workload assumptions. Stellar's BucketList is shaped around temporal churn, incremental hashing, and catchup. Here, dep-aware negentropy should be a projected incremental tree/cache, not a session-time rebuild.
 - Canonical encoding is a hard boundary. Stellar uses XDR for hashed, historical, and peer-message forms. Here, `codec.rs` produces canonical event bytes for ids, storage, projection, replay, and dedupe; connection wrapping is a separate transit layer. The codec should name the fixed-per-event-type format; shared utilities should do the repetitive binary lifting.
 - Prefer immutable snapshots and stable ids at concurrency boundaries.
