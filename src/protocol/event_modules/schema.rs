@@ -273,12 +273,6 @@ pub fn event_bytes(store: &Store, event_id: &EventId) -> rusqlite::Result<Option
     read_event(store, event_id).map(|event| event.map(|event| event.canonical_bytes))
 }
 
-pub fn shared_event_bytes(store: &Store, event_id: &EventId) -> rusqlite::Result<Option<Vec<u8>>> {
-    read_event(store, event_id).map(|event| {
-        event.and_then(|event| event.scope.is_shared().then_some(event.canonical_bytes))
-    })
-}
-
 pub fn event_label_rows(labels: Vec<EventLabel>) -> Vec<TableRow> {
     labels
         .into_iter()

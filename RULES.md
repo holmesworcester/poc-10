@@ -29,7 +29,7 @@ the rule is still prose/review only.
 | Connection outbox is id-only; transit batches canonical inner events. | static + partial | `connection_outbox_is_id_only_and_transit_batches_inner_events`; batching shape is checked, but exact batch sizing remains implementation/test coverage. |
 | Sync direction is connection-scope context, not canonical bytes. | static | `sync_canonical_bytes_do_not_encode_inbound_or_outbound_direction`. |
 | Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_schema_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
-| Query modules are read-only. | static | `event_module_queries_are_read_only`. |
+| Query modules are read-only CLI/reporting surfaces; worker reads live in workers and command read-context traits live in commands. | static | `event_module_queries_are_read_only`, `worker_and_command_logic_do_not_call_query_modules`. |
 | `EventRecord` literals are constructed only by codecs. | static | `event_records_are_constructed_only_by_codecs`. |
 | Codecs use shared binary helpers and reject trailing bytes. | static + partial | `codec_files_use_shared_binary_helpers_and_finish_reads`; this catches common drift but is not a formal fixed-width proof. |
 | `types.rs` does not store encoded/canonical artifacts as semantic fields. | static | `event_module_types_do_not_store_encoded_event_artifacts`. |
@@ -621,8 +621,16 @@ transport-target row in one projection. Do not model that route observation as a
 separate `transport_target` event module: the address is subjective to this
 peer's receive boundary, and it is meaningful only with the connection event
 being projected. Listener-side client source ports are receive metadata, but not
-durable routes. Durable events must not carry receive metadata unless storage is
-extended to persist it.
+durable routes. Durable receive metadata is allowed only when the event can be
+projected immediately; if dependency blocking would require storing that
+metadata for later, admission must fail unless storage is extended to persist it.
+
+`queries.rs` is not a worker junk drawer. Keep it for read-only CLI/reporting
+queries such as counts or staged test reads. Reads that are part of active work
+belong next to that work in `worker.rs`; reads that are part of command
+construction should be expressed as narrow command context traits. Prefer the
+generic projector context for event-to-event relationships before adding any
+custom read path.
 
 Durable data events are not pushed to peers on creation. Durable data transfer
 is queued only when protocol work asks for a durable event id, usually by a sync

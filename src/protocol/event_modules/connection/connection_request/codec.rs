@@ -1,9 +1,10 @@
 //! Wire codec for connection request events.
 //!
-//! A request is transient protocol traffic: it is a real event for projection
-//! and validation, but it is not durable history. The fixed magic prefix keeps
-//! connection establishment separate from ordinary tagged events, while
-//! `Reader::finish` ensures malformed extra bytes are rejected.
+//! A request is local protocol history. It is not shared by sync, but it is
+//! durable enough for the matching ack to name it as a dependency and validate
+//! through ordinary projector context. The fixed magic prefix keeps connection
+//! establishment separate from ordinary tagged events, while `Reader::finish`
+//! ensures malformed extra bytes are rejected.
 
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
@@ -52,7 +53,7 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         body_len: 0,
         canonical_bytes: bytes,
         dependencies: Vec::new(),
-        scope: EventScope::Transient,
+        scope: EventScope::Local,
         receive: None,
     })
 }

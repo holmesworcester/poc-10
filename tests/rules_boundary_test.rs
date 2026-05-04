@@ -1057,6 +1057,26 @@ fn event_module_queries_are_read_only() {
 }
 
 #[test]
+fn worker_and_command_logic_do_not_call_query_modules() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                name == "worker.rs" || name == "commands.rs" || name == "projector.rs"
+            })
+        })
+        .collect::<Vec<_>>();
+    let violations = file_contains_violations(root, &files, &["queries::", "::queries::"]);
+    assert!(
+        violations.is_empty(),
+        "queries.rs is for read-only CLI/reporting surfaces; active worker/command reads stay with their owning work:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn event_module_projectors_do_not_do_transit_or_crypto_work() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");

@@ -11,7 +11,6 @@ pub mod cli;
 pub mod compare;
 pub mod have_id;
 pub mod need_id;
-pub mod queries;
 pub mod schema;
 pub mod worker;
 

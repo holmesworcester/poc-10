@@ -73,7 +73,7 @@ fn worker_fetches_dependency_records_and_labels_before_projection() {
 }
 
 #[test]
-fn worker_rejects_durable_receive_metadata() {
+fn worker_rejects_blocked_durable_receive_metadata() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Protocol::open_store(tmp.path().join("receive-metadata.db")).unwrap();
 
@@ -85,7 +85,7 @@ fn worker_rejects_durable_receive_metadata() {
         timestamp: 1,
         body_len: bytes.len(),
         canonical_bytes: bytes,
-        dependencies: Vec::new(),
+        dependencies: vec![[9; 32]],
         scope: EventScope::Shared,
         receive: Some(ReceiveMetadata {
             origin: "127.0.0.1:1".parse::<SocketAddr>().unwrap(),
@@ -99,9 +99,9 @@ fn worker_rejects_durable_receive_metadata() {
         &registry,
         CommandOutput::with_events((), vec![event]),
     )
-    .expect_err("durable receive metadata must be rejected");
+    .expect_err("blocked durable receive metadata must be rejected");
     assert!(
-        err.contains("durable events cannot carry receive metadata"),
+        err.contains("durable receive metadata cannot be preserved while blocked"),
         "{err}"
     );
 }

@@ -27,18 +27,19 @@
 //! now. This worker may resolve one to the other, but core must never need to
 //! know that mapping.
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, str::FromStr};
 
 use crate::core::network_queues::{self, InboundNetworkRow, OutboundNetworkRow};
 use crate::core::store::Store;
 use crate::protocol::event_modules::identity::{endpoint, invite};
+use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::sync;
 use crate::protocol::event_modules::types::{EventRecord, ReceiveMetadata};
 use crate::protocol::event_modules::worker::{
     self, AdmitRecords, CommandOutput, EventRegistry, ProposedEvent,
 };
 
-use super::{connection_ack, connection_request, queries, schema, transit, types};
+use super::{connection_ack, connection_request, schema, transit, types};
 
 /// Transport metadata attached to one inbound frame.
 ///
@@ -314,7 +315,7 @@ fn unwrap_transit_bytes(
     // bootstrap frame has no connection id yet; an ordinary connection transit
     // frame must recover one before any inner bytes are trusted enough to route.
     let transit = transit::commands::unwrap(local, &bytes, |connection_id| {
-        queries::remote_endpoint(store, connection_id)
+        remote_endpoint(store, connection_id)
     })?;
     let mut frames = Vec::with_capacity(transit.inners.len());
     for inner in transit.inners {
@@ -345,7 +346,7 @@ fn drain_outbox_routes(
 ) -> Result<Vec<OutboundTransit>, String> {
     // Route draining is deliberately route-based, not global "send everything".
     // Slow or absent targets should only starve their own route.
-    let routes = queries::routes(store)?;
+    let routes = routes(store)?;
     let mut outbound = Vec::new();
     for route in routes {
         let drained = drain_outbox_for_route(store, local, route.connection_id)?;
@@ -366,11 +367,11 @@ fn drain_outbox_for_route(
     local: endpoint::types::EndpointKeypair,
     connection_id: types::ConnectionId,
 ) -> Result<DrainedOutbox, String> {
-    let items = queries::outbox_items_for_connection(store, connection_id)?;
+    let items = outbox_items_for_connection(store, connection_id)?;
     if items.is_empty() {
         return Ok(DrainedOutbox::default());
     }
-    let remote = queries::remote_endpoint(store, &connection_id)?;
+    let remote = remote_endpoint(store, &connection_id)?;
     let batches = batch_outbox_items(items);
     let mut outgoing = Vec::with_capacity(batches.len());
     let mut sent_outbox = Vec::with_capacity(batches.len());
@@ -432,6 +433,109 @@ fn mark_outbox_sent(store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), Stri
         .map_err(|err| format!("delete sent outbox rows: {err}"))
 }
 
+fn remote_endpoint(
+    store: &Store,
+    connection_id: &types::ConnectionId,
+) -> Result<endpoint::types::EndpointId, String> {
+    let bytes = store
+        .table_row(schema::CONNECTIONS, connection_id)
+        .map_err(|err| format!("load connection: {err}"))?
+        .ok_or_else(|| "unknown connection".to_string())?;
+    endpoint_id_from_bytes(&bytes)
+}
+
+fn routes(store: &Store) -> Result<Vec<types::TransportRoute>, String> {
+    let rows = store
+        .table_rows(schema::TRANSPORT_TARGETS)
+        .map_err(|err| format!("load transport targets: {err}"))?;
+    rows.into_iter()
+        .map(|(key, value)| {
+            let connection_id = types::connection_id_from_bytes(&key)?;
+            let text = String::from_utf8(value)
+                .map_err(|err| format!("transport target is not utf8: {err}"))?;
+            let addr = SocketAddr::from_str(&text)
+                .map_err(|err| format!("transport target is invalid: {err}"))?;
+            Ok(types::TransportRoute {
+                connection_id,
+                addr,
+            })
+        })
+        .collect()
+}
+
+fn outbox_items_for_connection(
+    store: &Store,
+    connection_id: types::ConnectionId,
+) -> Result<Vec<types::OutboxItem>, String> {
+    all_outbox_items(store).map(|items| {
+        items
+            .into_iter()
+            .filter(|item| item.key.connection_id == connection_id)
+            .collect()
+    })
+}
+
+fn all_outbox_items(store: &Store) -> Result<Vec<types::OutboxItem>, String> {
+    // Outbox rows are id-only. Durable data resolves from the common event
+    // store; connection-scoped protocol events resolve from the temporary
+    // connection byte cache populated by their projectors.
+    let rows = store
+        .table_rows(schema::OUTBOX)
+        .map_err(|err| format!("load outbox: {err}"))?;
+    let mut items = Vec::with_capacity(rows.len());
+    for (key, _) in rows {
+        let key = decode_outbox_key(&key)?;
+        let Some(event_bytes) = resolve_outbox_event_bytes(store, &key.event_id)? else {
+            continue;
+        };
+        items.push(types::OutboxItem { key, event_bytes });
+    }
+    Ok(items)
+}
+
+fn resolve_outbox_event_bytes(
+    store: &Store,
+    event_id: &[u8; 32],
+) -> Result<Option<Vec<u8>>, String> {
+    if let Some(bytes) = event_schema::event_bytes(store, event_id)
+        .map_err(|err| format!("load durable outbox event: {err}"))?
+    {
+        return Ok(Some(bytes));
+    }
+    store
+        .table_row(schema::CONNECTION_SCOPED_EVENTS, event_id)
+        .map_err(|err| format!("load connection-scoped outbox event: {err}"))
+}
+
+fn decode_outbox_key(bytes: &[u8]) -> Result<types::OutboxKey, String> {
+    if bytes.len() != 64 {
+        return Err("outbox key must be 64 bytes".to_string());
+    }
+    let connection_id = types::connection_id_from_bytes(&bytes[..32])?;
+    let mut event_id = [0; 32];
+    event_id.copy_from_slice(&bytes[32..]);
+    Ok(types::OutboxKey {
+        connection_id,
+        event_id,
+    })
+}
+
+fn bootstrap_hash_is_authorized(store: &Store, bootstrap_hash: &[u8; 32]) -> Result<bool, String> {
+    store
+        .table_row(invite::schema::INVITE_SECRETS, bootstrap_hash)
+        .map(|row| row.is_some())
+        .map_err(|err| format!("load invite secret: {err}"))
+}
+
+fn endpoint_id_from_bytes(bytes: &[u8]) -> Result<endpoint::types::EndpointId, String> {
+    if bytes.len() != 32 {
+        return Err("stored endpoint id is malformed".to_string());
+    }
+    let mut out = [0; 32];
+    out.copy_from_slice(bytes);
+    Ok(out)
+}
+
 fn ingest_connection_frame(
     store: &Store,
     local: endpoint::types::EndpointKeypair,
@@ -450,23 +554,19 @@ fn ingest_connection_frame(
             local.endpoint,
         ));
         let event = connection_request::codec::decode(&bytes)?;
-        let authorized =
-            invite::queries::bootstrap_hash_is_authorized(store, &event.bootstrap_hash)?;
+        let authorized = bootstrap_hash_is_authorized(store, &event.bootstrap_hash)?;
         let connection = connection_request::commands::accept(local, authorized, bytes)?;
         apply_connection_result(connection, &mut result);
     } else if connection_ack::codec::is_ack(&bytes) {
-        // Ack acceptance replays the original request bytes from local storage.
-        // This keeps the accept command pure: it receives canonical inputs and
-        // proposes connection facts without consulting the store itself.
+        // Ack projection validates the original request through the ack's
+        // declared dependency. The worker only checks local endpoint shape
+        // before admitting the ack and reporting the derived connection id.
         result.events.push(record_with_receive_metadata(
             connection_ack::codec::record_from_bytes(bytes.clone())?,
             metadata,
             local.endpoint,
         ));
-        let event = connection_ack::codec::decode(&bytes)?;
-        let request_bytes = queries::event_bytes(store, &event.request_id)?
-            .ok_or_else(|| "connection ack references unknown request".to_string())?;
-        let connection = connection_ack::commands::accept(local, request_bytes, bytes)?;
+        let connection = connection_ack::commands::accept(local, bytes)?;
         apply_connection_result(connection, &mut result);
     } else {
         return Err("unknown connection event".to_string());

@@ -10,8 +10,16 @@ use crate::protocol::event_modules::types::EventId;
 
 use super::super::have_id::{self, types::HaveIdEvent};
 use super::super::need_id::{self, types::NeedIdEvent};
-use super::queries;
 use super::types::{BucketSummary, CompareEvent, BUCKETS};
+
+pub trait ReadContext {
+    /// Summarize every shared event bucket.
+    fn summary(&self) -> Result<[BucketSummary; BUCKETS], String>;
+    /// Enumerate ids in one bucket when summaries differ.
+    fn ids_in_bucket(&self, bucket: u8) -> Result<Vec<EventId>, String>;
+    /// Check whether an advertised id is already present locally.
+    fn has_event(&self, event_id: &EventId) -> Result<bool, String>;
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncReport {
@@ -20,10 +28,7 @@ pub struct SyncReport {
     pub send_event_ids: Vec<EventId>,
 }
 
-pub fn start(
-    context: &impl queries::ReadContext,
-    connection_id: EventId,
-) -> Result<SyncReport, String> {
+pub fn start(context: &impl ReadContext, connection_id: EventId) -> Result<SyncReport, String> {
     // Manual start sends a full compare and, for the current simple protocol,
     // all have ids. The latter is intentionally easy to reason about and relies
     // on outbox idempotence rather than round state.
@@ -41,7 +46,7 @@ pub fn start(
 }
 
 pub fn handle_inbound_event(
-    context: &impl queries::ReadContext,
+    context: &impl ReadContext,
     expected_connection_id: EventId,
     bytes: &[u8],
 ) -> Result<SyncReport, String> {
@@ -94,7 +99,7 @@ fn ensure_connection(
 }
 
 fn all_have_items(
-    context: &impl queries::ReadContext,
+    context: &impl ReadContext,
     connection_id: EventId,
 ) -> Result<Vec<HaveIdEvent>, String> {
     let mut items = Vec::new();
@@ -112,7 +117,7 @@ fn all_have_items(
 }
 
 fn have_items_for_compare(
-    context: &impl queries::ReadContext,
+    context: &impl ReadContext,
     connection_id: EventId,
     local: [BucketSummary; BUCKETS],
     remote: [BucketSummary; BUCKETS],

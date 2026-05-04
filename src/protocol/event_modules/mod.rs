@@ -168,7 +168,7 @@ impl Modules {
         &self,
         store: &Store,
     ) -> Result<CommandOutput<identity::endpoint::types::EndpointKeypair>, String> {
-        match identity::endpoint::queries::local_keypair(store)? {
+        match identity::endpoint::commands::local_keypair(store)? {
             Some(local) => Ok(CommandOutput::new(local)),
             None => Ok(identity::endpoint::commands::create_local_keypair()),
         }
@@ -206,8 +206,20 @@ impl Modules {
         &self,
         store: &Store,
     ) -> Result<identity::endpoint::types::EndpointKeypair, String> {
-        identity::endpoint::queries::local_keypair(store)?
+        identity::endpoint::commands::local_keypair(store)?
             .ok_or_else(|| "local endpoint is missing".to_string())
+    }
+}
+
+impl identity::endpoint::commands::LocalEndpointRead for Store {
+    fn local_endpoint_secret(&self) -> Result<Option<Vec<u8>>, String> {
+        self.table_row(identity::endpoint::schema::LOCAL_ENDPOINT_SECRET, b"local")
+            .map_err(|err| format!("load local endpoint secret: {err}"))
+    }
+
+    fn local_endpoint(&self) -> Result<Option<Vec<u8>>, String> {
+        self.table_row(identity::endpoint::schema::LOCAL_ENDPOINT, b"local")
+            .map_err(|err| format!("load local endpoint: {err}"))
     }
 }
 

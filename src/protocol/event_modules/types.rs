@@ -31,8 +31,9 @@ pub struct EventRecord {
 /// This is not part of the globally canonical event id. It is local projection
 /// context for events whose meaning is inherently subjective to this endpoint,
 /// such as "we received this connection handshake from this socket address."
-/// Durable events currently cannot persist this field; the common worker rejects
-/// that combination rather than silently dropping projection context.
+/// Durable events currently cannot persist this field, so the common worker
+/// only allows it on events that can be projected immediately. If such an event
+/// would block, admission fails instead of silently dropping context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReceiveMetadata {
     pub origin: SocketAddr,

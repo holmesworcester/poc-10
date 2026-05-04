@@ -436,6 +436,13 @@ large or index-shaped to fit the default context. The module owns the context
 request type, the context result type, and the semantics of the read model; the
 protocol runner only routes the request/result and never inspects
 module-specific fields.
+
+`queries.rs` is reserved for read-only CLI/reporting surfaces. Active workers
+keep their state reads in the worker that consumes them, and command-time reads
+use narrow context traits owned by the command module. If a worker is checking a
+relationship between two events, prefer declaring the relationship as an event
+dependency and validating it through generic context.
+
 The known required case is negentropy response projection: compare/have/need
 responders need indexed summaries, bucket ids, presence checks, and event bytes
 from module-owned sync/negentropy tables. That is context for the sync module,

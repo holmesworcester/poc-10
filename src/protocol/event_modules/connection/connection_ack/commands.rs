@@ -1,27 +1,20 @@
 //! Command for accepting a connection ack.
 //!
-//! The command receives both the ack bytes and the original request bytes. That
-//! explicit context is the contract: validation is local and deterministic, and
-//! success returns only proposed event output plus the derived connection id.
+//! The command checks only facts available in the ack itself and the local
+//! endpoint. The deeper request relationship is a declared event dependency and
+//! is validated by the projector through standard dependency context.
 
 use crate::protocol::event_modules::identity::endpoint;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::super::connection_request;
 use super::super::types;
 use super::codec;
 
 pub fn accept(
     local: endpoint::types::EndpointKeypair,
-    request_bytes: Vec<u8>,
     bytes: Vec<u8>,
 ) -> Result<CommandOutput<types::InboundConnection>, String> {
     let event = codec::decode(&bytes)?;
-    let request = connection_request::codec::decode(&request_bytes)
-        .map_err(|_| "connection ack references a non-request event".to_string())?;
-    if request.from_endpoint != local.endpoint {
-        return Err("connection ack references another endpoint's request".to_string());
-    }
     if event.to_endpoint != local.endpoint {
         return Err("connection ack addressed to a different endpoint".to_string());
     }

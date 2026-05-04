@@ -1,8 +1,9 @@
 //! Wire codec for connection ack events.
 //!
-//! Acks use the same connection magic as requests and remain transient. Their
-//! body binds the accepting endpoint, the requester endpoint, the original
-//! request id, and the derived connection id into one fixed-width record.
+//! Acks use the same connection magic as requests and are local protocol
+//! history. The request id is both a body field and the event dependency that
+//! lets projection validate the ack through standard context instead of a
+//! worker-side lookup.
 
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
@@ -47,13 +48,13 @@ pub fn is_ack(bytes: &[u8]) -> bool {
 }
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
-    decode(&bytes)?;
+    let event = decode(&bytes)?;
     Ok(EventRecord {
         timestamp: 0,
         body_len: 0,
         canonical_bytes: bytes,
-        dependencies: Vec::new(),
-        scope: EventScope::Transient,
+        dependencies: vec![event.request_id],
+        scope: EventScope::Local,
         receive: None,
     })
 }

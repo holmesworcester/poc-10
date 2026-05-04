@@ -420,7 +420,11 @@ fn process_event_in_tx(
 
     let stored = store_durable_event_in_tx(store, event, report)?;
     if stored.inserted && stored.ready {
-        let apply = project_ready_event_in_tx(store, modules, &stored.event_id)?;
+        let apply = if record.receive.is_some() {
+            project_ready_event_record_in_tx(store, modules, &stored.event_id, record)?
+        } else {
+            project_ready_event_in_tx(store, modules, &stored.event_id)?
+        };
         report.applied_events += apply.applied_events;
     }
     Ok(())
@@ -463,13 +467,13 @@ fn store_durable_event_in_tx(
     report: &mut AdmitReport,
 ) -> rusqlite::Result<StoredDurableEvent> {
     let record = event.record();
-    if record.receive.is_some() {
-        return Err(module_error(
-            "durable events cannot carry receive metadata".to_string(),
-        ));
-    }
     let id = event.event_id();
     let missing = missing_dependencies(store, &record.dependencies)?;
+    if record.receive.is_some() && !missing.is_empty() {
+        return Err(module_error(
+            "durable receive metadata cannot be preserved while blocked".to_string(),
+        ));
+    }
     let status = if missing.is_empty() {
         EventStatus::Ready
     } else {
@@ -512,6 +516,22 @@ fn project_ready_event_in_tx(
             schema::event_bytes(store, event_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let record = modules.record_from_bytes(bytes).map_err(module_error)?;
         let changes = project_event_with_context_in_tx(store, modules, event_id, &record)?;
+        write_projection_output_in_tx(store, changes)?;
+        report.applied_events = 1;
+        report.unblocked_events = unblock_dependents(store, event_id)?;
+    }
+    Ok(report)
+}
+
+fn project_ready_event_record_in_tx(
+    store: &Store,
+    modules: &impl EventRegistry,
+    event_id: &EventId,
+    record: &EventRecord,
+) -> rusqlite::Result<ApplyReadyReport> {
+    let mut report = ApplyReadyReport::default();
+    if schema::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)? {
+        let changes = project_event_with_context_in_tx(store, modules, event_id, record)?;
         write_projection_output_in_tx(store, changes)?;
         report.applied_events = 1;
         report.unblocked_events = unblock_dependents(store, event_id)?;
