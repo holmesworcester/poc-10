@@ -8,9 +8,11 @@ use topo::core::store::Store;
 #[test]
 fn network_queues_are_opaque_and_idempotent_rows() {
     let tmp = tempfile::tempdir().unwrap();
-    let store =
-        Store::open_disk_with_tables(tmp.path().join("network-queues.db"), network_queues::TABLES)
-            .unwrap();
+    let store = Store::open_disk_with_schemas(
+        tmp.path().join("network-queues.db"),
+        network_queues::SCHEMAS,
+    )
+    .unwrap();
     let addr: SocketAddr = "127.0.0.1:41000".parse().unwrap();
     let other_addr: SocketAddr = "127.0.0.1:41001".parse().unwrap();
     let target = NetworkTarget::new(addr);

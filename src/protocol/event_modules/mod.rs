@@ -10,7 +10,7 @@ pub mod worker;
 use std::net::SocketAddr;
 
 use crate::core::network_queues::{self, NetworkTarget, OutboundNetworkRow};
-use crate::core::store::{Store, TableName};
+use crate::core::store::{Schema, Store};
 use crate::protocol::event_modules::worker::{
     CommandOutput, EventRegistry, EventWithContext, ProjectionOutput, ProposedEvent,
 };
@@ -282,19 +282,14 @@ impl Modules {
     }
 }
 
-pub fn row_tables() -> Vec<TableName> {
+pub fn schemas() -> Vec<Schema> {
     let mut out = Vec::new();
-    out.extend_from_slice(tables::TABLES);
-    out.extend_from_slice(&[
-        identity::endpoint::tables::LOCAL_ENDPOINT,
-        identity::endpoint::tables::LOCAL_ENDPOINT_SECRET,
-        identity::invite::tables::INVITE_SECRETS,
-        connection::tables::CONNECTION_EVENTS,
-        connection::tables::CONNECTIONS,
-        connection::tables::OUTBOX,
-        connection::transport_target::tables::TRANSPORT_TARGETS,
-        test_events::event_with_deps::tables::STAGED_EVENTS_WITH_DEPS,
-    ]);
+    out.extend_from_slice(tables::SCHEMAS);
+    out.extend_from_slice(identity::endpoint::tables::SCHEMAS);
+    out.extend_from_slice(identity::invite::tables::SCHEMAS);
+    out.extend_from_slice(connection::tables::SCHEMAS);
+    out.extend_from_slice(connection::transport_target::tables::SCHEMAS);
+    out.extend_from_slice(test_events::event_with_deps::tables::SCHEMAS);
     out
 }
 

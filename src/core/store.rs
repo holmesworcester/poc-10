@@ -1,14 +1,14 @@
 //! A small SQLite-backed row store.
 //!
-//! This file is intentionally below the protocol. It knows how to create named
-//! row tables, run transactions, and read or write keyed byte rows. It does not
-//! know what any row means. Event admission, labels, dependency waits, network
+//! This file is intentionally below the protocol. It knows how to apply declared
+//! schemas, run transactions, and read or write keyed byte rows. It does not
+//! know what any row means. Event admission, labels, missing-dep edges, network
 //! targets, and sync queues are all protocol or IO concepts layered on top of
 //! these primitives.
 //!
 //! The critical path is short:
-//! 1. Open a store with the static table names declared by core IO and the
-//!    selected protocol.
+//! 1. Open a store with the schemas declared by core IO and the selected
+//!    protocol's module scopes.
 //! 2. Use `write_transaction` to group rows that must become visible together.
 //! 3. Use the row helpers to insert, replace, delete, and scan by key prefix.
 //!
@@ -37,6 +37,46 @@ impl TableName {
     }
 }
 
+/// Where a declared schema is expected to live.
+///
+/// The SQL still says `CREATE TABLE` or `CREATE TEMP TABLE`; this value makes a
+/// module's persistence choice visible to the registry before SQLite sees the
+/// statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageClass {
+    Durable,
+    Temp,
+}
+
+/// One schema fragment owned by a core IO module or protocol module scope.
+///
+/// This is deliberately just metadata plus SQL. Core aggregates and executes
+/// declarations; it does not infer table meaning from ids, names, or columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Schema {
+    pub id: &'static str,
+    pub storage: StorageClass,
+    pub sql: &'static str,
+}
+
+impl Schema {
+    pub const fn durable(id: &'static str, sql: &'static str) -> Self {
+        Self {
+            id,
+            storage: StorageClass::Durable,
+            sql,
+        }
+    }
+
+    pub const fn temp(id: &'static str, sql: &'static str) -> Self {
+        Self {
+            id,
+            storage: StorageClass::Temp,
+            sql,
+        }
+    }
+}
+
 /// One opaque key/value row in one declared table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
@@ -53,40 +93,40 @@ pub struct Store {
 impl Store {
     /// Open a disk store without creating any protocol tables.
     ///
-    /// Production callers should prefer `open_disk_with_tables`; this form is
+    /// Production callers should prefer `open_disk_with_schemas`; this form is
     /// kept for tests that exercise the bare row substrate.
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        Self::open_disk_with_tables(path, &[])
+        Self::open_disk_with_schemas(path, &[])
     }
 
     /// Alias for `open`, kept so tests can name the backing medium explicitly.
     pub fn open_disk(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        Self::open_disk_with_tables(path, &[])
+        Self::open_disk_with_schemas(path, &[])
     }
 
-    /// Open a disk store and create the caller-declared row tables.
-    pub fn open_disk_with_tables(
+    /// Open a disk store and apply the caller-declared schemas.
+    pub fn open_disk_with_schemas(
         path: impl AsRef<Path>,
-        row_tables: &[TableName],
+        schemas: &[Schema],
     ) -> rusqlite::Result<Self> {
         let conn = SqliteConnection::open(path)?;
-        Self::from_connection(conn, row_tables)
+        Self::from_connection(conn, schemas)
     }
 
     /// Open an in-memory store without creating any protocol tables.
     pub fn open_memory() -> rusqlite::Result<Self> {
-        Self::open_memory_with_tables(&[])
+        Self::open_memory_with_schemas(&[])
     }
 
-    /// Open an in-memory store and create the caller-declared row tables.
-    pub fn open_memory_with_tables(row_tables: &[TableName]) -> rusqlite::Result<Self> {
+    /// Open an in-memory store and apply the caller-declared schemas.
+    pub fn open_memory_with_schemas(schemas: &[Schema]) -> rusqlite::Result<Self> {
         let conn = SqliteConnection::open_in_memory()?;
-        Self::from_connection(conn, row_tables)
+        Self::from_connection(conn, schemas)
     }
 
-    fn from_connection(conn: SqliteConnection, row_tables: &[TableName]) -> rusqlite::Result<Self> {
+    fn from_connection(conn: SqliteConnection, schemas: &[Schema]) -> rusqlite::Result<Self> {
         let store = Self { conn };
-        store.ensure_schema(row_tables)?;
+        store.apply_schemas(schemas)?;
         Ok(store)
     }
 
@@ -260,23 +300,48 @@ impl Store {
         rows.collect()
     }
 
-    // Schema helpers: core creates only the row tables it is handed.
-    fn ensure_schema(&self, row_tables: &[TableName]) -> rusqlite::Result<()> {
-        for table in row_tables {
-            self.ensure_row_table(*table)?;
+    // Schema helpers: core applies declarations from module scopes. It does not
+    // build protocol tables from central knowledge.
+    fn apply_schemas(&self, schemas: &[Schema]) -> rusqlite::Result<()> {
+        validate_schema_ids(schemas)?;
+        for schema in schemas {
+            self.apply_schema(schema)?;
         }
         Ok(())
     }
 
-    fn ensure_row_table(&self, table: TableName) -> rusqlite::Result<()> {
-        let table_name = quoted_table_name(table)?;
-        self.conn.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS {table_name} (
-                row_key BLOB PRIMARY KEY NOT NULL,
-                row_value BLOB NOT NULL
-            );"
-        ))
+    fn apply_schema(&self, schema: &Schema) -> rusqlite::Result<()> {
+        match schema.storage {
+            StorageClass::Durable | StorageClass::Temp => self.conn.execute_batch(schema.sql),
+        }
     }
+}
+
+fn validate_schema_ids(schemas: &[Schema]) -> rusqlite::Result<()> {
+    for (left_index, left) in schemas.iter().enumerate() {
+        validate_schema_id(left.id)?;
+        for right in &schemas[left_index + 1..] {
+            if left.id == right.id {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "duplicate schema id {}",
+                    left.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_schema_id(id: &str) -> rusqlite::Result<()> {
+    if id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+    {
+        return Ok(());
+    }
+    Err(rusqlite::Error::InvalidParameterName(format!(
+        "invalid schema id {id}"
+    )))
 }
 
 /// Compute the exclusive upper bound for a byte-prefix range.

@@ -710,22 +710,24 @@ fn core_store_is_row_only_not_protocol_fact_storage() {
 }
 
 #[test]
-fn core_store_creates_only_declared_row_tables() {
+fn core_store_applies_only_declared_schemas() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let text = source_text(&root.join("src/core/store.rs"));
     assert!(
-        text.contains("fn ensure_schema(&self, row_tables: &[TableName])")
-            && text.contains("fn ensure_row_table(&self, table: TableName)"),
-        "store schema creation should be driven by caller-declared TableName values"
+        text.contains("pub struct Schema")
+            && text.contains("fn apply_schemas(&self, schemas: &[Schema])")
+            && text.contains("fn apply_schema(&self, schema: &Schema)"),
+        "store schema creation should be driven by caller-declared Schema values"
     );
     for forbidden in [
         "CREATE TABLE IF NOT EXISTS events",
         "CREATE TABLE IF NOT EXISTS blocked_by_event",
         "CREATE INDEX IF NOT EXISTS idx_events",
+        "CREATE TABLE IF NOT EXISTS {table_name}",
     ] {
         assert!(
             !text.contains(forbidden),
-            "core/store.rs must not create protocol-specific tables: contains {forbidden}"
+            "core/store.rs must not synthesize protocol or generic row-table schemas: contains {forbidden}"
         );
     }
 }
@@ -735,11 +737,12 @@ fn protocol_event_tables_own_common_fact_indexes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let text = source_text(&root.join("src/protocol/event_modules/tables.rs"));
     for required in [
+        "pub const SCHEMAS",
         "pub const EVENTS",
         "pub const READY_EVENTS",
         "pub const PARTITION_EVENTS",
-        "pub const BLOCKED_BY_EVENT",
-        "pub const EVENT_BLOCKERS",
+        "pub const BLOCKED_EVENTS_BY_MISSING_DEP",
+        "pub const MISSING_DEPS_BY_BLOCKED_EVENT",
         "pub const EVENT_LABELS",
         "pub fn insert_event(",
         "pub fn event_labels(",
@@ -836,6 +839,8 @@ fn event_module_commands_do_not_mutate_storage_directly() {
         "insert_event(",
         "set_event_status",
         "delete_dependency_wait",
+        "insert_blocked_event_missing_dep",
+        "delete_blocked_events_by_missing_dep",
         "drain_until_idle",
         "rusqlite",
     ];
@@ -924,6 +929,8 @@ fn event_module_queries_are_read_only() {
         "insert_event",
         "set_event_status",
         "delete_dependency_wait",
+        "insert_blocked_event_missing_dep",
+        "delete_blocked_events_by_missing_dep",
     ];
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
@@ -1019,6 +1026,27 @@ fn table_names_are_declared_in_tables_files() {
 }
 
 #[test]
+fn table_declaration_files_declare_schemas() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut violations = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .chain([root.join("src/core/network_queues.rs")])
+    {
+        let text = source_text(&path);
+        if text.contains("TableName::new(") && !text.contains("pub const SCHEMAS") {
+            violations.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "every module/scope that names storage tables must also declare the schemas it owns:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn store_table_rows_use_typed_table_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let text = source_text(&root.join("src/core/store.rs"));
@@ -1026,8 +1054,10 @@ fn store_table_rows_use_typed_table_names() {
         text.contains("pub struct TableName")
             && text.contains("pub struct TableRow")
             && text.contains("pub table: TableName")
+            && text.contains("pub struct Schema")
+            && text.contains("pub sql: &'static str")
             && !text.contains("pub table: &'static str"),
-        "Store rows should use typed TableName values, not raw table-name strings"
+        "Store rows should use typed TableName values, and schemas should be explicit declarations"
     );
     assert!(
         text.contains("pub fn open_memory()") && text.contains("pub fn open_disk("),

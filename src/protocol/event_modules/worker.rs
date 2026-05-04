@@ -733,21 +733,23 @@ fn write_blockers(
 ) -> rusqlite::Result<usize> {
     let mut inserted = 0;
     for dependency in missing {
-        inserted += usize::from(tables::insert_dependency_wait(store, dependency, event_id)?);
+        inserted += usize::from(tables::insert_blocked_event_missing_dep(
+            store, dependency, event_id,
+        )?);
     }
     Ok(inserted)
 }
 
 fn unblock_dependents(store: &Store, applied_event_id: &EventId) -> rusqlite::Result<usize> {
-    let dependents = tables::events_waiting_on(store, applied_event_id)?;
-    tables::delete_dependency_waits_for(store, applied_event_id)?;
+    let dependents = tables::blocked_events_by_missing_dep(store, applied_event_id)?;
+    tables::delete_blocked_events_by_missing_dep(store, applied_event_id)?;
 
     let mut unblocked = 0;
     for dependent in dependents {
         // Unblocking only changes status. It does not recursively project the
         // newly unblocked event inside the same stack frame, which prevents a large
         // dependency cascade from becoming one unbounded transaction.
-        if !tables::event_has_dependency_waits(store, &dependent)?
+        if !tables::blocked_event_has_missing_deps(store, &dependent)?
             && tables::set_event_status(
                 store,
                 &dependent,

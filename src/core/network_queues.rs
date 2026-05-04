@@ -1,11 +1,30 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-use crate::core::store::{Store, TableName, TableRow};
+use crate::core::store::{Schema, Store, TableName, TableRow};
 
 pub const OUTBOUND_TABLE: TableName = TableName::new("core.network.outbound");
 pub const INBOUND_TABLE: TableName = TableName::new("core.network.inbound");
-pub const TABLES: &[TableName] = &[OUTBOUND_TABLE, INBOUND_TABLE];
+pub const SCHEMAS: &[Schema] = &[
+    Schema::durable(
+        "core.network.outbound.v1",
+        r#"
+        CREATE TABLE IF NOT EXISTS "core.network.outbound" (
+            row_key BLOB PRIMARY KEY NOT NULL,
+            row_value BLOB NOT NULL
+        );
+        "#,
+    ),
+    Schema::durable(
+        "core.network.inbound.v1",
+        r#"
+        CREATE TABLE IF NOT EXISTS "core.network.inbound" (
+            row_key BLOB PRIMARY KEY NOT NULL,
+            row_value BLOB NOT NULL
+        );
+        "#,
+    ),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetworkTarget {

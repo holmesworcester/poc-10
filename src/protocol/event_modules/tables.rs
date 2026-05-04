@@ -6,7 +6,7 @@
 //! commands. Keep new protocol meaning here or in a scoped event-module
 //! `tables.rs`; do not push it down into `core::store`.
 
-use crate::core::store::{Store, TableName, TableRow};
+use crate::core::store::{Schema, Store, TableName, TableRow};
 use crate::protocol::event_modules::types::{
     event_id, EventId, EventIndexEntry, EventRecord, EventScope, EventStatus, EventStatusCounts,
 };
@@ -14,17 +14,67 @@ use crate::protocol::event_modules::types::{
 pub const EVENTS: TableName = TableName::new("event_modules.events");
 pub const READY_EVENTS: TableName = TableName::new("event_modules.ready_events");
 pub const PARTITION_EVENTS: TableName = TableName::new("event_modules.partition_events");
-pub const BLOCKED_BY_EVENT: TableName = TableName::new("event_modules.blocked_by_event");
-pub const EVENT_BLOCKERS: TableName = TableName::new("event_modules.event_blockers");
+pub const BLOCKED_EVENTS_BY_MISSING_DEP: TableName =
+    TableName::new("event_modules.blocked_events_by_missing_dep");
+pub const MISSING_DEPS_BY_BLOCKED_EVENT: TableName =
+    TableName::new("event_modules.missing_deps_by_blocked_event");
 pub const EVENT_LABELS: TableName = TableName::new("event_modules.labels");
 
-pub const TABLES: &[TableName] = &[
-    EVENTS,
-    READY_EVENTS,
-    PARTITION_EVENTS,
-    BLOCKED_BY_EVENT,
-    EVENT_BLOCKERS,
-    EVENT_LABELS,
+pub const SCHEMAS: &[Schema] = &[
+    Schema::durable(
+        "event_modules.events.v1",
+        r#"
+        CREATE TABLE IF NOT EXISTS "event_modules.events" (
+            row_key BLOB PRIMARY KEY NOT NULL,
+            row_value BLOB NOT NULL
+        );
+        "#,
+    ),
+    Schema::durable(
+        "event_modules.ready_events.v1",
+        r#"
+        CREATE TABLE IF NOT EXISTS "event_modules.ready_events" (
+            row_key BLOB PRIMARY KEY NOT NULL,
+            row_value BLOB NOT NULL
+        );
+        "#,
+    ),
+    Schema::durable(
+        "event_modules.partition_events.v1",
+        r#"
+        CREATE TABLE IF NOT EXISTS "event_modules.partition_events" (
+            row_key BLOB PRIMARY KEY NOT NULL,
+            row_value BLOB NOT NULL
+        );
+        "#,
+    ),
+    Schema::durable(
+        "event_modules.blocked_events_by_missing_dep.v1",
+        r#"
+        CREATE TABLE IF NOT EXISTS "event_modules.blocked_events_by_missing_dep" (
+            row_key BLOB PRIMARY KEY NOT NULL,
+            row_value BLOB NOT NULL
+        );
+        "#,
+    ),
+    Schema::durable(
+        "event_modules.missing_deps_by_blocked_event.v1",
+        r#"
+        CREATE TABLE IF NOT EXISTS "event_modules.missing_deps_by_blocked_event" (
+            row_key BLOB PRIMARY KEY NOT NULL,
+            row_value BLOB NOT NULL
+        );
+        "#,
+    ),
+    Schema::durable(
+        "event_modules.labels.v1",
+        r#"
+        CREATE TABLE IF NOT EXISTS "event_modules.labels" (
+            row_key BLOB PRIMARY KEY NOT NULL,
+            row_value BLOB NOT NULL
+        );
+        "#,
+    ),
 ];
 
 const EVENT_ROW_HEADER_BYTES: usize = 8 + 8 + 1 + 1 + 1;
@@ -76,17 +126,21 @@ pub fn event_is_applied(store: &Store, event_id: &EventId) -> rusqlite::Result<b
     })
 }
 
-pub fn insert_dependency_wait(
+pub fn insert_blocked_event_missing_dep(
     store: &Store,
-    blocked_by_event_id: &EventId,
-    event_id: &EventId,
+    missing_dep_id: &EventId,
+    blocked_event_id: &EventId,
 ) -> rusqlite::Result<bool> {
-    let primary = wait_row(BLOCKED_BY_EVENT, blocked_by_event_id, event_id);
+    let primary = edge_row(
+        BLOCKED_EVENTS_BY_MISSING_DEP,
+        missing_dep_id,
+        blocked_event_id,
+    );
     let inserted = store.insert_table_rows_in_tx(vec![primary])? > 0;
-    store.insert_table_rows_in_tx(vec![wait_row(
-        EVENT_BLOCKERS,
-        event_id,
-        blocked_by_event_id,
+    store.insert_table_rows_in_tx(vec![edge_row(
+        MISSING_DEPS_BY_BLOCKED_EVENT,
+        blocked_event_id,
+        missing_dep_id,
     )])?;
     Ok(inserted)
 }
@@ -126,45 +180,48 @@ pub fn set_event_status(
     Ok(true)
 }
 
-pub fn delete_dependency_waits_for(
+pub fn delete_blocked_events_by_missing_dep(
     store: &Store,
-    blocked_by_event_id: &EventId,
+    missing_dep_id: &EventId,
 ) -> rusqlite::Result<usize> {
     let rows = store.table_rows_with_key_prefix(
-        BLOCKED_BY_EVENT,
-        blocked_by_event_id,
+        BLOCKED_EVENTS_BY_MISSING_DEP,
+        missing_dep_id,
         MAX_DEPENDENCY_ROWS_PER_EVENT,
     )?;
     let mut blocked_keys = Vec::with_capacity(rows.len());
     let mut reverse_keys = Vec::with_capacity(rows.len());
     for (key, _) in rows {
-        let (blocked_by, event_id) = split_wait_key(&key)?;
+        let (missing_dep, blocked_event_id) = split_edge_key(&key)?;
         blocked_keys.push(key);
-        reverse_keys.push(wait_key(&event_id, &blocked_by));
+        reverse_keys.push(edge_key(&blocked_event_id, &missing_dep));
     }
-    let deleted = store.delete_table_rows_in_tx(BLOCKED_BY_EVENT, blocked_keys)?;
-    store.delete_table_rows_in_tx(EVENT_BLOCKERS, reverse_keys)?;
+    let deleted = store.delete_table_rows_in_tx(BLOCKED_EVENTS_BY_MISSING_DEP, blocked_keys)?;
+    store.delete_table_rows_in_tx(MISSING_DEPS_BY_BLOCKED_EVENT, reverse_keys)?;
     Ok(deleted)
 }
 
-pub fn events_waiting_on(
+pub fn blocked_events_by_missing_dep(
     store: &Store,
-    blocked_by_event_id: &EventId,
+    missing_dep_id: &EventId,
 ) -> rusqlite::Result<Vec<EventId>> {
     store
         .table_rows_with_key_prefix(
-            BLOCKED_BY_EVENT,
-            blocked_by_event_id,
+            BLOCKED_EVENTS_BY_MISSING_DEP,
+            missing_dep_id,
             MAX_DEPENDENCY_ROWS_PER_EVENT,
         )?
         .into_iter()
-        .map(|(key, _)| split_wait_key(&key).map(|(_, event_id)| event_id))
+        .map(|(key, _)| split_edge_key(&key).map(|(_, blocked_event_id)| blocked_event_id))
         .collect()
 }
 
-pub fn event_has_dependency_waits(store: &Store, event_id: &EventId) -> rusqlite::Result<bool> {
+pub fn blocked_event_has_missing_deps(
+    store: &Store,
+    blocked_event_id: &EventId,
+) -> rusqlite::Result<bool> {
     store
-        .table_rows_with_key_prefix(EVENT_BLOCKERS, event_id, 1)
+        .table_rows_with_key_prefix(MISSING_DEPS_BY_BLOCKED_EVENT, blocked_event_id, 1)
         .map(|rows| !rows.is_empty())
 }
 
@@ -190,7 +247,7 @@ pub fn status_counts(store: &Store) -> rusqlite::Result<EventStatusCounts> {
             EventStatus::Rejected => counts.rejected += 1,
         }
     }
-    counts.blocked_edges = store.table_row_count(BLOCKED_BY_EVENT)?;
+    counts.blocked_edges = store.table_row_count(BLOCKED_EVENTS_BY_MISSING_DEP)?;
     Ok(counts)
 }
 
@@ -334,10 +391,10 @@ fn partition_row(partition: u8, event_id: &EventId) -> TableRow {
     }
 }
 
-fn wait_row(table: TableName, first: &EventId, second: &EventId) -> TableRow {
+fn edge_row(table: TableName, first: &EventId, second: &EventId) -> TableRow {
     TableRow {
         table,
-        key: wait_key(first, second),
+        key: edge_key(first, second),
         value: Vec::new(),
     }
 }
@@ -429,14 +486,14 @@ fn split_partition_key(key: &[u8]) -> rusqlite::Result<(u8, EventId)> {
     Ok((key[0], vec_to_id(key[1..].to_vec())?))
 }
 
-fn wait_key(first: &EventId, second: &EventId) -> Vec<u8> {
+fn edge_key(first: &EventId, second: &EventId) -> Vec<u8> {
     let mut key = Vec::with_capacity(64);
     key.extend_from_slice(first);
     key.extend_from_slice(second);
     key
 }
 
-fn split_wait_key(key: &[u8]) -> rusqlite::Result<(EventId, EventId)> {
+fn split_edge_key(key: &[u8]) -> rusqlite::Result<(EventId, EventId)> {
     if key.len() != 64 {
         return Err(table_error(format!(
             "dependency key should be 64 bytes, got {}",
