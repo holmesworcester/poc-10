@@ -36,7 +36,7 @@ fn file_contains_violations(
 
 #[test]
 fn event_modules_do_not_use_event_rs() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_modules");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
     let offenders = rust_files(&root)
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "event.rs"))
@@ -46,7 +46,7 @@ fn event_modules_do_not_use_event_rs() {
 
 #[test]
 fn event_modules_are_directories() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_modules");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
     let offenders = std::fs::read_dir(root)
         .expect("read event modules")
         .map(|entry| entry.expect("dir entry").path())
@@ -60,8 +60,9 @@ fn event_modules_are_directories() {
 }
 
 #[test]
-fn domain_modules_contain_only_child_modules() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_modules");
+fn domain_roots_contain_only_children_and_shared_domain_files() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
+    let allowed_domain_files = ["mod.rs", "actor.rs", "tables.rs", "queries.rs", "types.rs"];
     let mut offenders = Vec::new();
     for domain in std::fs::read_dir(&root).expect("read event modules") {
         let path = domain.expect("dir entry").path();
@@ -70,7 +71,12 @@ fn domain_modules_contain_only_child_modules() {
         }
         for entry in std::fs::read_dir(&path).expect("read domain module") {
             let candidate = entry.expect("dir entry").path();
-            if candidate.is_file() && !candidate.file_name().is_some_and(|name| name == "mod.rs") {
+            if candidate.is_file()
+                && !candidate
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| allowed_domain_files.contains(&name))
+            {
                 offenders.push(candidate.strip_prefix(&root).unwrap().display().to_string());
             }
         }
@@ -78,7 +84,7 @@ fn domain_modules_contain_only_child_modules() {
 
     assert!(
         offenders.is_empty(),
-        "domain folders are namespaces only; put commands/codecs/projectors/tables in the most relevant child module:\n{}",
+        "domain roots may contain only shared domain files; put leaf commands/codecs/projectors in child event modules:\n{}",
         offenders.join("\n")
     );
 }
@@ -86,7 +92,7 @@ fn domain_modules_contain_only_child_modules() {
 #[test]
 fn codec_files_do_not_define_public_types() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let event_root = root.join("src/event_modules");
+    let event_root = root.join("src/protocol/event_modules");
     let files = rust_files(&event_root)
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "codec.rs"))
@@ -102,7 +108,7 @@ fn codec_files_do_not_define_public_types() {
 
 #[test]
 fn codec_modules_have_type_files() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_modules");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
     let mut offenders = Vec::new();
     for codec in rust_files(&root)
         .into_iter()
@@ -122,25 +128,21 @@ fn codec_modules_have_type_files() {
 }
 
 #[test]
-fn core_imports_only_the_modules_registry() {
+fn core_does_not_import_protocol() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let core_files = [
-        "src/main.rs",
-        "src/pipeline.rs",
-        "src/control_loop.rs",
-        "src/store.rs",
-        "src/network.rs",
-        "src/blocking.rs",
+        "src/core/pipeline.rs",
+        "src/core/control_loop.rs",
+        "src/core/store.rs",
+        "src/core/blocking.rs",
+        "src/core/wire.rs",
     ];
     let mut violations = Vec::new();
 
     for file in core_files {
         let text = std::fs::read_to_string(root.join(file)).expect("read core file");
         for (line_idx, line) in text.lines().enumerate() {
-            if line.contains("event_modules::")
-                && !line.contains("event_modules::Modules")
-                && !line.contains("event_modules::{Modules")
-            {
+            if line.contains("crate::protocol") {
                 violations.push(format!("{file}:{}: {line}", line_idx + 1));
             }
         }
@@ -148,7 +150,7 @@ fn core_imports_only_the_modules_registry() {
 
     assert!(
         violations.is_empty(),
-        "core imports the Modules registry only; concrete event modules are composed in event_modules/mod.rs:\n{}",
+        "core must be protocol-agnostic; concrete protocols live under src/protocol:\n{}",
         violations.join("\n")
     );
 }
@@ -156,7 +158,7 @@ fn core_imports_only_the_modules_registry() {
 #[test]
 fn pipeline_has_no_protocol_branching_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = [root.join("src/pipeline.rs")];
+    let files = [root.join("src/core/pipeline.rs")];
     let forbidden = [
         "connection",
         "sync",
@@ -177,7 +179,7 @@ fn pipeline_has_no_protocol_branching_vocabulary() {
 #[test]
 fn store_uses_generic_storage_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = [root.join("src/store.rs")];
+    let files = [root.join("src/core/store.rs")];
     let forbidden = ["bucket", "module_rows", "payload_len"];
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
@@ -190,12 +192,12 @@ fn store_uses_generic_storage_vocabulary() {
 #[test]
 fn sync_event_module_does_not_own_transport_or_frame_io() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sync_root = root.join("src/event_modules/sync");
+    let sync_root = root.join("src/protocol/event_modules/sync");
     let files = rust_files(&sync_root);
     let forbidden = [
         "TcpStream",
         "TcpListener",
-        "crate::network",
+        "crate::protocol::network",
         "read_frame",
         "write_frame",
     ];
@@ -210,13 +212,13 @@ fn sync_event_module_does_not_own_transport_or_frame_io() {
 #[test]
 fn event_module_commands_do_not_mutate_storage_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let event_root = root.join("src/event_modules");
+    let event_root = root.join("src/protocol/event_modules");
     let files = rust_files(&event_root)
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "commands.rs"))
         .collect::<Vec<_>>();
     let forbidden = [
-        "use crate::store::Store",
+        "use crate::core::store::Store",
         "&Store",
         "Store,",
         "Store)",
@@ -243,13 +245,13 @@ fn event_module_commands_do_not_mutate_storage_directly() {
 #[test]
 fn event_module_projectors_do_not_query_storage_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let event_root = root.join("src/event_modules");
+    let event_root = root.join("src/protocol/event_modules");
     let files = rust_files(&event_root)
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "projector.rs"))
         .collect::<Vec<_>>();
     let forbidden = [
-        "use crate::store::Store",
+        "use crate::core::store::Store",
         "&Store",
         "Store,",
         "Store)",
@@ -270,7 +272,7 @@ fn event_module_projectors_do_not_query_storage_directly() {
 #[test]
 fn command_output_contains_events_not_state_changes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(root.join("src/store.rs")).expect("read store");
+    let text = std::fs::read_to_string(root.join("src/core/store.rs")).expect("read store");
     let start = text
         .find("pub struct CommandOutput")
         .expect("CommandOutput");
@@ -284,7 +286,7 @@ fn command_output_contains_events_not_state_changes() {
 #[test]
 fn projection_output_contains_rows_not_events() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(root.join("src/store.rs")).expect("read store");
+    let text = std::fs::read_to_string(root.join("src/core/store.rs")).expect("read store");
     let start = text
         .find("pub struct ProjectionOutput")
         .expect("ProjectionOutput");
@@ -300,7 +302,7 @@ fn projection_output_contains_rows_not_events() {
 #[test]
 fn sync_event_module_does_not_use_session_message_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sync_root = root.join("src/event_modules/sync");
+    let sync_root = root.join("src/protocol/event_modules/sync");
     let files = rust_files(&sync_root);
     let forbidden = ["Hello", "HelloAck", "Done", "Events"];
     let violations = file_contains_violations(root, &files, &forbidden);
@@ -316,9 +318,9 @@ fn core_files_do_not_contain_sync_protocol_logic() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = [
         "src/main.rs",
-        "src/pipeline.rs",
-        "src/store.rs",
-        "src/network.rs",
+        "src/core/pipeline.rs",
+        "src/core/store.rs",
+        "src/protocol/network.rs",
     ];
     let forbidden = ["negentropy", "Compare", "Have", "Need", "differing_buckets"];
     let mut violations = Vec::new();
@@ -332,7 +334,7 @@ fn core_files_do_not_contain_sync_protocol_logic() {
     }
     assert!(
         violations.is_empty(),
-        "sync protocol logic belongs in event_modules/sync:\n{}",
+        "sync protocol logic belongs in protocol/event_modules/sync:\n{}",
         violations.join("\n")
     );
 }
@@ -340,7 +342,7 @@ fn core_files_do_not_contain_sync_protocol_logic() {
 #[test]
 fn core_storage_and_transport_do_not_own_connection_or_bootstrap_schema() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = ["src/store.rs", "src/network.rs"];
+    let files = ["src/core/store.rs", "src/protocol/network.rs"];
     let forbidden = [
         "peer",
         "bootstrap",
@@ -359,7 +361,7 @@ fn core_storage_and_transport_do_not_own_connection_or_bootstrap_schema() {
     }
     assert!(
         violations.is_empty(),
-        "connection/bootstrap storage belongs in event_modules/connection:\n{}",
+        "connection/bootstrap storage belongs in protocol/event_modules/connection:\n{}",
         violations.join("\n")
     );
 }

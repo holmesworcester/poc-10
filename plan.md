@@ -8,51 +8,49 @@ I want to rewrite topo with clarity on:
 * realms of responsibility
 * event-based networking
 
-UPDATED:
-
-- Inbound processing is a pure function chain; admission by event id happens before context loading.
-- Queue-like work is just module-owned table rows at wait/dedupe/retry/schedule/IO boundaries.
-- Canonical events have scopes: shared, local-only, endpoint-scoped, or connection-scoped. The normal event id is always `BLAKE3(canonical_event_bytes)`; connection-scoped events include `connection_id` in their canonical bytes so their ids are naturally connection-local.
-- Durable shared data events live in durable event storage. Connection-scoped protocol events may live in transient storage, but still use normal canonical bytes and event ids. `outbox` stores only `(connection_id, event_id)`.
-- Blocking uses `blocked_by_event(blocked_by_event_id, event_id)` pair rows and same-transaction unblocking.
-- Projectors receive a core default context of immediate dependency events, labels, and origin metadata. Modules may define custom typed context only for module-owned read models that cannot be represented as bounded deps or labels; negentropy responders are the known case because compare/have/need answers depend on indexed summaries, bucket ids, and event-byte lookups.
-- Connection/transit modules create transit blobs. The kernel never creates transit blobs; it only packs module-produced bytes into TCP frames and writes them to transport targets.
-- Outgoing flow dedupes deterministic connection-scoped events before transit wrapping. TCP writability and socket backpressure are transport mechanics, not sync or connection semantics.
-- Event modules own their canonical `codec.rs`; "wire" means transit bytes, not canonical event bytes.
-- `state` materializes table definitions from event-module declarations; it owns storage mechanics, not domain schema meaning.
-- Sync is an event-module family, not a separate sync engine.
-- The kernel is only an actor scheduler plus IO adapters. It does not own a protocol flow; ready-event processing is just the default actor over module-owned event/projector contracts.
-- Timely Dataflow and Differential Dataflow are a proposal and source of ideas for Rust architecture and performance: deltas, arrangements, consolidation, frontiers, compaction, and bounded work should inform experiments without committing the kernel to those runtimes.
-- Production may physically purge deleted or TTL-expired events and rows, but only after surviving facts, labels, summaries, or high-water marks preserve any semantic truth future projections need.
-
 See appendix for documentation style rules and references.
 
-# Timely / Differential Proposal
+# Core
 
-Timely Dataflow and Differential Dataflow are a proposal and source of ideas, not a settled dependency choice or required kernel architecture. They are useful local references for Rust performance work because they make deltas, indexed arrangements, logical progress, compaction, and bounded work explicit.
+`core/` is protocol-agnostic. It provides the generic substrate needed by any
+protocol built on canonical events:
 
-The design should borrow ideas that simplify this kernel. It should not import their full model unless doing so clearly reduces code and operational complexity. A good outcome is that selected projector families could later be lowered into Differential-style dataflows, while the default kernel remains small and auditable.
+- canonical event storage and table-row application,
+- admission by `event_id = BLAKE3(canonical_event_bytes)`,
+- dependency blocking with `blocked_by_event(blocked_by_event_id, event_id)`,
+- same-transaction unblocking when dependencies apply,
+- bounded ready-event processing,
+- actor scheduling and effect commit ordering,
+- fixed-width binary helpers for protocol codecs.
 
-Ideas to test:
+Core does not know connection, bootstrap, transit, sync ranges, workspaces,
+content, endpoint identity, TCP, or CLI command semantics. A different protocol
+should be able to reuse `core/` by providing its own event registry, actors,
+tables, IO modules, and CLI/app shell.
 
-- Facts/events are base collections.
-- Projectors are incremental transformations from input deltas and indexed context to output deltas.
-- Module table declarations include the keys and indexes needed to maintain reusable arrangements.
-- Dedupe is consolidation by deterministic key: event id, wire id, `(connection_id, event_id)`, or module-owned fact key.
-- Joins, semijoins, antijoins, distincts, counts, and reductions should be expressed structurally in module declarations when possible, not hidden behind opaque context scans.
-- Large cascades become bounded obligations with fuel/batch limits; the control loop reactivates them rather than recursively draining them.
-- Logical truth and physical storage are separate: deletion, expiry, revocation, and supersession are facts; purge and merge are physical compaction of data whose semantic replacement is already represented.
-- Pure deterministic work such as parse, signature verify, decrypt, hash, and canonical encode may run inline or as module actors, but its results are facts. External IO remains an effect boundary.
+The current code split follows that boundary:
 
-Performance rules from these systems:
+```
+src/core/
+  store.rs
+  blocking.rs
+  pipeline.rs
+  control_loop.rs
+  wire.rs
 
-- Do work proportional to input deltas and affected arrangements, not total stored facts.
-- Maintain hot indexes incrementally; do not rebuild negentropy trees, dependency caches, or unblock state at session time.
-- Batch where throughput matters, especially inbound admission, projection apply, outbox refill, and socket writes.
-- Bound every unit of runtime work by records, bytes, or time.
-- Keep compaction explicit and tunable so simulation can disable purge while production can merge or discard physical detail that is no longer semantically required.
+src/protocol/
+  event_modules/
+  inbound.rs
+  app/             // current protocol app shell
+  network.rs
+```
 
-# Components / Responsibility
+# Protocol
+
+`protocol/` is the current Topo protocol built on the reusable core. It owns
+all event families, domain actors, protocol-specific IO names, and CLI/app
+effects. A completely different protocol should be able to replace
+`protocol/` while reusing `core/`.
 
 **event_modules/** contains every protocol or domain behavior that can be
 expressed as events, projectors, commands, module-owned tables, and module
@@ -61,23 +59,25 @@ behavior. A built-out module owns its schema/read model next to its event type:
 this is the poc-7 `message` / `reaction` pattern and the poc-6
 `message.py` + `message.sql` pattern. Do not split "event type" and "tables"
 into separate conceptual homes; tables live with the module that owns the
-projection or queue. A family of event modules may also own shared tables and
-actors at the family root when those tables coordinate several leaf event
+projection or queue. A domain may also own shared tables and
+actors at the domain root when those tables coordinate several leaf event
 modules.
 
-Core imports `event_modules::Modules` only. `event_modules/mod.rs` is the
-single composition point that imports concrete module families and exposes the
-narrow registry surface used by the control loop, CLI, and tests. Kernel files
-call methods on `Modules`; they do not import `connection`, `sync`, `content`,
-or `identity` directly. The kernel does not own protocol flows. It wakes and
-runs actors, commits returned rows, admits returned events, and executes
-returned effects. Module actors interpret framed bytes, canonical events,
+`protocol/mod.rs` defines the current protocol composition object. That object
+owns protocol IO namespaces and the event-module registry.
+`protocol/event_modules/mod.rs` imports concrete protocol families and exposes the
+narrow registry surface used by the protocol shell and tests. `core/` talks to
+the protocol through generic traits implemented by the protocol composition
+object, such as event parse/project; it does not
+import concrete event families. The protocol shell calls through the protocol
+composition object and does not import `connection`, `sync`, `content`, or
+`identity` directly. Module actors interpret framed bytes, canonical events,
 queues, and route state.
 
 Suggested organization:
 
 ```
-src/event_modules/
+src/protocol/event_modules/
   content/
     message/
       types.rs
@@ -124,7 +124,7 @@ file per concern (`types.rs`, `codec.rs`, `projector.rs`, `commands.rs`,
 `tables.rs`, `queries.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a
 module is small enough that a single `.rs` file would suffice. `tables.rs` is
 where the module declares its projection tables, indexes, queues, cursors, and
-storage class. A family root may also contain `tables.rs`, `queries.rs`,
+storage class. A domain root may also contain `tables.rs`, `queries.rs`,
 `types.rs`, and `actor.rs` when it owns shared tables or an actor coordinating
 several leaf event modules. There is no generic `jobs/` dumping ground and no
 fake event module for an algorithm: `sync/actor.rs` may run negentropy over
@@ -142,7 +142,7 @@ This rule is in conscious tension with "let complexity earn length" in the docum
 **networking** All complex networking behavior including bootstrap,
 connection, transit, and sync is implemented in event modules: commands propose
 events, projectors write rows, module actors decide what to run next, and
-connection/transit modules wrap and unwrap transit blobs. Kernel IO modules
+connection/transit modules wrap and unwrap transit blobs. protocol IO modules
 only frame and move bytes to concrete transport targets. Connections are
 between two endpoints (daemons) and sync all data in all workspaces those two
 endpoints share. Every workspace-scoped event carries its own `workspace_id`;
@@ -154,39 +154,39 @@ alone identifies the local processing scope and there is no separate
 
 **ready_event_loop** is not a protocol subsystem. It is the default actor:
 admit facts, load context, call the owning module's projector, and apply rows.
-Most event modules use only this generic actor. Families with richer state,
-such as sync, add family-owned actors over family-owned queues and cursors.
+Most event modules use only this generic actor. Domains with richer state,
+such as sync, add domain-owned actors over domain-owned queues and cursors.
 
 **control_loop** is the single-writer actor scheduler. It claims bounded batches of table rows, dispatches to the owning actor, applies returned state writes atomically, admits returned events through the generic ready-event actor, and runs external effects.
 
 **state** is the explicit table-shaped substrate that projectors and actors observe. It is materialized from event-module table declarations and can be a database in production or an in-memory store in testing and simulation.
 
-**kernel_io/** contains protocol-agnostic IO modules such as TCP listener,
-reader, writer, and timer modules. IO modules create and drain IO queues; they
-do not interpret transit blobs or canonical event bytes. They can return effects
-against operating-system resources and rows/events against kernel-owned IO
-tables such as inbound bytes, outbound bytes, listener state, socket state, and
+**protocol IO** contains IO modules such as TCP listener, reader, writer, and
+timer modules. IO modules create and drain IO queues; they do not interpret
+transit blobs or canonical event bytes. They can return effects against
+operating-system resources and rows/events against protocol-owned IO tables
+such as inbound bytes, outbound bytes, listener state, socket state, and
 backoff state.
 
-**network** is a TCP-only kernel IO module family. It accepts module-produced
+**network** is a TCP-only protocol IO module family. It accepts module-produced
 `TransportSend { target, bytes }` effects, packs `bytes` into length-prefixed
 TCP frames, writes sockets, and records inbound bytes with origin metadata. It
 does not create or interpret transit blobs.
 
 **actors** are module-owned active components woken by queue rows, timers, IO
 readiness, or explicit CLI requests. An actor declares its wake sources, read
-set, and write set. The kernel uses those declarations to load bounded context
+set, and write set. Core uses those declarations to load bounded context
 and commit output; the actor owns the semantic decision. Use `wake` for
 scheduling and `run` for execution.
 
 The substrate pieces outside `event_modules` are deliberately narrow:
 
 ```
-control_loop/   // dispatch, transactions, bounded batches, effect execution
-state/          // catalog materialization, storage, migrations, snapshots
-kernel_io/      // protocol-agnostic IO loop modules and IO queues
-network/        // TCP bytes and socket ownership, under kernel_io
-sender/         // TransportSend effects -> TCP frame/write, under kernel_io
+core/control_loop.rs     // dispatch, transactions, bounded batches, effect execution
+core/store.rs            // catalog materialization, storage, migrations, snapshots
+protocol/network.rs      // TCP bytes and socket ownership
+protocol/inbound.rs      // protocol-specific frame admission handoff
+protocol/event_modules/  // protocol facts, projectors, tables, actors
 ```
 
 If behavior is protocol semantics expressible as
@@ -194,7 +194,7 @@ events/projectors/commands/tables/actors, it belongs under `event_modules`. If
 it owns process execution, IO, storage mechanics, or scheduling, it belongs
 outside.
 
-## State and Registry
+## Core State and Registry Interface
 
 State is the set of declared tables the control loop can read and update atomically:
 
@@ -236,18 +236,18 @@ event_modules/*/registry_meta.rs
   -> database / memory store schema
 ```
 
-The event family owns semantic meaning: what a row means, which projection
+The event domain owns semantic meaning: what a row means, which projection
 writes it, which indexes are required, which actors consume it, and whether it
 may be rebuilt. A leaf event module owns one event type's codec, dependencies,
-commands, projector, and leaf projection tables. A family root owns shared
+commands, projector, and leaf projection tables. A domain root owns shared
 tables and actors that coordinate several leaves. `state` owns mechanics:
 creating tables, applying migrations, opening transactions, inserting NewRows,
 deleting Purges, querying declared indexes, resetting transient rows on
 startup, and choosing durable vs memory storage.
 
-Boundary tables should follow the same rule where possible. `outbox` can be declared by the sender-facing module, `blocked_by_event` by the ready-event loop, schedule rows by the owning module or `kernel_io/timers`, and sync caches by the sync modules. The fewer central special tables, the better.
+Boundary tables should follow the same rule where possible. `outbox` can be declared by the sender-facing module, `blocked_by_event` by the ready-event loop, schedule rows by the owning module or `protocol/timers`, and sync caches by the sync modules. The fewer central special tables, the better.
 
-## Ready Event Loop
+## Core Ready-Event Interface
 
 **codec** is canonical event encoding and parsing. It is not necessarily network wire. A module's `codec.rs` defines `Event <-> CanonicalEventBytes`, the event type tag, field layout, dependency field declarations, signature and signer-family rules, and deterministic id rules. Canonical event layout is fixed-width per event type: once the type tag is known, the field layout and canonical byte length are known, though different event types may have different fixed lengths. Shared binary utilities handle primitive reads/writes, fixed-size ids, truncation checks, and trailing-byte checks so codecs read as format descriptions.
 
@@ -400,7 +400,7 @@ work item:
 
 Examples of work items that do not need codecs are timer-fired, socket-writable, CLI-command-entered, and internal-wakeup notifications. Once something is inserted into `events`, referenced by id, deduped, blocked, replayed, or projected like an event, it needs canonical bytes.
 
-## Control Loop
+## Core Actor Scheduler
 
 The control loop is the only always-running runtime. It owns:
 
@@ -438,7 +438,7 @@ Mathematically:
 Actor_i : Wake_i x Read_i(State) -> Delta_i(State) x Events x Effects
 ```
 
-The module registry gives the kernel an actor catalog:
+The module registry gives core an actor catalog:
 
 ```
 ActorSpec:
@@ -449,7 +449,7 @@ ActorSpec:
   run
 ```
 
-The kernel owns the mechanical sequence:
+Core owns the mechanical sequence:
 
 ```
 select wake
@@ -493,10 +493,10 @@ the caller owns whether those bytes are admitted as events or sent to transport.
 
 Actors are the active boundary. Projectors can only change rows, especially
 queue rows. Commands are pure construction/query helpers. Actors are the only
-event-module surface that can return IO effects; the kernel runner executes
+event-module surface that can return IO effects; the core runner executes
 those effects without knowing protocol meaning.
 
-The first POC kernel may run this inbound chain directly from the socket reader
+The first POC may run this inbound chain directly from the socket reader
 without first durably queuing `InboundBytes`. That is still an actor boundary:
 the socket reader only passes `(origin, bytes)` into the inbound actor, and
 event modules decide meaning and queue follow-on work. A durable
@@ -578,7 +578,7 @@ rows for that connection, skipping ids already in `present`. For each
 deterministic send event, the module loads the referenced canonical bytes,
 checks connection/workspace authority, resolves C to a current transport
 target, calls the transit wrap command, and returns
-`TransportSend { target, bytes }`. The kernel IO sender module packs those
+`TransportSend { target, bytes }`. The protocol IO sender module packs those
 bytes into TCP frames and writes the socket. After the socket accepts a complete
 frame, the control loop deletes the corresponding `outbox` rows and removes
 those ids from `present`. On send failure it removes ids from `present`, leaves
@@ -602,11 +602,11 @@ The control loop has no sync, bootstrap, auth, connection, dependency, or event-
 
 ## Network
 
-**transport** is a kernel IO module family for TCP byte I/O between network routes (listeners, socket cache, `[u32 length][bytes]` framing, addresses learned from invite/`observed_address`/incoming connections). `TransportSend { target, bytes }` is the only egress, where `target` is a concrete route such as `(ip, port)` or an existing socket id, not a `connection_id`. Inbound bytes enter an IO-owned inbound-bytes queue with origin `(ip, port, socket_id, observed endpoint if known)`; a durable inbound-bytes buffer is optional until replay/fairness requirements justify it. *Invariant: transport produces and interprets no transit bytes; if it sends bytes, those bytes were produced by an event module.*
+**transport** is a protocol IO module family for TCP byte I/O between network routes (listeners, socket cache, `[u32 length][bytes]` framing, addresses learned from invite/`observed_address`/incoming connections). `TransportSend { target, bytes }` is the only egress, where `target` is a concrete route such as `(ip, port)` or an existing socket id, not a `connection_id`. Inbound bytes enter an IO-owned inbound-bytes queue with origin `(ip, port, socket_id, observed endpoint if known)`; a durable inbound-bytes buffer is optional until replay/fairness requirements justify it. *Invariant: transport produces and interprets no transit bytes; if it sends bytes, those bytes were produced by an event module.*
 
 **connection** is an event module. A connection event references two endpoints and carries `shared_workspaces`. Each workspace entry's authority is established by the connection event's own dependencies and signature: deps point at endpoint/bootstrap authorization plus workspace capability events (workspace-membership grant, invite, etc.) that authorize the signer to bind that workspace to that connection, and the ready-event loop's standard signature/dep validation is what makes the entry trustworthy. Rotation, revocation, and expiry are further connection-related events with their own deps/sigs. The same module owns `connection_secrets`: globally-unique `connection_secret_id` → `(key, direction, connection_id, ttl)`, with separate inbound and outbound secrets per connection, each known only to the two endpoints.
 
-The connection module also owns the transit envelope as plain functions, not as a kernel concern (mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`):
+The connection module also owns the transit envelope as plain functions, not as a protocol runtime concern (mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`):
 
 - `connection.wrap_bootstrap(remote_endpoint_id, inner_events) -> TransitBlob`: encrypts to the endpoint public key. Used for connection establishment and connection-secret repair.
 - `connection.wrap(connection_id, inner_events) -> TransitBlob`: looks up the outbound secret for the connection, asserts every inner event's `workspace_id ∈ shared_workspaces(connection_id)`, pads to a size bucket, encrypts. Used for ordinary sync/control/event traffic.
@@ -624,108 +624,38 @@ inner_event_id=E)` and admits it through the control loop. The `SendEvent`
 projector only writes `outbox(connection_id, send_event_id)`.
 `connection/actor.rs` claims outbox rows, checks that E's `workspace_id` is in
 `shared_workspaces(C)`, resolves C to a current transport target, calls the
-transit wrap command, and returns `TransportSend { target, bytes }`. The kernel
-IO sender module packs those bytes into TCP frames and writes sockets. A
+transit wrap command, and returns `TransportSend { target, bytes }`. The
+protocol IO sender module packs those bytes into TCP frames and writes sockets. A
 slow route backs off its own target; other transport targets continue.
 *Invariant: every ordinary byte on the wire is the product of two independent
 workspace-membership checks (SendEvent projection + `connection.wrap`) plus a
 third symmetric check on the receiving side (`connection.unwrap`).*
 
-# Forking plan
+# Protocol source references
 
-poc-9 forks poc-7 at commit `c6f142e9` ("Simplify projection context loading", 2026-03-28) — the commit immediately before `56a9bc21` adopts iroh.
+Use poc-6 for the event-based networking shape. Its `events/network/` tree is
+the local reference for expressing connection establishment, bootstrap,
+observed/self addresses, sync-window facts, and transit-related facts as
+ordinary canonical events projected into tables. The translation target is not
+to copy poc-6 directly; it is to keep connection, bootstrap, transit, and route
+state in protocol event modules rather than in core runtime code.
 
-What poc-9 keeps from poc-7 (era E4–E5 substrate):
+Use poc-7 for sync behavior and user-facing scope. Its negentropy and
+dep-aware sync code are the local references for range comparison, have/need
+id exchange, dependency closure accounting, incremental dep caches, and the CLI
+commands/perf surfaces worth preserving. The translation target is to move that
+logic behind `protocol/event_modules/sync` actors and tables rather than keep a
+parallel sync engine.
 
-- pure-functional projectors + two-stage deletion (`b8669d31`)
-- event-module locality under `event_modules/` (`bd14af95`, `7ace636d`, `26ec8c6f`)
-- FieldSpec wire layout (`04bce8fc`)
-- `shared_event_index`, atomic hard purge, projection context query adapters
-- `runtime/state/shared` Option-D layout (`d90d083b`)
+The protocol should preserve useful poc-7 CLI functionality as black-box
+surfaces: account/workspace creation, invite/join, messaging, file transfer,
+large message sync, and cascade/dependency stress commands. Those commands are
+not core APIs; they are this protocol's public behavior and tests.
 
-What poc-9 throws out and replaces:
-
-- iroh (not yet in tree at fork point — bespoke QUIC + holepunch/intro/nat/upnp code physically present as deletion target / reference)
-- `runtime/sync_engine/` range-owned session machinery, multi-source partition scheduler, receive/suppression plumbing
-- `runtime/peering/` shared-daemon-connection orchestration
-- the heavy `verus-proofs/` real-proof tree (not landed at fork point)
-- ad-hoc per-event-type context-query adapters (see below)
-
-Connection model follows poc-6's `events/network/` (`connection`, `connection_ack`, `intro`, `negentropy`, `self_address`, `sync_window`, etc. as canonical events). This is a **deliberate reversal** of poc-7's stance — poc-6's `SIMPLIFICATION_FOR_RUST_POC.md` §2 explicitly said "Connection/sync state is protocol/runtime state, not canonical events." poc-9 rejects that rule in favor of putting sync/connection facts through the same ready-event loop as everything else.
-
-**Each step must align 100% to plan.md. No duplication of logic.** Every migration of a poc-7 surface — a projector, a state table, a runtime path, an RPC, a test — has to land at the principles described in this document, not somewhere halfway. Specifically:
-
-- **No two implementations of the same concern.** Connection / transit / sync are event-based via `event_modules/connection/` and `event_modules/sync/` — there is no parallel session/round/open machinery, no second transport, no parallel sync engine. If a poc-7 module is brought over, the legacy machinery it depended on must be retired in the same commit, not left to coexist as a "transitional path."
-- **No ad-hoc per-event-type loaders.** `get_context` returns the core default context: `{event, deps, labels, origin}`. There is one generic context-loading path. If a projector needs additional state, first declare it as a dependency or write it as a label upstream. Custom module context is allowed only through a declared module-owned context request/result for indexed read models such as negentropy response state; the core routes that opaque request/result and does not learn sync-specific fields.
-- **No legacy compatibility scaffolding.** This is a POC. Canonical event ids and wire layouts are not load-bearing across deployments — change them whenever the new model needs a field. Do not preserve old hashes via shadow columns, sentinel strings, thread-local bridges, or "still-needed" parallel tables. If the legacy reader is still around, retire the reader.
-- **No duplication via vocabulary drift.** "Session", "round", "open", "tenant" (as a per-row scope key), "recorded_by" (as anything other than a transient diagnostic) are forbidden in active code. Substrate-level work is queue-driven and event-driven; reads scope by `workspace_id` (or `endpoint_id` for endpoint-scoped events). One word per concept.
-- **Each step ends green.** A migration that compiles by leaving partial scaffolding in place is not done. The build, the substrate test bar, and the relevant CLI tests must all pass at the end of each step. Half-done work is rolled back, not left to a future agent.
-
-The bar is alignment, not progress. A commit that lands more code while leaving plan.md violated by an extra abstraction layer or a duplicate path is a regression.
-
-**Ready-event loop simplicity is non-negotiable.** Preserve the ready-event shape of this document — see `get_context` in the Ready Event Loop section for the strict contract. poc-7's projection-context-query adapters (one custom `context_loader` per event module) are the surface this fork is rejecting. The exception is a declared module context request/result for large module-owned indexes such as negentropy; that request is part of the module API, not a second core loader. To restate concretely, in poc-9:
-
-- dependencies come from schema metadata on flat fields (one mechanism for all event types),
-- labels are a small generic table `(event_id, label_type)` populated by projectors as the only cross-event signal,
-- `get_context(event)` always starts with `{event, deps, labels, origin}`,
-- if a projector "needs more state," that state should arrive as a declared dependency or a label unless it is a module-owned index that requires a declared custom context request,
-- custom context is justified for negentropy responders because the answer depends on summaries, bucket ids, presence checks, and event-byte lookup; it is not justified for ordinary connection/bootstrap validation.
-
-Note: in poc-9, labels replace custom gates for deletes, user/peer removal, and bootstrap-anchor events. poc-7 handles these with bespoke projector logic that queries side tables (deletion tombstones, removal sets, `invite_bootstrap_trust` / `pending_invite_bootstrap_trust`). poc-9 uses one uniform pattern instead:
-
-1. on the gating event (delete X, remove user U, supersede invite I, etc.), act on all *existing* matching events in one pass — purge their rows, drop their derived state, etc.,
-2. write a single label of the appropriate type (e.g. `deleted:X`, `removed_by:U`, `superseded:I`) so the gate is reified as one durable label row,
-3. for any *future* incoming event that would otherwise match, the projector reads the same `labels` set already in its context and rejects / blocks / no-ops.
-
-No per-event-type gate query, no "two-stage deletion" projector branch, no bootstrap-trust side tables consulted out-of-band — one mechanism (labels) carries every "this thing has been retired / superseded / revoked" signal, and projectors see it through the same default context.
-
-This keeps one control loop, one projector contract, one dependency mechanism, and one set of correctness invariants for everything in the system. Sync may add module-owned context for negentropy indexes, but connection and bootstrap should stay on first-level deps, labels, and origin metadata unless a future design proves those are insufficient.
-
-## Event types brought over
-
-We can in principle bring over every event module from poc-7 at `c6f142e9` (`src/event_modules/`), but starting minimal is better — each event type carried forward must be re-justified under the new context-and-labels rules and the new connection-as-event model. The plan is two waves.
-
-**Wave 1 (minimal — auth + messages, brought over from poc-7):**
-
-- `workspace` — workspace identity / metadata root
-- `user` — user identity bound to a workspace
-- `peer_secret` / `peer_shared` — legacy workspace-scoped device principal if retained from poc-7; endpoint identity lives in connection events and is what gates bootstrap/transport acceptance
-- `user_invite_shared` / `peer_invite_shared` — invite events for joining a workspace and linking a device
-- `invite_secret` — invite local secret (issuer side)
-- `invite_accepted` — accepted-workspace binding
-- `key_secret` / `key_shared` — group-key material
-- `encrypted` — encrypted-event wrapper
-- `message` — chat message
-- `reaction` — message reaction
-- `message_deletion` — message delete (ported under the new label-based gate pattern; drop the two-stage-deletion branch and the deletion-tombstone side table)
-- `removal` — user/peer removal (same: act on existing rows + write a `removed_by:U` label; future events check the label)
-
-This is the smallest set that exercises all the hard cases: signed identity chains, dependency blocking, encrypted events, invites/joins, deletions, and removals — i.e. everything we need to validate the context-and-labels rules end-to-end.
-
-**Wave 1 deferred from poc-7** (port later when the wave-1 surface is solid): `admin`, `key_request`, `key_rotation`, `tenant`, `bench_dep`, `file`, `file_slice`. `file` / `file_slice` are big enough to be their own milestone and aren't on the auth/messages critical path.
-
-**Translation rules for any poc-7 module brought over:**
-
-1. drop the per-module `context_loader` — declare deps as schema metadata on flat fields,
-2. replace any side-table gate read (deletion tombstones, removal sets, `invite_bootstrap_trust`) with a label read on the in-context `labels` set,
-3. drop any "two-stage" projector branch (e.g. message_deletion, removal) in favor of the act-on-existing + write-label + check-label pattern,
-4. drop `recorded_by` in favor of the event's own `workspace_id`.
-
-**Connection-related event types translated from poc-6:**
-
-poc-6's `events/network/` originals: `connection_request`, `connection_prekey`, `connection_prekey_shared`, `connection_ack`, `intro`, `negentropy`, `observed_address`, `self_address`, `server_connection`, `sync_window`.
-
-Translation note: in poc-6 these were workspace-scoped; in poc-9 connections are between two **endpoints** (daemons) and a single connection carries every workspace the two endpoints share. So:
-
-- `connection` (new, replaces `connection_request` + `connection_ack`): two `endpoint_id`s, agreed `shared_workspaces` set signed at establishment, rotated by further `connection` events. No `workspace_id`.
-- `connection_prekey` / `connection_prekey_shared`: keep the secret/shared split, but key material is per-endpoint-pair, not per-workspace.
-- `intro`: keep as endpoint-pair introduction; carries no workspace identity.
-- `observed_address` / `self_address`: keep as-is; both are endpoint-scoped already.
-- `negentropy`: keep as the sync-compare event, but it must name `(connection_id, workspace_id)` because reconciliation is per-workspace within a shared connection.
-- `sync_window`: keep as the per-workspace range/window selector; same `(connection_id, workspace_id)` scoping.
-- `server_connection`: defer until we add cloud-relay / always-on server endpoints.
-
-The transit envelope is *not* an event type in poc-9. It is `connection.wrap` / `connection.unwrap` — plain functions on the connection module, mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`. The encrypted bytes are opaque transit form with no id, no deps, no labels; only the inner canonical event bytes are events. See the Network section above. Every connection-related event listed here travels *inside* a wrapped frame.
+Every migration of a poc-6 or poc-7 surface must land directly on this design:
+one core substrate, one protocol module family for each domain, projectors that
+write rows only, commands that propose events only, and actors that own active
+queue/cursor work. No compatibility adapters or duplicate engines.
 
 # Appendix: Negentropy, dependencies, and dedupe
 
@@ -923,7 +853,7 @@ NeedId
   -> connection::actor.run
   -> connection.wrap(connection_id, inner_event)
   -> TransportSend { target: ip/port or socket_id, bytes: transit_blob }
-  -> kernel_io TCP frame/write
+  -> protocol TCP frame/write
   -> delete sent outbox rows
 ```
 

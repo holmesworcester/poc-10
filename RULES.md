@@ -1,4 +1,4 @@
-# Rewrite Rules
+# Rules
 
 ## Commands Live In Event Modules
 
@@ -25,7 +25,7 @@ Module actors are the active boundary. Projectors do not perform IO or emit
 effects. Event-module commands do not perform IO either; they construct
 canonical events or transport bytes from explicit input and context. Actors own
 dequeueing, fairness, bounded work, retries, calling commands, admitting
-proposed events, and returning IO effects for the kernel runner.
+proposed events, and returning IO effects for the core runner.
 
 The intended shape is:
 
@@ -45,11 +45,11 @@ event_modules/<domain>/<module>/projector.rs
 event_modules/<domain>/<module>/tables.rs
   module-owned projection tables, indexes, queues, cursors, and storage class
 
-event_modules/<domain>/<family>/actor.rs
-  optional actor over family-owned queues/cursors shared by child event modules
+event_modules/<domain>/actor.rs
+  optional actor over domain-owned queues/cursors shared by child event modules
 ```
 
-Leaf event modules own event types. Family roots may own shared `tables.rs`,
+Leaf event modules own event types. Domain roots may own shared `tables.rs`,
 `queries.rs`, `types.rs`, and `actor.rs`. Do not create an event-module
 directory for an algorithm unless it defines an actual canonical event type.
 
@@ -58,40 +58,46 @@ in `types.rs`. `codec.rs` is only for canonical format tags, field order,
 encode/decode, and event-specific parse validation. Commands belong in
 `commands.rs`.
 
-## Core Imports One Module Registry
+## Core Is Protocol-Agnostic
 
-Core code imports `event_modules::Modules`, not individual domain modules.
-`event_modules/mod.rs` is the only composition point that knows the concrete
-module list.
+Core code under `src/core` must not import `src/protocol` or concrete event
+families. `protocol/event_modules/mod.rs` is the protocol composition point
+that knows the concrete module list.
 
 Allowed in core:
 
 ```text
-use crate::event_modules::Modules;
-use topo::event_modules::Modules;
+use crate::core::pipeline::EventRegistry;
+use crate::core::store::Store;
 ```
 
 Not allowed in core:
 
 ```text
-use crate::event_modules::{connection, sync};
-use topo::event_modules::{connection, content, identity};
-crate::event_modules::connection::...
+use crate::protocol::event_modules::Modules;
+use crate::protocol::event_modules::{connection, sync};
+crate::protocol::event_modules::connection::...
 ```
 
-The kernel may call methods on `Modules`, pass `Modules` into pipeline/control
-loop functions, and move returned bytes/effects. It must not import concrete
-module namespaces to get work done.
+The protocol shell talks to the current protocol composition object, `Protocol`.
+`Protocol` owns the event-module registry (`Modules`) and any protocol IO
+namespaces. The shell may pass `Protocol` into core pipeline/control-loop
+functions through core traits such as `EventRegistry` and move returned
+bytes/effects. Core must not import concrete protocol namespaces to get work
+done.
 
-`pipeline.rs` is generic admission/apply plumbing. It must not branch on
-connection, transit, sync, response, or transport-target details. The module
-registry interprets framed bytes and returns canonical event bytes plus outgoing
-bytes/effects.
+`pipeline.rs` is the core's generic ready-event actor: admit canonical bytes,
+check dependencies, parse new events, call projectors, and apply rows. It must
+not branch on connection, transit, sync, response, or transport-target details.
+The module registry parses and projects canonical event bytes. Framed byte
+handling lives under `src/protocol`.
 
 `store.rs` is generic storage mechanics. It should expose table rows, event
 status, dependency waits, and generic event-id partitions. It must not expose
 sync buckets, connection/bootstrap schema, or content payload semantics as
-storage concepts.
+storage concepts. Module `tables.rs` files declare whether each table is
+durable, memory, or temp; core provides the requested storage class without
+learning the table's protocol meaning.
 
 ## Event Writes Return Event IDs
 
@@ -164,7 +170,7 @@ All state mutation still goes through canonical events and projectors.
 
 ## Event Modules Use The Clean Contract
 
-Event modules must target the new kernel contract directly. Do not introduce
+Event modules must target the new core/protocol contract directly. Do not introduce
 compatibility adapters for old `state`, `runtime`, queue, or transport APIs.
 If an existing module depends on old core machinery, refactor the module until
 the dependency is gone.
@@ -183,8 +189,8 @@ event module =
 ```text
 event family =
   child event modules
-  shared tables/queries/types where needed
-  actor where active queued/cursor work spans child modules
+  shared domain tables/queries/types where needed
+  domain actor where active queued/cursor work spans child modules
 ```
 
 The universal contract is:
@@ -246,9 +252,9 @@ batch framing is not itself an open-ended canonical event schema.
 Strict checks should stay true:
 
 ```text
-rg "crate::runtime" src/event_modules
-rg "crate::state" src/event_modules
-rg "rusqlite|Transaction" src/event_modules
+rg "crate::runtime" src/protocol/event_modules
+rg "crate::state" src/protocol/event_modules
+rg "rusqlite|Transaction" src/protocol/event_modules
 ```
 
 These should return no matches unless a match is explicitly documented as a
@@ -257,9 +263,9 @@ data-only schema declaration.
 ## Sync And Connection Are Event Modules
 
 Sync and connection protocol logic must not be custom code hidden in the CLI,
-network transport, runtime loop, or kernel. It must be expressed as properly
+network transport, runtime loop, or core. It must be expressed as properly
 decoupled event modules along the same lines as the structured modules in
-`poc-8/src/event_modules`.
+`poc-8/src/protocol/event_modules`.
 
 This includes:
 
@@ -271,7 +277,7 @@ This includes:
 - dep-aware negentropy events and tree/cache maintenance
 - request/response behavior that can be represented as event emission
 
-The kernel may:
+Core may:
 
 - admit canonical events
 - compute event ids
@@ -284,12 +290,12 @@ The kernel may:
 - schedule bounded work
 
 The first POC may process inbound frames reactively without a durable inbound
-queue. The socket reader hands `(origin, bytes)` to the kernel pipeline; the
+queue. The socket reader hands `(origin, bytes)` to the core pipeline; the
 pipeline applies module projectors immediately and returns module-produced
 outgoing bytes. This shortcut is allowed only while the socket reader remains
 semantic-free and recurring sync can recreate lost transient control traffic.
 
-The kernel must not:
+Core must not:
 
 - contain a bespoke sync coordinator
 - contain connection protocol state machines
@@ -297,7 +303,7 @@ The kernel must not:
   which events are authorized on a connection
 - inspect sync ranges or negentropy trees except through module-declared tables
 - contain negentropy, compare/have/need, or sync-range vocabulary in
-  `pipeline.rs`, `control_loop.rs`, or `network.rs`
+  `core/pipeline.rs`, `core/control_loop.rs`, or `protocol/network.rs`
 - special-case have/need/compare behavior outside event modules
 - bypass event admission for protocol messages
 - use side-channel protocol messages when an event can express the fact
@@ -329,7 +335,7 @@ is queued only through deterministic connection-scoped protocol events, usually
 created by a sync actor after projectors write compare/need/range queue rows. The
 outbox dedupes these events by `(connection_id, event_id)`. The
 connection/transit module drains the outbox and creates transit blobs; the
-kernel only frames and writes those bytes.
+protocol network code only frames and writes those bytes.
 
 `TransportSend.target` is a transport route, not a semantic connection id. Use
 an address or socket target such as `(ip, port)` or `socket_id`. If a module
@@ -401,7 +407,7 @@ Use these rules:
 - Static boundary tests are allowed. They may scan source text or public module
   structure to enforce architectural rules, but they are not functional proof.
 - Harnesses may create temp directories, spawn processes, choose ports, and
-  assert output. They must not create kernel tables or apply domain semantics.
+  assert output. They must not create core tables or apply domain semantics.
 - Toy adapters are allowed only for small unit tests that name the fake
   explicitly, such as projector math or scheduler ordering. They are not
   acceptable evidence for end-to-end behavior.
@@ -415,7 +421,7 @@ Use these rules:
 
 CLI behavior and CLI tests should express product contracts, not core
 implementation contracts. The CLI surface should be stable enough that the old
-core and new kernel can both satisfy the same user-visible tests while internal
+core and new core/protocol split can both satisfy the same user-visible tests while internal
 queues, projection phases, and storage layout change underneath.
 
 CLI tests should cover:
@@ -434,10 +440,10 @@ CLI tests must not depend on:
 - projection phase names
 - exact sync round internals
 - whether an event became ready through one queue or another
-- whether storage is backed by the old state modules or the new kernel
+- whether storage is backed by the old state modules or the new core store
 
 The CLI test harness may spawn processes, allocate temp directories, choose
-ports, and assert command output. It must not create kernel tables, insert rows,
+ports, and assert command output. It must not create core tables, insert rows,
 copy databases, simulate sync, or decode private storage layout.
 
 Prefer stable machine-readable CLI outputs for tests where ambiguity matters:
@@ -452,7 +458,7 @@ topo daemon status --json
 ```
 
 The success criterion is that realistic CLI tests can run unchanged against the
-old core and the replacement kernel.
+old core and the replacement core/protocol implementation.
 
 ## Fresh Minimal Rewrite Guardrails
 
@@ -469,56 +475,58 @@ topo --db PATH sync
 A read-only `count`/`status` command is allowed solely so black-box tests can
 assert eventual convergence and measure sync-start to all-counted time.
 
-Keep the kernel boring:
+Keep core boring:
 
-- `network` owns TCP, frame boundaries, connection attempts, and byte IO only.
-- `store` owns durable bytes, generic module-owned rows, and generic event-set
+- `protocol/network.rs` owns TCP, frame boundaries, connection attempts, and byte IO only.
+- `core/store.rs` owns durable bytes, generic module-owned rows, and generic event-set
   reads/writes only.
-- `event_modules/content` owns content event construction, codec, and projection.
-- `event_modules/sync` owns all negentropy, compare/have/need/range decisions,
+- `protocol/event_modules/content` owns content event construction, codec, and projection.
+- `protocol/event_modules/sync` owns all negentropy, compare/have/need/range decisions,
   connection-scoped sync events, and sync actors.
-- `event_modules/connection` owns endpoint identity, bootstrap/connection
+- `protocol/event_modules/connection` owns endpoint identity, bootstrap/connection
   events, established-connection rows, and the route facts needed to reach an
   endpoint.
 
-The kernel should be a pleasure to read: small files, direct control flow,
+Core should be a pleasure to read: small files, direct control flow,
 plain names, and no hidden protocol cleverness. A reader should understand the
-kernel as an executor, durable byte store, and TCP byte mover without learning
-the content or sync protocols. All real domain and protocol logic belongs in
-event modules.
+core as an executor and durable byte store without learning the content or sync
+protocols. Protocol IO belongs under `src/protocol`; all real domain and
+protocol logic belongs in protocol event modules.
 
-Core kernel files must not own connection, peer, or bootstrap schema. If a
+Core files must not own connection, peer, or bootstrap schema. If a
 protocol needs a durable or transient table, the owning event module declares
 the table and writes it through generic storage/projector output.
 
 Do not put sync protocol vocabulary or decisions in core files. In particular,
-`store`, `network`, and CLI glue may not decide what a negentropy range means,
-when to split a range, which ids are needed, or which events satisfy a sync
-request. They may only call event-module functions and move returned bytes.
+`core/store.rs`, `core/pipeline.rs`, and `core/control_loop.rs` may not decide
+what a negentropy range means, when to split a range, which ids are needed, or
+which events satisfy a sync request. Protocol shell code may only call
+event-module functions and move returned bytes.
 
-Do not put transit wrapping in `network`, `store`, CLI glue, or sync modules.
-Connection/transit modules create transit blobs; the kernel creates only generic
-TCP frames around module-produced bytes.
+Do not put transit wrapping in `protocol/network.rs`, `core/store.rs`, CLI
+glue, or sync modules. Connection/transit modules create transit blobs;
+protocol network code creates only generic TCP frames around module-produced
+bytes.
 
 Event modules stay directory-shaped:
 
 ```text
-event_modules/<name>/commands.rs
-event_modules/<name>/codec.rs
-event_modules/<name>/types.rs
-event_modules/<name>/projector.rs
-event_modules/<name>/tables.rs
-event_modules/<name>/queries.rs   # only when needed
-event_modules/<name>/mod.rs
+protocol/event_modules/<name>/commands.rs
+protocol/event_modules/<name>/codec.rs
+protocol/event_modules/<name>/types.rs
+protocol/event_modules/<name>/projector.rs
+protocol/event_modules/<name>/tables.rs
+protocol/event_modules/<name>/queries.rs   # only when needed
+protocol/event_modules/<name>/mod.rs
 ```
 
-Family roots may additionally contain:
+Domain roots may additionally contain:
 
 ```text
-event_modules/<family>/actor.rs
-event_modules/<family>/tables.rs
-event_modules/<family>/queries.rs
-event_modules/<family>/types.rs
+protocol/event_modules/<domain>/actor.rs
+protocol/event_modules/<domain>/tables.rs
+protocol/event_modules/<domain>/queries.rs
+protocol/event_modules/<domain>/types.rs
 ```
 
 Never create `event.rs`.

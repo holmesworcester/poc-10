@@ -1,4 +1,5 @@
-use topo::{event_modules::Modules, pipeline, store::Store};
+use topo::core::{pipeline, store::Store};
+use topo::protocol::event_modules::Modules;
 
 #[test]
 fn command_admission_returns_event_ids_for_chaining() {
