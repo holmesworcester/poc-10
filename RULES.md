@@ -21,7 +21,7 @@ the rule is still prose/review only.
 | Workers live at the owning scope and expose one obvious entrypoint. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`, `worker_files_export_only_run_as_public_entrypoint`; no typed worker trait/catalog yet. |
 | Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs); static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
 | `protocol/app` is forbidden; CLI behavior is scoped. | static + partial | `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`; `src/protocol/cli.rs` still contains temporary cross-scope CLI orchestration for the synchronous POC. |
-| CLI scenario/check/expect definitions live beside relevant event modules. | partial | Documented in [plan.md](plan.md) and checked indirectly by the app file allowlist; no scenario-runner type or migrated scenario definitions yet. |
+| CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
 | Network is TCP framing only. | static | `protocol_network_remains_tcp_framing_only`, sync transport checks. |
 | Table names are typed and declared in `tables.rs`. | typed + static | [TableName](src/core/store.rs), `table_names_are_declared_in_tables_files`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only. | static | `event_module_queries_are_read_only`. |
@@ -99,6 +99,10 @@ The following rules should stay mechanically enforced where practical:
   fields.
 - `protocol/network.rs` remains TCP framing only, and protocol worker files do
   not import concrete event families directly.
+- `tests/cli_harness` stays process-only. It may know how to build and run the
+  `topo` binary, allocate temp db paths, reserve ports, and expose stdout/stderr
+  helpers. It must not know command names, global flag policy, invite syntax,
+  retry policy, output keys, or expected results.
 - Source tests reject fake-crypto terminology that would let placeholder crypto
   be named as real protection.
 
@@ -194,6 +198,24 @@ command semantics, help text, post-write queries, or formatting.
 CLI scenario definitions should live beside the closest relevant event module
 or domain root. A generic integration runner may execute those scenarios through
 the real CLI and check expected output.
+
+The intended `cli_test.rs` contract is scoped:
+
+- `event_modules/<domain>/<event>/cli_test.rs` covers the black-box CLI behavior
+  for one leaf event module: command params, created event ids, projection
+  visibility, validation failures, and output formatting for that module.
+- `event_modules/<domain>/cli_test.rs` covers workflows spanning child modules in
+  the same domain, such as invite/bootstrap/connection setup or sync request /
+  response behavior.
+- Protocol-level CLI tests cover cross-domain scenarios only, such as multiple
+  endpoints talking over real TCP.
+
+At every scope, the test file owns its parameters and expectations. It may define
+small local typed helpers for that scope, but the shared harness remains a
+minimal process runner. If a generic scenario type is introduced later, it
+should be data-only: full argv, setup resources, an optional timeout, and a
+checker function over stdout/stderr/status. It must not encode Topo command
+semantics in the harness.
 
 Crux stays isolated in `core/crux_runner.rs`. If a future UI/runtime wants Crux,
 it can use the core runner without introducing `protocol/app`, protocol

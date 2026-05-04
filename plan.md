@@ -244,6 +244,26 @@ domain root, not in the app shell. A generic scenario runner can still execute
 the real `topo` binary and real TCP; the scenario's setup, command sequence,
 and expected output stay local to the behavior being specified.
 
+`cli_test.rs` follows the same scope rule as `cli.rs`. A leaf event module test
+owns scenarios for that event type; a domain-root test owns workflows spanning
+its child event modules; protocol-level tests are only for cross-domain
+end-to-end behavior. The shared CLI harness is deliberately uninteresting:
+build/run the binary, allocate temp dbs and ports, capture output, and nothing
+else. Command names, argv construction, invite editing, retries, polling, output
+keys, and expected results belong to the scoped test file. If we add a generic
+scenario type, it should be a small data contract like:
+
+```
+CliScenario {
+  name,
+  setup,
+  steps: [argv + optional timeout + expect(stdout, stderr, status)]
+}
+```
+
+The scenario type must not know Topo command semantics; it only standardizes how
+scoped tests submit params and checks to the black-box runner.
+
 The substrate pieces outside `event_modules` are deliberately narrow:
 
 ```

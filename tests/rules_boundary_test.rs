@@ -449,6 +449,37 @@ fn cli_files_live_with_event_modules_or_the_protocol_shell() {
 }
 
 #[test]
+fn cli_harness_is_process_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = source_text(&root.join("tests/cli_harness/mod.rs"));
+    let forbidden = [
+        "--db",
+        "\"invite\"",
+        "\"connect\"",
+        "\"generate\"",
+        "\"sync\"",
+        "\"count\"",
+        "topo://",
+        "start_listener",
+        "connect_with_",
+        "replace_invite",
+        "assert_eventually_count",
+        "connection_count",
+        "connection_event_count",
+    ];
+    let violations = forbidden
+        .into_iter()
+        .filter(|needle| text.contains(needle))
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "tests/cli_harness must stay process-only; scenario files own command params, retries, invite syntax, output keys, and expected results:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn core_does_not_import_protocol() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let core_files = rust_files(&root.join("src/core"));

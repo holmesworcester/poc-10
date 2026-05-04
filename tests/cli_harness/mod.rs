@@ -4,22 +4,16 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
-use std::thread;
-use std::time::{Duration, Instant};
 
-pub fn topo(db: &str, args: &[&str]) -> Output {
+pub fn topo(args: &[&str]) -> Output {
     Command::new(topo_bin())
-        .arg("--db")
-        .arg(db)
         .args(args)
         .output()
         .expect("run topo")
 }
 
-pub fn spawn_topo(db: &str, args: &[&str]) -> Child {
+pub fn spawn_topo(args: &[&str]) -> Child {
     Command::new(topo_bin())
-        .arg("--db")
-        .arg(db)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -92,131 +86,6 @@ pub fn free_port() -> u16 {
 
 pub fn temp_db(dir: &tempfile::TempDir, name: &str) -> String {
     dir.path().join(name).to_string_lossy().to_string()
-}
-
-pub fn start_listener(db: &str, port: u16, accept: usize) -> Child {
-    spawn_topo(
-        db,
-        &[
-            "sync",
-            "--listen",
-            "127.0.0.1",
-            &port.to_string(),
-            "--accept",
-            &accept.to_string(),
-        ],
-    )
-}
-
-pub fn invite(db: &str, port: u16) -> String {
-    invite_with_addr(db, &format!("127.0.0.1:{port}"))
-}
-
-pub fn invite_with_addr(db: &str, addr: &str) -> String {
-    let out = assert_success(topo(db, &["invite", "--public-addr", addr]));
-    out.lines()
-        .find(|line| line.starts_with("topo://invite/"))
-        .unwrap_or_else(|| panic!("missing invite link in output:\n{out}"))
-        .to_string()
-}
-
-pub fn connect_with_retry(db: &str, invite: &str) -> String {
-    let mut last = String::new();
-    for _ in 0..200 {
-        let output = connect_with_invite(db, invite);
-        if output.status.success() {
-            return stdout(&output);
-        }
-        last = stderr(&output);
-        thread::sleep(Duration::from_millis(50));
-    }
-    panic!("connect never succeeded: {last}");
-}
-
-pub fn connect_with_invite(db: &str, invite: &str) -> Output {
-    topo(db, &["connect", invite])
-}
-
-pub fn connect_with_invite_after_listener(db: &str, invite: &str) -> Output {
-    let mut last = None;
-    for _ in 0..200 {
-        let output = connect_with_invite(db, invite);
-        if output.status.success() || !stderr(&output).contains("open tcp stream") {
-            return output;
-        }
-        last = Some(output);
-        thread::sleep(Duration::from_millis(50));
-    }
-    last.expect("connect attempted")
-}
-
-pub fn replace_invite_private_key(link: &str, private_key_hex: &str) -> String {
-    replace_invite_part(link, "INVITE_PRIVKEY", private_key_hex)
-}
-
-pub fn rewrite_invite_address(link: &str, addr: &str) -> String {
-    replace_invite_part(link, "ADDRESS", &addr.replace(':', "_"))
-}
-
-fn replace_invite_part(link: &str, label: &str, value: &str) -> String {
-    let prefix = format!("{label}.");
-    link.split('/')
-        .map(|part| {
-            if part.starts_with(&prefix) {
-                format!("{prefix}{value}")
-            } else {
-                part.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-pub fn generate(db: &str, count: usize, size: usize) -> String {
-    assert_success(topo(
-        db,
-        &["generate", &count.to_string(), &size.to_string()],
-    ))
-}
-
-pub fn sync(db: &str) -> String {
-    assert_success(topo(db, &["sync"]))
-}
-
-pub fn count(db: &str) -> usize {
-    let out = assert_success(topo(db, &["count"]));
-    line_value(&out, "events")
-        .parse()
-        .expect("parse event count")
-}
-
-pub fn connection_count(db: &str) -> usize {
-    let out = assert_success(topo(db, &["count"]));
-    line_value(&out, "connections")
-        .parse()
-        .expect("parse connection count")
-}
-
-pub fn connection_event_count(db: &str) -> usize {
-    let out = assert_success(topo(db, &["count"]));
-    line_value(&out, "connection_events")
-        .parse()
-        .expect("parse connection event count")
-}
-
-pub fn assert_eventually_count(db: &str, expected: usize, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        let actual = count(db);
-        if actual == expected {
-            return;
-        }
-        assert!(
-            start.elapsed() < timeout,
-            "event count did not reach {expected}; actual={actual}"
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
 }
 
 pub fn line_value(output: &str, key: &str) -> String {

@@ -9,14 +9,19 @@ fn cascade_cli_blocks_then_unblocks_10k_over_real_commands() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "cascade.db");
 
-    let staged = assert_success(topo(&db, &["generate-deps", "10000", "10"]));
+    let staged = assert_success(topo(&["--db", &db, "generate-deps", "10000", "10"]));
     assert_eq!(line_value(&staged, "staged_events"), "10000");
     assert_eq!(line_value(&staged, "deps_per_event"), "10");
     assert_eq!(line_value(&staged, "dep_edges"), "99945");
-    assert_eq!(count(&db), 0, "staged fixtures must be local-only");
+    let status = assert_success(topo(&["--db", &db, "count"]));
+    assert_eq!(
+        line_value(&status, "events"),
+        "0",
+        "staged fixtures must be local-only"
+    );
 
     let started = Instant::now();
-    let replayed = assert_success(topo(&db, &["replay-deps-reverse"]));
+    let replayed = assert_success(topo(&["--db", &db, "replay-deps-reverse"]));
     let elapsed = started.elapsed();
 
     assert_eq!(line_value(&replayed, "replayed_events"), "10000");
@@ -26,7 +31,7 @@ fn cascade_cli_blocks_then_unblocks_10k_over_real_commands() {
     assert_eq!(line_value(&replayed, "blocked_events"), "0");
     assert_eq!(line_value(&replayed, "blocked_edges"), "0");
 
-    let status = assert_success(topo(&db, &["count"]));
+    let status = assert_success(topo(&["--db", &db, "count"]));
     assert_eq!(line_value(&status, "events"), "10000");
     assert_eq!(line_value(&status, "applied_events"), "10000");
     assert_eq!(line_value(&status, "blocked_events"), "0");
@@ -44,11 +49,11 @@ fn cascade_cli_blocks_then_unblocks_50k_over_real_commands() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "cascade-50k.db");
 
-    let staged = assert_success(topo(&db, &["generate-deps", "50000", "10"]));
+    let staged = assert_success(topo(&["--db", &db, "generate-deps", "50000", "10"]));
     assert_eq!(line_value(&staged, "staged_events"), "50000");
 
     let started = Instant::now();
-    let replayed = assert_success(topo(&db, &["replay-deps-reverse"]));
+    let replayed = assert_success(topo(&["--db", &db, "replay-deps-reverse"]));
     let elapsed = started.elapsed();
 
     assert_eq!(line_value(&replayed, "replayed_events"), "50000");

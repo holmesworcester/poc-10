@@ -1,5 +1,7 @@
 mod cli_harness;
 
+use std::process::{Child, Output};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use cli_harness::*;
@@ -40,6 +42,117 @@ fn sync_converges_over_real_tcp() {
         "black_box_sync count={event_count} size={event_size} elapsed_ms={} events_per_s={events_per_second:.0} MiB_per_s={mib_per_second:.2}",
         elapsed.as_millis()
     );
+}
+
+fn start_listener(db: &str, port: u16, accept: usize) -> Child {
+    let port = port.to_string();
+    let accept = accept.to_string();
+    spawn_topo(&[
+        "--db",
+        db,
+        "sync",
+        "--listen",
+        "127.0.0.1",
+        &port,
+        "--accept",
+        &accept,
+    ])
+}
+
+fn invite(db: &str, port: u16) -> String {
+    let addr = format!("127.0.0.1:{port}");
+    let out = assert_success(topo(&["--db", db, "invite", "--public-addr", &addr]));
+    out.lines()
+        .find(|line| line.starts_with("topo://invite/"))
+        .unwrap_or_else(|| panic!("missing invite link in output:\n{out}"))
+        .to_string()
+}
+
+fn connect_with_retry(db: &str, invite: &str) -> String {
+    let mut last = String::new();
+    for _ in 0..200 {
+        let output = connect_with_invite(db, invite);
+        if output.status.success() {
+            return stdout(&output);
+        }
+        last = stderr(&output);
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("connect never succeeded: {last}");
+}
+
+fn connect_with_invite(db: &str, invite: &str) -> Output {
+    topo(&["--db", db, "connect", invite])
+}
+
+fn connect_with_invite_after_listener(db: &str, invite: &str) -> Output {
+    let mut last = None;
+    for _ in 0..200 {
+        let output = connect_with_invite(db, invite);
+        if output.status.success() || !stderr(&output).contains("open tcp stream") {
+            return output;
+        }
+        last = Some(output);
+        thread::sleep(Duration::from_millis(50));
+    }
+    last.expect("connect attempted")
+}
+
+fn replace_invite_private_key(link: &str, private_key_hex: &str) -> String {
+    replace_invite_part(link, "INVITE_PRIVKEY", private_key_hex)
+}
+
+fn replace_invite_part(link: &str, label: &str, value: &str) -> String {
+    let prefix = format!("{label}.");
+    link.split('/')
+        .map(|part| {
+            if part.starts_with(&prefix) {
+                format!("{prefix}{value}")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn generate(db: &str, count: usize, size: usize) -> String {
+    let count = count.to_string();
+    let size = size.to_string();
+    assert_success(topo(&["--db", db, "generate", &count, &size]))
+}
+
+fn sync(db: &str) -> String {
+    assert_success(topo(&["--db", db, "sync"]))
+}
+
+fn count(db: &str) -> usize {
+    let out = assert_success(topo(&["--db", db, "count"]));
+    line_value(&out, "events")
+        .parse()
+        .expect("parse event count")
+}
+
+fn connection_count(db: &str) -> usize {
+    let out = assert_success(topo(&["--db", db, "count"]));
+    line_value(&out, "connections")
+        .parse()
+        .expect("parse connection count")
+}
+
+fn assert_eventually_count(db: &str, expected: usize, timeout: Duration) {
+    let start = Instant::now();
+    loop {
+        let actual = count(db);
+        if actual == expected {
+            return;
+        }
+        assert!(
+            start.elapsed() < timeout,
+            "event count did not reach {expected}; actual={actual}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -197,7 +310,8 @@ fn invited_alice_bob_and_carol_sync_but_uninvited_mallory_cannot_connect() {
         elapsed.as_millis()
     );
 
-    let no_invite_connect = topo(&mallory, &["connect", &format!("127.0.0.1:{bob_port}")]);
+    let target = format!("127.0.0.1:{bob_port}");
+    let no_invite_connect = topo(&["--db", &mallory, "connect", &target]);
     assert!(
         !no_invite_connect.status.success(),
         "mallory unexpectedly connected with port only:\n{}",
