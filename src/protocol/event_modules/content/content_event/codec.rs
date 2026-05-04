@@ -1,4 +1,4 @@
-use crate::core::store::{EventRecord, EventScope};
+use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 
 use super::types::ContentEvent;

@@ -1,6 +1,6 @@
-use crate::core::store::EventId;
 use crate::protocol::event_modules::connection::types::ConnectionId;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
+use crate::protocol::event_modules::types::EventId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AckEvent {

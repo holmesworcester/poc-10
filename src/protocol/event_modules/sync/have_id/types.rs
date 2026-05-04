@@ -1,4 +1,4 @@
-use crate::core::store::EventId;
+use crate::protocol::event_modules::types::EventId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HaveIdEvent {

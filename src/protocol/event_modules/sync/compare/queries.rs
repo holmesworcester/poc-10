@@ -1,4 +1,6 @@
-use crate::core::store::{EventId, Store};
+use crate::core::store::Store;
+use crate::protocol::event_modules::tables as event_tables;
+use crate::protocol::event_modules::types::EventId;
 
 use super::types::{BucketSummary, BUCKETS};
 
@@ -29,8 +31,7 @@ impl ReadContext for Store {
 
 pub fn summary(store: &Store) -> Result<[BucketSummary; BUCKETS], String> {
     let mut summary = [BucketSummary::default(); BUCKETS];
-    for header in store
-        .event_index_entries()
+    for header in event_tables::event_index_entries(store)
         .map_err(|err| format!("load event headers: {err}"))?
     {
         let bucket = &mut summary[usize::from(header.partition)];
@@ -41,21 +42,17 @@ pub fn summary(store: &Store) -> Result<[BucketSummary; BUCKETS], String> {
 }
 
 pub fn ids_in_bucket(store: &Store, bucket: u8) -> Result<Vec<EventId>, String> {
-    store
-        .event_ids_in_partition(bucket)
+    event_tables::event_ids_in_partition(store, bucket)
         .map_err(|err| format!("load bucket ids: {err}"))
 }
 
 pub fn has_event(store: &Store, event_id: &EventId) -> Result<bool, String> {
-    store
-        .has_shared_event(event_id)
+    event_tables::has_shared_event(store, event_id)
         .map_err(|err| format!("check event presence: {err}"))
 }
 
 pub fn event_byte(store: &Store, id: &EventId) -> Result<Option<Vec<u8>>, String> {
-    store
-        .shared_event_bytes(id)
-        .map_err(|err| format!("load event bytes: {err}"))
+    event_tables::shared_event_bytes(store, id).map_err(|err| format!("load event bytes: {err}"))
 }
 
 fn fingerprint_id(id: &EventId) -> [u8; 32] {

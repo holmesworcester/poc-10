@@ -3,8 +3,9 @@ use std::str::FromStr;
 
 use crate::core::store::{Store, TableName, TableRow};
 
-const OUTBOUND_TABLE: TableName = TableName::new("core.network.outbound");
-const INBOUND_TABLE: TableName = TableName::new("core.network.inbound");
+pub const OUTBOUND_TABLE: TableName = TableName::new("core.network.outbound");
+pub const INBOUND_TABLE: TableName = TableName::new("core.network.inbound");
+pub const TABLES: &[TableName] = &[OUTBOUND_TABLE, INBOUND_TABLE];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetworkTarget {

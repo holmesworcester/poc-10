@@ -10,6 +10,7 @@ use crate::protocol::event_modules::connection::cli::{
 };
 use crate::protocol::event_modules::content::cli::GenerateSummary;
 use crate::protocol::event_modules::sync::cli::SyncSummary;
+use crate::protocol::event_modules::tables as event_tables;
 use crate::protocol::event_modules::test_events::event_with_deps::cli::{
     EventWithDepsReplaySummary, EventWithDepsStageSummary,
 };
@@ -252,8 +253,7 @@ pub fn run_replay_event_with_deps_reverse(
     )
     .map_err(|err| format!("admit reverse event_with_deps: {err}"))?;
 
-    let blocked_after_reverse = store
-        .status_counts()
+    let blocked_after_reverse = event_tables::status_counts(store)
         .map_err(|err| format!("count blocked reverse events: {err}"))?
         .blocked;
 
@@ -272,8 +272,7 @@ pub fn run_replay_event_with_deps_reverse(
         },
     )
     .map_err(|err| format!("drain event_with_deps replay: {err}"))?;
-    let final_counts = store
-        .status_counts()
+    let final_counts = event_tables::status_counts(store)
         .map_err(|err| format!("count event_with_deps replay statuses: {err}"))?;
 
     Ok(EventWithDepsReplaySummary {
@@ -290,17 +289,13 @@ pub fn run_replay_event_with_deps_reverse(
 }
 
 pub fn run_count(store: &Store, protocol: &Protocol) -> Result<Vec<String>, String> {
-    let events = store
-        .event_count()
-        .map_err(|err| format!("count events: {err}"))?;
-    let payload_bytes = store
-        .body_bytes()
-        .map_err(|err| format!("count bytes: {err}"))?;
+    let events = event_tables::event_count(store).map_err(|err| format!("count events: {err}"))?;
+    let payload_bytes =
+        event_tables::body_bytes(store).map_err(|err| format!("count bytes: {err}"))?;
     let connections = protocol.modules().connection_count(store)?;
     let connection_events = protocol.modules().connection_event_count(store)?;
-    let statuses = store
-        .status_counts()
-        .map_err(|err| format!("count event statuses: {err}"))?;
+    let statuses =
+        event_tables::status_counts(store).map_err(|err| format!("count event statuses: {err}"))?;
     Ok(CountSummary {
         events,
         payload_bytes,

@@ -14,6 +14,8 @@ the rule is still prose/review only.
 | Projectors return row-shaped output only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/protocol/event_modules/worker.rs), `projection_output_contains_rows_and_labels_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
 | Core is protocol-agnostic queue/storage support. | static | `core_does_not_import_protocol`, `core_does_not_own_protocol_worker_or_wire_codec`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `event_modules_worker_has_no_domain_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
 | Core stays small and named. | static | `core_file_set_stays_small_and_named`. |
+| Core store is a row substrate, not a protocol fact store. | typed + static | [TableName](src/core/store.rs), [TableRow](src/core/store.rs), `core_store_is_row_only_not_protocol_fact_storage`, `core_store_creates_only_declared_row_tables`, `store_table_rows_use_typed_table_names`. |
+| Protocol event modules own common fact/status/dependency tables. | typed + static | [event_modules/tables.rs](src/protocol/event_modules/tables.rs), `protocol_event_tables_own_common_fact_indexes`. |
 | Generic Crux command driving is core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), `crux_core_is_isolated_to_core`, core vocabulary checks. |
 | Worker admission/apply is scoped to event modules, not protocol root. | partial | [worker::run](src/protocol/event_modules/worker.rs) is the shared admission/apply entrypoint; there is not yet a typed worker catalog for all worker classes. |
 | Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
@@ -22,10 +24,10 @@ the rule is still prose/review only.
 | Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs); static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
 | `protocol/app` is forbidden; CLI behavior is scoped. | static + partial | `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`; `src/protocol/cli.rs` still contains temporary cross-scope CLI orchestration for the synchronous POC. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
-| Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
+| Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
 | Table names are typed and declared in `tables.rs`. | typed + static | [TableName](src/core/store.rs), `table_names_are_declared_in_tables_files`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only. | static | `event_module_queries_are_read_only`. |
-| `EventRecord` literals are constructed only by codecs/core store. | static | `event_records_are_constructed_only_by_codecs_or_core_tests`. |
+| `EventRecord` literals are constructed only by codecs. | static | `event_records_are_constructed_only_by_codecs`. |
 | Codecs use shared binary helpers and reject trailing bytes. | static + partial | `codec_files_use_shared_binary_helpers_and_finish_reads`; this catches common drift but is not a formal fixed-width proof. |
 | `types.rs` does not store encoded/canonical artifacts as semantic fields. | static | `event_module_types_do_not_store_encoded_event_artifacts`. |
 | Transit/crypto naming must not claim fake protection. | static + partial | `source_does_not_contain_fake_crypto_claims`; cryptographic correctness still needs implementation review and tests. |
@@ -75,6 +77,16 @@ The following rules should stay mechanically enforced where practical:
   such as connection, transit, sync, outbox, bootstrap schema, admission
   workers, blocking policy, or wire codec helpers. Core may own generic TCP
   mechanics and opaque network queue mechanics.
+- `core/store.rs` is only a generic row substrate. It may define `TableName`,
+  `TableRow`, transactions, row insert/replace/delete, exact row reads, and
+  prefix scans. It must not define event ids, event records, event statuses,
+  labels, dependency waits, protocol indexes, network queue semantics, or any
+  protocol table schema. Protocol tables are declared by `tables.rs` files and
+  passed to store at open time.
+- `protocol/event_modules/tables.rs` owns the protocol-wide fact/status,
+  dependency-wait, ready-event, partition-index, and label rows used by the
+  shared event-module worker. Scoped event modules own their own `tables.rs`
+  declarations for domain rows and queues.
 - Core has a small allowlisted file set and must not contain domain vocabulary
   such as workspace, content, endpoint, identity, invite, or message.
 - Generic Crux command driving belongs in core. Protocol code must not define
@@ -104,6 +116,8 @@ The following rules should stay mechanically enforced where practical:
   modules interpret bytes. There is one outbound network queue table with
   target metadata encoded into each row key for bounded target claims; do not
   create dynamic per-target queue tables.
+- `core/tcp.rs` uses `core/network_queues.rs` helpers for queue rows. It must
+  not name queue tables or encode/decode queue row keys directly.
 - `tests/cli_harness` stays process-only. It may know how to build and run the
   `topo` binary, allocate temp db paths, reserve ports, and expose stdout/stderr
   helpers. It must not know command names, global flag policy, invite syntax,
@@ -144,6 +158,8 @@ Projectors return `ProjectionOutput` with table rows and generic event labels
 only. They cannot emit events. If projection discovers follow-on work, it writes
 a module-owned queue row; a module worker reads that queue, queries context,
 runs a command, and sends the command's proposed events back through the worker.
+Generic event labels are protocol event-module state declared under
+`protocol/event_modules/tables.rs`; they are not a core store concept.
 
 Module workers are the active boundary. A `worker.rs` file exports exactly one
 public free function, `run`; work/output types may be public, and all helper
@@ -280,14 +296,14 @@ queue rows when dependencies are missing. Projectors may still write
 module-owned wait/blocked queue rows for semantic blockers that are not simple
 dependency absence.
 
-`store.rs` is generic storage mechanics. It should expose table rows, event
-status, and generic event-id partitions. It must not expose sync buckets,
-connection/bootstrap schema, content payload semantics, or network queue
-semantics as storage concepts. `core/network_queues.rs` owns typed network queue
-rows and encodes them through generic `TableRow`s. Module `tables.rs` files
-declare whether each table is durable,
-memory, or temp; core provides the requested storage class without learning the
-table's protocol meaning.
+`store.rs` is generic storage mechanics. It exposes typed table names,
+opaque key/value rows, transactions, exact row reads, and bounded prefix scans.
+It must not expose event ids, event status, labels, dependency waits, sync
+buckets, connection/bootstrap schema, content payload semantics, or network
+queue semantics as storage concepts. `core/network_queues.rs` owns typed
+network queue rows and encodes them through generic `TableRow`s. Protocol and
+module `tables.rs` files declare the tables the selected protocol needs; core
+creates those tables without learning their protocol meaning.
 
 ## Proposed Events Have Deterministic IDs
 
@@ -493,15 +509,23 @@ This includes:
 
 Core may:
 
-- store canonical bytes and table rows
-- compute generic event ids from bytes
-- maintain queue rows and status rows
+- store declared table rows as opaque key/value bytes
+- create row tables named by core IO and protocol `tables.rs` declarations
+- run transactions over generic rows
+- expose exact row reads and prefix scans for queues/indexes
 - maintain one opaque outbound network queue with target metadata and one opaque
   inbound network queue with source metadata
 - run generic TCP listener/connect/read-frame/write-frame mechanics over those
   opaque network queue rows
 - provide transactions and idempotent row insertion
-- expose generic reads over stored bytes, statuses, and rows
+
+Protocol event modules may:
+
+- compute event ids from canonical event bytes
+- store canonical bytes through protocol-owned event tables
+- maintain protocol event status, ready, blocked, dependency, label, and
+  partition-index rows
+- expose protocol queries over stored event bytes, statuses, and labels
 
 Network queues are ordinary core table rows with typed wrappers. There is one
 outbound queue table, not one table per target. `target` is metadata encoded

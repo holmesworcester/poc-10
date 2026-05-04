@@ -1,6 +1,7 @@
 use crate::core::store::Store;
 use crate::protocol::event_modules::identity::endpoint::queries::endpoint_id;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
+use crate::protocol::event_modules::tables as event_tables;
 
 use super::tables;
 use super::types::{connection_id_from_bytes, ConnectionId, OutboxItem, OutboxKey};
@@ -51,8 +52,7 @@ pub fn all_outbox_items(store: &Store) -> Result<Vec<OutboxItem>, String> {
     for (key, value) in rows {
         let key = decode_outbox_key(&key)?;
         let event_bytes = if value.is_empty() {
-            let Some(event_bytes) = store
-                .event_bytes(&key.event_id)
+            let Some(event_bytes) = event_tables::event_bytes(store, &key.event_id)
                 .map_err(|err| format!("load outbox event: {err}"))?
             else {
                 continue;

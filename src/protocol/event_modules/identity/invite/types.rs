@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use crate::core::store::EventId;
+use crate::protocol::event_modules::types::EventId;
 
 use super::super::endpoint::types::EndpointId;
 

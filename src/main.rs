@@ -2,7 +2,6 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use topo::core::store::Store;
 use topo::protocol::{cli, Protocol};
 
 fn main() {
@@ -14,8 +13,8 @@ fn main() {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let (db_path, command) = parse_args(args)?;
-    let store = Store::open(db_path).map_err(|err| format!("open store: {err}"))?;
     let protocol = Protocol::new();
+    let store = Protocol::open_store(db_path).map_err(|err| format!("open store: {err}"))?;
 
     match command {
         Command::Connect { invite } => {

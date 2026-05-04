@@ -1,4 +1,4 @@
-use crate::core::store::{EventRecord, EventScope};
+use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 
 use super::super::{compare, data, have_id, need_id};
@@ -54,7 +54,9 @@ pub fn is_frame(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-pub fn connection_id(bytes: &[u8]) -> Result<crate::core::store::EventId, String> {
+pub fn connection_id(
+    bytes: &[u8],
+) -> Result<crate::protocol::event_modules::types::EventId, String> {
     let frame = decode(bytes)?;
     let mut connection_id = None;
     for item in frame.items {

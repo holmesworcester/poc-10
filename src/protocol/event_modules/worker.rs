@@ -54,11 +54,12 @@
 //! around this path.
 
 use crate::core::network_queues::{self, InboundNetworkRow, OutboundNetworkRow};
-use crate::core::store::{
-    event_id, EventId, EventLabel, EventRecord, EventScope, EventStatus, Store, TableRow,
+use crate::core::store::{Store, TableRow};
+use crate::protocol::event_modules::types::{
+    event_id, EventId, EventRecord, EventScope, EventStatus,
 };
 
-use super::Modules;
+use super::{tables, Modules};
 
 /// Default upper bound for one ready-event drain.
 ///
@@ -118,7 +119,7 @@ impl From<EventRecord> for ProposedEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionOutput {
     pub rows: Vec<TableRow>,
-    pub labels: Vec<EventLabel>,
+    pub labels: Vec<tables::EventLabel>,
 }
 
 impl ProjectionOutput {
@@ -129,14 +130,14 @@ impl ProjectionOutput {
         }
     }
 
-    pub fn labels(labels: Vec<EventLabel>) -> Self {
+    pub fn labels(labels: Vec<tables::EventLabel>) -> Self {
         Self {
             rows: Vec::new(),
             labels,
         }
     }
 
-    pub fn rows_and_labels(rows: Vec<TableRow>, labels: Vec<EventLabel>) -> Self {
+    pub fn rows_and_labels(rows: Vec<TableRow>, labels: Vec<tables::EventLabel>) -> Self {
         Self { rows, labels }
     }
 
@@ -571,7 +572,7 @@ fn store_durable_event_in_tx(
         EventStatus::Blocked
     };
 
-    let inserted = store.insert_event(record, status)?;
+    let inserted = tables::insert_event(store, record, status)?;
     if inserted {
         report.inserted_events += 1;
         if missing.is_empty() {
@@ -599,13 +600,12 @@ fn project_ready_event_in_tx(
     event_id: &EventId,
 ) -> rusqlite::Result<ApplyReadyReport> {
     let mut report = ApplyReadyReport::default();
-    if store.set_event_status(event_id, EventStatus::Ready, EventStatus::Applied)? {
+    if tables::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)? {
         // The status change is the claim. Projection runs only for the worker
         // that successfully moved Ready -> Applied, which keeps duplicate drain
         // attempts idempotent when callers retry.
-        let bytes = store
-            .event_bytes(event_id)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let bytes =
+            tables::event_bytes(store, event_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let record = modules.record_from_bytes(bytes).map_err(module_error)?;
         let changes = project_event_with_context_in_tx(store, modules, event_id, &record)?;
         write_projection_output_in_tx(store, changes)?;
@@ -644,9 +644,8 @@ fn load_event_context_in_tx(
 ) -> rusqlite::Result<EventContext> {
     let mut dependencies = Vec::with_capacity(record.dependencies.len());
     for dependency in unique_dependencies(&record.dependencies) {
-        let bytes = store
-            .event_bytes(&dependency)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let bytes =
+            tables::event_bytes(store, &dependency)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let record = modules.record_from_bytes(bytes).map_err(module_error)?;
         dependencies.push(DependencyContext {
             event_id: dependency,
@@ -656,7 +655,7 @@ fn load_event_context_in_tx(
     Ok(EventContext {
         event_id: *event_id,
         dependencies,
-        labels: store.event_labels(event_id)?,
+        labels: tables::event_labels(store, event_id).map_err(module_error)?,
     })
 }
 
@@ -665,7 +664,7 @@ fn write_projection_output_in_tx(
     changes: ProjectionOutput,
 ) -> rusqlite::Result<usize> {
     let rows = store.insert_table_rows_in_tx(changes.rows)?;
-    let labels = store.insert_event_labels_in_tx(changes.labels)?;
+    let labels = store.insert_table_rows_in_tx(tables::event_label_rows(changes.labels))?;
     Ok(rows + labels)
 }
 
@@ -678,7 +677,7 @@ fn drain_ready(
         .write_transaction(|store| {
             let mut total = ApplyReadyReport::default();
             while total.applied_events < limit {
-                let Some(event_id) = store.next_ready_event()? else {
+                let Some(event_id) = tables::next_ready_event(store)? else {
                     break;
                 };
                 let report = project_ready_event_in_tx(store, modules, &event_id)?;
@@ -713,7 +712,7 @@ fn module_error(err: String) -> rusqlite::Error {
 fn missing_dependencies(store: &Store, dependencies: &[EventId]) -> rusqlite::Result<Vec<EventId>> {
     let mut missing = Vec::new();
     for dependency in unique_dependencies(dependencies) {
-        if !store.event_is_applied(&dependency)? {
+        if !tables::event_is_applied(store, &dependency)? {
             missing.push(dependency);
         }
     }
@@ -734,22 +733,27 @@ fn write_blockers(
 ) -> rusqlite::Result<usize> {
     let mut inserted = 0;
     for dependency in missing {
-        inserted += usize::from(store.insert_dependency_wait(dependency, event_id)?);
+        inserted += usize::from(tables::insert_dependency_wait(store, dependency, event_id)?);
     }
     Ok(inserted)
 }
 
 fn unblock_dependents(store: &Store, applied_event_id: &EventId) -> rusqlite::Result<usize> {
-    let dependents = store.events_waiting_on(applied_event_id)?;
-    store.delete_dependency_waits_for(applied_event_id)?;
+    let dependents = tables::events_waiting_on(store, applied_event_id)?;
+    tables::delete_dependency_waits_for(store, applied_event_id)?;
 
     let mut unblocked = 0;
     for dependent in dependents {
         // Unblocking only changes status. It does not recursively project the
         // newly unblocked event inside the same stack frame, which prevents a large
         // dependency cascade from becoming one unbounded transaction.
-        if !store.event_has_dependency_waits(&dependent)?
-            && store.set_event_status(&dependent, EventStatus::Blocked, EventStatus::Ready)?
+        if !tables::event_has_dependency_waits(store, &dependent)?
+            && tables::set_event_status(
+                store,
+                &dependent,
+                EventStatus::Blocked,
+                EventStatus::Ready,
+            )?
         {
             unblocked += 1;
         }

@@ -25,8 +25,9 @@
 //! sync events; it should not perform TCP IO, mutate content projections, or
 //! bypass normal event admission.
 
-use crate::core::store::{EventRecord, Store};
+use crate::core::store::Store;
 use crate::protocol::event_modules::connection;
+use crate::protocol::event_modules::types::EventRecord;
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::{compare, frame};

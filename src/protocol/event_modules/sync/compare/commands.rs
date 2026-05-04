@@ -1,4 +1,4 @@
-use crate::core::store::EventId;
+use crate::protocol::event_modules::types::EventId;
 
 use super::super::data::types::DataEvent;
 use super::super::frame::codec as frame_codec;

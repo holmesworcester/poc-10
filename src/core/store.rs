@@ -1,9 +1,29 @@
-use rusqlite::{params, types::Type, Connection as SqliteConnection, OptionalExtension};
-use std::io;
+//! A small SQLite-backed row store.
+//!
+//! This file is intentionally below the protocol. It knows how to create named
+//! row tables, run transactions, and read or write keyed byte rows. It does not
+//! know what any row means. Event admission, labels, dependency waits, network
+//! targets, and sync queues are all protocol or IO concepts layered on top of
+//! these primitives.
+//!
+//! The critical path is short:
+//! 1. Open a store with the static table names declared by core IO and the
+//!    selected protocol.
+//! 2. Use `write_transaction` to group rows that must become visible together.
+//! 3. Use the row helpers to insert, replace, delete, and scan by key prefix.
+//!
+//! The only dynamic SQL in this file is table-name interpolation. Values are
+//! always bound parameters, and table names are accepted only from `TableName`
+//! after a conservative identifier check.
+
+use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
 use std::path::Path;
 
-pub type EventId = [u8; 32];
-
+/// A static, trusted row-table name.
+///
+/// Protocol and core IO modules declare these names next to the row encoders
+/// that understand their values. Store validates the identifier before using
+/// it in SQL, then treats rows as opaque bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TableName(&'static str);
 
@@ -17,6 +37,7 @@ impl TableName {
     }
 }
 
+/// One opaque key/value row in one declared table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
     pub table: TableName,
@@ -24,220 +45,58 @@ pub struct TableRow {
     pub value: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventRecord {
-    pub timestamp: u64,
-    pub body_len: usize,
-    pub canonical_bytes: Vec<u8>,
-    pub dependencies: Vec<EventId>,
-    pub scope: EventScope,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventLabel {
-    pub event_id: EventId,
-    pub label: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventScope {
-    Shared,
-    Local,
-    Transient,
-}
-
-impl EventScope {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Shared => "shared",
-            Self::Local => "local",
-            Self::Transient => "transient",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventIndexEntry {
-    pub event_id: EventId,
-    pub partition: u8,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct EventStatusCounts {
-    pub ready: usize,
-    pub blocked: usize,
-    pub applied: usize,
-    pub rejected: usize,
-    pub blocked_edges: usize,
-}
-
+/// The only durable substrate core offers protocol code.
 pub struct Store {
     conn: SqliteConnection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventStatus {
-    Ready,
-    Blocked,
-    Applied,
-    Rejected,
-}
-
-impl EventStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Ready => "ready",
-            Self::Blocked => "blocked",
-            Self::Applied => "applied",
-            Self::Rejected => "rejected",
-        }
-    }
-}
-
 impl Store {
+    /// Open a disk store without creating any protocol tables.
+    ///
+    /// Production callers should prefer `open_disk_with_tables`; this form is
+    /// kept for tests that exercise the bare row substrate.
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        Self::open_disk(path)
+        Self::open_disk_with_tables(path, &[])
     }
 
+    /// Alias for `open`, kept so tests can name the backing medium explicitly.
     pub fn open_disk(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        Self::open_disk_with_tables(path, &[])
+    }
+
+    /// Open a disk store and create the caller-declared row tables.
+    pub fn open_disk_with_tables(
+        path: impl AsRef<Path>,
+        row_tables: &[TableName],
+    ) -> rusqlite::Result<Self> {
         let conn = SqliteConnection::open(path)?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, row_tables)
     }
 
+    /// Open an in-memory store without creating any protocol tables.
     pub fn open_memory() -> rusqlite::Result<Self> {
-        let conn = SqliteConnection::open_in_memory()?;
-        Self::from_connection(conn)
+        Self::open_memory_with_tables(&[])
     }
 
-    fn from_connection(conn: SqliteConnection) -> rusqlite::Result<Self> {
+    /// Open an in-memory store and create the caller-declared row tables.
+    pub fn open_memory_with_tables(row_tables: &[TableName]) -> rusqlite::Result<Self> {
+        let conn = SqliteConnection::open_in_memory()?;
+        Self::from_connection(conn, row_tables)
+    }
+
+    fn from_connection(conn: SqliteConnection, row_tables: &[TableName]) -> rusqlite::Result<Self> {
         let store = Self { conn };
-        store.ensure_schema()?;
+        store.ensure_schema(row_tables)?;
         Ok(store)
     }
 
-    pub fn insert_table_rows(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
-        self.write_transaction(|store| store.insert_table_rows_in_tx(rows))
-    }
-
-    pub fn insert_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
-        let mut inserted = 0;
-        for row in rows {
-            inserted += self.conn.execute(
-                "INSERT OR IGNORE INTO table_rows
-                    (table_name, row_key, row_value)
-                 VALUES (?1, ?2, ?3)",
-                params![row.table.as_str(), row.key, row.value],
-            )?;
-        }
-        Ok(inserted)
-    }
-
-    pub fn insert_event_labels_in_tx(&self, labels: Vec<EventLabel>) -> rusqlite::Result<usize> {
-        let mut inserted = 0;
-        for label in labels {
-            inserted += self.conn.execute(
-                "INSERT OR IGNORE INTO event_labels
-                    (event_id, label)
-                 VALUES (?1, ?2)",
-                params![label.event_id.to_vec(), label.label],
-            )?;
-        }
-        Ok(inserted)
-    }
-
-    pub fn delete_table_rows(
-        &self,
-        table: TableName,
-        keys: Vec<Vec<u8>>,
-    ) -> rusqlite::Result<usize> {
-        self.write_transaction(|store| {
-            let mut deleted = 0;
-            for key in keys {
-                deleted += store.conn.execute(
-                    "DELETE FROM table_rows
-                     WHERE table_name = ?1 AND row_key = ?2",
-                    params![table.as_str(), key],
-                )?;
-            }
-            Ok(deleted)
-        })
-    }
-
-    pub fn table_row(&self, table: TableName, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
-        self.conn
-            .query_row(
-                "SELECT row_value FROM table_rows
-                 WHERE table_name = ?1 AND row_key = ?2",
-                params![table.as_str(), key],
-                |row| row.get(0),
-            )
-            .optional()
-    }
-
-    pub fn table_row_count(&self, table: TableName) -> rusqlite::Result<usize> {
-        self.conn
-            .query_row(
-                "SELECT COUNT(*) FROM table_rows WHERE table_name = ?1",
-                params![table.as_str()],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count as usize)
-    }
-
-    pub fn table_rows(&self, table: TableName) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT row_key, row_value FROM table_rows
-             WHERE table_name = ?1
-             ORDER BY row_key",
-        )?;
-        let rows = stmt.query_map(params![table.as_str()], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
-        rows.collect()
-    }
-
-    pub fn table_rows_with_key_prefix(
-        &self,
-        table: TableName,
-        prefix: &[u8],
-        limit: usize,
-    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let Some(upper) = prefix_upper_bound(prefix) else {
-            let mut stmt = self.conn.prepare(
-                "SELECT row_key, row_value FROM table_rows
-                 WHERE table_name = ?1 AND row_key >= ?2
-                 ORDER BY row_key",
-            )?;
-            let rows = stmt.query_map(params![table.as_str(), prefix], |row| {
-                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?;
-            let mut out = Vec::new();
-            for row in rows {
-                let row = row?;
-                if !row.0.starts_with(prefix) || out.len() == limit {
-                    break;
-                }
-                out.push(row);
-            }
-            return Ok(out);
-        };
-
-        let mut stmt = self.conn.prepare(
-            "SELECT row_key, row_value FROM table_rows
-             WHERE table_name = ?1 AND row_key >= ?2 AND row_key < ?3
-             ORDER BY row_key
-             LIMIT ?4",
-        )?;
-        let rows = stmt.query_map(
-            params![table.as_str(), prefix, upper, limit as i64],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )?;
-        rows.collect()
-    }
-
+    // Critical path: callers put every atomic row mutation
+    // through this closure, then use the transaction-local row helpers below.
+    /// Run a write transaction.
+    ///
+    /// The closure sees its own writes through the same SQLite handle. Keep
+    /// closures narrow: they are where callers express the atomic unit, while
+    /// this store only supplies `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`.
     pub fn write_transaction<T>(
         &self,
         apply: impl FnOnce(&Store) -> rusqlite::Result<T>,
@@ -256,344 +115,171 @@ impl Store {
         }
     }
 
-    pub fn insert_event(&self, event: &EventRecord, status: EventStatus) -> rusqlite::Result<bool> {
-        let event_id = event_id(&event.canonical_bytes);
-        let inserted = self.conn.execute(
-            "INSERT OR IGNORE INTO events
-                (event_id, timestamp, body_len, event_partition, event_scope, status, canonical_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                event_id.to_vec(),
-                event.timestamp as i64,
-                event.body_len as i64,
-                i64::from(event_id[0]),
-                event.scope.as_str(),
-                status.as_str(),
-                &event.canonical_bytes,
-            ],
-        )?;
-        Ok(inserted > 0)
+    // Row writes: these are intentionally table/key/value operations. Any
+    // richer meaning belongs to the module that constructed the `TableRow`.
+    /// Insert rows idempotently in their declared tables.
+    pub fn insert_table_rows(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
+        self.write_transaction(|store| store.insert_table_rows_in_tx(rows))
     }
 
-    pub fn event_is_applied(&self, event_id: &EventId) -> rusqlite::Result<bool> {
-        self.conn
-            .query_row(
-                "SELECT 1 FROM events
-                 WHERE event_id = ?1 AND status = ?2",
-                params![event_id.to_vec(), EventStatus::Applied.as_str()],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|row| row.is_some())
-    }
-
-    pub fn event_labels(&self, event_id: &EventId) -> rusqlite::Result<Vec<Vec<u8>>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT label FROM event_labels
-             WHERE event_id = ?1
-             ORDER BY label",
-        )?;
-        let rows = stmt.query_map(params![event_id.to_vec()], |row| row.get(0))?;
-        rows.collect()
-    }
-
-    pub fn insert_dependency_wait(
-        &self,
-        blocked_by_event_id: &EventId,
-        event_id: &EventId,
-    ) -> rusqlite::Result<bool> {
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO blocked_by_event
-                    (blocked_by_event_id, event_id)
-                 VALUES (?1, ?2)",
-                params![blocked_by_event_id.to_vec(), event_id.to_vec()],
-            )
-            .map(|changed| changed > 0)
-    }
-
-    pub fn next_ready_event(&self) -> rusqlite::Result<Option<EventId>> {
-        self.conn
-            .query_row(
-                "SELECT event_id FROM events
-                 WHERE status = ?1
-                 ORDER BY timestamp, event_id
-                 LIMIT 1",
-                params![EventStatus::Ready.as_str()],
-                |row| {
-                    let id: Vec<u8> = row.get(0)?;
-                    vec_to_id(id)
-                },
-            )
-            .optional()
-    }
-
-    pub fn set_event_status(
-        &self,
-        event_id: &EventId,
-        from: EventStatus,
-        to: EventStatus,
-    ) -> rusqlite::Result<bool> {
-        self.conn
-            .execute(
-                "UPDATE events
-                 SET status = ?2
-                 WHERE event_id = ?1 AND status = ?3",
-                params![event_id.to_vec(), to.as_str(), from.as_str()],
-            )
-            .map(|changed| changed > 0)
-    }
-
-    pub fn delete_dependency_waits_for(
-        &self,
-        blocked_by_event_id: &EventId,
-    ) -> rusqlite::Result<usize> {
-        self.conn.execute(
-            "DELETE FROM blocked_by_event
-             WHERE blocked_by_event_id = ?1",
-            params![blocked_by_event_id.to_vec()],
-        )
-    }
-
-    pub fn events_waiting_on(
-        &self,
-        blocked_by_event_id: &EventId,
-    ) -> rusqlite::Result<Vec<EventId>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT event_id FROM blocked_by_event
-             WHERE blocked_by_event_id = ?1
-             ORDER BY event_id",
-        )?;
-        let rows = stmt.query_map(params![blocked_by_event_id.to_vec()], |row| {
-            let id: Vec<u8> = row.get(0)?;
-            vec_to_id(id)
-        })?;
-        rows.collect()
-    }
-
-    pub fn event_has_dependency_waits(&self, event_id: &EventId) -> rusqlite::Result<bool> {
-        self.conn
-            .query_row(
-                "SELECT 1 FROM blocked_by_event
-                 WHERE event_id = ?1
-                 LIMIT 1",
-                params![event_id.to_vec()],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|row| row.is_some())
-    }
-
-    pub fn max_timestamp(&self) -> rusqlite::Result<u64> {
-        let value = self
-            .conn
-            .query_row(
-                "SELECT MAX(timestamp) FROM events WHERE event_scope = ?1",
-                params![EventScope::Shared.as_str()],
-                |row| row.get::<_, Option<i64>>(0),
-            )?
-            .unwrap_or(0);
-        Ok(value.max(0) as u64)
-    }
-
-    pub fn event_count(&self) -> rusqlite::Result<usize> {
-        self.conn
-            .query_row(
-                "SELECT COUNT(*) FROM events WHERE event_scope = ?1",
-                params![EventScope::Shared.as_str()],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count as usize)
-    }
-
-    pub fn status_counts(&self) -> rusqlite::Result<EventStatusCounts> {
-        let ready = self.status_count(EventStatus::Ready)?;
-        let blocked = self.status_count(EventStatus::Blocked)?;
-        let applied = self.status_count(EventStatus::Applied)?;
-        let rejected = self.status_count(EventStatus::Rejected)?;
-        let blocked_edges =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM blocked_by_event", [], |row| {
-                    row.get::<_, i64>(0)
-                })? as usize;
-        Ok(EventStatusCounts {
-            ready,
-            blocked,
-            applied,
-            rejected,
-            blocked_edges,
-        })
-    }
-
-    fn status_count(&self, status: EventStatus) -> rusqlite::Result<usize> {
-        self.conn
-            .query_row(
-                "SELECT COUNT(*) FROM events
-                 WHERE status = ?1 AND event_scope = ?2",
-                params![status.as_str(), EventScope::Shared.as_str()],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count as usize)
-    }
-
-    pub fn body_bytes(&self) -> rusqlite::Result<usize> {
-        self.conn
-            .query_row(
-                "SELECT COALESCE(SUM(body_len), 0) FROM events
-                 WHERE event_scope = ?1",
-                params![EventScope::Shared.as_str()],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count as usize)
-    }
-
-    pub fn event_index_entries(&self) -> rusqlite::Result<Vec<EventIndexEntry>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT event_id, event_partition FROM events
-             WHERE event_scope = ?1
-             ORDER BY event_id",
-        )?;
-        let rows = stmt.query_map(params![EventScope::Shared.as_str()], |row| {
-            let id: Vec<u8> = row.get(0)?;
-            Ok(EventIndexEntry {
-                event_id: vec_to_id(id)?,
-                partition: row.get::<_, i64>(1)? as u8,
-            })
-        })?;
-        rows.collect()
-    }
-
-    pub fn event_ids_in_partition(&self, partition: u8) -> rusqlite::Result<Vec<EventId>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT event_id FROM events
-             WHERE event_partition = ?1 AND event_scope = ?2
-             ORDER BY event_id",
-        )?;
-        let rows = stmt.query_map(
-            params![i64::from(partition), EventScope::Shared.as_str()],
-            |row| {
-                let id: Vec<u8> = row.get(0)?;
-                vec_to_id(id)
-            },
-        )?;
-        rows.collect()
-    }
-
-    pub fn has_event(&self, event_id: &EventId) -> rusqlite::Result<bool> {
-        self.conn
-            .query_row(
-                "SELECT 1 FROM events WHERE event_id = ?1",
-                params![event_id.to_vec()],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|row| row.is_some())
-    }
-
-    pub fn has_shared_event(&self, event_id: &EventId) -> rusqlite::Result<bool> {
-        self.conn
-            .query_row(
-                "SELECT 1 FROM events
-                 WHERE event_id = ?1 AND event_scope = ?2",
-                params![event_id.to_vec(), EventScope::Shared.as_str()],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|row| row.is_some())
-    }
-
-    pub fn event_bytes(&self, event_id: &EventId) -> rusqlite::Result<Option<Vec<u8>>> {
-        self.conn
-            .query_row(
-                "SELECT canonical_bytes FROM events WHERE event_id = ?1",
-                params![event_id.to_vec()],
-                |row| row.get(0),
-            )
-            .optional()
-    }
-
-    pub fn shared_event_bytes(&self, event_id: &EventId) -> rusqlite::Result<Option<Vec<u8>>> {
-        self.conn
-            .query_row(
-                "SELECT canonical_bytes FROM events
-                 WHERE event_id = ?1 AND event_scope = ?2",
-                params![event_id.to_vec(), EventScope::Shared.as_str()],
-                |row| row.get(0),
-            )
-            .optional()
-    }
-
-    fn ensure_schema(&self) -> rusqlite::Result<()> {
-        self.conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS events (
-                event_id BLOB PRIMARY KEY NOT NULL,
-                timestamp INTEGER NOT NULL,
-                body_len INTEGER NOT NULL,
-                event_partition INTEGER NOT NULL,
-                event_scope TEXT NOT NULL DEFAULT 'shared',
-                status TEXT NOT NULL,
-                canonical_bytes BLOB NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_events_partition
-                ON events(event_partition, event_id);
-            CREATE INDEX IF NOT EXISTS idx_events_status
-                ON events(status, timestamp, event_id);
-            CREATE TABLE IF NOT EXISTS blocked_by_event (
-                blocked_by_event_id BLOB NOT NULL,
-                event_id BLOB NOT NULL,
-                PRIMARY KEY (blocked_by_event_id, event_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_blocked_by_event_event
-                ON blocked_by_event(event_id, blocked_by_event_id);
-            CREATE TABLE IF NOT EXISTS event_labels (
-                event_id BLOB NOT NULL,
-                label BLOB NOT NULL,
-                PRIMARY KEY (event_id, label)
-            );
-
-            CREATE TABLE IF NOT EXISTS table_rows (
-                table_name TEXT NOT NULL,
-                row_key BLOB NOT NULL,
-                row_value BLOB NOT NULL,
-                PRIMARY KEY (table_name, row_key)
-            );
-            ",
-        )?;
-        self.ensure_event_scope_column()
-    }
-
-    fn ensure_event_scope_column(&self) -> rusqlite::Result<()> {
-        let mut stmt = self.conn.prepare("PRAGMA table_info(events)")?;
-        let columns = stmt
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if !columns.iter().any(|column| column == "event_scope") {
-            self.conn.execute_batch(
-                "ALTER TABLE events ADD COLUMN event_scope TEXT NOT NULL DEFAULT 'shared';",
+    /// Transaction-local form of `insert_table_rows`.
+    pub fn insert_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
+        let mut inserted = 0;
+        for row in rows {
+            let table_name = quoted_table_name(row.table)?;
+            inserted += self.conn.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {table_name}
+                        (row_key, row_value)
+                     VALUES (?1, ?2)"
+                ),
+                params![row.key, row.value],
             )?;
+        }
+        Ok(inserted)
+    }
+
+    /// Replace rows in their declared tables.
+    pub fn replace_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
+        let mut replaced = 0;
+        for row in rows {
+            let table_name = quoted_table_name(row.table)?;
+            replaced += self.conn.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO {table_name}
+                        (row_key, row_value)
+                     VALUES (?1, ?2)"
+                ),
+                params![row.key, row.value],
+            )?;
+        }
+        Ok(replaced)
+    }
+
+    /// Delete rows by key from one declared table.
+    pub fn delete_table_rows(
+        &self,
+        table: TableName,
+        keys: Vec<Vec<u8>>,
+    ) -> rusqlite::Result<usize> {
+        self.write_transaction(|store| store.delete_table_rows_in_tx(table, keys))
+    }
+
+    /// Transaction-local form of `delete_table_rows`.
+    pub fn delete_table_rows_in_tx(
+        &self,
+        table: TableName,
+        keys: Vec<Vec<u8>>,
+    ) -> rusqlite::Result<usize> {
+        let mut deleted = 0;
+        let table_name = quoted_table_name(table)?;
+        for key in keys {
+            deleted += self.conn.execute(
+                &format!("DELETE FROM {table_name} WHERE row_key = ?1"),
+                params![key],
+            )?;
+        }
+        Ok(deleted)
+    }
+
+    // Row reads: exact lookup, count, full scan, and bounded prefix scan are the
+    // complete read surface core exposes.
+    /// Fetch one row value by exact key.
+    pub fn table_row(&self, table: TableName, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
+        let table_name = quoted_table_name(table)?;
+        self.conn
+            .query_row(
+                &format!("SELECT row_value FROM {table_name} WHERE row_key = ?1"),
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Count rows in one declared table.
+    pub fn table_row_count(&self, table: TableName) -> rusqlite::Result<usize> {
+        let table_name = quoted_table_name(table)?;
+        self.conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table_name}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as usize)
+    }
+
+    /// Scan one declared table in key order.
+    pub fn table_rows(&self, table: TableName) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let table_name = quoted_table_name(table)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT row_key, row_value FROM {table_name}
+                 ORDER BY row_key"
+        ))?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Scan one declared table by lexicographic key prefix.
+    pub fn table_rows_with_key_prefix(
+        &self,
+        table: TableName,
+        prefix: &[u8],
+        limit: usize,
+    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let table_name = quoted_table_name(table)?;
+        let Some(upper) = prefix_upper_bound(prefix) else {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT row_key, row_value FROM {table_name}
+                     WHERE row_key >= ?1
+                     ORDER BY row_key"
+            ))?;
+            let rows = stmt.query_map(params![prefix], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let row = row?;
+                if !row.0.starts_with(prefix) || out.len() == limit {
+                    break;
+                }
+                out.push(row);
+            }
+            return Ok(out);
+        };
+
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT row_key, row_value FROM {table_name}
+                 WHERE row_key >= ?1 AND row_key < ?2
+                 ORDER BY row_key
+                 LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![prefix, upper, limit as i64], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    // Schema helpers: core creates only the row tables it is handed.
+    fn ensure_schema(&self, row_tables: &[TableName]) -> rusqlite::Result<()> {
+        for table in row_tables {
+            self.ensure_row_table(*table)?;
         }
         Ok(())
     }
+
+    fn ensure_row_table(&self, table: TableName) -> rusqlite::Result<()> {
+        let table_name = quoted_table_name(table)?;
+        self.conn.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS {table_name} (
+                row_key BLOB PRIMARY KEY NOT NULL,
+                row_value BLOB NOT NULL
+            );"
+        ))
+    }
 }
 
-pub fn event_id(bytes: &[u8]) -> EventId {
-    *blake3::hash(bytes).as_bytes()
-}
-
-fn vec_to_id(bytes: Vec<u8>) -> rusqlite::Result<EventId> {
-    bytes.try_into().map_err(|bytes: Vec<u8>| {
-        rusqlite::Error::FromSqlConversionFailure(
-            0,
-            Type::Blob,
-            Box::new(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("expected 32-byte event id, got {}", bytes.len()),
-            )),
-        )
-    })
-}
-
+/// Compute the exclusive upper bound for a byte-prefix range.
 fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     let mut upper = prefix.to_vec();
     for byte in upper.iter_mut().rev() {
@@ -610,4 +296,18 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// Quote a trusted static table name after rejecting unsafe identifier bytes.
+fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
+    let name = table.as_str();
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+    {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "invalid table name {name}"
+        )));
+    }
+    Ok(format!("\"{name}\""))
 }

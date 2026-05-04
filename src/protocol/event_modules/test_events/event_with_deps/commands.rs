@@ -1,4 +1,4 @@
-use crate::core::store::{EventId, EventRecord};
+use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
@@ -38,7 +38,7 @@ pub fn build_records(
             payload: payload(idx),
         };
         let bytes = codec::encode(&event);
-        event_ids.push(crate::core::store::event_id(&bytes));
+        event_ids.push(crate::protocol::event_modules::types::event_id(&bytes));
         records.push(codec::record_from_bytes(bytes)?);
     }
 

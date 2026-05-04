@@ -1,5 +1,6 @@
-use crate::core::store::{EventId, TableName, TableRow};
+use crate::core::store::{TableName, TableRow};
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
+use crate::protocol::event_modules::types::EventId;
 
 use super::types::{ConnectionId, OutboxKey};
 

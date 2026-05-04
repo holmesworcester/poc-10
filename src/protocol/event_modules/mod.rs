@@ -2,16 +2,19 @@ pub mod connection;
 pub mod content;
 pub mod identity;
 pub mod sync;
+pub mod tables;
 pub mod test_events;
+pub mod types;
 pub mod worker;
 
 use std::net::SocketAddr;
 
 use crate::core::network_queues::{self, NetworkTarget, OutboundNetworkRow};
-use crate::core::store::{EventRecord, Store};
+use crate::core::store::{Store, TableName};
 use crate::protocol::event_modules::worker::{
     CommandOutput, EventRegistry, EventWithContext, ProjectionOutput, ProposedEvent,
 };
+use types::EventRecord;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules;
@@ -64,8 +67,7 @@ impl Modules {
         num_events: usize,
         event_size: usize,
     ) -> Result<CommandOutput<content::content_event::commands::GenerateReport>, String> {
-        let start = store
-            .max_timestamp()
+        let start = tables::max_timestamp(store)
             .map_err(|err| format!("load max timestamp: {err}"))?
             .saturating_add(1);
         content::content_event::commands::generate(start, num_events, event_size)
@@ -77,8 +79,7 @@ impl Modules {
         events: usize,
         deps_per_event: usize,
     ) -> Result<CommandOutput<test_events::event_with_deps::commands::StageReport>, String> {
-        let start = store
-            .max_timestamp()
+        let start = tables::max_timestamp(store)
             .map_err(|err| format!("load max timestamp: {err}"))?
             .saturating_add(1);
         test_events::event_with_deps::commands::stage(events, deps_per_event, start)
@@ -279,6 +280,22 @@ impl Modules {
         identity::endpoint::queries::local_keypair(store)?
             .ok_or_else(|| "local endpoint is missing".to_string())
     }
+}
+
+pub fn row_tables() -> Vec<TableName> {
+    let mut out = Vec::new();
+    out.extend_from_slice(tables::TABLES);
+    out.extend_from_slice(&[
+        identity::endpoint::tables::LOCAL_ENDPOINT,
+        identity::endpoint::tables::LOCAL_ENDPOINT_SECRET,
+        identity::invite::tables::INVITE_SECRETS,
+        connection::tables::CONNECTION_EVENTS,
+        connection::tables::CONNECTIONS,
+        connection::tables::OUTBOX,
+        connection::transport_target::tables::TRANSPORT_TARGETS,
+        test_events::event_with_deps::tables::STAGED_EVENTS_WITH_DEPS,
+    ]);
+    out
 }
 
 impl EventRegistry for Modules {

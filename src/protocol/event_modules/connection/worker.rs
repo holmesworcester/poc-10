@@ -28,8 +28,9 @@
 
 use std::net::SocketAddr;
 
-use crate::core::store::{EventRecord, Store};
+use crate::core::store::Store;
 use crate::protocol::event_modules::identity::{endpoint, invite};
+use crate::protocol::event_modules::types::EventRecord;
 use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
 
 use super::{

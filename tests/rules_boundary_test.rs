@@ -77,7 +77,8 @@ fn event_modules_are_directories() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
         .filter(|path| {
             path.file_name()
-                .is_none_or(|name| name != "mod.rs" && name != "worker.rs")
+                .is_none_or(|name| name != "mod.rs" && name != "worker.rs" && name != "tables.rs")
+                && path.file_name().is_none_or(|name| name != "types.rs")
         })
         .collect::<Vec<_>>();
     assert!(
@@ -593,6 +594,8 @@ fn store_uses_generic_storage_vocabulary() {
     let files = [root.join("src/core/store.rs")];
     let forbidden = [
         "bucket",
+        "EventLabel",
+        "event_labels",
         "module_rows",
         "payload_len",
         "Network",
@@ -671,6 +674,98 @@ fn store_exposes_generic_prefix_scan_not_network_methods() {
         assert!(
             !text.contains(forbidden),
             "store.rs must not know network queue types or operations: contains {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn core_store_is_row_only_not_protocol_fact_storage() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = source_text(&root.join("src/core/store.rs"));
+    let forbidden = [
+        "EventRecord",
+        "EventStatus",
+        "EventScope",
+        "EventIndexEntry",
+        "EventStatusCounts",
+        "canonical_bytes",
+        "blocked_by_event",
+        "dependency_wait",
+        "event_id(",
+        "blake3",
+    ];
+    for needle in forbidden {
+        assert!(
+            !text.contains(needle),
+            "core/store.rs must be a generic row store; protocol fact storage belongs in protocol/event_modules/tables.rs: contains {needle}"
+        );
+    }
+    assert!(
+        text.contains("pub fn insert_table_rows_in_tx(")
+            && text.contains("pub fn replace_table_rows_in_tx(")
+            && text.contains("pub fn delete_table_rows_in_tx(")
+            && text.contains("pub fn table_rows_with_key_prefix("),
+        "core/store.rs should expose generic row write/read primitives only"
+    );
+}
+
+#[test]
+fn core_store_creates_only_declared_row_tables() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = source_text(&root.join("src/core/store.rs"));
+    assert!(
+        text.contains("fn ensure_schema(&self, row_tables: &[TableName])")
+            && text.contains("fn ensure_row_table(&self, table: TableName)"),
+        "store schema creation should be driven by caller-declared TableName values"
+    );
+    for forbidden in [
+        "CREATE TABLE IF NOT EXISTS events",
+        "CREATE TABLE IF NOT EXISTS blocked_by_event",
+        "CREATE INDEX IF NOT EXISTS idx_events",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "core/store.rs must not create protocol-specific tables: contains {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn protocol_event_tables_own_common_fact_indexes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = source_text(&root.join("src/protocol/event_modules/tables.rs"));
+    for required in [
+        "pub const EVENTS",
+        "pub const READY_EVENTS",
+        "pub const PARTITION_EVENTS",
+        "pub const BLOCKED_BY_EVENT",
+        "pub const EVENT_BLOCKERS",
+        "pub const EVENT_LABELS",
+        "pub fn insert_event(",
+        "pub fn event_labels(",
+    ] {
+        assert!(
+            text.contains(required),
+            "protocol/event_modules/tables.rs should own common protocol fact/index storage: missing {required}"
+        );
+    }
+}
+
+#[test]
+fn tcp_uses_network_queue_helpers_not_table_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = source_text(&root.join("src/core/tcp.rs"));
+    assert!(
+        text.contains("network_queues::enqueue_inbound")
+            && text.contains("network_queues::enqueue_outbound")
+            && text.contains("network_queues::claim_outbound_for_target")
+            && text.contains("network_queues::delete_outbound"),
+        "core/tcp.rs should move bytes through core/network_queues helpers"
+    );
+    for forbidden in ["TableName", "TableRow", "OUTBOUND_TABLE", "INBOUND_TABLE"] {
+        assert!(
+            !text.contains(forbidden),
+            "core/tcp.rs should not manage queue schema or row encoding directly: contains {forbidden}"
         );
     }
 }
@@ -891,6 +986,7 @@ fn event_module_types_do_not_store_encoded_event_artifacts() {
     let files = rust_files(&event_root)
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "types.rs"))
+        .filter(|path| path != &event_root.join("types.rs"))
         .collect::<Vec<_>>();
     let forbidden = ["canonical_bytes", "encoded_event", "wire_event"];
     let violations = file_contains_violations(root, &files, &forbidden);
@@ -940,15 +1036,13 @@ fn store_table_rows_use_typed_table_names() {
 }
 
 #[test]
-fn event_records_are_constructed_only_by_codecs_or_core_tests() {
+fn event_records_are_constructed_only_by_codecs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let src_root = root.join("src");
-    let store_file = root.join("src/core/store.rs").canonicalize().ok();
     let mut violations = Vec::new();
     for path in rust_files(&src_root) {
         let is_codec = path.file_name().is_some_and(|name| name == "codec.rs");
-        let is_allowed_core = store_file == path.canonicalize().ok();
-        if is_codec || is_allowed_core {
+        if is_codec {
             continue;
         }
         let text = source_text(&path);
@@ -1014,7 +1108,7 @@ fn projection_output_contains_rows_and_labels_not_events() {
     let body = &text[start..text[start..].find("impl ProjectionOutput").unwrap() + start];
     assert!(
         body.contains("pub rows: Vec<TableRow>")
-            && body.contains("pub labels: Vec<EventLabel>")
+            && body.contains("pub labels: Vec<tables::EventLabel>")
             && !body.contains("EventRecord")
             && !body.contains("events"),
         "ProjectionOutput is projector-facing and must carry rows/labels only, not events"

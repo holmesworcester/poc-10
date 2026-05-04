@@ -1,4 +1,5 @@
-use crate::core::store::{EventRecord, Store};
+use crate::core::store::Store;
+use crate::protocol::event_modules::types::EventRecord;
 
 use super::codec;
 use super::tables;

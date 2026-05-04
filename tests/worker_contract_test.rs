@@ -1,15 +1,18 @@
 use std::cell::Cell;
 
-use topo::core::store::{event_id, EventId, EventLabel, EventRecord, EventScope, Store};
+use topo::core::store::Store;
+use topo::protocol::event_modules::tables::{self as event_tables, EventLabel};
+use topo::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
 use topo::protocol::event_modules::worker::{
     self, CommandOutput, EventRegistry, EventWithContext, ProjectionOutput,
 };
 use topo::protocol::event_modules::Modules;
+use topo::protocol::Protocol;
 
 #[test]
 fn command_admission_returns_event_ids_for_chaining() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("worker.db")).unwrap();
+    let store = Protocol::open_store(tmp.path().join("worker.db")).unwrap();
     let modules = Modules::new();
 
     let output = modules.generate_content(&store, 3, 64).unwrap();
@@ -25,14 +28,14 @@ fn command_admission_returns_event_ids_for_chaining() {
 
     assert_eq!(report.event_ids, proposed_ids);
     for event_id in report.event_ids {
-        assert!(store.has_shared_event(&event_id).unwrap());
+        assert!(event_tables::has_shared_event(&store, &event_id).unwrap());
     }
 }
 
 #[test]
 fn worker_fetches_dependency_records_and_labels_before_projection() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("context.db")).unwrap();
+    let store = Protocol::open_store(tmp.path().join("context.db")).unwrap();
 
     let dep_bytes = b"dep".to_vec();
     let child_bytes = b"child".to_vec();

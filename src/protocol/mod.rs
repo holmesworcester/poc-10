@@ -2,7 +2,13 @@ pub mod cli;
 pub mod event_modules;
 pub mod wire;
 
-use crate::core::store::{EventRecord, Store};
+use std::path::Path;
+
+use crate::core::{
+    network_queues,
+    store::{Store, TableName},
+};
+use event_modules::types::EventRecord;
 use event_modules::worker::{EventRegistry, EventWithContext, ProjectionOutput};
 use event_modules::Modules;
 
@@ -21,6 +27,20 @@ impl Protocol {
     pub fn modules(&self) -> &Modules {
         &self.modules
     }
+
+    pub fn open_store(path: impl AsRef<Path>) -> rusqlite::Result<Store> {
+        Store::open_disk_with_tables(path, &row_tables())
+    }
+
+    pub fn open_memory_store() -> rusqlite::Result<Store> {
+        Store::open_memory_with_tables(&row_tables())
+    }
+}
+
+pub fn row_tables() -> Vec<TableName> {
+    let mut tables = event_modules::row_tables();
+    tables.extend_from_slice(network_queues::TABLES);
+    tables
 }
 
 impl EventRegistry for Protocol {

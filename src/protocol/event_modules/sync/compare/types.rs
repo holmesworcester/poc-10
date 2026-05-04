@@ -1,4 +1,4 @@
-use crate::core::store::EventId;
+use crate::protocol::event_modules::types::EventId;
 
 pub const BUCKETS: usize = 256;
 
