@@ -4,6 +4,21 @@ use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::{compare, frame};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Work {
+    Start,
+    IngestFrame {
+        connection_id: connection::types::ConnectionId,
+        bytes: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Output {
+    Started(CommandOutput<SyncStartReport>),
+    IngestedFrame(SyncFrameReport),
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SyncStartReport {
     pub sent_events: usize,
@@ -17,7 +32,17 @@ pub struct SyncFrameReport {
     pub received_event_bytes: Vec<Vec<u8>>,
 }
 
-pub fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
+pub fn run(store: &Store, work: Work) -> Result<Output, String> {
+    match work {
+        Work::Start => start(store).map(Output::Started),
+        Work::IngestFrame {
+            connection_id,
+            bytes,
+        } => ingest_frame(store, connection_id, &bytes).map(Output::IngestedFrame),
+    }
+}
+
+fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
     let routes = connection::transport_target::queries::routes(store)?;
     if routes.is_empty() {
         return Ok(CommandOutput::new(SyncStartReport::default()));
@@ -37,7 +62,7 @@ pub fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
     ))
 }
 
-pub fn ingest_frame(
+fn ingest_frame(
     store: &Store,
     connection_id: connection::types::ConnectionId,
     bytes: &[u8],

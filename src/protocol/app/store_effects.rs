@@ -1,4 +1,4 @@
-use crate::protocol::event_modules::worker::{self, CommandOutput, Worker};
+use crate::protocol::event_modules::worker::{self, CommandOutput};
 
 use super::effects::{
     ConnectionRequest, DrainReadyReport, FrameIngest, GeneratedContent, OutboundSyncWork, StoreOp,
@@ -16,8 +16,7 @@ impl RealShell<'_> {
                     .modules()
                     .create_invite(self.store, public_addr)
                     .map_err(|err| format!("create invite: {err}"))?;
-                let (link, _) = Worker::new(self.store, self.protocol)
-                    .run_command(output)
+                let (link, _) = worker::run(self.store, self.protocol, output)
                     .map_err(|err| format!("apply invite: {err}"))?;
                 Ok(StoreReply::InviteCreated { link })
             }
@@ -27,8 +26,7 @@ impl RealShell<'_> {
                     .protocol
                     .modules()
                     .create_connection_request(self.store, &invite)?;
-                let request = Worker::new(self.store, self.protocol)
-                    .run_command(output)
+                let request = worker::run(self.store, self.protocol, output)
                     .map_err(|err| format!("record connection request: {err}"))?
                     .0;
                 Ok(StoreReply::ConnectionRequestCreated(ConnectionRequest {
@@ -41,14 +39,16 @@ impl RealShell<'_> {
                 remember_origin,
                 bytes,
             } => {
-                let result = worker::ingest_frame(
+                let result = worker::run(
                     self.store,
                     self.protocol.modules(),
-                    worker::FrameMetadata {
-                        origin,
-                        remember_origin,
+                    worker::IngestFrame {
+                        metadata: worker::FrameMetadata {
+                            origin,
+                            remember_origin,
+                        },
+                        bytes,
                     },
-                    bytes,
                 )?;
                 Ok(StoreReply::FrameIngested(FrameIngest {
                     outgoing: result.outgoing,
@@ -73,8 +73,7 @@ impl RealShell<'_> {
                     .modules()
                     .generate_content(self.store, num_events, event_size)
                     .map_err(|err| format!("generate: {err}"))?;
-                let (report, admitted) = Worker::new(self.store, self.protocol)
-                    .run_command(output)
+                let (report, admitted) = worker::run(self.store, self.protocol, output)
                     .map_err(|err| format!("admit generated events: {err}"))?;
                 Ok(StoreReply::Generated(GeneratedContent {
                     inserted_events: admitted.inserted_events,
@@ -93,8 +92,7 @@ impl RealShell<'_> {
                     .modules()
                     .stage_dependent_events(self.store, num_events, deps_per_event)
                     .map_err(|err| format!("stage dependent events: {err}"))?;
-                let (report, _) = Worker::new(self.store, self.protocol)
-                    .run_command(output)
+                let (report, _) = worker::run(self.store, self.protocol, output)
                     .map_err(|err| format!("admit staged dependent events: {err}"))?;
                 Ok(StoreReply::DependentEventsStaged(DependentStageSummary {
                     staged_events: report.staged_events,
@@ -121,9 +119,12 @@ impl RealShell<'_> {
                     .unwrap_or(0);
                 let root_count = records.len().min(max_deps.max(1));
                 let reverse_non_roots = records[root_count..].iter().rev().cloned().collect();
-                let (_, reverse_report) = Worker::new(self.store, self.protocol.modules())
-                    .run_command(CommandOutput::with_events((), reverse_non_roots))
-                    .map_err(|err| format!("admit reverse dependent events: {err}"))?;
+                let (_, reverse_report) = worker::run(
+                    self.store,
+                    self.protocol.modules(),
+                    CommandOutput::with_events((), reverse_non_roots),
+                )
+                .map_err(|err| format!("admit reverse dependent events: {err}"))?;
 
                 let blocked_after_reverse = self
                     .store
@@ -132,12 +133,20 @@ impl RealShell<'_> {
                     .blocked;
 
                 let roots = records[..root_count].to_vec();
-                let (_, root_report) = Worker::new(self.store, self.protocol.modules())
-                    .run_command(CommandOutput::with_events((), roots))
-                    .map_err(|err| format!("admit dependent roots: {err}"))?;
-                let drain = Worker::new(self.store, self.protocol.modules())
-                    .drain_until_idle(worker::DEFAULT_READY_BATCH)
-                    .map_err(|err| format!("drain dependent replay: {err}"))?;
+                let (_, root_report) = worker::run(
+                    self.store,
+                    self.protocol.modules(),
+                    CommandOutput::with_events((), roots),
+                )
+                .map_err(|err| format!("admit dependent roots: {err}"))?;
+                let drain = worker::run(
+                    self.store,
+                    self.protocol.modules(),
+                    worker::DrainUntilIdle {
+                        batch_size: worker::DEFAULT_READY_BATCH,
+                    },
+                )
+                .map_err(|err| format!("drain dependent replay: {err}"))?;
                 let final_counts = self
                     .store
                     .status_counts()
@@ -157,26 +166,33 @@ impl RealShell<'_> {
                 ))
             }
             StoreOp::DrainReadyUntilIdle { batch_size } => {
-                let report = Worker::new(self.store, self.protocol)
-                    .drain_until_idle(batch_size)
-                    .map_err(|err| format!("drain generated events: {err}"))?;
+                let report = worker::run(
+                    self.store,
+                    self.protocol,
+                    worker::DrainUntilIdle { batch_size },
+                )
+                .map_err(|err| format!("drain generated events: {err}"))?;
                 Ok(StoreReply::Drained(DrainReadyReport {
                     applied_events: report.applied_events,
                     unblocked_events: report.unblocked_events,
                 }))
             }
             StoreOp::StartSyncRoutes => {
-                Worker::new(self.store, self.protocol.modules())
-                    .drain_until_idle(worker::DEFAULT_READY_BATCH)
-                    .map_err(|err| format!("drain ready events before sync: {err}"))?;
+                worker::run(
+                    self.store,
+                    self.protocol.modules(),
+                    worker::DrainUntilIdle {
+                        batch_size: worker::DEFAULT_READY_BATCH,
+                    },
+                )
+                .map_err(|err| format!("drain ready events before sync: {err}"))?;
 
                 let start = self
                     .protocol
                     .modules()
                     .start_sync(self.store)
                     .map_err(|err| format!("start sync: {err}"))?;
-                let (started, _) = Worker::new(self.store, self.protocol)
-                    .run_command(start)
+                let (started, _) = worker::run(self.store, self.protocol, start)
                     .map_err(|err| format!("record sync frames: {err}"))?;
                 let outbound = self
                     .protocol

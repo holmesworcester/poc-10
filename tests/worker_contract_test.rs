@@ -16,7 +16,7 @@ fn command_admission_returns_event_ids_for_chaining() {
             event.event_id()
         })
         .collect::<Vec<_>>();
-    let (_, report) = worker::run_command(&store, &modules, output).unwrap();
+    let (_, report) = worker::run(&store, &modules, output).unwrap();
 
     assert_eq!(report.event_ids, proposed_ids);
     for event_id in report.event_ids {

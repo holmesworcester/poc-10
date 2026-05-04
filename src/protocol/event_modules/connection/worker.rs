@@ -15,6 +15,33 @@ pub struct FrameMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Work {
+    IngestFrame {
+        local: endpoint::types::EndpointKeypair,
+        metadata: FrameMetadata,
+        bytes: Vec<u8>,
+    },
+    DrainOutboxRoutes {
+        local: endpoint::types::EndpointKeypair,
+    },
+    DrainOutboxForRoute {
+        local: endpoint::types::EndpointKeypair,
+        connection_id: types::ConnectionId,
+    },
+    MarkOutboxSent {
+        sent_outbox: Vec<Vec<u8>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Output {
+    InboundFrame(InboundFrame),
+    OutboundRoutes(Vec<OutboundTransit>),
+    DrainedOutbox(DrainedOutbox),
+    OutboxMarked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboundFrame {
     Connection(ConnectionFrameReport),
     ConnectionScoped {
@@ -43,7 +70,27 @@ pub struct DrainedOutbox {
     pub sent_outbox: Vec<Vec<u8>>,
 }
 
-pub fn ingest_frame(
+pub fn run(store: &Store, work: Work) -> Result<Output, String> {
+    match work {
+        Work::IngestFrame {
+            local,
+            metadata,
+            bytes,
+        } => ingest_frame(store, local, metadata, bytes).map(Output::InboundFrame),
+        Work::DrainOutboxRoutes { local } => {
+            drain_outbox_routes(store, local).map(Output::OutboundRoutes)
+        }
+        Work::DrainOutboxForRoute {
+            local,
+            connection_id,
+        } => drain_outbox_for_route(store, local, connection_id).map(Output::DrainedOutbox),
+        Work::MarkOutboxSent { sent_outbox } => {
+            mark_outbox_sent(store, sent_outbox).map(|()| Output::OutboxMarked)
+        }
+    }
+}
+
+fn ingest_frame(
     store: &Store,
     local: endpoint::types::EndpointKeypair,
     metadata: FrameMetadata,
@@ -69,7 +116,7 @@ pub fn ingest_frame(
     })
 }
 
-pub fn drain_outbox_routes(
+fn drain_outbox_routes(
     store: &Store,
     local: endpoint::types::EndpointKeypair,
 ) -> Result<Vec<OutboundTransit>, String> {
@@ -89,7 +136,7 @@ pub fn drain_outbox_routes(
     Ok(outbound)
 }
 
-pub fn drain_outbox_for_route(
+fn drain_outbox_for_route(
     store: &Store,
     local: endpoint::types::EndpointKeypair,
     connection_id: types::ConnectionId,
@@ -116,7 +163,7 @@ pub fn drain_outbox_for_route(
     })
 }
 
-pub fn mark_outbox_sent(store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {
+fn mark_outbox_sent(store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {
     if sent_outbox.is_empty() {
         return Ok(());
     }

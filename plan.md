@@ -5,7 +5,7 @@ I want to rewrite topo with clarity on:
 * interfaces
 * the invariants they guarantee
 * decoupling
-* realms of responsibility
+* realms of responsibility (and *non* responsibility)
 * event-based networking
 
 See appendix for documentation style rules and references.
@@ -183,6 +183,9 @@ scope whose queues/cursors it owns. `protocol/event_modules/worker.rs` covers
 common canonical event admission/apply for all event modules. A domain worker
 such as `sync/worker.rs` covers active sync queues and cursors. There is no
 `protocol/worker.rs`: protocol root is too broad to own a worker.
+Every `worker.rs` exposes one public free function, `run`, as the obvious
+entrypoint. Public work/output types describe the worker boundary; helper
+functions stay private.
 
 Default dependency blocking is centralized in the event-modules worker after
 record decoding and before projection. Projectors remain expressive by writing

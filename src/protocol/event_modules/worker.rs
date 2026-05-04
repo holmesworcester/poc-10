@@ -91,6 +91,28 @@ pub trait EventRegistry {
     ) -> Result<ProjectionOutput, String>;
 }
 
+pub trait Work<R: EventRegistry> {
+    type Output;
+
+    fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmitRecords {
+    pub records: Vec<EventRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainUntilIdle {
+    pub batch_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestFrame {
+    pub metadata: FrameMetadata,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdmitReport {
     pub event_ids: Vec<EventId>,
@@ -122,52 +144,72 @@ pub struct IngestResult {
     pub received_events: usize,
 }
 
-pub struct Worker<'a, R> {
-    store: &'a Store,
-    registry: &'a R,
+pub fn run<R, W>(store: &Store, registry: &R, work: W) -> Result<W::Output, String>
+where
+    R: EventRegistry,
+    W: Work<R>,
+{
+    work.execute(store, registry)
 }
 
-impl<'a, R> Worker<'a, R>
+impl<T, R> Work<R> for CommandOutput<T>
 where
     R: EventRegistry,
 {
-    pub fn new(store: &'a Store, registry: &'a R) -> Self {
-        Self { store, registry }
-    }
+    type Output = (T, AdmitReport);
 
-    pub fn run_command<T>(&self, output: CommandOutput<T>) -> Result<(T, AdmitReport), String> {
-        run_command(self.store, self.registry, output)
-    }
-
-    pub fn admit_records(&self, records: Vec<EventRecord>) -> Result<AdmitReport, String> {
-        admit_records(self.store, self.registry, records)
-    }
-
-    pub fn drain_until_idle(&self, batch_size: usize) -> Result<ApplyReadyReport, String> {
-        drain_until_idle(self.store, self.registry, batch_size)
+    fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
+        run_command(store, registry, self)
     }
 }
 
-pub fn apply_changes(store: &Store, changes: ProjectionOutput) -> Result<usize, String> {
-    store
-        .write_transaction(|store| apply_changes_in_tx(store, changes))
-        .map_err(|err| format!("apply state changes: {err}"))
+impl<R> Work<R> for AdmitRecords
+where
+    R: EventRegistry,
+{
+    type Output = AdmitReport;
+
+    fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
+        admit_records(store, registry, self.records)
+    }
 }
 
-pub fn ingest_frame(
+impl<R> Work<R> for DrainUntilIdle
+where
+    R: EventRegistry,
+{
+    type Output = ApplyReadyReport;
+
+    fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
+        drain_until_idle(store, registry, self.batch_size)
+    }
+}
+
+impl Work<Modules> for IngestFrame {
+    type Output = IngestResult;
+
+    fn execute(self, store: &Store, modules: &Modules) -> Result<Self::Output, String> {
+        ingest_frame(store, modules, self)
+    }
+}
+
+fn ingest_frame(
     store: &Store,
     modules: &Modules,
-    metadata: FrameMetadata,
-    bytes: Vec<u8>,
+    work: IngestFrame,
 ) -> Result<IngestResult, String> {
-    let mut report =
-        modules.ingest_frame(store, metadata.origin, metadata.remember_origin, bytes)?;
+    let mut report = modules.ingest_frame(
+        store,
+        work.metadata.origin,
+        work.metadata.remember_origin,
+        work.bytes,
+    )?;
     report.events.extend(received_event_records(
         modules,
         report.received_event_bytes,
     )?);
     let outbox = report.drain_outbox_for;
-    Worker::new(store, modules).admit_records(report.events)?;
+    admit_records(store, modules, report.events)?;
     let mut outgoing = report.outgoing;
     let mut sent_outbox = Vec::new();
     if let Some(route_id) = outbox {
@@ -198,7 +240,7 @@ fn received_event_records(
     Ok(records)
 }
 
-pub fn run_command<T>(
+fn run_command<T>(
     store: &Store,
     modules: &impl EventRegistry,
     output: CommandOutput<T>,
@@ -207,7 +249,7 @@ pub fn run_command<T>(
     Ok((output.value, report))
 }
 
-pub fn admit_records(
+fn admit_records(
     store: &Store,
     modules: &impl EventRegistry,
     records: Vec<EventRecord>,
@@ -219,7 +261,7 @@ pub fn admit_records(
     )
 }
 
-pub fn admit_proposed_events(
+fn admit_proposed_events(
     store: &Store,
     modules: &impl EventRegistry,
     events: Vec<ProposedEvent>,
@@ -317,7 +359,7 @@ fn admit_event_in_tx(
     })
 }
 
-pub fn apply_ready_event_in_tx(
+fn apply_ready_event_in_tx(
     store: &Store,
     modules: &impl EventRegistry,
     event_id: &EventId,
@@ -338,7 +380,7 @@ pub fn apply_ready_event_in_tx(
     Ok(report)
 }
 
-pub fn drain_ready(
+fn drain_ready(
     store: &Store,
     modules: &impl EventRegistry,
     limit: usize,
@@ -359,7 +401,7 @@ pub fn drain_ready(
         .map_err(|err| format!("drain ready events: {err}"))
 }
 
-pub fn drain_until_idle(
+fn drain_until_idle(
     store: &Store,
     modules: &impl EventRegistry,
     batch_size: usize,

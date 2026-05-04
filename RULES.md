@@ -15,10 +15,10 @@ the rule is still prose/review only.
 | Core is protocol-agnostic queue/storage support. | static | `core_does_not_import_protocol`, `core_does_not_own_protocol_worker_or_wire_codec`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `event_modules_worker_has_no_domain_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
 | Core stays small and named. | static | `core_file_set_stays_small_and_named`. |
 | Generic Crux command driving is core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), `core_file_set_stays_small_and_named`, core vocabulary checks. |
-| Worker admission/apply is scoped to event modules, not protocol root. | partial | [Worker](src/protocol/event_modules/worker.rs) exists and app code uses it; there is not yet a typed worker catalog for all worker classes. |
+| Worker admission/apply is scoped to event modules, not protocol root. | partial | [worker::run](src/protocol/event_modules/worker.rs) is the shared admission/apply entrypoint; there is not yet a typed worker catalog for all worker classes. |
 | Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
 | `event.rs` is forbidden; semantic types live in `types.rs`; codecs do encode/decode only. | static | `event_modules_do_not_use_event_rs`, `codec_files_do_not_define_public_types`, `codec_modules_have_type_files`. |
-| Workers live at the owning scope. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`; no typed worker trait/catalog yet. |
+| Workers live at the owning scope and expose one obvious entrypoint. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`, `worker_files_export_only_run_as_public_entrypoint`; no typed worker trait/catalog yet. |
 | Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs); static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
 | Protocol app is only the current CLI adapter shell. | static + partial | `protocol_app_files_are_limited_to_cli_adapter_concerns`, `protocol_app_and_event_modules_worker_do_not_import_event_families_directly`; app still owns current Topo CLI flow vocabulary until module-local `cli.rs` adapters exist. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | partial | Documented in [plan.md](plan.md) and checked indirectly by the app file allowlist; no scenario-runner type or migrated scenario definitions yet. |
@@ -137,7 +137,9 @@ events. If projection discovers follow-on work, it writes a module-owned queue
 row; a module worker reads that queue, queries context, runs a command, and sends
 the command's proposed events back through the worker.
 
-Module workers are the active boundary. Projectors do not perform IO or emit
+Module workers are the active boundary. A `worker.rs` file exports exactly one
+public free function, `run`; work/output types may be public, and all helper
+functions stay private. Projectors do not perform IO or emit
 effects. Event-module commands do not perform IO either; they construct
 canonical events or transport bytes from explicit input and context. Workers own
 dequeueing, fairness, bounded work, retries, calling commands, admitting

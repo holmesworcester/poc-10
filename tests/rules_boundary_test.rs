@@ -38,6 +38,26 @@ fn source_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
 }
 
+fn public_free_function_names(text: &str) -> Vec<String> {
+    let mut depth = 0_i32;
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if depth == 0 && trimmed.starts_with("pub fn ") {
+            let name = trimmed
+                .trim_start_matches("pub fn ")
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            names.push(name);
+        }
+        depth += line.chars().filter(|ch| *ch == '{').count() as i32;
+        depth -= line.chars().filter(|ch| *ch == '}').count() as i32;
+    }
+    names
+}
+
 #[test]
 fn event_modules_do_not_use_event_rs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
@@ -314,6 +334,32 @@ fn active_components_are_named_worker() {
     assert!(
         offenders.is_empty(),
         "active protocol components are worker.rs at the owning scope; do not add actor/pipeline files or protocol-root workers:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn worker_files_export_only_run_as_public_entrypoint() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut offenders = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "worker.rs"))
+    {
+        let names = public_free_function_names(&source_text(&path));
+        if names != ["run"] {
+            offenders.push(format!(
+                "{} exports public free functions {:?}",
+                path.strip_prefix(root).unwrap().display(),
+                names
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "worker.rs files expose one obvious public entrypoint, run(); helpers stay private:\n{}",
         offenders.join("\n")
     );
 }

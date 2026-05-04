@@ -110,7 +110,18 @@ impl Modules {
             remember_origin,
         };
         let local = self.existing_local_keypair(store)?;
-        match connection::worker::ingest_frame(store, local, metadata, bytes)? {
+        let output = connection::worker::run(
+            store,
+            connection::worker::Work::IngestFrame {
+                local,
+                metadata,
+                bytes,
+            },
+        )?;
+        let connection::worker::Output::InboundFrame(frame) = output else {
+            return Err("connection worker returned non-ingest output".to_string());
+        };
+        match frame {
             connection::worker::InboundFrame::Connection(report) => Ok(ModuleFrameReport {
                 events: report.events,
                 outgoing: report.outgoing,
@@ -128,22 +139,30 @@ impl Modules {
         &self,
         store: &Store,
     ) -> Result<CommandOutput<sync::worker::SyncStartReport>, String> {
-        sync::worker::start(store)
+        match sync::worker::run(store, sync::worker::Work::Start)? {
+            sync::worker::Output::Started(output) => Ok(output),
+            sync::worker::Output::IngestedFrame(_) => {
+                Err("sync worker returned non-start output".to_string())
+            }
+        }
     }
 
     pub fn drain_outbox_routes(&self, store: &Store) -> Result<Vec<OutboundSync>, String> {
         let local = self.existing_local_keypair(store)?;
-        connection::worker::drain_outbox_routes(store, local).map(|outbound| {
-            outbound
-                .into_iter()
-                .map(|outbound| OutboundSync {
-                    target: outbound.target,
-                    outgoing: outbound.outgoing,
-                    sent_outbox: outbound.sent_outbox,
-                    sent_events: 0,
-                })
-                .collect()
-        })
+        let output =
+            connection::worker::run(store, connection::worker::Work::DrainOutboxRoutes { local })?;
+        let connection::worker::Output::OutboundRoutes(outbound) = output else {
+            return Err("connection worker returned non-outbox-routes output".to_string());
+        };
+        Ok(outbound
+            .into_iter()
+            .map(|outbound| OutboundSync {
+                target: outbound.target,
+                outgoing: outbound.outgoing,
+                sent_outbox: outbound.sent_outbox,
+                sent_events: 0,
+            })
+            .collect())
     }
 
     pub fn drain_outbox_for_route(
@@ -152,11 +171,28 @@ impl Modules {
         connection_id: connection::types::ConnectionId,
     ) -> Result<connection::worker::DrainedOutbox, String> {
         let local = self.existing_local_keypair(store)?;
-        connection::worker::drain_outbox_for_route(store, local, connection_id)
+        let output = connection::worker::run(
+            store,
+            connection::worker::Work::DrainOutboxForRoute {
+                local,
+                connection_id,
+            },
+        )?;
+        let connection::worker::Output::DrainedOutbox(drained) = output else {
+            return Err("connection worker returned non-outbox-route output".to_string());
+        };
+        Ok(drained)
     }
 
     pub fn mark_outbox_sent(&self, store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {
-        connection::worker::mark_outbox_sent(store, sent_outbox)
+        let output = connection::worker::run(
+            store,
+            connection::worker::Work::MarkOutboxSent { sent_outbox },
+        )?;
+        let connection::worker::Output::OutboxMarked = output else {
+            return Err("connection worker returned non-mark-outbox output".to_string());
+        };
+        Ok(())
     }
 
     pub fn connection_count(&self, store: &Store) -> Result<usize, String> {
@@ -173,7 +209,16 @@ impl Modules {
         connection_id: connection::types::ConnectionId,
         bytes: &[u8],
     ) -> Result<ModuleFrameReport, String> {
-        let report = sync::worker::ingest_frame(store, connection_id, bytes)?;
+        let output = sync::worker::run(
+            store,
+            sync::worker::Work::IngestFrame {
+                connection_id,
+                bytes: bytes.to_vec(),
+            },
+        )?;
+        let sync::worker::Output::IngestedFrame(report) = output else {
+            return Err("sync worker returned non-ingest output".to_string());
+        };
         Ok(ModuleFrameReport {
             events: report.events,
             drain_outbox_for: Some(connection_id),
