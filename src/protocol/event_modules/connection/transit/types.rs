@@ -1,4 +1,4 @@
-use crate::protocol::event_modules::connection::connection_record::types::ConnectionId;
+use crate::protocol::event_modules::connection::types::ConnectionId;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 
 pub type TransitNonce = [u8; 24];

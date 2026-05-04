@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use crate::core::store::{ProjectionOutput, TableRow};
 
-use super::super::connection_record::types::ConnectionId;
+use super::super::types::ConnectionId;
 use super::codec;
 use super::tables;
 

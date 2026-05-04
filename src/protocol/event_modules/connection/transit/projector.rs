@@ -1,5 +1,5 @@
 use super::super::super::identity::endpoint::types::{EndpointId, EndpointKeypair};
-use super::super::connection_record::types::ConnectionId;
+use super::super::types::ConnectionId;
 use super::codec::{self, TransitEnvelopeRef};
 use super::crypto;
 

@@ -1,8 +1,8 @@
 use crate::core::store::CommandOutput;
 use crate::protocol::event_modules::identity::endpoint;
 
-use super::super::connection_record::types;
 use super::super::connection_request;
+use super::super::types;
 use super::codec;
 
 pub fn accept(

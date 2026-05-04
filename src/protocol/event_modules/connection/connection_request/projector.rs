@@ -1,5 +1,5 @@
-use super::super::connection_record::projector as projection;
-use super::super::connection_record::types;
+use super::super::tables as projection;
+use super::super::types;
 use super::codec;
 use crate::core::store::ProjectionOutput;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;

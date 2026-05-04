@@ -2,7 +2,7 @@ use std::{net::SocketAddr, str::FromStr};
 
 use crate::core::store::Store;
 
-use super::super::connection_record::types::connection_id_from_bytes;
+use super::super::types::connection_id_from_bytes;
 use super::tables;
 use super::types::TransportRoute;
 

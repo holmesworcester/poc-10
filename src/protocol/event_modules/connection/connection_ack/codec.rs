@@ -1,7 +1,7 @@
 use crate::core::store::{EventRecord, EventScope};
 use crate::core::wire::{Reader, Writer};
 
-use super::super::connection_record::types::EVENT_MAGIC;
+use super::super::types::EVENT_MAGIC;
 use super::types::AckEvent;
 
 pub const TAG: u8 = 2;

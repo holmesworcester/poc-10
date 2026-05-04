@@ -1,9 +1,10 @@
 pub mod connection_ack;
-pub mod connection_record;
 pub mod connection_request;
-pub mod outbox;
+pub mod queries;
+pub mod tables;
 pub mod transit;
 pub mod transport_target;
+pub mod types;
 
 use crate::core::store::{ProjectionOutput, Store};
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
@@ -27,7 +28,7 @@ pub fn project_record(
         if event.from_endpoint == local_endpoint {
             return connection_ack::projector::outbound(bytes.to_vec(), local_endpoint);
         }
-        let request_bytes = connection_record::queries::event_bytes(store, &event.request_id)?
+        let request_bytes = queries::event_bytes(store, &event.request_id)?
             .ok_or_else(|| "connection ack references unknown request".to_string())?;
         return connection_ack::projector::inbound(bytes.to_vec(), local_endpoint, request_bytes);
     }

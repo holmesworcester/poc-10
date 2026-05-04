@@ -26,14 +26,42 @@ The following rules should stay mechanically enforced where practical:
   sibling `types.rs`.
 - Domain roots contain only child event modules plus shared domain files:
   `mod.rs`, `actor.rs`, `tables.rs`, `queries.rs`, `types.rs`, and `cli.rs`.
+- Child directories under `event_modules/<domain>/` are canonical event modules
+  and must carry the standard shape: `mod.rs`, `types.rs`, `codec.rs`, and
+  `tables.rs` at minimum. Shared domain tables, queues, and helper types live at
+  the domain root instead of masquerading as event modules.
+- Event-module files use standard concern names only. New concern files require
+  an explicit boundary decision and a static-test update.
+- Dumping-ground directories such as `jobs`, `cli_commands`, `runtime`,
+  `state`, and algorithm-only `negentropy` are forbidden under
+  `event_modules`.
 - Core never imports protocol modules and does not contain protocol vocabulary
   such as connection, transit, sync, outbox, TCP, sockets, or bootstrap schema.
+- Core has a small allowlisted file set and must not contain domain vocabulary
+  such as workspace, content, endpoint, identity, invite, or message.
 - The core pipeline is generic admission/apply plumbing; protocol branching
   belongs behind the protocol module registry.
 - Sync modules do not own TCP/frame IO, and core/network code does not contain
   sync protocol logic.
 - Event-module commands do not mutate storage directly. Event-module
   projectors do not query storage directly.
+- Event modules do not import runtime/control-loop/pipeline/transport effect
+  machinery. The top-level protocol registry is the only event-module file that
+  implements the core registry trait.
+- Projectors are row-only boundaries: no `CommandOutput`, `ProposedEvent`,
+  `EventRecord`, IO effects, transport work, or transit creation.
+- Table names are declared in `tables.rs`; projectors and queries use those
+  declarations.
+- `EventRecord` literals are constructed by codecs. Other code asks codecs to
+  produce records or proposed events.
+- `codec.rs` uses shared binary helpers and finishes reads so trailing bytes are
+  rejected.
+- `types.rs` does not store encoded/canonical event artifacts as semantic
+  fields.
+- `protocol/network.rs` remains TCP framing only, and `protocol/app`/`inbound`
+  do not import concrete event families directly.
+- Source tests reject fake-crypto terminology that would let placeholder crypto
+  be named as real protection.
 
 When a prose rule becomes mechanically enforceable, add the type boundary or
 static check and shorten the prose. Keep prose for realness, black-box proof,

@@ -34,6 +34,10 @@ fn file_contains_violations(
     violations
 }
 
+fn source_text(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
+}
+
 #[test]
 fn event_modules_do_not_use_event_rs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
@@ -56,6 +60,36 @@ fn event_modules_are_directories() {
     assert!(
         offenders.is_empty(),
         "event modules must be directories: {offenders:?}"
+    );
+}
+
+#[test]
+fn core_file_set_stays_small_and_named() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core");
+    let allowed = [
+        "blocking.rs",
+        "control_loop.rs",
+        "mod.rs",
+        "pipeline.rs",
+        "store.rs",
+        "wire.rs",
+    ];
+    let offenders = std::fs::read_dir(&root)
+        .expect("read core")
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| {
+            path.is_dir()
+                || !path
+                    .file_name()
+                    .is_some_and(|name| name.to_str().is_some_and(|name| allowed.contains(&name)))
+        })
+        .map(|path| path.strip_prefix(&root).unwrap().display().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "core should stay tiny; add protocol/domain behavior outside src/core:\n{}",
+        offenders.join("\n")
     );
 }
 
@@ -97,6 +131,104 @@ fn domain_roots_contain_only_children_and_shared_domain_files() {
 }
 
 #[test]
+fn event_module_files_use_only_standard_concern_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let allowed = [
+        "actor.rs",
+        "cli.rs",
+        "codec.rs",
+        "commands.rs",
+        "crypto.rs",
+        "mod.rs",
+        "projector.rs",
+        "queries.rs",
+        "registry_meta.rs",
+        "tables.rs",
+        "types.rs",
+    ];
+    let offenders = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| allowed.contains(&name))
+        })
+        .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "event modules use fixed concern filenames; split unusual concerns deliberately:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn child_event_module_directories_have_canonical_shape() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
+    let mut offenders = Vec::new();
+    for domain in std::fs::read_dir(&root).expect("read event modules") {
+        let domain = domain.expect("dir entry").path();
+        if !domain.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&domain).expect("read domain") {
+            let child = entry.expect("dir entry").path();
+            if !child.is_dir() {
+                continue;
+            }
+            for required in ["mod.rs", "types.rs", "codec.rs", "tables.rs"] {
+                if !child.join(required).exists() {
+                    offenders.push(format!(
+                        "{}/{}",
+                        child.strip_prefix(&root).unwrap().display(),
+                        required
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "child directories under event_modules are canonical event modules; shared tables/queues belong at the domain root:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn event_modules_do_not_use_dumping_ground_directories() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
+    let forbidden = ["jobs", "cli_commands", "runtime", "state", "negentropy"];
+    let mut offenders = Vec::new();
+    let mut pending = vec![root.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read event module dir") {
+            let path = entry.expect("dir entry").path();
+            if !path.is_dir() {
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| forbidden.contains(&name))
+            {
+                offenders.push(path.strip_prefix(&root).unwrap().display().to_string());
+            }
+            pending.push(path);
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "event modules should be organized by domain/event type, not dumping-ground directories:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn codec_files_do_not_define_public_types() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
@@ -109,6 +241,42 @@ fn codec_files_do_not_define_public_types() {
     assert!(
         violations.is_empty(),
         "event module semantic types belong in types.rs; codec.rs is encode/decode only:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn codec_files_use_shared_binary_helpers_and_finish_reads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut violations = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "codec.rs"))
+    {
+        let text = source_text(&path);
+        let relative = path.strip_prefix(root).unwrap().display();
+        let manual_parse_needles = [
+            ".copy_from_slice(&bytes[",
+            "from_be_bytes(",
+            "bytes.len() <",
+            "bytes.len() !=",
+        ];
+        if manual_parse_needles
+            .iter()
+            .any(|needle| text.contains(needle))
+            && !text.contains("Reader::new")
+        {
+            violations.push(format!("{relative} parses bytes without Reader"));
+        }
+        if text.contains("Reader::new") && !text.contains(".finish()?") {
+            violations.push(format!("{relative} uses Reader without finish"));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "codec.rs should use shared fixed-field binary helpers and reject trailing bytes:\n{}",
         violations.join("\n")
     );
 }
@@ -243,6 +411,31 @@ fn core_has_no_protocol_io_vocabulary() {
 }
 
 #[test]
+fn core_has_no_domain_vocabulary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let core_root = root.join("src/core");
+    let files = rust_files(&core_root);
+    let forbidden = [
+        "workspace",
+        "content",
+        "endpoint",
+        "identity",
+        "invite",
+        "bootstrap",
+        "negentropy",
+        "message",
+        "reaction",
+        "file_transfer",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "domain vocabulary belongs under src/protocol/event_modules, not src/core:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn store_uses_generic_storage_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = [root.join("src/core/store.rs")];
@@ -309,6 +502,38 @@ fn event_module_commands_do_not_mutate_storage_directly() {
 }
 
 #[test]
+fn event_modules_do_not_import_runtime_pipeline_or_transport() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path != &event_root.join("mod.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "crate::runtime",
+        "crate::state",
+        "crate::core::control_loop",
+        "crate::core::pipeline",
+        "drain_until_idle",
+        "protocol::network",
+        "TcpStream",
+        "TcpListener",
+        "read_frame",
+        "write_frame",
+        "NetworkOp",
+        "StoreOp",
+        "ProtocolEffect",
+        "TransportSend",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "event modules own protocol semantics, not runtime loops or transport implementation:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn event_module_projectors_do_not_query_storage_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
@@ -331,6 +556,97 @@ fn event_module_projectors_do_not_query_storage_directly() {
     assert!(
         violations.is_empty(),
         "projectors are pure transforms over event plus explicit context; queries belong outside projector.rs:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn event_module_projectors_are_row_only_boundaries() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "projector.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "CommandOutput",
+        "ProposedEvent",
+        "EventRecord {",
+        "ProtocolEffect",
+        "NetworkOp",
+        "StoreOp",
+        "TransportSend",
+        "TcpStream",
+        "TcpListener",
+        "create_connection(",
+        "create_bootstrap(",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "projectors are row-only; emitting events/effects or doing transit work belongs in commands/actors:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn event_module_types_do_not_store_encoded_event_artifacts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "types.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = ["canonical_bytes", "encoded_event", "wire_event"];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "types.rs should define semantic shapes; canonical bytes live at codec/boundary layers:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn table_names_are_declared_in_tables_files() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut violations = Vec::new();
+    for path in rust_files(&event_root) {
+        if path.file_name().is_some_and(|name| name == "tables.rs") {
+            continue;
+        }
+        let text = source_text(&path);
+        if text.contains("table: \"") || text.contains("pub const ") && text.contains(": &str = \"")
+        {
+            violations.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "module table names belong in tables.rs, with projectors/queries using those declarations:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn event_records_are_constructed_only_by_codecs_or_core_tests() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src_root = root.join("src");
+    let store_file = root.join("src/core/store.rs").canonicalize().ok();
+    let mut violations = Vec::new();
+    for path in rust_files(&src_root) {
+        let is_codec = path.file_name().is_some_and(|name| name == "codec.rs");
+        let is_allowed_core = store_file == path.canonicalize().ok();
+        if is_codec || is_allowed_core {
+            continue;
+        }
+        if source_text(&path).contains("EventRecord {") {
+            violations.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "EventRecord literals belong in codec constructors so metadata matches canonical bytes:\n{}",
         violations.join("\n")
     );
 }
@@ -422,6 +738,81 @@ fn core_files_do_not_contain_sync_protocol_logic() {
     assert!(
         violations.is_empty(),
         "sync protocol logic belongs in protocol/event_modules/sync:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn protocol_network_remains_tcp_framing_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = [root.join("src/protocol/network.rs")];
+    let forbidden = [
+        "EventRecord",
+        "event_id",
+        "canonical",
+        "connection_id",
+        "transit",
+        "bootstrap",
+        "outbox",
+        "negentropy",
+        "Compare",
+        "Have",
+        "Need",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "protocol/network.rs owns TCP framing only; protocol bytes are produced by event modules:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn protocol_app_and_inbound_do_not_import_event_families_directly() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = rust_files(&root.join("src/protocol/app"))
+        .into_iter()
+        .chain([root.join("src/protocol/inbound.rs")])
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "crate::protocol::event_modules::connection",
+        "crate::protocol::event_modules::content",
+        "crate::protocol::event_modules::identity",
+        "crate::protocol::event_modules::sync",
+        "crate::protocol::event_modules::test_events",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "app/inbound may call the protocol registry, not concrete event families:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn source_does_not_contain_fake_crypto_claims() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let this_file = root
+        .join("tests/rules_boundary_test.rs")
+        .canonicalize()
+        .ok();
+    let files = rust_files(&root.join("src"))
+        .into_iter()
+        .chain(rust_files(&root.join("tests")))
+        .filter(|path| path.canonicalize().ok() != this_file)
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "fake crypto",
+        "fake encryption",
+        "pass-through encryption",
+        "identity cipher",
+        "encrypted in name only",
+        "toy encryption",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "do not name fake or placeholder crypto as real protection:\n{}",
         violations.join("\n")
     );
 }

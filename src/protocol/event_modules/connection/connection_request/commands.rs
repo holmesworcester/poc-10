@@ -3,8 +3,8 @@ use rand_core::RngCore;
 use crate::core::store::{CommandOutput, EventId};
 use crate::protocol::event_modules::identity::{endpoint, invite};
 
-use super::super::connection_record::types;
 use super::super::transit;
+use super::super::types;
 use super::codec;
 use super::types::RequestEvent;
 

@@ -113,6 +113,7 @@ src/protocol/event_modules/
     actor.rs
     tables.rs
     queries.rs
+    types.rs
     cli.rs
     connection/
     connection_secret/
@@ -126,6 +127,7 @@ src/protocol/event_modules/
     compare/
     have/
     need/
+    frame/
     dep_cache/
   local/
     local_secret/
@@ -282,7 +284,11 @@ creating tables, applying migrations, opening transactions, inserting NewRows,
 deleting Purges, querying declared indexes, resetting transient rows on
 startup, and choosing durable vs memory storage.
 
-Boundary tables should follow the same rule where possible. `outbox` can be declared by the sender-facing module, `blocked_by_event` by the ready-event loop, schedule rows by the owning module or `protocol/timers`, and sync caches by the sync modules. The fewer central special tables, the better.
+Boundary tables should follow the same rule where possible. `outbox` is a
+connection-domain queue declared by the connection domain root, `blocked_by_event`
+by the ready-event loop, schedule rows by the owning module or `protocol/timers`,
+and sync caches by the sync modules. The fewer central special tables, the
+better.
 
 ## Core Ready-Event Interface
 
@@ -806,6 +812,12 @@ SyncCompare(connection_id, workspace_id, node, count, fingerprint)
 SyncHaveId(connection_id, workspace_id, node, event_id)
 SyncNeedId(connection_id, workspace_id, event_id)
 ```
+
+The current POC keeps `sync/frame` as the transient connection-scoped packet
+event for real TCP throughput: it batches compare/have/need/data items, its
+codec owns that packet format, and its projector only writes the connection
+outbox row. The protocol network layer still sees only opaque transit bytes and
+TCP length frames.
 
 Projectors do not write to sockets and do not emit events. They only maintain
 sync/outbox queue rows. Commands and module actors create deterministic

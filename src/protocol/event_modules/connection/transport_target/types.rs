@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use super::super::connection_record::types::ConnectionId;
+use super::super::types::ConnectionId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransportRoute {

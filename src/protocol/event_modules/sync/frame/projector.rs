@@ -1,11 +1,11 @@
 use crate::core::store::{event_id, ProjectionOutput};
 
 use super::codec;
-use crate::protocol::event_modules::connection::outbox;
+use crate::protocol::event_modules::connection::tables;
 
 pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
     let connection_id = codec::connection_id(bytes)?;
-    Ok(ProjectionOutput::rows(vec![outbox::projector::queue(
+    Ok(ProjectionOutput::rows(vec![tables::outbox_row(
         connection_id,
         event_id(bytes),
         bytes.to_vec(),

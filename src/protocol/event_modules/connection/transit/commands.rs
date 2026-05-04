@@ -1,7 +1,7 @@
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointKeypair;
 
-use super::super::connection_record::types::ConnectionId;
+use super::super::types::ConnectionId;
 use super::codec;
 use super::crypto;
 use super::types::TransitEnvelope;
