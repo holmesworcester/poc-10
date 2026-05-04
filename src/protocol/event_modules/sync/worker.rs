@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! manual sync start -> compare command for each known connection route
-//! inbound sync frame -> compare ingest command for that connection
+//! projected inbound sync frame rows -> compare handler for that connection
 //! ```
 //!
 //! Both paths produce connection-scoped sync frame events. Those events are
@@ -30,19 +30,21 @@ use crate::protocol::event_modules::connection;
 use crate::protocol::event_modules::types::EventRecord;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::{compare, frame};
+use super::{compare, frame, queries, schema};
+
+pub const DEFAULT_INBOUND_BATCH: usize = 1024;
 
 /// Work accepted by the sync worker.
 ///
 /// `Start` is intentionally explicit because the current control loop is still
-/// CLI-driven. `IngestFrame` handles one already-unwrapped sync frame under the
-/// connection id recovered by the connection worker.
+/// CLI-driven. `DrainInboundFrames` handles sync work that has already been
+/// projected from transient inbound frame events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
     Start,
-    IngestFrame {
+    DrainInboundFrames {
         connection_id: connection::types::ConnectionId,
-        bytes: Vec<u8>,
+        limit: usize,
     },
 }
 
@@ -50,7 +52,7 @@ pub enum Work {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
     Started(CommandOutput<SyncStartReport>),
-    IngestedFrame(SyncFrameReport),
+    DrainedInboundFrames(SyncFrameReport),
 }
 
 /// Summary of a manual sync start.
@@ -81,10 +83,10 @@ pub struct SyncFrameReport {
 pub fn run(store: &Store, work: Work) -> Result<Output, String> {
     match work {
         Work::Start => start(store).map(Output::Started),
-        Work::IngestFrame {
+        Work::DrainInboundFrames {
             connection_id,
-            bytes,
-        } => ingest_frame(store, connection_id, &bytes).map(Output::IngestedFrame),
+            limit,
+        } => drain_inbound_frames(store, connection_id, limit).map(Output::DrainedInboundFrames),
     }
 }
 
@@ -115,22 +117,40 @@ fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
     ))
 }
 
-fn ingest_frame(
+fn drain_inbound_frames(
     store: &Store,
     connection_id: connection::types::ConnectionId,
-    bytes: &[u8],
+    limit: usize,
 ) -> Result<SyncFrameReport, String> {
     let mut result = SyncFrameReport::default();
-    // Inbound compare handling may both request/send more sync frames and
-    // deliver durable event bytes. Keep those channels separate: response
-    // frames become transient sync events; durable bytes go through normal
-    // admission after this worker returns.
-    let report = compare::commands::ingest_frame(store, connection_id, bytes, |bytes| {
-        result.events.push(frame::codec::record_from_bytes(bytes)?);
-        Ok(())
-    })?;
-    result.sent_events += report.sent_events;
-    result.received_events += report.received_events;
-    result.received_event_bytes = report.received_event_bytes;
+    let limit = limit.max(1);
+    let frames = queries::inbound_frames_for_connection(store, connection_id, limit)?;
+    let mut consumed = Vec::with_capacity(frames.len());
+    for frame_work in frames {
+        // Inbound compare handling may both request/send more sync frames and
+        // deliver durable event bytes. Keep those channels separate: response
+        // frames become transient sync events; durable bytes go through normal
+        // admission after this worker returns.
+        let report = compare::commands::handle_frame(
+            store,
+            frame_work.connection_id,
+            &frame_work.frame_bytes,
+            |bytes| {
+                result.events.push(frame::codec::record_from_bytes(bytes)?);
+                Ok(())
+            },
+        )?;
+        result.sent_events += report.sent_events;
+        result.received_events += report.received_events;
+        result
+            .received_event_bytes
+            .extend(report.received_event_bytes);
+        consumed.push(frame_work.key());
+    }
+    if !consumed.is_empty() {
+        store
+            .delete_table_rows(schema::INBOUND_FRAMES, consumed)
+            .map_err(|err| format!("delete inbound sync frames: {err}"))?;
+    }
     Ok(result)
 }

@@ -568,6 +568,9 @@ fn event_modules_worker_has_no_domain_branching_vocabulary() {
         "record_transport",
         "is_connection_event",
         "ingest_sync",
+        "network_queues",
+        "InboundNetworkRow",
+        "OutboundNetworkRow",
     ];
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
@@ -844,6 +847,20 @@ fn sync_event_module_does_not_own_transport_or_frame_io() {
         violations.is_empty(),
         "sync event modules must not own TCP transport or frame IO:\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn sync_worker_drains_projected_rows_not_direct_ingest_work() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let worker = source_text(&root.join("src/protocol/event_modules/sync/worker.rs"));
+    assert!(
+        worker.contains("DrainInboundFrames"),
+        "sync worker should drain projected inbound-frame rows"
+    );
+    assert!(
+        !worker.contains("IngestFrame") && !worker.contains("IngestedFrame"),
+        "sync worker should not expose direct ingest-frame work; inbound frames project to sync-owned rows first"
     );
 }
 

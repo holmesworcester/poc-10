@@ -15,9 +15,10 @@ use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::core::network_queues::{InboundNetworkRow, NetworkTarget, OutboundNetworkRow};
 use crate::core::tcp;
 use crate::protocol::cli::Context;
-use crate::protocol::event_modules::worker;
+use crate::protocol::event_modules::worker as event_worker;
 
 use super::super::OutboundSync;
+use super::worker as connection_worker;
 
 const CONNECT_USAGE: &str = "connect INVITE_LINK";
 
@@ -69,7 +70,7 @@ pub fn run_connect(context: &mut Context, invite: String) -> Result<Vec<String>,
         .protocol
         .modules()
         .create_connection_request(&context.store, &invite)?;
-    let request = worker::run(&context.store, &context.protocol, output)
+    let request = event_worker::run(&context.store, &context.protocol, output)
         .map_err(|err| format!("record connection request: {err}"))?
         .0;
 
@@ -143,14 +144,22 @@ fn handle_inbound(
     summary: &mut StreamSummary,
     sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<u8>>>,
 ) -> Result<Vec<OutboundNetworkRow>, String> {
-    let ingest = worker::run(
+    let local = context
+        .protocol
+        .modules()
+        .existing_local_keypair(&context.store)?;
+    let ingest = connection_worker::run(
         &context.store,
-        context.protocol.modules(),
-        worker::IngestFrame {
+        &context.protocol,
+        connection_worker::Work::IngestNetwork {
+            local,
             inbound,
             remember_origin,
         },
     )?;
+    let connection_worker::Output::NetworkIngest(ingest) = ingest else {
+        return Err("connection worker returned non-network-ingest output".to_string());
+    };
     summary.established_routes += ingest.established_routes;
     summary.sent_events += ingest.sent_events;
     summary.received_events += ingest.received_events;

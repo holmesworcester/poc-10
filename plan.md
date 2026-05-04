@@ -928,10 +928,17 @@ SyncNeedId(connection_id, workspace_id, event_id)
 ```
 
 The current POC keeps `sync/frame` as the transient connection-scoped packet
-event for real TCP throughput: it batches compare/have/need/data items, its
-codec owns that packet format, and its projector only writes the connection
-outbox row. Core network queues and core TCP still see only opaque transit bytes
-and TCP length frames.
+event for real TCP throughput: it batches compare/have/need/data items, and its
+codec owns that packet format. Outbound frame events project to the connection
+outbox. Inbound transit bytes are first wrapped into a distinct inbound frame
+event form, then admitted through the common event-module worker; that inbound
+projector writes `sync.inbound_frames`, and `sync/worker.rs` reads only those
+projected rows. Core network queues and core TCP still see only opaque transit
+bytes and TCP length frames.
+
+Sync request events are not shared durable data. They are connection-scoped
+transient facts by default. A debug or trace mode may choose durable storage for
+the sync work rows, but that is a storage/debug choice, not protocol truth.
 
 Projectors do not write to sockets and do not emit events. They only maintain
 sync/outbox queue rows. Commands and module workers create deterministic
@@ -959,7 +966,7 @@ Durable event projected
   -> sync.new_events(event_id, applied_seq)
 
 Inbound SyncCompare / SyncHaveId / SyncNeedId projected
-  -> sync.work(Inbound { connection_id, required_frontier, payload })
+  -> sync.work or sync.inbound_frames { connection_id, required_frontier, payload }
 
 sync::worker.run
   -> first drains sync.new_events into sync.negentropy.index
@@ -985,6 +992,60 @@ than maintaining per-connection negentropy indexes.
 
 Duplicate worker output collapses because connection-scoped sync event bytes are
 deterministic and `outbox` is unique on `(connection_id, event_id)`.
+
+## Current-shape negentropy implementation plan
+
+Keep the current file shape. Do not add a separate `negentropy/` module unless
+it defines a real event type. The common event worker, connection worker, and
+sync worker each keep their present scope:
+
+1. Extend `protocol/event_modules/schema.rs` with an event-pipeline-owned
+   `shareable_events` log. The common event worker writes this row in the same
+   transaction that records a shared outer-valid event as ready, blocked, or
+   applied. Blocked shared events are shareable; rejected events and transient
+   sync frames are not.
+2. Extend `sync/schema.rs` with request-driven index state:
+   `sync_index_cursor`, `sync_present`, `sync_roots`, direct-dep rows,
+   known/present closure rows, dep waiters, and range-node summaries. Use
+   module-owned schemas and row helpers; core store remains a row substrate.
+3. Teach `sync/worker.rs` to do index catch-up before response work. For each
+   pending request scope, consume `shareable_events` up to the request frontier,
+   update the incremental plain-negentropy summaries first, then later the
+   dep-aware closure summaries, and advance the cursor atomically with those
+   writes.
+4. Keep `sync/frame` as the transient packet event for real TCP. Outbound frame
+   projection writes connection outbox rows. Inbound frame projection writes
+   sync-owned work rows. The sync worker parses those projected rows and emits
+   deterministic outbound frame events plus durable event bytes for normal
+   admission.
+5. Implement plain negentropy first: root compare over a range tree, split on
+   mismatch, have/need ids at leaves, and data/send events for requested ids.
+   Replace the current whole-set bucket shortcut only after the black-box sync
+   tests still pass.
+6. Add dep-aware summaries without changing the worker boundary: maintain known
+   and present transitive closures incrementally while indexing shareable
+   events; compare range nodes using root hash plus present external-dep hash;
+   on dep-probe slices, send present closure ids before root ids.
+7. Add `topo sync today` in `sync/cli.rs` as a sync-mode argument. It should
+   create or queue a sync request for the current day's `sync_key` suffix while
+   still allowing dep-aware sends to include older dependencies outside that
+   root range. If command-generated test events need wall-clock-shaped
+   timestamps, add that control to the closest test-event CLI, not to the
+   harness.
+
+New black-box limits should be tiered so ordinary validation remains useful:
+
+- keep the existing default 10k sync perf test and large-payload test;
+- add a default or short `50k x 256B` content sync test if runtime stays low;
+- add ignored heavy `100k` and `500k` content sync tests with events/s and
+  MiB/s measured from `sync` command start to receiver count convergence;
+- add a `sync today` one-old-dep test: old dependency outside today's range,
+  new root inside today's range, receiver projects both and does not receive
+  unrelated old roots;
+- add ignored dep-perf tests for a transitive old chain feeding one recent
+  root, with at least `1k` and `10k` chain variants, proving response-time
+  request handling reads precomputed closure rows instead of recursively
+  walking the graph.
 
 For the first implementation, this can be two storage classes rather than one clever table:
 

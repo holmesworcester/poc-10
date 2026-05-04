@@ -45,7 +45,7 @@ pub fn start(
     Ok(SyncReport::default())
 }
 
-pub fn ingest_frame(
+pub fn handle_frame(
     context: &impl queries::ReadContext,
     expected_connection_id: EventId,
     bytes: &[u8],

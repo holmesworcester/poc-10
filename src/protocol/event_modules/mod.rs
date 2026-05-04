@@ -31,23 +31,6 @@ use types::EventRecord;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules;
 
-/// Result of interpreting one inbound frame at the module boundary.
-///
-/// The fields are deliberately separated by responsibility: canonical events go
-/// to the common worker, raw outgoing bytes go to core network queues, and
-/// received durable bytes go back through normal admission. No caller should
-/// infer hidden state from a counter here.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModuleFrameReport {
-    pub events: Vec<EventRecord>,
-    pub outgoing: Vec<Vec<u8>>,
-    pub drain_outbox_for: Option<connection::types::ConnectionId>,
-    pub established_routes: usize,
-    pub sent_events: usize,
-    pub received_events: usize,
-    pub received_event_bytes: Vec<Vec<u8>>,
-}
-
 /// Opaque bytes prepared for one route after draining protocol outbox rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundSync {
@@ -125,54 +108,13 @@ impl Modules {
         Ok(merge_outputs(local.events, request))
     }
 
-    pub fn ingest_frame(
-        &self,
-        store: &Store,
-        origin: SocketAddr,
-        remember_origin: bool,
-        bytes: Vec<u8>,
-    ) -> Result<ModuleFrameReport, String> {
-        // Inbound bytes are first interpreted by the connection worker because
-        // only that domain can distinguish bootstrap/connection envelopes from
-        // invalid traffic. Connection-scoped inner bytes are then dispatched to
-        // the domain that owns their event syntax.
-        let metadata = connection::worker::FrameMetadata {
-            origin,
-            remember_origin,
-        };
-        let local = self.existing_local_keypair(store)?;
-        let output = connection::worker::run(
-            store,
-            connection::worker::Work::IngestFrame {
-                local,
-                metadata,
-                bytes,
-            },
-        )?;
-        let connection::worker::Output::InboundFrame(frame) = output else {
-            return Err("connection worker returned non-ingest output".to_string());
-        };
-        match frame {
-            connection::worker::InboundFrame::Connection(report) => Ok(ModuleFrameReport {
-                events: report.events,
-                outgoing: report.outgoing,
-                established_routes: report.established_routes,
-                ..ModuleFrameReport::default()
-            }),
-            connection::worker::InboundFrame::ConnectionScoped {
-                connection_id,
-                inner,
-            } => self.ingest_sync_frame(store, connection_id, &inner),
-        }
-    }
-
     pub fn start_sync(
         &self,
         store: &Store,
     ) -> Result<CommandOutput<sync::worker::SyncStartReport>, String> {
         match sync::worker::run(store, sync::worker::Work::Start)? {
             sync::worker::Output::Started(output) => Ok(output),
-            sync::worker::Output::IngestedFrame(_) => {
+            sync::worker::Output::DrainedInboundFrames(_) => {
                 Err("sync worker returned non-start output".to_string())
             }
         }
@@ -180,8 +122,11 @@ impl Modules {
 
     pub fn drain_outbox_routes(&self, store: &Store) -> Result<Vec<OutboundSync>, String> {
         let local = self.existing_local_keypair(store)?;
-        let output =
-            connection::worker::run(store, connection::worker::Work::DrainOutboxRoutes { local })?;
+        let output = connection::worker::run(
+            store,
+            self,
+            connection::worker::Work::DrainOutboxRoutes { local },
+        )?;
         let connection::worker::Output::OutboundRoutes(outbound) = output else {
             return Err("connection worker returned non-outbox-routes output".to_string());
         };
@@ -199,28 +144,10 @@ impl Modules {
             .collect())
     }
 
-    pub fn drain_outbox_for_route(
-        &self,
-        store: &Store,
-        connection_id: connection::types::ConnectionId,
-    ) -> Result<connection::worker::DrainedOutbox, String> {
-        let local = self.existing_local_keypair(store)?;
-        let output = connection::worker::run(
-            store,
-            connection::worker::Work::DrainOutboxForRoute {
-                local,
-                connection_id,
-            },
-        )?;
-        let connection::worker::Output::DrainedOutbox(drained) = output else {
-            return Err("connection worker returned non-outbox-route output".to_string());
-        };
-        Ok(drained)
-    }
-
     pub fn mark_outbox_sent(&self, store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {
         let output = connection::worker::run(
             store,
+            self,
             connection::worker::Work::MarkOutboxSent { sent_outbox },
         )?;
         let connection::worker::Output::OutboxMarked = output else {
@@ -235,32 +162,6 @@ impl Modules {
 
     pub fn connection_event_count(&self, store: &Store) -> Result<usize, String> {
         connection::queries::connection_event_count(store)
-    }
-
-    fn ingest_sync_frame(
-        &self,
-        store: &Store,
-        connection_id: connection::types::ConnectionId,
-        bytes: &[u8],
-    ) -> Result<ModuleFrameReport, String> {
-        let output = sync::worker::run(
-            store,
-            sync::worker::Work::IngestFrame {
-                connection_id,
-                bytes: bytes.to_vec(),
-            },
-        )?;
-        let sync::worker::Output::IngestedFrame(report) = output else {
-            return Err("sync worker returned non-ingest output".to_string());
-        };
-        Ok(ModuleFrameReport {
-            events: report.events,
-            drain_outbox_for: Some(connection_id),
-            sent_events: report.sent_events,
-            received_events: report.received_events,
-            received_event_bytes: report.received_event_bytes,
-            ..ModuleFrameReport::default()
-        })
     }
 
     fn local_keypair(
@@ -302,7 +203,7 @@ impl Modules {
         Err(format!("unknown event type {tag}"))
     }
 
-    fn existing_local_keypair(
+    pub(crate) fn existing_local_keypair(
         &self,
         store: &Store,
     ) -> Result<identity::endpoint::types::EndpointKeypair, String> {
@@ -321,6 +222,7 @@ pub fn schemas() -> Vec<Schema> {
     out.extend_from_slice(identity::invite::schema::SCHEMAS);
     out.extend_from_slice(connection::schema::SCHEMAS);
     out.extend_from_slice(connection::transport_target::schema::SCHEMAS);
+    out.extend_from_slice(sync::schema::SCHEMAS);
     out.extend_from_slice(test_events::event_with_deps::schema::SCHEMAS);
     out
 }

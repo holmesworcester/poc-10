@@ -21,7 +21,7 @@ the rule is still prose/review only.
 | Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `domain_root_cli_requires_cross_child_scope`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
 | `event.rs` is forbidden; semantic types live in `types.rs`; codecs do encode/decode only. | static | `event_modules_do_not_use_event_rs`, `codec_files_do_not_define_public_types`, `codec_modules_have_type_files`. |
 | Workers live at the owning scope and expose one obvious entrypoint. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`, `worker_files_export_only_run_as_public_entrypoint`; no typed worker trait/catalog yet. |
-| Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs); static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
+| Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs), `sync_worker_drains_projected_rows_not_direct_ingest_work`; static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
 | `protocol/app` is forbidden; CLI behavior is scoped. | typed + static | [CliCommand](src/core/cli.rs), [protocol/cli.rs](src/protocol/cli.rs), `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
@@ -595,6 +595,17 @@ worker applies their projector output immediately, and their outbox row may
 carry the canonical bytes until transport confirms send. After send, the outbox
 row can be deleted; a future identical connection-scoped event may be projected
 again.
+
+Inbound connection-scoped protocol bytes also become canonical transient
+events, but they must not be handled by direct worker calls. The connection
+worker unwraps transit, converts the inner bytes to the appropriate inbound
+event form, admits that event through the common event-module worker, and only
+then wakes the owning domain worker over rows already projected by that event.
+For sync today this means outbound sync frame events project to connection
+`outbox`, while inbound sync frame events project to `sync.inbound_frames`.
+Those sync request rows may be temporary; if a debug mode wants durable protocol
+trace facts, it should make the storage class explicit instead of treating them
+as shared durable data.
 
 Durable data events are not pushed to peers on creation. Durable data transfer
 is queued only through deterministic connection-scoped protocol events, usually

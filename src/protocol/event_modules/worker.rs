@@ -18,12 +18,11 @@
 //!          -> mark newly unblocked events ready
 //! ```
 //!
-//! Network input follows the same rule. Core TCP writes opaque bytes into a core
-//! inbound queue. The protocol registry asks the owning domain workers to
-//! interpret those bytes, but any surviving canonical event bytes come back here
-//! for ordinary admission. Network output is also kept outside projection:
-//! projectors may write protocol queue rows, and a domain worker later turns
-//! those rows into core network queue rows.
+//! Network input follows the same rule from the other side. A domain worker
+//! interprets opaque inbound bytes, and any surviving canonical event records
+//! come back here for ordinary admission. Network output is kept outside
+//! projection as well: projectors may write protocol queue rows, and a domain
+//! worker later turns those rows into opaque transport rows.
 //!
 //! Future maintainers should be suspicious of changes that make this file more
 //! knowledgeable. Domain-specific branching here is usually a sign that an event
@@ -53,13 +52,12 @@
 //! suspicious change adds a second path that stores, projects, unblocks, or sends
 //! around this path.
 
-use crate::core::network_queues::{self, InboundNetworkRow, OutboundNetworkRow};
 use crate::core::store::{Store, TableRow};
 use crate::protocol::event_modules::types::{
     event_id, EventId, EventRecord, EventScope, EventStatus,
 };
 
-use super::{schema, Modules};
+use super::schema;
 
 /// Default upper bound for one ready-event drain.
 ///
@@ -244,7 +242,7 @@ pub trait EventRegistry {
 /// Unit of work accepted by the worker runner.
 ///
 /// Work values are small boundary objects: "admit these records", "drain ready
-/// events", "ingest this inbound frame". They keep callers from reaching into
+/// events", or another worker-specific wake. They keep callers from reaching into
 /// helper functions and make the public entrypoint read like a scheduler.
 pub trait Work<R: EventRegistry> {
     type Output;
@@ -262,32 +260,6 @@ pub struct AdmitRecords {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrainUntilIdle {
     pub batch_size: usize,
-}
-
-/// Ingest one opaque network frame from the core inbound queue.
-///
-/// The source metadata is transport-level information only. `remember_origin`
-/// controls whether an owning domain should record this source as a usable
-/// route; replayed or synthetic frames can disable that side effect.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IngestFrame {
-    pub inbound: InboundNetworkRow,
-    pub remember_origin: bool,
-}
-
-/// Summary of inbound-frame processing.
-///
-/// `outgoing` contains opaque bytes ready for the core outbound queue.
-/// `sent_outbox` contains protocol outbox row keys that may be removed after the
-/// bytes have been queued for transport. The remaining counters are observability
-/// for CLI tests and logs; they are not control signals.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct IngestResult {
-    pub outgoing: Vec<OutboundNetworkRow>,
-    pub sent_outbox: Vec<Vec<u8>>,
-    pub established_routes: usize,
-    pub sent_events: usize,
-    pub received_events: usize,
 }
 
 /// Summary of event admission and any immediately-applied events.
@@ -353,77 +325,6 @@ where
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
         drain_until_idle(store, registry, self.batch_size)
     }
-}
-
-impl Work<Modules> for IngestFrame {
-    type Output = IngestResult;
-
-    fn execute(self, store: &Store, modules: &Modules) -> Result<Self::Output, String> {
-        ingest_frame(store, modules, self)
-    }
-}
-
-fn ingest_frame(
-    store: &Store,
-    modules: &Modules,
-    work: IngestFrame,
-) -> Result<IngestResult, String> {
-    // Domain workers may return two kinds of things:
-    //
-    // * canonical event records they constructed directly;
-    // * raw canonical bytes recovered from an opaque wrapper and still needing
-    //   normal codec dispatch.
-    //
-    // Both are admitted below before any outbox drain, so replies see the state
-    // caused by the inbound frame that triggered them.
-    let mut report = modules.ingest_frame(
-        store,
-        work.inbound.source.addr(),
-        work.remember_origin,
-        work.inbound.bytes,
-    )?;
-    report.events.extend(received_event_records(
-        modules,
-        report.received_event_bytes,
-    )?);
-    let outbox = report.drain_outbox_for;
-    admit_records(store, modules, report.events)?;
-
-    // Network targets are concrete transport routes. Any protocol-level route
-    // identifier must have been resolved before bytes cross into the core
-    // outbound queue.
-    let target = network_queues::NetworkTarget::new(work.inbound.source.addr());
-    let mut outgoing = network_queues::outbound_rows(target, report.outgoing);
-    let mut sent_outbox = Vec::new();
-    if let Some(route_id) = outbox {
-        // For an inbound request on an open socket, drain only the route that
-        // can reply on that socket. General background draining is owned by the
-        // owning domain worker.
-        let drained = modules.drain_outbox_for_route(store, route_id)?;
-        outgoing.extend(network_queues::outbound_rows(target, drained.outgoing));
-        sent_outbox.extend(drained.sent_outbox);
-    }
-    Ok(IngestResult {
-        outgoing,
-        sent_outbox,
-        established_routes: report.established_routes,
-        sent_events: report.sent_events,
-        received_events: report.received_events,
-    })
-}
-
-fn received_event_records(
-    modules: &Modules,
-    events: Vec<Vec<u8>>,
-) -> Result<Vec<EventRecord>, String> {
-    if events.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut records = Vec::with_capacity(events.len());
-    for bytes in events {
-        records.push(modules.record_from_bytes(bytes)?);
-    }
-    Ok(records)
 }
 
 // ---------------------------------------------------------------------------

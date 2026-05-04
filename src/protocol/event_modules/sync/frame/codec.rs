@@ -1,10 +1,9 @@
 //! Codec for transient sync frame events.
 //!
-//! A frame is the top-level event projected into the connection outbox. The
-//! items inside it are protocol-specific sync facts, but the frame itself is
-//! what receives an event id and passes through the common admission/projector
-//! path. Mixed connection ids are rejected so one frame cannot be routed to
-//! multiple connections.
+//! Outbound frame events are the bytes sent inside connection transit. Inbound
+//! frame events wrap those same bytes with a local-only prefix after transit has
+//! been unwrapped. That distinction keeps projection row-only: outbound frames
+//! project to the connection outbox, while inbound frames project to sync work.
 
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
@@ -13,6 +12,7 @@ use super::super::{compare, data, have_id, need_id};
 use super::types::{Frame, SyncItem};
 
 const MAGIC: &[u8; 9] = b"TOPOSYNC1";
+const INBOUND_MAGIC: &[u8; 9] = b"TOPOSYNI1";
 
 pub fn encode(frame: &Frame) -> Vec<u8> {
     let mut out = Writer::new();
@@ -31,6 +31,7 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
+    let bytes = raw_frame_bytes(bytes)?;
     if !bytes.starts_with(MAGIC) {
         return Err("not a sync frame".to_string());
     }
@@ -59,7 +60,11 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
 }
 
 pub fn is_frame(bytes: &[u8]) -> bool {
-    bytes.starts_with(MAGIC)
+    bytes.starts_with(MAGIC) || bytes.starts_with(INBOUND_MAGIC)
+}
+
+pub fn is_inbound_frame(bytes: &[u8]) -> bool {
+    bytes.starts_with(INBOUND_MAGIC)
 }
 
 pub fn connection_id(
@@ -94,4 +99,22 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         dependencies: Vec::new(),
         scope: EventScope::Transient,
     })
+}
+
+pub fn inbound_record_from_frame(bytes: Vec<u8>) -> Result<EventRecord, String> {
+    connection_id(&bytes)?;
+    let mut canonical_bytes = Vec::with_capacity(INBOUND_MAGIC.len() + bytes.len());
+    canonical_bytes.extend_from_slice(INBOUND_MAGIC);
+    canonical_bytes.extend_from_slice(&bytes);
+    record_from_bytes(canonical_bytes)
+}
+
+pub fn raw_frame_bytes(bytes: &[u8]) -> Result<&[u8], String> {
+    if bytes.starts_with(INBOUND_MAGIC) {
+        return Ok(&bytes[INBOUND_MAGIC.len()..]);
+    }
+    if bytes.starts_with(MAGIC) {
+        return Ok(bytes);
+    }
+    Err("not a sync frame".to_string())
 }
