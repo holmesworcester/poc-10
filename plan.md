@@ -102,7 +102,7 @@ src/protocol/event_modules/
       codec.rs
       commands.rs
       projector.rs
-      tables.rs
+      schema.rs
       queries.rs
       mod.rs
     reaction/
@@ -121,7 +121,7 @@ src/protocol/event_modules/
     cli.rs
   connection/
     worker.rs
-    tables.rs
+    schema.rs
     queries.rs
     types.rs
     cli.rs
@@ -130,7 +130,7 @@ src/protocol/event_modules/
     observed_address/
   sync/
     worker.rs
-    tables.rs
+    schema.rs
     queries.rs
     types.rs
     cli.rs
@@ -146,14 +146,14 @@ src/protocol/event_modules/
 
 **Per-file pattern, always.** Every leaf event module is a directory with one
 file per concern (`types.rs`, `codec.rs`, `projector.rs`, `commands.rs`,
-`tables.rs`, `queries.rs`, `cli.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a
-module is small enough that a single `.rs` file would suffice. `tables.rs` is
+`schema.rs`, `queries.rs`, `cli.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a
+module is small enough that a single `.rs` file would suffice. `schema.rs` is
 where the module declares its projection tables, indexes, queues, cursors, and
-storage class. A domain root may also contain `tables.rs`, `queries.rs`,
+storage class. A domain root may also contain `schema.rs`, `queries.rs`,
 `types.rs`, `worker.rs`, and `cli.rs` when it owns shared tables, a worker, or a
 domain-level CLI command registry coordinating several leaf event modules.
 There is no generic `jobs/` or `cli_commands/` dumping ground and no fake event
-module for an algorithm: `sync/worker.rs` may run negentropy over `sync/tables.rs`;
+module for an algorithm: `sync/worker.rs` may run negentropy over `sync/schema.rs`;
 `negentropy/` is only a child module if it defines an actual event type. `worker`
 is the component noun; `run` is the method verb.
 The cost is some empty-ish files in tiny modules; the win is that this is
@@ -723,6 +723,19 @@ protocol outbox row
 `Store` supports this without network semantics by exposing generic table-row
 operations, including a bounded `table_rows_with_key_prefix` scan. Network queue
 encoding lives in `core/network_queues.rs`, not `core/store.rs`.
+
+## Possible Further Work
+
+The current target-indexed core network queue is the right boundary for a POC,
+but the sender loop can become more mature without changing that model. A
+future long-lived sender should keep each open `NetworkTarget` fed with bounded
+low/high watermarks, claim queued bytes by target and byte budget, and wake
+protocol workers when that target has capacity for more wrapped bytes. That
+demand signal should stay generic: core TCP reports target capacity and drains
+opaque rows; protocol workers decide which connection-scoped outbox rows to
+wrap. This does not imply per-connection core network queues. Per-connection
+dedupe and fairness remain protocol concerns, while physical backpressure
+remains target-scoped in core.
 
 **connection** is an event module. A connection event references two endpoints and carries `shared_workspaces`. Each workspace entry's authority is established by the connection event's own dependencies and signature: deps point at endpoint/bootstrap authorization plus workspace capability events (workspace-membership grant, invite, etc.) that authorize the signer to bind that workspace to that connection, and the ready-event loop's standard signature/dep validation is what makes the entry trustworthy. Rotation, revocation, and expiry are further connection-related events with their own deps/sigs. The same module owns `connection_secrets`: globally-unique `connection_secret_id` → `(key, direction, connection_id, ttl)`, with separate inbound and outbound secrets per connection, each known only to the two endpoints.
 
