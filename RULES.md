@@ -99,43 +99,63 @@ storage concepts. Module `tables.rs` files declare whether each table is
 durable, memory, or temp; core provides the requested storage class without
 learning the table's protocol meaning.
 
-## Event Writes Return Event IDs
+## Proposed Events Have Deterministic IDs
 
-The substrate should expose an event writer API that returns the event id from
-the write path, including after projection, so commands can chain writes without
-re-querying or inferring ids from projected state.
+Event ids come from canonical event bytes, not from projected state. The codec
+or shared codec utility that constructs canonical bytes should also expose the
+event id, usually as `BLAKE3(canonical_event_bytes)`, so commands can chain
+proposed events without writing, re-querying, or inferring ids from projection
+tables.
+
+The write path still returns event ids as a receipt for the exact bytes it
+admitted. That receipt is for status and verification: callers can confirm the
+stored id matches the proposed id, learn whether the event was applied,
+blocked, or duplicate, and surface pending ids when needed.
+
+Prefer this command shape:
+
+```text
+create(input, ctx) -> CommandOutput {
+  value,
+  events: Vec<ProposedEvent { event_id, bytes }>
+}
+```
 
 Use two levels of write API:
 
 ```text
-append_event(bytes) -> Admission {
+append_event(proposed_event) -> Admission {
   event_id,
   status: Ready | Blocked { blocked_by } | Duplicate { status },
 }
 
-append_apply(bytes) -> WriteResult {
+append_apply(proposed_event) -> WriteResult {
   event_id,
   status: Applied | AlreadyApplied | Blocked { blocked_by },
   admitted: Vec<EventId>,
 }
 ```
 
-Commands that need a prior event to be semantically present before constructing
-the next event should use `append_apply` and require an applied result:
+Commands that only need a prior proposed event's id can use the proposed id
+directly:
 
 ```text
-let workspace = writer.append_apply(workspace::create(...))?.require_applied()?;
+let workspace = workspace::create(...)?;
+let account = account::create(workspace.event_id, username)?;
 
-let account = writer.append_apply(account::create(
-  workspace.workspace_id,
-  workspace.event_id,
-  username,
-))?.require_applied()?;
+CommandOutput {
+  value: account.value,
+  events: vec![workspace.event, account.event],
+}
 ```
 
+If a later event requires the prior event to be semantically applied, the actor
+or API running the command admits and applies the proposed chain in order and
+checks the write result. Event-module commands do not call the writer directly.
+
 Commands that intentionally create pending work, such as accepting an invite
-before the invite event has synced, may use `append_event` or accept a blocked
-`append_apply` result and surface that event id as pending.
+before the invite event has synced, may return proposed events whose admission
+can block; the caller surfaces the proposed id as pending.
 
 ## Apply Only The Command's Own Chain
 
