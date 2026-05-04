@@ -1,3 +1,36 @@
+//! Common event-module worker.
+//!
+//! This module is the narrow gate between canonical event bytes and projected
+//! protocol state. It is intentionally boring: admit an event, wait for its
+//! dependencies, call exactly one projector through the registry, and write the
+//! rows the projector returned. That shape is the defense against the kernel
+//! becoming a second protocol implementation.
+//!
+//! The worker does not know what any concrete event family means. Those meanings
+//! live in event modules. The worker only knows the protocol-wide mechanics that
+//! every canonical event shares:
+//!
+//! ```text
+//! command -> ProposedEvent
+//!          -> admit canonical bytes by deterministic event id
+//!          -> block until dependency event ids are applied
+//!          -> project ready events into rows
+//!          -> mark newly unblocked events ready
+//! ```
+//!
+//! Network input follows the same rule. Core TCP writes opaque bytes into a core
+//! inbound queue. The protocol registry asks the owning domain workers to
+//! interpret those bytes, but any surviving canonical event bytes come back here
+//! for ordinary admission. Network output is also kept outside projection:
+//! projectors may write protocol queue rows, and a domain worker later turns
+//! those rows into core network queue rows.
+//!
+//! Future maintainers should be suspicious of changes that make this file more
+//! knowledgeable. Domain-specific branching here is usually a sign that an event
+//! module is missing a codec, projector, command, query, table, or domain worker.
+//! The important invariant is not that this file stays tiny; it is that it stays
+//! mechanical enough to audit.
+
 use crate::core::network_queues::{self, InboundNetworkRow, OutboundNetworkRow};
 use crate::core::store::{
     event_id, EventId, EventRecord, EventScope, EventStatus, Store, TableRow,
@@ -5,8 +38,21 @@ use crate::core::store::{
 
 use super::Modules;
 
+/// Default upper bound for one ready-event drain.
+///
+/// This is a scheduling guard, not part of event semantics. A caller can choose
+/// a smaller batch to improve fairness or a larger batch to reduce loop
+/// overhead; the result must be the same as long as ready events are eventually
+/// drained.
 pub const DEFAULT_READY_BATCH: usize = 4096;
 
+/// Canonical event proposed by a command before admission.
+///
+/// Commands are allowed to decide *what event should exist*. They are not
+/// allowed to write event rows, projection rows, queue rows, or network rows.
+/// `ProposedEvent` keeps the command boundary ergonomic while still making the
+/// deterministic event id available immediately for command chaining and CLI
+/// output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposedEvent {
     event_id: EventId,
@@ -40,6 +86,12 @@ impl From<EventRecord> for ProposedEvent {
     }
 }
 
+/// Declarative output of a projector.
+///
+/// A projector may only return table rows. It may not emit more events, call a
+/// worker, send bytes, or query broad state. If projection appears to need one
+/// of those powers, the event module should write a queue row and let its domain
+/// worker perform the active step later.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionOutput {
     pub rows: Vec<TableRow>,
@@ -55,6 +107,12 @@ impl ProjectionOutput {
     }
 }
 
+/// Result of a command: a value for the caller plus proposed events to admit.
+///
+/// The value is command-local information such as a created id, a status report,
+/// or bytes that are intentionally not canonical events. The events are the only
+/// durable state change path. The API running a command is responsible for
+/// admitting them through this worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput<T> {
     pub value: T,
@@ -81,6 +139,13 @@ impl<T> CommandOutput<T> {
     }
 }
 
+/// Protocol registry used by the common worker.
+///
+/// This trait is the only place where the generic admission/apply loop touches
+/// concrete event modules. `record_from_bytes` chooses the module codec.
+/// `project_record` chooses the module projector. Keeping those decisions
+/// behind the registry lets this worker enforce common mechanics without
+/// learning event-type vocabulary.
 pub trait EventRegistry {
     fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String>;
     fn project_record(
@@ -90,28 +155,46 @@ pub trait EventRegistry {
     ) -> Result<ProjectionOutput, String>;
 }
 
+/// Unit of work accepted by the worker runner.
+///
+/// Work values are small boundary objects: "admit these records", "drain ready
+/// events", "ingest this inbound frame". They keep callers from reaching into
+/// helper functions and make the public entrypoint read like a scheduler.
 pub trait Work<R: EventRegistry> {
     type Output;
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String>;
 }
 
+/// Admit already-decoded records through normal dependency handling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmitRecords {
     pub records: Vec<EventRecord>,
 }
 
+/// Drain ready durable events until no ready event remains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrainUntilIdle {
     pub batch_size: usize,
 }
 
+/// Ingest one opaque network frame from the core inbound queue.
+///
+/// The source metadata is transport-level information only. `remember_origin`
+/// controls whether an owning domain should record this source as a usable
+/// route; replayed or synthetic frames can disable that side effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestFrame {
     pub inbound: InboundNetworkRow,
     pub remember_origin: bool,
 }
 
+/// Summary of inbound-frame processing.
+///
+/// `outgoing` contains opaque bytes ready for the core outbound queue.
+/// `sent_outbox` contains protocol outbox row keys that may be removed after the
+/// bytes have been queued for transport. The remaining counters are observability
+/// for CLI tests and logs; they are not control signals.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestResult {
     pub outgoing: Vec<OutboundNetworkRow>,
@@ -121,6 +204,7 @@ pub struct IngestResult {
     pub received_events: usize,
 }
 
+/// Summary of event admission and any immediately-applied events.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdmitReport {
     pub event_ids: Vec<EventId>,
@@ -131,12 +215,19 @@ pub struct AdmitReport {
     pub applied_events: usize,
 }
 
+/// Summary of a ready-event drain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ApplyReadyReport {
     pub applied_events: usize,
     pub unblocked_events: usize,
 }
 
+/// Run one common event-module worker action.
+///
+/// The single public function is deliberate. If a caller needs another behavior,
+/// add a `Work` value that names the behavior instead of exporting a helper. This
+/// keeps the admission/apply boundary small enough to reason about from tests and
+/// static checks.
 pub fn run<R, W>(store: &Store, registry: &R, work: W) -> Result<W::Output, String>
 where
     R: EventRegistry,
@@ -191,6 +282,14 @@ fn ingest_frame(
     modules: &Modules,
     work: IngestFrame,
 ) -> Result<IngestResult, String> {
+    // Domain workers may return two kinds of things:
+    //
+    // * canonical event records they constructed directly;
+    // * raw canonical bytes recovered from an opaque wrapper and still needing
+    //   normal codec dispatch.
+    //
+    // Both are admitted below before any outbox drain, so replies see the state
+    // caused by the inbound frame that triggered them.
     let mut report = modules.ingest_frame(
         store,
         work.inbound.source.addr(),
@@ -203,10 +302,17 @@ fn ingest_frame(
     )?);
     let outbox = report.drain_outbox_for;
     admit_records(store, modules, report.events)?;
+
+    // Network targets are concrete transport routes. Any protocol-level route
+    // identifier must have been resolved before bytes cross into the core
+    // outbound queue.
     let target = network_queues::NetworkTarget::new(work.inbound.source.addr());
     let mut outgoing = network_queues::outbound_rows(target, report.outgoing);
     let mut sent_outbox = Vec::new();
     if let Some(route_id) = outbox {
+        // For an inbound request on an open socket, drain only the route that
+        // can reply on that socket. General background draining is owned by the
+        // owning domain worker.
         let drained = modules.drain_outbox_for_route(store, route_id)?;
         outgoing.extend(network_queues::outbound_rows(target, drained.outgoing));
         sent_outbox.extend(drained.sent_outbox);
@@ -294,6 +400,10 @@ fn admit_and_apply_event_in_tx(
     let record = event.record();
     report.event_ids.push(event.event_id());
     if record.scope == EventScope::Transient {
+        // Transient events are canonical enough to project and dedupe inside the
+        // current process, but they are not durable facts. Letting them wait on
+        // durable dependencies would create hidden state that cannot be resumed
+        // after a crash.
         if !record.dependencies.is_empty() {
             return Err(module_error(
                 "transient events cannot wait on durable dependencies".to_string(),
@@ -360,6 +470,9 @@ fn apply_ready_event_in_tx(
 ) -> rusqlite::Result<ApplyReadyReport> {
     let mut report = ApplyReadyReport::default();
     if store.set_event_status(event_id, EventStatus::Ready, EventStatus::Applied)? {
+        // The status change is the claim. Projection runs only for the worker
+        // that successfully moved Ready -> Applied, which keeps duplicate drain
+        // attempts idempotent when callers retry.
         let bytes = store
             .event_bytes(event_id)?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
@@ -447,6 +560,9 @@ fn unblock_dependents(store: &Store, applied_event_id: &EventId) -> rusqlite::Re
 
     let mut unblocked = 0;
     for dependent in dependents {
+        // Unblocking only changes status. It does not recursively project the
+        // dependent event inside the same stack frame, which prevents a large
+        // dependency cascade from becoming one unbounded transaction.
         if !store.event_has_dependency_waits(&dependent)?
             && store.set_event_status(&dependent, EventStatus::Blocked, EventStatus::Ready)?
         {
