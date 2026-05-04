@@ -36,7 +36,7 @@ pub struct Modules;
 pub struct OutboundSync {
     pub target: NetworkTarget,
     pub outgoing: Vec<OutboundNetworkRow>,
-    pub sent_outbox: Vec<Vec<u8>>,
+    pub sent_outbox: Vec<Vec<Vec<u8>>>,
     pub sent_events: usize,
 }
 
@@ -114,7 +114,7 @@ impl Modules {
     ) -> Result<CommandOutput<sync::worker::SyncStartReport>, String> {
         match sync::worker::run(store, sync::worker::Work::Start)? {
             sync::worker::Output::Started(output) => Ok(output),
-            sync::worker::Output::DrainedInboundFrames(_) => {
+            sync::worker::Output::DrainedInboundSync(_) => {
                 Err("sync worker returned non-start output".to_string())
             }
         }
@@ -251,17 +251,16 @@ fn merge_outputs<T>(
 }
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
-    // Connection bootstrap records and sync frames use magic prefixes because
-    // they are transient protocol traffic. Ordinary shared/local event modules
-    // use a single leading type tag.
+    // Connection bootstrap records use a magic prefix. Ordinary shared/local
+    // events and connection-scoped sync events use a single leading type tag.
     if connection::connection_request::codec::is_request(&bytes) {
         return connection::connection_request::codec::record_from_bytes(bytes);
     }
     if connection::connection_ack::codec::is_ack(&bytes) {
         return connection::connection_ack::codec::record_from_bytes(bytes);
     }
-    if sync::frame::codec::is_frame(&bytes) {
-        return sync::frame::codec::record_from_bytes(bytes);
+    if sync::is_connection_scoped_event(&bytes) {
+        return sync::record_from_bytes(bytes);
     }
     let tag = bytes
         .first()
@@ -276,6 +275,9 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         connection::transport_target::codec::TYPE_TRANSPORT_TARGET => {
             connection::transport_target::codec::record_from_bytes(bytes)
         }
+        sync::compare::codec::TYPE_SYNC_COMPARE => sync::compare::codec::record_from_bytes(bytes),
+        sync::have_id::codec::TYPE_SYNC_HAVE_ID => sync::have_id::codec::record_from_bytes(bytes),
+        sync::need_id::codec::TYPE_SYNC_NEED_ID => sync::need_id::codec::record_from_bytes(bytes),
         content::content_event::codec::TYPE_CONTENT => {
             content::content_event::codec::record_from_bytes(bytes)
         }

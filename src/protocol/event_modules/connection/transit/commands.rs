@@ -15,7 +15,7 @@ use super::types::TransitEnvelope;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnwrappedTransit {
-    pub inner: Vec<u8>,
+    pub inners: Vec<Vec<u8>>,
     pub connection_id: Option<ConnectionId>,
 }
 
@@ -76,7 +76,7 @@ pub fn unwrap(
                 ciphertext,
             )?;
             Ok(UnwrappedTransit {
-                inner,
+                inners: vec![inner],
                 connection_id: None,
             })
         }
@@ -94,7 +94,7 @@ pub fn unwrap(
             if sender_endpoint != remote {
                 return Err("connection transit sender does not match connection".to_string());
             }
-            let inner = crypto::decrypt(
+            let plaintext = crypto::decrypt(
                 &local.secret,
                 &sender_endpoint,
                 crypto::CONNECTION_PURPOSE,
@@ -108,21 +108,23 @@ pub fn unwrap(
                 ciphertext,
             )?;
             Ok(UnwrappedTransit {
-                inner,
+                inners: codec::decode_inner_events(&plaintext)?,
                 connection_id: Some(connection_id),
             })
         }
     }
 }
 
-pub fn create_connection(
+pub fn create_connection_batch(
     local: &EndpointKeypair,
     recipient_endpoint: EndpointId,
     connection_id: ConnectionId,
-    inner: Vec<u8>,
+    inners: Vec<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
     // Ordinary frames bind sender, recipient, and connection id into the
-    // authenticated envelope before encrypting the inner event bytes.
+    // authenticated envelope before encrypting the inner event bytes. The
+    // plaintext is a small fixed-format list so one transit envelope can carry a
+    // coherent batch of canonical events without making TCP understand them.
     let nonce = crypto::nonce();
     let envelope = TransitEnvelope::Connection {
         connection_id,
@@ -131,13 +133,14 @@ pub fn create_connection(
         nonce,
         ciphertext: Vec::new(),
     };
+    let plaintext = codec::encode_inner_events(&inners)?;
     let ciphertext = crypto::encrypt(
         &local.secret,
         &recipient_endpoint,
         crypto::CONNECTION_PURPOSE,
         &codec::associated_data(&envelope),
         &nonce,
-        &inner,
+        &plaintext,
     )?;
     Ok(codec::encode(&TransitEnvelope::Connection {
         connection_id,

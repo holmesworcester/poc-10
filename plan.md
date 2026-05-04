@@ -137,9 +137,8 @@ src/protocol/event_modules/
     types.rs
     cli.rs
     compare/
-    have/
-    need/
-    frame/
+    have_id/
+    need_id/
     dep_cache/
   local/
     local_secret/
@@ -218,7 +217,7 @@ encoding.
 **core TCP** drains and fills opaque network queue rows. It owns listener,
 connect, length-prefixed frame read/write, socket shutdown, and transport
 backpressure mechanics. It does not create or interpret transit blobs,
-canonical event bytes, sync frames, invites, or connection ids.
+canonical event bytes, sync control events, invites, or connection ids.
 
 **workers** are module-owned active components woken by queue rows, timers, IO
 readiness, or explicit CLI requests. A worker declares its wake sources, read
@@ -700,7 +699,7 @@ There is no `protocol/network.rs`. Network mechanics are split:
 - `core/tcp.rs` owns listener, connect, `[u32 length][bytes]` framing, socket
   shutdown, and transport backpressure. It sends and receives only opaque bytes.
 - protocol event modules own route facts, connection ids, transit wrapping,
-  bootstrap, auth, sync frame meaning, and canonical event admission.
+  bootstrap, auth, sync event meaning, and canonical event admission.
 
 The only transport target visible to core is a concrete network target such as
 `(ip, port)` or a future socket id. If a protocol worker starts with a
@@ -927,14 +926,20 @@ SyncHaveId(connection_id, workspace_id, node, event_id)
 SyncNeedId(connection_id, workspace_id, event_id)
 ```
 
-The current POC keeps `sync/frame` as the transient connection-scoped packet
-event for real TCP throughput: it batches compare/have/need/data items, and its
-codec owns that packet format. Outbound frame events project to the connection
-outbox. Inbound transit bytes are first wrapped into a distinct inbound frame
-event form, then admitted through the common event-module worker; that inbound
-projector writes `sync.inbound_frames`, and `sync/worker.rs` reads only those
-projected rows. Core network queues and core TCP still see only opaque transit
-bytes and TCP length frames.
+The current POC uses real connection-scoped sync events: `SyncCompare`,
+`SyncHaveId`, and `SyncNeedId`. There is no sync packet/frame event. Outbound
+sync events project to a temporary connection-scoped byte cache and an id-only
+connection outbox row. Inbound transit bytes are converted to inbound sync event
+forms, admitted through the common event-module worker, projected to
+`sync.inbound_events`, and then read by `sync/worker.rs`. Core owns only TCP
+length framing; protocol event modules own event bytes and transit wrapping.
+
+Connection transit may batch several canonical inner events into one encrypted
+transit blob. That is still connection-domain work, not TCP framing: the
+plaintext batch is a fixed-format list of canonical event bytes, and core sees
+only one opaque `[u32 length][bytes]` frame for the resulting transit blob. The
+batch exists to keep the sender fed and to let the receiver project a coherent
+set of inbound sync events before the sync worker drains `sync.inbound_events`.
 
 Sync request events are not shared durable data. They are connection-scoped
 transient facts by default. A debug or trace mode may choose durable storage for
@@ -966,7 +971,7 @@ Durable event projected
   -> sync.new_events(event_id, applied_seq)
 
 Inbound SyncCompare / SyncHaveId / SyncNeedId projected
-  -> sync.work or sync.inbound_frames { connection_id, required_frontier, payload }
+  -> sync.work or sync.inbound_events { connection_id, required_frontier, payload }
 
 sync::worker.run
   -> first drains sync.new_events into sync.negentropy.index
@@ -1003,7 +1008,7 @@ sync worker each keep their present scope:
    `shareable_events` log. The common event worker writes this row in the same
    transaction that records a shared outer-valid event as ready, blocked, or
    applied. Blocked shared events are shareable; rejected events and transient
-   sync frames are not.
+   sync control events are not.
 2. Extend `sync/schema.rs` with request-driven index state:
    `sync_index_cursor`, `sync_present`, `sync_roots`, direct-dep rows,
    known/present closure rows, dep waiters, and range-node summaries. Use
@@ -1013,13 +1018,15 @@ sync worker each keep their present scope:
    update the incremental plain-negentropy summaries first, then later the
    dep-aware closure summaries, and advance the cursor atomically with those
    writes.
-4. Keep `sync/frame` as the transient packet event for real TCP. Outbound frame
-   projection writes connection outbox rows. Inbound frame projection writes
-   sync-owned work rows. The sync worker parses those projected rows and emits
-   deterministic outbound frame events plus durable event bytes for normal
-   admission.
+4. Keep compare/have/need as transient connection-scoped events. Outbound
+   projection writes connection-scoped byte-cache rows plus id-only outbox rows.
+   Inbound projection writes sync-owned work rows. The sync worker parses those
+   projected rows and emits deterministic outbound sync events or id-only
+   outbox rows for requested durable data. Connection transit may batch multiple
+   outbox ids into one encrypted transit blob; core TCP still owns only the
+   outer length frame.
 5. Implement plain negentropy first: root compare over a range tree, split on
-   mismatch, have/need ids at leaves, and data/send events for requested ids.
+   mismatch, have/need ids at leaves, and id-only sends for requested durable ids.
    Replace the current whole-set bucket shortcut only after the black-box sync
    tests still pass.
 6. Add dep-aware summaries without changing the worker boundary: maintain known

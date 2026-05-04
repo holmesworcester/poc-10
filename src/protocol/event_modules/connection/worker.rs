@@ -91,7 +91,7 @@ pub enum Output {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NetworkIngestResult {
     pub outgoing: Vec<OutboundNetworkRow>,
-    pub sent_outbox: Vec<Vec<u8>>,
+    pub sent_outbox: Vec<Vec<Vec<u8>>>,
     pub established_routes: usize,
     pub sent_events: usize,
     pub received_events: usize,
@@ -105,10 +105,11 @@ pub struct NetworkIngestResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InboundFrame {
     Connection(ConnectionFrameReport),
-    ConnectionScoped {
+    SyncEvent {
         connection_id: types::ConnectionId,
         inner: Vec<u8>,
     },
+    DurableEvent(Vec<u8>),
 }
 
 /// Records and response bytes produced while accepting a connection frame.
@@ -132,15 +133,17 @@ pub struct ConnectionFrameReport {
 pub struct OutboundTransit {
     pub target: SocketAddr,
     pub outgoing: Vec<Vec<u8>>,
-    pub sent_outbox: Vec<Vec<u8>>,
+    pub sent_outbox: Vec<Vec<Vec<u8>>>,
 }
 
 /// Result of draining one connection's protocol outbox.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DrainedOutbox {
     outgoing: Vec<Vec<u8>>,
-    sent_outbox: Vec<Vec<u8>>,
+    sent_outbox: Vec<Vec<Vec<u8>>>,
 }
+
+const TRANSIT_TARGET_PLAINTEXT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Run one connection worker action.
 ///
@@ -179,19 +182,28 @@ fn ingest_network(
         origin,
         remember_origin,
     };
-    let frame = unwrap_transit_bytes(store, local, metadata, inbound.bytes)?;
-    let mut report = match frame {
-        InboundFrame::Connection(report) => NetworkFrameReport {
-            events: report.events,
-            outgoing: report.outgoing,
-            established_routes: report.established_routes,
-            ..NetworkFrameReport::default()
-        },
-        InboundFrame::ConnectionScoped {
-            connection_id,
-            inner,
-        } => ingest_connection_scoped_frame(connection_id, inner)?,
-    };
+    let frames = unwrap_transit_bytes(store, local, metadata, inbound.bytes)?;
+    let mut report = NetworkFrameReport::default();
+    for frame in frames {
+        let next = match frame {
+            InboundFrame::Connection(report) => NetworkFrameReport {
+                events: report.events,
+                outgoing: report.outgoing,
+                established_routes: report.established_routes,
+                ..NetworkFrameReport::default()
+            },
+            InboundFrame::SyncEvent {
+                connection_id,
+                inner,
+            } => ingest_connection_scoped_sync_event(connection_id, inner)?,
+            InboundFrame::DurableEvent(inner) => NetworkFrameReport {
+                events: vec![registry.record_from_bytes(inner)?],
+                received_events: 1,
+                ..NetworkFrameReport::default()
+            },
+        };
+        report.merge(next);
+    }
 
     worker::run(
         store,
@@ -203,14 +215,14 @@ fn ingest_network(
 
     if let Some(connection_id) = report.drain_sync_for {
         let sync_report = drain_projected_sync_work(store, connection_id)?;
-        let mut records = sync_report.events;
-        records.extend(received_event_records(
+        worker::run(
+            store,
             registry,
-            sync_report.received_event_bytes,
-        )?);
-        worker::run(store, registry, AdmitRecords { records })?;
+            AdmitRecords {
+                records: sync_report.events,
+            },
+        )?;
         report.sent_events += sync_report.sent_events;
-        report.received_events += sync_report.received_events;
     }
 
     let target = network_queues::NetworkTarget::new(origin);
@@ -242,15 +254,23 @@ struct NetworkFrameReport {
     received_events: usize,
 }
 
-fn ingest_connection_scoped_frame(
+impl NetworkFrameReport {
+    fn merge(&mut self, other: Self) {
+        self.events.extend(other.events);
+        self.outgoing.extend(other.outgoing);
+        self.drain_sync_for = self.drain_sync_for.or(other.drain_sync_for);
+        self.drain_outbox_for = self.drain_outbox_for.or(other.drain_outbox_for);
+        self.established_routes += other.established_routes;
+        self.sent_events += other.sent_events;
+        self.received_events += other.received_events;
+    }
+}
+
+fn ingest_connection_scoped_sync_event(
     connection_id: types::ConnectionId,
     inner: Vec<u8>,
 ) -> Result<NetworkFrameReport, String> {
-    let frame_connection_id = sync::frame::codec::connection_id(&inner)?;
-    if frame_connection_id != connection_id {
-        return Err("sync frame used a different connection id".to_string());
-    }
-    let event = sync::frame::codec::inbound_record_from_frame(inner)?;
+    let event = sync::inbound_record_from_connection_bytes(inner)?;
     Ok(NetworkFrameReport {
         events: vec![event],
         drain_sync_for: Some(connection_id),
@@ -262,32 +282,28 @@ fn ingest_connection_scoped_frame(
 fn drain_projected_sync_work(
     store: &Store,
     connection_id: types::ConnectionId,
-) -> Result<sync::worker::SyncFrameReport, String> {
-    let output = sync::worker::run(
-        store,
-        sync::worker::Work::DrainInboundFrames {
-            connection_id,
-            limit: sync::worker::DEFAULT_INBOUND_BATCH,
-        },
-    )?;
-    let sync::worker::Output::DrainedInboundFrames(report) = output else {
-        return Err("sync worker returned non-drain output".to_string());
-    };
-    Ok(report)
-}
-
-fn received_event_records(
-    modules: &impl EventRegistry,
-    events: Vec<Vec<u8>>,
-) -> Result<Vec<EventRecord>, String> {
-    if events.is_empty() {
-        return Ok(Vec::new());
+) -> Result<sync::worker::SyncWorkReport, String> {
+    let mut aggregate = sync::worker::SyncWorkReport::default();
+    loop {
+        let output = sync::worker::run(
+            store,
+            sync::worker::Work::DrainInboundSync {
+                connection_id,
+                limit: sync::worker::DEFAULT_INBOUND_BATCH,
+            },
+        )?;
+        let sync::worker::Output::DrainedInboundSync(report) = output else {
+            return Err("sync worker returned non-drain output".to_string());
+        };
+        let processed_work = report.processed_work;
+        aggregate.processed_work += processed_work;
+        aggregate.sent_events += report.sent_events;
+        aggregate.events.extend(report.events);
+        aggregate.send_event_ids.extend(report.send_event_ids);
+        if processed_work < sync::worker::DEFAULT_INBOUND_BATCH {
+            return Ok(aggregate);
+        }
     }
-    let mut records = Vec::with_capacity(events.len());
-    for bytes in events {
-        records.push(modules.record_from_bytes(bytes)?);
-    }
-    Ok(records)
 }
 
 fn unwrap_transit_bytes(
@@ -295,28 +311,34 @@ fn unwrap_transit_bytes(
     local: endpoint::types::EndpointKeypair,
     metadata: FrameMetadata,
     bytes: Vec<u8>,
-) -> Result<InboundFrame, String> {
+) -> Result<Vec<InboundFrame>, String> {
     // Transit unwrap is the only place inbound bytes become meaningful. A
     // bootstrap frame has no connection id yet; an ordinary connection transit
     // frame must recover one before any inner bytes are trusted enough to route.
     let transit = transit::commands::unwrap(local, &bytes, |connection_id| {
         queries::remote_endpoint(store, connection_id)
     })?;
-    if types::is_connection_event(&transit.inner) {
-        return Ok(InboundFrame::Connection(ingest_connection_frame(
-            store,
-            local,
-            metadata,
-            transit.inner,
-        )?));
+    let mut frames = Vec::with_capacity(transit.inners.len());
+    for inner in transit.inners {
+        if types::is_connection_event(&inner) {
+            frames.push(InboundFrame::Connection(ingest_connection_frame(
+                store, local, metadata, inner,
+            )?));
+            continue;
+        }
+        let connection_id = transit
+            .connection_id
+            .ok_or_else(|| "connection-scoped frame requires connection transit".to_string())?;
+        if sync::is_connection_scoped_event(&inner) {
+            frames.push(InboundFrame::SyncEvent {
+                connection_id,
+                inner,
+            });
+        } else {
+            frames.push(InboundFrame::DurableEvent(inner));
+        }
     }
-    let connection_id = transit
-        .connection_id
-        .ok_or_else(|| "connection-scoped frame requires connection transit".to_string())?;
-    Ok(InboundFrame::ConnectionScoped {
-        connection_id,
-        inner: transit.inner,
-    })
+    Ok(frames)
 }
 
 fn drain_outbox_routes(
@@ -351,24 +373,52 @@ fn drain_outbox_for_route(
         return Ok(DrainedOutbox::default());
     }
     let remote = queries::remote_endpoint(store, &connection_id)?;
-    let mut outgoing = Vec::with_capacity(items.len());
-    let mut sent_outbox = Vec::with_capacity(items.len());
-    for item in items {
+    let batches = batch_outbox_items(items);
+    let mut outgoing = Vec::with_capacity(batches.len());
+    let mut sent_outbox = Vec::with_capacity(batches.len());
+    for batch in batches {
         // The outbox stores canonical inner event bytes. Wrapping happens here,
         // at the connection boundary, so event modules never need socket or
         // encryption context in their projectors.
-        outgoing.push(transit::commands::create_connection(
+        let mut inner_events = Vec::with_capacity(batch.len());
+        let mut batch_outbox = Vec::with_capacity(batch.len());
+        for item in batch {
+            inner_events.push(item.event_bytes);
+            batch_outbox.push(item.key.to_bytes());
+        }
+        outgoing.push(transit::commands::create_connection_batch(
             &local,
             remote,
             connection_id,
-            item.event_bytes,
+            inner_events,
         )?);
-        sent_outbox.push(item.key.to_bytes());
+        sent_outbox.push(batch_outbox);
     }
     Ok(DrainedOutbox {
         outgoing,
         sent_outbox,
     })
+}
+
+fn batch_outbox_items(items: Vec<types::OutboxItem>) -> Vec<Vec<types::OutboxItem>> {
+    let mut batches: Vec<Vec<types::OutboxItem>> = Vec::new();
+    let mut current = Vec::new();
+    let mut current_bytes = 0usize;
+    for item in items {
+        let item_bytes = 4usize.saturating_add(item.event_bytes.len());
+        if !current.is_empty()
+            && current_bytes.saturating_add(item_bytes) > TRANSIT_TARGET_PLAINTEXT_BYTES
+        {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current_bytes = current_bytes.saturating_add(item_bytes);
+        current.push(item);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
 }
 
 fn mark_outbox_sent(store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {

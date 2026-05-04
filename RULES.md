@@ -25,6 +25,7 @@ the rule is still prose/review only.
 | `protocol/app` is forbidden; CLI behavior is scoped. | typed + static | [CliCommand](src/core/cli.rs), [protocol/cli.rs](src/protocol/cli.rs), `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
+| Connection outbox is id-only; transit batches canonical inner events. | static + partial | `connection_outbox_is_id_only_and_transit_batches_inner_events`; batching shape is checked, but exact batch sizing remains implementation/test coverage. |
 | Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_schema_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only. | static | `event_module_queries_are_read_only`. |
 | `EventRecord` literals are constructed only by codecs. | static | `event_records_are_constructed_only_by_codecs`. |
@@ -591,29 +592,30 @@ Events declare scope explicitly:
 Connection-scoped protocol events are real canonical events. Their route or
 connection id must be inside their canonical bytes, and their id is the normal
 `BLAKE3(canonical_event_bytes)`. They are not durable event-set truth: the
-worker applies their projector output immediately, and their outbox row may
-carry the canonical bytes until transport confirms send. After send, the outbox
-row can be deleted; a future identical connection-scoped event may be projected
-again.
+worker applies their projector output immediately. The outbox row is id-only;
+the connection domain may keep a temporary canonical-byte cache for transient
+events until transport confirms send. After send, the outbox row can be deleted;
+a future identical connection-scoped event may be projected again.
 
 Inbound connection-scoped protocol bytes also become canonical transient
 events, but they must not be handled by direct worker calls. The connection
 worker unwraps transit, converts the inner bytes to the appropriate inbound
 event form, admits that event through the common event-module worker, and only
 then wakes the owning domain worker over rows already projected by that event.
-For sync today this means outbound sync frame events project to connection
-`outbox`, while inbound sync frame events project to `sync.inbound_frames`.
+For sync today this means outbound compare/have/need events project to
+connection `outbox`, while inbound compare/have/need events project to
+`sync.inbound_events`.
 Those sync request rows may be temporary; if a debug mode wants durable protocol
 trace facts, it should make the storage class explicit instead of treating them
 as shared durable data.
 
 Durable data events are not pushed to peers on creation. Durable data transfer
-is queued only through deterministic connection-scoped protocol events, usually
-created by a sync worker after projectors write compare/need/range queue rows.
-The protocol outbox dedupes these events by `(connection_id, event_id)`. The
-connection/transit module drains the protocol outbox and creates transit blobs;
-core network queues only carry target metadata plus opaque bytes, and core TCP
-only frames and writes those bytes.
+is queued only when protocol work asks for a durable event id, usually by a sync
+worker after projectors write compare/need/range queue rows. The protocol outbox
+dedupes by `(connection_id, event_id)`. The connection/transit module drains the
+protocol outbox and may batch several canonical inner events into one encrypted
+transit blob; core network queues only carry target metadata plus opaque bytes,
+and core TCP only frames and writes those bytes.
 
 Core TCP send queue targets are transport routes, not semantic connection ids.
 Use an address or socket target such as `(ip, port)` or `socket_id`. If a

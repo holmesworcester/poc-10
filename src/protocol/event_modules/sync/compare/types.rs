@@ -1,9 +1,10 @@
-//! Compare item types.
+//! Compare event types.
 //!
-//! The bucket count is fixed so compare frames have predictable shape. A bucket
+//! The bucket count is fixed so compare events have predictable shape. A bucket
 //! summary is the minimal answer to "are we the same for this range?" in the
 //! current POC: count plus fingerprint.
 
+use crate::protocol::event_modules::sync::types::SyncDirection;
 use crate::protocol::event_modules::types::EventId;
 
 pub const BUCKETS: usize = 256;
@@ -16,6 +17,7 @@ pub struct BucketSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompareEvent {
+    pub direction: SyncDirection,
     pub connection_id: EventId,
     pub summary: [BucketSummary; BUCKETS],
 }

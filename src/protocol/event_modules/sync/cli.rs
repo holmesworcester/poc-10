@@ -61,7 +61,7 @@ fn run_sync_routes(context: &mut Context) -> Result<Vec<String>, String> {
         .start_sync(&context.store)
         .map_err(|err| format!("start sync: {err}"))?;
     let (started, _) = worker::run(&context.store, &context.protocol, start)
-        .map_err(|err| format!("record sync frames: {err}"))?;
+        .map_err(|err| format!("record sync events: {err}"))?;
 
     let mut summary = SyncSummary {
         sent_events: started.sent_events,

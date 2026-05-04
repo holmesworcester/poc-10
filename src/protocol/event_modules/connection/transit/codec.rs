@@ -11,6 +11,7 @@ use crate::protocol::wire::{Reader, Writer};
 use super::types::{TransitEnvelope, TransitNonce};
 
 const MAGIC: &[u8; 10] = b"TOPOTRANS1";
+const INNER_EVENTS_MAGIC: &[u8; 10] = b"TOPOINNER1";
 const TAG_BOOTSTRAP: u8 = 1;
 const TAG_CONNECTION: u8 = 2;
 
@@ -115,6 +116,37 @@ pub fn encode(envelope: &TransitEnvelope) -> Vec<u8> {
         }
     }
     out.finish()
+}
+
+pub fn encode_inner_events(inners: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let count = inners.len();
+    if count > u32::MAX as usize {
+        return Err("too many inner events in transit".to_string());
+    }
+    let mut out = Writer::new();
+    out.raw(INNER_EVENTS_MAGIC);
+    out.u32(count);
+    for inner in inners {
+        out.sized_bytes(inner);
+    }
+    Ok(out.finish())
+}
+
+pub fn decode_inner_events(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    if !bytes.starts_with(INNER_EVENTS_MAGIC) {
+        return Err("not a connection inner-event batch".to_string());
+    }
+    let mut reader = Reader::new(
+        &bytes[INNER_EVENTS_MAGIC.len()..],
+        "connection inner events",
+    );
+    let count = reader.u32()? as usize;
+    let mut inners = Vec::with_capacity(count);
+    for _ in 0..count {
+        inners.push(reader.sized_slice()?.to_vec());
+    }
+    reader.finish()?;
+    Ok(inners)
 }
 
 pub fn decode(bytes: &[u8]) -> Result<TransitEnvelope, String> {

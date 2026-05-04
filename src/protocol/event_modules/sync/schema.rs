@@ -1,70 +1,70 @@
 //! Sync-owned work tables.
 //!
-//! Sync frames are connection-scoped protocol events. Outbound frames project
-//! into the connection outbox because they are already answers ready for
-//! wrapping. Inbound frames project here instead: the projector records that
-//! the sync worker has stateful comparison work to do, and the worker later
-//! drains these rows by connection.
+//! Sync compare/have/need are connection-scoped protocol events. Outbound
+//! events project into the connection outbox by id because they are already
+//! answers ready for wrapping. Inbound events project here instead: the
+//! projector records that the sync worker has stateful comparison work to do,
+//! and the worker later drains these rows by connection.
 
 use crate::core::store::{Schema, TableName, TableRow};
 use crate::protocol::event_modules::connection::types::ConnectionId;
 use crate::protocol::event_modules::types::EventId;
 
-pub const INBOUND_FRAMES: TableName = TableName::new("sync.inbound_frames");
+pub const INBOUND_EVENTS: TableName = TableName::new("sync.inbound_events");
 
 pub const SCHEMAS: &[Schema] = &[Schema::temp_row_table(
-    "sync.inbound_frames.v1",
-    INBOUND_FRAMES,
+    "sync.inbound_events.v1",
+    INBOUND_EVENTS,
 )];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboundFrameWork {
+pub struct InboundSyncEvent {
     pub connection_id: ConnectionId,
     pub event_id: EventId,
-    pub frame_bytes: Vec<u8>,
+    pub event_bytes: Vec<u8>,
 }
 
-impl InboundFrameWork {
+impl InboundSyncEvent {
     pub fn key(&self) -> Vec<u8> {
-        inbound_frame_key(self.connection_id, self.event_id)
+        inbound_event_key(self.connection_id, self.event_id)
     }
 }
 
-pub fn inbound_frame_row(
+pub fn inbound_event_row(
     connection_id: ConnectionId,
     event_id: EventId,
-    frame_bytes: Vec<u8>,
+    event_bytes: Vec<u8>,
 ) -> TableRow {
     TableRow {
-        table: INBOUND_FRAMES,
-        key: inbound_frame_key(connection_id, event_id),
-        value: frame_bytes,
+        table: INBOUND_EVENTS,
+        key: inbound_event_key(connection_id, event_id),
+        value: event_bytes,
     }
 }
 
-pub fn inbound_frame_prefix(connection_id: ConnectionId) -> Vec<u8> {
+pub fn inbound_event_prefix(connection_id: ConnectionId) -> Vec<u8> {
     connection_id.to_vec()
 }
 
-pub fn decode_inbound_frame_work(
+pub fn decode_inbound_event(
     key: Vec<u8>,
-    frame_bytes: Vec<u8>,
-) -> Result<InboundFrameWork, String> {
+    event_bytes: Vec<u8>,
+) -> Result<InboundSyncEvent, String> {
     if key.len() != 64 {
-        return Err("sync inbound frame key must be 64 bytes".to_string());
+        return Err("sync inbound event key must be 64 bytes".to_string());
     }
     let mut connection_id = [0; 32];
     connection_id.copy_from_slice(&key[..32]);
     let mut event_id = [0; 32];
     event_id.copy_from_slice(&key[32..]);
-    Ok(InboundFrameWork {
+    Ok(InboundSyncEvent {
         connection_id,
         event_id,
-        frame_bytes,
+        event_bytes,
     })
 }
 
-fn inbound_frame_key(connection_id: ConnectionId, event_id: EventId) -> Vec<u8> {
+fn inbound_event_key(connection_id: ConnectionId, event_id: EventId) -> Vec<u8> {
     let mut key = Vec::with_capacity(64);
     key.extend_from_slice(&connection_id);
     key.extend_from_slice(&event_id);

@@ -142,7 +142,7 @@ fn handle_inbound(
     inbound: InboundNetworkRow,
     remember_origin: bool,
     summary: &mut StreamSummary,
-    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<u8>>>,
+    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<Vec<u8>>>>,
 ) -> Result<Vec<OutboundNetworkRow>, String> {
     let local = context
         .protocol
@@ -171,9 +171,9 @@ fn handle_inbound(
 }
 
 fn remember_sent_outbox(
-    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<u8>>>,
+    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<Vec<u8>>>>,
     rows: &[OutboundNetworkRow],
-    outbox_keys: &[Vec<u8>],
+    outbox_keys: &[Vec<Vec<u8>>],
 ) -> Result<(), String> {
     if outbox_keys.is_empty() {
         return Ok(());
@@ -183,8 +183,11 @@ fn remember_sent_outbox(
     }
     let first = rows.len() - outbox_keys.len();
     let mut sent_outbox = sent_outbox.borrow_mut();
-    for (row, outbox_key) in rows[first..].iter().zip(outbox_keys) {
-        sent_outbox.insert(row.key.clone(), outbox_key.clone());
+    for (row, row_outbox_keys) in rows[first..].iter().zip(outbox_keys) {
+        sent_outbox
+            .entry(row.key.clone())
+            .or_default()
+            .extend(row_outbox_keys.iter().cloned());
     }
     Ok(())
 }
@@ -192,14 +195,14 @@ fn remember_sent_outbox(
 fn mark_sent_network_rows(
     context: &Context,
     rows: &[OutboundNetworkRow],
-    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<u8>>>,
+    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<Vec<u8>>>>,
 ) -> Result<(), String> {
     let mut outbox_keys = Vec::new();
     {
         let mut sent_outbox = sent_outbox.borrow_mut();
         for row in rows {
-            if let Some(outbox_key) = sent_outbox.remove(&row.key) {
-                outbox_keys.push(outbox_key);
+            if let Some(mut row_outbox_keys) = sent_outbox.remove(&row.key) {
+                outbox_keys.append(&mut row_outbox_keys);
             }
         }
     }

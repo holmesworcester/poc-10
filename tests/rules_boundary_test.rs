@@ -855,12 +855,45 @@ fn sync_worker_drains_projected_rows_not_direct_ingest_work() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let worker = source_text(&root.join("src/protocol/event_modules/sync/worker.rs"));
     assert!(
-        worker.contains("DrainInboundFrames"),
-        "sync worker should drain projected inbound-frame rows"
+        worker.contains("DrainInboundSync"),
+        "sync worker should drain projected inbound sync event rows"
     );
     assert!(
         !worker.contains("IngestFrame") && !worker.contains("IngestedFrame"),
-        "sync worker should not expose direct ingest-frame work; inbound frames project to sync-owned rows first"
+        "sync worker should not expose direct ingest-frame work; inbound sync events project to sync-owned rows first"
+    );
+}
+
+#[test]
+fn sync_has_no_protocol_frame_event_module() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sync_root = root.join("src/protocol/event_modules/sync");
+    assert!(
+        !sync_root.join("frame").exists() && !sync_root.join("data").exists(),
+        "sync should emit compare/have/need ids and durable event ids, not protocol frame/data packet modules"
+    );
+}
+
+#[test]
+fn connection_outbox_is_id_only_and_transit_batches_inner_events() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema = source_text(&root.join("src/protocol/event_modules/connection/schema.rs"));
+    assert!(
+        schema.contains("pub fn outbox_row(connection_id: ConnectionId, event_id: EventId)")
+            && schema.contains("value: Vec::new()"),
+        "connection outbox rows should be id-only; bytes resolve at the connection/transit boundary"
+    );
+
+    let transit_commands =
+        source_text(&root.join("src/protocol/event_modules/connection/transit/commands.rs"));
+    let transit_codec =
+        source_text(&root.join("src/protocol/event_modules/connection/transit/codec.rs"));
+    assert!(
+        transit_commands.contains("pub fn create_connection_batch")
+            && !transit_commands.contains("pub fn create_connection(")
+            && transit_codec.contains("encode_inner_events")
+            && transit_codec.contains("decode_inner_events"),
+        "connection transit should batch canonical inner events; core TCP still frames only opaque transit bytes"
     );
 }
 
