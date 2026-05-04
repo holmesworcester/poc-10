@@ -5,9 +5,9 @@
 Commands belong under `event_modules`, alongside the event types, codecs,
 projectors, queries, and module-owned tables they operate on.
 
-CLI, RPC, jobs, and other adapters should dispatch into module commands instead
-of constructing canonical event bytes directly. Adapters own input/output shape;
-event modules own protocol and domain semantics.
+CLI, RPC, module run loops, and other adapters should dispatch into module
+commands instead of constructing canonical event bytes directly. Adapters own
+input/output shape; event modules own protocol and domain semantics.
 
 Commands receive explicit input values plus narrow read context values. They do
 not mutate SQLite, open transactions, drain queues, or call broad apply loops.
@@ -18,14 +18,14 @@ chaining.
 
 Projectors return `ProjectionOutput` with table rows only. They cannot emit
 events. If projection discovers follow-on work, it writes a module-owned queue
-row; a job reads that queue, queries context, runs a command, and sends the
-command's proposed events back through the pipeline.
+row; a module run loop reads that queue, queries context, runs a command, and
+sends the command's proposed events back through the pipeline.
 
-Jobs are the actor boundary. Projectors do not perform IO or emit effects.
-Event-module commands do not perform IO either; they construct canonical events
-or transport bytes from explicit input and context. Jobs own dequeueing,
-fairness, bounded work, retries, calling commands, admitting proposed events,
-and returning IO effects for the kernel runner.
+Module run loops are the actor boundary. Projectors do not perform IO or emit
+effects. Event-module commands do not perform IO either; they construct
+canonical events or transport bytes from explicit input and context. Run loops
+own dequeueing, fairness, bounded work, retries, calling commands, admitting
+proposed events, and returning IO effects for the kernel runner.
 
 The intended shape is:
 
@@ -41,6 +41,12 @@ event_modules/<domain>/<module>/types.rs
 
 event_modules/<domain>/<module>/projector.rs
   EventWithContext -> ProjectionOutput { rows }
+
+event_modules/<domain>/<module>/tables.rs
+  module-owned projection tables, indexes, queues, cursors, and storage class
+
+event_modules/<domain>/<module>/run.rs
+  optional actor over the module-owned queue/cursor it names
 ```
 
 Do not create `event.rs` files in event modules. The typed event struct belongs
@@ -100,7 +106,7 @@ append_event(bytes) -> Admission {
 append_apply(bytes) -> WriteResult {
   event_id,
   status: Applied | AlreadyApplied | Blocked { blocked_by },
-  emitted: Vec<EventId>,
+  admitted: Vec<EventId>,
 }
 ```
 
@@ -141,7 +147,6 @@ The event writer owns storage mechanics:
 - projection apply
 - labels
 - outbox rows
-- emitted event ingestion
 - returned event ids
 
 Module commands own semantic construction:
@@ -169,6 +174,7 @@ event module =
   projector
   tables
   commands/queries where needed
+  run where active queued/cursor work exists
 ```
 
 The universal contract is:
@@ -180,18 +186,18 @@ Event -> Vec<EventId>
 
 Projection =
   rows
-  labels
-  outbox
-  emitted_events
-  purges
 ```
+
+Rows may target module-owned projection tables, indexes, labels, queues,
+outbox, or purge/compaction tables. They are still rows. Projectors do not
+return events or effects.
 
 Event modules must not:
 
 - import `crate::runtime`
 - import old `crate::state` internals
 - know queue table names or pipeline phase names
-- start jobs or drive the control loop
+- start run loops or drive the control loop
 - perform transactions
 - call global drain/apply functions
 - write SQLite directly, except for data-only table declarations if that
@@ -205,11 +211,11 @@ Event modules may:
 - declare owned tables, indexes, and storage class (`durable`, `memory`, or
   `temp`)
 - query through a narrow read context
-- append events through a narrow writer from commands
+- return canonical events from commands
 - return declarative projector output: rows, labels, queue rows, outbox rows,
   and purges
-- implement jobs that claim queue rows, call commands, and return bounded IO
-  effects
+- implement `run.rs` loops that claim module-owned queue rows, call commands,
+  and return bounded IO effects
 
 `codec.rs` describes the module's canonical/wire format: tags, field order,
 and event-specific validation. Shared binary mechanics such as integer
@@ -263,7 +269,7 @@ The kernel may:
 - apply pure projector output
 - enqueue outbox rows
 - receive framed transit bytes
-- execute job-produced `TransportSend { target, bytes }` effects by packing
+- execute run-produced `TransportSend { target, bytes }` effects by packing
   module-produced bytes into TCP frames and writing sockets
 - schedule bounded work
 
@@ -310,7 +316,7 @@ again.
 
 Durable data events are not pushed to peers on creation. Durable data transfer
 is queued only through deterministic connection-scoped protocol events, usually
-created by a sync job after projectors write compare/need/range queue rows. The
+created by a sync run loop after projectors write compare/need/range queue rows. The
 outbox dedupes these events by `(connection_id, event_id)`. The
 connection/transit module drains the outbox and creates transit blobs; the
 kernel only frames and writes those bytes.
@@ -460,7 +466,7 @@ Keep the kernel boring:
   reads/writes only.
 - `event_modules/content` owns content event construction, codec, and projection.
 - `event_modules/sync` owns all negentropy, compare/have/need/range decisions,
-  connection-scoped sync events, and sync jobs.
+  connection-scoped sync events, and sync run loops.
 - `event_modules/connection` owns endpoint identity, bootstrap/connection
   events, established-connection rows, and the route facts needed to reach an
   endpoint.
@@ -491,7 +497,9 @@ event_modules/<name>/commands.rs
 event_modules/<name>/codec.rs
 event_modules/<name>/types.rs
 event_modules/<name>/projector.rs
+event_modules/<name>/tables.rs
 event_modules/<name>/queries.rs   # only when needed
+event_modules/<name>/run.rs       # only when this module owns active queued/cursor work
 event_modules/<name>/mod.rs
 ```
 
