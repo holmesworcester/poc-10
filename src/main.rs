@@ -1,8 +1,8 @@
 use std::env;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use topo::protocol::{cli, Protocol};
+use topo::core::cli;
+use topo::protocol;
 
 fn main() {
     if let Err(err) = run(env::args().skip(1).collect()) {
@@ -12,238 +12,31 @@ fn main() {
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
-    let (db_path, command) = parse_args(args)?;
-    let protocol = Protocol::new();
-    let store = Protocol::open_store(db_path).map_err(|err| format!("open store: {err}"))?;
-
-    match command {
-        Command::Connect { invite } => {
-            let lines = cli::run_connect(&store, &protocol, invite)
-                .map_err(|err| format!("connect: {err}"))?;
-            for line in lines {
-                println!("{line}");
-            }
-        }
-        Command::Invite { public_addr } => {
-            let lines = cli::run_invite(&store, &protocol, public_addr)
-                .map_err(|err| format!("invite: {err}"))?;
-            for line in lines {
-                println!("{line}");
-            }
-        }
-        Command::Generate {
-            num_events,
-            event_size,
-        } => {
-            let lines = cli::run_generate(&store, &protocol, num_events, event_size)
-                .map_err(|err| format!("generate: {err}"))?;
-            for line in lines {
-                println!("{line}");
-            }
-        }
-        Command::GenerateDeps {
-            num_events,
-            deps_per_event,
-        } => {
-            let lines =
-                cli::run_generate_event_with_deps(&store, &protocol, num_events, deps_per_event)
-                    .map_err(|err| format!("generate-deps: {err}"))?;
-            for line in lines {
-                println!("{line}");
-            }
-        }
-        Command::ReplayDepsReverse => {
-            let lines = cli::run_replay_event_with_deps_reverse(&store, &protocol)
-                .map_err(|err| format!("replay-deps-reverse: {err}"))?;
-            for line in lines {
-                println!("{line}");
-            }
-        }
-        Command::Sync {
-            listen,
-            accept_count,
-        } => {
-            if let Some(addr) = listen {
-                let lines = cli::run_serve(&store, &protocol, addr, accept_count)
-                    .map_err(|err| format!("serve: {err}"))?;
-                for line in lines {
-                    println!("{line}");
-                }
-            } else {
-                let lines = cli::run_sync_routes(&store, &protocol)
-                    .map_err(|err| format!("sync: {err}"))?;
-                for line in lines {
-                    println!("{line}");
-                }
-            }
-        }
-        Command::Count => {
-            let lines = cli::run_count(&store, &protocol).map_err(|err| format!("count: {err}"))?;
-            for line in lines {
-                println!("{line}");
-            }
-        }
+    let (db_path, command_args) = parse_global_args(args)?;
+    let mut context = protocol::cli::Context::open(db_path)?;
+    let commands = protocol::cli::commands();
+    let output = cli::run(&commands, &mut context, &command_args)?;
+    for line in output.lines {
+        println!("{line}");
     }
-
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Command {
-    Connect {
-        invite: String,
-    },
-    Invite {
-        public_addr: SocketAddr,
-    },
-    Generate {
-        num_events: usize,
-        event_size: usize,
-    },
-    GenerateDeps {
-        num_events: usize,
-        deps_per_event: usize,
-    },
-    ReplayDepsReverse,
-    Sync {
-        listen: Option<SocketAddr>,
-        accept_count: usize,
-    },
-    Count,
-}
-
-fn parse_args(args: Vec<String>) -> Result<(PathBuf, Command), String> {
+fn parse_global_args(args: Vec<String>) -> Result<(PathBuf, Vec<String>), String> {
     let mut iter = args.into_iter();
     let mut db_path = None;
-    let mut rest = Vec::new();
+    let mut command_args = Vec::new();
 
     while let Some(arg) = iter.next() {
         if arg == "--db" {
             db_path = iter.next().map(PathBuf::from);
         } else {
-            rest.push(arg);
-            rest.extend(iter);
+            command_args.push(arg);
+            command_args.extend(iter);
             break;
         }
     }
 
-    let db_path = db_path.ok_or_else(|| usage("missing --db PATH"))?;
-    let command = rest.first().ok_or_else(|| usage("missing command"))?;
-    let parsed = match command.as_str() {
-        "connect" => {
-            if rest.len() != 2 {
-                return Err(usage("connect requires INVITE_LINK"));
-            }
-            Command::Connect {
-                invite: rest[1].clone(),
-            }
-        }
-        "invite" => {
-            let mut public_addr = None;
-            let mut idx = 1;
-            while idx < rest.len() {
-                match rest[idx].as_str() {
-                    "--public-addr" => {
-                        public_addr = Some(
-                            rest.get(idx + 1)
-                                .ok_or_else(|| usage("invite requires --public-addr ADDR"))?
-                                .parse::<SocketAddr>()
-                                .map_err(|_| usage("invite requires --public-addr ADDR"))?,
-                        );
-                        idx += 2;
-                    }
-                    other => return Err(usage(&format!("unknown invite option `{other}`"))),
-                }
-            }
-            Command::Invite {
-                public_addr: public_addr
-                    .ok_or_else(|| usage("invite requires --public-addr ADDR"))?,
-            }
-        }
-        "generate" => {
-            let num_events = parse_usize(rest.get(1), "generate requires NUM_EVENTS EVENT_SIZE")?;
-            let event_size = parse_usize(rest.get(2), "generate requires NUM_EVENTS EVENT_SIZE")?;
-            Command::Generate {
-                num_events,
-                event_size,
-            }
-        }
-        "generate-deps" => {
-            let num_events = parse_usize(
-                rest.get(1),
-                "generate-deps requires NUM_EVENTS DEPS_PER_EVENT",
-            )?;
-            let deps_per_event = parse_usize(
-                rest.get(2),
-                "generate-deps requires NUM_EVENTS DEPS_PER_EVENT",
-            )?;
-            Command::GenerateDeps {
-                num_events,
-                deps_per_event,
-            }
-        }
-        "replay-deps-reverse" => {
-            if rest.len() != 1 {
-                return Err(usage("replay-deps-reverse takes no arguments"));
-            }
-            Command::ReplayDepsReverse
-        }
-        "sync" => {
-            let mut listen = None;
-            let mut accept_count = 1usize;
-            let mut idx = 1;
-            while idx < rest.len() {
-                match rest[idx].as_str() {
-                    "--listen" => {
-                        let ip = rest
-                            .get(idx + 1)
-                            .ok_or_else(|| usage("sync --listen requires IP PORT"))?;
-                        let port = rest
-                            .get(idx + 2)
-                            .ok_or_else(|| usage("sync --listen requires IP PORT"))?;
-                        listen = Some(
-                            format!("{ip}:{port}")
-                                .parse::<SocketAddr>()
-                                .map_err(|_| usage("sync --listen requires IP PORT"))?,
-                        );
-                        idx += 3;
-                    }
-                    "--accept" => {
-                        accept_count = parse_usize(
-                            rest.get(idx + 1),
-                            "sync --accept requires a positive integer",
-                        )?;
-                        idx += 2;
-                    }
-                    other => return Err(usage(&format!("unknown sync option `{other}`"))),
-                }
-            }
-            if accept_count == 0 {
-                return Err(usage("sync --accept requires a positive integer"));
-            }
-            Command::Sync {
-                listen,
-                accept_count,
-            }
-        }
-        "count" | "status" => Command::Count,
-        other => return Err(usage(&format!("unknown command `{other}`"))),
-    };
-
-    Ok((db_path, parsed))
-}
-
-fn parse_usize(value: Option<&String>, message: &str) -> Result<usize, String> {
-    let value = value.ok_or_else(|| usage(message))?;
-    let parsed = value.parse::<usize>().map_err(|_| usage(message))?;
-    if parsed == 0 {
-        return Err(usage(message));
-    }
-    Ok(parsed)
-}
-
-fn usage(message: &str) -> String {
-    format!(
-        "{message}\nusage:\n  topo --db PATH invite --public-addr ADDR\n  topo --db PATH connect INVITE_LINK\n  topo --db PATH generate NUM_EVENTS EVENT_SIZE_BYTES\n  topo --db PATH generate-deps NUM_EVENTS DEPS_PER_EVENT\n  topo --db PATH replay-deps-reverse\n  topo --db PATH sync [--listen IP PORT --accept N]\n  topo --db PATH count"
-    )
+    let db_path = db_path.ok_or_else(|| "missing --db PATH".to_string())?;
+    Ok((db_path, command_args))
 }

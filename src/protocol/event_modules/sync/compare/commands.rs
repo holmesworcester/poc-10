@@ -13,8 +13,8 @@ use super::super::frame::codec as frame_codec;
 use super::super::frame::types::{Frame, SyncItem};
 use super::super::have_id::types::HaveIdEvent;
 use super::super::need_id::types::NeedIdEvent;
+use super::queries;
 use super::types::{BucketSummary, CompareEvent, BUCKETS};
-use super::{projector, queries};
 
 const FRAME_TARGET_BYTES: usize = 32 * 1024 * 1024;
 const FRAME_HEADER_BYTES: usize = 14;
@@ -156,7 +156,7 @@ fn have_items_for_compare(
     remote: [BucketSummary; BUCKETS],
 ) -> Result<Vec<SyncItem>, String> {
     let mut items = Vec::new();
-    for bucket in projector::differing_buckets(&local, &remote) {
+    for bucket in differing_buckets(&local, &remote) {
         let ids = context.ids_in_bucket(bucket)?;
         for id in ids {
             items.push(SyncItem::HaveId(HaveIdEvent {
@@ -167,6 +167,18 @@ fn have_items_for_compare(
         }
     }
     Ok(items)
+}
+
+fn differing_buckets(
+    local: &[BucketSummary; BUCKETS],
+    remote: &[BucketSummary; BUCKETS],
+) -> Vec<u8> {
+    local
+        .iter()
+        .zip(remote.iter())
+        .enumerate()
+        .filter_map(|(idx, (left, right))| (left != right).then_some(idx as u8))
+        .collect()
 }
 
 fn emit_control_and_requested_data(

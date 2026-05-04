@@ -16,13 +16,13 @@ the rule is still prose/review only.
 | Core stays small and named. | static | `core_file_set_stays_small_and_named`. |
 | Core store is a schema runner and row substrate, not a protocol fact store. | typed + static | [Schema](src/core/store.rs), [SchemaDefinition](src/core/store.rs), [TableName](src/core/store.rs), [TableRow](src/core/store.rs), `core_store_is_row_only_not_protocol_fact_storage`, `core_store_applies_only_declared_schemas`, `store_table_rows_use_typed_table_names`. |
 | Protocol event modules own common fact/status/dependency tables. | typed + static | [event_modules/schema.rs](src/protocol/event_modules/schema.rs), `protocol_event_schema_owns_common_fact_indexes`. |
-| Generic Crux command driving is core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), `crux_core_is_isolated_to_core`, core vocabulary checks. |
+| Generic Crux and CLI command driving are core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), [CliCommand](src/core/cli.rs), `crux_core_is_isolated_to_core`, core vocabulary checks. |
 | Worker admission/apply is scoped to event modules, not protocol root. | partial | [worker::run](src/protocol/event_modules/worker.rs) is the shared admission/apply entrypoint; there is not yet a typed worker catalog for all worker classes. |
-| Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
+| Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `domain_root_cli_requires_cross_child_scope`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
 | `event.rs` is forbidden; semantic types live in `types.rs`; codecs do encode/decode only. | static | `event_modules_do_not_use_event_rs`, `codec_files_do_not_define_public_types`, `codec_modules_have_type_files`. |
 | Workers live at the owning scope and expose one obvious entrypoint. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`, `worker_files_export_only_run_as_public_entrypoint`; no typed worker trait/catalog yet. |
 | Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs); static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
-| `protocol/app` is forbidden; CLI behavior is scoped. | static + partial | `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`; `src/protocol/cli.rs` still contains temporary cross-scope CLI orchestration for the synchronous POC. |
+| `protocol/app` is forbidden; CLI behavior is scoped. | typed + static | [CliCommand](src/core/cli.rs), [protocol/cli.rs](src/protocol/cli.rs), `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
 | Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_schema_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
@@ -53,8 +53,9 @@ The following rules should stay mechanically enforced where practical:
   canonical record.
 - Projectors return `ProjectionOutput` with `Vec<TableRow>`, not events.
 - `commands.rs` is reserved for event modules. CLI adapters live in
-  module-local or domain-local `cli.rs`; protocol-level CLI composition lives
-  only in `src/protocol/cli.rs`.
+  module-local or domain-local `cli.rs`; `src/protocol/cli.rs` only aggregates
+  scoped command specs, and `src/core/cli.rs` only dispatches generic command
+  specs.
 - `event.rs` is forbidden. Semantic event types live in `types.rs`; canonical
   wire parsing and formatting live in `codec.rs`.
 - Codec files do not define public semantic types, and every codec module has a
@@ -62,11 +63,15 @@ The following rules should stay mechanically enforced where practical:
 - Domain roots contain only child event modules plus shared domain files:
   `mod.rs`, `worker.rs`, `schema.rs`, `queries.rs`, `types.rs`, and `cli.rs`.
 - Child directories under `event_modules/<domain>/` are canonical event modules
-  and must carry the standard shape: `mod.rs`, `types.rs`, `codec.rs`, and
-  `schema.rs` at minimum. Shared domain schema, queues, and helper types live at
-  the domain root instead of masquerading as event modules.
+  and must carry `mod.rs`, `types.rs`, and `codec.rs` at minimum. Add
+  `schema.rs`, `projector.rs`, `queries.rs`, `commands.rs`, or `cli.rs` only
+  when that concern exists. Shared domain schema, queues, and helper types live
+  at the domain root instead of masquerading as event modules.
 - Event-module files use standard concern names only. New concern files require
   an explicit boundary decision and a static-test update.
+- Files live at the tightest scope that owns the behavior. A domain-root
+  `cli.rs` is only for commands spanning multiple child modules; a command for
+  one leaf event type belongs in that leaf's `cli.rs`.
 - Dumping-ground directories such as `jobs`, `cli_commands`, `runtime`,
   `state`, and algorithm-only `negentropy` are forbidden under
   `event_modules`.
@@ -90,8 +95,10 @@ The following rules should stay mechanically enforced where practical:
   declarations for domain rows and queues.
 - Core has a small allowlisted file set and must not contain domain vocabulary
   such as workspace, content, endpoint, identity, invite, or message.
-- Generic Crux command driving belongs in core. Protocol code must not define
-  Crux app/model/effect layers or import `crux_core`.
+- Generic Crux command driving and generic CLI command dispatch belong in core.
+  Protocol code must not define Crux app/model/effect layers or import
+  `crux_core`; core CLI code must not know Topo command names or module
+  semantics.
 - Protocol worker owns admission/apply plumbing; concrete domain branching
   belongs behind the protocol module registry.
 - Sync modules do not own TCP/frame IO, and core/network code does not contain
@@ -214,12 +221,16 @@ encode/decode, and event-specific parse validation. Commands belong in
 `commands.rs`.
 
 CLI commands belong in the closest relevant event module or domain root
-`cli.rs`. CLI output structs and formatting live there too. `src/protocol/cli.rs`
-may compose the current protocol's command surface and coordinate cross-scope
-POC flows, but it should keep shrinking as scoped module CLI commands take over.
-A generic CLI runner may parse global flags, dispatch to module CLI commands,
-admit/apply proposed events, and print returned output. It must not own domain
-command semantics, help text, post-write queries, or formatting.
+`cli.rs`. CLI output structs and formatting live there too. Each scoped CLI file
+exports `CliCommand` specs with command name, usage, help, parsing, worker
+wakes, follow-up queries, and formatting for that scope. `src/protocol/cli.rs`
+only aggregates the current protocol's command surface and owns truly
+whole-protocol commands such as `count`/`status`. `src/core/cli.rs` dispatches
+generic command specs and prints returned output. It must not own domain command
+semantics, help text, post-write queries, worker selection, or formatting.
+Use the tightest scope possible: a command for one event type belongs in
+`event_modules/<domain>/<event>/cli.rs`; a domain-root CLI file is for commands
+that coordinate multiple child modules in that domain.
 
 CLI scenario definitions should live beside the closest relevant event module
 or domain root. A generic integration runner may execute those scenarios through

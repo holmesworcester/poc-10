@@ -34,13 +34,14 @@ The current code split follows that boundary:
 
 ```
 src/core/
+  cli.rs
   store.rs
   crux_runner.rs
   network_queues.rs
   tcp.rs
 
 src/protocol/
-  cli.rs           // current protocol CLI composition
+  cli.rs           // current protocol command registry
   event_modules/
     worker.rs       // common event-module admission/apply worker
     connection/
@@ -57,12 +58,13 @@ all event families, domain workers, protocol byte meaning, and CLI commands. A
 completely different protocol should be able to replace `protocol/` while
 reusing `core/`.
 
-`protocol/cli.rs` composes the current Topo CLI. Command semantics and output
-types should live in the closest relevant scoped `cli.rs`; protocol-level CLI
-code only coordinates commands that cross module scopes, such as aggregate
-status/count and synchronous calls into the core TCP runner for this POC. There is no
-`protocol/app` layer. Crux remains available only as generic core runner
-machinery; protocol code must not define Crux app/model/effect types.
+`protocol/cli.rs` assembles the current Topo command registry. Command names,
+help text, argv parsing, worker calls, follow-up queries, and output formatting
+live in the closest relevant scoped `cli.rs`. The protocol-level CLI file only
+collects those command specs and owns whole-protocol commands such as
+status/count. There is no `protocol/app` layer. Core provides a generic command
+runner; Crux remains available only as generic core runner machinery; protocol
+code must not define Crux app/model/effect types.
 
 **event_modules/** contains every protocol or domain behavior that can be
 expressed as events, projectors, commands, module-owned tables, and module
@@ -146,21 +148,22 @@ src/protocol/event_modules/
 
 **Per-file pattern, always.** Every leaf event module is a directory with one
 file per concern (`types.rs`, `codec.rs`, `projector.rs`, `commands.rs`,
-`schema.rs`, `queries.rs`, `cli.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a
-module is small enough that a single `.rs` file would suffice. `schema.rs` is
-where the module declares its projection tables, indexes, queues, cursors, and
-storage class. A domain root may also contain `schema.rs`, `queries.rs`,
+`schema.rs`, `queries.rs`, `cli.rs`, `registry_meta.rs`, `mod.rs`, etc.) — but
+only when the concern exists. Do not keep placeholder concern files that merely
+say "no rows" or forward to another module. `schema.rs` is where the module
+declares its own projection tables, indexes, queues, cursors, and storage
+class. A domain root may also contain `schema.rs`, `queries.rs`,
 `types.rs`, `worker.rs`, and `cli.rs` when it owns shared tables, a worker, or a
 domain-level CLI command registry coordinating several leaf event modules.
 There is no generic `jobs/` or `cli_commands/` dumping ground and no fake event
 module for an algorithm: `sync/worker.rs` may run negentropy over `sync/schema.rs`;
 `negentropy/` is only a child module if it defines an actual event type. `worker`
 is the component noun; `run` is the method verb.
-The cost is some empty-ish files in tiny modules; the win is that this is
-intentional friction. In a codebase where most code is assistant-generated,
-uniform shape across the surface makes accumulating logic easy to spot — files
-that grow disproportionately, or directories that sprout extra concerns, are
-the audit signal that something needs simplification or splitting. No collapsed
+The win is intentional friction without boilerplate. In a codebase where most
+code is assistant-generated, uniform concern names make accumulating logic easy
+to spot, while omitting no-op concern files keeps the tree honest. Files that
+grow disproportionately, or directories that sprout extra concerns, are the
+audit signal that something needs simplification or splitting. No collapsed
 single-file event modules.
 
 This rule is in conscious tension with "let complexity earn length" in the documentation quality bar (see appendix): that rule applies to *prose* in docs, this rule applies to *code structure* in event modules. Both stand.
@@ -226,8 +229,16 @@ scheduling and `run` for execution.
 **cli.rs** is the module-local CLI adapter. It owns help text, parameter names,
 domain command invocation, follow-up queries, and output formatting for the
 commands that belong to that module or domain. The generic CLI runner stays
-boring: parse global flags, find the module CLI command, run proposed events,
-then hand control back to the module CLI command for queries and formatting.
+boring: find the named command spec, reject duplicate command names, pass argv
+tail and context to the command, and return text lines. The binary shell parses
+global flags such as `--db`; the scoped command decides which workers to wake
+and which queries to run.
+
+CLI files follow the tightest-scope rule. A command that creates or queries one
+event type lives in that leaf event module's `cli.rs`. A domain-root `cli.rs`
+exists only for commands that coordinate several child modules in the same
+domain. `protocol/cli.rs` is only the command registry for the assembled Topo
+protocol plus truly whole-protocol commands.
 
 For a write command, the module CLI calls a pure module command to produce
 `ProposedEvent`s with deterministic ids, asks the runner to process exactly
@@ -275,10 +286,11 @@ The substrate pieces outside `event_modules` are deliberately narrow:
 
 ```
 core/crux_runner.rs      // generic Crux app/effect driving
+core/cli.rs              // generic command registry dispatch
 core/store.rs            // typed table rows, memory/disk storage, transactions
 core/network_queues.rs   // opaque inbound/outbound byte queue rows
 core/tcp.rs              // generic length-prefixed TCP byte transport
-protocol/cli.rs          // current Topo CLI composition
+protocol/cli.rs          // current Topo command registry
 protocol/event_modules/worker.rs     // event-module admission/apply and blocking worker
 protocol/wire.rs         // shared fixed-field protocol codec helpers
 protocol/event_modules/  // protocol facts, projectors, tables, workers

@@ -91,6 +91,7 @@ fn event_modules_are_directories() {
 fn core_file_set_stays_small_and_named() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core");
     let allowed = [
+        "cli.rs",
         "crux_runner.rs",
         "mod.rs",
         "network_queues.rs",
@@ -163,6 +164,32 @@ fn domain_roots_contain_only_children_and_shared_domain_files() {
 }
 
 #[test]
+fn domain_root_cli_requires_cross_child_scope() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
+    let mut offenders = Vec::new();
+    for domain in std::fs::read_dir(&root).expect("read event modules") {
+        let path = domain.expect("dir entry").path();
+        if !path.is_dir() || !path.join("cli.rs").exists() {
+            continue;
+        }
+        let child_modules = std::fs::read_dir(&path)
+            .expect("read domain module")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|candidate| candidate.is_dir())
+            .count();
+        if child_modules <= 1 {
+            offenders.push(path.strip_prefix(&root).unwrap().display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "domain-root cli.rs is only for commands spanning multiple child modules; otherwise put the command in the leaf module:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn event_module_files_use_only_standard_concern_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
@@ -211,7 +238,7 @@ fn child_event_module_directories_have_canonical_shape() {
             if !child.is_dir() {
                 continue;
             }
-            for required in ["mod.rs", "types.rs", "codec.rs", "schema.rs"] {
+            for required in ["mod.rs", "types.rs", "codec.rs"] {
                 if !child.join(required).exists() {
                     offenders.push(format!(
                         "{}/{}",
@@ -440,17 +467,18 @@ fn commands_files_live_only_in_event_modules() {
 fn cli_files_live_with_event_modules_or_the_protocol_shell() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
+    let core_cli = root.join("src/core/cli.rs");
     let protocol_cli = root.join("src/protocol/cli.rs");
     let offenders = rust_files(&root.join("src"))
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
-        .filter(|path| !path.starts_with(&event_root) && path != &protocol_cli)
+        .filter(|path| !path.starts_with(&event_root) && path != &protocol_cli && path != &core_cli)
         .map(|path| path.strip_prefix(root).unwrap().display().to_string())
         .collect::<Vec<_>>();
 
     assert!(
         offenders.is_empty(),
-        "CLI adapters belong beside event modules; only src/protocol/cli.rs may compose the protocol CLI:\n{}",
+        "CLI adapters belong beside event modules; src/protocol/cli.rs may aggregate protocol commands and src/core/cli.rs may run generic command specs:\n{}",
         offenders.join("\n")
     );
 }
@@ -1044,6 +1072,48 @@ fn table_declaration_files_declare_schemas() {
     assert!(
         violations.is_empty(),
         "every module/scope that names storage tables must also declare the schemas it owns:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn schema_files_are_not_empty_placeholders() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut violations = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "schema.rs"))
+    {
+        let text = source_text(&path);
+        if !text.contains("TableName::new(") || !text.contains("pub const SCHEMAS") {
+            violations.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "omit schema.rs when a module owns no tables; schema files must declare real table names and schemas:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn projector_files_are_not_empty_placeholders() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut violations = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "projector.rs"))
+    {
+        let text = source_text(&path);
+        if !text.contains("ProjectionOutput::rows") && !text.contains("ProjectionOutput::with") {
+            violations.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "omit projector.rs when a module has no row/label projection; projector files must write real projection output:\n{}",
         violations.join("\n")
     );
 }
