@@ -1,5 +1,19 @@
 # Rules
 
+## Enforce Rules With Code First
+
+Prefer enforcement in this order:
+
+1. Rust types, traits, visibility, and crate/module boundaries.
+2. Static boundary tests over file paths, imports, exported names, and forbidden
+   vocabulary.
+3. Short prose rules for intent, review judgment, and behavior that cannot be
+   proven mechanically.
+
+When a prose rule becomes mechanically enforceable, add the type boundary or
+static check and shorten the prose. Keep prose for realness, black-box proof,
+crypto quality, performance expectations, and design rationale.
+
 ## Commands Live In Event Modules
 
 Commands belong under `event_modules`, alongside the event types, codecs,
@@ -303,17 +317,16 @@ Core may:
 - compute event ids
 - check dependencies
 - apply pure projector output
-- enqueue outbox rows
-- receive framed transit bytes
-- execute actor-produced `TransportSend { target, bytes }` effects by packing
-  module-produced bytes into TCP frames and writing sockets
 - schedule bounded work
+- commit actor state updates
+- return opaque actor effects to the protocol runner after commit
 
 The first POC may process inbound frames reactively without a durable inbound
-queue. The socket reader hands `(origin, bytes)` to the core pipeline; the
-pipeline applies module projectors immediately and returns module-produced
-outgoing bytes. This shortcut is allowed only while the socket reader remains
-semantic-free and recurring sync can recreate lost transient control traffic.
+queue. The protocol socket reader hands `(origin, bytes)` to a protocol
+inbound actor, which unwraps/parses protocol bytes and admits surviving
+canonical event bytes through the core ready-event path. This shortcut is
+allowed only while the socket reader remains semantic-free and recurring sync
+can recreate lost transient control traffic.
 
 Core must not:
 
@@ -324,6 +337,8 @@ Core must not:
 - inspect sync ranges or negentropy trees except through module-declared tables
 - contain negentropy, compare/have/need, or sync-range vocabulary in
   `core/pipeline.rs`, `core/control_loop.rs`, or `protocol/network.rs`
+- contain `TransportSend`, TCP frame, socket, inbound-byte, outbox, or
+  connection-target vocabulary in `src/core`
 - special-case have/need/compare behavior outside event modules
 - bypass event admission for protocol messages
 - use side-channel protocol messages when an event can express the fact
@@ -333,14 +348,19 @@ receiving, buffering, and backpressure to concrete targets such as `(ip, port)`
 or socket ids. It does not own sync, connection, transit wrapping, or
 authorization semantics.
 
+Protocol IO modules own IO effect names such as `TransportSend { target,
+bytes }`, inbound-byte queues, socket state, listener state, and send
+backpressure. Protocol event modules own outbox rows and transit bytes. Core
+does not name any of these concepts.
+
 Events declare scope explicitly:
 
 - `Shared`: durable data that participates in sync summaries and dependency
   checks.
 - `Local`: durable private facts such as endpoint keys, invites, and route
   observations.
-- `Connection`: transient canonical protocol events for exactly one established
-  connection.
+- `Transient`: non-durable canonical protocol events. The current Topo
+  protocol uses transient events for exactly one established connection.
 
 Connection-scoped protocol events are real canonical events. Their route or
 connection id must be inside their canonical bytes, and their id is the normal

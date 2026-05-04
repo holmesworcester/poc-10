@@ -47,6 +47,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         body_len: 0,
         canonical_bytes: bytes,
         dependencies: Vec::new(),
-        scope: EventScope::Connection,
+        scope: EventScope::Transient,
     })
 }

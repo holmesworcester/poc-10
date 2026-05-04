@@ -177,6 +177,28 @@ fn pipeline_has_no_protocol_branching_vocabulary() {
 }
 
 #[test]
+fn core_has_no_protocol_io_vocabulary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let core_root = root.join("src/core");
+    let files = rust_files(&core_root);
+    let forbidden = [
+        "TransportSend",
+        "Tcp",
+        "socket",
+        "inbound_bytes",
+        "outbox",
+        "connection_id",
+        "transit",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "protocol IO names belong under src/protocol, not src/core:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn store_uses_generic_storage_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = [root.join("src/core/store.rs")];

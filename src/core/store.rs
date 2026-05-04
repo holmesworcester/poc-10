@@ -1,4 +1,4 @@
-use rusqlite::{params, types::Type, Connection, OptionalExtension};
+use rusqlite::{params, types::Type, Connection as SqliteConnection, OptionalExtension};
 use std::io;
 use std::path::Path;
 
@@ -24,7 +24,7 @@ pub struct EventRecord {
 pub enum EventScope {
     Shared,
     Local,
-    Connection,
+    Transient,
 }
 
 impl EventScope {
@@ -32,7 +32,7 @@ impl EventScope {
         match self {
             Self::Shared => "shared",
             Self::Local => "local",
-            Self::Connection => "connection",
+            Self::Transient => "transient",
         }
     }
 }
@@ -87,7 +87,7 @@ pub struct EventStatusCounts {
 }
 
 pub struct Store {
-    conn: Connection,
+    conn: SqliteConnection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +111,7 @@ impl EventStatus {
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = SqliteConnection::open(path)?;
         let store = Self { conn };
         store.ensure_schema()?;
         Ok(store)

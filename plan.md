@@ -52,6 +52,11 @@ all event families, domain actors, protocol-specific IO names, and CLI/app
 effects. A completely different protocol should be able to replace
 `protocol/` while reusing `core/`.
 
+`protocol/app` is protocol-side because it names the current Topo command
+surface and effect vocabulary: invite, connect, sync, generate, network ops,
+store ops, and stdout. Core may later provide reusable app-runner traits, but
+this concrete Crux app/shell is not core.
+
 **event_modules/** contains every protocol or domain behavior that can be
 expressed as events, projectors, commands, module-owned tables, and module
 actors. This includes content, identity, auth, connection, sync, and local-only
@@ -383,7 +388,7 @@ connection-scoped event:
   workspace_id: optional, when the event concerns a workspace over the connection
   codec: yes
   signed: usually no
-  storage: transient by default
+  core scope: Transient
   may be sent only on that connection
   id: BLAKE3(canonical bytes), with connection_id inside the bytes
   examples: sync_compare, sync_have_id, sync_need_id
@@ -402,31 +407,30 @@ Examples of work items that do not need codecs are timer-fired, socket-writable,
 
 ## Core Actor Scheduler
 
-The control loop is the only always-running runtime. It owns:
+The control loop is the generic actor runner. It owns:
 
 - the module registry,
-- boundary-table storage,
+- generic table-row storage,
 - transaction boundaries,
-- clock wakes,
 - resource limits,
-- effect runners for TCP and local IO.
+- effect commit ordering.
 
 All domain behavior lives above the control loop in event modules and their
-colocated actors. The control loop is protocol-agnostic for a given IO
-surface: it sees queue rows, ready events, actor output, and effects, not sync
-ranges, connection handshakes, or content semantics.
+colocated actors. The control loop is protocol-agnostic: it sees ready events,
+opaque actor wakes, actor output, and opaque effects, not sync ranges,
+connection handshakes, content semantics, sockets, routes, or protocol IO
+names.
 
 Queued work is typed:
 
 ```
 WorkItem =
-  InboundBytes
   ReadyEvent
-  OutboxWake(connection_id)
-  ActorWake(actor_id)
+  ActorWake(actor_id, wake_key)
 ```
 
-Each queue item has exactly one owning actor. The control loop calls one function:
+Each queue item has exactly one owning actor. The control loop calls one
+function:
 
 ```
 actor.run(wake, context) -> ActorOutput
@@ -460,20 +464,23 @@ commit returned rows/events against write_set
 run effects after commit
 ```
 
+Core does not know what an effect means. A protocol supplies the actor catalog,
+the wake sources, and the effect runner for that protocol. For the current
+Topo protocol, effects may include TCP sends and local IO; for another
+protocol, they may be completely different.
+
 `ActorOutput` contains:
 
 ```
 StateUpdates   // includes NewRows into ordinary tables and boundary tables
 Events         // proposed canonical events to admit through the ready-event loop
-Effects
+Effects        // opaque to core; interpreted by the protocol runner
 ```
 
-Normal inbound processing is a pure chain inside the `InboundBytes` step:
+The core ready-event actor is a pure chain over canonical event bytes:
 
 ```
-InboundBytes
-  -> connection.unwrap / raw frame parse
-  -> CanonicalEventBytes
+CanonicalEventBytes
   -> event_id = BLAKE3(CanonicalEventBytes)
   -> admit_event_id(event_id)
   -> parse(CanonicalEventBytes)
@@ -482,26 +489,26 @@ InboundBytes
   -> apply(ProjectorRows)
 ```
 
-Admission happens before parse context. Known event ids stop at `admit_event_id`. Parse failures mark the inbound bytes invalid and release the event claim. Blocked events write `blocked_by_event` rows and stop.
+Admission happens before parse context. Known event ids stop at
+`admit_event_id`. Parse failures reject the proposed event and let the
+protocol caller record whatever IO-level failure row it owns. Blocked events
+write `blocked_by_event` rows and stop.
 
 Projectors only write rows. They cannot emit follow-on events. If projection
 discovers work, it writes a module-owned queue row; an actor reads bounded queue
 rows, queries its declared context, calls module commands, and sends the
-proposed canonical events back to the control loop for admission. Commands may
-also return wire bytes for transport-only boundaries such as transit wrapping;
-the caller owns whether those bytes are admitted as events or sent to transport.
+proposed canonical events back to the control loop for admission. If the work
+reaches an IO boundary, the actor returns an opaque effect for the protocol
+runner to interpret.
 
 Actors are the active boundary. Projectors can only change rows, especially
 queue rows. Commands are pure construction/query helpers. Actors are the only
-event-module surface that can return IO effects; the core runner executes
-those effects without knowing protocol meaning.
+event-module surface that can return IO effects; the protocol runner executes
+those effects after core commits state.
 
-The first POC may run this inbound chain directly from the socket reader
-without first durably queuing `InboundBytes`. That is still an actor boundary:
-the socket reader only passes `(origin, bytes)` into the inbound actor, and
-event modules decide meaning and queue follow-on work. A durable
-`inbound_bytes` table is added when we need crash replay, fairness across many
-sockets, leases, or independent retry.
+Protocol inbound processing may feed canonical bytes directly into this
+ready-event actor, or it may enqueue durable inbound rows first. That choice
+belongs to the protocol IO modules, not core.
 
 Boundary tables that need claim/retry ownership are ordinary module-owned tables with status metadata:
 
@@ -515,14 +522,11 @@ created_at_ms
 updated_at_ms
 ```
 
-Core boundary tables:
+Core tables:
 
 ```
-inbound_bytes       // transport ingress, dedupe by wire_id
 events              // canonical event bytes plus status; ready rows are claimable
 blocked_by_event    // dependency wait edges, not a job queue
-outbox              // connection_id + event_id, dedupe by unique pair
-wake_schedules      // time enters the system
 ```
 
 `events` stores every canonical event byte string that can be projected, replayed, referenced by id, or sent:
@@ -551,58 +555,47 @@ When event `D` becomes applied, the same transaction deletes `blocked_by_event_i
 
 Unblocking never recursively processes dependents in the same call. `events.status = ready` is the unblocked-events queue; the control loop later claims a bounded batch of ready events.
 
-`outbox` stores only deterministic event ids to process for a connection:
-
-```
-outbox:
-  connection_id
-  event_id
-  queued_at_ms
-  primary key(connection_id, event_id)
-```
-
-`outbox` is memory by default and has no per-row claim, lease, or retry status.
-Each active connection has exactly one `connection/actor.rs` owner for outbox
-drain work:
-
-```
-connection::actor.run:
-  connection_id
-  hot_queue: bounded deque<event_id>
-  present: set<event_id>
-```
-
-`hot_queue` is bounded by estimated bytes, not only event count. When it drops
-below a low-water mark, `connection::actor.run` refills from pending `outbox`
-rows for that connection, skipping ids already in `present`. For each
-deterministic send event, the module loads the referenced canonical bytes,
-checks connection/workspace authority, resolves C to a current transport
-target, calls the transit wrap command, and returns
-`TransportSend { target, bytes }`. The protocol IO sender module packs those
-bytes into TCP frames and writes the socket. After the socket accepts a complete
-frame, the control loop deletes the corresponding `outbox` rows and removes
-those ids from `present`. On send failure it removes ids from `present`, leaves
-`outbox` rows pending, and backs off. No database transaction is held while
-writing to the socket.
-
 The control loop commits `StateUpdates` in one transaction, then runs `Effects`. Effects may write new rows but do not directly project events.
 
 The first implementation has one process-wide control-loop writer. Failed
 claim/retry work remains in its table with status, attempts, and last_error
 until its owning module marks it pending, rejected, blocked, expired, or dead.
-Send failure is connection-level backoff: `outbox` rows stay present. On
-startup, transient statuses are reset: `events.processing -> ready` and
-`inbound_bytes.processing -> pending`. Memory `outbox` starts empty; recurring
-sync actors recreate root compare work, and any durable data sends are
-recreated only by later `NeedId` responses.
+On startup, `events.processing -> ready`; protocol-owned processing rows return
+to pending according to their module rules. Memory protocol queues start empty;
+recurring protocol actors recreate recoverable work.
 
 Modules may run pure helper transforms inline until they reach a queue, state, or effect boundary. Modules do not recursively drain queues and do not perform transport IO inline.
 
 The control loop has no sync, bootstrap, auth, connection, dependency, or event-type policy. It only knows dispatch, bounded batches, transactions, time, limits, retries, and effects. Leases are a later extension for multiple workers or long-running claim ownership.
 
-## Network
+## Protocol Network
 
 **transport** is a protocol IO module family for TCP byte I/O between network routes (listeners, socket cache, `[u32 length][bytes]` framing, addresses learned from invite/`observed_address`/incoming connections). `TransportSend { target, bytes }` is the only egress, where `target` is a concrete route such as `(ip, port)` or an existing socket id, not a `connection_id`. Inbound bytes enter an IO-owned inbound-bytes queue with origin `(ip, port, socket_id, observed endpoint if known)`; a durable inbound-bytes buffer is optional until replay/fairness requirements justify it. *Invariant: transport produces and interprets no transit bytes; if it sends bytes, those bytes were produced by an event module.*
+
+Protocol-owned boundary tables include:
+
+```
+inbound_bytes       // transport ingress, dedupe by wire_id, if durable ingress is enabled
+outbox              // connection_id + event_id, dedupe by unique pair
+wake_schedules      // timer IO enters the protocol
+socket_state        // listener/socket/cache state when needed
+```
+
+Normal inbound processing is a protocol actor chain:
+
+```
+InboundBytes
+  -> connection.unwrap / raw frame parse
+  -> CanonicalEventBytes
+  -> core ready-event actor
+```
+
+The first POC may run this chain directly from the socket reader without first
+durably queuing `InboundBytes`. That is still a protocol actor boundary: the
+socket reader only passes `(origin, bytes)` into the inbound actor, and event
+modules decide meaning and queue follow-on work. A durable `inbound_bytes`
+table is added when we need crash replay, fairness across many sockets,
+leases, or independent retry.
 
 **connection** is an event module. A connection event references two endpoints and carries `shared_workspaces`. Each workspace entry's authority is established by the connection event's own dependencies and signature: deps point at endpoint/bootstrap authorization plus workspace capability events (workspace-membership grant, invite, etc.) that authorize the signer to bind that workspace to that connection, and the ready-event loop's standard signature/dep validation is what makes the entry trustworthy. Rotation, revocation, and expiry are further connection-related events with their own deps/sigs. The same module owns `connection_secrets`: globally-unique `connection_secret_id` → `(key, direction, connection_id, ttl)`, with separate inbound and outbound secrets per connection, each known only to the two endpoints.
 
@@ -630,6 +623,35 @@ slow route backs off its own target; other transport targets continue.
 *Invariant: every ordinary byte on the wire is the product of two independent
 workspace-membership checks (SendEvent projection + `connection.wrap`) plus a
 third symmetric check on the receiving side (`connection.unwrap`).*
+
+`outbox` stores only deterministic event ids to process for a connection:
+
+```
+outbox:
+  connection_id
+  event_id
+  queued_at_ms
+  primary key(connection_id, event_id)
+```
+
+`outbox` is memory by default and has no per-row claim, lease, or retry status.
+Each active connection has exactly one `connection/actor.rs` owner for outbox
+drain work:
+
+```
+connection::actor.run:
+  connection_id
+  hot_queue: bounded deque<event_id>
+  present: set<event_id>
+```
+
+`hot_queue` is bounded by estimated bytes, not only event count. When it drops
+below a low-water mark, `connection::actor.run` refills from pending `outbox`
+rows for that connection, skipping ids already in `present`. After the socket
+accepts a complete frame, the protocol runner deletes the corresponding
+`outbox` rows and removes those ids from `present`. On send failure it removes
+ids from `present`, leaves `outbox` rows pending, and backs off the target. No
+database transaction is held while writing to the socket.
 
 # Protocol source references
 

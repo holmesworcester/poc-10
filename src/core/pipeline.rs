@@ -80,7 +80,7 @@ fn admit_and_apply_record_in_tx(
     report: &mut AdmitReport,
 ) -> rusqlite::Result<()> {
     report.event_ids.push(event_id(&record.canonical_bytes));
-    if record.scope == EventScope::Connection {
+    if record.scope == EventScope::Transient {
         if !record.dependencies.is_empty() {
             return Err(module_error(
                 "transient events cannot wait on durable dependencies".to_string(),
