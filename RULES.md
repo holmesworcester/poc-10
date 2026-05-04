@@ -11,7 +11,7 @@ the rule is still prose/review only.
 | --- | --- | --- |
 | Commands return proposed events, not rows/effects/storage writes. | typed + static | [CommandOutput](src/protocol/event_modules/worker.rs), `command_output_contains_events_not_state_changes`, `event_module_commands_do_not_mutate_storage_directly` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
 | Proposed event ids are deterministic from canonical bytes. | typed + static | [ProposedEvent](src/protocol/event_modules/worker.rs), `proposed_event_carries_deterministic_id_and_record`. |
-| Projectors return rows only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/protocol/event_modules/worker.rs), `projection_output_contains_rows_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
+| Projectors return row-shaped output only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/protocol/event_modules/worker.rs), `projection_output_contains_rows_and_labels_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
 | Core is protocol-agnostic queue/storage support. | static | `core_does_not_import_protocol`, `core_does_not_own_protocol_worker_or_wire_codec`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `event_modules_worker_has_no_domain_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
 | Core stays small and named. | static | `core_file_set_stays_small_and_named`. |
 | Generic Crux command driving is core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), `crux_core_is_isolated_to_core`, core vocabulary checks. |
@@ -140,10 +140,10 @@ not return rows or effects. The API that runs a command is responsible for
 admitting those proposed events through the worker; admission returns the
 event ids for chaining.
 
-Projectors return `ProjectionOutput` with table rows only. They cannot emit
-events. If projection discovers follow-on work, it writes a module-owned queue
-row; a module worker reads that queue, queries context, runs a command, and sends
-the command's proposed events back through the worker.
+Projectors return `ProjectionOutput` with table rows and generic event labels
+only. They cannot emit events. If projection discovers follow-on work, it writes
+a module-owned queue row; a module worker reads that queue, queries context,
+runs a command, and sends the command's proposed events back through the worker.
 
 Module workers are the active boundary. A `worker.rs` file exports exactly one
 public free function, `run`; work/output types may be public, and all helper
@@ -168,7 +168,7 @@ event_modules/<domain>/<module>/types.rs
   Event type and semantic constants
 
 event_modules/<domain>/<module>/projector.rs
-  EventWithContext -> ProjectionOutput { rows }
+  EventWithContext -> ProjectionOutput { rows, labels }
 
 event_modules/<domain>/<module>/tables.rs
   module-owned projection tables, indexes, queues, cursors, and storage class

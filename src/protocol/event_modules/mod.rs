@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use crate::core::network_queues::{self, NetworkTarget, OutboundNetworkRow};
 use crate::core::store::{EventRecord, Store};
 use crate::protocol::event_modules::worker::{
-    CommandOutput, EventRegistry, ProjectionOutput, ProposedEvent,
+    CommandOutput, EventRegistry, EventWithContext, ProjectionOutput, ProposedEvent,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -71,21 +71,24 @@ impl Modules {
         content::content_event::commands::generate(start, num_events, event_size)
     }
 
-    pub fn stage_dependent_events(
+    pub fn stage_event_with_deps(
         &self,
         store: &Store,
         events: usize,
         deps_per_event: usize,
-    ) -> Result<CommandOutput<test_events::dependent_event::commands::StageReport>, String> {
+    ) -> Result<CommandOutput<test_events::event_with_deps::commands::StageReport>, String> {
         let start = store
             .max_timestamp()
             .map_err(|err| format!("load max timestamp: {err}"))?
             .saturating_add(1);
-        test_events::dependent_event::commands::stage(events, deps_per_event, start)
+        test_events::event_with_deps::commands::stage(events, deps_per_event, start)
     }
 
-    pub fn staged_dependent_records(&self, store: &Store) -> Result<Vec<EventRecord>, String> {
-        test_events::dependent_event::queries::staged_records(store)
+    pub fn staged_event_with_deps_records(
+        &self,
+        store: &Store,
+    ) -> Result<Vec<EventRecord>, String> {
+        test_events::event_with_deps::queries::staged_records(store)
     }
 
     pub fn create_connection_request(
@@ -246,9 +249,9 @@ impl Modules {
     pub fn project_record(
         &self,
         store: &Store,
-        record: &EventRecord,
+        event: &EventWithContext<'_>,
     ) -> Result<ProjectionOutput, String> {
-        let bytes = &record.canonical_bytes;
+        let bytes = &event.record.canonical_bytes;
         if let Some(output) = identity::project_record(bytes)? {
             return Ok(output);
         }
@@ -286,9 +289,9 @@ impl EventRegistry for Modules {
     fn project_record(
         &self,
         store: &Store,
-        record: &EventRecord,
+        event: &EventWithContext<'_>,
     ) -> Result<ProjectionOutput, String> {
-        self.project_record(store, record)
+        self.project_record(store, event)
     }
 }
 
@@ -327,11 +330,11 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         content::content_event::codec::TYPE_CONTENT => {
             content::content_event::codec::record_from_bytes(bytes)
         }
-        test_events::dependent_event::codec::TYPE_DEPENDENT_EVENT => {
-            test_events::dependent_event::codec::record_from_bytes(bytes)
+        test_events::event_with_deps::codec::TYPE_EVENT_WITH_DEPS => {
+            test_events::event_with_deps::codec::record_from_bytes(bytes)
         }
-        test_events::dependent_event::codec::TYPE_STAGED_DEPENDENT_EVENT => {
-            test_events::dependent_event::codec::staged_record_from_bytes(bytes)
+        test_events::event_with_deps::codec::TYPE_STAGED_EVENT_WITH_DEPS => {
+            test_events::event_with_deps::codec::staged_record_from_bytes(bytes)
         }
         other => Err(format!("unknown event type {other}")),
     }

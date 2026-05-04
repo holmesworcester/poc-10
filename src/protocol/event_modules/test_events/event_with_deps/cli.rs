@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DependentStageSummary {
+pub struct EventWithDepsStageSummary {
     pub staged_events: usize,
     pub deps_per_event: usize,
     pub dep_edges: usize,
@@ -7,7 +7,7 @@ pub struct DependentStageSummary {
     pub last_timestamp: u64,
 }
 
-impl DependentStageSummary {
+impl EventWithDepsStageSummary {
     pub fn lines(&self) -> Vec<String> {
         vec![
             format!("staged_events: {}", self.staged_events),
@@ -20,7 +20,7 @@ impl DependentStageSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DependentReplaySummary {
+pub struct EventWithDepsReplaySummary {
     pub replayed_events: usize,
     pub blocked_after_reverse: usize,
     pub applied_events: usize,
@@ -29,7 +29,7 @@ pub struct DependentReplaySummary {
     pub blocked_edges: usize,
 }
 
-impl DependentReplaySummary {
+impl EventWithDepsReplaySummary {
     pub fn lines(&self) -> Vec<String> {
         vec![
             format!("replayed_events: {}", self.replayed_events),

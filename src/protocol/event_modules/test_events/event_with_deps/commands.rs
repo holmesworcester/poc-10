@@ -2,7 +2,7 @@ use crate::core::store::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
-use super::types::{DependentEvent, StagedDependentEvent, MAX_DEPS, PAYLOAD_BYTES};
+use super::types::{EventWithDeps, StagedEventWithDeps, MAX_DEPS, PAYLOAD_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StageReport {
@@ -19,10 +19,12 @@ pub fn build_records(
     start_timestamp: u64,
 ) -> Result<Vec<EventRecord>, String> {
     if events == 0 {
-        return Err("cascade requires at least one event".to_string());
+        return Err("event_with_deps requires at least one event".to_string());
     }
     if deps_per_event == 0 || deps_per_event > MAX_DEPS {
-        return Err(format!("cascade deps_per_event must be 1..={MAX_DEPS}"));
+        return Err(format!(
+            "event_with_deps deps_per_event must be 1..={MAX_DEPS}"
+        ));
     }
     let mut records = Vec::with_capacity(events);
     let mut event_ids = Vec::<EventId>::with_capacity(events);
@@ -30,7 +32,7 @@ pub fn build_records(
     for idx in 0..events {
         let dep_count = idx.min(deps_per_event);
         let dependencies = event_ids[idx - dep_count..idx].to_vec();
-        let event = DependentEvent {
+        let event = EventWithDeps {
             timestamp: start_timestamp + idx as u64,
             dependencies,
             payload: payload(idx),
@@ -54,9 +56,9 @@ pub fn stage(
         .into_iter()
         .enumerate()
         .map(|(index, record)| {
-            let bytes = codec::encode_staged(&StagedDependentEvent {
+            let bytes = codec::encode_staged(&StagedEventWithDeps {
                 index: index as u64,
-                dependent_bytes: record.canonical_bytes,
+                inner_bytes: record.canonical_bytes,
             });
             codec::staged_record_from_bytes(bytes)
         })

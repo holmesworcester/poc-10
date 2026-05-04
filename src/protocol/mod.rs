@@ -3,7 +3,7 @@ pub mod event_modules;
 pub mod wire;
 
 use crate::core::store::{EventRecord, Store};
-use event_modules::worker::{EventRegistry, ProjectionOutput};
+use event_modules::worker::{EventRegistry, EventWithContext, ProjectionOutput};
 use event_modules::Modules;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -31,8 +31,8 @@ impl EventRegistry for Protocol {
     fn project_record(
         &self,
         store: &Store,
-        record: &EventRecord,
+        event: &EventWithContext<'_>,
     ) -> Result<ProjectionOutput, String> {
-        self.modules.project_record(store, record)
+        self.modules.project_record(store, event)
     }
 }

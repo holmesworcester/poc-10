@@ -10,8 +10,8 @@ use crate::protocol::event_modules::connection::cli::{
 };
 use crate::protocol::event_modules::content::cli::GenerateSummary;
 use crate::protocol::event_modules::sync::cli::SyncSummary;
-use crate::protocol::event_modules::test_events::dependent_event::cli::{
-    DependentReplaySummary, DependentStageSummary,
+use crate::protocol::event_modules::test_events::event_with_deps::cli::{
+    EventWithDepsReplaySummary, EventWithDepsStageSummary,
 };
 use crate::protocol::event_modules::worker::{self, CommandOutput};
 use crate::protocol::Protocol;
@@ -204,7 +204,7 @@ pub fn run_generate(
     .lines())
 }
 
-pub fn run_generate_dependent_events(
+pub fn run_generate_event_with_deps(
     store: &Store,
     protocol: &Protocol,
     num_events: usize,
@@ -212,11 +212,11 @@ pub fn run_generate_dependent_events(
 ) -> Result<Vec<String>, String> {
     let output = protocol
         .modules()
-        .stage_dependent_events(store, num_events, deps_per_event)
-        .map_err(|err| format!("stage dependent events: {err}"))?;
+        .stage_event_with_deps(store, num_events, deps_per_event)
+        .map_err(|err| format!("stage event_with_deps: {err}"))?;
     let (report, _) = worker::run(store, protocol, output)
-        .map_err(|err| format!("admit staged dependent events: {err}"))?;
-    Ok(DependentStageSummary {
+        .map_err(|err| format!("admit staged event_with_deps: {err}"))?;
+    Ok(EventWithDepsStageSummary {
         staged_events: report.staged_events,
         deps_per_event: report.deps_per_event,
         dep_edges: report.dep_edges,
@@ -226,16 +226,16 @@ pub fn run_generate_dependent_events(
     .lines())
 }
 
-pub fn run_replay_dependent_events_reverse(
+pub fn run_replay_event_with_deps_reverse(
     store: &Store,
     protocol: &Protocol,
 ) -> Result<Vec<String>, String> {
     let records = protocol
         .modules()
-        .staged_dependent_records(store)
-        .map_err(|err| format!("load staged dependent events: {err}"))?;
+        .staged_event_with_deps_records(store)
+        .map_err(|err| format!("load staged event_with_deps: {err}"))?;
     if records.is_empty() {
-        return Err("no staged dependent events to replay".to_string());
+        return Err("no staged event_with_deps to replay".to_string());
     }
 
     let max_deps = records
@@ -250,7 +250,7 @@ pub fn run_replay_dependent_events_reverse(
         protocol.modules(),
         CommandOutput::with_events((), reverse_non_roots),
     )
-    .map_err(|err| format!("admit reverse dependent events: {err}"))?;
+    .map_err(|err| format!("admit reverse event_with_deps: {err}"))?;
 
     let blocked_after_reverse = store
         .status_counts()
@@ -263,7 +263,7 @@ pub fn run_replay_dependent_events_reverse(
         protocol.modules(),
         CommandOutput::with_events((), roots),
     )
-    .map_err(|err| format!("admit dependent roots: {err}"))?;
+    .map_err(|err| format!("admit event_with_deps roots: {err}"))?;
     let drain = worker::run(
         store,
         protocol.modules(),
@@ -271,12 +271,12 @@ pub fn run_replay_dependent_events_reverse(
             batch_size: worker::DEFAULT_READY_BATCH,
         },
     )
-    .map_err(|err| format!("drain dependent replay: {err}"))?;
+    .map_err(|err| format!("drain event_with_deps replay: {err}"))?;
     let final_counts = store
         .status_counts()
-        .map_err(|err| format!("count dependent replay statuses: {err}"))?;
+        .map_err(|err| format!("count event_with_deps replay statuses: {err}"))?;
 
-    Ok(DependentReplaySummary {
+    Ok(EventWithDepsReplaySummary {
         replayed_events: records.len(),
         blocked_after_reverse,
         applied_events: reverse_report.applied_events

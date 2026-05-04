@@ -33,6 +33,12 @@ pub struct EventRecord {
     pub scope: EventScope,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventLabel {
+    pub event_id: EventId,
+    pub label: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventScope {
     Shared,
@@ -121,6 +127,19 @@ impl Store {
                     (table_name, row_key, row_value)
                  VALUES (?1, ?2, ?3)",
                 params![row.table.as_str(), row.key, row.value],
+            )?;
+        }
+        Ok(inserted)
+    }
+
+    pub fn insert_event_labels_in_tx(&self, labels: Vec<EventLabel>) -> rusqlite::Result<usize> {
+        let mut inserted = 0;
+        for label in labels {
+            inserted += self.conn.execute(
+                "INSERT OR IGNORE INTO event_labels
+                    (event_id, label)
+                 VALUES (?1, ?2)",
+                params![label.event_id.to_vec(), label.label],
             )?;
         }
         Ok(inserted)
@@ -266,6 +285,16 @@ impl Store {
             )
             .optional()
             .map(|row| row.is_some())
+    }
+
+    pub fn event_labels(&self, event_id: &EventId) -> rusqlite::Result<Vec<Vec<u8>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT label FROM event_labels
+             WHERE event_id = ?1
+             ORDER BY label",
+        )?;
+        let rows = stmt.query_map(params![event_id.to_vec()], |row| row.get(0))?;
+        rows.collect()
     }
 
     pub fn insert_dependency_wait(
@@ -517,6 +546,11 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_blocked_by_event_event
                 ON blocked_by_event(event_id, blocked_by_event_id);
+            CREATE TABLE IF NOT EXISTS event_labels (
+                event_id BLOB NOT NULL,
+                label BLOB NOT NULL,
+                PRIMARY KEY (event_id, label)
+            );
 
             CREATE TABLE IF NOT EXISTS table_rows (
                 table_name TEXT NOT NULL,

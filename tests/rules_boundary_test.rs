@@ -1004,7 +1004,7 @@ fn proposed_event_carries_deterministic_id_and_record() {
 }
 
 #[test]
-fn projection_output_contains_rows_not_events() {
+fn projection_output_contains_rows_and_labels_not_events() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(root.join("src/protocol/event_modules/worker.rs"))
         .expect("read worker");
@@ -1014,9 +1014,10 @@ fn projection_output_contains_rows_not_events() {
     let body = &text[start..text[start..].find("impl ProjectionOutput").unwrap() + start];
     assert!(
         body.contains("pub rows: Vec<TableRow>")
+            && body.contains("pub labels: Vec<EventLabel>")
             && !body.contains("EventRecord")
             && !body.contains("events"),
-        "ProjectionOutput is projector-facing and must carry rows only, not events"
+        "ProjectionOutput is projector-facing and must carry rows/labels only, not events"
     );
 }
 

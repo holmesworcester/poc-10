@@ -3,8 +3,8 @@
 //! This module is the narrow gate between canonical event bytes and projected
 //! protocol state. It is intentionally boring: admit an event, wait for its
 //! dependencies, call exactly one projector through the registry, and write the
-//! rows the projector returned. That shape is the defense against the kernel
-//! becoming a second protocol implementation.
+//! row-shaped output the projector returned. That shape is the defense against
+//! the kernel becoming a second protocol implementation.
 //!
 //! The worker does not know what any concrete event family means. Those meanings
 //! live in event modules. The worker only knows the protocol-wide mechanics that
@@ -14,7 +14,7 @@
 //! command -> ProposedEvent
 //!          -> admit canonical bytes by deterministic event id
 //!          -> block until dependency event ids are applied
-//!          -> project ready events into rows
+//!          -> project ready events into rows and labels
 //!          -> mark newly unblocked events ready
 //! ```
 //!
@@ -30,10 +30,32 @@
 //! module is missing a codec, projector, command, query, table, or domain worker.
 //! The important invariant is not that this file stays tiny; it is that it stays
 //! mechanical enough to audit.
+//!
+//! If you are trying to understand the code path, start with `run` and then
+//! follow `run_admission_pipeline`. The heart of the file is
+//! `process_event_in_tx`, the one-event pipeline:
+//!
+//! ```text
+//! process_event_in_tx
+//!   if transient:
+//!     project_transient_event_in_tx
+//!   else:
+//!     store_durable_event_in_tx
+//!     if newly inserted and ready:
+//!       project_ready_event_in_tx
+//!         -> load_event_context_in_tx
+//!         -> write_projection_output_in_tx
+//!         -> unblock_dependents
+//! ```
+//!
+//! Every other helper exists to make one of those verbs precise. A good change
+//! should make that call tree shorter, clearer, or more obviously correct. A
+//! suspicious change adds a second path that stores, projects, unblocks, or sends
+//! around this path.
 
 use crate::core::network_queues::{self, InboundNetworkRow, OutboundNetworkRow};
 use crate::core::store::{
-    event_id, EventId, EventRecord, EventScope, EventStatus, Store, TableRow,
+    event_id, EventId, EventLabel, EventRecord, EventScope, EventStatus, Store, TableRow,
 };
 
 use super::Modules;
@@ -88,23 +110,85 @@ impl From<EventRecord> for ProposedEvent {
 
 /// Declarative output of a projector.
 ///
-/// A projector may only return table rows. It may not emit more events, call a
-/// worker, send bytes, or query broad state. If projection appears to need one
-/// of those powers, the event module should write a queue row and let its domain
-/// worker perform the active step later.
+/// A projector may only return rows in protocol-owned state: ordinary table rows
+/// and generic event labels. It may not emit more events, call a worker, send
+/// bytes, or query broad state. If projection appears to need one of those
+/// powers, the event module should write a queue row and let its domain worker
+/// perform the active step later.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionOutput {
     pub rows: Vec<TableRow>,
+    pub labels: Vec<EventLabel>,
 }
 
 impl ProjectionOutput {
     pub fn rows(rows: Vec<TableRow>) -> Self {
-        Self { rows }
+        Self {
+            rows,
+            labels: Vec::new(),
+        }
+    }
+
+    pub fn labels(labels: Vec<EventLabel>) -> Self {
+        Self {
+            rows: Vec::new(),
+            labels,
+        }
+    }
+
+    pub fn rows_and_labels(rows: Vec<TableRow>, labels: Vec<EventLabel>) -> Self {
+        Self { rows, labels }
     }
 
     pub fn append(&mut self, mut other: Self) {
         self.rows.append(&mut other.rows);
+        self.labels.append(&mut other.labels);
     }
+}
+
+/// One immediate dependency loaded as generic projector context.
+///
+/// Dependency context contains the event id and the decoded record. It is
+/// intentionally shallow: only dependencies named by the event are loaded here.
+/// Deeper walks belong in a domain worker or a module-owned indexed table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyContext {
+    pub event_id: EventId,
+    pub record: EventRecord,
+}
+
+/// Generic context every projector receives.
+///
+/// This is the default context promised by the protocol plan: the current event
+/// id, its immediate dependency records, and bounded labels attached to the
+/// current event id. If a projector seems to need arbitrary SQL, first ask
+/// whether the needed fact should be a dependency, a label, or a module-owned
+/// read model consumed by a worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventContext {
+    pub event_id: EventId,
+    pub dependencies: Vec<DependencyContext>,
+    pub labels: Vec<Vec<u8>>,
+}
+
+impl EventContext {
+    pub fn dependency(&self, event_id: &EventId) -> Option<&EventRecord> {
+        self.dependencies
+            .iter()
+            .find(|dependency| &dependency.event_id == event_id)
+            .map(|dependency| &dependency.record)
+    }
+
+    pub fn has_label(&self, label: &[u8]) -> bool {
+        self.labels.iter().any(|candidate| candidate == label)
+    }
+}
+
+/// Event record plus the generic context fetched by the worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventWithContext<'a> {
+    pub record: &'a EventRecord,
+    pub context: EventContext,
 }
 
 /// Result of a command: a value for the caller plus proposed events to admit.
@@ -143,7 +227,8 @@ impl<T> CommandOutput<T> {
 ///
 /// This trait is the only place where the generic admission/apply loop touches
 /// concrete event modules. `record_from_bytes` chooses the module codec.
-/// `project_record` chooses the module projector. Keeping those decisions
+/// `project_record` chooses the module projector and receives the
+/// `EventWithContext` already loaded by this worker. Keeping those decisions
 /// behind the registry lets this worker enforce common mechanics without
 /// learning event-type vocabulary.
 pub trait EventRegistry {
@@ -151,7 +236,7 @@ pub trait EventRegistry {
     fn project_record(
         &self,
         store: &Store,
-        record: &EventRecord,
+        event: &EventWithContext<'_>,
     ) -> Result<ProjectionOutput, String>;
 }
 
@@ -243,7 +328,7 @@ where
     type Output = (T, AdmitReport);
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
-        run_command(store, registry, self)
+        admit_command_output(store, registry, self)
     }
 }
 
@@ -340,12 +425,16 @@ fn received_event_records(
     Ok(records)
 }
 
-fn run_command<T>(
+// ---------------------------------------------------------------------------
+// Canonical event pipeline
+// ---------------------------------------------------------------------------
+
+fn admit_command_output<T>(
     store: &Store,
     modules: &impl EventRegistry,
     output: CommandOutput<T>,
 ) -> Result<(T, AdmitReport), String> {
-    let report = admit_proposed_events(store, modules, output.events)?;
+    let report = run_admission_pipeline(store, modules, output.events)?;
     Ok((output.value, report))
 }
 
@@ -354,14 +443,27 @@ fn admit_records(
     modules: &impl EventRegistry,
     records: Vec<EventRecord>,
 ) -> Result<AdmitReport, String> {
-    admit_proposed_events(
+    run_admission_pipeline(
         store,
         modules,
         records.into_iter().map(ProposedEvent::new).collect(),
     )
 }
 
-fn admit_proposed_events(
+/// Run the batch-level admission pipeline in one store transaction.
+///
+/// This function gives callers the useful atomic unit: either all proposed
+/// events in the batch are admitted/projected as far as their dependencies allow,
+/// or none of the batch is. The per-event logic is intentionally delegated to
+/// `process_event_in_tx`; this helper owns transaction shape, not event meaning.
+///
+/// SQLite reads its own writes within this transaction, and the worker relies on
+/// that. A command may propose a parent followed by a child; the parent can be
+/// inserted, projected, and made visible to the child's dependency check before
+/// the batch commits. Splitting this into one transaction per event would be
+/// simpler only superficially: it would give up atomic command output and add
+/// commit overhead without improving the semantics.
+fn run_admission_pipeline(
     store: &Store,
     modules: &impl EventRegistry,
     events: Vec<ProposedEvent>,
@@ -369,29 +471,40 @@ fn admit_proposed_events(
     store
         .write_transaction(|store| {
             let mut report = AdmitReport::default();
-            admit_events_in_tx(store, modules, events, &mut report)?;
+            process_event_batch_in_tx(store, modules, events, &mut report)?;
             Ok(report)
         })
         .map_err(|err| format!("admit events: {err}"))
 }
 
-fn apply_changes_in_tx(store: &Store, changes: ProjectionOutput) -> rusqlite::Result<usize> {
-    store.insert_table_rows_in_tx(changes.rows)
-}
-
-fn admit_events_in_tx(
+/// Process a caller-ordered event batch inside an existing transaction.
+///
+/// Order matters for command chaining: if a command proposes parent then child
+/// in one output, the child sees the parent as already applied when possible.
+fn process_event_batch_in_tx(
     store: &Store,
     modules: &impl EventRegistry,
     events: Vec<ProposedEvent>,
     report: &mut AdmitReport,
 ) -> rusqlite::Result<()> {
     for event in events {
-        admit_and_apply_event_in_tx(store, modules, &event, report)?;
+        process_event_in_tx(store, modules, &event, report)?;
     }
     Ok(())
 }
 
-fn admit_and_apply_event_in_tx(
+/// Process one proposed event.
+///
+/// This is the core pipeline. It has exactly two branches:
+///
+/// 1. Transient records are projected immediately and never inserted into the
+///    durable event table.
+/// 2. Durable records are inserted by deterministic id, blocked if dependencies
+///    are missing, and projected only if this insertion made them ready.
+///
+/// Duplicate durable events stop after insertion returns `inserted = false`.
+/// They do not re-project, rewrite blockers, or re-run module code.
+fn process_event_in_tx(
     store: &Store,
     modules: &impl EventRegistry,
     event: &ProposedEvent,
@@ -400,43 +513,55 @@ fn admit_and_apply_event_in_tx(
     let record = event.record();
     report.event_ids.push(event.event_id());
     if record.scope == EventScope::Transient {
-        // Transient events are canonical enough to project and dedupe inside the
-        // current process, but they are not durable facts. Letting them wait on
-        // durable dependencies would create hidden state that cannot be resumed
-        // after a crash.
-        if !record.dependencies.is_empty() {
-            return Err(module_error(
-                "transient events cannot wait on durable dependencies".to_string(),
-            ));
-        }
-        let changes = modules
-            .project_record(store, record)
-            .map_err(module_error)?;
-        apply_changes_in_tx(store, changes)?;
+        project_transient_event_in_tx(store, modules, record)?;
         report.applied_events += 1;
         return Ok(());
     }
 
-    let admitted = admit_event_in_tx(store, event, report)?;
-    if admitted.inserted && admitted.ready {
-        let apply = apply_ready_event_in_tx(store, modules, &admitted.event_id)?;
+    let stored = store_durable_event_in_tx(store, event, report)?;
+    if stored.inserted && stored.ready {
+        let apply = project_ready_event_in_tx(store, modules, &stored.event_id)?;
         report.applied_events += apply.applied_events;
     }
     Ok(())
 }
 
+fn project_transient_event_in_tx(
+    store: &Store,
+    modules: &impl EventRegistry,
+    record: &EventRecord,
+) -> rusqlite::Result<()> {
+    // Transient events are canonical enough to project and dedupe inside the
+    // current process, but they are not durable facts. Letting them wait on
+    // durable dependencies would create hidden state that cannot be resumed
+    // after a crash.
+    if !record.dependencies.is_empty() {
+        return Err(module_error(
+            "transient events cannot wait on durable dependencies".to_string(),
+        ));
+    }
+    let event_id = event_id(&record.canonical_bytes);
+    let changes = project_event_with_context_in_tx(store, modules, &event_id, record)?;
+    write_projection_output_in_tx(store, changes)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Admission {
+struct StoredDurableEvent {
     event_id: EventId,
     inserted: bool,
     ready: bool,
 }
 
-fn admit_event_in_tx(
+/// Insert a durable event row and, if blocked, the exact missing-dependency rows.
+///
+/// This helper does not project. It only records whether the event is new and
+/// whether it is ready, so the caller can decide if projection is allowed.
+fn store_durable_event_in_tx(
     store: &Store,
     event: &ProposedEvent,
     report: &mut AdmitReport,
-) -> rusqlite::Result<Admission> {
+) -> rusqlite::Result<StoredDurableEvent> {
     let record = event.record();
     let id = event.event_id();
     let missing = missing_dependencies(store, &record.dependencies)?;
@@ -456,14 +581,19 @@ fn admit_event_in_tx(
             report.blocked_edges += write_blockers(store, &id, &missing)?;
         }
     }
-    Ok(Admission {
+    Ok(StoredDurableEvent {
         event_id: id,
         inserted,
         ready: missing.is_empty(),
     })
 }
 
-fn apply_ready_event_in_tx(
+/// Claim and project one ready durable event.
+///
+/// Projection is coupled to the Ready -> Applied status change. That makes the
+/// operation idempotent under retry: if another caller already claimed the event,
+/// this helper reports no work instead of running the projector twice.
+fn project_ready_event_in_tx(
     store: &Store,
     modules: &impl EventRegistry,
     event_id: &EventId,
@@ -477,14 +607,66 @@ fn apply_ready_event_in_tx(
             .event_bytes(event_id)?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let record = modules.record_from_bytes(bytes).map_err(module_error)?;
-        let changes = modules
-            .project_record(store, &record)
-            .map_err(module_error)?;
-        apply_changes_in_tx(store, changes)?;
+        let changes = project_event_with_context_in_tx(store, modules, event_id, &record)?;
+        write_projection_output_in_tx(store, changes)?;
         report.applied_events = 1;
         report.unblocked_events = unblock_dependents(store, event_id)?;
     }
     Ok(report)
+}
+
+/// Load generic context and call the registry projector.
+///
+/// This is the `get_context -> project` part of the pipeline. The worker always
+/// loads the protocol-wide context first so leaf projectors can stay pure
+/// functions over event bytes plus bounded facts.
+fn project_event_with_context_in_tx(
+    store: &Store,
+    modules: &impl EventRegistry,
+    event_id: &EventId,
+    record: &EventRecord,
+) -> rusqlite::Result<ProjectionOutput> {
+    let context = load_event_context_in_tx(store, modules, event_id, record)?;
+    let event = EventWithContext { record, context };
+    modules.project_record(store, &event).map_err(module_error)
+}
+
+/// Fetch the generic context shared by all projectors.
+///
+/// The dependency list comes from the event itself and is safe to load here
+/// because blocked durable events do not reach projection. Labels are generic,
+/// bounded facts attached to this event id by earlier projections.
+fn load_event_context_in_tx(
+    store: &Store,
+    modules: &impl EventRegistry,
+    event_id: &EventId,
+    record: &EventRecord,
+) -> rusqlite::Result<EventContext> {
+    let mut dependencies = Vec::with_capacity(record.dependencies.len());
+    for dependency in unique_dependencies(&record.dependencies) {
+        let bytes = store
+            .event_bytes(&dependency)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let record = modules.record_from_bytes(bytes).map_err(module_error)?;
+        dependencies.push(DependencyContext {
+            event_id: dependency,
+            record,
+        });
+    }
+    Ok(EventContext {
+        event_id: *event_id,
+        dependencies,
+        labels: store.event_labels(event_id)?,
+    })
+}
+
+fn write_projection_output_in_tx(
+    store: &Store,
+    changes: ProjectionOutput,
+) -> rusqlite::Result<usize> {
+    let rows = store.insert_table_rows_in_tx(changes.rows)?;
+    let labels = store.insert_event_labels_in_tx(changes.labels)?;
+    Ok(rows + labels)
 }
 
 fn drain_ready(
@@ -499,7 +681,7 @@ fn drain_ready(
                 let Some(event_id) = store.next_ready_event()? else {
                     break;
                 };
-                let report = apply_ready_event_in_tx(store, modules, &event_id)?;
+                let report = project_ready_event_in_tx(store, modules, &event_id)?;
                 total.applied_events += report.applied_events;
                 total.unblocked_events += report.unblocked_events;
             }
@@ -529,17 +711,20 @@ fn module_error(err: String) -> rusqlite::Error {
 }
 
 fn missing_dependencies(store: &Store, dependencies: &[EventId]) -> rusqlite::Result<Vec<EventId>> {
-    let mut dependencies = dependencies.to_vec();
-    dependencies.sort();
-    dependencies.dedup();
-
     let mut missing = Vec::new();
-    for dependency in dependencies {
+    for dependency in unique_dependencies(dependencies) {
         if !store.event_is_applied(&dependency)? {
             missing.push(dependency);
         }
     }
     Ok(missing)
+}
+
+fn unique_dependencies(dependencies: &[EventId]) -> Vec<EventId> {
+    let mut dependencies = dependencies.to_vec();
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
 }
 
 fn write_blockers(
@@ -561,7 +746,7 @@ fn unblock_dependents(store: &Store, applied_event_id: &EventId) -> rusqlite::Re
     let mut unblocked = 0;
     for dependent in dependents {
         // Unblocking only changes status. It does not recursively project the
-        // dependent event inside the same stack frame, which prevents a large
+        // newly unblocked event inside the same stack frame, which prevents a large
         // dependency cascade from becoming one unbounded transaction.
         if !store.event_has_dependency_waits(&dependent)?
             && store.set_event_status(&dependent, EventStatus::Blocked, EventStatus::Ready)?

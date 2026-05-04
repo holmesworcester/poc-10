@@ -1,5 +1,10 @@
-use topo::core::store::{event_id, Store};
-use topo::protocol::event_modules::{worker, Modules};
+use std::cell::Cell;
+
+use topo::core::store::{event_id, EventId, EventLabel, EventRecord, EventScope, Store};
+use topo::protocol::event_modules::worker::{
+    self, CommandOutput, EventRegistry, EventWithContext, ProjectionOutput,
+};
+use topo::protocol::event_modules::Modules;
 
 #[test]
 fn command_admission_returns_event_ids_for_chaining() {
@@ -21,5 +26,107 @@ fn command_admission_returns_event_ids_for_chaining() {
     assert_eq!(report.event_ids, proposed_ids);
     for event_id in report.event_ids {
         assert!(store.has_shared_event(&event_id).unwrap());
+    }
+}
+
+#[test]
+fn worker_fetches_dependency_records_and_labels_before_projection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("context.db")).unwrap();
+
+    let dep_bytes = b"dep".to_vec();
+    let child_bytes = b"child".to_vec();
+    let dep_id = event_id(&dep_bytes);
+    let child_id = event_id(&child_bytes);
+    let registry = ContextRegistry {
+        dep_id,
+        child_id,
+        dep_bytes: dep_bytes.clone(),
+        child_bytes: child_bytes.clone(),
+        child_saw_context: Cell::new(false),
+    };
+
+    let child = registry.record_for(child_bytes).unwrap();
+    let (_, child_report) = worker::run(
+        &store,
+        &registry,
+        CommandOutput::with_events((), vec![child]),
+    )
+    .unwrap();
+    assert_eq!(child_report.blocked_events, 1);
+    assert_eq!(child_report.applied_events, 0);
+
+    let dep = registry.record_for(dep_bytes).unwrap();
+    let (_, dep_report) =
+        worker::run(&store, &registry, CommandOutput::with_events((), vec![dep])).unwrap();
+    assert_eq!(dep_report.applied_events, 1);
+
+    let drain = worker::run(&store, &registry, worker::DrainUntilIdle { batch_size: 10 }).unwrap();
+    assert_eq!(drain.applied_events, 1);
+    assert!(registry.child_saw_context.get());
+}
+
+struct ContextRegistry {
+    dep_id: EventId,
+    child_id: EventId,
+    dep_bytes: Vec<u8>,
+    child_bytes: Vec<u8>,
+    child_saw_context: Cell<bool>,
+}
+
+impl ContextRegistry {
+    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        if bytes == self.dep_bytes {
+            return Ok(EventRecord {
+                timestamp: 1,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: Vec::new(),
+                scope: EventScope::Shared,
+            });
+        }
+        if bytes == self.child_bytes {
+            return Ok(EventRecord {
+                timestamp: 2,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: vec![self.dep_id],
+                scope: EventScope::Shared,
+            });
+        }
+        Err("unknown test event".to_string())
+    }
+}
+
+impl EventRegistry for ContextRegistry {
+    fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        self.record_for(bytes)
+    }
+
+    fn project_record(
+        &self,
+        _store: &Store,
+        event: &EventWithContext<'_>,
+    ) -> Result<ProjectionOutput, String> {
+        if event.context.event_id == self.dep_id {
+            return Ok(ProjectionOutput::labels(vec![EventLabel {
+                event_id: self.child_id,
+                label: b"dep-applied".to_vec(),
+            }]));
+        }
+        if event.context.event_id == self.child_id {
+            assert_eq!(
+                event
+                    .context
+                    .dependency(&self.dep_id)
+                    .expect("dependency context")
+                    .canonical_bytes,
+                self.dep_bytes
+            );
+            assert!(event.context.has_label(b"dep-applied"));
+            self.child_saw_context.set(true);
+            return Ok(ProjectionOutput::default());
+        }
+        Err("unknown projection".to_string())
     }
 }

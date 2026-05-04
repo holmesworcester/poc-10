@@ -47,14 +47,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
             deps_per_event,
         } => {
             let lines =
-                cli::run_generate_dependent_events(&store, &protocol, num_events, deps_per_event)
+                cli::run_generate_event_with_deps(&store, &protocol, num_events, deps_per_event)
                     .map_err(|err| format!("generate-deps: {err}"))?;
             for line in lines {
                 println!("{line}");
             }
         }
         Command::ReplayDepsReverse => {
-            let lines = cli::run_replay_dependent_events_reverse(&store, &protocol)
+            let lines = cli::run_replay_event_with_deps_reverse(&store, &protocol)
                 .map_err(|err| format!("replay-deps-reverse: {err}"))?;
             for line in lines {
                 println!("{line}");

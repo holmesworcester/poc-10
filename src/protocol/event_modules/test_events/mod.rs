@@ -1,13 +1,13 @@
-pub mod dependent_event;
+pub mod event_with_deps;
 
 use crate::protocol::event_modules::worker::ProjectionOutput;
 
 pub fn project_record(bytes: &[u8]) -> Result<Option<ProjectionOutput>, String> {
     match bytes.first().copied() {
         Some(
-            dependent_event::codec::TYPE_DEPENDENT_EVENT
-            | dependent_event::codec::TYPE_STAGED_DEPENDENT_EVENT,
-        ) => Ok(Some(dependent_event::projector::project(bytes)?)),
+            event_with_deps::codec::TYPE_EVENT_WITH_DEPS
+            | event_with_deps::codec::TYPE_STAGED_EVENT_WITH_DEPS,
+        ) => Ok(Some(event_with_deps::projector::project(bytes)?)),
         _ => Ok(None),
     }
 }

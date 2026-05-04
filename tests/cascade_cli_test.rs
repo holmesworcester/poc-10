@@ -5,7 +5,7 @@ use std::time::Instant;
 use cli_harness::*;
 
 #[test]
-fn cascade_cli_blocks_then_unblocks_10k_over_real_commands() {
+fn cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_10k() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "cascade.db");
 
@@ -45,7 +45,7 @@ fn cascade_cli_blocks_then_unblocks_10k_over_real_commands() {
 
 #[test]
 #[ignore]
-fn cascade_cli_blocks_then_unblocks_50k_over_real_commands() {
+fn cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_50k() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "cascade-50k.db");
 
