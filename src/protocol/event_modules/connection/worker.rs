@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
 
-use crate::core::store::{CommandOutput, EventRecord, ProposedEvent, Store};
+use crate::core::store::{EventRecord, Store};
 use crate::protocol::event_modules::identity::{endpoint, invite};
+use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
 
 use super::{
     connection_ack, connection_request, queries, tables, transit, transport_target, types,

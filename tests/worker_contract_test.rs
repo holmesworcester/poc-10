@@ -1,13 +1,10 @@
-use topo::core::{
-    pipeline,
-    store::{event_id, Store},
-};
-use topo::protocol::event_modules::Modules;
+use topo::core::store::{event_id, Store};
+use topo::protocol::event_modules::{worker, Modules};
 
 #[test]
 fn command_admission_returns_event_ids_for_chaining() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("pipeline.db")).unwrap();
+    let store = Store::open(tmp.path().join("worker.db")).unwrap();
     let modules = Modules::new();
 
     let output = modules.generate_content(&store, 3, 64).unwrap();
@@ -19,7 +16,7 @@ fn command_admission_returns_event_ids_for_chaining() {
             event.event_id()
         })
         .collect::<Vec<_>>();
-    let (_, report) = pipeline::run_command(&store, &modules, output).unwrap();
+    let (_, report) = worker::run_command(&store, &modules, output).unwrap();
 
     assert_eq!(report.event_ids, proposed_ids);
     for event_id in report.event_ids {

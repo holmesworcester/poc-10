@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use crux_core::{command::CommandContext, Command};
 
-use crate::core::control_loop;
+use crate::protocol::event_modules::worker;
 
 use super::effects::{
     NetworkOp, NetworkReply, ProtocolEffect, StdoutOp, StdoutReply, StoreOp, StoreReply,
@@ -238,7 +238,7 @@ async fn pump_stream(
 
         match ctx
             .request_from_shell(StoreOp::DrainReadyUntilIdle {
-                batch_size: control_loop::DEFAULT_READY_BATCH,
+                batch_size: worker::DEFAULT_READY_BATCH,
             })
             .await
         {
@@ -300,7 +300,7 @@ pub(super) fn generate(
 
         let drained = match ctx
             .request_from_shell(StoreOp::DrainReadyUntilIdle {
-                batch_size: control_loop::DEFAULT_READY_BATCH,
+                batch_size: worker::DEFAULT_READY_BATCH,
             })
             .await
         {

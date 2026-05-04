@@ -13,35 +13,36 @@ See appendix for documentation style rules and references.
 # Core
 
 `core/` is protocol-agnostic. It provides the generic substrate needed by any
-protocol built on canonical events:
+protocol:
 
-- canonical event storage and table-row application,
-- admission by `event_id = BLAKE3(canonical_event_bytes)`,
-- dependency blocking with `blocked_by_event(blocked_by_event_id, event_id)`,
-- same-transaction unblocking when dependencies apply,
-- bounded ready-event processing,
-- actor scheduling and effect commit ordering,
-- fixed-width binary helpers for protocol codecs.
+- canonical byte and table-row storage,
+- queue tables and idempotent table-row writes,
+- storage operations used by protocol-owned wait queues,
+- generic transactions and storage queries,
+- generic Crux app/effect driving.
 
-Core does not know connection, bootstrap, transit, sync ranges, workspaces,
-content, endpoint identity, TCP, or CLI command semantics. A different protocol
-should be able to reuse `core/` by providing its own event registry, actors,
-tables, IO modules, and CLI/app shell.
+Core does not decide admission, blocking, dependency meaning, signature/auth
+validity, which projector runs, connection, bootstrap, transit, sync ranges,
+workspaces, content, endpoint identity, TCP, codec format, or CLI command
+semantics. A different protocol should be able to reuse `core/` by providing
+its own scoped workers, event registry, tables, IO modules, wire helpers, and
+CLI/app shell.
 
 The current code split follows that boundary:
 
 ```
 src/core/
   store.rs
-  blocking.rs
-  pipeline.rs
-  control_loop.rs
   crux_runner.rs
-  wire.rs
 
 src/protocol/
   event_modules/
-  actors.rs
+    worker.rs       // common event-module admission/apply worker
+    connection/
+      worker.rs     // connection-scope queued work
+    sync/
+      worker.rs     // sync-scope queued work
+  wire.rs
   app/             // current protocol app shell
   network.rs
 ```
@@ -49,7 +50,7 @@ src/protocol/
 # Protocol
 
 `protocol/` is the current Topo protocol built on the reusable core. It owns
-all event families, domain actors, protocol-specific IO names, and CLI/app
+all event families, domain workers, protocol-specific IO names, and CLI/app
 effects. A completely different protocol should be able to replace
 `protocol/` while reusing `core/`.
 
@@ -65,25 +66,31 @@ scenario definitions.
 
 **event_modules/** contains every protocol or domain behavior that can be
 expressed as events, projectors, commands, module-owned tables, and module
-actors. This includes content, identity, auth, connection, sync, and local-only
+workers. This includes content, identity, auth, connection, sync, and local-only
 behavior. A built-out module owns its schema/read model next to its event type:
 this is the poc-7 `message` / `reaction` pattern and the poc-6
 `message.py` + `message.sql` pattern. Do not split "event type" and "tables"
 into separate conceptual homes; tables live with the module that owns the
 projection or queue. A domain may also own shared tables and
-actors at the domain root when those tables coordinate several leaf event
+workers at the domain root when those tables coordinate several leaf event
 modules.
 
 `protocol/mod.rs` defines the current protocol composition object. That object
 owns protocol IO namespaces and the event-module registry.
-`protocol/event_modules/mod.rs` imports concrete protocol families and exposes the
-narrow registry surface used by the protocol shell and tests. `core/` talks to
-the protocol through generic traits implemented by the protocol composition
-object, such as event parse/project; it does not
-import concrete event families. The protocol shell calls through the protocol
-composition object and does not import `connection`, `sync`, `content`, or
-`identity` directly. Module actors interpret framed bytes, canonical events,
-queues, and route state.
+`protocol/event_modules/worker.rs` is the event-module-scope admission/apply
+worker: it hashes canonical bytes, applies this protocol's dependency/scope
+rules, calls this protocol's registry, and applies projector rows through core
+storage. It also owns the default Topo blocking policy: immediate dependencies
+declared by the codec/record are checked before projection, and missing
+dependencies are written to the protocol's blocked-event queue.
+`protocol/wire.rs` contains shared fixed-field binary helpers used by protocol
+codecs; it is shared by modules, but it is still protocol infrastructure.
+`protocol/event_modules/mod.rs` imports concrete protocol families and exposes
+the narrow registry surface used by the protocol shell and tests. `core/` does
+not call event parse/project traits and does not import concrete event
+families. The protocol shell calls through the protocol composition object and
+does not import `connection`, `sync`, `content`, or `identity` directly. Module
+workers interpret framed bytes, canonical events, queues, and route state.
 
 Suggested organization:
 
@@ -113,7 +120,7 @@ src/protocol/event_modules/
     removal/
     cli.rs
   connection/
-    actor.rs
+    worker.rs
     tables.rs
     queries.rs
     types.rs
@@ -122,7 +129,7 @@ src/protocol/event_modules/
     connection_secret/
     observed_address/
   sync/
-    actor.rs
+    worker.rs
     tables.rs
     queries.rs
     types.rs
@@ -143,11 +150,11 @@ file per concern (`types.rs`, `codec.rs`, `projector.rs`, `commands.rs`,
 module is small enough that a single `.rs` file would suffice. `tables.rs` is
 where the module declares its projection tables, indexes, queues, cursors, and
 storage class. A domain root may also contain `tables.rs`, `queries.rs`,
-`types.rs`, `actor.rs`, and `cli.rs` when it owns shared tables, an actor, or a
+`types.rs`, `worker.rs`, and `cli.rs` when it owns shared tables, a worker, or a
 domain-level CLI command registry coordinating several leaf event modules.
 There is no generic `jobs/` or `cli_commands/` dumping ground and no fake event
-module for an algorithm: `sync/actor.rs` may run negentropy over `sync/tables.rs`;
-`negentropy/` is only a child module if it defines an actual event type. `actor`
+module for an algorithm: `sync/worker.rs` may run negentropy over `sync/tables.rs`;
+`negentropy/` is only a child module if it defines an actual event type. `worker`
 is the component noun; `run` is the method verb.
 The cost is some empty-ish files in tiny modules; the win is that this is
 intentional friction. In a codebase where most code is assistant-generated,
@@ -160,7 +167,7 @@ This rule is in conscious tension with "let complexity earn length" in the docum
 
 **networking** All complex networking behavior including bootstrap,
 connection, transit, and sync is implemented in event modules: commands propose
-events, projectors write rows, module actors decide what to run next, and
+events, projectors write rows, module workers decide what to run next, and
 connection/transit modules wrap and unwrap transit blobs. protocol IO modules
 only frame and move bytes to concrete transport targets. Connections are
 between two endpoints (daemons) and sync all data in all workspaces those two
@@ -171,31 +178,42 @@ instance of any given workspace, so for workspace-scoped events `workspace_id`
 alone identifies the local processing scope and there is no separate
 "recorded_by". See **Event Scopes** below for the full taxonomy.
 
-**ready_event_loop** is not a protocol subsystem. It is the default actor:
-admit facts, load context, call the owning module's projector, and apply rows.
-Most event modules use only this generic actor. Domains with richer state,
-such as sync, add domain-owned actors over domain-owned queues and cursors.
+**worker.rs** is the only active-component filename. A worker lives at the
+scope whose queues/cursors it owns. `protocol/event_modules/worker.rs` covers
+common canonical event admission/apply for all event modules. A domain worker
+such as `sync/worker.rs` covers active sync queues and cursors. There is no
+`protocol/worker.rs`: protocol root is too broad to own a worker.
 
-**control_loop** is the single-writer actor scheduler. It claims bounded batches of table rows, dispatches to the owning actor, applies returned state writes atomically, admits returned events through the generic ready-event actor, and runs external effects.
+Default dependency blocking is centralized in the event-modules worker after
+record decoding and before projection. Projectors remain expressive by writing
+module-owned wait/blocked rows for semantic blockers that are not just
+immediate missing dependencies, but they do not each reimplement the common
+dependency wait queue.
 
-**state** is the explicit table-shaped substrate that projectors and actors observe. It is materialized from event-module table declarations and can be a database in production or an in-memory store in testing and simulation.
+**control loop** means the protocol's worker scheduling policy. It claims
+bounded batches of queue rows, dispatches to the owning worker, applies returned
+state writes atomically through core storage, and admits returned events
+through the event-modules worker. Workers queue IO by writing rows to core IO
+queues at IO boundaries; core IO workers drain those capability queues. Core
+provides queue and transaction mechanics; protocol owns which workers exist
+and what their work means.
+
+**state** is the explicit table-shaped substrate that projectors and workers observe. It is materialized from event-module table declarations and can be a database in production or an in-memory store in testing and simulation.
 
 **protocol IO** contains IO modules such as TCP listener, reader, writer, and
 timer modules. IO modules create and drain IO queues; they do not interpret
-transit blobs or canonical event bytes. They can return effects against
-operating-system resources and rows/events against protocol-owned IO tables
-such as inbound bytes, outbound bytes, listener state, socket state, and
-backoff state.
+transit blobs or canonical event bytes. Protocol workers request IO by writing
+rows to core IO capability queues such as TCP send/recv or timer wake queues.
 
-**network** is a TCP-only protocol IO module family. It accepts module-produced
-`TransportSend { target, bytes }` effects, packs `bytes` into length-prefixed
-TCP frames, writes sockets, and records inbound bytes with origin metadata. It
-does not create or interpret transit blobs.
+**network** is a TCP-only IO module family. It drains core TCP capability
+queues, packs opaque bytes into length-prefixed TCP frames, writes sockets, and
+records inbound bytes with origin metadata. It does not create or interpret
+transit blobs.
 
-**actors** are module-owned active components woken by queue rows, timers, IO
-readiness, or explicit CLI requests. An actor declares its wake sources, read
+**workers** are module-owned active components woken by queue rows, timers, IO
+readiness, or explicit CLI requests. A worker declares its wake sources, read
 set, and write set. Core uses those declarations to load bounded context
-and commit output; the actor owns the semantic decision. Use `wake` for
+and commit output; the worker owns the semantic decision. Use `wake` for
 scheduling and `run` for execution.
 
 **cli.rs** is the module-local CLI adapter. It owns help text, parameter names,
@@ -219,7 +237,7 @@ CliOutput::text(message::cli::format_created(row))
 projection rows are visible." It does not drain unrelated ready events. Query-only
 commands simply run module queries and format output. Commands that need
 external progress, such as `sync` or `assert-eventually`, say that explicitly by
-waking the owning actor or polling a module query.
+waking the owning worker or polling a module query.
 
 CLI scenario/check/expect definitions live in the closest event module or
 domain root, not in the app shell. A generic scenario runner can still execute
@@ -229,19 +247,21 @@ and expected output stay local to the behavior being specified.
 The substrate pieces outside `event_modules` are deliberately narrow:
 
 ```
-core/control_loop.rs     // dispatch, transactions, bounded batches, effect execution
 core/crux_runner.rs      // generic Crux app/effect driving
 core/store.rs            // catalog materialization, storage, migrations, snapshots
+protocol/event_modules/worker.rs     // event-module admission/apply and blocking worker
+protocol/wire.rs         // shared fixed-field protocol codec helpers
 protocol/network.rs      // TCP bytes and socket ownership
-protocol/actors.rs       // protocol-specific actor adapters
 protocol/app/            // current Topo CLI effect vocabulary and interpreters
-protocol/event_modules/  // protocol facts, projectors, tables, actors
+protocol/event_modules/  // protocol facts, projectors, tables, workers
 ```
 
 If behavior is protocol semantics expressible as
-events/projectors/commands/tables/actors, it belongs under `event_modules`. If
-it owns process execution, IO, storage mechanics, or scheduling, it belongs
-outside.
+events/projectors/commands/tables/workers, it belongs under `event_modules`. If
+it owns Topo admission/apply semantics, it belongs in `protocol/event_modules/worker.rs`.
+If it owns shared protocol encoding helpers, it belongs in `protocol/wire.rs`.
+If it owns process execution, IO, storage mechanics, or queue mechanics, it
+belongs outside event modules.
 
 ## Core State and Registry Interface
 
@@ -272,7 +292,7 @@ indexes
 storage class: durable | memory | temp
 migrations / schema version
 projectors
-commands / actors
+commands / workers
 ```
 
 Those declarations form the runtime catalog:
@@ -280,16 +300,16 @@ Those declarations form the runtime catalog:
 ```
 event_modules/*/registry_meta.rs
   -> ModuleRegistry
-  -> ActorRegistry
+  -> WorkerRegistry
   -> StateCatalog
   -> database / memory store schema
 ```
 
 The event domain owns semantic meaning: what a row means, which projection
-writes it, which indexes are required, which actors consume it, and whether it
+writes it, which indexes are required, which workers consume it, and whether it
 may be rebuilt. A leaf event module owns one event type's codec, dependencies,
 commands, projector, and leaf projection tables. A domain root owns shared
-tables and actors that coordinate several leaves. `state` owns mechanics:
+tables and workers that coordinate several leaves. `state` owns mechanics:
 creating tables, applying migrations, opening transactions, inserting NewRows,
 deleting Purges, querying declared indexes, resetting transient rows on
 startup, and choosing durable vs memory storage.
@@ -300,15 +320,18 @@ by the ready-event loop, schedule rows by the owning module or `protocol/timers`
 and sync caches by the sync modules. The fewer central special tables, the
 better.
 
-## Core Ready-Event Interface
+## Protocol Admission And Codec Interface
 
-**codec** is canonical event encoding and parsing. It is not necessarily network wire. A module's `codec.rs` defines `Event <-> CanonicalEventBytes`, the event type tag, field layout, dependency field declarations, signature and signer-family rules, and deterministic id rules. Canonical event layout is fixed-width per event type: once the type tag is known, the field layout and canonical byte length are known, though different event types may have different fixed lengths. Shared binary utilities handle primitive reads/writes, fixed-size ids, truncation checks, and trailing-byte checks so codecs read as format descriptions.
+**codec** is canonical event encoding and parsing. It is not necessarily network wire. A module's `codec.rs` defines `Event <-> CanonicalEventBytes`, the event type tag, field layout, dependency field declarations, signature and signer-family rules, and deterministic id rules. Canonical event layout is fixed-width per event type: once the type tag is known, the field layout and canonical byte length are known, though different event types may have different fixed lengths. `protocol/wire.rs` provides shared primitive reads/writes, fixed-size ids, truncation checks, and trailing-byte checks so codecs read as format descriptions.
 
 **encode** encodes an Event to `CanonicalEventBytes`, returning a BLAKE3 event id, usually used by `create` or other domain-specific functions.
 
 **parse** consumes `CanonicalEventBytes` and returns an Event, which includes all event values, its BLAKE3 hash id, its canonical bytes, and the `workspace_id` it belongs to, or throws an error if the bytes are invalid.
 
-**canonical-event processing** hashes the canonical bytes, checks admission before loading context, parses only newly admitted events, and then runs context/project/apply as one chained step unless the event blocks.
+**canonical-event processing** is owned by `protocol/event_modules/worker.rs`. It hashes
+the canonical bytes, checks protocol admission before loading context, parses
+only newly admitted events, and then runs context/project/apply as one chained
+step unless the event blocks.
 
 Typed Rust event values are the in-process semantic representation. They should not carry canonical bytes as ordinary fields. Canonical bytes and ids are boundary artifacts:
 
@@ -345,7 +368,7 @@ Traits are the module API; canonical bytes are event identity. Projectors that n
 **admit_event_id** consumes an event id and returns known or newly claimed. Known includes applied, blocked, rejected, and in-flight events. Duplicates record observations, call `suppress_received(id)` (see: Sync), and stop before context loading. Newly claimed ids become canonical event ids only after parse succeeds.
 
 **get_context** consumes a newly admitted Event and returns an EventWithContext.
-The core-owned default context for `project` is:
+The protocol-owned default context for `project` is:
 
 1. the parsed Event,
 2. the other Events that the consumed Event names as immediate dependencies,
@@ -363,7 +386,8 @@ label is missing.
 Custom typed context is allowed only for module-owned read models that are too
 large or index-shaped to fit the default context. The module owns the context
 request type, the context result type, and the semantics of the read model; the
-core only routes the request/result and never inspects module-specific fields.
+protocol runner only routes the request/result and never inspects
+module-specific fields.
 The known required case is negentropy response projection: compare/have/need
 responders need indexed summaries, bucket ids, presence checks, and event bytes
 from module-owned sync/negentropy tables. That is context for the sync module,
@@ -378,7 +402,7 @@ cut. Model their checks as first-level dependencies and labels:
 - invite acceptance creates or labels local trust anchors and route hints rather
   than reaching through custom context;
 - observed/self address and route facts are labels or module rows consumed by
-  sender/outbox actors, not projector-only hidden queries.
+  sender/outbox workers, not projector-only hidden queries.
 
 If a future connection or bootstrap behavior appears to need custom context,
 the burden is to prove that extra dependencies or labels cannot express it
@@ -386,7 +410,7 @@ boundedly.
 
 **labels** is a table whose rows are tuples of (event_id, label_type); adding a label can be a result of projection. Labels become part of context so there should be a bounded number of labels for a given event_id. "This event blocks others" can be a label. 
 
-**blocking** is ready-event-loop-owned. A blocked event remains an `events` row with `status = blocked`; each missing dependency is a `blocked_by_event(blocked_by_event_id, event_id)` row.
+**blocking** is protocol-worker-owned policy over core-maintained queues. A blocked event remains an `events` row with `status = blocked`; each missing dependency is a `blocked_by_event(blocked_by_event_id, event_id)` row.
 
 **project** consumes an EventWithContext and returns either RejectedEvent (if known invalid), BlockedEvent, or StateUpdates.
 
@@ -453,79 +477,79 @@ work item:
 
 Examples of work items that do not need codecs are timer-fired, socket-writable, CLI-command-entered, and internal-wakeup notifications. Once something is inserted into `events`, referenced by id, deduped, blocked, replayed, or projected like an event, it needs canonical bytes.
 
-## Core Actor Scheduler
+## Protocol Worker Scheduler
 
-The control loop is the generic actor runner. It owns:
+The control loop is the protocol worker scheduler. It owns:
 
 - the module registry,
 - generic table-row storage,
 - transaction boundaries,
 - resource limits,
-- effect commit ordering.
+- queue commit ordering.
 
-All domain behavior lives above the control loop in event modules and their
-colocated actors. The control loop is protocol-agnostic: it sees ready events,
-opaque actor wakes, actor output, and opaque effects, not sync ranges,
+All domain behavior lives in event modules and their colocated workers. The
+control loop should stay domain-agnostic within this protocol: it sees ready
+events, opaque worker wakes, and worker output, not sync ranges,
 connection handshakes, content semantics, sockets, routes, or protocol IO
-names.
+names. Core only maintains the queues and transactions the scheduler uses.
 
 Queued work is typed:
 
 ```
 WorkItem =
   ReadyEvent
-  ActorWake(actor_id, wake_key)
+  WorkerWake(worker_id, wake_key)
 ```
 
-Each queue item has exactly one owning actor. The control loop calls one
+Each queue item has exactly one owning worker. The control loop calls one
 function:
 
 ```
-actor.run(wake, context) -> ActorOutput
+worker.run(wake, context) -> WorkerOutput
+worker.run(wake, context) -> WorkerOutput
 ```
 
 Mathematically:
 
 ```
-Actor_i : Wake_i x Read_i(State) -> Delta_i(State) x Events x Effects
+Worker_i : Wake_i x Read_i(State) -> Delta_i(State) x Events x Complete
 ```
 
-The module registry gives core an actor catalog:
+The module registry gives core an worker catalog:
 
 ```
-ActorSpec:
-  actor_id
+WorkerSpec:
+  worker_id
   wake_sources
-  read_set       // declared tables/indexes this actor can read
-  write_set      // declared tables this actor can update
+  read_set       // declared tables/indexes this worker can read
+  write_set      // declared tables this worker can update
   run
 ```
 
-Core owns the mechanical sequence:
+The protocol scheduler owns the mechanical sequence:
 
 ```
 select wake
-lookup ActorSpec
+lookup WorkerSpec
 load declared context from read_set
-actor.run(wake, context)
-commit returned rows/events against write_set
-run effects after commit
+worker.run(wake, context)
+commit returned rows/events/completions against write_set
 ```
 
-Core does not know what an effect means. A protocol supplies the actor catalog,
-the wake sources, and the effect runner for that protocol. For the current
-Topo protocol, effects may include TCP sends and local IO; for another
-protocol, they may be completely different.
+Core does not know this worker catalog exists. The protocol supplies worker
+catalogs and wake sources. At IO boundaries, protocol workers write rows to
+core IO capability queues; core IO workers drain those queues without learning
+protocol meaning.
 
-`ActorOutput` contains:
+`WorkerOutput` contains:
 
 ```
 StateUpdates   // includes NewRows into ordinary tables and boundary tables
-Events         // proposed canonical events to admit through the ready-event loop
-Effects        // opaque to core; interpreted by the protocol runner
+Events         // proposed canonical events to admit through the event-modules worker
+Complete       // queue rows to complete/delete after the state commit
 ```
 
-The core ready-event actor is a pure chain over canonical event bytes:
+The event-modules worker is a pure chain over canonical event bytes:
 
 ```
 CanonicalEventBytes
@@ -543,19 +567,18 @@ protocol caller record whatever IO-level failure row it owns. Blocked events
 write `blocked_by_event` rows and stop.
 
 Projectors only write rows. They cannot emit follow-on events. If projection
-discovers work, it writes a module-owned queue row; an actor reads bounded queue
+discovers work, it writes a module-owned queue row; a worker reads bounded queue
 rows, queries its declared context, calls module commands, and sends the
 proposed canonical events back to the control loop for admission. If the work
-reaches an IO boundary, the actor returns an opaque effect for the protocol
-runner to interpret.
+reaches an IO boundary, the worker writes a row to a core IO queue.
 
-Actors are the active boundary. Projectors can only change rows, especially
-queue rows. Commands are pure construction/query helpers. Actors are the only
-event-module surface that can return IO effects; the protocol runner executes
-those effects after core commits state.
+Workers are the active boundary. Projectors can only change rows, especially
+queue rows. Commands are pure construction/query helpers. Workers are the only
+event-module surface that can advance queued work. They do not return ad hoc
+effects; they write queue rows.
 
 Protocol inbound processing may feed canonical bytes directly into this
-ready-event actor, or it may enqueue durable inbound rows first. That choice
+worker, or it may enqueue durable inbound rows first. That choice
 belongs to the protocol IO modules, not core.
 
 Boundary tables that need claim/retry ownership are ordinary module-owned tables with status metadata:
@@ -603,22 +626,26 @@ When event `D` becomes applied, the same transaction deletes `blocked_by_event_i
 
 Unblocking never recursively processes dependents in the same call. `events.status = ready` is the unblocked-events queue; the control loop later claims a bounded batch of ready events.
 
-The control loop commits `StateUpdates` in one transaction, then runs `Effects`. Effects may write new rows but do not directly project events.
+The control loop commits `StateUpdates`, proposed events, and queue completions in one transaction. IO happens later by draining committed core IO queues.
 
 The first implementation has one process-wide control-loop writer. Failed
 claim/retry work remains in its table with status, attempts, and last_error
 until its owning module marks it pending, rejected, blocked, expired, or dead.
 On startup, `events.processing -> ready`; protocol-owned processing rows return
 to pending according to their module rules. Memory protocol queues start empty;
-recurring protocol actors recreate recoverable work.
+recurring protocol workers recreate recoverable work.
 
 Modules may run pure helper transforms inline until they reach a queue, state, or effect boundary. Modules do not recursively drain queues and do not perform transport IO inline.
 
-The control loop has no sync, bootstrap, auth, connection, dependency, or event-type policy. It only knows dispatch, bounded batches, transactions, time, limits, retries, and effects. Leases are a later extension for multiple workers or long-running claim ownership.
+The control loop has no sync, bootstrap, auth, connection, or event-type policy
+beyond calling protocol workers. It only knows dispatch, bounded batches,
+transactions, time, limits, retries, and queue commits. Blocking policy belongs to
+the event-modules worker. Leases are a
+later extension for multiple workers or long-running claim ownership.
 
 ## Protocol Network
 
-**transport** is a protocol IO module family for TCP byte I/O between network routes (listeners, socket cache, `[u32 length][bytes]` framing, addresses learned from invite/`observed_address`/incoming connections). `TransportSend { target, bytes }` is the only egress, where `target` is a concrete route such as `(ip, port)` or an existing socket id, not a `connection_id`. Inbound bytes enter an IO-owned inbound-bytes queue with origin `(ip, port, socket_id, observed endpoint if known)`; a durable inbound-bytes buffer is optional until replay/fairness requirements justify it. *Invariant: transport produces and interprets no transit bytes; if it sends bytes, those bytes were produced by an event module.*
+**transport** is a protocol IO module family for TCP byte I/O between network routes (listeners, socket cache, `[u32 length][bytes]` framing, addresses learned from invite/`observed_address`/incoming connections). Its only egress is a core TCP send queue row whose `target` is a concrete route such as `(ip, port)` or an existing socket id, not a `connection_id`. Inbound bytes enter an IO-owned inbound-bytes queue with origin `(ip, port, socket_id, observed endpoint if known)`; a durable inbound-bytes buffer is optional until replay/fairness requirements justify it. *Invariant: transport produces and interprets no transit bytes; if it sends bytes, those bytes were produced by an event module.*
 
 Protocol-owned boundary tables include:
 
@@ -629,18 +656,18 @@ wake_schedules      // timer IO enters the protocol
 socket_state        // listener/socket/cache state when needed
 ```
 
-Normal inbound processing is a protocol actor chain:
+Normal inbound processing is a protocol worker chain:
 
 ```
 InboundBytes
   -> connection.unwrap / raw frame parse
   -> CanonicalEventBytes
-  -> core ready-event actor
+  -> event-modules worker
 ```
 
 The first POC may run this chain directly from the socket reader without first
-durably queuing `InboundBytes`. That is still a protocol actor boundary: the
-socket reader only passes `(origin, bytes)` into the inbound actor, and event
+durably queuing `InboundBytes`. That is still a protocol worker boundary: the
+socket reader only passes `(origin, bytes)` into the inbound worker, and event
 modules decide meaning and queue follow-on work. A durable `inbound_bytes`
 table is added when we need crash replay, fairness across many sockets,
 leases, or independent retry.
@@ -658,15 +685,15 @@ Wrapped bytes are never canonical events. They have no event id, no dependencies
 *Invariants: `shared_workspaces` is authoritative because the connection event's deps + signature have already been validated by the standard ready-event loop — the connection does not authorize itself, its dependencies do; a valid unwrap under one of our inbound secrets is by construction proof that the sender is the remote endpoint of that connection; every wrap is bound to exactly one connection; wrap and unwrap both enforce workspace ↔ connection alignment.*
 
 **Outbox.** No projector calls `transport.send` or emits a `SendEvent`.
-Projectors write rows to module-owned queues. A sync actor that wants to send a
+Projectors write rows to module-owned queues. A sync worker that wants to send a
 durable event — e.g. after reading a queued need from connection C for event E —
 calls a command that creates deterministic `SendEvent(connection_id=C,
 inner_event_id=E)` and admits it through the control loop. The `SendEvent`
 projector only writes `outbox(connection_id, send_event_id)`.
-`connection/actor.rs` claims outbox rows, checks that E's `workspace_id` is in
+`connection/worker.rs` claims outbox rows, checks that E's `workspace_id` is in
 `shared_workspaces(C)`, resolves C to a current transport target, calls the
-transit wrap command, and returns `TransportSend { target, bytes }`. The
-protocol IO sender module packs those bytes into TCP frames and writes sockets. A
+transit wrap command, and writes a core TCP send queue row. The
+TCP IO worker packs those bytes into TCP frames and writes sockets. A
 slow route backs off its own target; other transport targets continue.
 *Invariant: every ordinary byte on the wire is the product of two independent
 workspace-membership checks (SendEvent projection + `connection.wrap`) plus a
@@ -683,18 +710,18 @@ outbox:
 ```
 
 `outbox` is memory by default and has no per-row claim, lease, or retry status.
-Each active connection has exactly one `connection/actor.rs` owner for outbox
+Each active connection has exactly one `connection/worker.rs` owner for outbox
 drain work:
 
 ```
-connection::actor.run:
+connection::worker.run:
   connection_id
   hot_queue: bounded deque<event_id>
   present: set<event_id>
 ```
 
 `hot_queue` is bounded by estimated bytes, not only event count. When it drops
-below a low-water mark, `connection::actor.run` refills from pending `outbox`
+below a low-water mark, `connection::worker.run` refills from pending `outbox`
 rows for that connection, skipping ids already in `present`. After the socket
 accepts a complete frame, the protocol runner deletes the corresponding
 `outbox` rows and removes those ids from `present`. On send failure it removes
@@ -714,7 +741,7 @@ Use poc-7 for sync behavior and user-facing scope. Its negentropy and
 dep-aware sync code are the local references for range comparison, have/need
 id exchange, dependency closure accounting, incremental dep caches, and the CLI
 commands/perf surfaces worth preserving. The translation target is to move that
-logic behind `protocol/event_modules/sync` actors and tables rather than keep a
+logic behind `protocol/event_modules/sync` workers and tables rather than keep a
 parallel sync engine.
 
 The protocol should preserve useful poc-7 CLI functionality as black-box
@@ -724,7 +751,7 @@ not core APIs; they are this protocol's public behavior and tests.
 
 Every migration of a poc-6 or poc-7 surface must land directly on this design:
 one core substrate, one protocol module family for each domain, projectors that
-write rows only, commands that propose events only, and actors that own active
+write rows only, commands that propose events only, and workers that own active
 queue/cursor work. No compatibility adapters or duplicate engines.
 
 # Appendix: Negentropy, dependencies, and dedupe
@@ -756,7 +783,7 @@ compare(v, remote_count, remote_fingerprint):
 
 There is no protocol session id required for correctness. Duplicate compares
 are harmless because the compare answer is a pure function of projected state.
-The top-level compare starts a round of work for a connection. The sync actor
+The top-level compare starts a round of work for a connection. The sync worker
 should avoid creating a new root compare while that connection has recent
 sync or bulk-transfer activity.
 
@@ -830,7 +857,7 @@ outbox row. The protocol network layer still sees only opaque transit bytes and
 TCP length frames.
 
 Projectors do not write to sockets and do not emit events. They only maintain
-sync/outbox queue rows. Commands and module actors create deterministic
+sync/outbox queue rows. Commands and module workers create deterministic
 connection-scoped events, and the API running those commands admits the proposed
 events through the control loop so it gets back their event ids.
 
@@ -838,7 +865,7 @@ There is no distinct `SyncStartRequested` event in the base design. Manual sync
 starts by creating a root `SyncCompare`. If the negentropy index is maintained
 synchronously by projection, the CLI command can create the root compare
 directly from command context. If index catch-up is batched through
-`sync.new_events`, `sync/actor.rs` first drains that queue and then calls the
+`sync.new_events`, `sync/worker.rs` first drains that queue and then calls the
 same root-compare command. Either way, the first protocol event is still
 `SyncCompare(root)`.
 
@@ -857,7 +884,7 @@ Durable event projected
 Inbound SyncCompare / SyncHaveId / SyncNeedId projected
   -> sync.work(Inbound { connection_id, required_frontier, payload })
 
-sync::actor.run
+sync::worker.run
   -> first drains sync.new_events into sync.negentropy.index
   -> advances sync.negentropy.cursor
   -> then reads ready sync.work rows
@@ -865,13 +892,13 @@ sync::actor.run
   -> command(ctx, params) -> proposed SyncCompare / SyncHaveId / SyncNeedId / SendEvent
   -> admit(proposed events) -> event_ids
 
-connection::actor.run
+connection::worker.run
   -> reads outbox(connection_id, event_id)
   -> transit_wrap command returns transit bytes
-  -> returns TransportSend effects for those bytes
+  -> writes core TCP send queue rows for those bytes
 ```
 
-The sync actor's invariant is: never answer sync work against a stale negentropy
+The sync worker's invariant is: never answer sync work against a stale negentropy
 index. It must cover `sync.new_events` before responding to `sync.work`.
 Use `apply_seq`, not event timestamps, as the sync-index cursor order. Index
 updates and cursor advancement are one transaction; index writes are idempotent
@@ -879,7 +906,7 @@ with unique `(scope_key, event_id)` rows. Prefer per-workspace indexes and
 aggregate the allowed workspace scopes for a connection at response time rather
 than maintaining per-connection negentropy indexes.
 
-Duplicate actor output collapses because connection-scoped sync event bytes are
+Duplicate worker output collapses because connection-scoped sync event bytes are
 deterministic and `outbox` is unique on `(connection_id, event_id)`.
 
 For the first implementation, this can be two storage classes rather than one clever table:
@@ -890,7 +917,7 @@ connection_events(connection_id, event_id, canonical_event_bytes, expires_at)
 outbox(connection_id, event_id)
 ```
 
-`connection/actor.rs` resolves an outbox `event_id` from transient connection-event storage. For sync control events, it wraps their canonical bytes. For `SendEvent`, it loads the referenced durable event, checks authority, creates a transit blob, and emits `TransportSend { target, bytes }`. Sync modules do not batch ids into transport frames and do not create transit blobs.
+`connection/worker.rs` resolves an outbox `event_id` from transient connection-event storage. For sync control events, it wraps their canonical bytes. For `SendEvent`, it loads the referenced durable event, checks authority, creates a transit blob, and writes a core TCP send queue row. Sync modules do not batch ids into transport frames and do not create transit blobs.
 
 Outgoing dedupe belongs at the `outbox` boundary and the per-connection hot queue, not in every projector's context. Projectors should not need `recently_sent` sets. If suppression beyond pending-buffer dedupe is needed later, keep sent rows in `outbox` with a TTL.
 
@@ -931,9 +958,9 @@ Dedupe deterministic send intent before transit wrapping.
 NeedId
   -> SendEvent(connection_id, inner_event_id)
   -> outbox(connection_id, send_event_id)
-  -> connection::actor.run
+  -> connection::worker.run
   -> connection.wrap(connection_id, inner_event)
-  -> TransportSend { target: ip/port or socket_id, bytes: transit_blob }
+  -> core tcp_send_queue(target: ip/port or socket_id, bytes: transit_blob)
   -> protocol TCP frame/write
   -> delete sent outbox rows
 ```
@@ -991,7 +1018,7 @@ Code-structure lessons from Stellar Core:
 - Large runtime components should have a small public interface and a concrete implementation, following Stellar's `OverlayManager` / `OverlayManagerImpl`, `HistoryManager` / `HistoryManagerImpl`, and `Application` / `ApplicationImpl` pattern.
 - Abstract protocol machinery should be separated from application meaning. Stellar's `scp` is protocol-generic; `herder` maps slots and values onto ledgers and transaction sets. Here, negentropy is the generic comparison mechanism; sync event modules map it onto workspace roots, deps, have/need/send events, and outbox writes.
 - Managers own lifecycle, scheduling, and resource wiring. Helpers own algorithms. Do not let managers accumulate domain policy.
-- Long-running work should be represented explicitly, as Stellar does with `work/`, `catchup/*Work`, and `historywork/*Work`. Hidden background behavior should become an actor, table row, or effect owner.
+- Long-running work should be represented explicitly, as Stellar does with `work/`, `catchup/*Work`, and `historywork/*Work`. Hidden background behavior should become an worker, table row, or effect owner.
 - Data structures should encode workload assumptions. Stellar's BucketList is shaped around temporal churn, incremental hashing, and catchup. Here, dep-aware negentropy should be a projected incremental tree/cache, not a session-time rebuild.
 - Canonical encoding is a hard boundary. Stellar uses XDR for hashed, historical, and peer-message forms. Here, `codec.rs` produces canonical event bytes for ids, storage, projection, replay, and dedupe; connection wrapping is a separate transit layer. The codec should name the fixed-per-event-type format; shared utilities should do the repetitive binary lifting.
 - Prefer immutable snapshots and stable ids at concurrency boundaries.

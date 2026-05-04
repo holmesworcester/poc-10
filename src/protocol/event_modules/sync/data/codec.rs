@@ -1,4 +1,4 @@
-use crate::core::wire::{Reader, Writer};
+use crate::protocol::wire::{Reader, Writer};
 
 use super::types::DataEvent;
 

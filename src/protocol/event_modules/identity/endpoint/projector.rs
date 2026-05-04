@@ -1,4 +1,5 @@
-use crate::core::store::{ProjectionOutput, TableRow};
+use crate::core::store::TableRow;
+use crate::protocol::event_modules::worker::ProjectionOutput;
 
 use super::codec;
 use super::tables;

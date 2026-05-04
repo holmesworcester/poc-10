@@ -1,7 +1,7 @@
 use rand_core::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use crate::core::store::CommandOutput;
+use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
 use super::types::EndpointKeypair;

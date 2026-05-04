@@ -1,6 +1,4 @@
-use crate::core::control_loop::{self, PipelineActor};
-use crate::core::store::CommandOutput;
-use crate::protocol::actors;
+use crate::protocol::event_modules::worker::{self, CommandOutput, Worker};
 
 use super::effects::{
     ConnectionRequest, DrainReadyReport, FrameIngest, GeneratedContent, OutboundSyncWork, StoreOp,
@@ -18,7 +16,7 @@ impl RealShell<'_> {
                     .modules()
                     .create_invite(self.store, public_addr)
                     .map_err(|err| format!("create invite: {err}"))?;
-                let (link, _) = PipelineActor::new(self.store, self.protocol)
+                let (link, _) = Worker::new(self.store, self.protocol)
                     .run_command(output)
                     .map_err(|err| format!("apply invite: {err}"))?;
                 Ok(StoreReply::InviteCreated { link })
@@ -29,7 +27,7 @@ impl RealShell<'_> {
                     .protocol
                     .modules()
                     .create_connection_request(self.store, &invite)?;
-                let request = PipelineActor::new(self.store, self.protocol)
+                let request = Worker::new(self.store, self.protocol)
                     .run_command(output)
                     .map_err(|err| format!("record connection request: {err}"))?
                     .0;
@@ -43,10 +41,10 @@ impl RealShell<'_> {
                 remember_origin,
                 bytes,
             } => {
-                let result = actors::ingest_frame(
+                let result = worker::ingest_frame(
                     self.store,
                     self.protocol.modules(),
-                    actors::FrameMetadata {
+                    worker::FrameMetadata {
                         origin,
                         remember_origin,
                     },
@@ -75,7 +73,7 @@ impl RealShell<'_> {
                     .modules()
                     .generate_content(self.store, num_events, event_size)
                     .map_err(|err| format!("generate: {err}"))?;
-                let (report, admitted) = PipelineActor::new(self.store, self.protocol)
+                let (report, admitted) = Worker::new(self.store, self.protocol)
                     .run_command(output)
                     .map_err(|err| format!("admit generated events: {err}"))?;
                 Ok(StoreReply::Generated(GeneratedContent {
@@ -95,7 +93,7 @@ impl RealShell<'_> {
                     .modules()
                     .stage_dependent_events(self.store, num_events, deps_per_event)
                     .map_err(|err| format!("stage dependent events: {err}"))?;
-                let (report, _) = PipelineActor::new(self.store, self.protocol)
+                let (report, _) = Worker::new(self.store, self.protocol)
                     .run_command(output)
                     .map_err(|err| format!("admit staged dependent events: {err}"))?;
                 Ok(StoreReply::DependentEventsStaged(DependentStageSummary {
@@ -123,7 +121,7 @@ impl RealShell<'_> {
                     .unwrap_or(0);
                 let root_count = records.len().min(max_deps.max(1));
                 let reverse_non_roots = records[root_count..].iter().rev().cloned().collect();
-                let (_, reverse_report) = PipelineActor::new(self.store, self.protocol.modules())
+                let (_, reverse_report) = Worker::new(self.store, self.protocol.modules())
                     .run_command(CommandOutput::with_events((), reverse_non_roots))
                     .map_err(|err| format!("admit reverse dependent events: {err}"))?;
 
@@ -134,11 +132,11 @@ impl RealShell<'_> {
                     .blocked;
 
                 let roots = records[..root_count].to_vec();
-                let (_, root_report) = PipelineActor::new(self.store, self.protocol.modules())
+                let (_, root_report) = Worker::new(self.store, self.protocol.modules())
                     .run_command(CommandOutput::with_events((), roots))
                     .map_err(|err| format!("admit dependent roots: {err}"))?;
-                let drain = PipelineActor::new(self.store, self.protocol.modules())
-                    .drain_until_idle(control_loop::DEFAULT_READY_BATCH)
+                let drain = Worker::new(self.store, self.protocol.modules())
+                    .drain_until_idle(worker::DEFAULT_READY_BATCH)
                     .map_err(|err| format!("drain dependent replay: {err}"))?;
                 let final_counts = self
                     .store
@@ -159,7 +157,7 @@ impl RealShell<'_> {
                 ))
             }
             StoreOp::DrainReadyUntilIdle { batch_size } => {
-                let report = PipelineActor::new(self.store, self.protocol)
+                let report = Worker::new(self.store, self.protocol)
                     .drain_until_idle(batch_size)
                     .map_err(|err| format!("drain generated events: {err}"))?;
                 Ok(StoreReply::Drained(DrainReadyReport {
@@ -168,8 +166,8 @@ impl RealShell<'_> {
                 }))
             }
             StoreOp::StartSyncRoutes => {
-                PipelineActor::new(self.store, self.protocol.modules())
-                    .drain_until_idle(control_loop::DEFAULT_READY_BATCH)
+                Worker::new(self.store, self.protocol.modules())
+                    .drain_until_idle(worker::DEFAULT_READY_BATCH)
                     .map_err(|err| format!("drain ready events before sync: {err}"))?;
 
                 let start = self
@@ -177,7 +175,7 @@ impl RealShell<'_> {
                     .modules()
                     .start_sync(self.store)
                     .map_err(|err| format!("start sync: {err}"))?;
-                let (started, _) = PipelineActor::new(self.store, self.protocol)
+                let (started, _) = Worker::new(self.store, self.protocol)
                     .run_command(start)
                     .map_err(|err| format!("record sync frames: {err}"))?;
                 let outbound = self

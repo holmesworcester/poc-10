@@ -1,6 +1,6 @@
 pub mod content_event;
 
-use crate::core::store::ProjectionOutput;
+use crate::protocol::event_modules::worker::ProjectionOutput;
 
 pub fn project_record(bytes: &[u8]) -> Result<Option<ProjectionOutput>, String> {
     match bytes.first().copied() {

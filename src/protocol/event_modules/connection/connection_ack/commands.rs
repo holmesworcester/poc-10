@@ -1,5 +1,5 @@
-use crate::core::store::CommandOutput;
 use crate::protocol::event_modules::identity::endpoint;
+use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::super::connection_request;
 use super::super::types;

@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use crate::core::store::CommandOutput;
+use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::super::types::ConnectionId;
 use super::codec;

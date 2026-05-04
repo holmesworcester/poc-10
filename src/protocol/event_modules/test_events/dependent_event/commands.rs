@@ -1,4 +1,5 @@
-use crate::core::store::{CommandOutput, EventId, EventRecord};
+use crate::core::store::{EventId, EventRecord};
+use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
 use super::types::{DependentEvent, StagedDependentEvent, MAX_DEPS, PAYLOAD_BYTES};

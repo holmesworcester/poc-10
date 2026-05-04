@@ -1,7 +1,8 @@
 use rand_core::RngCore;
 
-use crate::core::store::{CommandOutput, EventId};
+use crate::core::store::EventId;
 use crate::protocol::event_modules::identity::{endpoint, invite};
+use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::super::transit;
 use super::super::types;

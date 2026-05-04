@@ -3,10 +3,8 @@ use std::{collections::VecDeque, net::SocketAddr};
 use crux_core::App;
 
 use super::*;
-use crate::core::{
-    control_loop,
-    crux_runner::{self, EffectHandler},
-};
+use crate::core::crux_runner::{self, EffectHandler};
+use crate::protocol::event_modules::worker;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TranscriptEntry {
@@ -416,7 +414,7 @@ fn generate_requests_store_then_drain_then_prints_summary() {
             },
             TranscriptEntry::GenerateReplied { inserted_events: 4 },
             TranscriptEntry::DrainRequested {
-                batch_size: control_loop::DEFAULT_READY_BATCH,
+                batch_size: worker::DEFAULT_READY_BATCH,
             },
             TranscriptEntry::DrainReplied { applied_events: 3 },
             TranscriptEntry::PrintRequested {
@@ -577,7 +575,7 @@ fn connect_opens_stream_exchanges_frames_and_prints_result() {
                 received_events: 0,
             },
             TranscriptEntry::DrainRequested {
-                batch_size: control_loop::DEFAULT_READY_BATCH,
+                batch_size: worker::DEFAULT_READY_BATCH,
             },
             TranscriptEntry::DrainReplied { applied_events: 3 },
             TranscriptEntry::ShutdownWrite { stream_id: 42 },
@@ -642,7 +640,7 @@ fn sync_routes_asks_store_for_module_routes_then_pumps_each_stream() {
                 received_events: 3,
             },
             TranscriptEntry::DrainRequested {
-                batch_size: control_loop::DEFAULT_READY_BATCH,
+                batch_size: worker::DEFAULT_READY_BATCH,
             },
             TranscriptEntry::DrainReplied { applied_events: 3 },
             TranscriptEntry::ShutdownWrite { stream_id: 42 },
@@ -718,7 +716,7 @@ fn serve_binds_accepts_and_lets_event_modules_drive_responses() {
                 received_events: 7,
             },
             TranscriptEntry::DrainRequested {
-                batch_size: control_loop::DEFAULT_READY_BATCH,
+                batch_size: worker::DEFAULT_READY_BATCH,
             },
             TranscriptEntry::DrainReplied { applied_events: 3 },
             TranscriptEntry::WriteFrames {

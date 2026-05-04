@@ -2,7 +2,7 @@ use std::{net::SocketAddr, str::FromStr};
 
 use rand_core::{OsRng, RngCore};
 
-use crate::core::store::CommandOutput;
+use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::super::endpoint;
 use super::codec;

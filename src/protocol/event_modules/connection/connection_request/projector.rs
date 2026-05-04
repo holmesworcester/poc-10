@@ -1,8 +1,8 @@
 use super::super::tables as projection;
 use super::super::types;
 use super::codec;
-use crate::core::store::ProjectionOutput;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
+use crate::protocol::event_modules::worker::ProjectionOutput;
 
 pub fn project(bytes: Vec<u8>, local_endpoint: EndpointId) -> Result<ProjectionOutput, String> {
     let event = codec::decode(&bytes)?;

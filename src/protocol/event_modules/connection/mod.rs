@@ -1,4 +1,3 @@
-pub mod actor;
 pub mod connection_ack;
 pub mod connection_request;
 pub mod queries;
@@ -6,9 +5,11 @@ pub mod tables;
 pub mod transit;
 pub mod transport_target;
 pub mod types;
+pub mod worker;
 
-use crate::core::store::{ProjectionOutput, Store};
+use crate::core::store::Store;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
+use crate::protocol::event_modules::worker::ProjectionOutput;
 
 pub fn is_projection_record(bytes: &[u8]) -> bool {
     connection_request::codec::is_request(bytes)

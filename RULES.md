@@ -9,18 +9,18 @@ the rule is still prose/review only.
 
 | Rule | Status | Enforcement |
 | --- | --- | --- |
-| Commands return proposed events, not rows/effects/storage writes. | typed + static | [CommandOutput](src/core/store.rs), `command_output_contains_events_not_state_changes`, `event_module_commands_do_not_mutate_storage_directly` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
-| Proposed event ids are deterministic from canonical bytes. | typed + static | [ProposedEvent](src/core/store.rs), `proposed_event_carries_deterministic_id_and_record`. |
-| Projectors return rows only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/core/store.rs), `projection_output_contains_rows_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
-| Core is protocol-agnostic. | static | `core_does_not_import_protocol`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `pipeline_has_no_protocol_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
+| Commands return proposed events, not rows/effects/storage writes. | typed + static | [CommandOutput](src/protocol/event_modules/worker.rs), `command_output_contains_events_not_state_changes`, `event_module_commands_do_not_mutate_storage_directly` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
+| Proposed event ids are deterministic from canonical bytes. | typed + static | [ProposedEvent](src/protocol/event_modules/worker.rs), `proposed_event_carries_deterministic_id_and_record`. |
+| Projectors return rows only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/protocol/event_modules/worker.rs), `projection_output_contains_rows_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
+| Core is protocol-agnostic queue/storage support. | static | `core_does_not_import_protocol`, `core_does_not_own_protocol_worker_or_wire_codec`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `event_modules_worker_has_no_domain_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
 | Core stays small and named. | static | `core_file_set_stays_small_and_named`. |
 | Generic Crux command driving is core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), `core_file_set_stays_small_and_named`, core vocabulary checks. |
-| Pipeline admission/apply is an actor boundary. | partial | [PipelineActor](src/core/control_loop.rs) exists and app code uses it; there is not yet a typed actor catalog for all actor classes. |
+| Worker admission/apply is scoped to event modules, not protocol root. | partial | [Worker](src/protocol/event_modules/worker.rs) exists and app code uses it; there is not yet a typed worker catalog for all worker classes. |
 | Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
 | `event.rs` is forbidden; semantic types live in `types.rs`; codecs do encode/decode only. | static | `event_modules_do_not_use_event_rs`, `codec_files_do_not_define_public_types`, `codec_modules_have_type_files`. |
-| Domain actors live at `event_modules/<domain>/actor.rs`. | static + partial | `actor_files_live_at_event_module_domain_roots`; no typed actor trait/catalog yet. |
-| Connection and sync operational logic lives in actors, not app/network/core. | partial | [connection/actor.rs](src/protocol/event_modules/connection/actor.rs), [sync/actor.rs](src/protocol/event_modules/sync/actor.rs), [protocol/actors.rs](src/protocol/actors.rs); static checks prevent core/network leaks, but do not yet prove every protocol action is actor-owned. |
-| Protocol app is only the current CLI adapter shell. | static + partial | `protocol_app_files_are_limited_to_cli_adapter_concerns`, `protocol_app_and_protocol_actors_do_not_import_event_families_directly`; app still owns current Topo CLI flow vocabulary until module-local `cli.rs` adapters exist. |
+| Workers live at the owning scope. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`; no typed worker trait/catalog yet. |
+| Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs); static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
+| Protocol app is only the current CLI adapter shell. | static + partial | `protocol_app_files_are_limited_to_cli_adapter_concerns`, `protocol_app_and_event_modules_worker_do_not_import_event_families_directly`; app still owns current Topo CLI flow vocabulary until module-local `cli.rs` adapters exist. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | partial | Documented in [plan.md](plan.md) and checked indirectly by the app file allowlist; no scenario-runner type or migrated scenario definitions yet. |
 | Network is TCP framing only. | static | `protocol_network_remains_tcp_framing_only`, sync transport checks. |
 | Table names are declared in `tables.rs`. | static | `table_names_are_declared_in_tables_files`. |
@@ -30,7 +30,7 @@ the rule is still prose/review only.
 | `types.rs` does not store encoded/canonical artifacts as semantic fields. | static | `event_module_types_do_not_store_encoded_event_artifacts`. |
 | Transit/crypto naming must not claim fake protection. | static + partial | `source_does_not_contain_fake_crypto_claims`; cryptographic correctness still needs implementation review and tests. |
 | Functional proof comes from black-box CLI/network tests, except pure projector/command tests. | partial | Existing tests spawn the real `topo` binary for sync/generate/cascade paths; this remains a process/testing rule, not a type guarantee. |
-| Jobs/actors with cursors, leases, fairness, and wake declarations are the long-term control loop. | uncovered | Described in [plan.md](plan.md); only the ready-event `PipelineActor`, protocol inbound actor, connection actor, and sync actor exist in the current POC. |
+| Workers with cursors, leases, fairness, and wake declarations are the long-term control loop. | uncovered | Described in [plan.md](plan.md); only the event-modules worker, connection worker, and sync worker exist in the current POC. |
 | Rust idiom and common correctness lints pass. | static | Run `cargo clippy --all-targets -- -D warnings` in addition to `cargo test`; Clippy complements but does not replace [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
 
 ## Rules Intended To Be Covered By Types And Static Checks
@@ -58,7 +58,7 @@ The following rules should stay mechanically enforced where practical:
 - Codec files do not define public semantic types, and every codec module has a
   sibling `types.rs`.
 - Domain roots contain only child event modules plus shared domain files:
-  `mod.rs`, `actor.rs`, `tables.rs`, `queries.rs`, `types.rs`, and `cli.rs`.
+  `mod.rs`, `worker.rs`, `tables.rs`, `queries.rs`, `types.rs`, and `cli.rs`.
 - Child directories under `event_modules/<domain>/` are canonical event modules
   and must carry the standard shape: `mod.rs`, `types.rs`, `codec.rs`, and
   `tables.rs` at minimum. Shared domain tables, queues, and helper types live at
@@ -68,25 +68,26 @@ The following rules should stay mechanically enforced where practical:
 - Dumping-ground directories such as `jobs`, `cli_commands`, `runtime`,
   `state`, and algorithm-only `negentropy` are forbidden under
   `event_modules`.
-- Domain actors live at `event_modules/<domain>/actor.rs`, not inside leaf
-  event modules. Leaf modules write queues; the domain actor coordinates shared
+- Domain workers live at `event_modules/<domain>/worker.rs`, not inside leaf
+  event modules. Leaf modules write queues; the domain worker coordinates shared
   queues and cursors when needed.
 - Core never imports protocol modules and does not contain protocol vocabulary
-  such as connection, transit, sync, outbox, TCP, sockets, or bootstrap schema.
+  such as connection, transit, sync, outbox, TCP, sockets, bootstrap schema,
+  admission workers, blocking policy, or wire codec helpers.
 - Core has a small allowlisted file set and must not contain domain vocabulary
   such as workspace, content, endpoint, identity, invite, or message.
 - Generic Crux command driving belongs in core; protocol-specific app files are
   limited to CLI adapter concerns (`crux_app`, flows, effects, shell, effect
   interpreters, model, summaries, and shell-flow tests).
-- The core pipeline is generic admission/apply plumbing; protocol branching
+- Protocol worker owns admission/apply plumbing; concrete domain branching
   belongs behind the protocol module registry.
 - Sync modules do not own TCP/frame IO, and core/network code does not contain
   sync protocol logic.
 - Event-module commands do not mutate storage directly. Event-module
   projectors do not query storage directly.
-- Event modules do not import runtime/control-loop/pipeline/transport effect
-  machinery. The top-level protocol registry is the only event-module file that
-  implements the core registry trait.
+- Event modules do not import runtime/control-loop/transport effect machinery.
+  The top-level protocol registry is the only event-module file that implements
+  the protocol worker registry trait.
 - Projectors are row-only boundaries: no `CommandOutput`, `ProposedEvent`,
   `EventRecord`, IO effects, transport work, or transit creation.
 - Table names are declared in `tables.rs`; projectors and queries use those
@@ -98,7 +99,7 @@ The following rules should stay mechanically enforced where practical:
 - `types.rs` does not store encoded/canonical event artifacts as semantic
   fields.
 - `protocol/network.rs` remains TCP framing only, and `protocol/app` plus
-  protocol actor files do not import concrete event families directly.
+  protocol worker files do not import concrete event families directly.
 - Source tests reject fake-crypto terminology that would let placeholder crypto
   be named as real protection.
 
@@ -120,7 +121,7 @@ catches folder shape, import direction, and protocol vocabulary.
 Commands belong under `event_modules`, alongside the event types, codecs,
 projectors, queries, and module-owned tables they operate on.
 
-CLI, RPC, actors, and other adapters should dispatch into module commands
+CLI, RPC, workers, and other adapters should dispatch into module commands
 instead of constructing canonical event bytes directly. Adapters own
 input/output shape; event modules own protocol and domain semantics.
 
@@ -128,19 +129,20 @@ Commands receive explicit input values plus narrow read context values. They do
 not mutate SQLite, open transactions, drain queues, or call broad apply loops.
 They return `CommandOutput` with proposed canonical events only. Commands must
 not return rows or effects. The API that runs a command is responsible for
-admitting those proposed events through the pipeline; admission returns the
+admitting those proposed events through the worker; admission returns the
 event ids for chaining.
 
 Projectors return `ProjectionOutput` with table rows only. They cannot emit
 events. If projection discovers follow-on work, it writes a module-owned queue
-row; a module actor reads that queue, queries context, runs a command, and sends
-the command's proposed events back through the pipeline.
+row; a module worker reads that queue, queries context, runs a command, and sends
+the command's proposed events back through the worker.
 
-Module actors are the active boundary. Projectors do not perform IO or emit
+Module workers are the active boundary. Projectors do not perform IO or emit
 effects. Event-module commands do not perform IO either; they construct
-canonical events or transport bytes from explicit input and context. Actors own
+canonical events or transport bytes from explicit input and context. Workers own
 dequeueing, fairness, bounded work, retries, calling commands, admitting
-proposed events, and returning IO effects for the core runner.
+proposed events, and queueing IO requests as rows at the core IO boundary.
+Workers do not return ad hoc effects.
 
 The intended shape is:
 
@@ -163,15 +165,15 @@ event_modules/<domain>/<module>/tables.rs
 event_modules/<domain>/<module>/cli.rs
   optional module-local CLI help, parameters, queries, and output formatting
 
-event_modules/<domain>/actor.rs
-  optional actor over domain-owned queues/cursors shared by child event modules
+event_modules/<domain>/worker.rs
+  optional worker over domain-owned queues/cursors shared by child event modules
 
 event_modules/<domain>/cli.rs
   optional domain-level CLI registry/help for commands spanning child modules
 ```
 
 Leaf event modules own event types. Domain roots may own shared `tables.rs`,
-`queries.rs`, `types.rs`, `actor.rs`, and `cli.rs`. Do not create an
+`queries.rs`, `types.rs`, `worker.rs`, and `cli.rs`. Do not create an
 event-module directory for an algorithm unless it defines an actual canonical
 event type.
 
@@ -206,10 +208,10 @@ depends on their projection rows. It must not rely on a broad global drain
 unless the command is explicitly a wait/poll command such as sync status or
 assert-eventually.
 
-Custom contexts for commands, projectors, and actors must be narrow DTOs, not
+Custom contexts for commands, projectors, and workers must be narrow DTOs, not
 database-shaped snapshots. If a context can answer arbitrary storage questions,
 the boundary has failed; replace it with explicit query results or a
-module-owned actor query.
+module-owned worker query.
 
 ## Core Is Protocol-Agnostic
 
@@ -220,7 +222,6 @@ that knows the concrete module list.
 Allowed in core:
 
 ```text
-use crate::core::pipeline::EventRegistry;
 use crate::core::store::Store;
 ```
 
@@ -232,25 +233,33 @@ use crate::protocol::event_modules::{connection, sync};
 crate::protocol::event_modules::connection::...
 ```
 
-The protocol shell talks to the current protocol composition object, `Protocol`.
-`Protocol` owns the event-module registry (`Modules`) and any protocol IO
-namespaces. The shell may pass `Protocol` into core pipeline/control-loop
-functions through core traits such as `EventRegistry` and move returned
-bytes/effects. Core must not import concrete protocol namespaces to get work
-done.
+The protocol shell talks to the current protocol composition object,
+`Protocol`. `Protocol` owns the event-module registry (`Modules`) and any
+protocol IO namespaces. The shell may pass `Protocol` into protocol workers and
+move returned bytes or queue rows. Core must not import concrete protocol
+namespaces to get work done.
 
-`pipeline.rs` is the core's generic ready-event actor: admit canonical bytes,
-check dependencies, parse new events, call projectors, and apply rows. It must
-not branch on connection, transit, sync, response, or transport-target details.
-The module registry parses and projects canonical event bytes. Framed byte
-handling lives under `src/protocol`.
+`protocol/event_modules/worker.rs` is the Topo ready-event worker: admit canonical bytes,
+apply protocol blocking policy, parse new events, call projectors, and apply
+rows. It must not branch on connection, transit, sync, response, or
+transport-target details; that branching belongs in the module registry and
+domain workers. Framed byte handling lives under `src/protocol`.
+
+`protocol/wire.rs` is the shared fixed-field codec helper used by protocol
+codecs. It is not core, because canonical event format is protocol surface.
+
+`protocol/event_modules/worker.rs` is the default Topo blocking policy. The worker checks
+immediate dependencies declared by codecs before projection and writes blocked
+queue rows when dependencies are missing. Projectors may still write
+module-owned wait/blocked queue rows for semantic blockers that are not simple
+dependency absence.
 
 `store.rs` is generic storage mechanics. It should expose table rows, event
-status, dependency waits, and generic event-id partitions. It must not expose
-sync buckets, connection/bootstrap schema, or content payload semantics as
-storage concepts. Module `tables.rs` files declare whether each table is
-durable, memory, or temp; core provides the requested storage class without
-learning the table's protocol meaning.
+status, queue rows, and generic event-id partitions. It must not expose sync
+buckets, connection/bootstrap schema, or content payload semantics as storage
+concepts. Module `tables.rs` files declare whether each table is durable,
+memory, or temp; core provides the requested storage class without learning the
+table's protocol meaning.
 
 ## Proposed Events Have Deterministic IDs
 
@@ -302,7 +311,7 @@ CommandOutput {
 }
 ```
 
-If a later event requires the prior event to be semantically applied, the actor
+If a later event requires the prior event to be semantically applied, the worker
 or API running the command admits and applies the proposed chain in order and
 checks the write result. Event-module commands do not call the writer directly.
 
@@ -367,7 +376,7 @@ event module =
 event family =
   child event modules
   shared domain tables/queries/types where needed
-  domain actor where active queued/cursor work spans child modules
+  domain worker where active queued/cursor work spans child modules
 ```
 
 The universal contract is:
@@ -389,8 +398,8 @@ Event modules must not:
 
 - import `crate::runtime`
 - import old `crate::state` internals
-- know queue table names or pipeline phase names
-- start actors or drive the control loop
+- know queue table names or worker phase names
+- start workers or drive the control loop
 - perform transactions
 - call global drain/apply functions
 - write SQLite directly, except for data-only table declarations if that
@@ -407,8 +416,8 @@ Event modules may:
 - return canonical events from commands
 - return declarative projector output: rows, labels, queue rows, outbox rows,
   and purges
-- implement `actor.rs` actors that claim module-owned queue rows, call
-  commands, and return bounded IO effects
+- implement `worker.rs` workers that claim module-owned queue rows, call
+  commands, and write core IO queue rows at IO boundaries
 
 `codec.rs` describes the module's canonical/wire format: tags, field order,
 and event-specific validation. Shared binary mechanics such as integer
@@ -456,18 +465,16 @@ This includes:
 
 Core may:
 
-- admit canonical events
-- compute event ids
-- check dependencies
-- apply pure projector output
-- schedule bounded work
-- commit actor state updates
-- return opaque actor effects to the protocol runner after commit
+- store canonical bytes and table rows
+- compute generic event ids from bytes
+- maintain queue rows and status rows
+- provide transactions and idempotent row insertion
+- expose generic reads over stored bytes, statuses, and rows
 
 The first POC may process inbound frames reactively without a durable inbound
 queue. The protocol socket reader hands `(origin, bytes)` to a protocol
-inbound actor, which unwraps/parses protocol bytes and admits surviving
-canonical event bytes through the core ready-event path. This shortcut is
+inbound worker, which unwraps/parses protocol bytes and admits surviving
+canonical event bytes through the event-modules worker. This shortcut is
 allowed only while the socket reader remains semantic-free and recurring sync
 can recreate lost transient control traffic.
 
@@ -479,8 +486,10 @@ Core must not:
   which events are authorized on a connection
 - inspect sync ranges or negentropy trees except through module-declared tables
 - contain negentropy, compare/have/need, or sync-range vocabulary in
-  `core/pipeline.rs`, `core/control_loop.rs`, or `protocol/network.rs`
-- contain `TransportSend`, TCP frame, socket, inbound-byte, outbox, or
+  `src/core` or `protocol/network.rs`
+- own protocol admission, blocking policy, projector dispatch, or wire codec
+  helpers
+- contain TCP frame, socket, inbound-byte, outbox, or
   connection-target vocabulary in `src/core`
 - special-case have/need/compare behavior outside event modules
 - bypass event admission for protocol messages
@@ -491,10 +500,10 @@ receiving, buffering, and backpressure to concrete targets such as `(ip, port)`
 or socket ids. It does not own sync, connection, transit wrapping, or
 authorization semantics.
 
-Protocol IO modules own IO effect names such as `TransportSend { target,
-bytes }`, inbound-byte queues, socket state, listener state, and send
-backpressure. Protocol event modules own outbox rows and transit bytes. Core
-does not name any of these concepts.
+Core IO modules own capability queues such as TCP send/recv, socket state,
+listener state, and send backpressure. Protocol event modules own protocol
+outbox rows and transit bytes. Core does not name sync, connection, outbox, or
+transit concepts.
 
 Events declare scope explicitly:
 
@@ -508,22 +517,22 @@ Events declare scope explicitly:
 Connection-scoped protocol events are real canonical events. Their route or
 connection id must be inside their canonical bytes, and their id is the normal
 `BLAKE3(canonical_event_bytes)`. They are not durable event-set truth: the
-pipeline applies their projector output immediately, and their outbox row may
+worker applies their projector output immediately, and their outbox row may
 carry the canonical bytes until transport confirms send. After send, the outbox
 row can be deleted; a future identical connection-scoped event may be projected
 again.
 
 Durable data events are not pushed to peers on creation. Durable data transfer
 is queued only through deterministic connection-scoped protocol events, usually
-created by a sync actor after projectors write compare/need/range queue rows. The
+created by a sync worker after projectors write compare/need/range queue rows. The
 outbox dedupes these events by `(connection_id, event_id)`. The
 connection/transit module drains the outbox and creates transit blobs; the
 protocol network code only frames and writes those bytes.
 
-`TransportSend.target` is a transport route, not a semantic connection id. Use
-an address or socket target such as `(ip, port)` or `socket_id`. If a module
-starts from `connection_id`, it must resolve that connection to a transport
-target before emitting the effect.
+Core TCP send queue targets are transport routes, not semantic connection ids.
+Use an address or socket target such as `(ip, port)` or `socket_id`. If a
+module starts from `connection_id`, it must resolve that connection to a
+transport target before writing the core IO queue row.
 
 ## No Fake Or Placeholder Encryption
 
@@ -665,14 +674,14 @@ Keep core boring:
   reads/writes only.
 - `protocol/event_modules/content` owns content event construction, codec, and projection.
 - `protocol/event_modules/sync` owns all negentropy, compare/have/need/range decisions,
-  connection-scoped sync events, and sync actors.
+  connection-scoped sync events, and sync workers.
 - `protocol/event_modules/connection` owns endpoint identity, bootstrap/connection
   events, established-connection rows, and the route facts needed to reach an
   endpoint.
 
 Core should be a pleasure to read: small files, direct control flow,
 plain names, and no hidden protocol cleverness. A reader should understand the
-core as an executor and durable byte store without learning the content or sync
+core as queue/storage mechanics without learning the content or sync
 protocols. Protocol IO belongs under `src/protocol`; all real domain and
 protocol logic belongs in protocol event modules.
 
@@ -681,10 +690,10 @@ protocol needs a durable or transient table, the owning event module declares
 the table and writes it through generic storage/projector output.
 
 Do not put sync protocol vocabulary or decisions in core files. In particular,
-`core/store.rs`, `core/pipeline.rs`, and `core/control_loop.rs` may not decide
-what a negentropy range means, when to split a range, which ids are needed, or
-which events satisfy a sync request. Protocol shell code may only call
-event-module functions and move returned bytes.
+`core/store.rs` may not decide what a negentropy range means, when to split a
+range, which ids are needed, or which events satisfy a sync request. Protocol
+shell code may only call protocol workers/event-module functions and move
+returned bytes.
 
 Do not put transit wrapping in `protocol/network.rs`, `core/store.rs`, CLI
 glue, or sync modules. Connection/transit modules create transit blobs;
@@ -706,7 +715,7 @@ protocol/event_modules/<name>/mod.rs
 Domain roots may additionally contain:
 
 ```text
-protocol/event_modules/<domain>/actor.rs
+protocol/event_modules/<domain>/worker.rs
 protocol/event_modules/<domain>/tables.rs
 protocol/event_modules/<domain>/queries.rs
 protocol/event_modules/<domain>/types.rs

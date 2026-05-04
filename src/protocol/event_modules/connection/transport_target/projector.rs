@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
-use crate::core::store::{ProjectionOutput, TableRow};
+use crate::core::store::TableRow;
+use crate::protocol::event_modules::worker::ProjectionOutput;
 
 use super::super::types::ConnectionId;
 use super::codec;

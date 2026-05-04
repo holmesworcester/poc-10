@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::core::store::{EventRecord, EventScope};
-use crate::core::wire::{Reader, Writer};
+use crate::protocol::wire::{Reader, Writer};
 
 use super::types::TransportTargetEvent;
 

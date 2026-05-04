@@ -1,5 +1,6 @@
-use crate::core::store::{CommandOutput, EventRecord, Store};
+use crate::core::store::{EventRecord, Store};
 use crate::protocol::event_modules::connection;
+use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::{compare, frame};
 

@@ -1,4 +1,4 @@
-use crate::core::store::ProjectionOutput;
+use crate::protocol::event_modules::worker::ProjectionOutput;
 
 use super::codec;
 

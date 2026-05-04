@@ -1,10 +1,10 @@
-pub mod actors;
 pub mod app;
 pub mod event_modules;
 pub mod network;
+pub mod wire;
 
-use crate::core::pipeline::EventRegistry;
-use crate::core::store::{EventRecord, ProjectionOutput, Store};
+use crate::core::store::{EventRecord, Store};
+use event_modules::worker::{EventRegistry, ProjectionOutput};
 use event_modules::Modules;
 
 #[derive(Debug, Clone, Copy, Default)]

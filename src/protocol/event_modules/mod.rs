@@ -3,11 +3,14 @@ pub mod content;
 pub mod identity;
 pub mod sync;
 pub mod test_events;
+pub mod worker;
 
 use std::net::SocketAddr;
 
-use crate::core::pipeline::EventRegistry;
-use crate::core::store::{CommandOutput, EventRecord, ProjectionOutput, ProposedEvent, Store};
+use crate::core::store::{EventRecord, Store};
+use crate::protocol::event_modules::worker::{
+    CommandOutput, EventRegistry, ProjectionOutput, ProposedEvent,
+};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules;
@@ -102,19 +105,19 @@ impl Modules {
         remember_origin: bool,
         bytes: Vec<u8>,
     ) -> Result<ModuleFrameReport, String> {
-        let metadata = connection::actor::FrameMetadata {
+        let metadata = connection::worker::FrameMetadata {
             origin,
             remember_origin,
         };
         let local = self.existing_local_keypair(store)?;
-        match connection::actor::ingest_frame(store, local, metadata, bytes)? {
-            connection::actor::InboundFrame::Connection(report) => Ok(ModuleFrameReport {
+        match connection::worker::ingest_frame(store, local, metadata, bytes)? {
+            connection::worker::InboundFrame::Connection(report) => Ok(ModuleFrameReport {
                 events: report.events,
                 outgoing: report.outgoing,
                 established_routes: report.established_routes,
                 ..ModuleFrameReport::default()
             }),
-            connection::actor::InboundFrame::ConnectionScoped {
+            connection::worker::InboundFrame::ConnectionScoped {
                 connection_id,
                 inner,
             } => self.ingest_sync_frame(store, connection_id, &inner),
@@ -124,13 +127,13 @@ impl Modules {
     pub fn start_sync(
         &self,
         store: &Store,
-    ) -> Result<CommandOutput<sync::actor::SyncStartReport>, String> {
-        sync::actor::start(store)
+    ) -> Result<CommandOutput<sync::worker::SyncStartReport>, String> {
+        sync::worker::start(store)
     }
 
     pub fn drain_outbox_routes(&self, store: &Store) -> Result<Vec<OutboundSync>, String> {
         let local = self.existing_local_keypair(store)?;
-        connection::actor::drain_outbox_routes(store, local).map(|outbound| {
+        connection::worker::drain_outbox_routes(store, local).map(|outbound| {
             outbound
                 .into_iter()
                 .map(|outbound| OutboundSync {
@@ -147,13 +150,13 @@ impl Modules {
         &self,
         store: &Store,
         connection_id: connection::types::ConnectionId,
-    ) -> Result<connection::actor::DrainedOutbox, String> {
+    ) -> Result<connection::worker::DrainedOutbox, String> {
         let local = self.existing_local_keypair(store)?;
-        connection::actor::drain_outbox_for_route(store, local, connection_id)
+        connection::worker::drain_outbox_for_route(store, local, connection_id)
     }
 
     pub fn mark_outbox_sent(&self, store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {
-        connection::actor::mark_outbox_sent(store, sent_outbox)
+        connection::worker::mark_outbox_sent(store, sent_outbox)
     }
 
     pub fn connection_count(&self, store: &Store) -> Result<usize, String> {
@@ -170,7 +173,7 @@ impl Modules {
         connection_id: connection::types::ConnectionId,
         bytes: &[u8],
     ) -> Result<ModuleFrameReport, String> {
-        let report = sync::actor::ingest_frame(store, connection_id, bytes)?;
+        let report = sync::worker::ingest_frame(store, connection_id, bytes)?;
         Ok(ModuleFrameReport {
             events: report.events,
             drain_outbox_for: Some(connection_id),

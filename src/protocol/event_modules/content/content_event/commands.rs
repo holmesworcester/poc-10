@@ -1,4 +1,4 @@
-use crate::core::store::CommandOutput;
+use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
 use super::types::ContentEvent;

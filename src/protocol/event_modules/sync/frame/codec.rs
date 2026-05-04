@@ -1,5 +1,5 @@
 use crate::core::store::{EventRecord, EventScope};
-use crate::core::wire::{Reader, Writer};
+use crate::protocol::wire::{Reader, Writer};
 
 use super::super::{compare, data, have_id, need_id};
 use super::types::{Frame, SyncItem};

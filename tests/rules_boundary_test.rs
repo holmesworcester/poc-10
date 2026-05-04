@@ -55,7 +55,10 @@ fn event_modules_are_directories() {
         .expect("read event modules")
         .map(|entry| entry.expect("dir entry").path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .filter(|path| path.file_name().is_none_or(|name| name != "mod.rs"))
+        .filter(|path| {
+            path.file_name()
+                .is_none_or(|name| name != "mod.rs" && name != "worker.rs")
+        })
         .collect::<Vec<_>>();
     assert!(
         offenders.is_empty(),
@@ -66,15 +69,7 @@ fn event_modules_are_directories() {
 #[test]
 fn core_file_set_stays_small_and_named() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core");
-    let allowed = [
-        "blocking.rs",
-        "control_loop.rs",
-        "crux_runner.rs",
-        "mod.rs",
-        "pipeline.rs",
-        "store.rs",
-        "wire.rs",
-    ];
+    let allowed = ["crux_runner.rs", "mod.rs", "store.rs"];
     let offenders = std::fs::read_dir(&root)
         .expect("read core")
         .map(|entry| entry.expect("dir entry").path())
@@ -89,7 +84,7 @@ fn core_file_set_stays_small_and_named() {
 
     assert!(
         offenders.is_empty(),
-        "core should stay tiny; add protocol/domain behavior outside src/core:\n{}",
+        "core should stay tiny and queue/storage-oriented; add protocol/domain behavior outside src/core:\n{}",
         offenders.join("\n")
     );
 }
@@ -135,7 +130,7 @@ fn domain_roots_contain_only_children_and_shared_domain_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
     let allowed_domain_files = [
         "mod.rs",
-        "actor.rs",
+        "worker.rs",
         "tables.rs",
         "queries.rs",
         "types.rs",
@@ -172,7 +167,6 @@ fn event_module_files_use_only_standard_concern_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
     let allowed = [
-        "actor.rs",
         "cli.rs",
         "codec.rs",
         "commands.rs",
@@ -183,6 +177,7 @@ fn event_module_files_use_only_standard_concern_names() {
         "registry_meta.rs",
         "tables.rs",
         "types.rs",
+        "worker.rs",
     ];
     let offenders = rust_files(&event_root)
         .into_iter()
@@ -266,23 +261,59 @@ fn event_modules_do_not_use_dumping_ground_directories() {
 }
 
 #[test]
-fn actor_files_live_at_event_module_domain_roots() {
+fn worker_files_live_at_event_module_scope_roots() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
     let mut offenders = Vec::new();
     for path in rust_files(&event_root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "actor.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "worker.rs"))
     {
-        let parent = path.parent().expect("actor parent");
-        if parent.parent() != Some(event_root.as_path()) {
+        let parent = path.parent().expect("worker parent");
+        let is_event_modules_scope = parent == event_root.as_path();
+        let is_domain_scope = parent.parent() == Some(event_root.as_path());
+        if !is_event_modules_scope && !is_domain_scope {
             offenders.push(path.strip_prefix(root).unwrap().display().to_string());
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "domain actors live at event_modules/<domain>/actor.rs, not inside leaf event modules:\n{}",
+        "workers live at event_modules/worker.rs or event_modules/<domain>/worker.rs, not inside leaf event modules:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn active_components_are_named_worker() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let protocol_root = root.join("src/protocol");
+    let forbidden_paths = [
+        protocol_root.join("workers.rs"),
+        protocol_root.join("worker.rs"),
+        protocol_root.join("actors.rs"),
+        protocol_root.join("pipeline.rs"),
+    ];
+    let mut offenders = forbidden_paths
+        .into_iter()
+        .filter(|path| path.exists())
+        .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+        .collect::<Vec<_>>();
+    offenders.extend(
+        rust_files(&protocol_root)
+            .into_iter()
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name == "actor.rs" || name == "pipeline.rs")
+            })
+            .map(|path| path.strip_prefix(root).unwrap().display().to_string()),
+    );
+    offenders.sort();
+    offenders.dedup();
+
+    assert!(
+        offenders.is_empty(),
+        "active protocol components are worker.rs at the owning scope; do not add actor/pipeline files or protocol-root workers:\n{}",
         offenders.join("\n")
     );
 }
@@ -401,20 +432,18 @@ fn cli_files_live_with_event_modules_or_the_protocol_shell() {
 #[test]
 fn core_does_not_import_protocol() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let core_files = [
-        "src/core/pipeline.rs",
-        "src/core/control_loop.rs",
-        "src/core/store.rs",
-        "src/core/blocking.rs",
-        "src/core/wire.rs",
-    ];
+    let core_files = rust_files(&root.join("src/core"));
     let mut violations = Vec::new();
 
     for file in core_files {
-        let text = std::fs::read_to_string(root.join(file)).expect("read core file");
+        let text = std::fs::read_to_string(&file).expect("read core file");
         for (line_idx, line) in text.lines().enumerate() {
             if line.contains("crate::protocol") {
-                violations.push(format!("{file}:{}: {line}", line_idx + 1));
+                violations.push(format!(
+                    "{}:{}: {line}",
+                    file.strip_prefix(root).unwrap().display(),
+                    line_idx + 1
+                ));
             }
         }
     }
@@ -427,9 +456,25 @@ fn core_does_not_import_protocol() {
 }
 
 #[test]
-fn pipeline_has_no_protocol_branching_vocabulary() {
+fn core_does_not_own_protocol_worker_or_wire_codec() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = [root.join("src/core/pipeline.rs")];
+    let core_root = root.join("src/core");
+    let forbidden = ["blocking.rs", "worker.rs", "control_loop.rs", "wire.rs"];
+    let offenders = forbidden
+        .into_iter()
+        .filter(|name| core_root.join(name).exists())
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "core maintains queues/storage only; protocol workers and wire codec helpers live under src/protocol/event_modules or src/protocol:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn event_modules_worker_has_no_domain_branching_vocabulary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = [root.join("src/protocol/event_modules/worker.rs")];
     let forbidden = [
         "connection",
         "sync",
@@ -442,7 +487,7 @@ fn pipeline_has_no_protocol_branching_vocabulary() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "pipeline is generic admission/apply plumbing; protocol branching belongs in event_modules::Modules:\n{}",
+        "event_modules/worker.rs owns common admission/apply, but concrete branching belongs in event_modules::Modules or domain workers:\n{}",
         violations.join("\n")
     );
 }
@@ -555,24 +600,27 @@ fn event_module_commands_do_not_mutate_storage_directly() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "commands receive explicit context and return CommandOutput events only; projectors/pipeline/store own rows and writes:\n{}",
+        "commands receive explicit context and return CommandOutput events only; projectors/workers/store own rows and writes:\n{}",
         violations.join("\n")
     );
 }
 
 #[test]
-fn event_modules_do_not_import_runtime_pipeline_or_transport() {
+fn event_modules_do_not_import_runtime_worker_or_transport() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
     let files = rust_files(&event_root)
         .into_iter()
         .filter(|path| path != &event_root.join("mod.rs"))
+        .filter(|path| path.file_name().is_none_or(|name| name != "worker.rs"))
         .collect::<Vec<_>>();
     let forbidden = [
         "crate::runtime",
         "crate::state",
+        "crate::core::worker",
         "crate::core::control_loop",
-        "crate::core::pipeline",
+        "crate::core::wire",
+        "PipelineActor",
         "drain_until_idle",
         "protocol::network",
         "TcpStream",
@@ -638,7 +686,7 @@ fn event_module_queries_are_read_only() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "queries.rs is read-only; mutations belong in actors or core write paths:\n{}",
+        "queries.rs is read-only; mutations belong in workers or core write paths:\n{}",
         violations.join("\n")
     );
 }
@@ -655,7 +703,7 @@ fn event_module_projectors_do_not_do_transit_or_crypto_work() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "projectors write rows; transit wrapping/unwrapping and crypto belong in commands/actors/helpers:\n{}",
+        "projectors write rows; transit wrapping/unwrapping and crypto belong in commands/workers/helpers:\n{}",
         violations.join("\n")
     );
 }
@@ -684,7 +732,7 @@ fn event_module_projectors_are_row_only_boundaries() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "projectors are row-only; emitting events/effects or doing transit work belongs in commands/actors:\n{}",
+        "projectors are row-only; emitting events/effects or doing transit work belongs in commands/workers:\n{}",
         violations.join("\n")
     );
 }
@@ -740,7 +788,11 @@ fn event_records_are_constructed_only_by_codecs_or_core_tests() {
         if is_codec || is_allowed_core {
             continue;
         }
-        if source_text(&path).contains("EventRecord {") {
+        let text = source_text(&path);
+        if text.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("EventRecord {") || line.contains("Ok(EventRecord {")
+        }) {
             violations.push(path.strip_prefix(root).unwrap().display().to_string());
         }
     }
@@ -754,7 +806,8 @@ fn event_records_are_constructed_only_by_codecs_or_core_tests() {
 #[test]
 fn command_output_contains_events_not_state_changes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(root.join("src/core/store.rs")).expect("read store");
+    let text = std::fs::read_to_string(root.join("src/protocol/event_modules/worker.rs"))
+        .expect("read worker");
     let start = text
         .find("pub struct CommandOutput")
         .expect("CommandOutput");
@@ -768,7 +821,8 @@ fn command_output_contains_events_not_state_changes() {
 #[test]
 fn proposed_event_carries_deterministic_id_and_record() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(root.join("src/core/store.rs")).expect("read store");
+    let text = std::fs::read_to_string(root.join("src/protocol/event_modules/worker.rs"))
+        .expect("read worker");
     let start = text
         .find("pub struct ProposedEvent")
         .expect("ProposedEvent");
@@ -789,7 +843,8 @@ fn proposed_event_carries_deterministic_id_and_record() {
 #[test]
 fn projection_output_contains_rows_not_events() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(root.join("src/core/store.rs")).expect("read store");
+    let text = std::fs::read_to_string(root.join("src/protocol/event_modules/worker.rs"))
+        .expect("read worker");
     let start = text
         .find("pub struct ProjectionOutput")
         .expect("ProjectionOutput");
@@ -821,8 +876,8 @@ fn core_files_do_not_contain_sync_protocol_logic() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = [
         "src/main.rs",
-        "src/core/pipeline.rs",
         "src/core/store.rs",
+        "src/protocol/event_modules/worker.rs",
         "src/protocol/network.rs",
     ];
     let forbidden = ["negentropy", "Compare", "Have", "Need", "differing_buckets"];
@@ -868,11 +923,11 @@ fn protocol_network_remains_tcp_framing_only() {
 }
 
 #[test]
-fn protocol_app_and_protocol_actors_do_not_import_event_families_directly() {
+fn protocol_app_and_event_modules_worker_do_not_import_event_families_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = rust_files(&root.join("src/protocol/app"))
         .into_iter()
-        .chain([root.join("src/protocol/actors.rs")])
+        .chain([root.join("src/protocol/event_modules/worker.rs")])
         .collect::<Vec<_>>();
     let forbidden = [
         "crate::protocol::event_modules::connection",
@@ -884,7 +939,7 @@ fn protocol_app_and_protocol_actors_do_not_import_event_families_directly() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "app/protocol actors may call the protocol registry, not concrete event families:\n{}",
+        "app and the event_modules worker may call the protocol registry, not concrete event families:\n{}",
         violations.join("\n")
     );
 }

@@ -1,7 +1,7 @@
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::core::store::{EventRecord, EventScope};
-use crate::core::wire::{Reader, Writer};
+use crate::protocol::wire::{Reader, Writer};
 
 use super::types::EndpointKeypair;
 
