@@ -6,7 +6,6 @@
 //! ids to the connection outbox. The command emits event records and ids only:
 //! transit wrapping and TCP framing are outside sync.
 
-use crate::protocol::event_modules::sync::types::SyncDirection;
 use crate::protocol::event_modules::types::EventId;
 
 use super::super::have_id::{self, types::HaveIdEvent};
@@ -32,7 +31,6 @@ pub fn start(
     report
         .events
         .push(super::codec::outbound_record(CompareEvent {
-            direction: SyncDirection::Outbound,
             connection_id,
             summary: context.summary()?,
         })?);
@@ -50,7 +48,7 @@ pub fn handle_inbound_event(
     let mut report = SyncReport::default();
     if super::codec::is_event(bytes) {
         let event = super::codec::decode(bytes)?;
-        ensure_inbound(event.direction, event.connection_id, expected_connection_id)?;
+        ensure_connection(event.connection_id, expected_connection_id)?;
         let local = context.summary()?;
         if local != event.summary {
             for have in have_items_for_compare(context, event.connection_id, local, event.summary)?
@@ -62,12 +60,11 @@ pub fn handle_inbound_event(
     }
     if have_id::codec::is_event(bytes) {
         let event = have_id::codec::decode(bytes)?;
-        ensure_inbound(event.direction, event.connection_id, expected_connection_id)?;
+        ensure_connection(event.connection_id, expected_connection_id)?;
         if !context.has_event(&event.id)? {
             report
                 .events
                 .push(need_id::codec::outbound_record(NeedIdEvent {
-                    direction: SyncDirection::Outbound,
                     connection_id: event.connection_id,
                     id: event.id,
                 })?);
@@ -76,7 +73,7 @@ pub fn handle_inbound_event(
     }
     if need_id::codec::is_event(bytes) {
         let event = need_id::codec::decode(bytes)?;
-        ensure_inbound(event.direction, event.connection_id, expected_connection_id)?;
+        ensure_connection(event.connection_id, expected_connection_id)?;
         if context.has_event(&event.id)? {
             report.send_event_ids.push(event.id);
             report.sent_events = 1;
@@ -86,14 +83,10 @@ pub fn handle_inbound_event(
     Err("not an inbound sync event".to_string())
 }
 
-fn ensure_inbound(
-    direction: SyncDirection,
+fn ensure_connection(
     connection_id: EventId,
     expected_connection_id: EventId,
 ) -> Result<(), String> {
-    if direction != SyncDirection::Inbound {
-        return Err("sync worker received an outbound sync event".to_string());
-    }
     if connection_id != expected_connection_id {
         return Err("sync event used a different connection id".to_string());
     }
@@ -109,7 +102,6 @@ fn all_have_items(
         let ids = context.ids_in_bucket(bucket as u8)?;
         for id in ids {
             items.push(HaveIdEvent {
-                direction: SyncDirection::Outbound,
                 connection_id,
                 bucket: bucket as u8,
                 id,
@@ -130,7 +122,6 @@ fn have_items_for_compare(
         let ids = context.ids_in_bucket(bucket)?;
         for id in ids {
             items.push(HaveIdEvent {
-                direction: SyncDirection::Outbound,
                 connection_id,
                 bucket,
                 id,

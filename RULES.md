@@ -9,7 +9,7 @@ the rule is still prose/review only.
 
 | Rule | Status | Enforcement |
 | --- | --- | --- |
-| Commands return proposed events, not rows/effects/storage writes. | typed + static | [CommandOutput](src/protocol/event_modules/worker.rs), `command_output_contains_events_not_state_changes`, `event_module_commands_do_not_mutate_storage_directly` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
+| Commands create new semantic events and return proposed events, not rows/effects/storage writes. | typed + static | [CommandOutput](src/protocol/event_modules/worker.rs), `command_output_contains_events_not_state_changes`, `event_module_commands_do_not_mutate_storage_directly` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
 | Proposed event ids are deterministic from canonical bytes. | typed + static | [ProposedEvent](src/protocol/event_modules/worker.rs), `proposed_event_carries_deterministic_id_and_record`. |
 | Projectors return row-shaped output only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/protocol/event_modules/worker.rs), `projection_output_contains_rows_and_labels_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
 | Core is protocol-agnostic queue/storage support. | static | `core_does_not_import_protocol`, `core_does_not_own_protocol_worker_or_wire_codec`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `event_modules_worker_has_no_domain_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
@@ -26,6 +26,7 @@ the rule is still prose/review only.
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
 | Connection outbox is id-only; transit batches canonical inner events. | static + partial | `connection_outbox_is_id_only_and_transit_batches_inner_events`; batching shape is checked, but exact batch sizing remains implementation/test coverage. |
+| Sync direction is connection-scope context, not canonical bytes. | static | `sync_canonical_bytes_do_not_encode_inbound_or_outbound_direction`. |
 | Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_schema_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only. | static | `event_module_queries_are_read_only`. |
 | `EventRecord` literals are constructed only by codecs. | static | `event_records_are_constructed_only_by_codecs`. |
@@ -587,23 +588,25 @@ Events declare scope explicitly:
 - `Local`: durable private facts such as endpoint keys, invites, and route
   observations.
 - `Transient`: non-durable canonical protocol events. The current Topo
-  protocol uses transient events for exactly one established connection.
+  protocol uses connection-scoped transient events for established connections.
 
-Connection-scoped protocol events are real canonical events. Their route or
-connection id must be inside their canonical bytes, and their id is the normal
-`BLAKE3(canonical_event_bytes)`. They are not durable event-set truth: the
-worker applies their projector output immediately. The outbox row is id-only;
-the connection domain may keep a temporary canonical-byte cache for transient
-events until transport confirms send. After send, the outbox row can be deleted;
-a future identical connection-scoped event may be projected again.
+Connection-scoped protocol events are real canonical events. Their connection id
+must be inside their canonical bytes, and their id is the normal
+`BLAKE3(canonical_event_bytes)`. Inbound/outbound handling is not encoded in the
+event body. It is `EventScope::Connection(...)` projection context supplied by
+the command path or receive path. They are not durable event-set truth: the
+worker applies their projector output immediately. The outbox row is id-only; the
+connection domain may keep a temporary canonical-byte cache for transient events
+until transport confirms send. After send, the outbox row can be deleted; a
+future identical connection-scoped event may be projected again.
 
 Inbound connection-scoped protocol bytes also become canonical transient
 events, but they must not be handled by direct worker calls. The connection
 worker unwraps transit, converts the inner bytes to the appropriate inbound
 event form, admits that event through the common event-module worker, and only
 then wakes the owning domain worker over rows already projected by that event.
-For sync today this means outbound compare/have/need events project to
-connection `outbox`, while inbound compare/have/need events project to
+For sync today this means outgoing-scoped compare/have/need events project to
+connection `outbox`, while incoming-scoped compare/have/need events project to
 `sync.inbound_events`.
 Those sync request rows may be temporary; if a debug mode wants durable protocol
 trace facts, it should make the storage class explicit instead of treating them
@@ -616,6 +619,12 @@ dedupes by `(connection_id, event_id)`. The connection/transit module drains the
 protocol outbox and may batch several canonical inner events into one encrypted
 transit blob; core network queues only carry target metadata plus opaque bytes,
 and core TCP only frames and writes those bytes.
+
+Only commands create new semantic events. Workers can decide that a follow-up
+event is needed, but they express that by calling an event-module command and
+admitting the returned `ProposedEvent`s. Workers may admit canonical bytes that
+already exist, such as bytes received from a connection, but they should not
+construct new event meanings inline.
 
 Core TCP send queue targets are transport routes, not semantic connection ids.
 Use an address or socket target such as `(ip, port)` or `socket_id`. If a

@@ -53,9 +53,7 @@
 //! around this path.
 
 use crate::core::store::{Store, TableRow};
-use crate::protocol::event_modules::types::{
-    event_id, EventId, EventRecord, EventScope, EventStatus,
-};
+use crate::protocol::event_modules::types::{event_id, EventId, EventRecord, EventStatus};
 
 use super::schema;
 
@@ -414,7 +412,7 @@ fn process_event_in_tx(
 ) -> rusqlite::Result<()> {
     let record = event.record();
     report.event_ids.push(event.event_id());
-    if record.scope == EventScope::Transient {
+    if !record.scope.is_durable() {
         project_transient_event_in_tx(store, modules, record)?;
         report.applied_events += 1;
         return Ok(());

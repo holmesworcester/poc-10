@@ -75,11 +75,11 @@ pub fn insert_event(
         return Ok(false);
     }
 
-    let mut rows = vec![event_row(&id, event, status)];
+    let mut rows = vec![event_row(&id, event, status)?];
     if status == EventStatus::Ready {
         rows.push(ready_row(event.timestamp, &id));
     }
-    if event.scope == EventScope::Shared {
+    if event.scope.is_shared() {
         rows.push(partition_row(id[0], &id));
     }
     store.insert_table_rows_in_tx(rows)?;
@@ -139,7 +139,7 @@ pub fn set_event_status(
 
     let old_ready_key = (from == EventStatus::Ready).then(|| ready_key(event.timestamp, event_id));
     event.status = to;
-    let mut rows = vec![stored_event_row(event_id, &event)];
+    let mut rows = vec![stored_event_row(event_id, &event)?];
     if to == EventStatus::Ready {
         rows.push(ready_row(event.timestamp, event_id));
     }
@@ -265,11 +265,8 @@ pub fn has_event(store: &Store, event_id: &EventId) -> rusqlite::Result<bool> {
 }
 
 pub fn has_shared_event(store: &Store, event_id: &EventId) -> rusqlite::Result<bool> {
-    read_event(store, event_id).map(|event| {
-        event
-            .map(|event| event.scope == EventScope::Shared)
-            .unwrap_or(false)
-    })
+    read_event(store, event_id)
+        .map(|event| event.map(|event| event.scope.is_shared()).unwrap_or(false))
 }
 
 pub fn event_bytes(store: &Store, event_id: &EventId) -> rusqlite::Result<Option<Vec<u8>>> {
@@ -278,7 +275,7 @@ pub fn event_bytes(store: &Store, event_id: &EventId) -> rusqlite::Result<Option
 
 pub fn shared_event_bytes(store: &Store, event_id: &EventId) -> rusqlite::Result<Option<Vec<u8>>> {
     read_event(store, event_id).map(|event| {
-        event.and_then(|event| (event.scope == EventScope::Shared).then_some(event.canonical_bytes))
+        event.and_then(|event| event.scope.is_shared().then_some(event.canonical_bytes))
     })
 }
 
@@ -305,9 +302,7 @@ fn shared_events(store: &Store) -> rusqlite::Result<Vec<(EventId, StoredEvent)>>
         .table_rows(EVENTS)?
         .into_iter()
         .filter_map(|(key, value)| match decode_event_row_value(&value) {
-            Ok(event) if event.scope == EventScope::Shared => {
-                Some(vec_to_id(key).map(|id| (id, event)))
-            }
+            Ok(event) if event.scope.is_shared() => Some(vec_to_id(key).map(|id| (id, event))),
             Ok(_) => None,
             Err(err) => Some(Err(err)),
         })
@@ -321,8 +316,12 @@ fn read_event(store: &Store, event_id: &EventId) -> rusqlite::Result<Option<Stor
         .transpose()
 }
 
-fn event_row(event_id: &EventId, event: &EventRecord, status: EventStatus) -> TableRow {
-    TableRow {
+fn event_row(
+    event_id: &EventId,
+    event: &EventRecord,
+    status: EventStatus,
+) -> rusqlite::Result<TableRow> {
+    Ok(TableRow {
         table: EVENTS,
         key: event_id.to_vec(),
         value: encode_event_row_value(
@@ -332,12 +331,12 @@ fn event_row(event_id: &EventId, event: &EventRecord, status: EventStatus) -> Ta
             event.scope,
             status,
             &event.canonical_bytes,
-        ),
-    }
+        )?,
+    })
 }
 
-fn stored_event_row(event_id: &EventId, event: &StoredEvent) -> TableRow {
-    TableRow {
+fn stored_event_row(event_id: &EventId, event: &StoredEvent) -> rusqlite::Result<TableRow> {
+    Ok(TableRow {
         table: EVENTS,
         key: event_id.to_vec(),
         value: encode_event_row_value(
@@ -347,8 +346,8 @@ fn stored_event_row(event_id: &EventId, event: &StoredEvent) -> TableRow {
             event.scope,
             event.status,
             &event.canonical_bytes,
-        ),
-    }
+        )?,
+    })
 }
 
 fn ready_row(timestamp: u64, event_id: &EventId) -> TableRow {
@@ -382,17 +381,17 @@ fn encode_event_row_value(
     scope: EventScope,
     status: EventStatus,
     canonical_bytes: &[u8],
-) -> Vec<u8> {
+) -> rusqlite::Result<Vec<u8>> {
     // Keep the header fixed width so count/status scans can avoid parsing the
     // event body. The canonical bytes follow unchanged.
     let mut out = Vec::with_capacity(EVENT_ROW_HEADER_BYTES + canonical_bytes.len());
     out.extend_from_slice(&timestamp.to_be_bytes());
     out.extend_from_slice(&(body_len as u64).to_be_bytes());
     out.push(partition);
-    out.push(scope.as_u8());
+    out.push(scope.durable_tag().map_err(table_error)?);
     out.push(status.as_u8());
     out.extend_from_slice(canonical_bytes);
-    out
+    Ok(out)
 }
 
 fn decode_event_row_value(value: &[u8]) -> rusqlite::Result<StoredEvent> {
@@ -406,7 +405,7 @@ fn decode_event_row_value(value: &[u8]) -> rusqlite::Result<StoredEvent> {
     let timestamp = read_u64(value, &mut offset)?;
     let body_len = read_u64(value, &mut offset)? as usize;
     let partition = read_u8(value, &mut offset)?;
-    let scope = EventScope::from_u8(read_u8(value, &mut offset)?).map_err(table_error)?;
+    let scope = EventScope::from_durable_tag(read_u8(value, &mut offset)?).map_err(table_error)?;
     let status = EventStatus::from_u8(read_u8(value, &mut offset)?).map_err(table_error)?;
     let canonical_bytes = value[offset..].to_vec();
     Ok(StoredEvent {

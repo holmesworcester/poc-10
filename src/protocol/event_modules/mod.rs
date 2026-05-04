@@ -190,7 +190,7 @@ impl Modules {
             let local = self.existing_local_keypair(store)?;
             return connection::project_record(store, bytes, local.endpoint);
         }
-        if let Some(output) = sync::project_record(bytes)? {
+        if let Some(output) = sync::project_record(event)? {
             return Ok(output);
         }
         if let Some(output) = content::project_record(bytes)? {

@@ -1,10 +1,11 @@
 //! Sync domain.
 //!
 //! Sync is modeled as connection-scoped compare/have/need events plus a domain
-//! worker. Projectors put outbound transient sync events into the connection
-//! outbox by id and inbound transient sync events into sync-owned work rows.
-//! The worker decides what follow-up ids to propose by querying event indexes.
-//! This keeps reconciliation protocol logic out of the common admission worker.
+//! worker. Projectors use connection scope metadata, not event-body direction
+//! fields: locally proposed sync events go to the connection outbox by id, while
+//! received sync events go to sync-owned work rows. The worker decides what
+//! follow-up ids to propose by querying event indexes. This keeps reconciliation
+//! protocol logic out of the common admission worker.
 
 pub mod cli;
 pub mod compare;
@@ -12,21 +13,22 @@ pub mod have_id;
 pub mod need_id;
 pub mod queries;
 pub mod schema;
-pub mod types;
 pub mod worker;
 
+use crate::protocol::event_modules::connection;
 use crate::protocol::event_modules::types::EventRecord;
-use crate::protocol::event_modules::worker::ProjectionOutput;
+use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-pub fn project_record(bytes: &[u8]) -> Result<Option<ProjectionOutput>, String> {
+pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionOutput>, String> {
+    let bytes = &event.record.canonical_bytes;
     if compare::codec::is_event(bytes) {
-        return Ok(Some(compare::projector::project(bytes)?));
+        return Ok(Some(compare::projector::project(event)?));
     }
     if have_id::codec::is_event(bytes) {
-        return Ok(Some(have_id::projector::project(bytes)?));
+        return Ok(Some(have_id::projector::project(event)?));
     }
     if need_id::codec::is_event(bytes) {
-        return Ok(Some(need_id::projector::project(bytes)?));
+        return Ok(Some(need_id::projector::project(event)?));
     }
     Ok(None)
 }
@@ -50,15 +52,41 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     Err("not a sync event".to_string())
 }
 
-pub fn inbound_record_from_connection_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
+pub fn inbound_record_from_connection_bytes(
+    connection_id: connection::types::ConnectionId,
+    bytes: Vec<u8>,
+) -> Result<EventRecord, String> {
     if compare::codec::is_event(&bytes) {
-        return compare::codec::inbound_record_from_wire(bytes);
+        let record = compare::codec::inbound_record_from_wire(bytes)?;
+        ensure_record_connection(connection_id, &record)?;
+        return Ok(record);
     }
     if have_id::codec::is_event(&bytes) {
-        return have_id::codec::inbound_record_from_wire(bytes);
+        let record = have_id::codec::inbound_record_from_wire(bytes)?;
+        ensure_record_connection(connection_id, &record)?;
+        return Ok(record);
     }
     if need_id::codec::is_event(&bytes) {
-        return need_id::codec::inbound_record_from_wire(bytes);
+        let record = need_id::codec::inbound_record_from_wire(bytes)?;
+        ensure_record_connection(connection_id, &record)?;
+        return Ok(record);
     }
     Err("not a sync event".to_string())
+}
+
+fn ensure_record_connection(
+    expected: connection::types::ConnectionId,
+    record: &EventRecord,
+) -> Result<(), String> {
+    let actual = match record.scope {
+        crate::protocol::event_modules::types::EventScope::Connection(scope) => {
+            scope.connection_id()
+        }
+        _ => return Err("sync event did not carry connection scope".to_string()),
+    };
+    if actual == expected {
+        Ok(())
+    } else {
+        Err("sync event used a different connection id".to_string())
+    }
 }

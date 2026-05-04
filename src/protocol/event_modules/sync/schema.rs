@@ -1,8 +1,8 @@
 //! Sync-owned work tables.
 //!
-//! Sync compare/have/need are connection-scoped protocol events. Outbound
+//! Sync compare/have/need are connection-scoped protocol events. Outgoing-scoped
 //! events project into the connection outbox by id because they are already
-//! answers ready for wrapping. Inbound events project here instead: the
+//! answers ready for wrapping. Incoming-scoped events project here instead: the
 //! projector records that the sync worker has stateful comparison work to do,
 //! and the worker later drains these rows by connection.
 

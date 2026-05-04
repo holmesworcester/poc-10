@@ -270,7 +270,7 @@ fn ingest_connection_scoped_sync_event(
     connection_id: types::ConnectionId,
     inner: Vec<u8>,
 ) -> Result<NetworkFrameReport, String> {
-    let event = sync::inbound_record_from_connection_bytes(inner)?;
+    let event = sync::inbound_record_from_connection_bytes(connection_id, inner)?;
     Ok(NetworkFrameReport {
         events: vec![event],
         drain_sync_for: Some(connection_id),

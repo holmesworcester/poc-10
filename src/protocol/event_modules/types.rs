@@ -3,8 +3,9 @@
 //! Concrete event bodies live in leaf module `types.rs` files. This file holds
 //! only the common envelope facts the admission worker needs for every decoded
 //! event: deterministic id, timestamp, body length, dependencies, scope, and
-//! durable status. Keeping the common shape small is what lets projectors stay
-//! pure and modules stay independently understandable.
+//! durable status. Scope is projection context, not part of the canonical bytes;
+//! keeping that distinction sharp is what lets projectors stay pure and modules
+//! stay independently understandable.
 
 pub type EventId = [u8; 32];
 
@@ -24,31 +25,63 @@ pub struct EventRecord {
 
 /// Storage and sharing policy for an event.
 ///
-/// `Shared` participates in sync. `Local` is durable but node-local. `Transient`
-/// is a real event for projection and routing purposes but is not stored in the
-/// durable event history.
+/// `Shared` participates in sync. `Local` is durable but node-local.
+/// `Transient` is a real event for projection purposes but is not stored in the
+/// durable event history. `Connection` is also transient; it carries the
+/// connection context needed by projectors for protocol messages whose canonical
+/// bytes are scoped to one established connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventScope {
     Shared,
     Local,
     Transient,
+    Connection(ConnectionScope),
 }
 
 impl EventScope {
-    pub fn as_u8(self) -> u8 {
+    pub fn is_shared(self) -> bool {
+        matches!(self, Self::Shared)
+    }
+
+    pub fn is_durable(self) -> bool {
+        matches!(self, Self::Shared | Self::Local)
+    }
+
+    pub fn durable_tag(self) -> Result<u8, String> {
         match self {
-            Self::Shared => 0,
-            Self::Local => 1,
-            Self::Transient => 2,
+            Self::Shared => Ok(0),
+            Self::Local => Ok(1),
+            Self::Transient | Self::Connection(_) => {
+                Err("non-durable event scope cannot be stored".to_string())
+            }
         }
     }
 
-    pub fn from_u8(value: u8) -> Result<Self, String> {
+    pub fn from_durable_tag(value: u8) -> Result<Self, String> {
         match value {
             0 => Ok(Self::Shared),
             1 => Ok(Self::Local),
-            2 => Ok(Self::Transient),
-            _ => Err(format!("unknown event scope {value}")),
+            _ => Err(format!("unknown durable event scope {value}")),
+        }
+    }
+}
+
+/// Projection context for a connection-scoped transient event.
+///
+/// This is deliberately metadata, not event-body data. The same canonical sync
+/// event bytes can be locally proposed for a connection or received from that
+/// connection; projectors use this scope to decide which module-owned rows to
+/// write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionScope {
+    Outgoing { connection_id: EventId },
+    Incoming { connection_id: EventId },
+}
+
+impl ConnectionScope {
+    pub fn connection_id(self) -> EventId {
+        match self {
+            Self::Outgoing { connection_id } | Self::Incoming { connection_id } => connection_id,
         }
     }
 }

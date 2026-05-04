@@ -928,11 +928,22 @@ SyncNeedId(connection_id, workspace_id, event_id)
 
 The current POC uses real connection-scoped sync events: `SyncCompare`,
 `SyncHaveId`, and `SyncNeedId`. There is no sync packet/frame event. Outbound
-sync events project to a temporary connection-scoped byte cache and an id-only
-connection outbox row. Inbound transit bytes are converted to inbound sync event
-forms, admitted through the common event-module worker, projected to
-`sync.inbound_events`, and then read by `sync/worker.rs`. Core owns only TCP
-length framing; protocol event modules own event bytes and transit wrapping.
+and inbound are not encoded in those canonical bytes. They are connection-scope
+projection context:
+
+```
+EventScope::Connection(Outgoing { connection_id })
+  -> projector writes connection-scoped byte cache + id-only connection outbox row
+
+EventScope::Connection(Incoming { connection_id })
+  -> projector writes sync.inbound_events
+```
+
+Inbound transit bytes are unwrapped by the connection worker, decoded as the
+same canonical sync event bytes, admitted with incoming connection scope,
+projected to `sync.inbound_events`, and then read by `sync/worker.rs`. Core owns
+only TCP length framing; protocol event modules own event bytes and transit
+wrapping.
 
 Connection transit may batch several canonical inner events into one encrypted
 transit blob. That is still connection-domain work, not TCP framing: the
@@ -946,9 +957,11 @@ transient facts by default. A debug or trace mode may choose durable storage for
 the sync work rows, but that is a storage/debug choice, not protocol truth.
 
 Projectors do not write to sockets and do not emit events. They only maintain
-sync/outbox queue rows. Commands and module workers create deterministic
-connection-scoped events, and the API running those commands admits the proposed
-events through the control loop so it gets back their event ids.
+sync/outbox queue rows. Commands are the only place new semantic events are
+created. Workers may decide that an event should be created, but they express
+that decision by calling a module command and admitting its `ProposedEvent`s.
+Workers may also admit canonical bytes that already exist, such as bytes
+received from a connection, but decoding existing bytes is not event creation.
 
 There is no distinct `SyncStartRequested` event in the base design. Manual sync
 starts by creating a root `SyncCompare`. If the negentropy index is maintained
@@ -964,13 +977,13 @@ topo sync connection_id
   -> proposed SyncCompare(connection_id, workspace_id, root, count, fingerprint)
   -> admit event
 
-Local SyncCompare / SyncHaveId / SyncNeedId projected
+Outgoing-scoped SyncCompare / SyncHaveId / SyncNeedId projected
   -> outbox(connection_id, event_id)
 
 Durable event projected
   -> sync.new_events(event_id, applied_seq)
 
-Inbound SyncCompare / SyncHaveId / SyncNeedId projected
+Incoming-scoped SyncCompare / SyncHaveId / SyncNeedId projected
   -> sync.work or sync.inbound_events { connection_id, required_frontier, payload }
 
 sync::worker.run
@@ -1018,10 +1031,10 @@ sync worker each keep their present scope:
    update the incremental plain-negentropy summaries first, then later the
    dep-aware closure summaries, and advance the cursor atomically with those
    writes.
-4. Keep compare/have/need as transient connection-scoped events. Outbound
+4. Keep compare/have/need as transient connection-scoped events. Outgoing scope
    projection writes connection-scoped byte-cache rows plus id-only outbox rows.
-   Inbound projection writes sync-owned work rows. The sync worker parses those
-   projected rows and emits deterministic outbound sync events or id-only
+   Incoming scope projection writes sync-owned work rows. The sync worker parses
+   those projected rows and emits deterministic connection-scoped sync events or id-only
    outbox rows for requested durable data. Connection transit may batch multiple
    outbox ids into one encrypted transit blob; core TCP still owns only the
    outer length frame.

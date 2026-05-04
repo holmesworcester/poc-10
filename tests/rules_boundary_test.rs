@@ -875,6 +875,20 @@ fn sync_has_no_protocol_frame_event_module() {
 }
 
 #[test]
+fn sync_canonical_bytes_do_not_encode_inbound_or_outbound_direction() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sync_root = root.join("src/protocol/event_modules/sync");
+    let files = rust_files(&sync_root);
+    let forbidden = ["SyncDirection", "direction: SyncDirection"];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "sync direction is connection-scope projection context, not canonical event-body data:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn connection_outbox_is_id_only_and_transit_batches_inner_events() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let schema = source_text(&root.join("src/protocol/event_modules/connection/schema.rs"));
