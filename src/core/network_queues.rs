@@ -6,24 +6,8 @@ use crate::core::store::{Schema, Store, TableName, TableRow};
 pub const OUTBOUND_TABLE: TableName = TableName::new("core.network.outbound");
 pub const INBOUND_TABLE: TableName = TableName::new("core.network.inbound");
 pub const SCHEMAS: &[Schema] = &[
-    Schema::durable(
-        "core.network.outbound.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "core.network.outbound" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
-    ),
-    Schema::durable(
-        "core.network.inbound.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "core.network.inbound" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
-    ),
+    Schema::durable_row_table("core.network.outbound.v1", OUTBOUND_TABLE),
+    Schema::durable_row_table("core.network.inbound.v1", INBOUND_TABLE),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

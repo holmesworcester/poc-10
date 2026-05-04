@@ -14,7 +14,7 @@ the rule is still prose/review only.
 | Projectors return row-shaped output only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/protocol/event_modules/worker.rs), `projection_output_contains_rows_and_labels_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
 | Core is protocol-agnostic queue/storage support. | static | `core_does_not_import_protocol`, `core_does_not_own_protocol_worker_or_wire_codec`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `event_modules_worker_has_no_domain_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
 | Core stays small and named. | static | `core_file_set_stays_small_and_named`. |
-| Core store is a schema runner and row substrate, not a protocol fact store. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), [TableRow](src/core/store.rs), `core_store_is_row_only_not_protocol_fact_storage`, `core_store_applies_only_declared_schemas`, `store_table_rows_use_typed_table_names`. |
+| Core store is a schema runner and row substrate, not a protocol fact store. | typed + static | [Schema](src/core/store.rs), [SchemaDefinition](src/core/store.rs), [TableName](src/core/store.rs), [TableRow](src/core/store.rs), `core_store_is_row_only_not_protocol_fact_storage`, `core_store_applies_only_declared_schemas`, `store_table_rows_use_typed_table_names`. |
 | Protocol event modules own common fact/status/dependency tables. | typed + static | [event_modules/tables.rs](src/protocol/event_modules/tables.rs), `protocol_event_tables_own_common_fact_indexes`. |
 | Generic Crux command driving is core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), `crux_core_is_isolated_to_core`, core vocabulary checks. |
 | Worker admission/apply is scoped to event modules, not protocol root. | partial | [worker::run](src/protocol/event_modules/worker.rs) is the shared admission/apply entrypoint; there is not yet a typed worker catalog for all worker classes. |
@@ -25,7 +25,7 @@ the rule is still prose/review only.
 | `protocol/app` is forbidden; CLI behavior is scoped. | static + partial | `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`; `src/protocol/cli.rs` still contains temporary cross-scope CLI orchestration for the synchronous POC. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
-| Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_tables_files`, `table_declaration_files_declare_schemas`, `store_table_rows_use_typed_table_names`. |
+| Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_tables_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only. | static | `event_module_queries_are_read_only`. |
 | `EventRecord` literals are constructed only by codecs. | static | `event_records_are_constructed_only_by_codecs`. |
 | Codecs use shared binary helpers and reject trailing bytes. | static + partial | `codec_files_use_shared_binary_helpers_and_finish_reads`; this catches common drift but is not a formal fixed-width proof. |
@@ -78,11 +78,12 @@ The following rules should stay mechanically enforced where practical:
   workers, blocking policy, or wire codec helpers. Core may own generic TCP
   mechanics and opaque network queue mechanics.
 - `core/store.rs` is only a schema runner and generic row substrate. It may
-  define `Schema`, `StorageClass`, `TableName`, `TableRow`, transactions, row
-  insert/replace/delete, exact row reads, and prefix scans. It must not define
-  event ids, event records, event statuses, labels, missing-dep edges, protocol
-  indexes, network queue semantics, or any protocol table schema. Protocol
-  tables are declared by `tables.rs` files and passed to store at open time.
+  define `Schema`, `SchemaDefinition`, `StorageClass`, `TableName`, `TableRow`,
+  transactions, row insert/replace/delete, exact row reads, prefix scans, and
+  the generic key/value row-table schema helper. It must not define event ids,
+  event records, event statuses, labels, missing-dep edges, protocol indexes,
+  network queue semantics, or any protocol table schema. Protocol tables are
+  declared by `tables.rs` files and passed to store at open time.
 - `protocol/event_modules/tables.rs` owns the protocol-wide fact/status,
   missing-dep, ready-event, partition-index, and label rows used by the
   shared event-module worker. Scoped event modules own their own `tables.rs`
@@ -104,7 +105,9 @@ The following rules should stay mechanically enforced where practical:
   `EventRecord`, IO effects, transport work, or transit creation.
 - Table names and schemas are declared in the owning `tables.rs` scope as typed
   `TableName` and `Schema` values; projectors and queries use those
-  declarations.
+  declarations. Ordinary row tables should use `Schema::durable_row_table` or
+  `Schema::temp_row_table` so the module owns the table name while store owns
+  the uniform row shape.
 - `EventRecord` literals are constructed by codecs. Other code asks codecs to
   produce records or proposed events.
 - `codec.rs` uses shared binary helpers and finishes reads so trailing bytes are
@@ -300,12 +303,14 @@ dependency absence.
 `store.rs` is generic storage mechanics. It applies `Schema` declarations from
 core IO modules and protocol module scopes, then exposes typed table names,
 opaque key/value rows, transactions, exact row reads, and bounded prefix scans.
-It must not expose event ids, event status, labels, missing-dep edges, sync
-buckets, connection/bootstrap schema, content payload semantics, or network
-queue semantics as storage concepts. `core/network_queues.rs` owns typed
-network queue rows and encodes them through generic `TableRow`s. Protocol and
-module `tables.rs` files declare the tables the selected protocol needs; core
-executes those declarations without learning their protocol meaning.
+It may generate the uniform `(row_key, row_value)` table shape for
+module-declared row tables. It must not expose event ids, event status, labels,
+missing-dep edges, sync buckets, connection/bootstrap schema, content payload
+semantics, or network queue semantics as storage concepts.
+`core/network_queues.rs` owns typed network queue rows and encodes them through
+generic `TableRow`s. Protocol and module `tables.rs` files declare the tables
+the selected protocol needs; core executes those declarations without learning
+their protocol meaning.
 
 ## Proposed Events Have Deterministic IDs
 

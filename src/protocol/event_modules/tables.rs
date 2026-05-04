@@ -21,60 +21,18 @@ pub const MISSING_DEPS_BY_BLOCKED_EVENT: TableName =
 pub const EVENT_LABELS: TableName = TableName::new("event_modules.labels");
 
 pub const SCHEMAS: &[Schema] = &[
-    Schema::durable(
-        "event_modules.events.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "event_modules.events" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
-    ),
-    Schema::durable(
-        "event_modules.ready_events.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "event_modules.ready_events" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
-    ),
-    Schema::durable(
-        "event_modules.partition_events.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "event_modules.partition_events" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
-    ),
-    Schema::durable(
+    Schema::durable_row_table("event_modules.events.v1", EVENTS),
+    Schema::durable_row_table("event_modules.ready_events.v1", READY_EVENTS),
+    Schema::durable_row_table("event_modules.partition_events.v1", PARTITION_EVENTS),
+    Schema::durable_row_table(
         "event_modules.blocked_events_by_missing_dep.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "event_modules.blocked_events_by_missing_dep" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
+        BLOCKED_EVENTS_BY_MISSING_DEP,
     ),
-    Schema::durable(
+    Schema::durable_row_table(
         "event_modules.missing_deps_by_blocked_event.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "event_modules.missing_deps_by_blocked_event" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
+        MISSING_DEPS_BY_BLOCKED_EVENT,
     ),
-    Schema::durable(
-        "event_modules.labels.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "event_modules.labels" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
-    ),
+    Schema::durable_row_table("event_modules.labels.v1", EVENT_LABELS),
 ];
 
 const EVENT_ROW_HEADER_BYTES: usize = 8 + 8 + 1 + 1 + 1;

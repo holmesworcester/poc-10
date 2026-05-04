@@ -12,9 +12,10 @@
 //! 2. Use `write_transaction` to group rows that must become visible together.
 //! 3. Use the row helpers to insert, replace, delete, and scan by key prefix.
 //!
-//! The only dynamic SQL in this file is table-name interpolation. Values are
-//! always bound parameters, and table names are accepted only from `TableName`
-//! after a conservative identifier check.
+//! The only dynamic SQL in this file is generic row-table creation and
+//! table-name interpolation for row operations. Values are always bound
+//! parameters, and table names are accepted only from `TableName` after a
+//! conservative identifier check.
 
 use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
 use std::path::Path;
@@ -50,21 +51,46 @@ pub enum StorageClass {
 
 /// One schema fragment owned by a core IO module or protocol module scope.
 ///
-/// This is deliberately just metadata plus SQL. Core aggregates and executes
-/// declarations; it does not infer table meaning from ids, names, or columns.
+/// Most modules should use `Schema::durable_row_table`: the module owns the
+/// table name and persistence decision, while store supplies the uniform
+/// `(row_key BLOB PRIMARY KEY, row_value BLOB)` shape. Raw SQL exists for
+/// future specialized indexes, but it should be uncommon and reviewed harder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Schema {
     pub id: &'static str,
     pub storage: StorageClass,
-    pub sql: &'static str,
+    pub definition: SchemaDefinition,
+}
+
+/// The concrete schema operation requested by a module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaDefinition {
+    RowTable(TableName),
+    Sql(&'static str),
 }
 
 impl Schema {
+    pub const fn row_table(id: &'static str, storage: StorageClass, table: TableName) -> Self {
+        Self {
+            id,
+            storage,
+            definition: SchemaDefinition::RowTable(table),
+        }
+    }
+
+    pub const fn durable_row_table(id: &'static str, table: TableName) -> Self {
+        Self::row_table(id, StorageClass::Durable, table)
+    }
+
+    pub const fn temp_row_table(id: &'static str, table: TableName) -> Self {
+        Self::row_table(id, StorageClass::Temp, table)
+    }
+
     pub const fn durable(id: &'static str, sql: &'static str) -> Self {
         Self {
             id,
             storage: StorageClass::Durable,
-            sql,
+            definition: SchemaDefinition::Sql(sql),
         }
     }
 
@@ -72,7 +98,7 @@ impl Schema {
         Self {
             id,
             storage: StorageClass::Temp,
-            sql,
+            definition: SchemaDefinition::Sql(sql),
         }
     }
 }
@@ -311,9 +337,28 @@ impl Store {
     }
 
     fn apply_schema(&self, schema: &Schema) -> rusqlite::Result<()> {
-        match schema.storage {
-            StorageClass::Durable | StorageClass::Temp => self.conn.execute_batch(schema.sql),
+        match schema.definition {
+            SchemaDefinition::RowTable(table) => self.apply_row_table_schema(schema.storage, table),
+            SchemaDefinition::Sql(sql) => self.conn.execute_batch(sql),
         }
+    }
+
+    fn apply_row_table_schema(
+        &self,
+        storage: StorageClass,
+        table: TableName,
+    ) -> rusqlite::Result<()> {
+        let table_name = quoted_table_name(table)?;
+        let create = match storage {
+            StorageClass::Durable => "CREATE TABLE IF NOT EXISTS",
+            StorageClass::Temp => "CREATE TEMP TABLE IF NOT EXISTS",
+        };
+        self.conn.execute_batch(&format!(
+            "{create} {table_name} (
+                row_key BLOB PRIMARY KEY NOT NULL,
+                row_value BLOB NOT NULL
+            );"
+        ))
     }
 }
 

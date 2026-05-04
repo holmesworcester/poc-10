@@ -9,33 +9,9 @@ pub const CONNECTIONS: TableName = TableName::new("connection.connections");
 pub const OUTBOX: TableName = TableName::new("connection.outbox");
 
 pub const SCHEMAS: &[Schema] = &[
-    Schema::durable(
-        "connection.connection_events.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "connection.connection_events" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
-    ),
-    Schema::durable(
-        "connection.connections.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "connection.connections" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
-    ),
-    Schema::durable(
-        "connection.outbox.v1",
-        r#"
-        CREATE TABLE IF NOT EXISTS "connection.outbox" (
-            row_key BLOB PRIMARY KEY NOT NULL,
-            row_value BLOB NOT NULL
-        );
-        "#,
-    ),
+    Schema::durable_row_table("connection.connection_events.v1", CONNECTION_EVENTS),
+    Schema::durable_row_table("connection.connections.v1", CONNECTIONS),
+    Schema::durable_row_table("connection.outbox.v1", OUTBOX),
 ];
 
 pub(crate) fn connection_event_row(event_id: EventId, bytes: Vec<u8>) -> TableRow {
