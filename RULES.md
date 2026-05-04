@@ -22,7 +22,7 @@ the rule is still prose/review only.
 | Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs); static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
 | `protocol/app` is forbidden; CLI behavior is scoped. | static + partial | `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`; `src/protocol/cli.rs` still contains temporary cross-scope CLI orchestration for the synchronous POC. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
-| Network is TCP framing only. | static | `protocol_network_remains_tcp_framing_only`, sync transport checks. |
+| Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
 | Table names are typed and declared in `tables.rs`. | typed + static | [TableName](src/core/store.rs), `table_names_are_declared_in_tables_files`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only. | static | `event_module_queries_are_read_only`. |
 | `EventRecord` literals are constructed only by codecs/core store. | static | `event_records_are_constructed_only_by_codecs_or_core_tests`. |
@@ -72,8 +72,9 @@ The following rules should stay mechanically enforced where practical:
   event modules. Leaf modules write queues; the domain worker coordinates shared
   queues and cursors when needed.
 - Core never imports protocol modules and does not contain protocol vocabulary
-  such as connection, transit, sync, outbox, TCP, sockets, bootstrap schema,
-  admission workers, blocking policy, or wire codec helpers.
+  such as connection, transit, sync, outbox, bootstrap schema, admission
+  workers, blocking policy, or wire codec helpers. Core may own generic TCP
+  mechanics and opaque network queue mechanics.
 - Core has a small allowlisted file set and must not contain domain vocabulary
   such as workspace, content, endpoint, identity, invite, or message.
 - Generic Crux command driving belongs in core. Protocol code must not define
@@ -97,8 +98,12 @@ The following rules should stay mechanically enforced where practical:
   rejected.
 - `types.rs` does not store encoded/canonical event artifacts as semantic
   fields.
-- `protocol/network.rs` remains TCP framing only, and protocol worker files do
-  not import concrete event families directly.
+- `protocol/network.rs` is forbidden. Raw TCP mechanics live in `core/tcp.rs`.
+  Opaque inbound/outbound byte queues live in `core/network_queues.rs`.
+  Protocol workers may read/write those core queue row types, but only event
+  modules interpret bytes. There is one outbound network queue table with
+  target metadata encoded into each row key for bounded target claims; do not
+  create dynamic per-target queue tables.
 - `tests/cli_harness` stays process-only. It may know how to build and run the
   `topo` binary, allocate temp db paths, reserve ports, and expose stdout/stderr
   helpers. It must not know command names, global flag policy, invite syntax,
@@ -146,7 +151,8 @@ functions stay private. Projectors do not perform IO or emit
 effects. Event-module commands do not perform IO either; they construct
 canonical events or transport bytes from explicit input and context. Workers own
 dequeueing, fairness, bounded work, retries, calling commands, admitting
-proposed events, and queueing IO requests as rows at the core IO boundary.
+proposed events, and queueing network requests as `OutboundNetworkRow`s at the
+core network boundary.
 Workers do not return ad hoc effects.
 
 The intended shape is:
@@ -254,16 +260,16 @@ crate::protocol::event_modules::connection::...
 ```
 
 The protocol shell talks to the current protocol composition object,
-`Protocol`. `Protocol` owns the event-module registry (`Modules`) and any
-protocol IO namespaces. The shell may pass `Protocol` into protocol workers and
-move returned bytes or queue rows. Core must not import concrete protocol
-namespaces to get work done.
+`Protocol`. `Protocol` owns the event-module registry (`Modules`). The shell may
+pass `Protocol` into protocol workers, but raw network mechanics go through core
+`NetworkTarget`, `InboundNetworkRow`, `OutboundNetworkRow`, and TCP helpers.
+Core must not import concrete protocol namespaces to get work done.
 
 `protocol/event_modules/worker.rs` is the Topo ready-event worker: admit canonical bytes,
 apply protocol blocking policy, parse new events, call projectors, and apply
 rows. It must not branch on connection, transit, sync, response, or
 transport-target details; that branching belongs in the module registry and
-domain workers. Framed byte handling lives under `src/protocol`.
+domain workers. Framed byte handling lives in `core/tcp.rs` as opaque bytes.
 
 `protocol/wire.rs` is the shared fixed-field codec helper used by protocol
 codecs. It is not core, because canonical event format is protocol surface.
@@ -275,9 +281,11 @@ module-owned wait/blocked queue rows for semantic blockers that are not simple
 dependency absence.
 
 `store.rs` is generic storage mechanics. It should expose table rows, event
-status, queue rows, and generic event-id partitions. It must not expose sync
-buckets, connection/bootstrap schema, or content payload semantics as storage
-concepts. Module `tables.rs` files declare whether each table is durable,
+status, and generic event-id partitions. It must not expose sync buckets,
+connection/bootstrap schema, content payload semantics, or network queue
+semantics as storage concepts. `core/network_queues.rs` owns typed network queue
+rows and encodes them through generic `TableRow`s. Module `tables.rs` files
+declare whether each table is durable,
 memory, or temp; core provides the requested storage class without learning the
 table's protocol meaning.
 
@@ -437,7 +445,7 @@ Event modules may:
 - return declarative projector output: rows, labels, queue rows, outbox rows,
   and purges
 - implement `worker.rs` workers that claim module-owned queue rows, call
-  commands, and write core IO queue rows at IO boundaries
+  commands, and write core network queue rows at network boundaries
 
 `codec.rs` describes the module's canonical/wire format: tags, field order,
 and event-specific validation. Shared binary mechanics such as integer
@@ -488,15 +496,18 @@ Core may:
 - store canonical bytes and table rows
 - compute generic event ids from bytes
 - maintain queue rows and status rows
+- maintain one opaque outbound network queue with target metadata and one opaque
+  inbound network queue with source metadata
+- run generic TCP listener/connect/read-frame/write-frame mechanics over those
+  opaque network queue rows
 - provide transactions and idempotent row insertion
 - expose generic reads over stored bytes, statuses, and rows
 
-The first POC may process inbound frames reactively without a durable inbound
-queue. The protocol socket reader hands `(origin, bytes)` to a protocol
-inbound worker, which unwraps/parses protocol bytes and admits surviving
-canonical event bytes through the event-modules worker. This shortcut is
-allowed only while the socket reader remains semantic-free and recurring sync
-can recreate lost transient control traffic.
+Network queues are ordinary core table rows with typed wrappers. There is one
+outbound queue table, not one table per target. `target` is metadata encoded
+into the row key so core can claim a bounded batch for a target with a generic
+key-prefix scan. `Store` may expose `table_rows_with_key_prefix`; it must not
+grow network-specific methods.
 
 Core must not:
 
@@ -506,24 +517,25 @@ Core must not:
   which events are authorized on a connection
 - inspect sync ranges or negentropy trees except through module-declared tables
 - contain negentropy, compare/have/need, or sync-range vocabulary in
-  `src/core` or `protocol/network.rs`
+  `src/core`
 - own protocol admission, blocking policy, projector dispatch, or wire codec
   helpers
-- contain TCP frame, socket, inbound-byte, outbox, or
-  connection-target vocabulary in `src/core`
+- contain connection-target, semantic outbox, transit, or connection-id
+  vocabulary in `src/core`
 - special-case have/need/compare behavior outside event modules
 - bypass event admission for protocol messages
 - use side-channel protocol messages when an event can express the fact
 
-The network layer owns only transport mechanics: TCP framing, sending,
-receiving, buffering, and backpressure to concrete targets such as `(ip, port)`
-or socket ids. It does not own sync, connection, transit wrapping, or
-authorization semantics.
+`core/tcp.rs` owns only transport mechanics: TCP framing, sending, receiving,
+buffering, and backpressure to concrete targets such as `(ip, port)` or socket
+ids. It does not own sync, connection, transit wrapping, or authorization
+semantics.
 
-Core IO modules own capability queues such as TCP send/recv, socket state,
-listener state, and send backpressure. Protocol event modules own protocol
-outbox rows and transit bytes. Core does not name sync, connection, outbox, or
-transit concepts.
+`core/network_queues.rs` owns typed opaque byte queues:
+`NetworkTarget`, `NetworkSource`, `OutboundNetworkRow`, and
+`InboundNetworkRow`. Protocol event modules own protocol outbox rows and
+transit bytes. Core does not name sync, connection, semantic outbox, or transit
+concepts.
 
 Events declare scope explicitly:
 
@@ -544,15 +556,16 @@ again.
 
 Durable data events are not pushed to peers on creation. Durable data transfer
 is queued only through deterministic connection-scoped protocol events, usually
-created by a sync worker after projectors write compare/need/range queue rows. The
-outbox dedupes these events by `(connection_id, event_id)`. The
-connection/transit module drains the outbox and creates transit blobs; the
-protocol network code only frames and writes those bytes.
+created by a sync worker after projectors write compare/need/range queue rows.
+The protocol outbox dedupes these events by `(connection_id, event_id)`. The
+connection/transit module drains the protocol outbox and creates transit blobs;
+core network queues only carry target metadata plus opaque bytes, and core TCP
+only frames and writes those bytes.
 
 Core TCP send queue targets are transport routes, not semantic connection ids.
 Use an address or socket target such as `(ip, port)` or `socket_id`. If a
 module starts from `connection_id`, it must resolve that connection to a
-transport target before writing the core IO queue row.
+transport target before writing an `OutboundNetworkRow`.
 
 ## No Fake Or Placeholder Encryption
 
@@ -689,9 +702,12 @@ assert eventual convergence and measure sync-start to all-counted time.
 
 Keep core boring:
 
-- `protocol/network.rs` owns TCP, frame boundaries, connection attempts, and byte IO only.
+- `core/tcp.rs` owns TCP, frame boundaries, connection attempts, and byte IO only.
+- `core/network_queues.rs` owns one target-indexed outbound byte queue and one
+  source-indexed inbound byte queue; it does not define per-target tables.
 - `core/store.rs` owns durable bytes, generic module-owned rows, and generic event-set
-  reads/writes only.
+  reads/writes only. It may expose generic prefix scans over table row keys,
+  but it must not know network queue meaning.
 - `protocol/event_modules/content` owns content event construction, codec, and projection.
 - `protocol/event_modules/sync` owns all negentropy, compare/have/need/range decisions,
   connection-scoped sync events, and sync workers.
@@ -701,9 +717,9 @@ Keep core boring:
 
 Core should be a pleasure to read: small files, direct control flow,
 plain names, and no hidden protocol cleverness. A reader should understand the
-core as queue/storage mechanics without learning the content or sync
-protocols. Protocol IO belongs under `src/protocol`; all real domain and
-protocol logic belongs in protocol event modules.
+core as queue/storage/TCP mechanics without learning the content or sync
+protocols. All real domain and protocol logic belongs in protocol event
+modules.
 
 Core files must not own connection, peer, or bootstrap schema. If a
 protocol needs a durable or transient table, the owning event module declares
@@ -715,10 +731,10 @@ range, which ids are needed, or which events satisfy a sync request. Protocol
 shell code may only call protocol workers/event-module functions and move
 returned bytes.
 
-Do not put transit wrapping in `protocol/network.rs`, `core/store.rs`, CLI
-glue, or sync modules. Connection/transit modules create transit blobs;
-protocol network code creates only generic TCP frames around module-produced
-bytes.
+Do not put transit wrapping in `core/tcp.rs`, `core/network_queues.rs`,
+`core/store.rs`, CLI glue, or sync modules. Connection/transit modules create
+transit blobs; core TCP creates only generic TCP frames around module-produced
+opaque bytes.
 
 Event modules stay directory-shaped:
 

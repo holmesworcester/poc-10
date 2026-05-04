@@ -89,7 +89,13 @@ fn event_modules_are_directories() {
 #[test]
 fn core_file_set_stays_small_and_named() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core");
-    let allowed = ["crux_runner.rs", "mod.rs", "store.rs"];
+    let allowed = [
+        "crux_runner.rs",
+        "mod.rs",
+        "network_queues.rs",
+        "store.rs",
+        "tcp.rs",
+    ];
     let offenders = std::fs::read_dir(&root)
         .expect("read core")
         .map(|entry| entry.expect("dir entry").path())
@@ -547,19 +553,11 @@ fn core_has_no_protocol_io_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let core_root = root.join("src/core");
     let files = rust_files(&core_root);
-    let forbidden = [
-        "TransportSend",
-        "Tcp",
-        "socket",
-        "inbound_bytes",
-        "outbox",
-        "connection_id",
-        "transit",
-    ];
+    let forbidden = ["TransportSend", "outbox", "connection_id", "transit"];
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "protocol IO names belong under src/protocol, not src/core:\n{}",
+        "protocol-specific IO vocabulary belongs under src/protocol/event_modules, not src/core:\n{}",
         violations.join("\n")
     );
 }
@@ -593,11 +591,110 @@ fn core_has_no_domain_vocabulary() {
 fn store_uses_generic_storage_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = [root.join("src/core/store.rs")];
-    let forbidden = ["bucket", "module_rows", "payload_len"];
+    let forbidden = [
+        "bucket",
+        "module_rows",
+        "payload_len",
+        "Network",
+        "Tcp",
+        "SocketAddr",
+    ];
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "store owns generic mechanics, not sync buckets, module-row escape hatches, or payload semantics:\n{}",
+        "store owns generic mechanics, not sync buckets, module-row escape hatches, payload semantics, or network queue semantics:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn core_network_queues_are_opaque_byte_rows() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = [root.join("src/core/network_queues.rs")];
+    let forbidden = [
+        "EventRecord",
+        "canonical",
+        "event_id",
+        "connection_id",
+        "workspace",
+        "transit",
+        "invite",
+        "sync",
+        "bootstrap",
+        "outbox",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "core/network_queues.rs owns opaque byte rows only, not protocol meaning:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn network_queue_uses_single_target_indexed_outbound_table() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = source_text(&root.join("src/core/network_queues.rs"));
+    assert_eq!(
+        text.matches("TableName::new(\"core.network.outbound\")")
+            .count(),
+        1,
+        "core/network_queues.rs should define one outbound table, not dynamic per-target tables"
+    );
+    assert!(
+        text.contains("fn target_prefix(")
+            && text.contains("table_rows_with_key_prefix(OUTBOUND_TABLE")
+            && text.contains("pub fn claim_outbound_for_target("),
+        "outbound network queue rows should carry target metadata in the key and be claimed by target prefix"
+    );
+    assert!(
+        !text.contains("format!(\"core.network.outbound")
+            && !text.contains("table_rows(OUTBOUND_TABLE"),
+        "do not simulate per-target queues by dynamic table names or full-table scans"
+    );
+}
+
+#[test]
+fn store_exposes_generic_prefix_scan_not_network_methods() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = source_text(&root.join("src/core/store.rs"));
+    assert!(
+        text.contains("pub fn table_rows_with_key_prefix("),
+        "store should expose generic key-prefix scans for indexed queue claims"
+    );
+    for forbidden in [
+        "claim_outbound",
+        "NetworkTarget",
+        "OutboundNetworkRow",
+        "InboundNetworkRow",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "store.rs must not know network queue types or operations: contains {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn core_tcp_is_opaque_frame_transport() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = [root.join("src/core/tcp.rs")];
+    let forbidden = [
+        "EventRecord",
+        "canonical",
+        "event_id",
+        "connection_id",
+        "workspace",
+        "transit",
+        "invite",
+        "sync",
+        "bootstrap",
+        "outbox",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "core/tcp.rs owns length-prefixed opaque frames only, not protocol meaning:\n{}",
         violations.join("\n")
     );
 }
@@ -943,8 +1040,9 @@ fn core_files_do_not_contain_sync_protocol_logic() {
     let files = [
         "src/main.rs",
         "src/core/store.rs",
+        "src/core/network_queues.rs",
+        "src/core/tcp.rs",
         "src/protocol/event_modules/worker.rs",
-        "src/protocol/network.rs",
     ];
     let forbidden = ["negentropy", "Compare", "Have", "Need", "differing_buckets"];
     let mut violations = Vec::new();
@@ -964,26 +1062,33 @@ fn core_files_do_not_contain_sync_protocol_logic() {
 }
 
 #[test]
-fn protocol_network_remains_tcp_framing_only() {
+fn protocol_network_module_does_not_exist() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = [root.join("src/protocol/network.rs")];
+    assert!(
+        !root.join("src/protocol/network.rs").exists(),
+        "protocol/network.rs is forbidden; raw TCP mechanics live in core/tcp.rs and protocol meaning lives in event modules"
+    );
+}
+
+#[test]
+fn protocol_cli_does_not_use_socket_primitives() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = [root.join("src/protocol/cli.rs")];
     let forbidden = [
-        "EventRecord",
-        "event_id",
-        "canonical",
-        "connection_id",
-        "transit",
-        "bootstrap",
-        "outbox",
-        "negentropy",
-        "Compare",
-        "Have",
-        "Need",
+        "TcpStream",
+        "TcpListener",
+        "Shutdown",
+        "read_frame",
+        "write_frame",
+        "connect_timeout",
+        ".accept()",
+        ".read_exact(",
+        ".write_all(",
     ];
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "protocol/network.rs owns TCP framing only; protocol bytes are produced by event modules:\n{}",
+        "protocol/cli.rs may invoke core TCP runtime helpers, but must not own socket/frame mechanics:\n{}",
         violations.join("\n")
     );
 }
@@ -1035,7 +1140,11 @@ fn source_does_not_contain_fake_crypto_claims() {
 #[test]
 fn core_storage_and_transport_do_not_own_connection_or_bootstrap_schema() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = ["src/core/store.rs", "src/protocol/network.rs"];
+    let files = [
+        "src/core/store.rs",
+        "src/core/network_queues.rs",
+        "src/core/tcp.rs",
+    ];
     let forbidden = [
         "peer",
         "bootstrap",

@@ -1,5 +1,4 @@
-use std::net::SocketAddr;
-
+use crate::core::network_queues::{self, InboundNetworkRow, OutboundNetworkRow};
 use crate::core::store::{
     event_id, EventId, EventRecord, EventScope, EventStatus, Store, TableRow,
 };
@@ -109,8 +108,17 @@ pub struct DrainUntilIdle {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestFrame {
-    pub metadata: FrameMetadata,
-    pub bytes: Vec<u8>,
+    pub inbound: InboundNetworkRow,
+    pub remember_origin: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IngestResult {
+    pub outgoing: Vec<OutboundNetworkRow>,
+    pub sent_outbox: Vec<Vec<u8>>,
+    pub established_routes: usize,
+    pub sent_events: usize,
+    pub received_events: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -127,21 +135,6 @@ pub struct AdmitReport {
 pub struct ApplyReadyReport {
     pub applied_events: usize,
     pub unblocked_events: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrameMetadata {
-    pub origin: SocketAddr,
-    pub remember_origin: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct IngestResult {
-    pub outgoing: Vec<Vec<u8>>,
-    pub sent_outbox: Vec<Vec<u8>>,
-    pub established_routes: usize,
-    pub sent_events: usize,
-    pub received_events: usize,
 }
 
 pub fn run<R, W>(store: &Store, registry: &R, work: W) -> Result<W::Output, String>
@@ -200,9 +193,9 @@ fn ingest_frame(
 ) -> Result<IngestResult, String> {
     let mut report = modules.ingest_frame(
         store,
-        work.metadata.origin,
-        work.metadata.remember_origin,
-        work.bytes,
+        work.inbound.source.addr(),
+        work.remember_origin,
+        work.inbound.bytes,
     )?;
     report.events.extend(received_event_records(
         modules,
@@ -210,11 +203,12 @@ fn ingest_frame(
     )?);
     let outbox = report.drain_outbox_for;
     admit_records(store, modules, report.events)?;
-    let mut outgoing = report.outgoing;
+    let target = network_queues::NetworkTarget::new(work.inbound.source.addr());
+    let mut outgoing = network_queues::outbound_rows(target, report.outgoing);
     let mut sent_outbox = Vec::new();
     if let Some(route_id) = outbox {
         let drained = modules.drain_outbox_for_route(store, route_id)?;
-        outgoing.extend(drained.outgoing);
+        outgoing.extend(network_queues::outbound_rows(target, drained.outgoing));
         sent_outbox.extend(drained.sent_outbox);
     }
     Ok(IngestResult {

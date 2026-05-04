@@ -177,6 +177,48 @@ impl Store {
         rows.collect()
     }
 
+    pub fn table_rows_with_key_prefix(
+        &self,
+        table: TableName,
+        prefix: &[u8],
+        limit: usize,
+    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(upper) = prefix_upper_bound(prefix) else {
+            let mut stmt = self.conn.prepare(
+                "SELECT row_key, row_value FROM table_rows
+                 WHERE table_name = ?1 AND row_key >= ?2
+                 ORDER BY row_key",
+            )?;
+            let rows = stmt.query_map(params![table.as_str(), prefix], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let row = row?;
+                if !row.0.starts_with(prefix) || out.len() == limit {
+                    break;
+                }
+                out.push(row);
+            }
+            return Ok(out);
+        };
+
+        let mut stmt = self.conn.prepare(
+            "SELECT row_key, row_value FROM table_rows
+             WHERE table_name = ?1 AND row_key >= ?2 AND row_key < ?3
+             ORDER BY row_key
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            params![table.as_str(), prefix, upper, limit as i64],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )?;
+        rows.collect()
+    }
+
     pub fn write_transaction<T>(
         &self,
         apply: impl FnOnce(&Store) -> rusqlite::Result<T>,
@@ -516,4 +558,22 @@ fn vec_to_id(bytes: Vec<u8>) -> rusqlite::Result<EventId> {
             )),
         )
     })
+}
+
+fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut upper = prefix.to_vec();
+    for byte in upper.iter_mut().rev() {
+        if *byte != u8::MAX {
+            *byte += 1;
+            upper.truncate(
+                prefix
+                    .iter()
+                    .rposition(|candidate| *candidate != u8::MAX)
+                    .expect("position found")
+                    + 1,
+            );
+            return Some(upper);
+        }
+    }
+    None
 }

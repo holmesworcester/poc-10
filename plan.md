@@ -17,16 +17,17 @@ protocol:
 
 - canonical byte and table-row storage,
 - queue tables and idempotent table-row writes,
+- opaque network queue row types and generic target/source queue mechanics,
+- generic TCP listener/connect/read-frame/write-frame mechanics,
 - storage operations used by protocol-owned wait queues,
 - generic transactions and storage queries,
 - generic Crux app/effect driving, isolated from protocol code.
 
 Core does not decide admission, blocking, dependency meaning, signature/auth
 validity, which projector runs, connection, bootstrap, transit, sync ranges,
-workspaces, content, endpoint identity, TCP, codec format, or CLI command
-semantics. A different protocol should be able to reuse `core/` by providing
-its own scoped workers, event registry, tables, IO modules, wire helpers, and
-CLI command registry.
+workspaces, content, endpoint identity, codec format, or CLI command semantics.
+A different protocol should be able to reuse `core/` by providing its own
+scoped workers, event registry, tables, wire helpers, and CLI command registry.
 
 The current code split follows that boundary:
 
@@ -34,6 +35,8 @@ The current code split follows that boundary:
 src/core/
   store.rs
   crux_runner.rs
+  network_queues.rs
+  tcp.rs
 
 src/protocol/
   cli.rs           // current protocol CLI composition
@@ -44,20 +47,19 @@ src/protocol/
     sync/
       worker.rs     // sync-scope queued work
   wire.rs
-  network.rs
 ```
 
 # Protocol
 
 `protocol/` is the current Topo protocol built on the reusable core. It owns
-all event families, domain workers, protocol-specific IO names, and CLI
-commands. A completely different protocol should be able to replace
-`protocol/` while reusing `core/`.
+all event families, domain workers, protocol byte meaning, and CLI commands. A
+completely different protocol should be able to replace `protocol/` while
+reusing `core/`.
 
 `protocol/cli.rs` composes the current Topo CLI. Command semantics and output
 types should live in the closest relevant scoped `cli.rs`; protocol-level CLI
 code only coordinates commands that cross module scopes, such as aggregate
-status/count and synchronous TCP pump wiring for this POC. There is no
+status/count and synchronous calls into the core TCP runner for this POC. There is no
 `protocol/app` layer. Crux remains available only as generic core runner
 machinery; protocol code must not define Crux app/model/effect types.
 
@@ -73,7 +75,7 @@ workers at the domain root when those tables coordinate several leaf event
 modules.
 
 `protocol/mod.rs` defines the current protocol composition object. That object
-owns protocol IO namespaces and the event-module registry.
+owns the event-module registry.
 `protocol/event_modules/worker.rs` is the event-module-scope admission/apply
 worker: it hashes canonical bytes, applies this protocol's dependency/scope
 rules, calls this protocol's registry, and applies projector rows through core
@@ -87,7 +89,7 @@ the narrow registry surface used by the protocol shell and tests. `core/` does
 not call event parse/project traits and does not import concrete event
 families. The protocol shell calls through the protocol composition object and
 does not import `connection`, `sync`, `content`, or `identity` directly. Module
-workers interpret framed bytes, canonical events, queues, and route state.
+workers interpret inbound byte rows, canonical events, queues, and route state.
 
 Suggested organization:
 
@@ -165,8 +167,9 @@ This rule is in conscious tension with "let complexity earn length" in the docum
 **networking** All complex networking behavior including bootstrap,
 connection, transit, and sync is implemented in event modules: commands propose
 events, projectors write rows, module workers decide what to run next, and
-connection/transit modules wrap and unwrap transit blobs. protocol IO modules
-only frame and move bytes to concrete transport targets. Connections are
+connection/transit modules wrap and unwrap transit blobs. Core network queues
+carry only `target/source + opaque bytes`, and core TCP only frames and moves
+those bytes to concrete transport targets. Connections are
 between two endpoints (daemons) and sync all data in all workspaces those two
 endpoints share. Every workspace-scoped event carries its own `workspace_id`;
 endpoint-scoped events (connection, intro, observed_address, self_address,
@@ -193,22 +196,25 @@ dependency wait queue.
 **control loop** means the protocol's worker scheduling policy. It claims
 bounded batches of queue rows, dispatches to the owning worker, applies returned
 state writes atomically through core storage, and admits returned events
-through the event-modules worker. Workers queue IO by writing rows to core IO
-queues at IO boundaries; core IO workers drain those capability queues. Core
+through the event-modules worker. Workers queue network IO by writing
+`OutboundNetworkRow`s with target metadata; core TCP drains those rows as
+opaque frames. Core
 provides queue and transaction mechanics; protocol owns which workers exist
 and what their work means.
 
 **state** is the explicit table-shaped substrate that projectors and workers observe. It is materialized from event-module table declarations and can be a database in production or an in-memory store in testing and simulation.
 
-**protocol IO** contains IO modules such as TCP listener, reader, writer, and
-timer modules. IO modules create and drain IO queues; they do not interpret
-transit blobs or canonical event bytes. Protocol workers request IO by writing
-rows to core IO capability queues such as TCP send/recv or timer wake queues.
+**core network queues** contain one outbound table and one inbound table. The
+outbound queue is not split into per-target tables; `target` is metadata encoded
+into the row key so core can claim a bounded batch for one target with a generic
+key-prefix scan. `Store` only exposes generic table-row and prefix-scan
+mechanics; `core/network_queues.rs` owns the typed row wrappers and queue
+encoding.
 
-**network** is a TCP-only IO module family. It drains core TCP capability
-queues, packs opaque bytes into length-prefixed TCP frames, writes sockets, and
-records inbound bytes with origin metadata. It does not create or interpret
-transit blobs.
+**core TCP** drains and fills opaque network queue rows. It owns listener,
+connect, length-prefixed frame read/write, socket shutdown, and transport
+backpressure mechanics. It does not create or interpret transit blobs,
+canonical event bytes, sync frames, invites, or connection ids.
 
 **workers** are module-owned active components woken by queue rows, timers, IO
 readiness, or explicit CLI requests. A worker declares its wake sources, read
@@ -269,10 +275,11 @@ The substrate pieces outside `event_modules` are deliberately narrow:
 ```
 core/crux_runner.rs      // generic Crux app/effect driving
 core/store.rs            // typed table rows, memory/disk storage, transactions
+core/network_queues.rs   // opaque inbound/outbound byte queue rows
+core/tcp.rs              // generic length-prefixed TCP byte transport
 protocol/cli.rs          // current Topo CLI composition
 protocol/event_modules/worker.rs     // event-module admission/apply and blocking worker
 protocol/wire.rs         // shared fixed-field protocol codec helpers
-protocol/network.rs      // TCP bytes and socket ownership
 protocol/event_modules/  // protocol facts, projectors, tables, workers
 ```
 
@@ -510,8 +517,9 @@ The control loop is the protocol worker scheduler. It owns:
 All domain behavior lives in event modules and their colocated workers. The
 control loop should stay domain-agnostic within this protocol: it sees ready
 events, opaque worker wakes, and worker output, not sync ranges,
-connection handshakes, content semantics, sockets, routes, or protocol IO
-names. Core only maintains the queues and transactions the scheduler uses.
+connection handshakes, content semantics, or connection routes. Core maintains
+the queues, transactions, opaque network queues, and TCP byte mechanics the
+scheduler uses.
 
 Queued work is typed:
 
@@ -557,9 +565,9 @@ commit returned rows/events/completions against write_set
 ```
 
 Core does not know this worker catalog exists. The protocol supplies worker
-catalogs and wake sources. At IO boundaries, protocol workers write rows to
-core IO capability queues; core IO workers drain those queues without learning
-protocol meaning.
+catalogs and wake sources. At network boundaries, protocol workers write
+`OutboundNetworkRow`s with target metadata; core TCP drains those rows without
+learning protocol meaning.
 
 `WorkerOutput` contains:
 
@@ -590,16 +598,17 @@ Projectors only write rows. They cannot emit follow-on events. If projection
 discovers work, it writes a module-owned queue row; a worker reads bounded queue
 rows, queries its declared context, calls module commands, and sends the
 proposed canonical events back to the control loop for admission. If the work
-reaches an IO boundary, the worker writes a row to a core IO queue.
+reaches a network boundary, the worker writes `OutboundNetworkRow`s to the core
+network queue.
 
 Workers are the active boundary. Projectors can only change rows, especially
 queue rows. Commands are pure construction/query helpers. Workers are the only
 event-module surface that can advance queued work. They do not return ad hoc
 effects; they write queue rows.
 
-Protocol inbound processing may feed canonical bytes directly into this
-worker, or it may enqueue durable inbound rows first. That choice
-belongs to the protocol IO modules, not core.
+Protocol inbound processing receives `InboundNetworkRow`s from core TCP. The
+connection worker unwraps or rejects the opaque bytes and sends surviving
+canonical bytes through the event-modules worker.
 
 Boundary tables that need claim/retry ownership are ordinary module-owned tables with status metadata:
 
@@ -646,7 +655,9 @@ When event `D` becomes applied, the same transaction deletes `blocked_by_event_i
 
 Unblocking never recursively processes dependents in the same call. `events.status = ready` is the unblocked-events queue; the control loop later claims a bounded batch of ready events.
 
-The control loop commits `StateUpdates`, proposed events, and queue completions in one transaction. IO happens later by draining committed core IO queues.
+The control loop commits `StateUpdates`, proposed events, and queue completions
+in one transaction. Network IO happens later by draining committed core network
+queues.
 
 The first implementation has one process-wide control-loop writer. Failed
 claim/retry work remains in its table with status, attempts, and last_error
@@ -655,7 +666,9 @@ On startup, `events.processing -> ready`; protocol-owned processing rows return
 to pending according to their module rules. Memory protocol queues start empty;
 recurring protocol workers recreate recoverable work.
 
-Modules may run pure helper transforms inline until they reach a queue, state, or effect boundary. Modules do not recursively drain queues and do not perform transport IO inline.
+Modules may run pure helper transforms inline until they reach a queue, state,
+or effect boundary. Modules do not recursively drain queues and do not perform
+transport IO inline.
 
 The control loop has no sync, bootstrap, auth, connection, or event-type policy
 beyond calling protocol workers. It only knows dispatch, bounded batches,
@@ -663,34 +676,52 @@ transactions, time, limits, retries, and queue commits. Blocking policy belongs 
 the event-modules worker. Leases are a
 later extension for multiple workers or long-running claim ownership.
 
-## Protocol Network
+## Network Boundary
 
-**transport** is a protocol IO module family for TCP byte I/O between network routes (listeners, socket cache, `[u32 length][bytes]` framing, addresses learned from invite/`observed_address`/incoming connections). Its only egress is a core TCP send queue row whose `target` is a concrete route such as `(ip, port)` or an existing socket id, not a `connection_id`. Inbound bytes enter an IO-owned inbound-bytes queue with origin `(ip, port, socket_id, observed endpoint if known)`; a durable inbound-bytes buffer is optional until replay/fairness requirements justify it. *Invariant: transport produces and interprets no transit bytes; if it sends bytes, those bytes were produced by an event module.*
+There is no `protocol/network.rs`. Network mechanics are split:
+
+- `core/network_queues.rs` defines one outbound byte queue and one inbound byte
+  queue. The outbound queue is not split into per-target tables. Target metadata
+  is encoded into each row key so core can claim bounded batches for a concrete
+  target with a generic key-prefix scan.
+- `core/tcp.rs` owns listener, connect, `[u32 length][bytes]` framing, socket
+  shutdown, and transport backpressure. It sends and receives only opaque bytes.
+- protocol event modules own route facts, connection ids, transit wrapping,
+  bootstrap, auth, sync frame meaning, and canonical event admission.
+
+The only transport target visible to core is a concrete network target such as
+`(ip, port)` or a future socket id. If a protocol worker starts with a
+`connection_id`, it must resolve that id to a concrete `NetworkTarget` before
+writing `OutboundNetworkRow`s. Core must not see the connection id.
 
 Protocol-owned boundary tables include:
 
 ```
-inbound_bytes       // transport ingress, dedupe by wire_id, if durable ingress is enabled
 outbox              // connection_id + event_id, dedupe by unique pair
 wake_schedules      // timer IO enters the protocol
-socket_state        // listener/socket/cache state when needed
 ```
 
-Normal inbound processing is a protocol worker chain:
+Normal inbound processing is a core/protocol worker chain:
 
 ```
-InboundBytes
+InboundNetworkRow { source, bytes }
   -> connection.unwrap / raw frame parse
   -> CanonicalEventBytes
   -> event-modules worker
 ```
 
-The first POC may run this chain directly from the socket reader without first
-durably queuing `InboundBytes`. That is still a protocol worker boundary: the
-socket reader only passes `(origin, bytes)` into the inbound worker, and event
-modules decide meaning and queue follow-on work. A durable `inbound_bytes`
-table is added when we need crash replay, fairness across many sockets,
-leases, or independent retry.
+Normal outbound processing is:
+
+```
+protocol outbox row
+  -> connection/transit worker resolves NetworkTarget and creates opaque bytes
+  -> OutboundNetworkRow { target, bytes }
+  -> core/tcp.rs writes length-prefixed TCP frames
+```
+
+`Store` supports this without network semantics by exposing generic table-row
+operations, including a bounded `table_rows_with_key_prefix` scan. Network queue
+encoding lives in `core/network_queues.rs`, not `core/store.rs`.
 
 **connection** is an event module. A connection event references two endpoints and carries `shared_workspaces`. Each workspace entry's authority is established by the connection event's own dependencies and signature: deps point at endpoint/bootstrap authorization plus workspace capability events (workspace-membership grant, invite, etc.) that authorize the signer to bind that workspace to that connection, and the ready-event loop's standard signature/dep validation is what makes the entry trustworthy. Rotation, revocation, and expiry are further connection-related events with their own deps/sigs. The same module owns `connection_secrets`: globally-unique `connection_secret_id` → `(key, direction, connection_id, ttl)`, with separate inbound and outbound secrets per connection, each known only to the two endpoints.
 
@@ -873,8 +904,8 @@ SyncNeedId(connection_id, workspace_id, event_id)
 The current POC keeps `sync/frame` as the transient connection-scoped packet
 event for real TCP throughput: it batches compare/have/need/data items, its
 codec owns that packet format, and its projector only writes the connection
-outbox row. The protocol network layer still sees only opaque transit bytes and
-TCP length frames.
+outbox row. Core network queues and core TCP still see only opaque transit bytes
+and TCP length frames.
 
 Projectors do not write to sockets and do not emit events. They only maintain
 sync/outbox queue rows. Commands and module workers create deterministic
@@ -937,13 +968,19 @@ connection_events(connection_id, event_id, canonical_event_bytes, expires_at)
 outbox(connection_id, event_id)
 ```
 
-`connection/worker.rs` resolves an outbox `event_id` from transient connection-event storage. For sync control events, it wraps their canonical bytes. For `SendEvent`, it loads the referenced durable event, checks authority, creates a transit blob, and writes a core TCP send queue row. Sync modules do not batch ids into transport frames and do not create transit blobs.
+`connection/worker.rs` resolves an outbox `event_id` from transient
+connection-event storage. For sync control events, it wraps their canonical
+bytes. For `SendEvent`, it loads the referenced durable event, checks authority,
+creates a transit blob, resolves the connection to a concrete `NetworkTarget`,
+and writes an `OutboundNetworkRow`. Sync modules do not batch ids into transport
+frames and do not create transit blobs.
 
 Outgoing dedupe belongs at the `outbox` boundary and the per-connection hot queue, not in every projector's context. Projectors should not need `recently_sent` sets. If suppression beyond pending-buffer dedupe is needed later, keep sent rows in `outbox` with a TTL.
 
 ## Incoming buffer dedupe
 
-Transport remains byte-only. On receive, the buffer hashes bytes before parsing:
+Core TCP and core network queues remain byte-only. On receive, a durable inbound
+buffer can hash bytes before parsing:
 
 For the minimal reactive POC this buffer can be memory-only or skipped: the socket reader wakes the inbound-byte loop immediately, and recurring sync can recreate transient control traffic after a crash. When durable ingress is enabled, use the shape below.
 

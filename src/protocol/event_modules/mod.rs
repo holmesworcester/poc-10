@@ -7,6 +7,7 @@ pub mod worker;
 
 use std::net::SocketAddr;
 
+use crate::core::network_queues::{self, NetworkTarget, OutboundNetworkRow};
 use crate::core::store::{EventRecord, Store};
 use crate::protocol::event_modules::worker::{
     CommandOutput, EventRegistry, ProjectionOutput, ProposedEvent,
@@ -28,8 +29,8 @@ pub struct ModuleFrameReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundSync {
-    pub target: SocketAddr,
-    pub outgoing: Vec<Vec<u8>>,
+    pub target: NetworkTarget,
+    pub outgoing: Vec<OutboundNetworkRow>,
     pub sent_outbox: Vec<Vec<u8>>,
     pub sent_events: usize,
 }
@@ -157,8 +158,11 @@ impl Modules {
         Ok(outbound
             .into_iter()
             .map(|outbound| OutboundSync {
-                target: outbound.target,
-                outgoing: outbound.outgoing,
+                target: NetworkTarget::new(outbound.target),
+                outgoing: network_queues::outbound_rows(
+                    NetworkTarget::new(outbound.target),
+                    outbound.outgoing,
+                ),
                 sent_outbox: outbound.sent_outbox,
                 sent_events: 0,
             })

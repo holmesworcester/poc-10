@@ -1,6 +1,10 @@
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 
+use crate::core::network_queues::{InboundNetworkRow, NetworkTarget, OutboundNetworkRow};
 use crate::core::store::Store;
+use crate::core::tcp;
 use crate::protocol::event_modules::connection::cli::{
     ConnectSummary, ServeSummary, StreamSummary,
 };
@@ -10,7 +14,7 @@ use crate::protocol::event_modules::test_events::dependent_event::cli::{
     DependentReplaySummary, DependentStageSummary,
 };
 use crate::protocol::event_modules::worker::{self, CommandOutput};
-use crate::protocol::{network, Protocol};
+use crate::protocol::Protocol;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CountSummary {
@@ -68,9 +72,18 @@ pub fn run_connect(
         .map_err(|err| format!("record connection request: {err}"))?
         .0;
 
-    let mut stream = network::connect(addr).map_err(|err| format!("open tcp stream: {err}"))?;
-    network::write_frames(&mut stream, vec![request.bytes])?;
-    let summary = pump_stream(store, protocol, &mut stream, addr, true)?;
+    let target = NetworkTarget::new(addr);
+    let sent_outbox = RefCell::new(HashMap::new());
+    let summary = tcp::connect_exchange(
+        store,
+        target,
+        vec![OutboundNetworkRow::new(target, request.bytes)],
+        StreamSummary::default(),
+        |inbound, summary| {
+            handle_inbound_network_row(store, protocol, inbound, true, summary, &sent_outbox)
+        },
+        |rows, _| mark_sent_network_rows(store, protocol, rows, &sent_outbox),
+    )?;
     if summary.established_routes == 0 {
         return Err("connection was not established".to_string());
     }
@@ -108,14 +121,18 @@ pub fn run_sync_routes(store: &Store, protocol: &Protocol) -> Result<Vec<String>
         .drain_outbox_routes(store)
         .map_err(|err| format!("drain sync outbox: {err}"))?
     {
-        let mut stream =
-            network::connect(outbound.target).map_err(|err| format!("open tcp stream: {err}"))?;
-        network::write_frames(&mut stream, outbound.outgoing)?;
-        protocol
-            .modules()
-            .mark_outbox_sent(store, outbound.sent_outbox)?;
-
-        let stream_summary = pump_stream(store, protocol, &mut stream, outbound.target, false)?;
+        let sent_outbox = RefCell::new(HashMap::new());
+        remember_sent_outbox(&sent_outbox, &outbound.outgoing, &outbound.sent_outbox)?;
+        let stream_summary = tcp::connect_exchange(
+            store,
+            outbound.target,
+            outbound.outgoing,
+            StreamSummary::default(),
+            |inbound, summary| {
+                handle_inbound_network_row(store, protocol, inbound, false, summary, &sent_outbox)
+            },
+            |rows, _| mark_sent_network_rows(store, protocol, rows, &sent_outbox),
+        )?;
         summary.routes_synced += 1;
         summary.sent_events += outbound.sent_events + stream_summary.sent_events;
         summary.received_events += stream_summary.received_events;
@@ -130,25 +147,30 @@ pub fn run_serve(
     listen: SocketAddr,
     accept_count: usize,
 ) -> Result<Vec<String>, String> {
-    let listener = TcpListener::bind(listen).map_err(|err| format!("listen: {err}"))?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|err| format!("listener local addr: {err}"))?;
-    println!("listening: {local_addr}");
-
-    let mut summary = ServeSummary::default();
-    for _ in 0..accept_count {
-        let (mut stream, peer_addr) = listener
-            .accept()
-            .map_err(|err| format!("accept tcp stream: {err}"))?;
-        stream
-            .set_nodelay(true)
-            .map_err(|err| format!("set stream nodelay: {err}"))?;
-        let stream_summary = pump_stream(store, protocol, &mut stream, peer_addr, false)?;
-        summary.accepted_connections += 1;
-        summary.received_events += stream_summary.received_events;
-    }
-
+    let sent_outbox = RefCell::new(HashMap::new());
+    let report = tcp::serve(
+        store,
+        listen,
+        accept_count,
+        ServeSummary::default(),
+        |inbound, summary| {
+            let mut stream_summary = StreamSummary::default();
+            let outgoing = handle_inbound_network_row(
+                store,
+                protocol,
+                inbound,
+                false,
+                &mut stream_summary,
+                &sent_outbox,
+            )?;
+            summary.received_events += stream_summary.received_events;
+            Ok(outgoing)
+        },
+        |rows, _| mark_sent_network_rows(store, protocol, rows, &sent_outbox),
+    )?;
+    println!("listening: {}", report.local_addr);
+    let mut summary = report.value;
+    summary.accepted_connections = report.accepted_connections;
     Ok(summary.lines())
 }
 
@@ -293,68 +315,72 @@ pub fn run_count(store: &Store, protocol: &Protocol) -> Result<Vec<String>, Stri
     .lines())
 }
 
-fn pump_stream(
+fn handle_inbound_network_row(
     store: &Store,
     protocol: &Protocol,
-    stream: &mut TcpStream,
-    origin: SocketAddr,
+    inbound: InboundNetworkRow,
     remember_origin: bool,
-) -> Result<StreamSummary, String> {
-    let mut summary = StreamSummary::default();
-    let mut write_open = true;
-    loop {
-        let bytes = match network::read_frame(stream) {
-            Ok(bytes) => bytes,
-            Err(err) if is_stream_closed(&err) => break,
-            Err(err) => return Err(format!("read frame: {err}")),
-        };
+    summary: &mut StreamSummary,
+    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<u8>>>,
+) -> Result<Vec<OutboundNetworkRow>, String> {
+    let ingest = worker::run(
+        store,
+        protocol.modules(),
+        worker::IngestFrame {
+            inbound,
+            remember_origin,
+        },
+    )?;
+    summary.established_routes += ingest.established_routes;
+    summary.sent_events += ingest.sent_events;
+    summary.received_events += ingest.received_events;
 
-        let ingest = worker::run(
-            store,
-            protocol.modules(),
-            worker::IngestFrame {
-                metadata: worker::FrameMetadata {
-                    origin,
-                    remember_origin,
-                },
-                bytes,
-            },
-        )?;
-        summary.established_routes += ingest.established_routes;
-        summary.sent_events += ingest.sent_events;
-        summary.received_events += ingest.received_events;
+    worker::run(
+        store,
+        protocol,
+        worker::DrainUntilIdle {
+            batch_size: worker::DEFAULT_READY_BATCH,
+        },
+    )
+    .map_err(|err| format!("drain ready events: {err}"))?;
 
-        worker::run(
-            store,
-            protocol,
-            worker::DrainUntilIdle {
-                batch_size: worker::DEFAULT_READY_BATCH,
-            },
-        )
-        .map_err(|err| format!("drain ready events: {err}"))?;
-
-        if ingest.outgoing.is_empty() {
-            if write_open {
-                stream
-                    .shutdown(Shutdown::Write)
-                    .map_err(|err| format!("shutdown stream write: {err}"))?;
-                write_open = false;
-            }
-        } else {
-            network::write_frames(stream, ingest.outgoing)?;
-            protocol
-                .modules()
-                .mark_outbox_sent(store, ingest.sent_outbox)?;
-        }
-    }
-    Ok(summary)
+    remember_sent_outbox(sent_outbox, &ingest.outgoing, &ingest.sent_outbox)?;
+    Ok(ingest.outgoing)
 }
 
-fn is_stream_closed(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::UnexpectedEof
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::BrokenPipe
-    )
+fn remember_sent_outbox(
+    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<u8>>>,
+    rows: &[OutboundNetworkRow],
+    outbox_keys: &[Vec<u8>],
+) -> Result<(), String> {
+    if outbox_keys.is_empty() {
+        return Ok(());
+    }
+    if outbox_keys.len() > rows.len() {
+        return Err("more outbox keys than outbound network rows".to_string());
+    }
+    let first = rows.len() - outbox_keys.len();
+    let mut sent_outbox = sent_outbox.borrow_mut();
+    for (row, outbox_key) in rows[first..].iter().zip(outbox_keys) {
+        sent_outbox.insert(row.key.clone(), outbox_key.clone());
+    }
+    Ok(())
+}
+
+fn mark_sent_network_rows(
+    store: &Store,
+    protocol: &Protocol,
+    rows: &[OutboundNetworkRow],
+    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<u8>>>,
+) -> Result<(), String> {
+    let mut outbox_keys = Vec::new();
+    {
+        let mut sent_outbox = sent_outbox.borrow_mut();
+        for row in rows {
+            if let Some(outbox_key) = sent_outbox.remove(&row.key) {
+                outbox_keys.push(outbox_key);
+            }
+        }
+    }
+    protocol.modules().mark_outbox_sent(store, outbox_keys)
 }

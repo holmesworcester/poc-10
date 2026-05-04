@@ -1,6 +1,5 @@
 pub mod cli;
 pub mod event_modules;
-pub mod network;
 pub mod wire;
 
 use crate::core::store::{EventRecord, Store};
