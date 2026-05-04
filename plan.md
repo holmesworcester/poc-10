@@ -21,6 +21,7 @@ UPDATED:
 - Event modules own their canonical `codec.rs`; "wire" means transit bytes, not canonical event bytes.
 - `state` materializes table definitions from event-module declarations; it owns storage mechanics, not domain schema meaning.
 - Sync is an event-module family, not a separate sync engine.
+- The kernel is only a job runner plus IO adapters. It does not own a protocol flow; ready-event processing is just the default run loop over module-owned event/projector contracts.
 - Timely Dataflow and Differential Dataflow are a proposal and source of ideas for Rust architecture and performance: deltas, arrangements, consolidation, frontiers, compaction, and bounded work should inform experiments without committing the kernel to those runtimes.
 - Production may physically purge deleted or TTL-expired events and rows, but only after surviving facts, labels, summaries, or high-water marks preserve any semantic truth future projections need.
 
@@ -55,7 +56,7 @@ Performance rules from these systems:
 
 **event_modules/** contains every protocol or domain behavior that can be expressed as events, projectors, commands, jobs, and projected tables. This includes content, identity, auth, connection, sync, and local-only behavior.
 
-Core imports `event_modules::Modules` only. `event_modules/mod.rs` is the single composition point that imports concrete module families and exposes the narrow registry surface used by the pipeline, control loop, CLI, and tests. Kernel files call methods on `Modules`; they do not import `connection`, `sync`, `content`, or `identity` directly. The pipeline does not branch on connection, transit, or sync protocol shape; `Modules` interprets framed bytes and returns canonical event bytes plus outgoing effects for the generic pipeline to admit or hand back to transport.
+Core imports `event_modules::Modules` only. `event_modules/mod.rs` is the single composition point that imports concrete module families and exposes the narrow registry surface used by the control loop, CLI, and tests. Kernel files call methods on `Modules`; they do not import `connection`, `sync`, `content`, or `identity` directly. The kernel does not own protocol flows. It wakes and runs loops, commits returned rows, admits returned events, and executes returned effects. Module loops interpret framed bytes, canonical events, queues, and route state.
 
 Suggested organization:
 
@@ -85,32 +86,43 @@ src/event_modules/
     dep_cache/
   local/
     local_secret/
-    job_tick/
+    job_run/
 ```
 
 **Per-file pattern, always.** Every event module is a directory with one file per concern (`types.rs`, `codec.rs`, `projector.rs`, `commands.rs`, `queries.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a module is small enough that a single `.rs` file would suffice. The cost is some empty-ish files in tiny modules; the win is that this is intentional friction. In a codebase where most code is assistant-generated, uniform shape across the surface makes accumulating logic easy to spot — files that grow disproportionately, or directories that sprout extra concerns, are the audit signal that something needs simplification or splitting. No collapsed single-file event modules.
 
 This rule is in conscious tension with "let complexity earn length" in the documentation quality bar (see appendix): that rule applies to *prose* in docs, this rule applies to *code structure* in event modules. Both stand.
 
-**networking** All complex networking behavior including bootstrap, connection, transit, and sync is implemented in event modules: commands (run by jobs) initiate activity, projectors respond to activity, and connection/transit modules wrap and unwrap transit blobs. The kernel network layer only frames and moves bytes to concrete transport targets. Connections are between two endpoints (daemons) and sync all data in all workspaces those two endpoints share. Every workspace-scoped event carries its own `workspace_id`; endpoint-scoped events (connection, intro, observed_address, self_address, prekey events) carry endpoint identity instead. A daemon hosts at most one instance of any given workspace, so for workspace-scoped events `workspace_id` alone identifies the local processing scope and there is no separate "recorded_by". See **Event Scopes** below for the full taxonomy.
+**networking** All complex networking behavior including bootstrap, connection, transit, and sync is implemented in event modules: commands propose events, projectors write rows, jobs decide what to run next, and connection/transit modules wrap and unwrap transit blobs. Kernel IO modules only frame and move bytes to concrete transport targets. Connections are between two endpoints (daemons) and sync all data in all workspaces those two endpoints share. Every workspace-scoped event carries its own `workspace_id`; endpoint-scoped events (connection, intro, observed_address, self_address, prekey events) carry endpoint identity instead. A daemon hosts at most one instance of any given workspace, so for workspace-scoped events `workspace_id` alone identifies the local processing scope and there is no separate "recorded_by". See **Event Scopes** below for the full taxonomy.
 
-**event_pipeline** uses `event_modules` to process all Events (whether received or locally-created) such that an Event set, processed in any order, results in the same State at a given time (some event types can expire).
+**ready_event_loop** is not a kernel subsystem. It is the default run loop: admit facts, load context, call the owning module's projector, and apply rows. Most event modules use only this generic loop. Modules with richer state, such as sync, add their own module-owned run loops over module-owned queues.
 
-**control_loop** is the single-writer runtime substrate. It claims bounded batches of table rows, dispatches to the owning event module or job module, applies returned state writes atomically, and runs external effects.
+**control_loop** is the single-writer job runner. It claims bounded batches of table rows, dispatches to the owning module loop, applies returned state writes atomically, admits returned events through the generic ready-event loop, and runs external effects.
 
 **state** is the explicit table-shaped substrate that projectors and jobs observe. It is materialized from event-module table declarations and can be a database in production or an in-memory store in testing and simulation.
 
-**network** is a TCP-only byte interface. It accepts module-produced `TransportSend { target, bytes }` effects, packs `bytes` into length-prefixed TCP frames, writes sockets, and records inbound bytes with origin metadata. It does not create or interpret transit blobs.
+**kernel_io/** contains protocol-agnostic IO modules such as TCP listener,
+reader, writer, and timer modules. IO modules create and drain IO queues; they
+do not interpret transit blobs or canonical event bytes. They can return effects
+against operating-system resources and rows/events against kernel-owned IO
+tables such as inbound bytes, outbound bytes, listener state, socket state, and
+backoff state.
 
-**jobs** is a set of event-module commands that run at a regular cadence; each can query state to decide whether it runs and what other commands it calls.  
+**network** is a TCP-only kernel IO module family. It accepts module-produced
+`TransportSend { target, bytes }` effects, packs `bytes` into length-prefixed
+TCP frames, writes sockets, and records inbound bytes with origin metadata. It
+does not create or interpret transit blobs.
+
+**jobs** are event-module actors woken by queue rows, timers, IO readiness, or explicit CLI requests. A job can query state, decide whether it is ready to run, call commands, admit proposed events, update/delete queue rows, and return effects. Use `wake` for scheduling and `run` for execution.
 
 The substrate pieces outside `event_modules` are deliberately narrow:
 
 ```
 control_loop/   // dispatch, transactions, bounded batches, effect execution
 state/          // catalog materialization, storage, migrations, snapshots
-network/        // TCP bytes and socket ownership
-sender/         // TransportSend effects -> TCP frame/write
+kernel_io/      // protocol-agnostic IO loop modules and IO queues
+network/        // TCP bytes and socket ownership, under kernel_io
+sender/         // TransportSend effects -> TCP frame/write, under kernel_io
 ```
 
 If behavior is protocol semantics expressible as events/projectors/commands/tables, it belongs under `event_modules`. If it owns process execution, IO, storage mechanics, or scheduling, it belongs outside.
@@ -158,9 +170,9 @@ event_modules/*/registry_meta.rs
 
 The event module owns semantic meaning: what a row means, which projection writes it, which indexes are required, and whether it may be rebuilt. `state` owns mechanics: creating tables, applying migrations, opening transactions, inserting NewRows, deleting Purges, querying declared indexes, resetting transient rows on startup, and choosing durable vs memory storage.
 
-Boundary tables should follow the same rule where possible. `outbox` can be declared by the sender-facing module, `blocked_by_event` by the pipeline module, `job_schedules` by the jobs module, and sync caches by the sync modules. The fewer central special tables, the better.
+Boundary tables should follow the same rule where possible. `outbox` can be declared by the sender-facing module, `blocked_by_event` by the ready-event loop, job schedules by the jobs module, and sync caches by the sync modules. The fewer central special tables, the better.
 
-## Event Pipeline
+## Ready Event Loop
 
 **codec** is canonical event encoding and parsing. It is not necessarily network wire. A module's `codec.rs` defines `Event <-> CanonicalEventBytes`, the event type tag, field layout, dependency field declarations, signature and signer-family rules, and deterministic id rules. Canonical event layout is fixed-width per event type: once the type tag is known, the field layout and canonical byte length are known, though different event types may have different fixed lengths. Shared binary utilities handle primitive reads/writes, fixed-size ids, truncation checks, and trailing-byte checks so codecs read as format descriptions.
 
@@ -246,7 +258,7 @@ boundedly.
 
 **labels** is a table whose rows are tuples of (event_id, label_type); adding a label can be a result of projection. Labels become part of context so there should be a bounded number of labels for a given event_id. "This event blocks others" can be a label. 
 
-**blocking** is pipeline-owned. A blocked event remains an `events` row with `status = blocked`; each missing dependency is a `blocked_by_event(blocked_by_event_id, event_id)` row.
+**blocking** is ready-event-loop-owned. A blocked event remains an `events` row with `status = blocked`; each missing dependency is a `blocked_by_event(blocked_by_event_id, event_id)` row.
 
 **project** consumes an EventWithContext and returns either RejectedEvent (if known invalid), BlockedEvent, or StateUpdates.
 
@@ -320,11 +332,14 @@ The control loop is the only always-running runtime. It owns:
 - the module registry,
 - boundary-table storage,
 - transaction boundaries,
-- clock ticks,
+- clock wakes,
 - resource limits,
 - effect runners for TCP and local IO.
 
 All domain behavior lives above the control loop in event modules and job modules.
+The control loop is protocol-agnostic for a given IO surface: it sees queue
+rows, ready events, run results, and effects, not sync ranges, connection
+handshakes, or content semantics.
 
 Queued work is typed:
 
@@ -333,19 +348,20 @@ WorkItem =
   InboundBytes
   ReadyEvent
   OutboxWake(connection_id)
-  JobTick
+  JobWake(module, job)
 ```
 
 Each queue item has exactly one owning module. The control loop calls one function:
 
 ```
-step(work_item, context) -> StepResult
+run(work_item, context) -> RunResult
 ```
 
-`StepResult` contains:
+`RunResult` contains:
 
 ```
 StateUpdates   // includes NewRows into ordinary tables and boundary tables
+Events         // proposed canonical events to admit through the ready-event loop
 Effects
 ```
 
@@ -368,7 +384,7 @@ Admission happens before parse context. Known event ids stop at `admit_event_id`
 Projectors only write rows. They cannot emit follow-on events. If projection
 discovers work, it writes a module-owned queue row; a job reads bounded queue
 rows, queries its context, calls module commands, and sends the proposed
-canonical events back through the pipeline. Commands may also return wire bytes
+canonical events back to the control loop for admission. Commands may also return wire bytes
 for transport-only boundaries such as transit wrapping; the caller owns whether
 those bytes are admitted as events or sent to transport.
 
@@ -377,7 +393,7 @@ Commands are pure construction/query helpers. Jobs are the only event-module
 surface that can return IO effects; the kernel runner executes those effects
 without knowing protocol meaning.
 
-The first POC kernel may run this inbound chain directly from the socket reader without first durably queuing `InboundBytes`. That is still a kernel pipeline boundary: the socket reader only passes `(origin, bytes)` into `pipeline.ingest_frame`, and event modules decide meaning and queue follow-on work. A durable `inbound_bytes` table is added when we need crash replay, fairness across many sockets, leases, or independent retry.
+The first POC kernel may run this inbound chain directly from the socket reader without first durably queuing `InboundBytes`. That is still a loop boundary: the socket reader only passes `(origin, bytes)` into the inbound run loop, and event modules decide meaning and queue follow-on work. A durable `inbound_bytes` table is added when we need crash replay, fairness across many sockets, leases, or independent retry.
 
 Boundary tables that need claim/retry ownership are ordinary module-owned tables with status metadata:
 
@@ -446,7 +462,7 @@ ConnectionTransitJob:
   present: set<event_id>
 ```
 
-`hot_queue` is bounded by estimated bytes, not only event count. When it drops below a low-water mark, the connection/transit job refills from pending `outbox` rows for that connection, skipping ids already in `present`. For each deterministic send event, the module loads the referenced canonical bytes, checks connection/workspace authority, resolves the current transport target, creates a transit blob, and returns `TransportSend { target, bytes }`. The kernel network effect runner packs those bytes into TCP frames and writes the socket. After the socket accepts a complete frame, the control loop deletes the corresponding `outbox` rows and removes those ids from `present`. On send failure it removes ids from `present`, leaves `outbox` rows pending, and backs off. No database transaction is held while writing to the socket.
+`hot_queue` is bounded by estimated bytes, not only event count. When it drops below a low-water mark, the connection/transit job refills from pending `outbox` rows for that connection, skipping ids already in `present`. For each deterministic send event, the module loads the referenced canonical bytes, checks connection/workspace authority, resolves C to a current transport target, calls the transit wrap command, and returns `TransportSend { target, bytes }`. The kernel IO sender module packs those bytes into TCP frames and writes the socket. After the socket accepts a complete frame, the control loop deletes the corresponding `outbox` rows and removes those ids from `present`. On send failure it removes ids from `present`, leaves `outbox` rows pending, and backs off. No database transaction is held while writing to the socket.
 
 The control loop commits `StateUpdates` in one transaction, then runs `Effects`. Effects may write new rows but do not directly project events.
 
@@ -458,30 +474,30 @@ The control loop has no sync, bootstrap, auth, connection, dependency, or event-
 
 ## Network
 
-**transport** owns TCP byte I/O between network routes (listeners, socket cache, `[u32 length][bytes]` framing, addresses learned from invite/`observed_address`/incoming connections). `TransportSend { target, bytes }` is the only egress, where `target` is a concrete route such as `(ip, port)` or an existing socket id, not a `connection_id`. Inbound bytes enter the kernel pipeline with origin `(ip, port, socket_id, observed endpoint if known)`; a durable inbound-bytes buffer is optional until replay/fairness requirements justify it. *Invariant: transport produces and interprets no transit bytes; if it sends bytes, those bytes were produced by an event module.*
+**transport** is a kernel IO module family for TCP byte I/O between network routes (listeners, socket cache, `[u32 length][bytes]` framing, addresses learned from invite/`observed_address`/incoming connections). `TransportSend { target, bytes }` is the only egress, where `target` is a concrete route such as `(ip, port)` or an existing socket id, not a `connection_id`. Inbound bytes enter an IO-owned inbound-bytes queue with origin `(ip, port, socket_id, observed endpoint if known)`; a durable inbound-bytes buffer is optional until replay/fairness requirements justify it. *Invariant: transport produces and interprets no transit bytes; if it sends bytes, those bytes were produced by an event module.*
 
-**connection** is an event module. A connection event references two endpoints and carries `shared_workspaces`. Each workspace entry's authority is established by the connection event's own dependencies and signature: deps point at endpoint/bootstrap authorization plus workspace capability events (workspace-membership grant, invite, etc.) that authorize the signer to bind that workspace to that connection, and the pipeline's standard signature/dep validation is what makes the entry trustworthy. Rotation, revocation, and expiry are further connection-related events with their own deps/sigs. The same module owns `connection_secrets`: globally-unique `connection_secret_id` → `(key, direction, connection_id, ttl)`, with separate inbound and outbound secrets per connection, each known only to the two endpoints.
+**connection** is an event module. A connection event references two endpoints and carries `shared_workspaces`. Each workspace entry's authority is established by the connection event's own dependencies and signature: deps point at endpoint/bootstrap authorization plus workspace capability events (workspace-membership grant, invite, etc.) that authorize the signer to bind that workspace to that connection, and the ready-event loop's standard signature/dep validation is what makes the entry trustworthy. Rotation, revocation, and expiry are further connection-related events with their own deps/sigs. The same module owns `connection_secrets`: globally-unique `connection_secret_id` → `(key, direction, connection_id, ttl)`, with separate inbound and outbound secrets per connection, each known only to the two endpoints.
 
 The connection module also owns the transit envelope as plain functions, not as a kernel concern (mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`):
 
 - `connection.wrap_bootstrap(remote_endpoint_id, inner_events) -> TransitBlob`: encrypts to the endpoint public key. Used for connection establishment and connection-secret repair.
 - `connection.wrap(connection_id, inner_events) -> TransitBlob`: looks up the outbound secret for the connection, asserts every inner event's `workspace_id ∈ shared_workspaces(connection_id)`, pads to a size bucket, encrypts. Used for ordinary sync/control/event traffic.
-- `connection.unwrap(bytes) -> Vec<CanonicalEventBytes>`: a parse-stage transform run by the pipeline on every inbound frame. Unwraps either endpoint-pubkey bootstrap frames or connection-secret frames. Connection-secret frames recover `connection_id`, drop any inner event whose `workspace_id ∉ shared_workspaces(connection_id)`, and pass the surviving canonical event bytes into canonical-event processing.
+- `connection.unwrap(bytes) -> Vec<CanonicalEventBytes>`: a parse-stage transform run by the inbound-byte loop on every inbound frame. Unwraps either endpoint-pubkey bootstrap frames or connection-secret frames. Connection-secret frames recover `connection_id`, drop any inner event whose `workspace_id ∉ shared_workspaces(connection_id)`, and pass the surviving canonical event bytes into canonical-event processing.
 
 Wrapped bytes are never canonical events. They have no event id, no dependencies, and no labels — they are an opaque transit form. Only inner canonical event bytes are ids in the event store.
 
-*Invariants: `shared_workspaces` is authoritative because the connection event's deps + signature have already been validated by the standard pipeline — the connection does not authorize itself, its dependencies do; a valid unwrap under one of our inbound secrets is by construction proof that the sender is the remote endpoint of that connection; every wrap is bound to exactly one connection; wrap and unwrap both enforce workspace ↔ connection alignment.*
+*Invariants: `shared_workspaces` is authoritative because the connection event's deps + signature have already been validated by the standard ready-event loop — the connection does not authorize itself, its dependencies do; a valid unwrap under one of our inbound secrets is by construction proof that the sender is the remote endpoint of that connection; every wrap is bound to exactly one connection; wrap and unwrap both enforce workspace ↔ connection alignment.*
 
 **Outbox.** No projector calls `transport.send` or emits a `SendEvent`.
 Projectors write rows to module-owned queues. A sync job that wants to send a
 durable event — e.g. after reading a queued need from connection C for event E —
 calls a command that creates deterministic `SendEvent(connection_id=C,
-inner_event_id=E)` and admits it through the pipeline. The `SendEvent`
+inner_event_id=E)` and admits it through the control loop. The `SendEvent`
 projector only writes `outbox(connection_id, send_event_id)`. A
 connection/transit job claims outbox rows, checks that E's `workspace_id` is in
 `shared_workspaces(C)`, resolves C to a current transport target, calls the
 transit wrap command, and returns `TransportSend { target, bytes }`. The kernel
-network effect runner packs those bytes into TCP frames and writes sockets. A
+IO sender module packs those bytes into TCP frames and writes sockets. A
 slow route backs off its own target; other transport targets continue.
 *Invariant: every ordinary byte on the wire is the product of two independent
 workspace-membership checks (SendEvent projection + `connection.wrap`) plus a
@@ -507,7 +523,7 @@ What poc-9 throws out and replaces:
 - the heavy `verus-proofs/` real-proof tree (not landed at fork point)
 - ad-hoc per-event-type context-query adapters (see below)
 
-Connection model follows poc-6's `events/network/` (`connection`, `connection_ack`, `intro`, `negentropy`, `self_address`, `sync_window`, etc. as canonical events). This is a **deliberate reversal** of poc-7's stance — poc-6's `SIMPLIFICATION_FOR_RUST_POC.md` §2 explicitly said "Connection/sync state is protocol/runtime state, not canonical events." poc-9 rejects that rule in favor of putting sync/connection facts through the same event pipeline as everything else.
+Connection model follows poc-6's `events/network/` (`connection`, `connection_ack`, `intro`, `negentropy`, `self_address`, `sync_window`, etc. as canonical events). This is a **deliberate reversal** of poc-7's stance — poc-6's `SIMPLIFICATION_FOR_RUST_POC.md` §2 explicitly said "Connection/sync state is protocol/runtime state, not canonical events." poc-9 rejects that rule in favor of putting sync/connection facts through the same ready-event loop as everything else.
 
 **Each step must align 100% to plan.md. No duplication of logic.** Every migration of a poc-7 surface — a projector, a state table, a runtime path, an RPC, a test — has to land at the principles described in this document, not somewhere halfway. Specifically:
 
@@ -519,7 +535,7 @@ Connection model follows poc-6's `events/network/` (`connection`, `connection_ac
 
 The bar is alignment, not progress. A commit that lands more code while leaving plan.md violated by an extra abstraction layer or a duplicate path is a regression.
 
-**Pipeline simplicity is non-negotiable.** Preserve the pipeline shape of this document — see `get_context` in the Event Pipeline section for the strict contract. poc-7's projection-context-query adapters (one custom `context_loader` per event module) are the surface this fork is rejecting. The exception is a declared module context request/result for large module-owned indexes such as negentropy; that request is part of the module API, not a second core loader. To restate concretely, in poc-9:
+**Ready-event loop simplicity is non-negotiable.** Preserve the ready-event shape of this document — see `get_context` in the Ready Event Loop section for the strict contract. poc-7's projection-context-query adapters (one custom `context_loader` per event module) are the surface this fork is rejecting. The exception is a declared module context request/result for large module-owned indexes such as negentropy; that request is part of the module API, not a second core loader. To restate concretely, in poc-9:
 
 - dependencies come from schema metadata on flat fields (one mechanism for all event types),
 - labels are a small generic table `(event_id, label_type)` populated by projectors as the only cross-event signal,
@@ -676,25 +692,39 @@ SyncNeedId(connection_id, workspace_id, event_id)
 Projectors do not write to sockets and do not emit events. They only maintain
 sync/outbox queue rows. Commands and jobs create deterministic
 connection-scoped events, and the API running those commands admits the proposed
-events through the pipeline so it gets back their event ids:
+events through the control loop so it gets back their event ids:
 
 ```
+topo sync connection_id
+  -> sync_start command(params, context(params))
+  -> proposed SyncStartRequested(connection_id, request_id, required_frontier)
+  -> admit event
+
+SyncStartRequested projected
+  -> sync.work(Start { connection_id, request_id, required_frontier })
+
 Durable event projected
-  -> negentropy_new_event_queue(event_id, timestamp)
+  -> sync.new_events(event_id, applied_seq)
 
 SyncCompare / SyncHaveId / SyncNeedId projected
-  -> negentropy_request_queue(connection_id, workspace_id, node/event_id)
+  -> sync.work(Inbound { connection_id, required_frontier, payload })
 
 NegentropyJob
-  -> reads bounded queue rows and sync indexes
+  -> first drains sync.new_events into sync.negentropy.index
+  -> advances sync.negentropy.cursor
+  -> then reads ready sync.work rows
+  -> only answers work with required_frontier <= sync.negentropy.cursor
   -> command(ctx, params) -> proposed SyncCompare / SyncHaveId / SyncNeedId / SendEvent
-  -> pipeline.admit(proposed events) -> event_ids
+  -> admit(proposed events) -> event_ids
 
 ConnectionTransitJob
   -> reads outbox(connection_id, event_id)
   -> transit_wrap command returns transit bytes
   -> returns TransportSend effects for those bytes
 ```
+
+The sync job's invariant is: never answer sync work against a stale negentropy
+index. It must cover `sync.new_events` before responding to `sync.work`.
 
 Duplicate job output collapses because connection-scoped sync event bytes are
 deterministic and `outbox` is unique on `(connection_id, event_id)`.
@@ -715,7 +745,7 @@ Outgoing dedupe belongs at the `outbox` boundary and the per-connection hot queu
 
 Transport remains byte-only. On receive, the buffer hashes bytes before parsing:
 
-For the minimal reactive POC this buffer can be memory-only or skipped: the socket reader calls the kernel pipeline immediately, and recurring sync can recreate transient control traffic after a crash. When durable ingress is enabled, use the shape below.
+For the minimal reactive POC this buffer can be memory-only or skipped: the socket reader wakes the inbound-byte loop immediately, and recurring sync can recreate transient control traffic after a crash. When durable ingress is enabled, use the shape below.
 
 ```
 wire_id = BLAKE3(bytes)
@@ -751,7 +781,7 @@ NeedId
   -> connection/transit job
   -> connection.wrap(connection_id, inner_event)
   -> TransportSend { target: ip/port or socket_id, bytes: transit_blob }
-  -> kernel TCP frame/write
+  -> kernel_io TCP frame/write
   -> delete sent outbox rows
 ```
 
