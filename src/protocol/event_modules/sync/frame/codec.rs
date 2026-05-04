@@ -1,3 +1,11 @@
+//! Codec for transient sync frame events.
+//!
+//! A frame is the top-level event projected into the connection outbox. The
+//! items inside it are protocol-specific sync facts, but the frame itself is
+//! what receives an event id and passes through the common admission/projector
+//! path. Mixed connection ids are rejected so one frame cannot be routed to
+//! multiple connections.
+
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 

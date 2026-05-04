@@ -1,4 +1,4 @@
 pub mod codec;
 pub mod projector;
-pub mod tables;
+pub mod schema;
 pub mod types;

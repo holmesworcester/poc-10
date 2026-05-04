@@ -1,3 +1,8 @@
+//! Command for recording a usable transport target.
+//!
+//! The command merely proposes a local event. Learning when an address is worth
+//! recording is a worker decision; projecting the event writes the route row.
+
 use std::net::SocketAddr;
 
 use crate::protocol::event_modules::worker::CommandOutput;

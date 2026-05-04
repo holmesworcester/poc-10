@@ -1,3 +1,9 @@
+//! Codec for compare sync items.
+//!
+//! A compare item carries one connection id and a fixed array of bucket
+//! summaries. It is not a top-level event by itself; the frame codec embeds it
+//! inside a transient sync frame event.
+
 use crate::protocol::wire::{Reader, Writer};
 
 use super::types::{BucketSummary, CompareEvent, BUCKETS};

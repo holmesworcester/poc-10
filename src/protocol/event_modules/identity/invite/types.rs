@@ -1,3 +1,9 @@
+//! Invite value types.
+//!
+//! `Invite` is the parsed link used by commands. `InviteSecretEvent` is the
+//! local event projected into authorization state. Keeping them separate makes
+//! it clear which fields travel in a link and which fields enter the store.
+
 use std::net::SocketAddr;
 
 use crate::protocol::event_modules::types::EventId;

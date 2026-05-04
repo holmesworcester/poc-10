@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use topo::core::store::Store;
-use topo::protocol::event_modules::tables::{self as event_tables, EventLabel};
+use topo::protocol::event_modules::schema::{self as event_schema, EventLabel};
 use topo::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
 use topo::protocol::event_modules::worker::{
     self, CommandOutput, EventRegistry, EventWithContext, ProjectionOutput,
@@ -28,7 +28,7 @@ fn command_admission_returns_event_ids_for_chaining() {
 
     assert_eq!(report.event_ids, proposed_ids);
     for event_id in report.event_ids {
-        assert!(event_tables::has_shared_event(&store, &event_id).unwrap());
+        assert!(event_schema::has_shared_event(&store, &event_id).unwrap());
     }
 }
 

@@ -1,3 +1,11 @@
+//! Connection-owned row tables.
+//!
+//! `CONNECTION_EVENTS` stores canonical request/ack bytes that are needed to
+//! validate later connection facts. `CONNECTIONS` maps established connection
+//! ids to remote endpoints. `OUTBOX` is the protocol queue of inner event bytes
+//! awaiting connection wrapping; core network queues only see the wrapped bytes
+//! produced later by the worker.
+
 use crate::core::store::{Schema, TableName, TableRow};
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::types::EventId;

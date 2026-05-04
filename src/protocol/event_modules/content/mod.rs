@@ -1,3 +1,10 @@
+//! Content domain.
+//!
+//! Content events are the simplest shared events in this POC: timestamped bytes
+//! with no dependencies and no projection rows. Their value is mostly as real
+//! payload for sync and throughput tests, which makes their codec and command
+//! path a useful baseline for more complex event modules.
+
 pub mod cli;
 pub mod content_event;
 

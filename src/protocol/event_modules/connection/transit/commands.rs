@@ -1,3 +1,10 @@
+//! Transit wrap and unwrap commands.
+//!
+//! This is the active boundary between connection state and network bytes. It
+//! accepts explicit endpoint keys and connection context, then returns opaque
+//! transit bytes or recovered inner bytes. It does not admit events or mutate
+//! schema; the connection worker decides what to do with the result.
+
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointKeypair;
 
@@ -17,6 +24,8 @@ pub fn create_bootstrap(
     recipient_endpoint: EndpointId,
     inner: &[u8],
 ) -> Result<Vec<u8>, String> {
+    // Bootstrap frames are addressed directly to an endpoint because a
+    // connection id does not exist yet.
     let nonce = crypto::nonce();
     let envelope = TransitEnvelope::Bootstrap {
         sender_endpoint: local.endpoint,
@@ -45,6 +54,9 @@ pub fn unwrap(
     bytes: &[u8],
     remote_endpoint: impl FnOnce(&ConnectionId) -> Result<EndpointId, String>,
 ) -> Result<UnwrappedTransit, String> {
+    // The caller supplies remote endpoint lookup for established connections.
+    // That keeps storage access in the worker and makes this function a pure
+    // cryptographic transform over explicit context.
     match codec::decode_ref(bytes)? {
         TransitEnvelopeRef::Bootstrap {
             sender_endpoint,
@@ -109,6 +121,8 @@ pub fn create_connection(
     connection_id: ConnectionId,
     inner: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
+    // Ordinary frames bind sender, recipient, and connection id into the
+    // authenticated envelope before encrypting the inner event bytes.
     let nonce = crypto::nonce();
     let envelope = TransitEnvelope::Connection {
         connection_id,

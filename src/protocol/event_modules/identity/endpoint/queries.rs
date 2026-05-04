@@ -1,16 +1,22 @@
+//! Read-only local endpoint view.
+//!
+//! The keypair is loaded as a pair and rechecked before it leaves this module.
+//! Callers should not infer an endpoint from just one row; both rows must exist
+//! and must agree cryptographically.
+
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::core::store::Store;
 
-use super::tables;
+use super::schema;
 use super::types::{EndpointId, EndpointKeypair};
 
 pub fn local_keypair(store: &Store) -> Result<Option<EndpointKeypair>, String> {
     let secret = store
-        .table_row(tables::LOCAL_ENDPOINT_SECRET, b"local")
+        .table_row(schema::LOCAL_ENDPOINT_SECRET, b"local")
         .map_err(|err| format!("load local endpoint secret: {err}"))?;
     let endpoint = store
-        .table_row(tables::LOCAL_ENDPOINT, b"local")
+        .table_row(schema::LOCAL_ENDPOINT, b"local")
         .map_err(|err| format!("load local endpoint: {err}"))?;
 
     match (secret, endpoint) {

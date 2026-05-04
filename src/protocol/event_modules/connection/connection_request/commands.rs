@@ -1,3 +1,10 @@
+//! Commands for initiating and accepting connection requests.
+//!
+//! Commands create proposed events and return any immediate bytes needed by the
+//! caller. They do not write rows. The accept path receives its authorization
+//! decision as a parameter, which keeps policy queries in the worker and keeps
+//! this file a pure transformation over explicit inputs.
+
 use rand_core::RngCore;
 
 use crate::protocol::event_modules::identity::{endpoint, invite};
@@ -21,6 +28,9 @@ pub fn create(
     local: endpoint::types::EndpointKeypair,
     invite_link: &str,
 ) -> Result<CommandOutput<OutboundRequest>, String> {
+    // The bootstrap hash proves knowledge of the invite secret without placing
+    // that secret on the wire. The request event is proposed locally so the
+    // eventual ack can be checked against the exact bytes we sent.
     let invite = invite::commands::parse(invite_link)?;
     let event = RequestEvent {
         from_endpoint: local.endpoint,
@@ -46,6 +56,9 @@ pub fn accept(
     bootstrap_hash_is_authorized: bool,
     bytes: Vec<u8>,
 ) -> Result<CommandOutput<types::InboundConnection>, String> {
+    // Authorization has already been checked by the worker against local invite
+    // state. Once accepted, the response ack is just another proposed event
+    // plus immediate return bytes for the caller to send back.
     let event = codec::decode(&bytes)?;
     if !bootstrap_hash_is_authorized {
         return Err("invite private key rejected".to_string());

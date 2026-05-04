@@ -1,3 +1,8 @@
+//! Dependency-cascade event types.
+//!
+//! `EventWithDeps` is the shared event under test. `StagedEventWithDeps` is a
+//! local wrapper used to store exact bytes before replaying them out of order.
+
 use crate::protocol::event_modules::types::EventId;
 
 pub const MAX_DEPS: usize = 10;

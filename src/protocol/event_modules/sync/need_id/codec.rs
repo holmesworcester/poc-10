@@ -1,3 +1,8 @@
+//! Codec for need-id sync items.
+//!
+//! A need-id item asks the peer to send bytes for exactly one event id. The
+//! response path dedupes requested ids before building data frames.
+
 use crate::protocol::wire::{Reader, Writer};
 
 use super::types::NeedIdEvent;

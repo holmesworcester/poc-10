@@ -1,3 +1,11 @@
+//! Compare-driven sync commands.
+//!
+//! This is the POC's simple reconciliation engine. A peer asks "do these bucket
+//! summaries match?" If not, the responder sends have ids for differing
+//! buckets; missing ids become need ids; need ids become data items. The command
+//! emits sync frame bytes through a callback so the worker can reify them as
+//! transient events instead of sending ad hoc messages.
+
 use crate::protocol::event_modules::types::EventId;
 
 use super::super::data::types::DataEvent;
@@ -25,6 +33,9 @@ pub fn start(
     connection_id: EventId,
     mut emit: impl FnMut(Vec<u8>) -> Result<(), String>,
 ) -> Result<SyncReport, String> {
+    // Manual start sends a full compare and, for the current simple protocol,
+    // all have ids. The latter is intentionally easy to reason about and relies
+    // on frame/outbox idempotence rather than round state.
     let mut items = vec![SyncItem::Compare(Box::new(CompareEvent {
         connection_id,
         summary: context.summary()?,
@@ -40,6 +51,9 @@ pub fn ingest_frame(
     bytes: &[u8],
     mut emit: impl FnMut(Vec<u8>) -> Result<(), String>,
 ) -> Result<SyncReport, String> {
+    // One frame may contain control items and data. Control produces response
+    // items; data is returned as raw event bytes for ordinary admission by the
+    // common worker.
     let frame = frame_codec::decode(bytes)?;
     let mut frame_connection_id = None;
     let mut response_items = Vec::new();
@@ -162,6 +176,9 @@ fn emit_control_and_requested_data(
     requested_ids: &[EventId],
     emit: &mut impl FnMut(Vec<u8>) -> Result<(), String>,
 ) -> Result<usize, String> {
+    // Deduplicate requested ids at the command boundary. This keeps duplicate
+    // need items from expanding into duplicate data entries in the same output
+    // frame, while still allowing harmless retries across separate frames.
     if requested_ids.is_empty() {
         emit_items(control_items, emit)?;
         return Ok(0);

@@ -1,3 +1,9 @@
+//! Command for accepting a connection ack.
+//!
+//! The command receives both the ack bytes and the original request bytes. That
+//! explicit context is the contract: validation is local and deterministic, and
+//! success returns only proposed event output plus the derived connection id.
+
 use crate::protocol::event_modules::identity::endpoint;
 use crate::protocol::event_modules::worker::CommandOutput;
 

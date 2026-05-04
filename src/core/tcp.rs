@@ -1,3 +1,18 @@
+//! Blocking TCP frame pump over opaque network queue rows.
+//!
+//! This file is deliberately a byte mover. It opens sockets, reads and writes
+//! `[u32 length][bytes]` frames, records inbound bytes in the core queue, and
+//! drains outbound bytes for the connected route. All interpretation of those
+//! bytes belongs to workers outside core that read and write queue rows; the
+//! callbacks here are only handoff points for tests and the current CLI runner.
+//!
+//! The invariant is that socket success and protocol success are separate. A
+//! frame is first written to a core queue row, then handed to the caller, and
+//! only deleted after the caller accepts responsibility for it. The same shape
+//! is used on send: callers provide opaque rows, this pump writes frames, and
+//! then calls back so the caller can update its own send bookkeeping. Keep this
+//! file boring; cleverness here usually means a domain worker is missing.
+
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
@@ -9,12 +24,14 @@ use crate::core::store::Store;
 
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
 
+/// Counts observed while pumping one TCP stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamReport {
     pub sent_frames: usize,
     pub received_frames: usize,
 }
 
+/// Result of accepting one or more TCP streams.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeReport<T> {
     pub local_addr: SocketAddr,
@@ -22,6 +39,12 @@ pub struct ServeReport<T> {
     pub value: T,
 }
 
+/// Open a TCP stream, send initial rows, then react to inbound frames.
+///
+/// `on_inbound` is the protocol boundary: it receives an opaque inbound row and
+/// may return more opaque outbound rows for the same route. `on_sent` is called
+/// after frame writes and queue deletion, so protocol bookkeeping can lag socket
+/// writes without being hidden in core.
 pub fn connect_exchange<T>(
     store: &Store,
     target: NetworkTarget,
@@ -43,6 +66,11 @@ pub fn connect_exchange<T>(
     .map(|(_, value)| value)
 }
 
+/// Serve a fixed number of incoming streams.
+///
+/// This POC runner is intentionally finite; tests can ask it to accept exactly
+/// the number of streams they intend to drive. A long-lived scheduler can wrap
+/// this same stream pump later without changing the byte/queue boundary.
 pub fn serve<T>(
     store: &Store,
     listen: SocketAddr,
@@ -85,6 +113,9 @@ pub fn serve<T>(
     })
 }
 
+// Drive one stream until the remote side closes it or neither side has more
+// bytes to write. Every frame passes through the inbound queue before the
+// callback sees it, which keeps the core/protocol handoff visible in tests.
 fn pump_stream<T>(
     store: &Store,
     stream: &mut TcpStream,
@@ -142,6 +173,8 @@ fn pump_stream<T>(
     Ok((report, value))
 }
 
+// Commit rows to the outbound queue before writing them. The caller's `on_sent`
+// hook runs only after the rows were written and removed from the core queue.
 fn write_outbound<T>(
     store: &Store,
     stream: &mut TcpStream,
@@ -187,6 +220,9 @@ fn write_frame(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
     stream.flush()
 }
 
+// The frame format is fixed and intentionally not self-describing. Type tags,
+// encryption, and validation are all properties of the bytes carried inside the
+// frame and are owned above this layer.
 fn read_frame(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let mut len = [0u8; 4];
     stream.read_exact(&mut len)?;

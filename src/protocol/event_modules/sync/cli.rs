@@ -1,3 +1,8 @@
+//! Sync CLI summaries.
+//!
+//! These counters describe the externally visible sync exchange while keeping
+//! the top-level CLI independent of sync item internals.
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncSummary {
     pub routes_synced: usize,

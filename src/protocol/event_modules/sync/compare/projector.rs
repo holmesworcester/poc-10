@@ -1,3 +1,9 @@
+//! Pure compare helpers.
+//!
+//! The compare event has no row projection of its own. This helper identifies
+//! bucket summaries that differ, leaving query and response construction to the
+//! sync command path.
+
 use super::types::{BucketSummary, BUCKETS};
 
 pub fn differing_buckets(

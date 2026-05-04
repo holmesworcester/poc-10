@@ -1,3 +1,9 @@
+//! Test-only event modules.
+//!
+//! These modules exist to exercise protocol mechanics with real events. They
+//! should stay honest: no fake harness writes, no bypassing the common worker,
+//! and no assumptions that would not hold for a production event module.
+
 pub mod event_with_deps;
 
 use crate::protocol::event_modules::worker::ProjectionOutput;

@@ -1,3 +1,10 @@
+//! CLI summaries for dependency-cascade tests.
+//!
+//! The output names the observable admission behavior: how many events were
+//! staged, how many were blocked by reverse replay, and whether the final drain
+//! applied everything. These summaries are intentionally close to the event
+//! module so black-box tests can stay small.
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventWithDepsStageSummary {
     pub staged_events: usize,

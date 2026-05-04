@@ -1,3 +1,15 @@
+//! Concrete Topo protocol assembly.
+//!
+//! `Protocol` is intentionally a small registry object. Core provides storage,
+//! queues, TCP, and a Crux runner; event modules provide commands, codecs,
+//! projectors, schema declarations, queries, and workers. This file wires those pieces
+//! together without becoming another place where event semantics are
+//! implemented.
+//!
+//! The main invariant is that every store opened for this protocol receives
+//! schemas declared by the owning module scopes. If a new feature needs state,
+//! add its schema beside the rows that encode it, then aggregate it here.
+
 pub mod cli;
 pub mod event_modules;
 pub mod wire;
@@ -38,6 +50,9 @@ impl Protocol {
 }
 
 pub fn schemas() -> Vec<Schema> {
+    // Core IO schemas are selected with the protocol because this binary uses
+    // the core TCP queues. The queue tables remain core-owned; event module
+    // schemas remain protocol-owned.
     let mut schemas = event_modules::schemas();
     schemas.extend_from_slice(network_queues::SCHEMAS);
     schemas

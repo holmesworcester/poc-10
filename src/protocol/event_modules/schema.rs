@@ -1,10 +1,17 @@
-//! Protocol-wide row tables used by the common event-module worker.
+//! Protocol-wide schema and row helpers for the common event-module worker.
 //!
 //! Core storage deliberately does not know about Topo events. This file is the
-//! protocol side of that boundary: it names the row tables, encodes protocol
+//! protocol side of that boundary: it names row tables, encodes protocol
 //! facts into `TableRow`s, and offers narrow query helpers for workers and CLI
 //! commands. Keep new protocol meaning here or in a scoped event-module
-//! `tables.rs`; do not push it down into `core::store`.
+//! `schema.rs`; do not push it down into `core::store`.
+//!
+//! The common worker relies on three small indexes. `EVENTS` stores canonical
+//! durable bytes and a compact header. `READY_EVENTS` and the two missing-dep
+//! edge tables make admission incremental: inserting a newly applied dependency
+//! only has to inspect events known to be waiting on that dependency. Labels are
+//! generic, bounded context for projectors; richer read models belong in scoped
+//! module schema files.
 
 use crate::core::store::{Schema, Store, TableName, TableRow};
 use crate::protocol::event_modules::types::{
@@ -60,6 +67,9 @@ pub fn insert_event(
     event: &EventRecord,
     status: EventStatus,
 ) -> rusqlite::Result<bool> {
+    // The event id is the row key, so admission is naturally idempotent. The
+    // header is enough for scans and counts; callers load full bytes only when
+    // they need to decode or send the event.
     let id = event_id(&event.canonical_bytes);
     if store.table_row(EVENTS, &id)?.is_some() {
         return Ok(false);
@@ -89,6 +99,9 @@ pub fn insert_blocked_event_missing_dep(
     missing_dep_id: &EventId,
     blocked_event_id: &EventId,
 ) -> rusqlite::Result<bool> {
+    // Maintain both directions of the wait graph. The forward table answers
+    // "what can this newly-applied dependency unblock?" and the reverse table
+    // answers "does this event still have any missing dependency?"
     let primary = edge_row(
         BLOCKED_EVENTS_BY_MISSING_DEP,
         missing_dep_id,
@@ -142,6 +155,9 @@ pub fn delete_blocked_events_by_missing_dep(
     store: &Store,
     missing_dep_id: &EventId,
 ) -> rusqlite::Result<usize> {
+    // Removing a dependency edge must remove the reverse edge in the same
+    // transaction. Otherwise an event could look permanently blocked even after
+    // all of its dependencies were applied.
     let rows = store.table_rows_with_key_prefix(
         BLOCKED_EVENTS_BY_MISSING_DEP,
         missing_dep_id,
@@ -217,6 +233,8 @@ pub fn body_bytes(store: &Store) -> rusqlite::Result<usize> {
 }
 
 pub fn event_index_entries(store: &Store) -> rusqlite::Result<Vec<EventIndexEntry>> {
+    // The partition index is intentionally simple: a fixed byte prefix lets
+    // sync summarize and enumerate small buckets without decoding every event.
     store
         .table_rows(PARTITION_EVENTS)?
         .into_iter()
@@ -365,6 +383,8 @@ fn encode_event_row_value(
     status: EventStatus,
     canonical_bytes: &[u8],
 ) -> Vec<u8> {
+    // Keep the header fixed width so count/status scans can avoid parsing the
+    // event body. The canonical bytes follow unchanged.
     let mut out = Vec::with_capacity(EVENT_ROW_HEADER_BYTES + canonical_bytes.len());
     out.extend_from_slice(&timestamp.to_be_bytes());
     out.extend_from_slice(&(body_len as u64).to_be_bytes());

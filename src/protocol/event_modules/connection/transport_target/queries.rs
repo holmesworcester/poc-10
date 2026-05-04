@@ -1,14 +1,20 @@
+//! Read-only route view for the connection worker.
+//!
+//! Routes are local facts produced by transport-target events. The worker uses
+//! this view to decide which established connections have an address to try;
+//! socket handling still belongs to core TCP.
+
 use std::{net::SocketAddr, str::FromStr};
 
 use crate::core::store::Store;
 
 use super::super::types::connection_id_from_bytes;
-use super::tables;
+use super::schema;
 use super::types::TransportRoute;
 
 pub fn routes(store: &Store) -> Result<Vec<TransportRoute>, String> {
     let rows = store
-        .table_rows(tables::TRANSPORT_TARGETS)
+        .table_rows(schema::TRANSPORT_TARGETS)
         .map_err(|err| format!("load transport targets: {err}"))?;
     rows.into_iter()
         .map(|(key, value)| {

@@ -1,3 +1,9 @@
+//! Codec for sync data items.
+//!
+//! Data items carry canonical event bytes requested by need ids. The codec does
+//! not decode those inner events; they must enter the common admission worker
+//! after the sync worker returns them.
+
 use crate::protocol::wire::{Reader, Writer};
 
 use super::types::DataEvent;

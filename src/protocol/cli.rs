@@ -1,3 +1,18 @@
+//! Synchronous CLI composition for the POC protocol.
+//!
+//! The CLI is not a hidden runtime. It translates user commands into module
+//! commands, runs proposed events through the common worker, invokes core TCP
+//! helpers, and formats scoped summaries for tests and humans. That is more
+//! orchestration than a leaf event module should own, but it is still kept
+//! outside core and outside projectors.
+//!
+//! Network flow remains event-based: inbound bytes go through the connection
+//! worker, any decoded canonical bytes are admitted by the common worker, sync
+//! responses are projected into the connection outbox, and only then does the
+//! connection worker wrap bytes for core TCP. If a shortcut here writes rows
+//! directly or parses socket frames itself, it is breaking the model the CLI is
+//! meant to demonstrate.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -9,8 +24,8 @@ use crate::protocol::event_modules::connection::cli::{
     ConnectSummary, ServeSummary, StreamSummary,
 };
 use crate::protocol::event_modules::content::cli::GenerateSummary;
+use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::sync::cli::SyncSummary;
-use crate::protocol::event_modules::tables as event_tables;
 use crate::protocol::event_modules::test_events::event_with_deps::cli::{
     EventWithDepsReplaySummary, EventWithDepsStageSummary,
 };
@@ -253,7 +268,7 @@ pub fn run_replay_event_with_deps_reverse(
     )
     .map_err(|err| format!("admit reverse event_with_deps: {err}"))?;
 
-    let blocked_after_reverse = event_tables::status_counts(store)
+    let blocked_after_reverse = event_schema::status_counts(store)
         .map_err(|err| format!("count blocked reverse events: {err}"))?
         .blocked;
 
@@ -272,7 +287,7 @@ pub fn run_replay_event_with_deps_reverse(
         },
     )
     .map_err(|err| format!("drain event_with_deps replay: {err}"))?;
-    let final_counts = event_tables::status_counts(store)
+    let final_counts = event_schema::status_counts(store)
         .map_err(|err| format!("count event_with_deps replay statuses: {err}"))?;
 
     Ok(EventWithDepsReplaySummary {
@@ -289,13 +304,13 @@ pub fn run_replay_event_with_deps_reverse(
 }
 
 pub fn run_count(store: &Store, protocol: &Protocol) -> Result<Vec<String>, String> {
-    let events = event_tables::event_count(store).map_err(|err| format!("count events: {err}"))?;
+    let events = event_schema::event_count(store).map_err(|err| format!("count events: {err}"))?;
     let payload_bytes =
-        event_tables::body_bytes(store).map_err(|err| format!("count bytes: {err}"))?;
+        event_schema::body_bytes(store).map_err(|err| format!("count bytes: {err}"))?;
     let connections = protocol.modules().connection_count(store)?;
     let connection_events = protocol.modules().connection_event_count(store)?;
     let statuses =
-        event_tables::status_counts(store).map_err(|err| format!("count event statuses: {err}"))?;
+        event_schema::status_counts(store).map_err(|err| format!("count event statuses: {err}"))?;
     Ok(CountSummary {
         events,
         payload_bytes,
@@ -318,6 +333,9 @@ fn handle_inbound_network_row(
     summary: &mut StreamSummary,
     sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<u8>>>,
 ) -> Result<Vec<OutboundNetworkRow>, String> {
+    // One inbound frame can create connection facts, produce immediate response
+    // bytes, and deliver inner canonical bytes. Each product still goes through
+    // the owning worker; this function only sequences those boundaries.
     let ingest = worker::run(
         store,
         protocol.modules(),
@@ -348,6 +366,9 @@ fn remember_sent_outbox(
     rows: &[OutboundNetworkRow],
     outbox_keys: &[Vec<u8>],
 ) -> Result<(), String> {
+    // The TCP queue row key and the protocol outbox row key are different
+    // identities. Remember their pairing only long enough to delete the
+    // protocol row after the corresponding bytes have been queued and written.
     if outbox_keys.is_empty() {
         return Ok(());
     }
@@ -368,6 +389,9 @@ fn mark_sent_network_rows(
     rows: &[OutboundNetworkRow],
     sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<u8>>>,
 ) -> Result<(), String> {
+    // Core has already deleted its byte rows when this callback runs. The only
+    // remaining responsibility is to mark the protocol outbox rows represented
+    // by those bytes as sent.
     let mut outbox_keys = Vec::new();
     {
         let mut sent_outbox = sent_outbox.borrow_mut();

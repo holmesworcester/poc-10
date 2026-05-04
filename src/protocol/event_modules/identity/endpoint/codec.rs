@@ -1,3 +1,9 @@
+//! Codec for the local endpoint event.
+//!
+//! The event stores the endpoint public key and local secret as a local-only
+//! fact. Decoding re-derives the public key from the secret, so corrupted or
+//! mismatched identity rows fail before projection.
+
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::protocol::event_modules::types::{EventRecord, EventScope};

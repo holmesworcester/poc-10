@@ -1,3 +1,11 @@
+//! Invite creation and parsing.
+//!
+//! An invite is a human-copyable carrier for address, endpoint, workspace id,
+//! and a bootstrap private value. The durable/local state is only the
+//! hash-to-secret event proposed by `create`; parsing a link performs no writes.
+//! This mirrors the event-module rule: commands return events and values, while
+//! workers/projectors decide what becomes rows.
+
 use std::{net::SocketAddr, str::FromStr};
 
 use rand_core::{OsRng, RngCore};
@@ -21,6 +29,8 @@ pub fn create(
     local: endpoint::types::EndpointKeypair,
     public_addr: SocketAddr,
 ) -> CommandOutput<String> {
+    // The link includes the secret; the local event stores only the mapping
+    // needed to authorize a future request that proves knowledge of it.
     let invite_event_id = nonce32();
     let bootstrap_secret = nonce32();
     let workspace_id = nonce32();
@@ -47,6 +57,8 @@ pub fn addr(invite: &str) -> Result<SocketAddr, String> {
 }
 
 pub fn parse(value: &str) -> Result<Invite, String> {
+    // The current syntax follows the older POC shape closely so black-box CLI
+    // tests can treat invites as real links rather than test-only handles.
     let body = value
         .strip_prefix(INVITE_PREFIX)
         .ok_or_else(|| "invite must start with topo://invite/".to_string())?;

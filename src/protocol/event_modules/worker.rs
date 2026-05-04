@@ -59,7 +59,7 @@ use crate::protocol::event_modules::types::{
     event_id, EventId, EventRecord, EventScope, EventStatus,
 };
 
-use super::{tables, Modules};
+use super::{schema, Modules};
 
 /// Default upper bound for one ready-event drain.
 ///
@@ -119,7 +119,7 @@ impl From<EventRecord> for ProposedEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionOutput {
     pub rows: Vec<TableRow>,
-    pub labels: Vec<tables::EventLabel>,
+    pub labels: Vec<schema::EventLabel>,
 }
 
 impl ProjectionOutput {
@@ -130,14 +130,14 @@ impl ProjectionOutput {
         }
     }
 
-    pub fn labels(labels: Vec<tables::EventLabel>) -> Self {
+    pub fn labels(labels: Vec<schema::EventLabel>) -> Self {
         Self {
             rows: Vec::new(),
             labels,
         }
     }
 
-    pub fn rows_and_labels(rows: Vec<TableRow>, labels: Vec<tables::EventLabel>) -> Self {
+    pub fn rows_and_labels(rows: Vec<TableRow>, labels: Vec<schema::EventLabel>) -> Self {
         Self { rows, labels }
     }
 
@@ -572,7 +572,7 @@ fn store_durable_event_in_tx(
         EventStatus::Blocked
     };
 
-    let inserted = tables::insert_event(store, record, status)?;
+    let inserted = schema::insert_event(store, record, status)?;
     if inserted {
         report.inserted_events += 1;
         if missing.is_empty() {
@@ -600,12 +600,12 @@ fn project_ready_event_in_tx(
     event_id: &EventId,
 ) -> rusqlite::Result<ApplyReadyReport> {
     let mut report = ApplyReadyReport::default();
-    if tables::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)? {
+    if schema::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)? {
         // The status change is the claim. Projection runs only for the worker
         // that successfully moved Ready -> Applied, which keeps duplicate drain
         // attempts idempotent when callers retry.
         let bytes =
-            tables::event_bytes(store, event_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            schema::event_bytes(store, event_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let record = modules.record_from_bytes(bytes).map_err(module_error)?;
         let changes = project_event_with_context_in_tx(store, modules, event_id, &record)?;
         write_projection_output_in_tx(store, changes)?;
@@ -645,7 +645,7 @@ fn load_event_context_in_tx(
     let mut dependencies = Vec::with_capacity(record.dependencies.len());
     for dependency in unique_dependencies(&record.dependencies) {
         let bytes =
-            tables::event_bytes(store, &dependency)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            schema::event_bytes(store, &dependency)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let record = modules.record_from_bytes(bytes).map_err(module_error)?;
         dependencies.push(DependencyContext {
             event_id: dependency,
@@ -655,7 +655,7 @@ fn load_event_context_in_tx(
     Ok(EventContext {
         event_id: *event_id,
         dependencies,
-        labels: tables::event_labels(store, event_id).map_err(module_error)?,
+        labels: schema::event_labels(store, event_id).map_err(module_error)?,
     })
 }
 
@@ -664,7 +664,7 @@ fn write_projection_output_in_tx(
     changes: ProjectionOutput,
 ) -> rusqlite::Result<usize> {
     let rows = store.insert_table_rows_in_tx(changes.rows)?;
-    let labels = store.insert_table_rows_in_tx(tables::event_label_rows(changes.labels))?;
+    let labels = store.insert_table_rows_in_tx(schema::event_label_rows(changes.labels))?;
     Ok(rows + labels)
 }
 
@@ -677,7 +677,7 @@ fn drain_ready(
         .write_transaction(|store| {
             let mut total = ApplyReadyReport::default();
             while total.applied_events < limit {
-                let Some(event_id) = tables::next_ready_event(store)? else {
+                let Some(event_id) = schema::next_ready_event(store)? else {
                     break;
                 };
                 let report = project_ready_event_in_tx(store, modules, &event_id)?;
@@ -712,7 +712,7 @@ fn module_error(err: String) -> rusqlite::Error {
 fn missing_dependencies(store: &Store, dependencies: &[EventId]) -> rusqlite::Result<Vec<EventId>> {
     let mut missing = Vec::new();
     for dependency in unique_dependencies(dependencies) {
-        if !tables::event_is_applied(store, &dependency)? {
+        if !schema::event_is_applied(store, &dependency)? {
             missing.push(dependency);
         }
     }
@@ -733,7 +733,7 @@ fn write_blockers(
 ) -> rusqlite::Result<usize> {
     let mut inserted = 0;
     for dependency in missing {
-        inserted += usize::from(tables::insert_blocked_event_missing_dep(
+        inserted += usize::from(schema::insert_blocked_event_missing_dep(
             store, dependency, event_id,
         )?);
     }
@@ -741,16 +741,16 @@ fn write_blockers(
 }
 
 fn unblock_dependents(store: &Store, applied_event_id: &EventId) -> rusqlite::Result<usize> {
-    let dependents = tables::blocked_events_by_missing_dep(store, applied_event_id)?;
-    tables::delete_blocked_events_by_missing_dep(store, applied_event_id)?;
+    let dependents = schema::blocked_events_by_missing_dep(store, applied_event_id)?;
+    schema::delete_blocked_events_by_missing_dep(store, applied_event_id)?;
 
     let mut unblocked = 0;
     for dependent in dependents {
         // Unblocking only changes status. It does not recursively project the
         // newly unblocked event inside the same stack frame, which prevents a large
         // dependency cascade from becoming one unbounded transaction.
-        if !tables::blocked_event_has_missing_deps(store, &dependent)?
-            && tables::set_event_status(
+        if !schema::blocked_event_has_missing_deps(store, &dependent)?
+            && schema::set_event_status(
                 store,
                 &dependent,
                 EventStatus::Blocked,

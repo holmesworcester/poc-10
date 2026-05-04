@@ -1,3 +1,9 @@
+//! Compare item types.
+//!
+//! The bucket count is fixed so compare frames have predictable shape. A bucket
+//! summary is the minimal answer to "are we the same for this range?" in the
+//! current POC: count plus fingerprint.
+
 use crate::protocol::event_modules::types::EventId;
 
 pub const BUCKETS: usize = 256;

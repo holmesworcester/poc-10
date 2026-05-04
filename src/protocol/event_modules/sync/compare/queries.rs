@@ -1,13 +1,24 @@
+//! Read-only sync context.
+//!
+//! The sync command is written against `ReadContext` so its algorithm does not
+//! depend on SQLite. The store implementation below derives summaries from the
+//! protocol-wide event indexes: bucket count plus XOR fingerprint. That summary
+//! is intentionally compact and order-independent.
+
 use crate::core::store::Store;
-use crate::protocol::event_modules::tables as event_tables;
+use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventId;
 
 use super::types::{BucketSummary, BUCKETS};
 
 pub trait ReadContext {
+    /// Summarize every shared event bucket.
     fn summary(&self) -> Result<[BucketSummary; BUCKETS], String>;
+    /// Enumerate ids in one bucket when summaries differ.
     fn ids_in_bucket(&self, bucket: u8) -> Result<Vec<EventId>, String>;
+    /// Check whether an advertised id is already present locally.
     fn has_event(&self, event_id: &EventId) -> Result<bool, String>;
+    /// Load event bytes requested by a peer.
     fn event_byte(&self, id: &EventId) -> Result<Option<Vec<u8>>, String>;
 }
 
@@ -31,7 +42,7 @@ impl ReadContext for Store {
 
 pub fn summary(store: &Store) -> Result<[BucketSummary; BUCKETS], String> {
     let mut summary = [BucketSummary::default(); BUCKETS];
-    for header in event_tables::event_index_entries(store)
+    for header in event_schema::event_index_entries(store)
         .map_err(|err| format!("load event headers: {err}"))?
     {
         let bucket = &mut summary[usize::from(header.partition)];
@@ -42,17 +53,17 @@ pub fn summary(store: &Store) -> Result<[BucketSummary; BUCKETS], String> {
 }
 
 pub fn ids_in_bucket(store: &Store, bucket: u8) -> Result<Vec<EventId>, String> {
-    event_tables::event_ids_in_partition(store, bucket)
+    event_schema::event_ids_in_partition(store, bucket)
         .map_err(|err| format!("load bucket ids: {err}"))
 }
 
 pub fn has_event(store: &Store, event_id: &EventId) -> Result<bool, String> {
-    event_tables::has_shared_event(store, event_id)
+    event_schema::has_shared_event(store, event_id)
         .map_err(|err| format!("check event presence: {err}"))
 }
 
 pub fn event_byte(store: &Store, id: &EventId) -> Result<Option<Vec<u8>>, String> {
-    event_tables::shared_event_bytes(store, id).map_err(|err| format!("load event bytes: {err}"))
+    event_schema::shared_event_bytes(store, id).map_err(|err| format!("load event bytes: {err}"))
 }
 
 fn fingerprint_id(id: &EventId) -> [u8; 32] {
@@ -63,6 +74,9 @@ fn fingerprint_id(id: &EventId) -> [u8; 32] {
 }
 
 fn xor_into(target: &mut [u8; 32], value: &[u8; 32]) {
+    // XOR fingerprints are not a proof of equality, but they are cheap and
+    // deterministic. The protocol falls back to id exchange for differing
+    // buckets, so collisions only risk extra work in this POC.
     for (left, right) in target.iter_mut().zip(value.iter()) {
         *left ^= *right;
     }

@@ -1,3 +1,9 @@
+//! Command for creating the local endpoint.
+//!
+//! The command returns the generated keypair and proposes the local endpoint
+//! event that will store it. It does not inspect or mutate existing state; the
+//! protocol facade decides whether creation is needed before calling it.
+
 use rand_core::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 

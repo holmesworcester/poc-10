@@ -1,3 +1,9 @@
+//! Wire codec for connection ack events.
+//!
+//! Acks use the same connection magic as requests and remain transient. Their
+//! body binds the accepting endpoint, the requester endpoint, the original
+//! request id, and the derived connection id into one fixed-width record.
+
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 

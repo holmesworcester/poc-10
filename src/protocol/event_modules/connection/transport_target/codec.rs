@@ -1,3 +1,10 @@
+//! Codec for local transport-target events.
+//!
+//! A transport target says "for this connection id, this socket address is
+//! currently worth trying." It is local state, not shared history. The address
+//! encoding is fixed width by IP family so route facts stay simple to parse and
+//! stable across string formatting differences.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::protocol::event_modules::types::{EventRecord, EventScope};

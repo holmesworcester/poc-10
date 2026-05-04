@@ -1,3 +1,8 @@
+//! Schema for local endpoint rows.
+//!
+//! Endpoint state is module-owned local state. Core only creates the declared
+//! row tables; this module decides what keys and values mean.
+
 use crate::core::store::{Schema, TableName};
 
 pub const LOCAL_ENDPOINT: TableName = TableName::new("identity.local_endpoint");

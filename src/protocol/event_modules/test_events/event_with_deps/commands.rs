@@ -1,3 +1,9 @@
+//! Commands for building dependency-cascade fixtures as real events.
+//!
+//! The staging command creates local wrapper events that contain shared event
+//! bytes. A CLI test can then replay those shared events in reverse order and
+//! prove the common worker's block/unblock path without direct table writes.
+
 use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::CommandOutput;
 
@@ -18,6 +24,9 @@ pub fn build_records(
     deps_per_event: usize,
     start_timestamp: u64,
 ) -> Result<Vec<EventRecord>, String> {
+    // Each event depends on up to `deps_per_event` immediately preceding events,
+    // producing a wide enough cascade to stress unblocking while keeping the
+    // graph easy to audit by index.
     if events == 0 {
         return Err("event_with_deps requires at least one event".to_string());
     }

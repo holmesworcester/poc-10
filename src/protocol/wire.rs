@@ -1,8 +1,21 @@
+//! Shared fixed-field wire helpers for protocol codecs.
+//!
+//! Event modules own their event formats, but they should not each invent a
+//! byte reader. This file gives them a small, explicit vocabulary for big-endian
+//! integers, fixed ids, raw bytes, and length-prefixed byte slices. A codec is
+//! still responsible for its tags, field order, and invariants; the helper only
+//! makes truncation and trailing data checks uniform.
+//!
+//! Keep this layer intentionally plain. It is not a schema language and it does
+//! not know which event type it is reading. The useful discipline is that every
+//! decoder consumes exactly the bytes it claims by calling `finish`.
+
 pub struct Writer {
     bytes: Vec<u8>,
 }
 
 impl Writer {
+    /// Start a new byte writer with no implied type tag or header.
     pub fn new() -> Self {
         Self { bytes: Vec::new() }
     }
@@ -60,6 +73,11 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    /// Read from a codec-owned byte slice.
+    ///
+    /// `label` is only for errors. It should name the event or nested item
+    /// being decoded so malformed bytes are diagnosable without teaching the
+    /// reader any protocol vocabulary.
     pub fn new(bytes: &'a [u8], label: &'static str) -> Self {
         Self { rest: bytes, label }
     }

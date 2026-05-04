@@ -1,3 +1,10 @@
+//! Sync domain.
+//!
+//! Sync is modeled as connection-scoped events plus a domain worker. Projectors
+//! put transient sync frames into the connection outbox; the worker decides what
+//! compare/have/need/data items to produce by querying event indexes. This keeps
+//! reconciliation protocol logic out of the common admission worker.
+
 pub mod cli;
 pub mod compare;
 pub mod data;

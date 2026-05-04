@@ -1,3 +1,10 @@
+//! Wire codec for connection request events.
+//!
+//! A request is transient protocol traffic: it is a real event for projection
+//! and validation, but it is not durable history. The fixed magic prefix keeps
+//! connection establishment separate from ordinary tagged events, while
+//! `Reader::finish` ensures malformed extra bytes are rejected.
+
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 

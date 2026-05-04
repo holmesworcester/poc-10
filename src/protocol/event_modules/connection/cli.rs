@@ -1,3 +1,9 @@
+//! Connection CLI summaries.
+//!
+//! Command execution lives in `protocol::cli`; this file only owns the shape of
+//! connection-domain output. Keeping formatting data near the domain prevents
+//! the top-level CLI from accumulating knowledge about which counters matter.
+
 use std::net::SocketAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

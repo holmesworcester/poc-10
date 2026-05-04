@@ -1,3 +1,9 @@
+//! Codec for stored invite-secret events.
+//!
+//! The shareable invite link carries the secret to the invited peer. Locally we
+//! store the hash-to-secret mapping as an event so bootstrap authorization is a
+//! projected fact rather than hidden CLI state.
+
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 

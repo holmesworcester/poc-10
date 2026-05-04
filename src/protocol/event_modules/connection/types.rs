@@ -1,3 +1,10 @@
+//! Shared connection-domain types.
+//!
+//! The connection id is derived from the request id and accepting endpoint so
+//! both sides can agree on it without another round trip. Outbox keys pair that
+//! connection id with the inner event id, giving queued sends a deterministic
+//! identity before any transport wrapping introduces fresh nonces.
+
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::types::EventId;
 

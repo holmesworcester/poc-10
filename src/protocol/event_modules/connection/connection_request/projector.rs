@@ -1,4 +1,11 @@
-use super::super::tables as projection;
+//! Projector for connection request events.
+//!
+//! The projector only writes connection-domain rows. Local outbound requests
+//! are remembered so later acks can be validated. Inbound requests additionally
+//! create the established connection row after the bootstrap hash has been
+//! checked by the worker/command path.
+
+use super::super::schema as projection;
 use super::super::types;
 use super::codec;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;

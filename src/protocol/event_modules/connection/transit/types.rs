@@ -1,3 +1,10 @@
+//! Transit envelope data types.
+//!
+//! These values describe encrypted transport envelopes, not stored events.
+//! Bootstrap envelopes are endpoint-addressed. Connection envelopes add the
+//! established connection id so the worker can route the recovered inner bytes
+//! without consulting the payload.
+
 use crate::protocol::event_modules::connection::types::ConnectionId;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 

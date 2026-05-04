@@ -34,7 +34,7 @@ use crate::protocol::event_modules::types::EventRecord;
 use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
 
 use super::{
-    connection_ack, connection_request, queries, tables, transit, transport_target, types,
+    connection_ack, connection_request, queries, schema, transit, transport_target, types,
 };
 
 /// Transport metadata attached to one inbound frame.
@@ -242,7 +242,7 @@ fn mark_outbox_sent(store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), Stri
     // network rows. A crash before this point may resend duplicate protocol
     // events, which is acceptable because event ids and outbox keys dedupe.
     store
-        .delete_table_rows(tables::OUTBOX, sent_outbox)
+        .delete_table_rows(schema::OUTBOX, sent_outbox)
         .map(|_| ())
         .map_err(|err| format!("delete sent outbox rows: {err}"))
 }

@@ -1,5 +1,18 @@
+//! Protocol-wide event metadata.
+//!
+//! Concrete event bodies live in leaf module `types.rs` files. This file holds
+//! only the common envelope facts the admission worker needs for every decoded
+//! event: deterministic id, timestamp, body length, dependencies, scope, and
+//! durable status. Keeping the common shape small is what lets projectors stay
+//! pure and modules stay independently understandable.
+
 pub type EventId = [u8; 32];
 
+/// Decoded canonical event plus the metadata needed by the common worker.
+///
+/// `canonical_bytes` is stored because event ids, network transfer, and replay
+/// all operate on the exact encoded bytes. Semantic fields should not be added
+/// here unless every event type truly shares them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
     pub timestamp: u64,
@@ -9,6 +22,11 @@ pub struct EventRecord {
     pub scope: EventScope,
 }
 
+/// Storage and sharing policy for an event.
+///
+/// `Shared` participates in sync. `Local` is durable but node-local. `Transient`
+/// is a real event for projection and routing purposes but is not stored in the
+/// durable event history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventScope {
     Shared,
@@ -35,6 +53,7 @@ impl EventScope {
     }
 }
 
+/// Durable admission status for shared/local events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventStatus {
     Ready,

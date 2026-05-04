@@ -1,3 +1,10 @@
+//! Codec for shared content events.
+//!
+//! Content events are intentionally small in meaning and large in bytes. The
+//! codec extracts timestamp and payload length without requiring projection to
+//! understand payload contents. That keeps sync performance tests honest: bytes
+//! are real event bytes, not side-channel fixtures.
+
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 
@@ -36,6 +43,8 @@ pub fn validate(bytes: &[u8]) -> Result<(), String> {
 }
 
 fn metadata(bytes: &[u8]) -> Result<ContentMetadata, String> {
+    // Metadata parsing validates the full record but avoids allocating the
+    // payload, which is useful when building the common event header.
     let mut reader = Reader::new(bytes, "content event");
     let tag = reader.u8()?;
     if tag != TYPE_CONTENT {

@@ -1,3 +1,17 @@
+//! Opaque byte queues used by the TCP pump.
+//!
+//! Core owns the mechanics of queueing bytes by route because the TCP code
+//! needs a durable place to stage frames before and after socket writes. It does
+//! not own the bytes' meaning. The only interpretation here is the route key
+//! needed to claim a bounded batch for one remote address without scanning every
+//! pending row.
+//!
+//! The queue key is intentionally deterministic: the same route and same bytes
+//! map to the same row. That gives the boundary a cheap idempotence property
+//! while callers are still free to retry after crashes. If this file starts
+//! parsing the payload, naming protocol concepts, or deciding when a row should
+//! be produced, it has crossed out of core and into an event module.
+
 use std::net::SocketAddr;
 use std::str::FromStr;
 
@@ -5,6 +19,12 @@ use crate::core::store::{Schema, Store, TableName, TableRow};
 
 pub const OUTBOUND_TABLE: TableName = TableName::new("core.network.outbound");
 pub const INBOUND_TABLE: TableName = TableName::new("core.network.inbound");
+
+/// Store declarations for the two core-owned byte queues.
+///
+/// Network queues are core IO state, so their schemas live here rather than in
+/// the protocol registry. They still use the same generic row-table shape as
+/// module-owned tables.
 pub const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("core.network.outbound.v1", OUTBOUND_TABLE),
     Schema::durable_row_table("core.network.inbound.v1", INBOUND_TABLE),
@@ -74,6 +94,7 @@ impl InboundNetworkRow {
     }
 }
 
+/// Build deterministic queued rows for a target and a set of opaque frames.
 pub fn outbound_rows(target: NetworkTarget, frames: Vec<Vec<u8>>) -> Vec<OutboundNetworkRow> {
     frames
         .into_iter()
@@ -81,12 +102,22 @@ pub fn outbound_rows(target: NetworkTarget, frames: Vec<Vec<u8>>) -> Vec<Outboun
         .collect()
 }
 
+/// Insert outbound rows idempotently.
+///
+/// The store handles the transaction; this helper only converts typed queue
+/// rows to generic `TableRow`s. Deletion is a separate, explicit step so callers
+/// can commit their own "sent" bookkeeping at the right boundary.
 pub fn enqueue_outbound(store: &Store, rows: &[OutboundNetworkRow]) -> Result<usize, String> {
     store
         .insert_table_rows(rows.iter().map(outbound_table_row).collect())
         .map_err(|err| format!("enqueue outbound network rows: {err}"))
 }
 
+/// Claim at most `limit` outbound rows for one concrete target.
+///
+/// The target prefix in the row key is the performance property that matters:
+/// a slow route does not require a full-table scan and does not block other
+/// routes from being claimed by their own callers.
 pub fn claim_outbound_for_target(
     store: &Store,
     target: NetworkTarget,
@@ -100,6 +131,7 @@ pub fn claim_outbound_for_target(
         .collect()
 }
 
+/// Remove outbound rows that have been successfully handed off by the caller.
 pub fn delete_outbound(store: &Store, rows: &[OutboundNetworkRow]) -> Result<(), String> {
     store
         .delete_table_rows(
@@ -110,12 +142,14 @@ pub fn delete_outbound(store: &Store, rows: &[OutboundNetworkRow]) -> Result<(),
         .map_err(|err| format!("delete outbound network rows: {err}"))
 }
 
+/// Insert inbound rows idempotently.
 pub fn enqueue_inbound(store: &Store, rows: &[InboundNetworkRow]) -> Result<usize, String> {
     store
         .insert_table_rows(rows.iter().map(inbound_table_row).collect())
         .map_err(|err| format!("enqueue inbound network rows: {err}"))
 }
 
+/// Remove inbound rows after the caller has accepted responsibility for them.
 pub fn delete_inbound(store: &Store, rows: &[InboundNetworkRow]) -> Result<(), String> {
     store
         .delete_table_rows(
@@ -193,6 +227,9 @@ fn read_u32(value: &[u8], offset: &mut usize) -> Result<u32, String> {
 }
 
 fn queue_key(kind: &[u8], addr: SocketAddr, bytes: &[u8]) -> Vec<u8> {
+    // Include direction, route, length, and bytes in the digest. The route is
+    // also present as a plain prefix for efficient claims; the digest makes the
+    // rest of the key compact and stable.
     let mut key = target_prefix(addr);
     let mut hasher = blake3::Hasher::new();
     hasher.update(kind);

@@ -1,3 +1,11 @@
+//! Transit envelope codec.
+//!
+//! Transit bytes are not canonical events and do not have event ids. They are
+//! encrypted envelopes around canonical inner bytes, used only at the connection
+//! boundary. The associated-data helpers intentionally encode every routing
+//! field covered by authentication, so unwrap can reject frames whose plaintext
+//! was copied under a different endpoint or connection.
+
 use crate::protocol::wire::{Reader, Writer};
 
 use super::types::{TransitEnvelope, TransitNonce};
@@ -41,6 +49,10 @@ pub fn associated_data(envelope: &TransitEnvelope) -> Vec<u8> {
     }
 }
 
+/// Encode the bytes that are authenticated but not encrypted.
+///
+/// Keep this in lockstep with `encode`: if a field affects routing or envelope
+/// identity, it must be present here as well.
 pub fn associated_data_bootstrap(
     sender_endpoint: &[u8; 32],
     recipient_endpoint: &[u8; 32],
@@ -135,6 +147,8 @@ pub fn decode(bytes: &[u8]) -> Result<TransitEnvelope, String> {
 }
 
 pub(crate) fn decode_ref(bytes: &[u8]) -> Result<TransitEnvelopeRef<'_>, String> {
+    // Borrow the ciphertext slice during decoding so unwrap can decrypt without
+    // first allocating a second copy.
     if !bytes.starts_with(MAGIC) {
         return Err("not a transit envelope".to_string());
     }

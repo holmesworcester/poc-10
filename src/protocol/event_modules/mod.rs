@@ -1,8 +1,20 @@
+//! Event-module registry and cross-domain protocol facade.
+//!
+//! Leaf modules own concrete event syntax and projection rules. Domain workers
+//! own active work such as unwrap, wrap, and sync comparison. This registry is
+//! the narrow place where those independent pieces are selected by tag and
+//! composed into user-facing commands.
+//!
+//! The file should read as routing, not implementation. A good addition here
+//! names which module owns a behavior and forwards to it. A suspicious addition
+//! starts decoding fields inline, writing rows directly, or making a network
+//! decision without going through the relevant worker.
+
 pub mod connection;
 pub mod content;
 pub mod identity;
+pub mod schema;
 pub mod sync;
-pub mod tables;
 pub mod test_events;
 pub mod types;
 pub mod worker;
@@ -19,6 +31,12 @@ use types::EventRecord;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules;
 
+/// Result of interpreting one inbound frame at the module boundary.
+///
+/// The fields are deliberately separated by responsibility: canonical events go
+/// to the common worker, raw outgoing bytes go to core network queues, and
+/// received durable bytes go back through normal admission. No caller should
+/// infer hidden state from a counter here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleFrameReport {
     pub events: Vec<EventRecord>,
@@ -30,6 +48,7 @@ pub struct ModuleFrameReport {
     pub received_event_bytes: Vec<Vec<u8>>,
 }
 
+/// Opaque bytes prepared for one route after draining protocol outbox rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundSync {
     pub target: NetworkTarget,
@@ -52,6 +71,9 @@ impl Modules {
         store: &Store,
         public_addr: SocketAddr,
     ) -> Result<CommandOutput<String>, String> {
+        // Invites depend on a local endpoint. If none exists yet, the endpoint
+        // command is proposed first and the invite command follows in the same
+        // admitted batch.
         let local = self.local_keypair(store)?;
         let invite = identity::invite::commands::create(local.value, public_addr);
         Ok(merge_outputs(local.events, invite))
@@ -67,7 +89,7 @@ impl Modules {
         num_events: usize,
         event_size: usize,
     ) -> Result<CommandOutput<content::content_event::commands::GenerateReport>, String> {
-        let start = tables::max_timestamp(store)
+        let start = schema::max_timestamp(store)
             .map_err(|err| format!("load max timestamp: {err}"))?
             .saturating_add(1);
         content::content_event::commands::generate(start, num_events, event_size)
@@ -79,7 +101,7 @@ impl Modules {
         events: usize,
         deps_per_event: usize,
     ) -> Result<CommandOutput<test_events::event_with_deps::commands::StageReport>, String> {
-        let start = tables::max_timestamp(store)
+        let start = schema::max_timestamp(store)
             .map_err(|err| format!("load max timestamp: {err}"))?
             .saturating_add(1);
         test_events::event_with_deps::commands::stage(events, deps_per_event, start)
@@ -110,6 +132,10 @@ impl Modules {
         remember_origin: bool,
         bytes: Vec<u8>,
     ) -> Result<ModuleFrameReport, String> {
+        // Inbound bytes are first interpreted by the connection worker because
+        // only that domain can distinguish bootstrap/connection envelopes from
+        // invalid traffic. Connection-scoped inner bytes are then dispatched to
+        // the domain that owns their event syntax.
         let metadata = connection::worker::FrameMetadata {
             origin,
             remember_origin,
@@ -252,6 +278,9 @@ impl Modules {
         store: &Store,
         event: &EventWithContext<'_>,
     ) -> Result<ProjectionOutput, String> {
+        // Projection dispatch is tag-based and intentionally shallow. Each
+        // branch immediately hands control to the owning domain so this registry
+        // does not accumulate projector logic.
         let bytes = &event.record.canonical_bytes;
         if let Some(output) = identity::project_record(bytes)? {
             return Ok(output);
@@ -283,13 +312,16 @@ impl Modules {
 }
 
 pub fn schemas() -> Vec<Schema> {
+    // Schema aggregation is explicit so storage ownership remains visible in
+    // review. Adding a module-owned table should add one line here and the
+    // actual declaration in that module's `schema.rs`.
     let mut out = Vec::new();
-    out.extend_from_slice(tables::SCHEMAS);
-    out.extend_from_slice(identity::endpoint::tables::SCHEMAS);
-    out.extend_from_slice(identity::invite::tables::SCHEMAS);
-    out.extend_from_slice(connection::tables::SCHEMAS);
-    out.extend_from_slice(connection::transport_target::tables::SCHEMAS);
-    out.extend_from_slice(test_events::event_with_deps::tables::SCHEMAS);
+    out.extend_from_slice(schema::SCHEMAS);
+    out.extend_from_slice(identity::endpoint::schema::SCHEMAS);
+    out.extend_from_slice(identity::invite::schema::SCHEMAS);
+    out.extend_from_slice(connection::schema::SCHEMAS);
+    out.extend_from_slice(connection::transport_target::schema::SCHEMAS);
+    out.extend_from_slice(test_events::event_with_deps::schema::SCHEMAS);
     out
 }
 
@@ -317,6 +349,9 @@ fn merge_outputs<T>(
 }
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
+    // Connection bootstrap records and sync frames use magic prefixes because
+    // they are transient protocol traffic. Ordinary shared/local event modules
+    // use a single leading type tag.
     if connection::connection_request::codec::is_request(&bytes) {
         return connection::connection_request::codec::record_from_bytes(bytes);
     }

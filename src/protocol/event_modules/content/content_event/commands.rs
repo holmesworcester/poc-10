@@ -1,3 +1,10 @@
+//! Commands for generating content events.
+//!
+//! Generation is deterministic from `(start_timestamp, count, size)`, which
+//! lets CLI tests compare counts and throughput without relying on random test
+//! fixtures. The command proposes shared events only; storing and projection are
+//! handled by the common worker.
+
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
@@ -34,6 +41,8 @@ pub fn generate(
 }
 
 fn payload(timestamp: u64, size: usize) -> Vec<u8> {
+    // Derive pseudo-random-looking bytes from the timestamp so large payload
+    // tests move nontrivial data while remaining reproducible.
     let mut seed = blake3::Hasher::new();
     seed.update(b"content-payload:");
     seed.update(&timestamp.to_be_bytes());

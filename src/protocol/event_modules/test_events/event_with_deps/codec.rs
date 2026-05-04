@@ -1,3 +1,10 @@
+//! Fixed-width codec for dependency-cascade test events.
+//!
+//! The event body is deliberately rigid: a timestamp, a bounded dependency
+//! array, and a fixed payload. This makes out-of-order replay tests deterministic
+//! and makes malformed dependency padding visible. The staged wrapper is a
+//! local-only event that stores canonical shared event bytes for later replay.
+
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 
@@ -29,6 +36,8 @@ pub fn encode(event: &EventWithDeps) -> Vec<u8> {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<EventWithDeps, String> {
+    // Unused dependency slots must be zero. This prevents two encodings of the
+    // same semantic dependency set from producing different event ids.
     if bytes.len() != ENCODED_BYTES {
         return Err("event_with_deps length mismatch".to_string());
     }

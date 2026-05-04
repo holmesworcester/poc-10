@@ -1,8 +1,16 @@
+//! Connection domain.
+//!
+//! Connection events establish the semantic relationship between two endpoints.
+//! They are distinct from transport targets, which are merely addresses where
+//! bytes might be sent right now. The domain owns request/ack event syntax,
+//! route facts, transit wrapping helpers, and the connection worker that bridges
+//! opaque network frames to canonical event bytes.
+
 pub mod cli;
 pub mod connection_ack;
 pub mod connection_request;
 pub mod queries;
-pub mod tables;
+pub mod schema;
 pub mod transit;
 pub mod transport_target;
 pub mod types;

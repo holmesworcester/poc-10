@@ -1,3 +1,9 @@
+//! Identity domain.
+//!
+//! Identity owns local endpoint material and invite secrets. These are local
+//! facts: they let this node create bootstrap traffic and decide whether an
+//! incoming request is authorized, but they are not shared content history.
+
 pub mod endpoint;
 pub mod invite;
 

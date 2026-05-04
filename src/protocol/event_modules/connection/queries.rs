@@ -1,14 +1,22 @@
+//! Read-only connection views.
+//!
+//! These helpers are the only way workers look at connection-owned rows. They
+//! resolve semantic connection ids to remote endpoints, load stored connection
+//! events needed for validation, and enumerate queued inner event bytes. They
+//! never mutate rows; doing so here would make worker effects impossible to
+//! audit.
+
 use crate::core::store::Store;
 use crate::protocol::event_modules::identity::endpoint::queries::endpoint_id;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
-use crate::protocol::event_modules::tables as event_tables;
+use crate::protocol::event_modules::schema as event_schema;
 
-use super::tables;
+use super::schema;
 use super::types::{connection_id_from_bytes, ConnectionId, OutboxItem, OutboxKey};
 
 pub fn remote_endpoint(store: &Store, connection_id: &ConnectionId) -> Result<EndpointId, String> {
     let bytes = store
-        .table_row(tables::CONNECTIONS, connection_id)
+        .table_row(schema::CONNECTIONS, connection_id)
         .map_err(|err| format!("load connection: {err}"))?
         .ok_or_else(|| "unknown connection".to_string())?;
     endpoint_id(&bytes)
@@ -16,19 +24,19 @@ pub fn remote_endpoint(store: &Store, connection_id: &ConnectionId) -> Result<En
 
 pub fn event_bytes(store: &Store, event_id: &[u8; 32]) -> Result<Option<Vec<u8>>, String> {
     store
-        .table_row(tables::CONNECTION_EVENTS, event_id)
+        .table_row(schema::CONNECTION_EVENTS, event_id)
         .map_err(|err| format!("load connection event: {err}"))
 }
 
 pub fn connection_count(store: &Store) -> Result<usize, String> {
     store
-        .table_row_count(tables::CONNECTIONS)
+        .table_row_count(schema::CONNECTIONS)
         .map_err(|err| format!("count connections: {err}"))
 }
 
 pub fn connection_event_count(store: &Store) -> Result<usize, String> {
     store
-        .table_row_count(tables::CONNECTION_EVENTS)
+        .table_row_count(schema::CONNECTION_EVENTS)
         .map_err(|err| format!("count connection events: {err}"))
 }
 
@@ -45,14 +53,18 @@ pub fn outbox_items_for_connection(
 }
 
 pub fn all_outbox_items(store: &Store) -> Result<Vec<OutboxItem>, String> {
+    // An empty row value means "send the durable event with this id"; a nonempty
+    // row value means "send exactly these transient bytes." That keeps durable
+    // data deduped in the event store while still letting connection-scoped
+    // protocol events use the same queue.
     let rows = store
-        .table_rows(tables::OUTBOX)
+        .table_rows(schema::OUTBOX)
         .map_err(|err| format!("load outbox: {err}"))?;
     let mut items = Vec::with_capacity(rows.len());
     for (key, value) in rows {
         let key = decode_outbox_key(&key)?;
         let event_bytes = if value.is_empty() {
-            let Some(event_bytes) = event_tables::event_bytes(store, &key.event_id)
+            let Some(event_bytes) = event_schema::event_bytes(store, &key.event_id)
                 .map_err(|err| format!("load outbox event: {err}"))?
             else {
                 continue;

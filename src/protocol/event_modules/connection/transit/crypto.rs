@@ -1,3 +1,15 @@
+//! Cryptographic primitive wrapper for transit envelopes.
+//!
+//! The protocol uses endpoint X25519 keys directly for this POC. For each
+//! envelope, both sides derive a symmetric key from Diffie-Hellman output and a
+//! purpose string, then use XChaCha20-Poly1305 with codec-provided associated
+//! data. The purpose string is part of the invariant: bootstrap and established
+//! connection traffic must not share keys even when the endpoints are the same.
+//!
+//! Keep policy out of this file. It encrypts, decrypts, derives keys, and makes
+//! nonces; it does not decide whether a sender is authorized or whether an
+//! inner event should be accepted.
+
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
@@ -65,6 +77,8 @@ fn derive_key(
     remote_endpoint: &EndpointId,
     purpose: &[u8],
 ) -> Result<[u8; 32], String> {
+    // HKDF domain-separates by purpose, so the same endpoint pair can safely be
+    // used for the bootstrap and ordinary connection envelope families.
     let secret = StaticSecret::from(*local_secret);
     let remote = PublicKey::from(*remote_endpoint);
     let shared = secret.diffie_hellman(&remote);

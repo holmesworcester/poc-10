@@ -1,3 +1,3 @@
 pub mod codec;
-pub mod tables;
+pub mod schema;
 pub mod types;

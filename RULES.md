@@ -15,7 +15,7 @@ the rule is still prose/review only.
 | Core is protocol-agnostic queue/storage support. | static | `core_does_not_import_protocol`, `core_does_not_own_protocol_worker_or_wire_codec`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `event_modules_worker_has_no_domain_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
 | Core stays small and named. | static | `core_file_set_stays_small_and_named`. |
 | Core store is a schema runner and row substrate, not a protocol fact store. | typed + static | [Schema](src/core/store.rs), [SchemaDefinition](src/core/store.rs), [TableName](src/core/store.rs), [TableRow](src/core/store.rs), `core_store_is_row_only_not_protocol_fact_storage`, `core_store_applies_only_declared_schemas`, `store_table_rows_use_typed_table_names`. |
-| Protocol event modules own common fact/status/dependency tables. | typed + static | [event_modules/tables.rs](src/protocol/event_modules/tables.rs), `protocol_event_tables_own_common_fact_indexes`. |
+| Protocol event modules own common fact/status/dependency tables. | typed + static | [event_modules/schema.rs](src/protocol/event_modules/schema.rs), `protocol_event_schema_owns_common_fact_indexes`. |
 | Generic Crux command driving is core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), `crux_core_is_isolated_to_core`, core vocabulary checks. |
 | Worker admission/apply is scoped to event modules, not protocol root. | partial | [worker::run](src/protocol/event_modules/worker.rs) is the shared admission/apply entrypoint; there is not yet a typed worker catalog for all worker classes. |
 | Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
@@ -25,7 +25,7 @@ the rule is still prose/review only.
 | `protocol/app` is forbidden; CLI behavior is scoped. | static + partial | `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`; `src/protocol/cli.rs` still contains temporary cross-scope CLI orchestration for the synchronous POC. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
-| Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_tables_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
+| Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_schema_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only. | static | `event_module_queries_are_read_only`. |
 | `EventRecord` literals are constructed only by codecs. | static | `event_records_are_constructed_only_by_codecs`. |
 | Codecs use shared binary helpers and reject trailing bytes. | static + partial | `codec_files_use_shared_binary_helpers_and_finish_reads`; this catches common drift but is not a formal fixed-width proof. |
@@ -60,10 +60,10 @@ The following rules should stay mechanically enforced where practical:
 - Codec files do not define public semantic types, and every codec module has a
   sibling `types.rs`.
 - Domain roots contain only child event modules plus shared domain files:
-  `mod.rs`, `worker.rs`, `tables.rs`, `queries.rs`, `types.rs`, and `cli.rs`.
+  `mod.rs`, `worker.rs`, `schema.rs`, `queries.rs`, `types.rs`, and `cli.rs`.
 - Child directories under `event_modules/<domain>/` are canonical event modules
   and must carry the standard shape: `mod.rs`, `types.rs`, `codec.rs`, and
-  `tables.rs` at minimum. Shared domain tables, queues, and helper types live at
+  `schema.rs` at minimum. Shared domain schema, queues, and helper types live at
   the domain root instead of masquerading as event modules.
 - Event-module files use standard concern names only. New concern files require
   an explicit boundary decision and a static-test update.
@@ -83,10 +83,10 @@ The following rules should stay mechanically enforced where practical:
   the generic key/value row-table schema helper. It must not define event ids,
   event records, event statuses, labels, missing-dep edges, protocol indexes,
   network queue semantics, or any protocol table schema. Protocol tables are
-  declared by `tables.rs` files and passed to store at open time.
-- `protocol/event_modules/tables.rs` owns the protocol-wide fact/status,
+  declared by `schema.rs` files and passed to store at open time.
+- `protocol/event_modules/schema.rs` owns the protocol-wide fact/status,
   missing-dep, ready-event, partition-index, and label rows used by the
-  shared event-module worker. Scoped event modules own their own `tables.rs`
+  shared event-module worker. Scoped event modules own their own `schema.rs`
   declarations for domain rows and queues.
 - Core has a small allowlisted file set and must not contain domain vocabulary
   such as workspace, content, endpoint, identity, invite, or message.
@@ -103,7 +103,7 @@ The following rules should stay mechanically enforced where practical:
   the protocol worker registry trait.
 - Projectors are row-only boundaries: no `CommandOutput`, `ProposedEvent`,
   `EventRecord`, IO effects, transport work, or transit creation.
-- Table names and schemas are declared in the owning `tables.rs` scope as typed
+- Table names and schemas are declared in the owning `schema.rs` scope as typed
   `TableName` and `Schema` values; projectors and queries use those
   declarations. Ordinary row tables should use `Schema::durable_row_table` or
   `Schema::temp_row_table` so the module owns the table name while store owns
@@ -163,7 +163,7 @@ only. They cannot emit events. If projection discovers follow-on work, it writes
 a module-owned queue row; a module worker reads that queue, queries context,
 runs a command, and sends the command's proposed events back through the worker.
 Generic event labels are protocol event-module state declared under
-`protocol/event_modules/tables.rs`; they are not a core store concept.
+`protocol/event_modules/schema.rs`; they are not a core store concept.
 
 Module workers are the active boundary. A `worker.rs` file exports exactly one
 public free function, `run`; work/output types may be public, and all helper
@@ -190,8 +190,8 @@ event_modules/<domain>/<module>/types.rs
 event_modules/<domain>/<module>/projector.rs
   EventWithContext -> ProjectionOutput { rows, labels }
 
-event_modules/<domain>/<module>/tables.rs
-  module-owned projection tables, indexes, queues, cursors, and storage class
+event_modules/<domain>/<module>/schema.rs
+  module-owned projection schema, indexes, queues, cursors, and storage class
 
 event_modules/<domain>/<module>/cli.rs
   optional module-local CLI help, parameters, queries, and output formatting
@@ -203,7 +203,7 @@ event_modules/<domain>/cli.rs
   optional domain-level CLI registry/help for commands spanning child modules
 ```
 
-Leaf event modules own event types. Domain roots may own shared `tables.rs`,
+Leaf event modules own event types. Domain roots may own shared `schema.rs`,
 `queries.rs`, `types.rs`, `worker.rs`, and `cli.rs`. Do not create an
 event-module directory for an algorithm unless it defines an actual canonical
 event type.
@@ -308,7 +308,7 @@ module-declared row tables. It must not expose event ids, event status, labels,
 missing-dep edges, sync buckets, connection/bootstrap schema, content payload
 semantics, or network queue semantics as storage concepts.
 `core/network_queues.rs` owns typed network queue rows and encodes them through
-generic `TableRow`s. Protocol and module `tables.rs` files declare the tables
+generic `TableRow`s. Protocol and module `schema.rs` files declare the tables
 the selected protocol needs; core executes those declarations without learning
 their protocol meaning.
 
@@ -441,7 +441,7 @@ Projection =
   rows
 ```
 
-Rows may target module-owned projection tables, indexes, labels, queues,
+Rows may target module-owned projection schema, indexes, labels, queues,
 outbox, or purge/compaction tables. They are still rows. Projectors do not
 return events or effects.
 
@@ -461,7 +461,7 @@ Event modules may:
 
 - decode and encode canonical event bytes
 - declare dependencies
-- declare owned tables, indexes, and storage class (`durable`, `memory`, or
+- declare owned schema, indexes, and storage class (`durable`, `memory`, or
   `temp`)
 - query through a narrow read context
 - return canonical events from commands
@@ -699,7 +699,7 @@ CLI tests must not depend on:
 - whether storage is backed by the old state modules or the new core store
 
 The CLI test harness may spawn processes, allocate temp directories, choose
-ports, and assert command output. It must not create core tables, insert rows,
+ports, and assert command output. It must not create core schema, insert rows,
 copy databases, simulate sync, or decode private storage layout.
 
 Prefer stable machine-readable CLI outputs for tests where ambiguity matters:
@@ -774,7 +774,7 @@ protocol/event_modules/<name>/commands.rs
 protocol/event_modules/<name>/codec.rs
 protocol/event_modules/<name>/types.rs
 protocol/event_modules/<name>/projector.rs
-protocol/event_modules/<name>/tables.rs
+protocol/event_modules/<name>/schema.rs
 protocol/event_modules/<name>/queries.rs   # only when needed
 protocol/event_modules/<name>/mod.rs
 ```
@@ -783,7 +783,7 @@ Domain roots may additionally contain:
 
 ```text
 protocol/event_modules/<domain>/worker.rs
-protocol/event_modules/<domain>/tables.rs
+protocol/event_modules/<domain>/schema.rs
 protocol/event_modules/<domain>/queries.rs
 protocol/event_modules/<domain>/types.rs
 ```

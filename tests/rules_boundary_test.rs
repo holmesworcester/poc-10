@@ -77,7 +77,7 @@ fn event_modules_are_directories() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
         .filter(|path| {
             path.file_name()
-                .is_none_or(|name| name != "mod.rs" && name != "worker.rs" && name != "tables.rs")
+                .is_none_or(|name| name != "mod.rs" && name != "worker.rs" && name != "schema.rs")
                 && path.file_name().is_none_or(|name| name != "types.rs")
         })
         .collect::<Vec<_>>();
@@ -131,7 +131,7 @@ fn domain_roots_contain_only_children_and_shared_domain_files() {
     let allowed_domain_files = [
         "mod.rs",
         "worker.rs",
-        "tables.rs",
+        "schema.rs",
         "queries.rs",
         "types.rs",
         "cli.rs",
@@ -175,7 +175,7 @@ fn event_module_files_use_only_standard_concern_names() {
         "projector.rs",
         "queries.rs",
         "registry_meta.rs",
-        "tables.rs",
+        "schema.rs",
         "types.rs",
         "worker.rs",
     ];
@@ -211,7 +211,7 @@ fn child_event_module_directories_have_canonical_shape() {
             if !child.is_dir() {
                 continue;
             }
-            for required in ["mod.rs", "types.rs", "codec.rs", "tables.rs"] {
+            for required in ["mod.rs", "types.rs", "codec.rs", "schema.rs"] {
                 if !child.join(required).exists() {
                     offenders.push(format!(
                         "{}/{}",
@@ -225,7 +225,7 @@ fn child_event_module_directories_have_canonical_shape() {
 
     assert!(
         offenders.is_empty(),
-        "child directories under event_modules are canonical event modules; shared tables/queues belong at the domain root:\n{}",
+        "child directories under event_modules are canonical event modules; shared schema/queues belong at the domain root:\n{}",
         offenders.join("\n")
     );
 }
@@ -697,7 +697,7 @@ fn core_store_is_row_only_not_protocol_fact_storage() {
     for needle in forbidden {
         assert!(
             !text.contains(needle),
-            "core/store.rs must be a generic row store; protocol fact storage belongs in protocol/event_modules/tables.rs: contains {needle}"
+            "core/store.rs must be a generic row store; protocol fact storage belongs in protocol/event_modules/schema.rs: contains {needle}"
         );
     }
     assert!(
@@ -735,9 +735,9 @@ fn core_store_applies_only_declared_schemas() {
 }
 
 #[test]
-fn protocol_event_tables_own_common_fact_indexes() {
+fn protocol_event_schema_owns_common_fact_indexes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = source_text(&root.join("src/protocol/event_modules/tables.rs"));
+    let text = source_text(&root.join("src/protocol/event_modules/schema.rs"));
     for required in [
         "pub const SCHEMAS",
         "pub const EVENTS",
@@ -751,7 +751,7 @@ fn protocol_event_tables_own_common_fact_indexes() {
     ] {
         assert!(
             text.contains(required),
-            "protocol/event_modules/tables.rs should own common protocol fact/index storage: missing {required}"
+            "protocol/event_modules/schema.rs should own common protocol fact/index storage: missing {required}"
         );
     }
 }
@@ -1007,12 +1007,12 @@ fn event_module_types_do_not_store_encoded_event_artifacts() {
 }
 
 #[test]
-fn table_names_are_declared_in_tables_files() {
+fn table_names_are_declared_in_schema_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
     let mut violations = Vec::new();
     for path in rust_files(&event_root) {
-        if path.file_name().is_some_and(|name| name == "tables.rs") {
+        if path.file_name().is_some_and(|name| name == "schema.rs") {
             continue;
         }
         let text = source_text(&path);
@@ -1022,7 +1022,7 @@ fn table_names_are_declared_in_tables_files() {
     }
     assert!(
         violations.is_empty(),
-        "module table names belong in tables.rs as typed TableName declarations, with projectors/queries using those declarations:\n{}",
+        "module table names belong in schema.rs as typed TableName declarations, with projectors/queries using those declarations:\n{}",
         violations.join("\n")
     );
 }
@@ -1162,7 +1162,7 @@ fn projection_output_contains_rows_and_labels_not_events() {
     let body = &text[start..text[start..].find("impl ProjectionOutput").unwrap() + start];
     assert!(
         body.contains("pub rows: Vec<TableRow>")
-            && body.contains("pub labels: Vec<tables::EventLabel>")
+            && body.contains("pub labels: Vec<schema::EventLabel>")
             && !body.contains("EventRecord")
             && !body.contains("events"),
         "ProjectionOutput is projector-facing and must carry rows/labels only, not events"

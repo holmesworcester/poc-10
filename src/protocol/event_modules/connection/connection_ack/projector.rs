@@ -1,7 +1,14 @@
+//! Projector for connection ack events.
+//!
+//! A local outbound ack only records the ack event. An inbound ack must match
+//! the original request and the local endpoint before it can create the
+//! connection row. The projector returns rows only; it relies on its caller to
+//! supply the request bytes as explicit context.
+
 use crate::protocol::event_modules::worker::ProjectionOutput;
 
 use super::super::connection_request;
-use super::super::tables as projection;
+use super::super::schema as projection;
 use super::super::types;
 use super::codec;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;

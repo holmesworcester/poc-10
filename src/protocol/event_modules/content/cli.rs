@@ -1,3 +1,8 @@
+//! Content CLI summaries.
+//!
+//! The content module owns the words used to report generated event ranges, so
+//! the top-level CLI can compose output without knowing content internals.
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerateSummary {
     pub generated_events: usize,

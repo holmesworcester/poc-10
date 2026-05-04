@@ -1,3 +1,9 @@
+//! Codec for have-id sync items.
+//!
+//! A have-id item advertises one event id in one bucket. It is cheap to
+//! duplicate and cheap to dedupe, which is why it can remain a simple item
+//! inside a transient sync frame.
+
 use crate::protocol::wire::{Reader, Writer};
 
 use super::types::HaveIdEvent;
