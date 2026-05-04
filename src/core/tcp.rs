@@ -6,7 +6,9 @@
 //! bytes belongs to workers outside core that read and write queue rows; the
 //! callbacks here are only handoff points for tests and the current CLI runner.
 //!
-//! The invariant is that socket success and protocol success are separate. A
+//! The invariant is routing correctness: each outbound row is sent only on the
+//! stream for its `NetworkTarget`, and each inbound row is recorded with the
+//! `NetworkSource` observed from the socket before any worker sees the bytes. A
 //! frame is first written to a core queue row, then handed to the caller, and
 //! only deleted after the caller accepts responsibility for it. The same shape
 //! is used on send: callers provide opaque rows, this pump writes frames, and
