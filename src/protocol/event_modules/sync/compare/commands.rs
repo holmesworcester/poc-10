@@ -25,10 +25,10 @@ pub fn start(
     connection_id: EventId,
     mut emit: impl FnMut(Vec<u8>) -> Result<(), String>,
 ) -> Result<SyncReport, String> {
-    let mut items = vec![SyncItem::Compare(CompareEvent {
+    let mut items = vec![SyncItem::Compare(Box::new(CompareEvent {
         connection_id,
         summary: context.summary()?,
-    })];
+    }))];
     items.extend(all_have_items(context, connection_id)?);
     emit_items(items, &mut emit)?;
     Ok(SyncReport::default())

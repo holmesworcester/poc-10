@@ -1,6 +1,6 @@
+pub mod actors;
 pub mod app;
 pub mod event_modules;
-pub mod inbound;
 pub mod network;
 
 use crate::core::pipeline::EventRegistry;

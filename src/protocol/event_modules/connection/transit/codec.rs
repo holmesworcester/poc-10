@@ -162,6 +162,6 @@ pub(crate) fn decode_ref(bytes: &[u8]) -> Result<TransitEnvelopeRef<'_>, String>
 fn nonce24(reader: &mut Reader<'_>) -> Result<TransitNonce, String> {
     let bytes = reader.slice(24)?;
     let mut nonce = [0; 24];
-    nonce.copy_from_slice(&bytes);
+    nonce.copy_from_slice(bytes);
     Ok(nonce)
 }

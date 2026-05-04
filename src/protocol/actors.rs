@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use crate::core::pipeline;
+use crate::core::control_loop::PipelineActor;
 use crate::core::store::{EventRecord, Store};
 use crate::protocol::event_modules::Modules;
 
@@ -32,7 +32,7 @@ pub fn ingest_frame(
         report.received_event_bytes,
     )?);
     let outbox = report.drain_outbox_for;
-    pipeline::admit_records(store, modules, report.events)?;
+    PipelineActor::new(store, modules).admit_records(report.events)?;
     let mut outgoing = report.outgoing;
     let mut sent_outbox = Vec::new();
     if let Some(route_id) = outbox {

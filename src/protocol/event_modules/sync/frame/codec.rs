@@ -36,7 +36,9 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
     let mut items = Vec::with_capacity(item_count);
     for _ in 0..item_count {
         let item = match reader.u8()? {
-            compare::codec::TAG => SyncItem::Compare(compare::codec::decode(&mut reader)?),
+            compare::codec::TAG => {
+                SyncItem::Compare(Box::new(compare::codec::decode(&mut reader)?))
+            }
             have_id::codec::TAG => SyncItem::HaveId(have_id::codec::decode(&mut reader)?),
             need_id::codec::TAG => SyncItem::NeedId(need_id::codec::decode(&mut reader)?),
             data::codec::TAG => SyncItem::Data(data::codec::decode(&mut reader)?),

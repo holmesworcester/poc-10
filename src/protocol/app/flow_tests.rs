@@ -1,9 +1,12 @@
 use std::{collections::VecDeque, net::SocketAddr};
 
-use crux_core::{App, Command};
+use crux_core::App;
 
 use super::*;
-use crate::core::control_loop;
+use crate::core::{
+    control_loop,
+    crux_runner::{self, EffectHandler},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TranscriptEntry {
@@ -110,36 +113,12 @@ struct FakeShell {
 
 impl FakeShell {
     fn run(&mut self, app: &ProtocolApp, model: &mut ProtocolModel, event: ProtocolMsg) {
-        let mut pending = VecDeque::from([event]);
-        while let Some(event) = pending.pop_front() {
-            let mut command = app.update(event, model);
-            self.drain_command(&mut command, &mut pending);
-        }
+        crux_runner::run(app, model, event, self).expect("flow should complete");
     }
+}
 
-    fn drain_command(
-        &mut self,
-        command: &mut Command<ProtocolEffect, ProtocolMsg>,
-        pending: &mut VecDeque<ProtocolMsg>,
-    ) {
-        loop {
-            let effects = command.effects().collect::<Vec<_>>();
-            let events = command.events().collect::<Vec<_>>();
-            let made_progress = !effects.is_empty() || !events.is_empty();
-
-            for effect in effects {
-                self.handle_effect(effect);
-            }
-            pending.extend(events);
-
-            if command.is_done() {
-                break;
-            }
-            assert!(made_progress, "protocol command stalled");
-        }
-    }
-
-    fn handle_effect(&mut self, effect: ProtocolEffect) {
+impl EffectHandler<ProtocolEffect> for FakeShell {
+    fn handle_effect(&mut self, effect: ProtocolEffect) -> Result<(), String> {
         match effect {
             ProtocolEffect::Store(mut request) => match request.operation.clone() {
                 StoreOp::CreateInvite { public_addr } => {
@@ -402,6 +381,7 @@ impl FakeShell {
                 }
             },
         }
+        Ok(())
     }
 }
 

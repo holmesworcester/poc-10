@@ -1,5 +1,38 @@
 # Rules
 
+## Enforcement Checklist
+
+Legend: **typed** means Rust types make the invalid shape hard or impossible to
+express; **static** means a boundary test scans or inspects source; **partial**
+means the guard exists but does not prove the whole rule; **uncovered** means
+the rule is still prose/review only.
+
+| Rule | Status | Enforcement |
+| --- | --- | --- |
+| Commands return proposed events, not rows/effects/storage writes. | typed + static | [CommandOutput](src/core/store.rs), `command_output_contains_events_not_state_changes`, `event_module_commands_do_not_mutate_storage_directly` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
+| Proposed event ids are deterministic from canonical bytes. | typed + static | [ProposedEvent](src/core/store.rs), `proposed_event_carries_deterministic_id_and_record`. |
+| Projectors return rows only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/core/store.rs), `projection_output_contains_rows_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
+| Core is protocol-agnostic. | static | `core_does_not_import_protocol`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `pipeline_has_no_protocol_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
+| Core stays small and named. | static | `core_file_set_stays_small_and_named`. |
+| Generic Crux command driving is core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), `core_file_set_stays_small_and_named`, core vocabulary checks. |
+| Pipeline admission/apply is an actor boundary. | partial | [PipelineActor](src/core/control_loop.rs) exists and app code uses it; there is not yet a typed actor catalog for all actor classes. |
+| Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
+| `event.rs` is forbidden; semantic types live in `types.rs`; codecs do encode/decode only. | static | `event_modules_do_not_use_event_rs`, `codec_files_do_not_define_public_types`, `codec_modules_have_type_files`. |
+| Domain actors live at `event_modules/<domain>/actor.rs`. | static + partial | `actor_files_live_at_event_module_domain_roots`; no typed actor trait/catalog yet. |
+| Connection and sync operational logic lives in actors, not app/network/core. | partial | [connection/actor.rs](src/protocol/event_modules/connection/actor.rs), [sync/actor.rs](src/protocol/event_modules/sync/actor.rs), [protocol/actors.rs](src/protocol/actors.rs); static checks prevent core/network leaks, but do not yet prove every protocol action is actor-owned. |
+| Protocol app is only the current CLI adapter shell. | static + partial | `protocol_app_files_are_limited_to_cli_adapter_concerns`, `protocol_app_and_protocol_actors_do_not_import_event_families_directly`; app still owns current Topo CLI flow vocabulary until module-local `cli.rs` adapters exist. |
+| CLI scenario/check/expect definitions live beside relevant event modules. | partial | Documented in [plan.md](plan.md) and checked indirectly by the app file allowlist; no scenario-runner type or migrated scenario definitions yet. |
+| Network is TCP framing only. | static | `protocol_network_remains_tcp_framing_only`, sync transport checks. |
+| Table names are declared in `tables.rs`. | static | `table_names_are_declared_in_tables_files`. |
+| Query modules are read-only. | static | `event_module_queries_are_read_only`. |
+| `EventRecord` literals are constructed only by codecs/core store. | static | `event_records_are_constructed_only_by_codecs_or_core_tests`. |
+| Codecs use shared binary helpers and reject trailing bytes. | static + partial | `codec_files_use_shared_binary_helpers_and_finish_reads`; this catches common drift but is not a formal fixed-width proof. |
+| `types.rs` does not store encoded/canonical artifacts as semantic fields. | static | `event_module_types_do_not_store_encoded_event_artifacts`. |
+| Transit/crypto naming must not claim fake protection. | static + partial | `source_does_not_contain_fake_crypto_claims`; cryptographic correctness still needs implementation review and tests. |
+| Functional proof comes from black-box CLI/network tests, except pure projector/command tests. | partial | Existing tests spawn the real `topo` binary for sync/generate/cascade paths; this remains a process/testing rule, not a type guarantee. |
+| Jobs/actors with cursors, leases, fairness, and wake declarations are the long-term control loop. | uncovered | Described in [plan.md](plan.md); only the ready-event `PipelineActor`, protocol inbound actor, connection actor, and sync actor exist in the current POC. |
+| Rust idiom and common correctness lints pass. | static | Run `cargo clippy --all-targets -- -D warnings` in addition to `cargo test`; Clippy complements but does not replace [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
+
 ## Rules Intended To Be Covered By Types And Static Checks
 
 Prefer enforcement in this order:
@@ -35,10 +68,16 @@ The following rules should stay mechanically enforced where practical:
 - Dumping-ground directories such as `jobs`, `cli_commands`, `runtime`,
   `state`, and algorithm-only `negentropy` are forbidden under
   `event_modules`.
+- Domain actors live at `event_modules/<domain>/actor.rs`, not inside leaf
+  event modules. Leaf modules write queues; the domain actor coordinates shared
+  queues and cursors when needed.
 - Core never imports protocol modules and does not contain protocol vocabulary
   such as connection, transit, sync, outbox, TCP, sockets, or bootstrap schema.
 - Core has a small allowlisted file set and must not contain domain vocabulary
   such as workspace, content, endpoint, identity, invite, or message.
+- Generic Crux command driving belongs in core; protocol-specific app files are
+  limited to CLI adapter concerns (`crux_app`, flows, effects, shell, effect
+  interpreters, model, summaries, and shell-flow tests).
 - The core pipeline is generic admission/apply plumbing; protocol branching
   belongs behind the protocol module registry.
 - Sync modules do not own TCP/frame IO, and core/network code does not contain
@@ -58,14 +97,23 @@ The following rules should stay mechanically enforced where practical:
   rejected.
 - `types.rs` does not store encoded/canonical event artifacts as semantic
   fields.
-- `protocol/network.rs` remains TCP framing only, and `protocol/app`/`inbound`
-  do not import concrete event families directly.
+- `protocol/network.rs` remains TCP framing only, and `protocol/app` plus
+  protocol actor files do not import concrete event families directly.
 - Source tests reject fake-crypto terminology that would let placeholder crypto
   be named as real protection.
 
 When a prose rule becomes mechanically enforceable, add the type boundary or
 static check and shorten the prose. Keep prose for realness, black-box proof,
 crypto quality, performance expectations, and design rationale.
+
+`tests/rules_boundary_test.rs` is the current architectural linter. Keep it
+fast, deterministic, and runnable as `cargo test --test rules_boundary_test`.
+If it grows beyond test-shaped source checks, move the same checks into an
+`xtask`/lint command instead of weakening them.
+
+Run Clippy as a separate linter: `cargo clippy --all-targets -- -D warnings`.
+Clippy catches Rust mistakes and suspicious idioms; the architectural linter
+catches folder shape, import direction, and protocol vocabulary.
 
 ## Commands Live In Event Modules
 
@@ -137,12 +185,31 @@ CLI commands belong in the closest relevant event module or domain root
 commands, admit/apply proposed events, and print returned output. It must not
 own domain command semantics, help text, post-write queries, or formatting.
 
+CLI scenario definitions should live beside the closest relevant event module
+or domain root. A generic integration runner may execute those scenarios through
+the real CLI and check expected output, but app-level tests should stay limited
+to shell flow and effect interpretation.
+
+A Crux command uses `request_from_shell` when correctness depends on the shell
+reply. `notify_shell` is only for fire-and-forget effects where failure cannot
+change durable state, protocol progress, or user-visible command success.
+
+Shell-flow transcript tests are useful for app-runner behavior: drive app
+messages, inspect requested effects, resolve them with fake replies, and assert
+continuation order. They are not functional proof; real functionality still
+requires black-box CLI/network tests.
+
 A module CLI command may run module queries and format text or JSON output. If
 it creates events, it first calls a pure module command, then asks the generic
 runner to process exactly those proposed events, then runs any query that
 depends on their projection rows. It must not rely on a broad global drain
 unless the command is explicitly a wait/poll command such as sync status or
 assert-eventually.
+
+Custom contexts for commands, projectors, and actors must be narrow DTOs, not
+database-shaped snapshots. If a context can answer arbitrary storage questions,
+the boundary has failed; replace it with explicit query results or a
+module-owned actor query.
 
 ## Core Is Protocol-Agnostic
 
@@ -280,6 +347,10 @@ Event modules must target the new core/protocol contract directly. Do not introd
 compatibility adapters for old `state`, `runtime`, queue, or transport APIs.
 If an existing module depends on old core machinery, refactor the module until
 the dependency is gone.
+
+When migrating a boundary, retire the old path in the same commit that proves
+the new path. Do not leave parallel old/new engines for the same behavior unless
+one is explicitly disabled and scheduled for deletion before handoff.
 
 The module shape is:
 

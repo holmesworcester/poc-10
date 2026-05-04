@@ -48,6 +48,12 @@ impl Writer {
     }
 }
 
+impl Default for Writer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct Reader<'a> {
     rest: &'a [u8],
     label: &'static str,

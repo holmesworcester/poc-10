@@ -36,11 +36,12 @@ src/core/
   blocking.rs
   pipeline.rs
   control_loop.rs
+  crux_runner.rs
   wire.rs
 
 src/protocol/
   event_modules/
-  inbound.rs
+  actors.rs
   app/             // current protocol app shell
   network.rs
 ```
@@ -54,11 +55,13 @@ effects. A completely different protocol should be able to replace
 
 `protocol/app` is protocol-side because it names the current Topo command
 surface and effect vocabulary: invite, connect, sync, generate, network ops,
-store ops, and stdout. The end shape should be smaller: a generic CLI runner
-routes argv to module-local `cli.rs` commands, and each module owns its own
-help text, command parameters, domain command calls, post-write queries, and
-output formatting. Core may later provide reusable app-runner traits, but this
-concrete Topo CLI/app shell is not core.
+store ops, and stdout. The generic Crux command runner is core because it only
+drives app events and opaque effects. The concrete Topo CLI/app shell remains
+protocol-side because it interprets those effects against the current protocol.
+The end shape should be smaller: a generic CLI runner routes argv to
+module-local `cli.rs` commands, and each module owns its own help text, command
+parameters, domain command calls, post-write queries, output formatting, and
+scenario definitions.
 
 **event_modules/** contains every protocol or domain behavior that can be
 expressed as events, projectors, commands, module-owned tables, and module
@@ -218,13 +221,20 @@ commands simply run module queries and format output. Commands that need
 external progress, such as `sync` or `assert-eventually`, say that explicitly by
 waking the owning actor or polling a module query.
 
+CLI scenario/check/expect definitions live in the closest event module or
+domain root, not in the app shell. A generic scenario runner can still execute
+the real `topo` binary and real TCP; the scenario's setup, command sequence,
+and expected output stay local to the behavior being specified.
+
 The substrate pieces outside `event_modules` are deliberately narrow:
 
 ```
 core/control_loop.rs     // dispatch, transactions, bounded batches, effect execution
+core/crux_runner.rs      // generic Crux app/effect driving
 core/store.rs            // catalog materialization, storage, migrations, snapshots
 protocol/network.rs      // TCP bytes and socket ownership
-protocol/inbound.rs      // protocol-specific frame admission handoff
+protocol/actors.rs       // protocol-specific actor adapters
+protocol/app/            // current Topo CLI effect vocabulary and interpreters
 protocol/event_modules/  // protocol facts, projectors, tables, actors
 ```
 
@@ -863,6 +873,11 @@ connection::actor.run
 
 The sync actor's invariant is: never answer sync work against a stale negentropy
 index. It must cover `sync.new_events` before responding to `sync.work`.
+Use `apply_seq`, not event timestamps, as the sync-index cursor order. Index
+updates and cursor advancement are one transaction; index writes are idempotent
+with unique `(scope_key, event_id)` rows. Prefer per-workspace indexes and
+aggregate the allowed workspace scopes for a connection at response time rather
+than maintaining per-connection negentropy indexes.
 
 Duplicate actor output collapses because connection-scoped sync event bytes are
 deterministic and `outbox` is unique on `(connection_id, event_id)`.

@@ -12,12 +12,6 @@ use crate::core::store::{CommandOutput, EventRecord, ProjectionOutput, ProposedE
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FrameMetadata {
-    pub origin: SocketAddr,
-    pub remember_origin: bool,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleFrameReport {
     pub events: Vec<EventRecord>,
@@ -34,17 +28,6 @@ pub struct OutboundSync {
     pub target: SocketAddr,
     pub outgoing: Vec<Vec<u8>>,
     pub sent_outbox: Vec<Vec<u8>>,
-    pub sent_events: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DrainedOutbox {
-    pub outgoing: Vec<Vec<u8>>,
-    pub sent_outbox: Vec<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SyncStartReport {
     pub sent_events: usize,
 }
 
@@ -119,162 +102,58 @@ impl Modules {
         remember_origin: bool,
         bytes: Vec<u8>,
     ) -> Result<ModuleFrameReport, String> {
-        let metadata = FrameMetadata {
+        let metadata = connection::actor::FrameMetadata {
             origin,
             remember_origin,
         };
         let local = self.existing_local_keypair(store)?;
-        let transit = connection::transit::projector::unwrap(local, &bytes, |connection_id| {
-            connection::queries::remote_endpoint(store, connection_id)
-        })?;
-        if connection::types::is_connection_event(&transit.inner) {
-            return self.ingest_connection_frame(store, metadata, transit.inner);
+        match connection::actor::ingest_frame(store, local, metadata, bytes)? {
+            connection::actor::InboundFrame::Connection(report) => Ok(ModuleFrameReport {
+                events: report.events,
+                outgoing: report.outgoing,
+                established_routes: report.established_routes,
+                ..ModuleFrameReport::default()
+            }),
+            connection::actor::InboundFrame::ConnectionScoped {
+                connection_id,
+                inner,
+            } => self.ingest_sync_frame(store, connection_id, &inner),
         }
-        let connection_id = transit
-            .connection_id
-            .ok_or_else(|| "sync frame requires connection transit".to_string())?;
-        self.ingest_sync_frame(store, connection_id, &transit.inner)
     }
 
-    fn ingest_connection_frame(
+    pub fn start_sync(
         &self,
         store: &Store,
-        metadata: FrameMetadata,
-        bytes: Vec<u8>,
-    ) -> Result<ModuleFrameReport, String> {
-        let mut result = ModuleFrameReport::default();
-        if connection::connection_request::codec::is_request(&bytes) {
-            result
-                .events
-                .push(connection::connection_request::codec::record_from_bytes(
-                    bytes.clone(),
-                )?);
-            let event = connection::connection_request::codec::decode(&bytes)?;
-            let authorized = identity::invite::queries::bootstrap_hash_is_authorized(
-                store,
-                &event.bootstrap_hash,
-            )?;
-            let local = self.local_keypair(store)?;
-            let connection =
-                connection::connection_request::commands::accept(local.value, authorized, bytes)?;
-            let connection = merge_outputs(local.events, connection);
-            self.apply_connection_result(metadata, connection, &mut result);
-        } else if connection::connection_ack::codec::is_ack(&bytes) {
-            result
-                .events
-                .push(connection::connection_ack::codec::record_from_bytes(
-                    bytes.clone(),
-                )?);
-            let event = connection::connection_ack::codec::decode(&bytes)?;
-            let request_bytes = connection::queries::event_bytes(store, &event.request_id)?
-                .ok_or_else(|| "connection ack references unknown request".to_string())?;
-            let local = self.local_keypair(store)?;
-            let connection =
-                connection::connection_ack::commands::accept(local.value, request_bytes, bytes)?;
-            let connection = merge_outputs(local.events, connection);
-            self.apply_connection_result(metadata, connection, &mut result);
-        } else {
-            return Err("unknown connection event".to_string());
-        }
-        Ok(result)
-    }
-
-    fn apply_connection_result(
-        &self,
-        metadata: FrameMetadata,
-        connection: CommandOutput<connection::types::InboundConnection>,
-        result: &mut ModuleFrameReport,
-    ) {
-        result.events.extend(
-            connection
-                .events
-                .into_iter()
-                .map(ProposedEvent::into_record),
-        );
-        result.outgoing.extend(connection.value.outgoing);
-        if let Some(connection_id) = connection.value.connection_id {
-            if metadata.remember_origin {
-                let route =
-                    connection::transport_target::commands::record(connection_id, metadata.origin);
-                result
-                    .events
-                    .extend(route.events.into_iter().map(ProposedEvent::into_record));
-            }
-            result.established_routes += 1;
-        }
-    }
-
-    pub fn start_sync(&self, store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
-        let routes = connection::transport_target::queries::routes(store)?;
-        if routes.is_empty() {
-            return Ok(CommandOutput::new(SyncStartReport::default()));
-        }
-        let mut events = Vec::new();
-        let mut sent_events = 0;
-        for route in routes {
-            let report = sync::compare::commands::start(store, route.connection_id, |bytes| {
-                events.push(sync::frame::codec::record_from_bytes(bytes)?);
-                Ok(())
-            })?;
-            sent_events += report.sent_events;
-        }
-        Ok(CommandOutput::with_events(
-            SyncStartReport { sent_events },
-            events,
-        ))
+    ) -> Result<CommandOutput<sync::actor::SyncStartReport>, String> {
+        sync::actor::start(store)
     }
 
     pub fn drain_outbox_routes(&self, store: &Store) -> Result<Vec<OutboundSync>, String> {
-        let routes = connection::transport_target::queries::routes(store)?;
-        let mut outbound = Vec::new();
-        for route in routes {
-            let drained = self.drain_outbox_for_route(store, route.connection_id)?;
-            if drained.outgoing.is_empty() {
-                continue;
-            }
-            outbound.push(OutboundSync {
-                target: route.addr,
-                outgoing: drained.outgoing,
-                sent_outbox: drained.sent_outbox,
-                sent_events: 0,
-            });
-        }
-        Ok(outbound)
+        let local = self.existing_local_keypair(store)?;
+        connection::actor::drain_outbox_routes(store, local).map(|outbound| {
+            outbound
+                .into_iter()
+                .map(|outbound| OutboundSync {
+                    target: outbound.target,
+                    outgoing: outbound.outgoing,
+                    sent_outbox: outbound.sent_outbox,
+                    sent_events: 0,
+                })
+                .collect()
+        })
     }
 
     pub fn drain_outbox_for_route(
         &self,
         store: &Store,
         connection_id: connection::types::ConnectionId,
-    ) -> Result<DrainedOutbox, String> {
-        let items = connection::queries::outbox_items_for_connection(store, connection_id)?;
-        if items.is_empty() {
-            return Ok(DrainedOutbox::default());
-        }
+    ) -> Result<connection::actor::DrainedOutbox, String> {
         let local = self.existing_local_keypair(store)?;
-        let remote = connection::queries::remote_endpoint(store, &connection_id)?;
-        let mut outgoing = Vec::with_capacity(items.len());
-        let mut sent_outbox = Vec::with_capacity(items.len());
-        for item in items {
-            outgoing.push(connection::transit::commands::create_connection(
-                &local,
-                remote,
-                connection_id,
-                item.event_bytes,
-            )?);
-            sent_outbox.push(item.key.to_bytes());
-        }
-        Ok(DrainedOutbox {
-            outgoing,
-            sent_outbox,
-        })
+        connection::actor::drain_outbox_for_route(store, local, connection_id)
     }
 
     pub fn mark_outbox_sent(&self, store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {
-        if sent_outbox.is_empty() {
-            return Ok(());
-        }
-        connection::queries::delete_outbox_encoded(store, sent_outbox)
+        connection::actor::mark_outbox_sent(store, sent_outbox)
     }
 
     pub fn connection_count(&self, store: &Store) -> Result<usize, String> {
@@ -291,18 +170,15 @@ impl Modules {
         connection_id: connection::types::ConnectionId,
         bytes: &[u8],
     ) -> Result<ModuleFrameReport, String> {
-        let mut result = ModuleFrameReport::default();
-        let report = sync::compare::commands::ingest_frame(store, connection_id, bytes, |bytes| {
-            result
-                .events
-                .push(sync::frame::codec::record_from_bytes(bytes)?);
-            Ok(())
-        })?;
-        result.drain_outbox_for = Some(connection_id);
-        result.sent_events += report.sent_events;
-        result.received_events += report.received_events;
-        result.received_event_bytes = report.received_event_bytes;
-        Ok(result)
+        let report = sync::actor::ingest_frame(store, connection_id, bytes)?;
+        Ok(ModuleFrameReport {
+            events: report.events,
+            drain_outbox_for: Some(connection_id),
+            sent_events: report.sent_events,
+            received_events: report.received_events,
+            received_event_bytes: report.received_event_bytes,
+            ..ModuleFrameReport::default()
+        })
     }
 
     fn local_keypair(

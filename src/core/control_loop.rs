@@ -1,7 +1,33 @@
-use crate::core::pipeline::{self, ApplyReadyReport, EventRegistry};
-use crate::core::store::Store;
+use crate::core::pipeline::{self, AdmitReport, ApplyReadyReport, EventRegistry};
+use crate::core::store::{CommandOutput, EventRecord, Store};
 
 pub const DEFAULT_READY_BATCH: usize = 4096;
+
+pub struct PipelineActor<'a, R> {
+    store: &'a Store,
+    registry: &'a R,
+}
+
+impl<'a, R> PipelineActor<'a, R>
+where
+    R: EventRegistry,
+{
+    pub fn new(store: &'a Store, registry: &'a R) -> Self {
+        Self { store, registry }
+    }
+
+    pub fn run_command<T>(&self, output: CommandOutput<T>) -> Result<(T, AdmitReport), String> {
+        pipeline::run_command(self.store, self.registry, output)
+    }
+
+    pub fn admit_records(&self, records: Vec<EventRecord>) -> Result<AdmitReport, String> {
+        pipeline::admit_records(self.store, self.registry, records)
+    }
+
+    pub fn drain_until_idle(&self, batch_size: usize) -> Result<ApplyReadyReport, String> {
+        drain_until_idle(self.store, self.registry, batch_size)
+    }
+}
 
 pub fn drain_ready(
     store: &Store,

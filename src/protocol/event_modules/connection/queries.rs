@@ -66,18 +66,6 @@ pub fn all_outbox_items(store: &Store) -> Result<Vec<OutboxItem>, String> {
     Ok(items)
 }
 
-pub fn delete_outbox(store: &Store, keys: &[OutboxKey]) -> Result<(), String> {
-    let keys = keys.iter().map(|key| key.to_bytes()).collect::<Vec<_>>();
-    delete_outbox_encoded(store, keys)
-}
-
-pub fn delete_outbox_encoded(store: &Store, keys: Vec<Vec<u8>>) -> Result<(), String> {
-    store
-        .delete_table_rows(tables::OUTBOX, keys)
-        .map(|_| ())
-        .map_err(|err| format!("delete sent outbox rows: {err}"))
-}
-
 fn decode_outbox_key(bytes: &[u8]) -> Result<OutboxKey, String> {
     if bytes.len() != 64 {
         return Err("outbox key must be 64 bytes".to_string());
