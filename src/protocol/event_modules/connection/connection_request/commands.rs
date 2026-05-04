@@ -51,7 +51,7 @@ pub fn create(
     ))
 }
 
-pub fn accept(
+pub(in crate::protocol::event_modules::connection) fn accept(
     local: endpoint::types::EndpointKeypair,
     bootstrap_hash_is_authorized: bool,
     bytes: Vec<u8>,

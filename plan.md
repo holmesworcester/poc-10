@@ -817,9 +817,11 @@ outbox:
   primary key(connection_id, event_id)
 ```
 
-`outbox` is memory by default and has no per-row claim, lease, or retry status.
-Each active connection has exactly one `connection/worker.rs` owner for outbox
-drain work:
+`outbox` is a temporary row table by default and has no per-row claim, lease, or
+retry status. It is send work, not truth: if the process restarts, sync can
+recreate the same deterministic connection-scoped events and outbox rows. Each
+active connection has exactly one `connection/worker.rs` owner for outbox drain
+work:
 
 ```
 connection::worker.run:
@@ -829,8 +831,9 @@ connection::worker.run:
 ```
 
 `hot_queue` is bounded by estimated bytes, not only event count. When it drops
-below a low-water mark, `connection::worker.run` refills from pending `outbox`
-rows for that connection, skipping ids already in `present`. After the socket
+below a low-water mark, `connection::worker.run` refills with a prefix scan over
+pending `outbox` rows for that connection, skipping ids already in `present`.
+After the socket
 accepts a complete frame, the protocol runner deletes the corresponding
 `outbox` rows and removes those ids from `present`. On send failure it removes
 ids from `present`, leaves `outbox` rows pending, and backs off the target. No
@@ -1104,7 +1107,7 @@ For the first implementation, this can be two storage classes rather than one cl
 ```
 durable_events(event_id, canonical_event_bytes, ...)
 connection_events(connection_id, event_id, canonical_event_bytes, expires_at)
-outbox(connection_id, event_id)
+temp_outbox(connection_id, event_id)
 ```
 
 `connection/worker.rs` resolves an outbox `event_id` from transient
@@ -1114,7 +1117,11 @@ creates a transit blob, resolves the connection to a concrete `NetworkTarget`,
 and writes an `OutboundNetworkRow`. Sync modules do not batch ids into transport
 frames and do not create transit blobs.
 
-Outgoing dedupe belongs at the `outbox` boundary and the per-connection hot queue, not in every projector's context. Projectors should not need `recently_sent` sets. If suppression beyond pending-buffer dedupe is needed later, keep sent rows in `outbox` with a TTL.
+Outgoing dedupe belongs at the temp `outbox` boundary and the per-connection hot
+queue, not in every projector's context. Projectors should not need
+`recently_sent` sets. If suppression beyond pending-buffer dedupe is needed
+later, add an explicit recent-send table with TTL instead of turning outbox into
+durable truth.
 
 ## Incoming buffer dedupe
 
@@ -1163,7 +1170,9 @@ NeedId
 
 Bootstrap and repair traffic uses `connection.wrap_bootstrap(remote_endpoint_id, inner_events)`. Ordinary sync/control/event traffic uses `connection.wrap(connection_id, inner_events)`.
 
-If send fails, leave the `outbox` rows for retry and back off the connection sender. Dedupe remains `(connection_id, event_id)` based, not ciphertext based.
+If send fails, leave the temp `outbox` rows for retry and back off the
+connection sender. If the process crashes before retry, later sync recreates the
+work. Dedupe remains `(connection_id, event_id)` based, not ciphertext based.
 
 The receiver still validates inner events normally after decrypting. Network sync messages can cause work to be attempted, but they cannot make invalid durable events valid.
 

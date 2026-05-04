@@ -26,7 +26,7 @@ the rule is still prose/review only.
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
 | Connection route learning is part of connection projection, not a transport-target event module. | typed + static | [ReceiveMetadata](src/protocol/event_modules/types.rs), [connection/schema.rs](src/protocol/event_modules/connection/schema.rs), `connection_routes_are_projected_from_receive_metadata`. |
-| Connection outbox is id-only; transit batches canonical inner events. | static + partial | `connection_outbox_is_id_only_and_transit_batches_inner_events`; batching shape is checked, but exact batch sizing remains implementation/test coverage. |
+| Connection outbox is temporary id-only send work; transit batches canonical inner events. | typed + static + partial | Connection outbox row helpers are visible only inside `protocol::event_modules`; `connection_outbox_is_id_only_and_transit_batches_inner_events` checks the table shape, and connection module tests cover temp restart/stale-row cleanup. Exact batch sizing remains implementation/test coverage. |
 | Sync direction is connection-scope context, not canonical bytes. | static | `sync_canonical_bytes_do_not_encode_inbound_or_outbound_direction`. |
 | Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_schema_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only CLI/reporting surfaces; worker reads live in workers and command read-context traits live in commands. | static | `event_module_queries_are_read_only`, `worker_and_command_logic_do_not_call_query_modules`. |
@@ -595,10 +595,12 @@ must be inside their canonical bytes, and their id is the normal
 `BLAKE3(canonical_event_bytes)`. Inbound/outbound handling is not encoded in the
 event body. It is `EventScope::Connection(...)` projection context supplied by
 the command path or receive path. They are not durable event-set truth: the
-worker applies their projector output immediately. The outbox row is id-only; the
-connection domain may keep a temporary canonical-byte cache for transient events
-until transport confirms send. After send, the outbox row can be deleted; a
-future identical connection-scoped event may be projected again.
+worker applies their projector output immediately. The outbox row is id-only and
+temporary; it is pending send work, not protocol truth. The connection domain may
+keep a temporary canonical-byte cache for transient events until transport
+confirms send. After send, the outbox row can be deleted; after restart, sync can
+recreate any needed send work by emitting the same deterministic
+connection-scoped events again.
 
 Inbound connection-scoped protocol bytes also become canonical transient
 events, but they must not be handled by direct worker calls. The connection
@@ -635,7 +637,8 @@ custom read path.
 Durable data events are not pushed to peers on creation. Durable data transfer
 is queued only when protocol work asks for a durable event id, usually by a sync
 worker after projectors write compare/need/range queue rows. The protocol outbox
-dedupes by `(connection_id, event_id)`. The connection/transit module drains the
+dedupes by `(connection_id, event_id)` while the work is pending; it is a temp
+queue, not a durable resend log. The connection/transit module drains the
 protocol outbox and may batch several canonical inner events into one encrypted
 transit blob; core network queues only carry target metadata plus opaque bytes,
 and core TCP only frames and writes those bytes.

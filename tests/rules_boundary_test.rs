@@ -893,9 +893,10 @@ fn connection_outbox_is_id_only_and_transit_batches_inner_events() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let schema = source_text(&root.join("src/protocol/event_modules/connection/schema.rs"));
     assert!(
-        schema.contains("pub fn outbox_row(connection_id: ConnectionId, event_id: EventId)")
+        schema.contains("fn outbox_row(")
+            && schema.contains("Schema::temp_row_table(\"connection.outbox.v1\", OUTBOX)")
             && schema.contains("value: Vec::new()"),
-        "connection outbox rows should be id-only; bytes resolve at the connection/transit boundary"
+        "connection outbox rows should be temp id-only send work; bytes resolve at the connection/transit boundary"
     );
 
     let transit_commands =
@@ -924,7 +925,7 @@ fn connection_routes_are_projected_from_receive_metadata() {
     let request_projector = source_text(&connection_root.join("connection_request/projector.rs"));
     let ack_projector = source_text(&connection_root.join("connection_ack/projector.rs"));
     assert!(
-        schema.contains("pub const TRANSPORT_TARGETS")
+        schema.contains("const TRANSPORT_TARGETS")
             && request_projector.contains("event.record.receive")
             && request_projector.contains("transport_target_row")
             && ack_projector.contains("event.record.receive")

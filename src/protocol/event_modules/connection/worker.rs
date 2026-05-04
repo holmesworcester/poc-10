@@ -142,6 +142,24 @@ struct DrainedOutbox {
     sent_outbox: Vec<Vec<Vec<u8>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TransportRoute {
+    connection_id: types::ConnectionId,
+    addr: SocketAddr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutboxItem {
+    key: types::OutboxKey,
+    event_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OutboxDrain {
+    items: Vec<OutboxItem>,
+    stale_keys: Vec<Vec<u8>>,
+}
+
 const TRANSIT_TARGET_PLAINTEXT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Run one connection worker action.
@@ -367,7 +385,13 @@ fn drain_outbox_for_route(
     local: endpoint::types::EndpointKeypair,
     connection_id: types::ConnectionId,
 ) -> Result<DrainedOutbox, String> {
-    let items = outbox_items_for_connection(store, connection_id)?;
+    let outbox = outbox_items_for_connection(store, connection_id)?;
+    if !outbox.stale_keys.is_empty() {
+        store
+            .delete_table_rows(schema::OUTBOX, outbox.stale_keys)
+            .map_err(|err| format!("delete stale outbox rows: {err}"))?;
+    }
+    let items = outbox.items;
     if items.is_empty() {
         return Ok(DrainedOutbox::default());
     }
@@ -399,8 +423,8 @@ fn drain_outbox_for_route(
     })
 }
 
-fn batch_outbox_items(items: Vec<types::OutboxItem>) -> Vec<Vec<types::OutboxItem>> {
-    let mut batches: Vec<Vec<types::OutboxItem>> = Vec::new();
+fn batch_outbox_items(items: Vec<OutboxItem>) -> Vec<Vec<OutboxItem>> {
+    let mut batches: Vec<Vec<OutboxItem>> = Vec::new();
     let mut current = Vec::new();
     let mut current_bytes = 0usize;
     for item in items {
@@ -444,7 +468,7 @@ fn remote_endpoint(
     endpoint_id_from_bytes(&bytes)
 }
 
-fn routes(store: &Store) -> Result<Vec<types::TransportRoute>, String> {
+fn routes(store: &Store) -> Result<Vec<TransportRoute>, String> {
     let rows = store
         .table_rows(schema::TRANSPORT_TARGETS)
         .map_err(|err| format!("load transport targets: {err}"))?;
@@ -455,7 +479,7 @@ fn routes(store: &Store) -> Result<Vec<types::TransportRoute>, String> {
                 .map_err(|err| format!("transport target is not utf8: {err}"))?;
             let addr = SocketAddr::from_str(&text)
                 .map_err(|err| format!("transport target is invalid: {err}"))?;
-            Ok(types::TransportRoute {
+            Ok(TransportRoute {
                 connection_id,
                 addr,
             })
@@ -466,31 +490,30 @@ fn routes(store: &Store) -> Result<Vec<types::TransportRoute>, String> {
 fn outbox_items_for_connection(
     store: &Store,
     connection_id: types::ConnectionId,
-) -> Result<Vec<types::OutboxItem>, String> {
-    all_outbox_items(store).map(|items| {
-        items
-            .into_iter()
-            .filter(|item| item.key.connection_id == connection_id)
-            .collect()
-    })
-}
-
-fn all_outbox_items(store: &Store) -> Result<Vec<types::OutboxItem>, String> {
+) -> Result<OutboxDrain, String> {
     // Outbox rows are id-only. Durable data resolves from the common event
     // store; connection-scoped protocol events resolve from the temporary
     // connection byte cache populated by their projectors.
+    let prefix = connection_id.to_vec();
     let rows = store
-        .table_rows(schema::OUTBOX)
+        .table_rows_with_key_prefix(schema::OUTBOX, &prefix, 4096)
         .map_err(|err| format!("load outbox: {err}"))?;
-    let mut items = Vec::with_capacity(rows.len());
+    let mut drain = OutboxDrain {
+        items: Vec::with_capacity(rows.len()),
+        stale_keys: Vec::new(),
+    };
     for (key, _) in rows {
-        let key = decode_outbox_key(&key)?;
-        let Some(event_bytes) = resolve_outbox_event_bytes(store, &key.event_id)? else {
+        let outbox_key = decode_outbox_key(&key)?;
+        let Some(event_bytes) = resolve_outbox_event_bytes(store, &outbox_key.event_id)? else {
+            drain.stale_keys.push(key);
             continue;
         };
-        items.push(types::OutboxItem { key, event_bytes });
+        drain.items.push(OutboxItem {
+            key: outbox_key,
+            event_bytes,
+        });
     }
-    Ok(items)
+    Ok(drain)
 }
 
 fn resolve_outbox_event_bytes(
@@ -603,5 +626,48 @@ fn apply_connection_result(
     result.outgoing.extend(connection.value.outgoing);
     if connection.value.connection_id.is_some() {
         result.established_routes += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::Protocol;
+
+    use super::*;
+
+    #[test]
+    fn drain_outbox_routes_removes_rows_whose_bytes_are_gone() {
+        let store = Protocol::open_memory_store().expect("open store");
+        let connection_id = [3; 32];
+        let missing_event_id = [4; 32];
+        let addr = "127.0.0.1:41000"
+            .parse::<SocketAddr>()
+            .expect("test socket addr");
+        store
+            .insert_table_rows(vec![
+                schema::transport_target_row(connection_id, addr),
+                schema::outbox_row(connection_id, missing_event_id),
+            ])
+            .expect("insert route and stale outbox row");
+
+        let output = run(
+            &store,
+            &Protocol::new(),
+            Work::DrainOutboxRoutes {
+                local: endpoint::types::EndpointKeypair {
+                    endpoint: [8; 32],
+                    secret: [9; 32],
+                },
+            },
+        )
+        .expect("drain outbox");
+
+        assert_eq!(output, Output::OutboundRoutes(Vec::new()));
+        assert_eq!(
+            store
+                .table_row_count(schema::OUTBOX)
+                .expect("count outbox rows"),
+            0
+        );
     }
 }
