@@ -1,8 +1,8 @@
 mod app;
 #[cfg(test)]
 mod app_tests;
-mod commands;
 mod effects;
+mod flows;
 mod model;
 mod shell;
 mod summaries;

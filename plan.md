@@ -54,8 +54,11 @@ effects. A completely different protocol should be able to replace
 
 `protocol/app` is protocol-side because it names the current Topo command
 surface and effect vocabulary: invite, connect, sync, generate, network ops,
-store ops, and stdout. Core may later provide reusable app-runner traits, but
-this concrete Crux app/shell is not core.
+store ops, and stdout. The end shape should be smaller: a generic CLI runner
+routes argv to module-local `cli.rs` commands, and each module owns its own
+help text, command parameters, domain command calls, post-write queries, and
+output formatting. Core may later provide reusable app-runner traits, but this
+concrete Topo CLI/app shell is not core.
 
 **event_modules/** contains every protocol or domain behavior that can be
 expressed as events, projectors, commands, module-owned tables, and module
@@ -95,18 +98,22 @@ src/protocol/event_modules/
     reaction/
       ...
     file/
+    cli.rs          // optional content-level command registry/help
   identity/
     workspace/
     user/
     peer/
+    cli.rs
   auth/
     invite/
     key/
     removal/
+    cli.rs
   connection/
     actor.rs
     tables.rs
     queries.rs
+    cli.rs
     connection/
     connection_secret/
     observed_address/
@@ -115,6 +122,7 @@ src/protocol/event_modules/
     tables.rs
     queries.rs
     types.rs
+    cli.rs
     compare/
     have/
     need/
@@ -126,15 +134,16 @@ src/protocol/event_modules/
 
 **Per-file pattern, always.** Every leaf event module is a directory with one
 file per concern (`types.rs`, `codec.rs`, `projector.rs`, `commands.rs`,
-`tables.rs`, `queries.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a
+`tables.rs`, `queries.rs`, `cli.rs`, `registry_meta.rs`, `mod.rs`, etc.) — even when a
 module is small enough that a single `.rs` file would suffice. `tables.rs` is
 where the module declares its projection tables, indexes, queues, cursors, and
 storage class. A domain root may also contain `tables.rs`, `queries.rs`,
-`types.rs`, and `actor.rs` when it owns shared tables or an actor coordinating
-several leaf event modules. There is no generic `jobs/` dumping ground and no
-fake event module for an algorithm: `sync/actor.rs` may run negentropy over
-`sync/tables.rs`; `negentropy/` is only a child module if it defines an actual
-event type. `actor` is the component noun; `run` is the method verb.
+`types.rs`, `actor.rs`, and `cli.rs` when it owns shared tables, an actor, or a
+domain-level CLI command registry coordinating several leaf event modules.
+There is no generic `jobs/` or `cli_commands/` dumping ground and no fake event
+module for an algorithm: `sync/actor.rs` may run negentropy over `sync/tables.rs`;
+`negentropy/` is only a child module if it defines an actual event type. `actor`
+is the component noun; `run` is the method verb.
 The cost is some empty-ish files in tiny modules; the win is that this is
 intentional friction. In a codebase where most code is assistant-generated,
 uniform shape across the surface makes accumulating logic easy to spot — files
@@ -183,6 +192,29 @@ readiness, or explicit CLI requests. An actor declares its wake sources, read
 set, and write set. Core uses those declarations to load bounded context
 and commit output; the actor owns the semantic decision. Use `wake` for
 scheduling and `run` for execution.
+
+**cli.rs** is the module-local CLI adapter. It owns help text, parameter names,
+domain command invocation, follow-up queries, and output formatting for the
+commands that belong to that module or domain. The generic CLI runner stays
+boring: parse global flags, find the module CLI command, run proposed events,
+then hand control back to the module CLI command for queries and formatting.
+
+For a write command, the module CLI calls a pure module command to produce
+`ProposedEvent`s with deterministic ids, asks the runner to process exactly
+those proposed events, then runs whatever module query is needed for output:
+
+```
+let proposed = message::commands::create(params, context)?;
+let applied = runner.run_proposed(proposed.events)?;
+let row = message::queries::by_event_id(store, applied.primary_id)?;
+CliOutput::text(message::cli::format_created(row))
+```
+
+`run_proposed` means "admit and apply this proposed chain enough that its own
+projection rows are visible." It does not drain unrelated ready events. Query-only
+commands simply run module queries and format output. Commands that need
+external progress, such as `sync` or `assert-eventually`, say that explicitly by
+waking the owning actor or polling a module query.
 
 The substrate pieces outside `event_modules` are deliberately narrow:
 

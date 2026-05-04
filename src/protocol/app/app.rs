@@ -1,10 +1,10 @@
 use crux_core::{App, Command};
 
-use super::commands::{
+use super::effects::ProtocolEffect;
+use super::flows::{
     connect, count, generate, generate_dependent_events, invite, replay_dependent_events_reverse,
     serve, sync_routes,
 };
-use super::effects::ProtocolEffect;
 use super::model::{ProtocolModel, ProtocolMsg, ProtocolView};
 
 #[derive(Debug, Default)]

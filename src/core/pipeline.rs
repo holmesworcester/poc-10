@@ -1,6 +1,7 @@
 use crate::core::blocking;
 use crate::core::store::{
-    event_id, CommandOutput, EventId, EventRecord, EventScope, EventStatus, ProjectionOutput, Store,
+    CommandOutput, EventId, EventRecord, EventScope, EventStatus, ProjectionOutput, ProposedEvent,
+    Store,
 };
 
 pub trait EventRegistry {
@@ -39,7 +40,7 @@ pub fn run_command<T>(
     modules: &impl EventRegistry,
     output: CommandOutput<T>,
 ) -> Result<(T, AdmitReport), String> {
-    let report = admit_records(store, modules, output.events)?;
+    let report = admit_proposed_events(store, modules, output.events)?;
     Ok((output.value, report))
 }
 
@@ -48,10 +49,22 @@ pub fn admit_records(
     modules: &impl EventRegistry,
     records: Vec<EventRecord>,
 ) -> Result<AdmitReport, String> {
+    admit_proposed_events(
+        store,
+        modules,
+        records.into_iter().map(ProposedEvent::new).collect(),
+    )
+}
+
+pub fn admit_proposed_events(
+    store: &Store,
+    modules: &impl EventRegistry,
+    events: Vec<ProposedEvent>,
+) -> Result<AdmitReport, String> {
     store
         .write_transaction(|store| {
             let mut report = AdmitReport::default();
-            admit_records_in_tx(store, modules, records, &mut report)?;
+            admit_events_in_tx(store, modules, events, &mut report)?;
             Ok(report)
         })
         .map_err(|err| format!("admit events: {err}"))
@@ -61,25 +74,26 @@ fn apply_changes_in_tx(store: &Store, changes: ProjectionOutput) -> rusqlite::Re
     store.insert_table_rows_in_tx(changes.rows)
 }
 
-fn admit_records_in_tx(
+fn admit_events_in_tx(
     store: &Store,
     modules: &impl EventRegistry,
-    records: Vec<EventRecord>,
+    events: Vec<ProposedEvent>,
     report: &mut AdmitReport,
 ) -> rusqlite::Result<()> {
-    for record in records {
-        admit_and_apply_record_in_tx(store, modules, &record, report)?;
+    for event in events {
+        admit_and_apply_event_in_tx(store, modules, &event, report)?;
     }
     Ok(())
 }
 
-fn admit_and_apply_record_in_tx(
+fn admit_and_apply_event_in_tx(
     store: &Store,
     modules: &impl EventRegistry,
-    record: &EventRecord,
+    event: &ProposedEvent,
     report: &mut AdmitReport,
 ) -> rusqlite::Result<()> {
-    report.event_ids.push(event_id(&record.canonical_bytes));
+    let record = event.record();
+    report.event_ids.push(event.event_id());
     if record.scope == EventScope::Transient {
         if !record.dependencies.is_empty() {
             return Err(module_error(
@@ -94,7 +108,7 @@ fn admit_and_apply_record_in_tx(
         return Ok(());
     }
 
-    let admitted = admit_record_in_tx(store, record, report)?;
+    let admitted = admit_event_in_tx(store, event, report)?;
     if admitted.inserted && admitted.ready {
         let apply = apply_ready_event_in_tx(store, modules, &admitted.event_id)?;
         report.applied_events += apply.applied_events;
@@ -109,12 +123,13 @@ struct Admission {
     ready: bool,
 }
 
-fn admit_record_in_tx(
+fn admit_event_in_tx(
     store: &Store,
-    record: &EventRecord,
+    event: &ProposedEvent,
     report: &mut AdmitReport,
 ) -> rusqlite::Result<Admission> {
-    let id = event_id(&record.canonical_bytes);
+    let record = event.record();
+    let id = event.event_id();
     let missing = blocking::missing_dependencies(store, &record.dependencies)?;
     let status = if missing.is_empty() {
         EventStatus::Ready

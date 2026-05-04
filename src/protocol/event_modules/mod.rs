@@ -7,7 +7,7 @@ pub mod test_events;
 use std::net::SocketAddr;
 
 use crate::core::pipeline::EventRegistry;
-use crate::core::store::{CommandOutput, EventRecord, ProjectionOutput, Store};
+use crate::core::store::{CommandOutput, EventRecord, ProjectionOutput, ProposedEvent, Store};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules;
@@ -186,7 +186,12 @@ impl Modules {
         connection: CommandOutput<connection::connection_record::types::InboundConnection>,
         result: &mut ModuleFrameReport,
     ) {
-        result.events.extend(connection.events);
+        result.events.extend(
+            connection
+                .events
+                .into_iter()
+                .map(ProposedEvent::into_record),
+        );
         result.outgoing.extend(connection.value.outgoing);
         if let Some(connection_id) = connection.value.connection_id {
             if metadata.remember_origin {
@@ -363,7 +368,7 @@ impl EventRegistry for Modules {
 }
 
 fn merge_outputs<T>(
-    mut events: Vec<EventRecord>,
+    mut events: Vec<ProposedEvent>,
     mut output: CommandOutput<T>,
 ) -> CommandOutput<T> {
     events.append(&mut output.events);

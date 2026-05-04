@@ -1,6 +1,6 @@
 # Rules
 
-## Enforce Rules With Code First
+## Rules Intended To Be Covered By Types And Static Checks
 
 Prefer enforcement in this order:
 
@@ -9,6 +9,31 @@ Prefer enforcement in this order:
    vocabulary.
 3. Short prose rules for intent, review judgment, and behavior that cannot be
    proven mechanically.
+
+The following rules should stay mechanically enforced where practical:
+
+- Commands return `CommandOutput<T>` with `Vec<ProposedEvent>`, not rows,
+  effects, or storage writes. `ProposedEvent` is constructed from an
+  `EventRecord` and carries both the deterministic `event_id` and that
+  canonical record.
+- Projectors return `ProjectionOutput` with `Vec<TableRow>`, not events.
+- `commands.rs` is reserved for event modules. App shells and adapters use
+  shell-specific names such as `flows.rs`, and module CLI adapters live in
+  module-local or domain-local `cli.rs`.
+- `event.rs` is forbidden. Semantic event types live in `types.rs`; canonical
+  wire parsing and formatting live in `codec.rs`.
+- Codec files do not define public semantic types, and every codec module has a
+  sibling `types.rs`.
+- Domain roots contain only child event modules plus shared domain files:
+  `mod.rs`, `actor.rs`, `tables.rs`, `queries.rs`, `types.rs`, and `cli.rs`.
+- Core never imports protocol modules and does not contain protocol vocabulary
+  such as connection, transit, sync, outbox, TCP, sockets, or bootstrap schema.
+- The core pipeline is generic admission/apply plumbing; protocol branching
+  belongs behind the protocol module registry.
+- Sync modules do not own TCP/frame IO, and core/network code does not contain
+  sync protocol logic.
+- Event-module commands do not mutate storage directly. Event-module
+  projectors do not query storage directly.
 
 When a prose rule becomes mechanically enforceable, add the type boundary or
 static check and shorten the prose. Keep prose for realness, black-box proof,
@@ -25,10 +50,10 @@ input/output shape; event modules own protocol and domain semantics.
 
 Commands receive explicit input values plus narrow read context values. They do
 not mutate SQLite, open transactions, drain queues, or call broad apply loops.
-They return `CommandOutput` with canonical events only. Commands must not return
-rows or effects. The API that runs a command is responsible for admitting those
-proposed events through the pipeline; admission returns the event ids for
-chaining.
+They return `CommandOutput` with proposed canonical events only. Commands must
+not return rows or effects. The API that runs a command is responsible for
+admitting those proposed events through the pipeline; admission returns the
+event ids for chaining.
 
 Projectors return `ProjectionOutput` with table rows only. They cannot emit
 events. If projection discovers follow-on work, it writes a module-owned queue
@@ -45,7 +70,7 @@ The intended shape is:
 
 ```text
 event_modules/<domain>/<module>/commands.rs
-  command(ctx, input) -> CommandOutput { value, events }
+  command(ctx, input) -> CommandOutput { value, events: Vec<ProposedEvent> }
 
 event_modules/<domain>/<module>/codec.rs
   Event <-> CanonicalEventBytes
@@ -59,18 +84,37 @@ event_modules/<domain>/<module>/projector.rs
 event_modules/<domain>/<module>/tables.rs
   module-owned projection tables, indexes, queues, cursors, and storage class
 
+event_modules/<domain>/<module>/cli.rs
+  optional module-local CLI help, parameters, queries, and output formatting
+
 event_modules/<domain>/actor.rs
   optional actor over domain-owned queues/cursors shared by child event modules
+
+event_modules/<domain>/cli.rs
+  optional domain-level CLI registry/help for commands spanning child modules
 ```
 
 Leaf event modules own event types. Domain roots may own shared `tables.rs`,
-`queries.rs`, `types.rs`, and `actor.rs`. Do not create an event-module
-directory for an algorithm unless it defines an actual canonical event type.
+`queries.rs`, `types.rs`, `actor.rs`, and `cli.rs`. Do not create an
+event-module directory for an algorithm unless it defines an actual canonical
+event type.
 
 Do not create `event.rs` files in event modules. The typed event struct belongs
 in `types.rs`. `codec.rs` is only for canonical format tags, field order,
 encode/decode, and event-specific parse validation. Commands belong in
 `commands.rs`.
+
+CLI commands belong in the closest relevant event module or domain root
+`cli.rs`. A generic CLI runner may parse global flags, dispatch to module CLI
+commands, admit/apply proposed events, and print returned output. It must not
+own domain command semantics, help text, post-write queries, or formatting.
+
+A module CLI command may run module queries and format text or JSON output. If
+it creates events, it first calls a pure module command, then asks the generic
+runner to process exactly those proposed events, then runs any query that
+depends on their projection rows. It must not rely on a broad global drain
+unless the command is explicitly a wait/poll command such as sync status or
+assert-eventually.
 
 ## Core Is Protocol-Agnostic
 
@@ -131,7 +175,7 @@ Prefer this command shape:
 ```text
 create(input, ctx) -> CommandOutput {
   value,
-  events: Vec<ProposedEvent { event_id, bytes }>
+  events: Vec<ProposedEvent { event_id, record }>
 }
 ```
 

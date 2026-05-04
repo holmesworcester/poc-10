@@ -62,7 +62,14 @@ fn event_modules_are_directories() {
 #[test]
 fn domain_roots_contain_only_children_and_shared_domain_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
-    let allowed_domain_files = ["mod.rs", "actor.rs", "tables.rs", "queries.rs", "types.rs"];
+    let allowed_domain_files = [
+        "mod.rs",
+        "actor.rs",
+        "tables.rs",
+        "queries.rs",
+        "types.rs",
+        "cli.rs",
+    ];
     let mut offenders = Vec::new();
     for domain in std::fs::read_dir(&root).expect("read event modules") {
         let path = domain.expect("dir entry").path();
@@ -123,6 +130,43 @@ fn codec_modules_have_type_files() {
     assert!(
         offenders.is_empty(),
         "modules with codec.rs must define semantic shapes in sibling types.rs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn commands_files_live_only_in_event_modules() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let offenders = rust_files(&root.join("src"))
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "commands.rs"))
+        .filter(|path| !path.starts_with(&event_root))
+        .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "commands.rs is reserved for event modules; adapters should use cli.rs, flows.rs, or shell-specific names:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn cli_files_live_with_event_modules_or_the_protocol_shell() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let app_root = root.join("src/protocol/app");
+    let offenders = rust_files(&root.join("src"))
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
+        .filter(|path| !path.starts_with(&event_root) && !path.starts_with(&app_root))
+        .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "module CLI adapters belong beside event modules; only the generic protocol shell may own app-level CLI wiring:\n{}",
         offenders.join("\n")
     );
 }
@@ -300,8 +344,29 @@ fn command_output_contains_events_not_state_changes() {
         .expect("CommandOutput");
     let body = &text[start..text[start..].find("impl<T> CommandOutput").unwrap() + start];
     assert!(
-        body.contains("pub events: Vec<EventRecord>") && !body.contains("ProjectionOutput"),
-        "CommandOutput is command-facing and must carry events only, not projector rows"
+        body.contains("pub events: Vec<ProposedEvent>") && !body.contains("ProjectionOutput"),
+        "CommandOutput is command-facing and must carry proposed events only, not projector rows"
+    );
+}
+
+#[test]
+fn proposed_event_carries_deterministic_id_and_record() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(root.join("src/core/store.rs")).expect("read store");
+    let start = text
+        .find("pub struct ProposedEvent")
+        .expect("ProposedEvent");
+    let body = &text[start..text[start..].find("impl ProposedEvent").unwrap() + start];
+    assert!(
+        body.contains("event_id: EventId")
+            && body.contains("record: EventRecord")
+            && !body.contains("pub event_id")
+            && !body.contains("pub record"),
+        "ProposedEvent must make deterministic ids part of the command contract"
+    );
+    assert!(
+        text.contains("event_id(&record.canonical_bytes)"),
+        "ProposedEvent ids must be derived from canonical event bytes"
     );
 }
 

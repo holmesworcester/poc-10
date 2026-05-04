@@ -20,6 +20,39 @@ pub struct EventRecord {
     pub scope: EventScope,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposedEvent {
+    event_id: EventId,
+    record: EventRecord,
+}
+
+impl ProposedEvent {
+    pub fn new(record: EventRecord) -> Self {
+        Self {
+            event_id: event_id(&record.canonical_bytes),
+            record,
+        }
+    }
+
+    pub fn event_id(&self) -> EventId {
+        self.event_id
+    }
+
+    pub fn record(&self) -> &EventRecord {
+        &self.record
+    }
+
+    pub fn into_record(self) -> EventRecord {
+        self.record
+    }
+}
+
+impl From<EventRecord> for ProposedEvent {
+    fn from(record: EventRecord) -> Self {
+        Self::new(record)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventScope {
     Shared,
@@ -55,7 +88,7 @@ impl ProjectionOutput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput<T> {
     pub value: T,
-    pub events: Vec<EventRecord>,
+    pub events: Vec<ProposedEvent>,
 }
 
 impl<T> CommandOutput<T> {
@@ -67,6 +100,13 @@ impl<T> CommandOutput<T> {
     }
 
     pub fn with_events(value: T, events: Vec<EventRecord>) -> Self {
+        Self {
+            value,
+            events: events.into_iter().map(ProposedEvent::new).collect(),
+        }
+    }
+
+    pub fn with_proposed_events(value: T, events: Vec<ProposedEvent>) -> Self {
         Self { value, events }
     }
 }
