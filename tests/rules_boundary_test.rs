@@ -912,6 +912,28 @@ fn connection_outbox_is_id_only_and_transit_batches_inner_events() {
 }
 
 #[test]
+fn connection_routes_are_projected_from_receive_metadata() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let connection_root = root.join("src/protocol/event_modules/connection");
+    assert!(
+        !connection_root.join("transport_target").exists(),
+        "transport targets are receive-derived connection rows, not a separate event module"
+    );
+
+    let schema = source_text(&connection_root.join("schema.rs"));
+    let request_projector = source_text(&connection_root.join("connection_request/projector.rs"));
+    let ack_projector = source_text(&connection_root.join("connection_ack/projector.rs"));
+    assert!(
+        schema.contains("pub const TRANSPORT_TARGETS")
+            && request_projector.contains("event.record.receive")
+            && request_projector.contains("transport_target_row")
+            && ack_projector.contains("event.record.receive")
+            && ack_projector.contains("transport_target_row"),
+        "connection request/ack projection should atomically write route rows from receive metadata"
+    );
+}
+
+#[test]
 fn event_module_commands_do_not_mutate_storage_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");

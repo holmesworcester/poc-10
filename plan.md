@@ -422,6 +422,15 @@ supersession, or "this event blocks others." Do not introduce bespoke
 per-event-type SQL queries against arbitrary state just because a dependency or
 label is missing.
 
+Connection handshakes are the important subjective case. A received
+request/ack is canonical event bytes plus local receive metadata:
+`origin`, `local_endpoint`, and whether that origin should be remembered as a
+route. The connection projector consumes those together and writes the
+established connection row plus the current transport-target row only when the
+origin is a route worth dialing later. The route is not a separate durable
+`transport_target` event because it has no independent meaning outside this
+peer's observation of that connection event.
+
 Custom typed context is allowed only for module-owned read models that are too
 large or index-shaped to fit the default context. The module owns the context
 request type, the context result type, and the semantics of the read model; the
@@ -774,6 +783,22 @@ slow route backs off its own target; other transport targets continue.
 *Invariant: every ordinary byte on the wire is the product of two independent
 workspace-membership checks (SendEvent projection + `connection.wrap`) plus a
 third symmetric check on the receiving side (`connection.unwrap`).*
+
+For the current POC, connection request/ack projection also owns route learning.
+The connection worker attaches receive metadata to accepted inbound handshake
+records before admitting them. The projector writes:
+
+```
+connection.connections[connection_id] = remote_endpoint
+connection.transport_targets[connection_id] = observed_socket_addr   # only if remember_route
+```
+
+This keeps connection establishment and "where can I send back to that
+connection?" in one atomic projection. A transport target is still a protocol
+row consumed by the connection worker, but it is not its own child event module.
+For TCP listeners, the client's ephemeral source port is valid receive metadata
+but usually not a durable route; client-side ack receive is the ordinary place to
+remember the listener address.
 
 `outbox` stores only deterministic event ids to process for a connection:
 

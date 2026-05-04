@@ -463,6 +463,11 @@ fn store_durable_event_in_tx(
     report: &mut AdmitReport,
 ) -> rusqlite::Result<StoredDurableEvent> {
     let record = event.record();
+    if record.receive.is_some() {
+        return Err(module_error(
+            "durable events cannot carry receive metadata".to_string(),
+        ));
+    }
     let id = event.event_id();
     let missing = missing_dependencies(store, &record.dependencies)?;
     let status = if missing.is_empty() {

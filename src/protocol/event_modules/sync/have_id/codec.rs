@@ -61,6 +61,7 @@ fn record_with_scope(bytes: Vec<u8>, scope: EventScope) -> Result<EventRecord, S
         canonical_bytes: bytes,
         dependencies: Vec::new(),
         scope,
+        receive: None,
     })
 }
 

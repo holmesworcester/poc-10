@@ -6,7 +6,12 @@
 //! cache for non-durable connection-scoped events such as sync compare/have/need.
 //! `OUTBOX` is id-only: the connection worker resolves each id to durable or
 //! temporary canonical bytes before wrapping. Core network queues only see the
-//! wrapped bytes produced later by the worker.
+//! wrapped bytes produced later by the worker. `TRANSPORT_TARGETS` is
+//! receive-derived local state: connection projection writes the latest socket
+//! address observed for a connection, but the address is not a separate semantic
+//! event.
+
+use std::net::SocketAddr;
 
 use crate::core::store::{Schema, TableName, TableRow};
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
@@ -19,10 +24,12 @@ pub const CONNECTIONS: TableName = TableName::new("connection.connections");
 pub const CONNECTION_SCOPED_EVENTS: TableName =
     TableName::new("connection.connection_scoped_events");
 pub const OUTBOX: TableName = TableName::new("connection.outbox");
+pub const TRANSPORT_TARGETS: TableName = TableName::new("connection.transport_targets");
 
 pub const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("connection.connection_events.v1", CONNECTION_EVENTS),
     Schema::durable_row_table("connection.connections.v1", CONNECTIONS),
+    Schema::durable_row_table("connection.transport_targets.v1", TRANSPORT_TARGETS),
     Schema::temp_row_table(
         "connection.connection_scoped_events.v1",
         CONNECTION_SCOPED_EVENTS,
@@ -43,6 +50,14 @@ pub(crate) fn connection_row(connection_id: ConnectionId, remote_endpoint: Endpo
         table: CONNECTIONS,
         key: connection_id.to_vec(),
         value: remote_endpoint.to_vec(),
+    }
+}
+
+pub(crate) fn transport_target_row(connection_id: ConnectionId, addr: SocketAddr) -> TableRow {
+    TableRow {
+        table: TRANSPORT_TARGETS,
+        key: connection_id.to_vec(),
+        value: addr.to_string().into_bytes(),
     }
 }
 

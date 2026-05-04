@@ -3,9 +3,11 @@
 //! Concrete event bodies live in leaf module `types.rs` files. This file holds
 //! only the common envelope facts the admission worker needs for every decoded
 //! event: deterministic id, timestamp, body length, dependencies, scope, and
-//! durable status. Scope is projection context, not part of the canonical bytes;
-//! keeping that distinction sharp is what lets projectors stay pure and modules
-//! stay independently understandable.
+//! durable status. Scope and receive metadata are projection context, not part
+//! of the canonical bytes; keeping that distinction sharp is what lets
+//! projectors stay pure and modules stay independently understandable.
+
+use std::net::SocketAddr;
 
 pub type EventId = [u8; 32];
 
@@ -21,6 +23,21 @@ pub struct EventRecord {
     pub canonical_bytes: Vec<u8>,
     pub dependencies: Vec<EventId>,
     pub scope: EventScope,
+    pub receive: Option<ReceiveMetadata>,
+}
+
+/// Subjective metadata attached by a receive boundary.
+///
+/// This is not part of the globally canonical event id. It is local projection
+/// context for events whose meaning is inherently subjective to this endpoint,
+/// such as "we received this connection handshake from this socket address."
+/// Durable events currently cannot persist this field; the common worker rejects
+/// that combination rather than silently dropping projection context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiveMetadata {
+    pub origin: SocketAddr,
+    pub local_endpoint: EventId,
+    pub remember_route: bool,
 }
 
 /// Storage and sharing policy for an event.

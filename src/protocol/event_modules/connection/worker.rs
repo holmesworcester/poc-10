@@ -33,21 +33,19 @@ use crate::core::network_queues::{self, InboundNetworkRow, OutboundNetworkRow};
 use crate::core::store::Store;
 use crate::protocol::event_modules::identity::{endpoint, invite};
 use crate::protocol::event_modules::sync;
-use crate::protocol::event_modules::types::EventRecord;
+use crate::protocol::event_modules::types::{EventRecord, ReceiveMetadata};
 use crate::protocol::event_modules::worker::{
     self, AdmitRecords, CommandOutput, EventRegistry, ProposedEvent,
 };
 
-use super::{
-    connection_ack, connection_request, queries, schema, transit, transport_target, types,
-};
+use super::{connection_ack, connection_request, queries, schema, transit, types};
 
 /// Transport metadata attached to one inbound frame.
 ///
 /// `origin` is a concrete route observed by core TCP. `remember_origin` tells
-/// the worker whether a successful connection handshake should persist that
-/// route as a usable transport target. Tests and replay paths can ingest bytes
-/// without mutating route state by setting it to false.
+/// the worker whether a connection handshake record should project with that
+/// route. Tests and replay paths can ingest bytes without mutating route state
+/// by setting it to false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FrameMetadata {
     pub origin: SocketAddr,
@@ -347,7 +345,7 @@ fn drain_outbox_routes(
 ) -> Result<Vec<OutboundTransit>, String> {
     // Route draining is deliberately route-based, not global "send everything".
     // Slow or absent targets should only starve their own route.
-    let routes = transport_target::queries::routes(store)?;
+    let routes = queries::routes(store)?;
     let mut outbound = Vec::new();
     for route in routes {
         let drained = drain_outbox_for_route(store, local, route.connection_id)?;
@@ -444,35 +442,52 @@ fn ingest_connection_frame(
     if connection_request::codec::is_request(&bytes) {
         // Request acceptance proves the invite/bootstrap authorization before
         // producing an ack. The raw request event is also admitted so the
-        // resulting connection has a durable dependency to point at.
-        result
-            .events
-            .push(connection_request::codec::record_from_bytes(bytes.clone())?);
+        // connection projector can atomically write the connection row and the
+        // route learned from receive metadata.
+        result.events.push(record_with_receive_metadata(
+            connection_request::codec::record_from_bytes(bytes.clone())?,
+            metadata,
+            local.endpoint,
+        ));
         let event = connection_request::codec::decode(&bytes)?;
         let authorized =
             invite::queries::bootstrap_hash_is_authorized(store, &event.bootstrap_hash)?;
         let connection = connection_request::commands::accept(local, authorized, bytes)?;
-        apply_connection_result(metadata, connection, &mut result);
+        apply_connection_result(connection, &mut result);
     } else if connection_ack::codec::is_ack(&bytes) {
         // Ack acceptance replays the original request bytes from local storage.
         // This keeps the accept command pure: it receives canonical inputs and
         // proposes connection facts without consulting the store itself.
-        result
-            .events
-            .push(connection_ack::codec::record_from_bytes(bytes.clone())?);
+        result.events.push(record_with_receive_metadata(
+            connection_ack::codec::record_from_bytes(bytes.clone())?,
+            metadata,
+            local.endpoint,
+        ));
         let event = connection_ack::codec::decode(&bytes)?;
         let request_bytes = queries::event_bytes(store, &event.request_id)?
             .ok_or_else(|| "connection ack references unknown request".to_string())?;
         let connection = connection_ack::commands::accept(local, request_bytes, bytes)?;
-        apply_connection_result(metadata, connection, &mut result);
+        apply_connection_result(connection, &mut result);
     } else {
         return Err("unknown connection event".to_string());
     }
     Ok(result)
 }
 
-fn apply_connection_result(
+fn record_with_receive_metadata(
+    mut record: EventRecord,
     metadata: FrameMetadata,
+    local_endpoint: endpoint::types::EndpointId,
+) -> EventRecord {
+    record.receive = Some(ReceiveMetadata {
+        origin: metadata.origin,
+        local_endpoint,
+        remember_route: metadata.remember_origin,
+    });
+    record
+}
+
+fn apply_connection_result(
     connection: CommandOutput<types::InboundConnection>,
     result: &mut ConnectionFrameReport,
 ) {
@@ -486,16 +501,7 @@ fn apply_connection_result(
             .map(ProposedEvent::into_record),
     );
     result.outgoing.extend(connection.value.outgoing);
-    if let Some(connection_id) = connection.value.connection_id {
-        if metadata.remember_origin {
-            // Transport targets are learned facts. They are represented as
-            // canonical local events rather than hidden socket state, so replay
-            // and tests see the same route table.
-            let route = transport_target::commands::record(connection_id, metadata.origin);
-            result
-                .events
-                .extend(route.events.into_iter().map(ProposedEvent::into_record));
-        }
+    if connection.value.connection_id.is_some() {
         result.established_routes += 1;
     }
 }

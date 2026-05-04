@@ -93,7 +93,7 @@ fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
     // Manual sync fans out over known routes. The route table is owned by the
     // connection domain; sync only borrows the connection id needed to make a
     // connection-scoped compare event.
-    let routes = connection::transport_target::queries::routes(store)?;
+    let routes = connection::queries::routes(store)?;
     if routes.is_empty() {
         return Ok(CommandOutput::new(SyncStartReport::default()));
     }

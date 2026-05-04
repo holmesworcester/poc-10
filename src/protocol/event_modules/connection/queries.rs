@@ -6,13 +6,15 @@
 //! never mutate rows; doing so here would make worker effects impossible to
 //! audit.
 
+use std::{net::SocketAddr, str::FromStr};
+
 use crate::core::store::Store;
 use crate::protocol::event_modules::identity::endpoint::queries::endpoint_id;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::schema as event_schema;
 
 use super::schema;
-use super::types::{connection_id_from_bytes, ConnectionId, OutboxItem, OutboxKey};
+use super::types::{connection_id_from_bytes, ConnectionId, OutboxItem, OutboxKey, TransportRoute};
 
 pub fn remote_endpoint(store: &Store, connection_id: &ConnectionId) -> Result<EndpointId, String> {
     let bytes = store
@@ -38,6 +40,25 @@ pub fn connection_event_count(store: &Store) -> Result<usize, String> {
     store
         .table_row_count(schema::CONNECTION_EVENTS)
         .map_err(|err| format!("count connection events: {err}"))
+}
+
+pub fn routes(store: &Store) -> Result<Vec<TransportRoute>, String> {
+    let rows = store
+        .table_rows(schema::TRANSPORT_TARGETS)
+        .map_err(|err| format!("load transport targets: {err}"))?;
+    rows.into_iter()
+        .map(|(key, value)| {
+            let connection_id = connection_id_from_bytes(&key)?;
+            let text = String::from_utf8(value)
+                .map_err(|err| format!("transport target is not utf8: {err}"))?;
+            let addr = SocketAddr::from_str(&text)
+                .map_err(|err| format!("transport target is invalid: {err}"))?;
+            Ok(TransportRoute {
+                connection_id,
+                addr,
+            })
+        })
+        .collect()
 }
 
 pub fn outbox_items_for_connection(

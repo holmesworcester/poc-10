@@ -176,7 +176,7 @@ impl Modules {
 
     pub fn project_record(
         &self,
-        store: &Store,
+        _store: &Store,
         event: &EventWithContext<'_>,
     ) -> Result<ProjectionOutput, String> {
         // Projection dispatch is tag-based and intentionally shallow. Each
@@ -187,8 +187,7 @@ impl Modules {
             return Ok(output);
         }
         if connection::is_projection_record(bytes) {
-            let local = self.existing_local_keypair(store)?;
-            return connection::project_record(store, bytes, local.endpoint);
+            return connection::project_record(event);
         }
         if let Some(output) = sync::project_record(event)? {
             return Ok(output);
@@ -221,7 +220,6 @@ pub fn schemas() -> Vec<Schema> {
     out.extend_from_slice(identity::endpoint::schema::SCHEMAS);
     out.extend_from_slice(identity::invite::schema::SCHEMAS);
     out.extend_from_slice(connection::schema::SCHEMAS);
-    out.extend_from_slice(connection::transport_target::schema::SCHEMAS);
     out.extend_from_slice(sync::schema::SCHEMAS);
     out.extend_from_slice(test_events::event_with_deps::schema::SCHEMAS);
     out
@@ -271,9 +269,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         }
         identity::invite::codec::TYPE_INVITE_SECRET => {
             identity::invite::codec::record_from_bytes(bytes)
-        }
-        connection::transport_target::codec::TYPE_TRANSPORT_TARGET => {
-            connection::transport_target::codec::record_from_bytes(bytes)
         }
         sync::compare::codec::TYPE_SYNC_COMPARE => sync::compare::codec::record_from_bytes(bytes),
         sync::have_id::codec::TYPE_SYNC_HAVE_ID => sync::have_id::codec::record_from_bytes(bytes),

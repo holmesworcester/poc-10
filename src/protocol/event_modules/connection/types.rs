@@ -5,6 +5,8 @@
 //! connection id with the inner event id, giving queued sends a deterministic
 //! identity before any transport wrapping introduces fresh nonces.
 
+use std::net::SocketAddr;
+
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::types::EventId;
 
@@ -16,6 +18,12 @@ pub const EVENT_MAGIC: &[u8; 10] = b"TOPOCONN1\0";
 pub struct InboundConnection {
     pub outgoing: Vec<Vec<u8>>,
     pub connection_id: Option<ConnectionId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportRoute {
+    pub connection_id: ConnectionId,
+    pub addr: SocketAddr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

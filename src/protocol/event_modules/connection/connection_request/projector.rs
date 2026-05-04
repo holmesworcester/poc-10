@@ -1,48 +1,35 @@
 //! Projector for connection request events.
 //!
-//! The projector only writes connection-domain rows. Local outbound requests
-//! are remembered so later acks can be validated. Inbound requests additionally
-//! create the established connection row after the bootstrap hash has been
-//! checked by the worker/command path.
+//! The projector writes the request bytes for later validation. When the common
+//! worker supplies receive metadata, the same projection also learns the
+//! subjective local connection fact: "this endpoint received the request from
+//! this route." That keeps route learning atomic with connection establishment
+//! without turning socket addresses into separate semantic events.
 
 use super::super::schema as projection;
 use super::super::types;
 use super::codec;
-use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
-use crate::protocol::event_modules::worker::ProjectionOutput;
+use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-pub fn project(bytes: Vec<u8>, local_endpoint: EndpointId) -> Result<ProjectionOutput, String> {
+pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
+    let bytes = event.record.canonical_bytes.clone();
+    let receive = event.record.receive;
     let event = codec::decode(&bytes)?;
-    if event.from_endpoint == local_endpoint {
-        outbound(bytes)
-    } else {
-        inbound(bytes, local_endpoint, event.bootstrap_hash)
-    }
-}
-
-pub fn outbound(bytes: Vec<u8>) -> Result<ProjectionOutput, String> {
-    codec::decode(&bytes)?;
     let request_id = types::event_id(&bytes);
-    Ok(ProjectionOutput::rows(vec![
-        projection::connection_event_row(request_id, bytes),
-    ]))
-}
-
-pub fn inbound(
-    bytes: Vec<u8>,
-    local_endpoint: EndpointId,
-    expected_bootstrap_hash: [u8; 32],
-) -> Result<ProjectionOutput, String> {
-    let event = codec::decode(&bytes)?;
-    if event.bootstrap_hash != expected_bootstrap_hash {
-        return Err("bootstrap hash rejected".to_string());
+    let mut rows = vec![projection::connection_event_row(request_id, bytes)];
+    if let Some(receive) = receive {
+        let connection_id = types::connection_id(&request_id, &receive.local_endpoint);
+        rows.push(projection::connection_row(
+            connection_id,
+            event.from_endpoint,
+        ));
+        if receive.remember_route {
+            rows.push(projection::transport_target_row(
+                connection_id,
+                receive.origin,
+            ));
+        }
     }
 
-    let request_id = types::event_id(&bytes);
-    let connection_id = types::connection_id(&request_id, &local_endpoint);
-
-    Ok(ProjectionOutput::rows(vec![
-        projection::connection_event_row(request_id, bytes),
-        projection::connection_row(connection_id, event.from_endpoint),
-    ]))
+    Ok(ProjectionOutput::rows(rows))
 }

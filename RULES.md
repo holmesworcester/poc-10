@@ -25,6 +25,7 @@ the rule is still prose/review only.
 | `protocol/app` is forbidden; CLI behavior is scoped. | typed + static | [CliCommand](src/core/cli.rs), [protocol/cli.rs](src/protocol/cli.rs), `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
+| Connection route learning is part of connection projection, not a transport-target event module. | typed + static | [ReceiveMetadata](src/protocol/event_modules/types.rs), [connection/schema.rs](src/protocol/event_modules/connection/schema.rs), `connection_routes_are_projected_from_receive_metadata`. |
 | Connection outbox is id-only; transit batches canonical inner events. | static + partial | `connection_outbox_is_id_only_and_transit_batches_inner_events`; batching shape is checked, but exact batch sizing remains implementation/test coverage. |
 | Sync direction is connection-scope context, not canonical bytes. | static | `sync_canonical_bytes_do_not_encode_inbound_or_outbound_direction`. |
 | Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_schema_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
@@ -585,8 +586,7 @@ Events declare scope explicitly:
 
 - `Shared`: durable data that participates in sync summaries and dependency
   checks.
-- `Local`: durable private facts such as endpoint keys, invites, and route
-  observations.
+- `Local`: durable private facts such as endpoint keys and invites.
 - `Transient`: non-durable canonical protocol events. The current Topo
   protocol uses connection-scoped transient events for established connections.
 
@@ -611,6 +611,18 @@ connection `outbox`, while incoming-scoped compare/have/need events project to
 Those sync request rows may be temporary; if a debug mode wants durable protocol
 trace facts, it should make the storage class explicit instead of treating them
 as shared durable data.
+
+Connection request/ack receive metadata is projection context. When core TCP
+hands an inbound frame to the connection worker, the worker may attach
+`ReceiveMetadata { origin, local_endpoint, remember_route }` to the decoded
+canonical connection event before admission. The request/ack projector then
+writes the connection row and, when the route is worth dialing later, the current
+transport-target row in one projection. Do not model that route observation as a
+separate `transport_target` event module: the address is subjective to this
+peer's receive boundary, and it is meaningful only with the connection event
+being projected. Listener-side client source ports are receive metadata, but not
+durable routes. Durable events must not carry receive metadata unless storage is
+extended to persist it.
 
 Durable data events are not pushed to peers on creation. Durable data transfer
 is queued only when protocol work asks for a durable event id, usually by a sync
