@@ -110,38 +110,11 @@ fn core_file_set_stays_small_and_named() {
 }
 
 #[test]
-fn protocol_app_files_are_limited_to_cli_adapter_concerns() {
+fn protocol_app_layer_does_not_exist() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let app_root = root.join("src/protocol/app");
-    let allowed = [
-        "crux_app.rs",
-        "effects.rs",
-        "flow_tests.rs",
-        "flows.rs",
-        "mod.rs",
-        "model.rs",
-        "network_effects.rs",
-        "shell.rs",
-        "store_effects.rs",
-        "summaries.rs",
-    ];
-    let offenders = std::fs::read_dir(&app_root)
-        .expect("read protocol app")
-        .map(|entry| entry.expect("dir entry").path())
-        .filter(|path| {
-            path.is_dir()
-                || !path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| allowed.contains(&name))
-        })
-        .map(|path| path.strip_prefix(root).unwrap().display().to_string())
-        .collect::<Vec<_>>();
-
     assert!(
-        offenders.is_empty(),
-        "protocol/app is only the CLI adapter shell; scenario definitions belong beside the closest event module:\n{}",
-        offenders.join("\n")
+        !root.join("src/protocol/app").exists(),
+        "protocol/app is forbidden; CLI behavior belongs in scoped cli.rs files and Crux stays isolated in core"
     );
 }
 
@@ -451,7 +424,7 @@ fn commands_files_live_only_in_event_modules() {
 
     assert!(
         offenders.is_empty(),
-        "commands.rs is reserved for event modules; adapters should use cli.rs, flows.rs, or shell-specific names:\n{}",
+        "commands.rs is reserved for event modules; CLI adapters should use scoped cli.rs files:\n{}",
         offenders.join("\n")
     );
 }
@@ -460,17 +433,17 @@ fn commands_files_live_only_in_event_modules() {
 fn cli_files_live_with_event_modules_or_the_protocol_shell() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
-    let app_root = root.join("src/protocol/app");
+    let protocol_cli = root.join("src/protocol/cli.rs");
     let offenders = rust_files(&root.join("src"))
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
-        .filter(|path| !path.starts_with(&event_root) && !path.starts_with(&app_root))
+        .filter(|path| !path.starts_with(&event_root) && path != &protocol_cli)
         .map(|path| path.strip_prefix(root).unwrap().display().to_string())
         .collect::<Vec<_>>();
 
     assert!(
         offenders.is_empty(),
-        "module CLI adapters belong beside event modules; only the generic protocol shell may own app-level CLI wiring:\n{}",
+        "CLI adapters belong beside event modules; only src/protocol/cli.rs may compose the protocol CLI:\n{}",
         offenders.join("\n")
     );
 }
@@ -810,15 +783,31 @@ fn table_names_are_declared_in_tables_files() {
             continue;
         }
         let text = source_text(&path);
-        if text.contains("table: \"") || text.contains("pub const ") && text.contains(": &str = \"")
-        {
+        if text.contains("table: \"") || text.contains("TableName::new(") {
             violations.push(path.strip_prefix(root).unwrap().display().to_string());
         }
     }
     assert!(
         violations.is_empty(),
-        "module table names belong in tables.rs, with projectors/queries using those declarations:\n{}",
+        "module table names belong in tables.rs as typed TableName declarations, with projectors/queries using those declarations:\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn store_table_rows_use_typed_table_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = source_text(&root.join("src/core/store.rs"));
+    assert!(
+        text.contains("pub struct TableName")
+            && text.contains("pub struct TableRow")
+            && text.contains("pub table: TableName")
+            && !text.contains("pub table: &'static str"),
+        "Store rows should use typed TableName values, not raw table-name strings"
+    );
+    assert!(
+        text.contains("pub fn open_memory()") && text.contains("pub fn open_disk("),
+        "Store should make memory vs disk storage explicit"
     );
 }
 
@@ -969,23 +958,17 @@ fn protocol_network_remains_tcp_framing_only() {
 }
 
 #[test]
-fn protocol_app_and_event_modules_worker_do_not_import_event_families_directly() {
+fn crux_core_is_isolated_to_core() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = rust_files(&root.join("src/protocol/app"))
+    let core_root = root.join("src/core");
+    let files = rust_files(&root.join("src"))
         .into_iter()
-        .chain([root.join("src/protocol/event_modules/worker.rs")])
+        .filter(|path| !path.starts_with(&core_root))
         .collect::<Vec<_>>();
-    let forbidden = [
-        "crate::protocol::event_modules::connection",
-        "crate::protocol::event_modules::content",
-        "crate::protocol::event_modules::identity",
-        "crate::protocol::event_modules::sync",
-        "crate::protocol::event_modules::test_events",
-    ];
-    let violations = file_contains_violations(root, &files, &forbidden);
+    let violations = file_contains_violations(root, &files, &["crux_core", "ProtocolApp"]);
     assert!(
         violations.is_empty(),
-        "app and the event_modules worker may call the protocol registry, not concrete event families:\n{}",
+        "Crux is a core runner detail; protocol code should not define Crux app/model/effect layers:\n{}",
         violations.join("\n")
     );
 }

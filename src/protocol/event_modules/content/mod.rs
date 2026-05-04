@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod content_event;
 
 use crate::protocol::event_modules::worker::ProjectionOutput;

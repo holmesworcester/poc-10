@@ -1,1 +1,3 @@
-pub const TRANSPORT_TARGETS: &str = "connection.transport_targets";
+use crate::core::store::TableName;
+
+pub const TRANSPORT_TARGETS: TableName = TableName::new("connection.transport_targets");

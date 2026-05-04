@@ -14,16 +14,16 @@ the rule is still prose/review only.
 | Projectors return rows only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/protocol/event_modules/worker.rs), `projection_output_contains_rows_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
 | Core is protocol-agnostic queue/storage support. | static | `core_does_not_import_protocol`, `core_does_not_own_protocol_worker_or_wire_codec`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `event_modules_worker_has_no_domain_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
 | Core stays small and named. | static | `core_file_set_stays_small_and_named`. |
-| Generic Crux command driving is core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), `core_file_set_stays_small_and_named`, core vocabulary checks. |
+| Generic Crux command driving is core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), `crux_core_is_isolated_to_core`, core vocabulary checks. |
 | Worker admission/apply is scoped to event modules, not protocol root. | partial | [worker::run](src/protocol/event_modules/worker.rs) is the shared admission/apply entrypoint; there is not yet a typed worker catalog for all worker classes. |
 | Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
 | `event.rs` is forbidden; semantic types live in `types.rs`; codecs do encode/decode only. | static | `event_modules_do_not_use_event_rs`, `codec_files_do_not_define_public_types`, `codec_modules_have_type_files`. |
 | Workers live at the owning scope and expose one obvious entrypoint. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`, `worker_files_export_only_run_as_public_entrypoint`; no typed worker trait/catalog yet. |
 | Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs); static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
-| Protocol app is only the current CLI adapter shell. | static + partial | `protocol_app_files_are_limited_to_cli_adapter_concerns`, `protocol_app_and_event_modules_worker_do_not_import_event_families_directly`; app still owns current Topo CLI flow vocabulary until module-local `cli.rs` adapters exist. |
+| `protocol/app` is forbidden; CLI behavior is scoped. | static + partial | `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`; `src/protocol/cli.rs` still contains temporary cross-scope CLI orchestration for the synchronous POC. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | partial | Documented in [plan.md](plan.md) and checked indirectly by the app file allowlist; no scenario-runner type or migrated scenario definitions yet. |
 | Network is TCP framing only. | static | `protocol_network_remains_tcp_framing_only`, sync transport checks. |
-| Table names are declared in `tables.rs`. | static | `table_names_are_declared_in_tables_files`. |
+| Table names are typed and declared in `tables.rs`. | typed + static | [TableName](src/core/store.rs), `table_names_are_declared_in_tables_files`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only. | static | `event_module_queries_are_read_only`. |
 | `EventRecord` literals are constructed only by codecs/core store. | static | `event_records_are_constructed_only_by_codecs_or_core_tests`. |
 | Codecs use shared binary helpers and reject trailing bytes. | static + partial | `codec_files_use_shared_binary_helpers_and_finish_reads`; this catches common drift but is not a formal fixed-width proof. |
@@ -50,9 +50,9 @@ The following rules should stay mechanically enforced where practical:
   `EventRecord` and carries both the deterministic `event_id` and that
   canonical record.
 - Projectors return `ProjectionOutput` with `Vec<TableRow>`, not events.
-- `commands.rs` is reserved for event modules. App shells and adapters use
-  shell-specific names such as `flows.rs`, and module CLI adapters live in
-  module-local or domain-local `cli.rs`.
+- `commands.rs` is reserved for event modules. CLI adapters live in
+  module-local or domain-local `cli.rs`; protocol-level CLI composition lives
+  only in `src/protocol/cli.rs`.
 - `event.rs` is forbidden. Semantic event types live in `types.rs`; canonical
   wire parsing and formatting live in `codec.rs`.
 - Codec files do not define public semantic types, and every codec module has a
@@ -76,9 +76,8 @@ The following rules should stay mechanically enforced where practical:
   admission workers, blocking policy, or wire codec helpers.
 - Core has a small allowlisted file set and must not contain domain vocabulary
   such as workspace, content, endpoint, identity, invite, or message.
-- Generic Crux command driving belongs in core; protocol-specific app files are
-  limited to CLI adapter concerns (`crux_app`, flows, effects, shell, effect
-  interpreters, model, summaries, and shell-flow tests).
+- Generic Crux command driving belongs in core. Protocol code must not define
+  Crux app/model/effect layers or import `crux_core`.
 - Protocol worker owns admission/apply plumbing; concrete domain branching
   belongs behind the protocol module registry.
 - Sync modules do not own TCP/frame IO, and core/network code does not contain
@@ -90,16 +89,16 @@ The following rules should stay mechanically enforced where practical:
   the protocol worker registry trait.
 - Projectors are row-only boundaries: no `CommandOutput`, `ProposedEvent`,
   `EventRecord`, IO effects, transport work, or transit creation.
-- Table names are declared in `tables.rs`; projectors and queries use those
-  declarations.
+- Table names are declared in `tables.rs` as typed `TableName` values;
+  projectors and queries use those declarations.
 - `EventRecord` literals are constructed by codecs. Other code asks codecs to
   produce records or proposed events.
 - `codec.rs` uses shared binary helpers and finishes reads so trailing bytes are
   rejected.
 - `types.rs` does not store encoded/canonical event artifacts as semantic
   fields.
-- `protocol/network.rs` remains TCP framing only, and `protocol/app` plus
-  protocol worker files do not import concrete event families directly.
+- `protocol/network.rs` remains TCP framing only, and protocol worker files do
+  not import concrete event families directly.
 - Source tests reject fake-crypto terminology that would let placeholder crypto
   be named as real protection.
 
@@ -185,23 +184,20 @@ encode/decode, and event-specific parse validation. Commands belong in
 `commands.rs`.
 
 CLI commands belong in the closest relevant event module or domain root
-`cli.rs`. A generic CLI runner may parse global flags, dispatch to module CLI
-commands, admit/apply proposed events, and print returned output. It must not
-own domain command semantics, help text, post-write queries, or formatting.
+`cli.rs`. CLI output structs and formatting live there too. `src/protocol/cli.rs`
+may compose the current protocol's command surface and coordinate cross-scope
+POC flows, but it should keep shrinking as scoped module CLI commands take over.
+A generic CLI runner may parse global flags, dispatch to module CLI commands,
+admit/apply proposed events, and print returned output. It must not own domain
+command semantics, help text, post-write queries, or formatting.
 
 CLI scenario definitions should live beside the closest relevant event module
 or domain root. A generic integration runner may execute those scenarios through
-the real CLI and check expected output, but app-level tests should stay limited
-to shell flow and effect interpretation.
+the real CLI and check expected output.
 
-A Crux command uses `request_from_shell` when correctness depends on the shell
-reply. `notify_shell` is only for fire-and-forget effects where failure cannot
-change durable state, protocol progress, or user-visible command success.
-
-Shell-flow transcript tests are useful for app-runner behavior: drive app
-messages, inspect requested effects, resolve them with fake replies, and assert
-continuation order. They are not functional proof; real functionality still
-requires black-box CLI/network tests.
+Crux stays isolated in `core/crux_runner.rs`. If a future UI/runtime wants Crux,
+it can use the core runner without introducing `protocol/app`, protocol
+`ProtocolMsg`, or protocol effect enums.
 
 A module CLI command may run module queries and format text or JSON output. If
 it creates events, it first calls a pure module command, then asks the generic

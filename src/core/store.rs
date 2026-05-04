@@ -4,9 +4,22 @@ use std::path::Path;
 
 pub type EventId = [u8; 32];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TableName(&'static str);
+
+impl TableName {
+    pub const fn new(name: &'static str) -> Self {
+        Self(name)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
-    pub table: &'static str,
+    pub table: TableName,
     pub key: Vec<u8>,
     pub value: Vec<u8>,
 }
@@ -77,7 +90,20 @@ impl EventStatus {
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        Self::open_disk(path)
+    }
+
+    pub fn open_disk(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
         let conn = SqliteConnection::open(path)?;
+        Self::from_connection(conn)
+    }
+
+    pub fn open_memory() -> rusqlite::Result<Self> {
+        let conn = SqliteConnection::open_in_memory()?;
+        Self::from_connection(conn)
+    }
+
+    fn from_connection(conn: SqliteConnection) -> rusqlite::Result<Self> {
         let store = Self { conn };
         store.ensure_schema()?;
         Ok(store)
@@ -94,7 +120,7 @@ impl Store {
                 "INSERT OR IGNORE INTO table_rows
                     (table_name, row_key, row_value)
                  VALUES (?1, ?2, ?3)",
-                params![row.table, row.key, row.value],
+                params![row.table.as_str(), row.key, row.value],
             )?;
         }
         Ok(inserted)
@@ -102,7 +128,7 @@ impl Store {
 
     pub fn delete_table_rows(
         &self,
-        table: &'static str,
+        table: TableName,
         keys: Vec<Vec<u8>>,
     ) -> rusqlite::Result<usize> {
         self.write_transaction(|store| {
@@ -111,41 +137,43 @@ impl Store {
                 deleted += store.conn.execute(
                     "DELETE FROM table_rows
                      WHERE table_name = ?1 AND row_key = ?2",
-                    params![table, key],
+                    params![table.as_str(), key],
                 )?;
             }
             Ok(deleted)
         })
     }
 
-    pub fn table_row(&self, table: &'static str, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
+    pub fn table_row(&self, table: TableName, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
         self.conn
             .query_row(
                 "SELECT row_value FROM table_rows
                  WHERE table_name = ?1 AND row_key = ?2",
-                params![table, key],
+                params![table.as_str(), key],
                 |row| row.get(0),
             )
             .optional()
     }
 
-    pub fn table_row_count(&self, table: &'static str) -> rusqlite::Result<usize> {
+    pub fn table_row_count(&self, table: TableName) -> rusqlite::Result<usize> {
         self.conn
             .query_row(
                 "SELECT COUNT(*) FROM table_rows WHERE table_name = ?1",
-                params![table],
+                params![table.as_str()],
                 |row| row.get::<_, i64>(0),
             )
             .map(|count| count as usize)
     }
 
-    pub fn table_rows(&self, table: &'static str) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    pub fn table_rows(&self, table: TableName) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut stmt = self.conn.prepare(
             "SELECT row_key, row_value FROM table_rows
              WHERE table_name = ?1
              ORDER BY row_key",
         )?;
-        let rows = stmt.query_map(params![table], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = stmt.query_map(params![table.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
         rows.collect()
     }
 

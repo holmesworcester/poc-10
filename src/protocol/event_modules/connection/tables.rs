@@ -1,11 +1,11 @@
-use crate::core::store::{EventId, TableRow};
+use crate::core::store::{EventId, TableName, TableRow};
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 
 use super::types::{ConnectionId, OutboxKey};
 
-pub const CONNECTION_EVENTS: &str = "connection.connection_events";
-pub const CONNECTIONS: &str = "connection.connections";
-pub const OUTBOX: &str = "connection.outbox";
+pub const CONNECTION_EVENTS: TableName = TableName::new("connection.connection_events");
+pub const CONNECTIONS: TableName = TableName::new("connection.connections");
+pub const OUTBOX: TableName = TableName::new("connection.outbox");
 
 pub(crate) fn connection_event_row(event_id: EventId, bytes: Vec<u8>) -> TableRow {
     TableRow {

@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod compare;
 pub mod data;
 pub mod frame;

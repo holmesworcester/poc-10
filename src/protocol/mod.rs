@@ -1,4 +1,4 @@
-pub mod app;
+pub mod cli;
 pub mod event_modules;
 pub mod network;
 pub mod wire;

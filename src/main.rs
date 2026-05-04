@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use topo::core::store::Store;
-use topo::protocol::{app, Protocol};
+use topo::protocol::{cli, Protocol};
 
 fn main() {
     if let Err(err) = run(env::args().skip(1).collect()) {
@@ -19,14 +19,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
     match command {
         Command::Connect { invite } => {
-            let lines = app::run_connect(&store, &protocol, invite)
+            let lines = cli::run_connect(&store, &protocol, invite)
                 .map_err(|err| format!("connect: {err}"))?;
             for line in lines {
                 println!("{line}");
             }
         }
         Command::Invite { public_addr } => {
-            let lines = app::run_invite(&store, &protocol, public_addr)
+            let lines = cli::run_invite(&store, &protocol, public_addr)
                 .map_err(|err| format!("invite: {err}"))?;
             for line in lines {
                 println!("{line}");
@@ -36,7 +36,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             num_events,
             event_size,
         } => {
-            let lines = app::run_generate(&store, &protocol, num_events, event_size)
+            let lines = cli::run_generate(&store, &protocol, num_events, event_size)
                 .map_err(|err| format!("generate: {err}"))?;
             for line in lines {
                 println!("{line}");
@@ -47,14 +47,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
             deps_per_event,
         } => {
             let lines =
-                app::run_generate_dependent_events(&store, &protocol, num_events, deps_per_event)
+                cli::run_generate_dependent_events(&store, &protocol, num_events, deps_per_event)
                     .map_err(|err| format!("generate-deps: {err}"))?;
             for line in lines {
                 println!("{line}");
             }
         }
         Command::ReplayDepsReverse => {
-            let lines = app::run_replay_dependent_events_reverse(&store, &protocol)
+            let lines = cli::run_replay_dependent_events_reverse(&store, &protocol)
                 .map_err(|err| format!("replay-deps-reverse: {err}"))?;
             for line in lines {
                 println!("{line}");
@@ -65,13 +65,13 @@ fn run(args: Vec<String>) -> Result<(), String> {
             accept_count,
         } => {
             if let Some(addr) = listen {
-                let lines = app::run_serve(&store, &protocol, addr, accept_count)
+                let lines = cli::run_serve(&store, &protocol, addr, accept_count)
                     .map_err(|err| format!("serve: {err}"))?;
                 for line in lines {
                     println!("{line}");
                 }
             } else {
-                let lines = app::run_sync_routes(&store, &protocol)
+                let lines = cli::run_sync_routes(&store, &protocol)
                     .map_err(|err| format!("sync: {err}"))?;
                 for line in lines {
                     println!("{line}");
@@ -79,7 +79,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             }
         }
         Command::Count => {
-            let lines = app::run_count(&store, &protocol).map_err(|err| format!("count: {err}"))?;
+            let lines = cli::run_count(&store, &protocol).map_err(|err| format!("count: {err}"))?;
             for line in lines {
                 println!("{line}");
             }

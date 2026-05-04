@@ -19,14 +19,14 @@ protocol:
 - queue tables and idempotent table-row writes,
 - storage operations used by protocol-owned wait queues,
 - generic transactions and storage queries,
-- generic Crux app/effect driving.
+- generic Crux app/effect driving, isolated from protocol code.
 
 Core does not decide admission, blocking, dependency meaning, signature/auth
 validity, which projector runs, connection, bootstrap, transit, sync ranges,
 workspaces, content, endpoint identity, TCP, codec format, or CLI command
 semantics. A different protocol should be able to reuse `core/` by providing
 its own scoped workers, event registry, tables, IO modules, wire helpers, and
-CLI/app shell.
+CLI command registry.
 
 The current code split follows that boundary:
 
@@ -36,6 +36,7 @@ src/core/
   crux_runner.rs
 
 src/protocol/
+  cli.rs           // current protocol CLI composition
   event_modules/
     worker.rs       // common event-module admission/apply worker
     connection/
@@ -43,26 +44,22 @@ src/protocol/
     sync/
       worker.rs     // sync-scope queued work
   wire.rs
-  app/             // current protocol app shell
   network.rs
 ```
 
 # Protocol
 
 `protocol/` is the current Topo protocol built on the reusable core. It owns
-all event families, domain workers, protocol-specific IO names, and CLI/app
-effects. A completely different protocol should be able to replace
+all event families, domain workers, protocol-specific IO names, and CLI
+commands. A completely different protocol should be able to replace
 `protocol/` while reusing `core/`.
 
-`protocol/app` is protocol-side because it names the current Topo command
-surface and effect vocabulary: invite, connect, sync, generate, network ops,
-store ops, and stdout. The generic Crux command runner is core because it only
-drives app events and opaque effects. The concrete Topo CLI/app shell remains
-protocol-side because it interprets those effects against the current protocol.
-The end shape should be smaller: a generic CLI runner routes argv to
-module-local `cli.rs` commands, and each module owns its own help text, command
-parameters, domain command calls, post-write queries, output formatting, and
-scenario definitions.
+`protocol/cli.rs` composes the current Topo CLI. Command semantics and output
+types should live in the closest relevant scoped `cli.rs`; protocol-level CLI
+code only coordinates commands that cross module scopes, such as aggregate
+status/count and synchronous TCP pump wiring for this POC. There is no
+`protocol/app` layer. Crux remains available only as generic core runner
+machinery; protocol code must not define Crux app/model/effect types.
 
 **event_modules/** contains every protocol or domain behavior that can be
 expressed as events, projectors, commands, module-owned tables, and module
@@ -251,11 +248,11 @@ The substrate pieces outside `event_modules` are deliberately narrow:
 
 ```
 core/crux_runner.rs      // generic Crux app/effect driving
-core/store.rs            // catalog materialization, storage, migrations, snapshots
+core/store.rs            // typed table rows, memory/disk storage, transactions
+protocol/cli.rs          // current Topo CLI composition
 protocol/event_modules/worker.rs     // event-module admission/apply and blocking worker
 protocol/wire.rs         // shared fixed-field protocol codec helpers
 protocol/network.rs      // TCP bytes and socket ownership
-protocol/app/            // current Topo CLI effect vocabulary and interpreters
 protocol/event_modules/  // protocol facts, projectors, tables, workers
 ```
 
