@@ -10,7 +10,8 @@
 //! 1. Open a store with the schemas declared by core IO and the selected
 //!    protocol's module scopes.
 //! 2. Use `write_transaction` to group rows that must become visible together.
-//! 3. Use the row helpers to insert, replace, delete, and scan by key prefix.
+//! 3. Use the row helpers to insert, replace, delete, and scan by key prefix or
+//!    by an explicit key range.
 //!
 //! The only dynamic SQL in this file is generic row-table creation and
 //! table-name interpolation for row operations. Values are always bound
@@ -248,8 +249,8 @@ impl Store {
         Ok(deleted)
     }
 
-    // Row reads: exact lookup, count, full scan, and bounded prefix scan are the
-    // complete read surface core exposes.
+    // Row reads: exact lookup, count, full scan, bounded prefix scan, and
+    // bounded key-range scan are the complete read surface core exposes.
     /// Fetch one row value by exact key.
     pub fn table_row(&self, table: TableName, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
         let table_name = quoted_table_name(table)?;
@@ -324,6 +325,51 @@ impl Store {
             Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
         })?;
         rows.collect()
+    }
+
+    /// Scan one declared table by lexicographic key range.
+    ///
+    /// This is still a row-store primitive, not a protocol index. Protocol
+    /// modules choose key encodings such as `(timestamp, event_id)` and store
+    /// only asks SQLite for rows whose opaque keys fall in the requested span.
+    pub fn table_rows_in_key_range(
+        &self,
+        table: TableName,
+        lower_inclusive: &[u8],
+        upper_exclusive: Option<&[u8]>,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let table_name = quoted_table_name(table)?;
+        match upper_exclusive {
+            Some(upper) => {
+                let mut stmt = self.conn.prepare(&format!(
+                    "SELECT row_key, row_value FROM {table_name}
+                         WHERE row_key >= ?1 AND row_key < ?2
+                         ORDER BY row_key
+                         LIMIT ?3"
+                ))?;
+                let rows = stmt
+                    .query_map(params![lower_inclusive, upper, limit as i64], |row| {
+                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })?;
+                rows.collect()
+            }
+            None => {
+                let mut stmt = self.conn.prepare(&format!(
+                    "SELECT row_key, row_value FROM {table_name}
+                         WHERE row_key >= ?1
+                         ORDER BY row_key
+                         LIMIT ?2"
+                ))?;
+                let rows = stmt.query_map(params![lower_inclusive, limit as i64], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })?;
+                rows.collect()
+            }
+        }
     }
 
     // Schema helpers: core applies declarations from module scopes. It does not

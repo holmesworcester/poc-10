@@ -9,7 +9,7 @@
 //! The current POC has two wake shapes:
 //!
 //! ```text
-//! manual sync start -> compare command for each known connection route
+//! manual sync start -> root compare command for each known connection route
 //! projected inbound sync event rows -> compare/have/need handler for that connection
 //! ```
 //!
@@ -156,24 +156,27 @@ struct StoreSyncContext<'a> {
 }
 
 impl compare::commands::ReadContext for StoreSyncContext<'_> {
-    fn summary(&self) -> Result<[compare::types::BucketSummary; compare::types::BUCKETS], String> {
-        let mut summary = [compare::types::BucketSummary::default(); compare::types::BUCKETS];
-        for header in event_schema::event_index_entries(self.store)
-            .map_err(|err| format!("load event headers: {err}"))?
+    fn summary(
+        &self,
+        range: compare::types::TimestampRange,
+    ) -> Result<compare::types::RangeSummary, String> {
+        let mut summary = compare::types::RangeSummary::default();
+        for header in
+            event_schema::event_index_entries_in_timestamp_range(self.store, range.start, range.end)
+                .map_err(|err| format!("load event headers: {err}"))?
         {
-            let bucket = &mut summary[usize::from(header.partition)];
-            bucket.count += 1;
-            xor_into(&mut bucket.fingerprint, &fingerprint_id(&header.event_id));
+            summary.count += 1;
+            xor_into(&mut summary.fingerprint, &fingerprint_id(&header.event_id));
         }
         Ok(summary)
     }
 
-    fn ids_in_bucket(
+    fn ids_in_range(
         &self,
-        bucket: u8,
-    ) -> Result<Vec<crate::protocol::event_modules::types::EventId>, String> {
-        event_schema::event_ids_in_partition(self.store, bucket)
-            .map_err(|err| format!("load bucket ids: {err}"))
+        range: compare::types::TimestampRange,
+    ) -> Result<Vec<crate::protocol::event_modules::types::EventIndexEntry>, String> {
+        event_schema::event_index_entries_in_timestamp_range(self.store, range.start, range.end)
+            .map_err(|err| format!("load range ids: {err}"))
     }
 
     fn has_event(

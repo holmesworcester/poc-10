@@ -1,25 +1,26 @@
 //! Codec for compare sync events.
 //!
-//! A compare event carries one connection id and a fixed array of bucket
-//! summaries. It is a real connection-scoped transient event, not a nested
-//! packet item.
+//! A compare event carries one connection id, one inclusive timestamp range,
+//! and the sender's summary for that range. It is a real connection-scoped
+//! transient event, not a nested packet item.
 
 use crate::protocol::event_modules::types::{ConnectionScope, EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 
-use super::types::{BucketSummary, CompareEvent, BUCKETS};
+use super::types::{CompareEvent, RangeSummary, TimestampRange};
 
 pub const TYPE_SYNC_COMPARE: u8 = 140;
-pub const ENCODED_BYTES: usize = 1 + 32 + BUCKETS * (8 + 32);
+pub const ENCODED_BYTES: usize = 1 + 32 + 8 + 8 + 8 + 32 + 1;
 
 pub fn encode(event: &CompareEvent) -> Vec<u8> {
     let mut out = Writer::with_capacity(ENCODED_BYTES);
     out.u8(TYPE_SYNC_COMPARE);
     out.id(&event.connection_id);
-    for bucket in &event.summary {
-        out.u64(bucket.count);
-        out.id(&bucket.fingerprint);
-    }
+    out.u64(event.range.start);
+    out.u64(event.range.end);
+    out.u64(event.summary.count);
+    out.id(&event.summary.fingerprint);
+    out.u8(u8::from(event.response_requested));
     out.finish()
 }
 
@@ -33,15 +34,28 @@ pub fn decode(bytes: &[u8]) -> Result<CompareEvent, String> {
         return Err("unknown sync compare event".to_string());
     }
     let connection_id = reader.id()?;
-    let mut summary = [BucketSummary::default(); BUCKETS];
-    for bucket in &mut summary {
-        bucket.count = reader.u64()?;
-        bucket.fingerprint = reader.id()?;
+    let range = TimestampRange {
+        start: reader.u64()?,
+        end: reader.u64()?,
+    };
+    if range.start > range.end {
+        return Err("sync compare range is inverted".to_string());
     }
+    let summary = RangeSummary {
+        count: reader.u64()?,
+        fingerprint: reader.id()?,
+    };
+    let response_requested = match reader.u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err("sync compare response flag is invalid".to_string()),
+    };
     reader.finish()?;
     Ok(CompareEvent {
         connection_id,
+        range,
         summary,
+        response_requested,
     })
 }
 

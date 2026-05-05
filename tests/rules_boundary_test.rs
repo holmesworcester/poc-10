@@ -636,7 +636,7 @@ fn store_uses_generic_storage_vocabulary() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "store owns generic mechanics, not sync buckets, module-row escape hatches, payload semantics, or network queue semantics:\n{}",
+        "store owns generic mechanics, not sync ranges, module-row escape hatches, payload semantics, or network queue semantics:\n{}",
         violations.join("\n")
     );
 }
@@ -693,8 +693,9 @@ fn store_exposes_generic_prefix_scan_not_network_methods() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let text = source_text(&root.join("src/core/store.rs"));
     assert!(
-        text.contains("pub fn table_rows_with_key_prefix("),
-        "store should expose generic key-prefix scans for indexed queue claims"
+        text.contains("pub fn table_rows_with_key_prefix(")
+            && text.contains("pub fn table_rows_in_key_range("),
+        "store should expose generic key-prefix and key-range scans for indexed queue claims"
     );
     for forbidden in [
         "claim_outbound",
@@ -735,7 +736,8 @@ fn core_store_is_row_only_not_protocol_fact_storage() {
         text.contains("pub fn insert_table_rows_in_tx(")
             && text.contains("pub fn replace_table_rows_in_tx(")
             && text.contains("pub fn delete_table_rows_in_tx(")
-            && text.contains("pub fn table_rows_with_key_prefix("),
+            && text.contains("pub fn table_rows_with_key_prefix(")
+            && text.contains("pub fn table_rows_in_key_range("),
         "core/store.rs should expose generic row write/read primitives only"
     );
 }
@@ -773,7 +775,7 @@ fn protocol_event_schema_owns_common_fact_indexes() {
         "pub const SCHEMAS",
         "pub const EVENTS",
         "pub const READY_EVENTS",
-        "pub const PARTITION_EVENTS",
+        "pub const TIMESTAMP_EVENTS",
         "pub const BLOCKED_EVENTS_BY_MISSING_DEP",
         "pub const MISSING_DEPS_BY_BLOCKED_EVENT",
         "pub const EVENT_LABELS",

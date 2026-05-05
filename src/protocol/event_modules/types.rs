@@ -137,7 +137,7 @@ impl EventStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventIndexEntry {
     pub event_id: EventId,
-    pub partition: u8,
+    pub timestamp: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

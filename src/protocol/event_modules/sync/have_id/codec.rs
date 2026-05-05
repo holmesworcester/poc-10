@@ -1,6 +1,6 @@
 //! Codec for have-id sync events.
 //!
-//! A have-id event advertises one event id in one bucket. It is cheap to
+//! A have-id event advertises one event id at one timestamp. It is cheap to
 //! duplicate and cheap to dedupe, and it has its own event id before transit
 //! wrapping.
 
@@ -10,13 +10,13 @@ use crate::protocol::wire::{Reader, Writer};
 use super::types::HaveIdEvent;
 
 pub const TYPE_SYNC_HAVE_ID: u8 = 141;
-pub const ENCODED_BYTES: usize = 1 + 32 + 1 + 32;
+pub const ENCODED_BYTES: usize = 1 + 32 + 8 + 32;
 
 pub fn encode(event: &HaveIdEvent) -> Vec<u8> {
     let mut out = Writer::with_capacity(ENCODED_BYTES);
     out.u8(TYPE_SYNC_HAVE_ID);
     out.id(&event.connection_id);
-    out.u8(event.bucket);
+    out.u64(event.timestamp);
     out.id(&event.id);
     out.finish()
 }
@@ -32,7 +32,7 @@ pub fn decode(bytes: &[u8]) -> Result<HaveIdEvent, String> {
     }
     let event = HaveIdEvent {
         connection_id: reader.id()?,
-        bucket: reader.u8()?,
+        timestamp: reader.u64()?,
         id: reader.id()?,
     };
     reader.finish()?;

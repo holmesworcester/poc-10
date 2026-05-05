@@ -191,6 +191,64 @@ fn sync_perf_reports_10k_event_rate_from_sync_start_to_all_counted() {
 }
 
 #[test]
+fn negentropy_sync_one_new_event_after_10k_shared_history_is_incremental() {
+    let elapsed = sync_one_new_event_after_shared_history(10_000, 128, Duration::from_secs(5));
+    eprintln!(
+        "black_box_negentropy_incremental_10k elapsed_ms={}",
+        elapsed.as_millis()
+    );
+}
+
+#[test]
+#[ignore = "heavy negentropy performance guard; run explicitly when changing sync"]
+fn negentropy_sync_one_new_event_after_100k_shared_history_is_incremental() {
+    let elapsed = sync_one_new_event_after_shared_history(100_000, 64, Duration::from_secs(10));
+    eprintln!(
+        "black_box_negentropy_incremental_100k elapsed_ms={}",
+        elapsed.as_millis()
+    );
+}
+
+fn sync_one_new_event_after_shared_history(
+    baseline_count: usize,
+    event_size: usize,
+    incremental_timeout: Duration,
+) -> Duration {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let port = free_port();
+    let bob_invite = invite(&bob, port);
+
+    let listener = start_listener(&bob, port, 3);
+    connect_with_retry(&alice, &bob_invite);
+
+    let generated = generate(&alice, baseline_count, event_size);
+    assert!(
+        generated.contains(&format!("generated_events: {baseline_count}")),
+        "{generated}"
+    );
+    let first_sync = sync(&alice);
+    assert!(first_sync.contains("routes_synced: 1"), "{first_sync}");
+    assert_eventually_count(&bob, baseline_count, Duration::from_secs(30));
+
+    let generated = generate(&alice, 1, event_size);
+    assert!(generated.contains("generated_events: 1"), "{generated}");
+
+    let started = Instant::now();
+    let second_sync = sync(&alice);
+    assert!(second_sync.contains("routes_synced: 1"), "{second_sync}");
+    wait_success(listener, "incremental negentropy listener");
+    assert_eventually_count(&bob, baseline_count + 1, incremental_timeout);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < incremental_timeout,
+        "incremental sync took {elapsed:?}, expected under {incremental_timeout:?}"
+    );
+    elapsed
+}
+
+#[test]
 fn repeated_sync_reuses_connection_scoped_events_without_durable_deduping() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -342,4 +400,40 @@ fn invited_alice_bob_and_carol_sync_but_uninvited_mallory_cannot_connect() {
     );
     assert_eq!(connection_count(&mallory), 0);
     assert_eq!(count(&mallory), 0);
+}
+
+#[test]
+#[ignore = "dep-aware sync today is the next sync variant; this should fail until that CLI and index exist"]
+fn dep_aware_sync_today_projects_recent_root_with_old_deps_quickly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let port = free_port();
+    let bob_invite = invite(&bob, port);
+
+    let listener = start_listener(&bob, port, 3);
+    connect_with_retry(&alice, &bob_invite);
+
+    assert_success(topo(&["--db", &alice, "generate-deps", "10000", "10"]));
+    assert_success(topo(&["--db", &alice, "replay-deps-reverse"]));
+    let first_sync = sync(&alice);
+    assert!(first_sync.contains("routes_synced: 1"), "{first_sync}");
+    assert_eventually_count(&bob, 10_000, Duration::from_secs(30));
+
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "generate-deps-recent-root",
+        "10000",
+        "10",
+    ]));
+    let started = Instant::now();
+    let today_sync = assert_success(topo(&["--db", &alice, "sync", "today"]));
+    assert!(today_sync.contains("routes_synced: 1"), "{today_sync}");
+    wait_success(listener, "dep-aware sync today listener");
+    assert_eventually_count(&bob, 10_001, Duration::from_secs(5));
+    eprintln!(
+        "black_box_dep_aware_recent_root_old_deps elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
 }

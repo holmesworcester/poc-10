@@ -6,12 +6,13 @@
 //! commands. Keep new protocol meaning here or in a scoped event-module
 //! `schema.rs`; do not push it down into `core::store`.
 //!
-//! The common worker relies on three small indexes. `EVENTS` stores canonical
+//! The common worker relies on small generic indexes. `EVENTS` stores canonical
 //! durable bytes and a compact header. `READY_EVENTS` and the two missing-dep
 //! edge tables make admission incremental: inserting a newly applied dependency
-//! only has to inspect events known to be waiting on that dependency. Labels are
-//! generic, bounded context for projectors; richer read models belong in scoped
-//! module schema files.
+//! only has to inspect events known to be waiting on that dependency.
+//! `TIMESTAMP_EVENTS` gives sync a timestamp-ordered feed of shared event ids
+//! without teaching core what an event is. Labels are generic, bounded context
+//! for projectors; richer read models belong in scoped module schema files.
 
 use crate::core::store::{Schema, Store, TableName, TableRow};
 use crate::protocol::event_modules::types::{
@@ -20,7 +21,7 @@ use crate::protocol::event_modules::types::{
 
 pub const EVENTS: TableName = TableName::new("event_modules.events");
 pub const READY_EVENTS: TableName = TableName::new("event_modules.ready_events");
-pub const PARTITION_EVENTS: TableName = TableName::new("event_modules.partition_events");
+pub const TIMESTAMP_EVENTS: TableName = TableName::new("event_modules.timestamp_events");
 pub const BLOCKED_EVENTS_BY_MISSING_DEP: TableName =
     TableName::new("event_modules.blocked_events_by_missing_dep");
 pub const MISSING_DEPS_BY_BLOCKED_EVENT: TableName =
@@ -30,7 +31,7 @@ pub const EVENT_LABELS: TableName = TableName::new("event_modules.labels");
 pub const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("event_modules.events.v1", EVENTS),
     Schema::durable_row_table("event_modules.ready_events.v1", READY_EVENTS),
-    Schema::durable_row_table("event_modules.partition_events.v1", PARTITION_EVENTS),
+    Schema::durable_row_table("event_modules.timestamp_events.v1", TIMESTAMP_EVENTS),
     Schema::durable_row_table(
         "event_modules.blocked_events_by_missing_dep.v1",
         BLOCKED_EVENTS_BY_MISSING_DEP,
@@ -80,7 +81,7 @@ pub fn insert_event(
         rows.push(ready_row(event.timestamp, &id));
     }
     if event.scope.is_shared() {
-        rows.push(partition_row(id[0], &id));
+        rows.push(timestamp_row(event.timestamp, &id));
     }
     store.insert_table_rows_in_tx(rows)?;
     Ok(true)
@@ -232,31 +233,28 @@ pub fn body_bytes(store: &Store) -> rusqlite::Result<usize> {
         .sum())
 }
 
-pub fn event_index_entries(store: &Store) -> rusqlite::Result<Vec<EventIndexEntry>> {
-    // The partition index is intentionally simple: a fixed byte prefix lets
-    // sync summarize and enumerate small buckets without decoding every event.
+pub fn event_index_entries_in_timestamp_range(
+    store: &Store,
+    start_timestamp: u64,
+    end_timestamp: u64,
+) -> rusqlite::Result<Vec<EventIndexEntry>> {
+    let lower = timestamp_range_lower_key(start_timestamp);
+    let upper = timestamp_range_upper_key(end_timestamp);
     store
-        .table_rows(PARTITION_EVENTS)?
-        .into_iter()
-        .map(|(key, _)| {
-            let (partition, event_id) = split_partition_key(&key)?;
-            Ok(EventIndexEntry {
-                event_id,
-                partition,
-            })
-        })
-        .collect()
-}
-
-pub fn event_ids_in_partition(store: &Store, partition: u8) -> rusqlite::Result<Vec<EventId>> {
-    store
-        .table_rows_with_key_prefix(
-            PARTITION_EVENTS,
-            &[partition],
+        .table_rows_in_key_range(
+            TIMESTAMP_EVENTS,
+            &lower,
+            upper.as_deref(),
             MAX_DEPENDENCY_ROWS_PER_EVENT,
         )?
         .into_iter()
-        .map(|(key, _)| split_partition_key(&key).map(|(_, event_id)| event_id))
+        .map(|(key, _)| {
+            let (timestamp, event_id) = split_timestamp_key(&key)?;
+            Ok(EventIndexEntry {
+                event_id,
+                timestamp,
+            })
+        })
         .collect()
 }
 
@@ -352,10 +350,10 @@ fn ready_row(timestamp: u64, event_id: &EventId) -> TableRow {
     }
 }
 
-fn partition_row(partition: u8, event_id: &EventId) -> TableRow {
+fn timestamp_row(timestamp: u64, event_id: &EventId) -> TableRow {
     TableRow {
-        table: PARTITION_EVENTS,
-        key: partition_key(partition, event_id),
+        table: TIMESTAMP_EVENTS,
+        key: timestamp_key(timestamp, event_id),
         value: Vec::new(),
     }
 }
@@ -440,21 +438,33 @@ fn ready_key(timestamp: u64, event_id: &EventId) -> Vec<u8> {
     key
 }
 
-fn partition_key(partition: u8, event_id: &EventId) -> Vec<u8> {
-    let mut key = Vec::with_capacity(1 + event_id.len());
-    key.push(partition);
+fn timestamp_key(timestamp: u64, event_id: &EventId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(8 + event_id.len());
+    key.extend_from_slice(&timestamp.to_be_bytes());
     key.extend_from_slice(event_id);
     key
 }
 
-fn split_partition_key(key: &[u8]) -> rusqlite::Result<(u8, EventId)> {
-    if key.len() != 33 {
+fn timestamp_range_lower_key(timestamp: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(40);
+    key.extend_from_slice(&timestamp.to_be_bytes());
+    key.extend_from_slice(&[0; 32]);
+    key
+}
+
+fn timestamp_range_upper_key(timestamp: u64) -> Option<Vec<u8>> {
+    timestamp.checked_add(1).map(timestamp_range_lower_key)
+}
+
+fn split_timestamp_key(key: &[u8]) -> rusqlite::Result<(u64, EventId)> {
+    if key.len() != 40 {
         return Err(table_error(format!(
-            "partition key should be 33 bytes, got {}",
+            "timestamp key should be 40 bytes, got {}",
             key.len()
         )));
     }
-    Ok((key[0], vec_to_id(key[1..].to_vec())?))
+    let timestamp = u64::from_be_bytes(key[..8].try_into().expect("slice length checked"));
+    Ok((timestamp, vec_to_id(key[8..].to_vec())?))
 }
 
 fn edge_key(first: &EventId, second: &EventId) -> Vec<u8> {

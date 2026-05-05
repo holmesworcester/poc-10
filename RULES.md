@@ -316,10 +316,11 @@ dependency absence.
 
 `store.rs` is generic storage mechanics. It applies `Schema` declarations from
 core IO modules and protocol module scopes, then exposes typed table names,
-opaque key/value rows, transactions, exact row reads, and bounded prefix scans.
+opaque key/value rows, transactions, exact row reads, bounded prefix scans, and
+bounded key-range scans.
 It may generate the uniform `(row_key, row_value)` table shape for
 module-declared row tables. It must not expose event ids, event status, labels,
-missing-dep edges, sync buckets, connection/bootstrap schema, content payload
+missing-dep edges, sync ranges, connection/bootstrap schema, content payload
 semantics, or network queue semantics as storage concepts.
 `core/network_queues.rs` owns typed network queue rows and encodes them through
 generic `TableRow`s. Protocol and module `schema.rs` files declare the tables
@@ -533,7 +534,7 @@ Core may:
 - store declared table rows as opaque key/value bytes
 - execute schemas declared by core IO and protocol module scopes
 - run transactions over generic rows
-- expose exact row reads and prefix scans for queues/indexes
+- expose exact row reads, prefix scans, and key-range scans for queues/indexes
 - maintain one opaque outbound network queue with target metadata and one opaque
   inbound network queue with source metadata
 - run generic TCP listener/connect/read-frame/write-frame mechanics over those
@@ -551,7 +552,8 @@ Protocol event modules may:
 Network queues are ordinary core table rows with typed wrappers. There is one
 outbound queue table, not one table per target. `target` is metadata encoded
 into the row key so core can claim a bounded batch for a target with a generic
-key-prefix scan. `Store` may expose `table_rows_with_key_prefix`; it must not
+key-prefix scan. `Store` may expose `table_rows_with_key_prefix` and generic
+key-range scans; it must not
 grow network-specific methods.
 
 Core must not:
@@ -793,7 +795,7 @@ Keep core boring:
 - `core/network_queues.rs` owns one target-indexed outbound byte queue and one
   source-indexed inbound byte queue; it does not define per-target tables.
 - `core/store.rs` owns durable bytes, generic module-owned rows, and generic event-set
-  reads/writes only. It may expose generic prefix scans over table row keys,
+  reads/writes only. It may expose generic prefix and key-range scans over table row keys,
   but it must not know network queue meaning.
 - `protocol/event_modules/content` owns content event construction, codec, and projection.
 - `protocol/event_modules/sync` owns all negentropy, compare/have/need/range decisions,

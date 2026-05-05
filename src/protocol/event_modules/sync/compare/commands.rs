@@ -1,22 +1,25 @@
 //! Compare-driven sync commands.
 //!
-//! This is the POC's simple reconciliation engine. A peer asks "do these bucket
-//! summaries match?" If not, the responder sends have ids for differing
-//! buckets; missing ids become need ids; received need ids queue durable event
-//! ids to the connection outbox. The command emits event records and ids only:
-//! transit wrapping and TCP framing are outside sync.
+//! This is the POC's range-negentropy reconciliation engine. A peer asks "does
+//! this timestamp range have the same count and fingerprint?" If not, the
+//! responder answers with child compares until a timestamp leaf can advertise
+//! concrete ids. Missing ids become need ids; received need ids queue durable
+//! event ids to the connection outbox. The command emits event records and ids
+//! only: transit wrapping and TCP framing are outside sync.
 
-use crate::protocol::event_modules::types::EventId;
+use crate::protocol::event_modules::types::{EventId, EventIndexEntry};
 
 use super::super::have_id::{self, types::HaveIdEvent};
 use super::super::need_id::{self, types::NeedIdEvent};
-use super::types::{BucketSummary, CompareEvent, BUCKETS};
+use super::types::{CompareEvent, RangeSummary, TimestampRange};
+
+const MAX_HAVE_IDS_PER_RANGE: usize = 64;
 
 pub trait ReadContext {
-    /// Summarize every shared event bucket.
-    fn summary(&self) -> Result<[BucketSummary; BUCKETS], String>;
-    /// Enumerate ids in one bucket when summaries differ.
-    fn ids_in_bucket(&self, bucket: u8) -> Result<Vec<EventId>, String>;
+    /// Summarize every shared event whose timestamp is inside the range.
+    fn summary(&self, range: TimestampRange) -> Result<RangeSummary, String>;
+    /// Enumerate ids in one timestamp range when summaries differ.
+    fn ids_in_range(&self, range: TimestampRange) -> Result<Vec<EventIndexEntry>, String>;
     /// Check whether an advertised id is already present locally.
     fn has_event(&self, event_id: &EventId) -> Result<bool, String>;
 }
@@ -29,19 +32,18 @@ pub struct SyncReport {
 }
 
 pub fn start(context: &impl ReadContext, connection_id: EventId) -> Result<SyncReport, String> {
-    // Manual start sends a full compare and, for the current simple protocol,
-    // all have ids. The latter is intentionally easy to reason about and relies
-    // on outbox idempotence rather than round state.
+    // Manual start sends only the root compare. The rest of the exchange is
+    // driven by projected inbound compare rows.
+    let range = TimestampRange::ROOT;
     let mut report = SyncReport::default();
     report
         .events
         .push(super::codec::outbound_record(CompareEvent {
             connection_id,
-            summary: context.summary()?,
+            range,
+            summary: context.summary(range)?,
+            response_requested: true,
         })?);
-    for event in all_have_items(context, connection_id)? {
-        report.events.push(have_id::codec::outbound_record(event)?);
-    }
     Ok(report)
 }
 
@@ -54,12 +56,17 @@ pub fn handle_inbound_event(
     if super::codec::is_event(bytes) {
         let event = super::codec::decode(bytes)?;
         ensure_connection(event.connection_id, expected_connection_id)?;
-        let local = context.summary()?;
+        let local = context.summary(event.range)?;
         if local != event.summary {
-            for have in have_items_for_compare(context, event.connection_id, local, event.summary)?
-            {
-                report.events.push(have_id::codec::outbound_record(have)?);
-            }
+            let events = compare_response(
+                context,
+                event.connection_id,
+                event.range,
+                local,
+                event.summary,
+                event.response_requested,
+            )?;
+            report.events.extend(events);
         }
         return Ok(report);
     }
@@ -98,52 +105,113 @@ fn ensure_connection(
     Ok(())
 }
 
-fn all_have_items(
+fn compare_response(
     context: &impl ReadContext,
     connection_id: EventId,
-) -> Result<Vec<HaveIdEvent>, String> {
-    let mut items = Vec::new();
-    for bucket in 0..BUCKETS {
-        let ids = context.ids_in_bucket(bucket as u8)?;
-        for id in ids {
-            items.push(HaveIdEvent {
+    range: TimestampRange,
+    local: RangeSummary,
+    remote: RangeSummary,
+    response_requested: bool,
+) -> Result<Vec<crate::protocol::event_modules::types::EventRecord>, String> {
+    let mut records = Vec::new();
+    let entries = context.ids_in_range(range)?;
+    if entries.is_empty() {
+        if response_requested {
+            records.push(super::codec::outbound_record(CompareEvent {
                 connection_id,
-                bucket: bucket as u8,
-                id,
-            });
+                range,
+                summary: local,
+                response_requested: false,
+            })?);
         }
+        return Ok(records);
     }
-    Ok(items)
-}
 
-fn have_items_for_compare(
-    context: &impl ReadContext,
-    connection_id: EventId,
-    local: [BucketSummary; BUCKETS],
-    remote: [BucketSummary; BUCKETS],
-) -> Result<Vec<HaveIdEvent>, String> {
-    let mut items = Vec::new();
-    for bucket in differing_buckets(&local, &remote) {
-        let ids = context.ids_in_bucket(bucket)?;
-        for id in ids {
-            items.push(HaveIdEvent {
+    if entries.len() <= MAX_HAVE_IDS_PER_RANGE {
+        for entry in entries {
+            records.push(have_id::codec::outbound_record(HaveIdEvent {
                 connection_id,
-                bucket,
-                id,
-            });
+                timestamp: entry.timestamp,
+                id: entry.event_id,
+            })?);
         }
+        if response_requested && remote.count > 0 {
+            records.push(super::codec::outbound_record(CompareEvent {
+                connection_id,
+                range,
+                summary: local,
+                response_requested: false,
+            })?);
+        }
+        return Ok(records);
     }
-    Ok(items)
-}
 
-fn differing_buckets(
-    local: &[BucketSummary; BUCKETS],
-    remote: &[BucketSummary; BUCKETS],
-) -> Vec<u8> {
-    local
-        .iter()
-        .zip(remote.iter())
-        .enumerate()
-        .filter_map(|(idx, (left, right))| (left != right).then_some(idx as u8))
-        .collect()
+    let min_timestamp = entries
+        .first()
+        .map(|entry| entry.timestamp)
+        .expect("entries not empty");
+    let max_timestamp = entries
+        .last()
+        .map(|entry| entry.timestamp)
+        .expect("entries not empty");
+    if min_timestamp == max_timestamp {
+        for entry in entries {
+            records.push(have_id::codec::outbound_record(HaveIdEvent {
+                connection_id,
+                timestamp: entry.timestamp,
+                id: entry.event_id,
+            })?);
+        }
+        if response_requested && remote.count > 0 {
+            records.push(super::codec::outbound_record(CompareEvent {
+                connection_id,
+                range,
+                summary: local,
+                response_requested: false,
+            })?);
+        }
+        return Ok(records);
+    }
+
+    if range.start < min_timestamp {
+        let empty_left = TimestampRange {
+            start: range.start,
+            end: min_timestamp - 1,
+        };
+        records.push(super::codec::outbound_record(CompareEvent {
+            connection_id,
+            range: empty_left,
+            summary: RangeSummary::default(),
+            response_requested: true,
+        })?);
+    }
+    if max_timestamp < range.end {
+        let empty_right = TimestampRange {
+            start: max_timestamp + 1,
+            end: range.end,
+        };
+        records.push(super::codec::outbound_record(CompareEvent {
+            connection_id,
+            range: empty_right,
+            summary: RangeSummary::default(),
+            response_requested: true,
+        })?);
+    }
+
+    let local_range = TimestampRange {
+        start: min_timestamp,
+        end: max_timestamp,
+    };
+    if let Some((left, right)) = local_range.split() {
+        for child in [left, right] {
+            records.push(super::codec::outbound_record(CompareEvent {
+                connection_id,
+                range: child,
+                summary: context.summary(child)?,
+                response_requested: true,
+            })?);
+        }
+        return Ok(records);
+    }
+    Ok(records)
 }

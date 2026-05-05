@@ -210,9 +210,9 @@ and what their work means.
 **core network queues** contain one outbound table and one inbound table. The
 outbound queue is not split into per-target tables; `target` is metadata encoded
 into the row key so core can claim a bounded batch for one target with a generic
-key-prefix scan. `Store` only exposes generic table-row and prefix-scan
-mechanics; `core/network_queues.rs` owns the typed row wrappers and queue
-encoding.
+key-prefix scan. `Store` only exposes generic table-row, prefix-scan, and
+key-range-scan mechanics; `core/network_queues.rs` owns the typed row wrappers
+and queue encoding.
 
 **core TCP** drains and fills opaque network queue rows. It owns listener,
 connect, length-prefixed frame read/write, socket shutdown, and transport
@@ -444,9 +444,9 @@ relationship between two events, prefer declaring the relationship as an event
 dependency and validating it through generic context.
 
 The known required case is negentropy response projection: compare/have/need
-responders need indexed summaries, bucket ids, presence checks, and event bytes
-from module-owned sync/negentropy tables. That is context for the sync module,
-not sync vocabulary in the core.
+responders need indexed range summaries, event ids, presence checks, and event
+bytes from module-owned sync/negentropy tables. That is context for the sync
+module, not sync vocabulary in the core.
 
 Connection and bootstrap projectors should not need custom context in the first
 cut. Model their checks as first-level dependencies and labels:
@@ -748,8 +748,8 @@ protocol outbox row
 ```
 
 `Store` supports this without network semantics by exposing generic table-row
-operations, including a bounded `table_rows_with_key_prefix` scan. Network queue
-encoding lives in `core/network_queues.rs`, not `core/store.rs`.
+operations, including bounded prefix and key-range scans. Network queue encoding
+lives in `core/network_queues.rs`, not `core/store.rs`.
 
 ## Possible Further Work
 
@@ -958,16 +958,16 @@ bytes, and `event_id = BLAKE3(canonical_event_bytes)`. `connection_id` is part
 of the canonical sync event, so ids for otherwise identical sync messages do not
 overlap across connections.
 
-The current POC event shape is the deliberately small bucket-sync baseline:
+The current POC event shape is the plain range-negentropy baseline:
 
 ```
-SyncCompare(connection_id, [BucketSummary; 256])
-SyncHaveId(connection_id, bucket, event_id)
+SyncCompare(connection_id, start_timestamp, end_timestamp, count, fingerprint, response_requested)
+SyncHaveId(connection_id, timestamp, event_id)
 SyncNeedId(connection_id, event_id)
 ```
 
-The true plain-negentropy target keeps the same module shape but replaces the
-bucket summary with explicit range-tree nodes:
+The durable dep-aware target keeps the same module shape but extends range
+identity from raw timestamps to a workspace/sync-key range:
 
 ```
 SyncCompare(connection_id, workspace_scope, node, count, fingerprint)
@@ -1018,17 +1018,17 @@ work, not a newly created event.
 There is no distinct `SyncStartRequested` protocol event in the base design.
 The current CLI wakes `sync::worker::Work::Start`; that wake is local worker
 control, not wire protocol. Today the worker fans out across known routed
-connections, calls `compare::commands::start`, and returns outgoing
-`SyncCompare` plus simple `SyncHaveId` events for admission. In the true
-plain-negentropy version, the same wake first catches the sync index up if
-needed and then calls a root-compare command for each selected connection. The
-first protocol event on the wire is still `SyncCompare(root)`.
+connections, calls `compare::commands::start`, and returns an outgoing root
+`SyncCompare` for admission. Once the materialized sync index exists, the same
+wake first catches the index up and then calls the root-compare command for each
+selected connection. The first protocol event on the wire remains
+`SyncCompare(root)`.
 
 ```
 topo sync
   -> sync::worker::run(Work::Start)
   -> compare command from current sync index/context
-  -> proposed outgoing SyncCompare / SyncHaveId events
+  -> proposed outgoing root SyncCompare events
   -> common event-module worker admits events
 
 Outgoing-scoped SyncCompare / SyncHaveId / SyncNeedId projected
@@ -1055,50 +1055,51 @@ connection::worker.run
   -> writes core TCP send queue rows for those bytes
 ```
 
-The plain-negentropy worker's invariant will be: never answer sync work against
-a stale sync index. Once the shared-event feed and `sync.index_cursor` exist,
-the worker must catch up that feed before responding to `sync.inbound_events`.
-Use an apply/feed sequence, not event timestamps, as cursor order. Index updates
-and cursor advancement are one transaction; index writes are idempotent with
-unique `(scope_key, event_id)` rows. Prefer per-workspace indexes and aggregate
-the allowed workspace scopes for a connection at response time rather than
-maintaining per-connection negentropy indexes.
+The current implementation keeps a timestamp-ordered shared-event index in the
+common event schema and computes range summaries from that index. The next
+performance step is to materialize the range tree in `sync/schema.rs`. Once the
+shared-event feed and `sync.index_cursor` exist, the worker must catch up that
+feed before responding to `sync.inbound_events`. Use an apply/feed sequence, not
+event timestamps, as cursor order. Index updates and cursor advancement are one
+transaction; index writes are idempotent with unique `(scope_key, event_id)`
+rows. Prefer per-workspace indexes and aggregate the allowed workspace scopes
+for a connection at response time rather than maintaining per-connection
+negentropy indexes.
 
 Duplicate worker output collapses because connection-scoped sync event bytes are
 deterministic and `outbox` is unique on `(connection_id, event_id)`.
 
-## Current-shape negentropy implementation plan
+## Negentropy implementation plan
 
 Keep the current file shape. Do not add a separate `negentropy/` module unless
-it defines a real event type. The patch order should be:
+it defines a real event type. The implementation plan is:
 
-1. Preserve the current POC boundary as the baseline. `sync/compare`,
+1. Preserve the current POC boundary. `sync/compare`,
    `sync/have_id`, and `sync/need_id` stay leaf event modules. Their projectors
    remain row-only: outgoing scope writes connection-scoped bytes plus temp
    outbox rows, incoming scope writes `sync.inbound_events`. `sync/worker.rs`
    remains the only sync component that scans indexes, chooses responses, or
    queues requested durable ids.
-2. Add a shared-event feed in `protocol/event_modules/schema.rs` or the closest
+2. The current code already has real range negotiation: `SyncCompare` names an
+   inclusive timestamp range and carries a count/fingerprint summary;
+   mismatched ranges split; small leaves emit `SyncHaveId`; missing ids emit
+   `SyncNeedId`; received needs queue id-only temp outbox rows. This replaced
+   the old whole-set bucket shortcut and is covered by black-box TCP tests,
+   including a 10k-history/one-new-event incremental guard.
+3. Add a shared-event feed in `protocol/event_modules/schema.rs` or the closest
    common event-worker schema. The common event worker writes one feed row for
    each admitted shared event in the same transaction that records the event.
    Use a monotonically increasing feed/apply sequence in the row key, not event
    timestamps. Transient sync events and rejected bytes do not enter this feed.
-3. Add plain-negentropy state to `sync/schema.rs`: `sync.index_cursor`,
+4. Add materialized plain-negentropy state to `sync/schema.rs`: `sync.index_cursor`,
    `sync.range_nodes`, `sync.range_members`, and any small helper table needed
    to map a sync key to its leaf path. These are module-owned row tables with
    typed row helpers; core store remains a generic row substrate.
-4. Teach `sync/worker.rs` to run index catch-up before response work. It drains
+5. Teach `sync/worker.rs` to run index catch-up before response work. It drains
    the shared-event feed after `sync.index_cursor`, updates leaf-to-root range
    summaries with path updates, and advances the cursor in the same transaction
    as the index writes. This is the point where negentropy hashes become cheap:
    no full tree rebuild on ordinary event arrival.
-5. Replace the current bucket shortcut with recursive range compare. `Work::Start`
-   calls the compare command for the root node. Inbound compare rows cause the
-   worker to compare the named node: if equal, emit nothing; if mismatched and
-   splittable, emit child `SyncCompare` events; if at a leaf, emit `SyncHaveId`
-   events. Inbound `SyncHaveId` emits `SyncNeedId` when missing. Inbound
-   `SyncNeedId` writes an id-only temp outbox row when the durable shared event
-   is present.
 6. Keep every newly created sync protocol item on the command/admission path.
    The sync worker may call module commands and return proposed events to the
    common event-module worker; it must not hand bytes to transit or write core
