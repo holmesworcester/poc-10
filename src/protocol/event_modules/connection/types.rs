@@ -3,6 +3,9 @@
 //! The connection id is derived from the request id and accepting endpoint so
 //! both sides can agree on it without another round trip.
 
+use std::net::SocketAddr;
+use std::time::Duration;
+
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::types::EventId;
 
@@ -53,4 +56,56 @@ pub(in crate::protocol::event_modules) fn connection_id_from_bytes(
 
 pub(super) fn is_connection_event(bytes: &[u8]) -> bool {
     bytes.starts_with(EVENT_MAGIC)
+}
+
+/// Options for the long-lived connection daemon loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonOptions {
+    pub listen: SocketAddr,
+    pub duration: Option<Duration>,
+    pub idle: Duration,
+    pub ready_batch: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectReport {
+    pub addr: SocketAddr,
+    pub established_routes: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServeReport {
+    pub local_addr: Option<SocketAddr>,
+    pub accepted_connections: usize,
+    pub received_events: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteExchangeReport {
+    pub routes_synced: usize,
+    pub failed_routes: usize,
+    pub sent_events: usize,
+    pub received_events: usize,
+}
+
+impl RouteExchangeReport {
+    pub(super) fn merge(&mut self, other: Self) {
+        self.routes_synced += other.routes_synced;
+        self.failed_routes += other.failed_routes;
+        self.sent_events += other.sent_events;
+        self.received_events += other.received_events;
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DaemonReport {
+    pub local_addr: Option<SocketAddr>,
+    pub accepted_connections: usize,
+    pub sync_rounds: usize,
+    pub routes_synced: usize,
+    pub failed_routes: usize,
+    pub sent_events: usize,
+    pub received_events: usize,
+    pub ready_events: usize,
+    pub unblocked_events: usize,
 }

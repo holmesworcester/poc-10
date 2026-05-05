@@ -29,12 +29,7 @@
 //! know that mapping.
 
 use std::{
-    cell::RefCell,
-    collections::HashMap,
-    net::SocketAddr,
-    str::FromStr,
-    thread,
-    time::{Duration, Instant},
+    cell::RefCell, collections::HashMap, net::SocketAddr, str::FromStr, thread, time::Instant,
 };
 
 use crate::core::network_queues::{self, InboundNetworkRow, NetworkTarget, OutboundNetworkRow};
@@ -68,15 +63,6 @@ struct FrameMetadata {
 
 pub const DEFAULT_DAEMON_READY_BATCH: usize = worker::DEFAULT_READY_BATCH;
 
-/// Options for the long-lived connection daemon loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DaemonOptions {
-    pub listen: SocketAddr,
-    pub duration: Option<Duration>,
-    pub idle: Duration,
-    pub ready_batch: usize,
-}
-
 /// Work accepted by the connection worker.
 ///
 /// Each variant is an active connection-domain operation. The variants are
@@ -96,61 +82,18 @@ pub enum Work {
         selection: sync::worker::SyncSelection,
     },
     RunDaemon {
-        options: DaemonOptions,
+        options: types::DaemonOptions,
     },
 }
 
 /// Result of a connection worker action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
-    Connected(ConnectReport),
-    Served(ServeReport),
-    RoutesExchanged(RouteExchangeReport),
-    SyncRoutesStarted(RouteExchangeReport),
-    DaemonRan(DaemonReport),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConnectReport {
-    pub addr: SocketAddr,
-    pub established_routes: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ServeReport {
-    pub local_addr: Option<SocketAddr>,
-    pub accepted_connections: usize,
-    pub received_events: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RouteExchangeReport {
-    pub routes_synced: usize,
-    pub failed_routes: usize,
-    pub sent_events: usize,
-    pub received_events: usize,
-}
-
-impl RouteExchangeReport {
-    fn merge(&mut self, other: Self) {
-        self.routes_synced += other.routes_synced;
-        self.failed_routes += other.failed_routes;
-        self.sent_events += other.sent_events;
-        self.received_events += other.received_events;
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DaemonReport {
-    pub local_addr: Option<SocketAddr>,
-    pub accepted_connections: usize,
-    pub sync_rounds: usize,
-    pub routes_synced: usize,
-    pub failed_routes: usize,
-    pub sent_events: usize,
-    pub received_events: usize,
-    pub ready_events: usize,
-    pub unblocked_events: usize,
+    Connected(types::ConnectReport),
+    Served(types::ServeReport),
+    RoutesExchanged(types::RouteExchangeReport),
+    SyncRoutesStarted(types::RouteExchangeReport),
+    DaemonRan(types::DaemonReport),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -203,7 +146,7 @@ enum InboundFrame {
 /// connection response traffic that should go back to the frame origin. Route
 /// establishment is reported separately for CLI output and tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ConnectionFrameReport {
+struct ConnectionFrameReport {
     pub events: Vec<EventRecord>,
     pub outgoing: Vec<Vec<u8>>,
     pub established_routes: usize,
@@ -275,7 +218,11 @@ where
     }
 }
 
-fn run_connect<R>(store: &Store, registry: &R, invite: String) -> Result<ConnectReport, String>
+fn run_connect<R>(
+    store: &Store,
+    registry: &R,
+    invite: String,
+) -> Result<types::ConnectReport, String>
 where
     R: ConnectionRegistry,
 {
@@ -299,7 +246,7 @@ where
     if summary.established_routes == 0 {
         return Err("connection was not established".to_string());
     }
-    Ok(ConnectReport {
+    Ok(types::ConnectReport {
         addr,
         established_routes: summary.established_routes,
     })
@@ -310,7 +257,7 @@ fn run_serve<R>(
     registry: &R,
     listen: SocketAddr,
     accept_count: usize,
-) -> Result<ServeReport, String>
+) -> Result<types::ServeReport, String>
 where
     R: ConnectionRegistry,
 {
@@ -319,7 +266,7 @@ where
         store,
         listen,
         accept_count,
-        ServeReport::default(),
+        types::ServeReport::default(),
         |inbound, summary| {
             let mut one_stream = StreamExchangeReport::default();
             let outgoing = handle_inbound(
@@ -344,23 +291,23 @@ where
 fn run_daemon<R>(
     store: &Store,
     registry: &R,
-    options: DaemonOptions,
-) -> Result<DaemonReport, String>
+    options: types::DaemonOptions,
+) -> Result<types::DaemonReport, String>
 where
     R: ConnectionRegistry,
 {
     let listener = tcp::listen(options.listen)?;
     let sent_outbox = RefCell::new(HashMap::new());
-    let mut summary = DaemonReport {
+    let mut summary = types::DaemonReport {
         local_addr: Some(listener.local_addr()),
-        ..DaemonReport::default()
+        ..types::DaemonReport::default()
     };
     let started = Instant::now();
 
     loop {
         let accept = listener.accept_available(
             store,
-            ServeReport::default(),
+            types::ServeReport::default(),
             |inbound, stream_summary| {
                 let mut one_stream = StreamExchangeReport::default();
                 let outgoing = handle_inbound(
@@ -412,7 +359,7 @@ fn start_sync_routes<R>(
     registry: &R,
     selection: sync::worker::SyncSelection,
     fail_on_route_error: bool,
-) -> Result<RouteExchangeReport, String>
+) -> Result<types::RouteExchangeReport, String>
 where
     R: ConnectionRegistry,
 {
@@ -431,9 +378,9 @@ where
     let (started, _) = worker::run(store, registry, start)
         .map_err(|err| format!("record daemon sync events: {err}"))?;
 
-    let mut summary = RouteExchangeReport {
+    let mut summary = types::RouteExchangeReport {
         sent_events: started.sent_events,
-        ..RouteExchangeReport::default()
+        ..types::RouteExchangeReport::default()
     };
     summary.merge(exchange_outbound_routes(
         store,
@@ -447,11 +394,11 @@ fn exchange_outbound_routes<R>(
     store: &Store,
     registry: &R,
     fail_on_route_error: bool,
-) -> Result<RouteExchangeReport, String>
+) -> Result<types::RouteExchangeReport, String>
 where
     R: ConnectionRegistry,
 {
-    let mut summary = RouteExchangeReport::default();
+    let mut summary = types::RouteExchangeReport::default();
     for outbound in drain_outbox_routes(store).map_err(|err| format!("drain outbox: {err}"))? {
         let outbound = outbound_sync(outbound);
         let target = outbound.target;
@@ -1047,7 +994,7 @@ mod tests {
 
         assert_eq!(
             output,
-            Output::RoutesExchanged(RouteExchangeReport::default())
+            Output::RoutesExchanged(types::RouteExchangeReport::default())
         );
         assert_eq!(
             store

@@ -10,7 +10,9 @@ use std::net::SocketAddr;
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::protocol::cli::Context;
-use crate::protocol::event_modules::connection::worker as connection_worker;
+use crate::protocol::event_modules::connection::{
+    types as connection_types, worker as connection_worker,
+};
 
 use super::worker::SyncSelection;
 
@@ -129,7 +131,7 @@ impl SyncOptions {
     }
 }
 
-fn serve_lines(report: &connection_worker::ServeReport) -> Vec<String> {
+fn serve_lines(report: &connection_types::ServeReport) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(local_addr) = report.local_addr {
         lines.push(format!("listening: {local_addr}"));

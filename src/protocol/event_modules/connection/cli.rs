@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::protocol::cli::Context;
 
-use super::worker as connection_worker;
+use super::{types, worker as connection_worker};
 
 const CONNECT_USAGE: &str = "connect INVITE_LINK";
 const DAEMON_USAGE: &str =
@@ -63,7 +63,7 @@ fn run_daemon_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOut
     Ok(CliOutput::lines(daemon_lines(&report)))
 }
 
-fn parse_daemon_options(args: CliArgs<'_>) -> Result<connection_worker::DaemonOptions, String> {
+fn parse_daemon_options(args: CliArgs<'_>) -> Result<types::DaemonOptions, String> {
     let mut listen = None;
     let mut duration = None;
     let mut idle = Duration::from_millis(250);
@@ -98,7 +98,7 @@ fn parse_daemon_options(args: CliArgs<'_>) -> Result<connection_worker::DaemonOp
             other => return Err(format!("unknown daemon option `{other}`\n{DAEMON_USAGE}")),
         }
     }
-    Ok(connection_worker::DaemonOptions {
+    Ok(types::DaemonOptions {
         listen: listen.ok_or_else(|| DAEMON_USAGE.to_string())?,
         duration,
         idle,
@@ -115,7 +115,7 @@ fn parse_positive_u64(value: Option<&str>) -> Result<u64, String> {
     Ok(parsed)
 }
 
-fn daemon_lines(report: &connection_worker::DaemonReport) -> Vec<String> {
+fn daemon_lines(report: &types::DaemonReport) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(local_addr) = report.local_addr {
         lines.push(format!("listening: {local_addr}"));
