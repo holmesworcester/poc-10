@@ -34,10 +34,7 @@ pub fn create(
     let invite_event_id = nonce32();
     let bootstrap_secret = nonce32();
     let workspace_id = nonce32();
-    let secret_event = InviteSecretEvent {
-        bootstrap_hash: secret_hash(&bootstrap_secret),
-        bootstrap_secret,
-    };
+    let secret_event = InviteSecretEvent::new(bootstrap_secret);
     let bytes = codec::encode(&secret_event);
     CommandOutput::with_events(
         format!(
@@ -87,11 +84,31 @@ pub fn parse(value: &str) -> Result<Invite, String> {
             .split_once('.')
             .ok_or_else(|| format!("invite part `{part}` is missing label"))?;
         match label {
-            LABEL_INVITE_ID => invite_event_id = Some(decode_hex_32(value)?),
-            LABEL_INVITE_PRIVKEY => bootstrap_secret = Some(decode_hex_32(value)?),
-            LABEL_WORKSPACE => workspace_id = Some(decode_hex_32(value)?),
-            LABEL_ENDPOINT_ID => endpoint = Some(decode_hex_32(value)?),
-            LABEL_ADDRESS => addr = Some(decode_address(value)?),
+            LABEL_INVITE_ID => {
+                if invite_event_id.replace(decode_hex_32(value)?).is_some() {
+                    return Err("invite has duplicate INVITE_ID".to_string());
+                }
+            }
+            LABEL_INVITE_PRIVKEY => {
+                if bootstrap_secret.replace(decode_hex_32(value)?).is_some() {
+                    return Err("invite has duplicate INVITE_PRIVKEY".to_string());
+                }
+            }
+            LABEL_WORKSPACE => {
+                if workspace_id.replace(decode_hex_32(value)?).is_some() {
+                    return Err("invite has duplicate WORKSPACE".to_string());
+                }
+            }
+            LABEL_ENDPOINT_ID => {
+                if endpoint.replace(decode_hex_32(value)?).is_some() {
+                    return Err("invite has duplicate ENDPOINT_ID".to_string());
+                }
+            }
+            LABEL_ADDRESS => {
+                if addr.replace(decode_address(value)?).is_some() {
+                    return Err("invite has duplicate ADDRESS".to_string());
+                }
+            }
             other => return Err(format!("unknown invite part `{other}`")),
         }
     }
@@ -108,10 +125,7 @@ pub fn parse(value: &str) -> Result<Invite, String> {
 }
 
 pub fn secret_hash(secret: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"topo-bootstrap-token-v1");
-    hasher.update(encode_hex(secret).as_bytes());
-    *hasher.finalize().as_bytes()
+    super::types::bootstrap_secret_hash(secret)
 }
 
 pub fn encode_hex(bytes: &[u8; 32]) -> String {
@@ -171,4 +185,124 @@ fn nonce32() -> [u8; 32] {
     let mut nonce = [0; 32];
     OsRng.fill_bytes(&mut nonce);
     nonce
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::event_modules::identity::endpoint;
+    use crate::protocol::event_modules::types::EventScope;
+
+    use super::*;
+
+    fn local_endpoint() -> endpoint::types::EndpointKeypair {
+        endpoint::commands::create_local_keypair().value
+    }
+
+    #[test]
+    fn create_invite_proposes_local_only_secret_event_and_parseable_link() {
+        let local = local_endpoint();
+        let public_addr = "127.0.0.1:41001".parse().expect("socket addr");
+        let output = create(local, public_addr);
+
+        assert_eq!(output.events.len(), 1);
+        let record = output.events[0].record();
+        assert_eq!(record.scope, EventScope::Local);
+        assert!(!record.scope.is_shared());
+        assert!(record.dependencies.is_empty());
+
+        let invite = parse(&output.value).expect("parse created invite");
+        assert_eq!(invite.endpoint, local.endpoint);
+        assert_eq!(invite.addr, public_addr);
+
+        let secret_event =
+            codec::decode(&record.canonical_bytes).expect("decode local invite secret");
+        assert_eq!(
+            secret_event.bootstrap_hash,
+            secret_hash(&invite.bootstrap_secret)
+        );
+        assert_eq!(secret_event.bootstrap_secret, invite.bootstrap_secret);
+    }
+
+    #[test]
+    fn parse_accepts_stable_invite_link_shape() {
+        let link = concat!(
+            "topo://invite/v6/user/",
+            "INVITE_ID.",
+            "1111111111111111111111111111111111111111111111111111111111111111/",
+            "INVITE_PRIVKEY.",
+            "2222222222222222222222222222222222222222222222222222222222222222/",
+            "WORKSPACE.",
+            "3333333333333333333333333333333333333333333333333333333333333333/",
+            "ENDPOINT_ID.",
+            "4444444444444444444444444444444444444444444444444444444444444444/",
+            "ADDRESS.127.0.0.1_42000"
+        );
+
+        let invite = parse(link).expect("parse stable invite");
+
+        assert_eq!(invite.invite_event_id, [0x11; 32]);
+        assert_eq!(invite.bootstrap_secret, [0x22; 32]);
+        assert_eq!(invite.workspace_id, [0x33; 32]);
+        assert_eq!(invite.endpoint, [0x44; 32]);
+        assert_eq!(
+            invite.addr,
+            "127.0.0.1:42000".parse::<std::net::SocketAddr>().unwrap()
+        );
+        assert_eq!(addr(link).expect("parse invite addr"), invite.addr);
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_or_unknown_invite_parts() {
+        let duplicate = concat!(
+            "topo://invite/v6/user/",
+            "INVITE_ID.",
+            "1111111111111111111111111111111111111111111111111111111111111111/",
+            "INVITE_ID.",
+            "2222222222222222222222222222222222222222222222222222222222222222/",
+            "INVITE_PRIVKEY.",
+            "2222222222222222222222222222222222222222222222222222222222222222/",
+            "WORKSPACE.",
+            "3333333333333333333333333333333333333333333333333333333333333333/",
+            "ENDPOINT_ID.",
+            "4444444444444444444444444444444444444444444444444444444444444444/",
+            "ADDRESS.127.0.0.1_42000"
+        );
+        let unknown = concat!(
+            "topo://invite/v6/user/",
+            "INVITE_ID.",
+            "1111111111111111111111111111111111111111111111111111111111111111/",
+            "INVITE_PRIVKEY.",
+            "2222222222222222222222222222222222222222222222222222222222222222/",
+            "WORKSPACE.",
+            "3333333333333333333333333333333333333333333333333333333333333333/",
+            "ENDPOINT_ID.",
+            "4444444444444444444444444444444444444444444444444444444444444444/",
+            "EXTRA.value/",
+            "ADDRESS.127.0.0.1_42000"
+        );
+
+        assert_eq!(
+            parse(duplicate).expect_err("duplicate field must fail"),
+            "invite has duplicate INVITE_ID"
+        );
+        assert_eq!(
+            parse(unknown).expect_err("unknown field must fail"),
+            "unknown invite part `EXTRA`"
+        );
+    }
+
+    #[test]
+    fn secret_hash_is_stable_domain_separated_and_secret_sensitive() {
+        let secret = [0x42; 32];
+        let same_secret = [0x42; 32];
+        let other_secret = [0x43; 32];
+
+        assert_eq!(secret_hash(&secret), secret_hash(&same_secret));
+        assert_ne!(secret_hash(&secret), secret);
+        assert_ne!(secret_hash(&secret), secret_hash(&other_secret));
+        assert_eq!(
+            encode_hex(&secret_hash(&secret)),
+            "be8e6cf94085c4c35ebb239b6128f50cb5b3fb9d6d624b6db280833a6d47797e"
+        );
+    }
 }

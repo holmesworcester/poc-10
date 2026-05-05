@@ -48,3 +48,44 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         receive: None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::event_modules::identity::endpoint::commands;
+    use crate::protocol::event_modules::types::EventScope;
+
+    use super::*;
+
+    #[test]
+    fn decode_rejects_endpoint_that_does_not_match_secret() {
+        let good = commands::create_local_keypair().value;
+        let bad = commands::create_local_keypair().value;
+        let bytes = encode(&EndpointKeypair {
+            endpoint: good.endpoint,
+            secret: bad.secret,
+        });
+
+        let err = decode(&bytes).expect_err("mismatched endpoint must fail");
+
+        assert_eq!(err, "local endpoint secret does not match endpoint");
+    }
+
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        let mut bytes = encode(&commands::create_local_keypair().value);
+        bytes.push(0);
+
+        let err = decode(&bytes).expect_err("trailing byte must fail");
+
+        assert!(err.starts_with("trailing "), "{err}");
+    }
+
+    #[test]
+    fn record_from_bytes_marks_endpoint_local_only() {
+        let bytes = encode(&commands::create_local_keypair().value);
+        let record = record_from_bytes(bytes).expect("record");
+
+        assert_eq!(record.scope, EventScope::Local);
+        assert!(!record.scope.is_shared());
+    }
+}

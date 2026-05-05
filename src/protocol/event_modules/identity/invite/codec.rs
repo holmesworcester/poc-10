@@ -30,7 +30,7 @@ pub fn decode(bytes: &[u8]) -> Result<InviteSecretEvent, String> {
         bootstrap_secret: reader.id()?,
     };
     reader.finish()?;
-    Ok(event)
+    event.validate()
 }
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
@@ -43,4 +43,42 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         scope: EventScope::Local,
         receive: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::event_modules::types::EventScope;
+
+    use super::*;
+    use crate::protocol::event_modules::identity::invite::types::InviteSecretEvent;
+
+    #[test]
+    fn decode_rejects_hash_that_does_not_match_secret() {
+        let event = InviteSecretEvent {
+            bootstrap_hash: [9; 32],
+            bootstrap_secret: [7; 32],
+        };
+
+        let err = decode(&encode(&event)).expect_err("mismatched hash must fail");
+
+        assert_eq!(err, "invite secret hash does not match secret");
+    }
+
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        let mut bytes = encode(&InviteSecretEvent::new([7; 32]));
+        bytes.push(0);
+
+        let err = decode(&bytes).expect_err("trailing byte must fail");
+
+        assert!(err.starts_with("trailing "), "{err}");
+    }
+
+    #[test]
+    fn record_from_bytes_marks_invite_secret_local_only() {
+        let record = record_from_bytes(encode(&InviteSecretEvent::new([7; 32]))).expect("record");
+
+        assert_eq!(record.scope, EventScope::Local);
+        assert!(!record.scope.is_shared());
+    }
 }

@@ -33,3 +33,31 @@ pub fn local_endpoint(endpoint: EndpointId, secret: [u8; 32]) -> Vec<TableRow> {
         },
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::event_modules::identity::endpoint::commands;
+
+    use super::*;
+
+    #[test]
+    fn project_writes_public_endpoint_and_secret_as_local_rows() {
+        let local = commands::create_local_keypair().value;
+        let bytes = codec::encode(&local);
+        let output = project(&bytes).expect("project endpoint");
+
+        assert_eq!(output.rows.len(), 2);
+        assert!(output
+            .rows
+            .iter()
+            .any(|row| row.table == schema::LOCAL_ENDPOINT
+                && row.key == b"local"
+                && row.value == local.endpoint));
+        assert!(output
+            .rows
+            .iter()
+            .any(|row| row.table == schema::LOCAL_ENDPOINT_SECRET
+                && row.key == b"local"
+                && row.value == local.secret));
+    }
+}

@@ -59,3 +59,76 @@ fn endpoint_id(bytes: &[u8]) -> Result<EndpointId, String> {
     out.copy_from_slice(bytes);
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::event_modules::types::EventScope;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct ReadContext {
+        endpoint: Option<Vec<u8>>,
+        secret: Option<Vec<u8>>,
+    }
+
+    impl LocalEndpointRead for ReadContext {
+        fn local_endpoint_secret(&self) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.secret.clone())
+        }
+
+        fn local_endpoint(&self) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.endpoint.clone())
+        }
+    }
+
+    #[test]
+    fn create_local_keypair_proposes_local_only_matching_secret_event() {
+        let output = create_local_keypair();
+
+        assert_eq!(output.events.len(), 1);
+        let record = output.events[0].record();
+        assert_eq!(record.scope, EventScope::Local);
+        assert!(!record.scope.is_shared());
+        assert!(record.dependencies.is_empty());
+
+        let decoded = codec::decode(&record.canonical_bytes).expect("decode local endpoint");
+        assert_eq!(decoded, output.value);
+    }
+
+    #[test]
+    fn local_keypair_rejects_stored_secret_that_does_not_match_endpoint() {
+        let good = create_local_keypair().value;
+        let bad = create_local_keypair().value;
+        let context = ReadContext {
+            endpoint: Some(good.endpoint.to_vec()),
+            secret: Some(bad.secret.to_vec()),
+        };
+
+        let err = local_keypair(&context).expect_err("mismatched keypair must fail");
+
+        assert_eq!(err, "stored endpoint does not match local endpoint secret");
+    }
+
+    #[test]
+    fn local_keypair_reports_missing_side_of_local_material() {
+        let local = create_local_keypair().value;
+        let missing_secret = ReadContext {
+            endpoint: Some(local.endpoint.to_vec()),
+            secret: None,
+        };
+        let missing_endpoint = ReadContext {
+            endpoint: None,
+            secret: Some(local.secret.to_vec()),
+        };
+
+        assert_eq!(
+            local_keypair(&missing_secret).expect_err("missing secret must fail"),
+            "local endpoint secret is missing"
+        );
+        assert_eq!(
+            local_keypair(&missing_endpoint).expect_err("missing endpoint must fail"),
+            "local endpoint public key is missing"
+        );
+    }
+}
