@@ -2,9 +2,17 @@
 //!
 //! This file is deliberately a byte mover. It opens sockets, reads and writes
 //! `[u32 length][bytes]` frames, records inbound bytes in the core queue, and
-//! drains outbound bytes for the connected route. All interpretation of those
-//! bytes belongs to workers outside core that read and write queue rows; the
-//! callbacks here are only handoff points for tests and the current CLI runner.
+//! drains outbound bytes for the connected route.
+//!
+//! The protocol boundary is the stored queue rows in `core/network_queues.rs`.
+//! On receive, TCP wraps a frame in an `InboundNetworkRow` keyed by the observed
+//! `NetworkSource`, inserts it into the inbound queue, hands that exact row to
+//! the caller, and deletes it only after the caller returns protocol-produced
+//! outbound rows. On send, callers provide `OutboundNetworkRow`s keyed by one
+//! `NetworkTarget`; TCP inserts them into the outbound queue, claims rows for
+//! that same target, writes their opaque bytes as frames, deletes the sent core
+//! rows, and then reports the sent rows back through `on_sent` so protocol-owned
+//! bookkeeping can advance. Core never interprets or constructs protocol bytes.
 //!
 //! The invariant is routing correctness: each outbound row is sent only on the
 //! stream for its `NetworkTarget`, and each inbound row is recorded with the
