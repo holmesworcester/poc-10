@@ -25,3 +25,20 @@ pub fn invite_secret(bootstrap_hash: [u8; 32], private_key: [u8; 32]) -> Vec<Tab
         value: private_key.to_vec(),
     }]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::InviteSecretEvent;
+    use super::*;
+
+    #[test]
+    fn project_writes_secret_by_bootstrap_hash_as_local_authority_row() {
+        let event = InviteSecretEvent::new([7; 32]);
+        let output = project(&codec::encode(&event)).expect("project invite secret");
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0].table, schema::INVITE_SECRETS);
+        assert_eq!(output.rows[0].key, event.bootstrap_hash);
+        assert_eq!(output.rows[0].value, event.bootstrap_secret);
+    }
+}

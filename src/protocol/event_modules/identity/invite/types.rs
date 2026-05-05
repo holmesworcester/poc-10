@@ -24,3 +24,37 @@ pub struct InviteSecretEvent {
     pub bootstrap_hash: [u8; 32],
     pub bootstrap_secret: [u8; 32],
 }
+
+impl InviteSecretEvent {
+    pub fn new(bootstrap_secret: [u8; 32]) -> Self {
+        Self {
+            bootstrap_hash: bootstrap_secret_hash(&bootstrap_secret),
+            bootstrap_secret,
+        }
+    }
+
+    pub fn validate(self) -> Result<Self, String> {
+        let expected = bootstrap_secret_hash(&self.bootstrap_secret);
+        if self.bootstrap_hash != expected {
+            return Err("invite secret hash does not match secret".to_string());
+        }
+        Ok(self)
+    }
+}
+
+pub fn bootstrap_secret_hash(secret: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"topo-bootstrap-token-v1");
+    hasher.update(encode_hex(secret).as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+fn encode_hex(bytes: &[u8; 32]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
