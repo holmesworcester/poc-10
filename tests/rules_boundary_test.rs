@@ -231,11 +231,30 @@ fn event_module_mod_rs_files_do_not_orchestrate_commands_or_work() {
         "queries::",
         "CommandOutput",
         "ProposedEvent",
+        "crate::core::tcp",
+        "tcp::",
+        "TcpStream",
+        "TcpListener",
         "NetworkTarget",
         "OutboundNetworkRow",
         "network_queues",
+        "RefCell",
+        "HashMap",
+        "HashSet",
+        "BTreeMap",
+        "thread::",
+        "Duration",
+        "Instant",
+        "connect_exchange",
+        "accept_available",
         "worker::run",
         "Work::",
+        "insert_table_rows",
+        "delete_table_rows",
+        "table_rows",
+        "table_row(",
+        "table_row_count",
+        "write_transaction",
         "pub fn create_",
         "pub fn generate_",
         "pub fn stage_",
@@ -250,6 +269,40 @@ fn event_module_mod_rs_files_do_not_orchestrate_commands_or_work() {
     assert!(
         violations.is_empty(),
         "mod.rs files are plumbing: declarations, schema aggregation, and shallow codec/projector dispatch only:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn scoped_cli_files_do_not_own_transport_or_cross_cli_operations() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "crate::core::tcp",
+        "core::network_queues",
+        "network_queues::",
+        "InboundNetworkRow",
+        "OutboundNetworkRow",
+        "NetworkTarget",
+        "RefCell",
+        "HashMap",
+        "thread::",
+        "thread::sleep",
+        "Instant",
+        "connect_exchange",
+        "accept_available",
+        "::cli::run_",
+        "::cli::drain_",
+        "::cli::exchange_",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "scoped cli.rs files parse args, call commands/workers, and format reports; transport, send bookkeeping, and cross-cli operational helpers belong in workers:\n{}",
         violations.join("\n")
     );
 }

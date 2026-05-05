@@ -73,6 +73,11 @@ The following rules should stay mechanically enforced where practical:
   at the domain root instead of masquerading as event modules.
 - Event-module files use standard concern names only. New concern files require
   an explicit boundary decision and a static-test update.
+- `mod.rs` files have one job: declare child modules and provide shallow
+  registry/catalog dispatch such as schema aggregation, tag-to-codec decoding,
+  and tag-to-projector routing. They must not own commands, queries, workers,
+  TCP exchange, queue draining, storage mutation, scheduling loops, or send
+  bookkeeping.
 - Files live at the tightest scope that owns the behavior. A domain-root
   `cli.rs` is only for commands spanning multiple child modules; a command for
   one leaf event type belongs in that leaf's `cli.rs`.
@@ -290,13 +295,17 @@ output. They must not compute semantic values such as "next content timestamp",
 then create an invite/request", "which routes should be drained", or "which
 sync range means today". Those choices belong to `commands.rs` when they create
 events, or to `worker.rs` when they drain queues, wake protocol work, or touch
-module-owned operational state.
+module-owned operational state. CLI files must not own TCP exchange, core
+network queue row bookkeeping, daemon scheduling, or operational helper APIs for
+other CLI files. If another command needs that behavior, expose it through the
+owning worker instead of calling a sibling `cli.rs`.
 
 `src/protocol/event_modules/mod.rs` is even stricter than CLI. It is the module
-registry and cross-module dispatch point, not a public service layer. Do not add
-new public helpers there just because several callers need them. Move the
-behavior to the closest event/domain module and have callers import that scoped
-API directly.
+registry and cross-module dispatch point, not a public service layer. Keep it
+to declarations, schema cataloging, codec selection, projector selection, and
+registry trait glue. Do not add new public helpers there just because several
+callers need them. Move behavior to the closest event/domain module and have
+callers import that scoped API directly.
 
 Custom contexts for commands, projectors, and workers must be narrow DTOs, not
 database-shaped snapshots. If a context can answer arbitrary storage questions,

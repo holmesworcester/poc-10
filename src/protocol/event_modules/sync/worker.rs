@@ -49,12 +49,19 @@ pub const DEFAULT_INBOUND_BATCH: usize = 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
     Start {
-        range: TimestampRange,
+        selection: SyncSelection,
     },
     DrainInboundSync {
         connection_id: connection::types::ConnectionId,
         limit: usize,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SyncSelection {
+    #[default]
+    All,
+    Today,
 }
 
 /// Result of a sync worker action.
@@ -92,12 +99,25 @@ pub struct SyncWorkReport {
 pub fn run(store: &Store, index: &SyncIndex, work: Work) -> Result<Output, String> {
     index.catch_up(store)?;
     match work {
-        Work::Start { range } => start(store, index, range).map(Output::Started),
+        Work::Start { selection } => {
+            start(store, index, selected_range(store, selection)?).map(Output::Started)
+        }
         Work::DrainInboundSync {
             connection_id,
             limit,
         } => {
             drain_inbound_events(store, index, connection_id, limit).map(Output::DrainedInboundSync)
+        }
+    }
+}
+
+fn selected_range(store: &Store, selection: SyncSelection) -> Result<TimestampRange, String> {
+    match selection {
+        SyncSelection::All => Ok(TimestampRange::ROOT),
+        SyncSelection::Today => {
+            let timestamp = event_schema::max_timestamp(store)
+                .map_err(|err| format!("load max timestamp for sync today: {err}"))?;
+            Ok(TimestampRange::containing_day(timestamp))
         }
     }
 }

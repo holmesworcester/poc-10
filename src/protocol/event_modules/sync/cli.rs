@@ -10,10 +10,9 @@ use std::net::SocketAddr;
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::protocol::cli::Context;
-use crate::protocol::event_modules::{connection, schema as event_schema, worker};
+use crate::protocol::event_modules::{connection::worker as connection_worker, worker};
 
-use super::compare::types::TimestampRange;
-use super::worker as sync_worker;
+use super::worker::{self as sync_worker, SyncSelection};
 
 const SYNC_USAGE: &str = "sync [today] [--listen IP PORT --accept N]";
 
@@ -51,7 +50,18 @@ fn run_sync_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
                 "sync range selection cannot be used with --listen\n{SYNC_USAGE}"
             ));
         }
-        connection::cli::run_serve(context, listen, options.accept_count)?
+        let output = connection_worker::run(
+            &context.store,
+            &context.protocol,
+            connection_worker::Work::Serve {
+                listen,
+                accept_count: options.accept_count,
+            },
+        )?;
+        let connection_worker::Output::Served(report) = output else {
+            return Err("connection worker returned non-serve output".to_string());
+        };
+        serve_lines(&report)
     } else {
         run_sync_routes(context, options.selection)?
     };
@@ -68,14 +78,10 @@ fn run_sync_routes(context: &mut Context, selection: SyncSelection) -> Result<Ve
     )
     .map_err(|err| format!("drain ready events before sync: {err}"))?;
 
-    let range = match selection {
-        SyncSelection::All => TimestampRange::ROOT,
-        SyncSelection::Today => latest_timestamp_range(&context.store)?,
-    };
     let start = match sync_worker::run(
         &context.store,
         context.protocol.modules().sync_index(),
-        sync_worker::Work::Start { range },
+        sync_worker::Work::Start { selection },
     )
     .map_err(|err| format!("start sync: {err}"))?
     {
@@ -92,14 +98,18 @@ fn run_sync_routes(context: &mut Context, selection: SyncSelection) -> Result<Ve
         ..SyncSummary::default()
     };
 
-    for outbound in connection::cli::drain_outbox_routes(context)
-        .map_err(|err| format!("drain sync outbox: {err}"))?
-    {
-        let stream_summary = connection::cli::exchange_outbound_route(context, outbound)?;
-        summary.routes_synced += 1;
-        summary.sent_events += stream_summary.sent_events;
-        summary.received_events += stream_summary.received_events;
-    }
+    let exchanged = connection_worker::run(
+        &context.store,
+        &context.protocol,
+        connection_worker::Work::ExchangeOutboundRoutes,
+    )
+    .map_err(|err| format!("exchange sync outbox routes: {err}"))?;
+    let connection_worker::Output::RoutesExchanged(exchanged) = exchanged else {
+        return Err("connection worker returned non-route-exchange output".to_string());
+    };
+    summary.routes_synced += exchanged.routes_synced;
+    summary.sent_events += exchanged.sent_events;
+    summary.received_events += exchanged.received_events;
 
     Ok(summary.lines())
 }
@@ -108,13 +118,6 @@ struct SyncOptions {
     listen: Option<SocketAddr>,
     accept_count: usize,
     selection: SyncSelection,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum SyncSelection {
-    #[default]
-    All,
-    Today,
 }
 
 impl SyncOptions {
@@ -154,8 +157,14 @@ impl SyncOptions {
     }
 }
 
-fn latest_timestamp_range(store: &crate::core::store::Store) -> Result<TimestampRange, String> {
-    let timestamp = event_schema::max_timestamp(store)
-        .map_err(|err| format!("load max timestamp for sync today: {err}"))?;
-    Ok(TimestampRange::containing_day(timestamp))
+fn serve_lines(report: &connection_worker::ServeReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(local_addr) = report.local_addr {
+        lines.push(format!("listening: {local_addr}"));
+    }
+    lines.extend([
+        format!("accepted_connections: {}", report.accepted_connections),
+        format!("received_events: {}", report.received_events),
+    ]);
+    lines
 }
