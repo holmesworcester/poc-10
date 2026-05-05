@@ -231,6 +231,7 @@ pub fn schemas() -> Vec<Schema> {
     out.extend_from_slice(schema::SCHEMAS);
     out.extend_from_slice(identity::endpoint::schema::SCHEMAS);
     out.extend_from_slice(identity::invite::schema::SCHEMAS);
+    out.extend_from_slice(identity::workspace::schema::SCHEMAS);
     out.extend_from_slice(connection::schema::SCHEMAS);
     out.extend_from_slice(sync::schema::SCHEMAS);
     out.extend_from_slice(test_events::event_with_deps::schema::SCHEMAS);
@@ -281,6 +282,9 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         }
         identity::invite::codec::TYPE_INVITE_SECRET => {
             identity::invite::codec::record_from_bytes(bytes)
+        }
+        identity::workspace::codec::TYPE_WORKSPACE => {
+            identity::workspace::codec::record_from_bytes(bytes)
         }
         sync::compare::codec::TYPE_SYNC_COMPARE => sync::compare::codec::record_from_bytes(bytes),
         sync::have_id::codec::TYPE_SYNC_HAVE_ID => sync::have_id::codec::record_from_bytes(bytes),
