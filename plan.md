@@ -82,6 +82,12 @@ instead of defining primitive implementations locally. Event modules still own
 their semantic context: which canonical bytes are signed, what signer dependency
 is allowed, and what associated data or purpose string is passed to core crypto.
 
+Follow the `poc-6/core/crypto.py` simplification pattern: expose a small core
+facade around real primitives (`hash`, `sign`/`verify`, and later
+`wrap`/`unwrap` or `check`-style helpers) instead of spreading library-specific
+crypto calls through event modules. Keep the facade honest: every helper name
+must match a real cryptographic property it enforces.
+
 ## Concept Mapping
 
 `poc-8` identity scope is `workspace + endpoint`. There is no tenant layer.

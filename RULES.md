@@ -663,6 +663,11 @@ Event modules still own semantic decisions: what is signed, what dependency is
 authorized, which associated data is passed, and how projection treats a
 verification failure.
 
+Keep the core crypto API small and honest, following the useful `poc-6` shape:
+`hash`, `sign`/`verify`, and later `wrap`/`unwrap` or `check`-style helpers over
+real primitives. Do not leak low-level library calls through event modules, and
+do not name a helper after a property it does not actually enforce.
+
 ## No Fake Or Placeholder Encryption
 
 Never implement fake, placeholder, pass-through, XOR, reversible toy, or
