@@ -58,6 +58,18 @@ fn public_free_function_names(text: &str) -> Vec<String> {
     names
 }
 
+fn meaningful_mod_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("//!")
+                && !line.starts_with("///")
+                && !line.starts_with("//")
+        })
+        .collect()
+}
+
 #[test]
 fn event_modules_do_not_use_event_rs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
@@ -160,6 +172,85 @@ fn domain_roots_contain_only_children_and_shared_domain_files() {
         offenders.is_empty(),
         "domain roots may contain only shared domain files; put leaf commands/codecs/projectors in child event modules:\n{}",
         offenders.join("\n")
+    );
+}
+
+#[test]
+fn leaf_mod_rs_files_are_declarations_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut offenders = Vec::new();
+    for domain in std::fs::read_dir(&event_root).expect("read event modules") {
+        let domain = domain.expect("dir entry").path();
+        if !domain.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&domain).expect("read domain") {
+            let child = entry.expect("dir entry").path();
+            if !child.is_dir() {
+                continue;
+            }
+            let mod_rs = child.join("mod.rs");
+            if !mod_rs.exists() {
+                continue;
+            }
+            let text = source_text(&mod_rs);
+            let bad_lines = meaningful_mod_lines(&text)
+                .into_iter()
+                .filter(|line| {
+                    !(line.starts_with("pub mod ") && line.ends_with(';') && !line.contains('{'))
+                })
+                .collect::<Vec<_>>();
+            if !bad_lines.is_empty() {
+                offenders.push(format!(
+                    "{} contains non-declaration lines: {}",
+                    mod_rs.strip_prefix(root).unwrap().display(),
+                    bad_lines.join(" | ")
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "leaf event-module mod.rs files are only concern declarations; move adapters/helpers to schema.rs, commands.rs, worker.rs, or cli.rs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn event_module_mod_rs_files_do_not_orchestrate_commands_or_work() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "mod.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "commands::",
+        "queries::",
+        "CommandOutput",
+        "ProposedEvent",
+        "NetworkTarget",
+        "OutboundNetworkRow",
+        "network_queues",
+        "worker::run",
+        "Work::",
+        "pub fn create_",
+        "pub fn generate_",
+        "pub fn stage_",
+        "pub fn start_",
+        "pub fn drain_",
+        "pub fn mark_",
+        "fn local_keypair",
+        "fn existing_local_keypair",
+        "fn merge_outputs",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "mod.rs files are plumbing: declarations, schema aggregation, and shallow codec/projector dispatch only:\n{}",
+        violations.join("\n")
     );
 }
 

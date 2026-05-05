@@ -2,8 +2,7 @@
 //!
 //! Leaf modules own concrete event syntax and projection rules. Domain workers
 //! own active work such as unwrap, wrap, and sync comparison. This registry is
-//! the narrow place where those independent pieces are selected by tag and
-//! composed into user-facing commands.
+//! the narrow place where those independent pieces are selected by tag.
 //!
 //! The file should read as routing, not implementation. A good addition here
 //! names which module owns a behavior and forwards to it. A suspicious addition
@@ -19,159 +18,28 @@ pub mod test_events;
 pub mod types;
 pub mod worker;
 
-use std::net::SocketAddr;
+use std::sync::Arc;
 
-use crate::core::network_queues::{self, NetworkTarget, OutboundNetworkRow};
 use crate::core::store::{Schema, Store};
-use crate::protocol::event_modules::worker::{
-    CommandOutput, EventRegistry, EventWithContext, ProjectionOutput, ProposedEvent,
-};
+use crate::protocol::event_modules::worker::{EventRegistry, EventWithContext, ProjectionOutput};
 use types::EventRecord;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Modules;
-
-/// Opaque bytes prepared for one route after draining protocol outbox rows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutboundSync {
-    pub target: NetworkTarget,
-    pub outgoing: Vec<OutboundNetworkRow>,
-    pub sent_outbox: Vec<Vec<Vec<u8>>>,
-    pub sent_events: usize,
+#[derive(Debug, Clone, Default)]
+pub struct Modules {
+    sync_index: Arc<sync::worker::SyncIndex>,
 }
 
 impl Modules {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub(crate) fn sync_index(&self) -> &sync::worker::SyncIndex {
+        &self.sync_index
     }
 
     pub fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
         record_from_bytes(bytes)
-    }
-
-    pub fn create_invite(
-        &self,
-        store: &Store,
-        public_addr: SocketAddr,
-    ) -> Result<CommandOutput<String>, String> {
-        // Invites depend on a local endpoint. If none exists yet, the endpoint
-        // command is proposed first and the invite command follows in the same
-        // admitted batch.
-        let local = self.local_keypair(store)?;
-        let invite = identity::invite::commands::create(local.value, public_addr);
-        Ok(merge_outputs(local.events, invite))
-    }
-
-    pub fn invite_addr(&self, invite: &str) -> Result<SocketAddr, String> {
-        identity::invite::commands::addr(invite)
-    }
-
-    pub fn generate_content(
-        &self,
-        store: &Store,
-        num_events: usize,
-        event_size: usize,
-    ) -> Result<CommandOutput<content::content_event::commands::GenerateReport>, String> {
-        let start = schema::max_timestamp(store)
-            .map_err(|err| format!("load max timestamp: {err}"))?
-            .saturating_add(1);
-        content::content_event::commands::generate(start, num_events, event_size)
-    }
-
-    pub fn stage_event_with_deps(
-        &self,
-        store: &Store,
-        events: usize,
-        deps_per_event: usize,
-    ) -> Result<CommandOutput<test_events::event_with_deps::commands::StageReport>, String> {
-        let start = schema::max_timestamp(store)
-            .map_err(|err| format!("load max timestamp: {err}"))?
-            .saturating_add(1);
-        test_events::event_with_deps::commands::stage(events, deps_per_event, start)
-    }
-
-    pub fn staged_event_with_deps_records(
-        &self,
-        store: &Store,
-    ) -> Result<Vec<EventRecord>, String> {
-        test_events::event_with_deps::queries::staged_records(store)
-    }
-
-    pub fn create_connection_request(
-        &self,
-        store: &Store,
-        invite: &str,
-    ) -> Result<CommandOutput<connection::connection_request::commands::OutboundRequest>, String>
-    {
-        let local = self.local_keypair(store)?;
-        let request = connection::connection_request::commands::create(local.value, invite)?;
-        Ok(merge_outputs(local.events, request))
-    }
-
-    pub fn start_sync(
-        &self,
-        store: &Store,
-    ) -> Result<CommandOutput<sync::worker::SyncStartReport>, String> {
-        match sync::worker::run(store, sync::worker::Work::Start)? {
-            sync::worker::Output::Started(output) => Ok(output),
-            sync::worker::Output::DrainedInboundSync(_) => {
-                Err("sync worker returned non-start output".to_string())
-            }
-        }
-    }
-
-    pub fn drain_outbox_routes(&self, store: &Store) -> Result<Vec<OutboundSync>, String> {
-        let local = self.existing_local_keypair(store)?;
-        let output = connection::worker::run(
-            store,
-            self,
-            connection::worker::Work::DrainOutboxRoutes { local },
-        )?;
-        let connection::worker::Output::OutboundRoutes(outbound) = output else {
-            return Err("connection worker returned non-outbox-routes output".to_string());
-        };
-        Ok(outbound
-            .into_iter()
-            .map(|outbound| OutboundSync {
-                target: NetworkTarget::new(outbound.target),
-                outgoing: network_queues::outbound_rows(
-                    NetworkTarget::new(outbound.target),
-                    outbound.outgoing,
-                ),
-                sent_outbox: outbound.sent_outbox,
-                sent_events: 0,
-            })
-            .collect())
-    }
-
-    pub fn mark_outbox_sent(&self, store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {
-        let output = connection::worker::run(
-            store,
-            self,
-            connection::worker::Work::MarkOutboxSent { sent_outbox },
-        )?;
-        let connection::worker::Output::OutboxMarked = output else {
-            return Err("connection worker returned non-mark-outbox output".to_string());
-        };
-        Ok(())
-    }
-
-    pub fn connection_count(&self, store: &Store) -> Result<usize, String> {
-        connection::queries::connection_count(store)
-    }
-
-    pub fn connection_event_count(&self, store: &Store) -> Result<usize, String> {
-        connection::queries::connection_event_count(store)
-    }
-
-    fn local_keypair(
-        &self,
-        store: &Store,
-    ) -> Result<CommandOutput<identity::endpoint::types::EndpointKeypair>, String> {
-        match identity::endpoint::commands::local_keypair(store)? {
-            Some(local) => Ok(CommandOutput::new(local)),
-            None => Ok(identity::endpoint::commands::create_local_keypair()),
-        }
     }
 
     pub fn project_record(
@@ -201,25 +69,11 @@ impl Modules {
         let tag = bytes.first().copied().unwrap_or_default();
         Err(format!("unknown event type {tag}"))
     }
-
-    pub(crate) fn existing_local_keypair(
-        &self,
-        store: &Store,
-    ) -> Result<identity::endpoint::types::EndpointKeypair, String> {
-        identity::endpoint::commands::local_keypair(store)?
-            .ok_or_else(|| "local endpoint is missing".to_string())
-    }
 }
 
-impl identity::endpoint::commands::LocalEndpointRead for Store {
-    fn local_endpoint_secret(&self) -> Result<Option<Vec<u8>>, String> {
-        self.table_row(identity::endpoint::schema::LOCAL_ENDPOINT_SECRET, b"local")
-            .map_err(|err| format!("load local endpoint secret: {err}"))
-    }
-
-    fn local_endpoint(&self) -> Result<Option<Vec<u8>>, String> {
-        self.table_row(identity::endpoint::schema::LOCAL_ENDPOINT, b"local")
-            .map_err(|err| format!("load local endpoint: {err}"))
+impl connection::worker::ConnectionRegistry for Modules {
+    fn sync_index(&self) -> &sync::worker::SyncIndex {
+        self.sync_index()
     }
 }
 
@@ -249,15 +103,6 @@ impl EventRegistry for Modules {
     ) -> Result<ProjectionOutput, String> {
         self.project_record(store, event)
     }
-}
-
-fn merge_outputs<T>(
-    mut events: Vec<ProposedEvent>,
-    mut output: CommandOutput<T>,
-) -> CommandOutput<T> {
-    events.append(&mut output.events);
-    output.events = events;
-    output
 }
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {

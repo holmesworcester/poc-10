@@ -24,13 +24,20 @@
 //! sync events; it should not perform TCP IO, mutate content projections, or
 //! bypass normal event admission.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Mutex;
+
 use crate::core::store::Store;
 use crate::protocol::event_modules::connection;
 use crate::protocol::event_modules::schema as event_schema;
-use crate::protocol::event_modules::types::EventRecord;
+use crate::protocol::event_modules::types::{EventId, EventIndexEntry, EventRecord};
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::{compare, schema};
+use super::{
+    compare,
+    compare::types::{RangeSummary, TimestampRange},
+    schema,
+};
 
 pub const DEFAULT_INBOUND_BATCH: usize = 1024;
 
@@ -41,7 +48,9 @@ pub const DEFAULT_INBOUND_BATCH: usize = 1024;
 /// from transient inbound sync events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
-    Start,
+    Start {
+        range: TimestampRange,
+    },
     DrainInboundSync {
         connection_id: connection::types::ConnectionId,
         limit: usize,
@@ -80,17 +89,24 @@ pub struct SyncWorkReport {
 /// The only public entrypoint mirrors the other workers. Adding a new sync wake
 /// should add a `Work` variant and keep the command/query/projection boundary
 /// visible here.
-pub fn run(store: &Store, work: Work) -> Result<Output, String> {
+pub fn run(store: &Store, index: &SyncIndex, work: Work) -> Result<Output, String> {
+    index.catch_up(store)?;
     match work {
-        Work::Start => start(store).map(Output::Started),
+        Work::Start { range } => start(store, index, range).map(Output::Started),
         Work::DrainInboundSync {
             connection_id,
             limit,
-        } => drain_inbound_events(store, connection_id, limit).map(Output::DrainedInboundSync),
+        } => {
+            drain_inbound_events(store, index, connection_id, limit).map(Output::DrainedInboundSync)
+        }
     }
 }
 
-fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
+fn start(
+    store: &Store,
+    index: &SyncIndex,
+    range: TimestampRange,
+) -> Result<CommandOutput<SyncStartReport>, String> {
     // Manual sync fans out over known routes. The route table is owned by the
     // connection domain; sync only borrows the connection id needed to make a
     // connection-scoped compare event.
@@ -100,9 +116,9 @@ fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
     }
     let mut events = Vec::new();
     let mut sent_events = 0;
-    let context = StoreSyncContext { store };
+    let context = StoreSyncContext { store, index };
     for connection_id in connections {
-        let report = compare::commands::start(&context, connection_id)?;
+        let report = compare::commands::start(&context, connection_id, range)?;
         events.extend(report.events);
         sent_events += report.sent_events;
     }
@@ -114,6 +130,7 @@ fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
 
 fn drain_inbound_events(
     store: &Store,
+    index: &SyncIndex,
     connection_id: connection::types::ConnectionId,
     limit: usize,
 ) -> Result<SyncWorkReport, String> {
@@ -124,7 +141,7 @@ fn drain_inbound_events(
     let mut consumed = Vec::with_capacity(works.len());
     let mut outbox_rows = Vec::new();
     for work in works {
-        let context = StoreSyncContext { store };
+        let context = StoreSyncContext { store, index };
         let report = compare::commands::handle_inbound_event(
             &context,
             work.connection_id,
@@ -153,6 +170,7 @@ fn drain_inbound_events(
 
 struct StoreSyncContext<'a> {
     store: &'a Store,
+    index: &'a SyncIndex,
 }
 
 impl compare::commands::ReadContext for StoreSyncContext<'_> {
@@ -160,31 +178,43 @@ impl compare::commands::ReadContext for StoreSyncContext<'_> {
         &self,
         range: compare::types::TimestampRange,
     ) -> Result<compare::types::RangeSummary, String> {
-        let mut summary = compare::types::RangeSummary::default();
-        for header in
-            event_schema::event_index_entries_in_timestamp_range(self.store, range.start, range.end)
-                .map_err(|err| format!("load event headers: {err}"))?
-        {
-            summary.count += 1;
-            xor_into(&mut summary.fingerprint, &fingerprint_id(&header.event_id));
-        }
-        Ok(summary)
+        self.index.summary(range)
     }
 
     fn ids_in_range(
         &self,
         range: compare::types::TimestampRange,
     ) -> Result<Vec<crate::protocol::event_modules::types::EventIndexEntry>, String> {
-        event_schema::event_index_entries_in_timestamp_range(self.store, range.start, range.end)
-            .map_err(|err| format!("load range ids: {err}"))
+        self.index.ids_in_range(range)
+    }
+
+    fn timestamp_bounds(
+        &self,
+        range: compare::types::TimestampRange,
+    ) -> Result<Option<(u64, u64)>, String> {
+        self.index.timestamp_bounds(range)
     }
 
     fn has_event(
         &self,
         event_id: &crate::protocol::event_modules::types::EventId,
     ) -> Result<bool, String> {
-        event_schema::has_shared_event(self.store, event_id)
-            .map_err(|err| format!("check event presence: {err}"))
+        self.index.has_event(event_id)
+    }
+
+    fn dependency_closure_entries(
+        &self,
+        roots: &[crate::protocol::event_modules::types::EventIndexEntry],
+    ) -> Result<Vec<crate::protocol::event_modules::types::EventIndexEntry>, String> {
+        self.index.dependency_closure_entries(self.store, roots)
+    }
+
+    fn fresh_have_entries(
+        &self,
+        connection_id: crate::protocol::event_modules::types::EventId,
+        entries: Vec<crate::protocol::event_modules::types::EventIndexEntry>,
+    ) -> Result<Vec<crate::protocol::event_modules::types::EventIndexEntry>, String> {
+        self.index.fresh_have_entries(connection_id, entries)
     }
 }
 
@@ -213,7 +243,282 @@ fn inbound_events_for_connection(
         .collect()
 }
 
-fn fingerprint_id(id: &crate::protocol::event_modules::types::EventId) -> [u8; 32] {
+// ---------------------------------------------------------------------------
+// In-memory negentropy index
+// ---------------------------------------------------------------------------
+
+/// Process-local negentropy state owned by the sync worker.
+///
+/// SQLite remains the source of truth for canonical events. This index catches
+/// up from the shared-event feed, updates a timestamp tree along each inserted
+/// event's path, and serves range summaries without rebuilding hashes for every
+/// compare. In the current CLI each command gets a fresh process and may rebuild
+/// once at startup; in the intended long-lived control loop the same structure
+/// stays warm and receives only path updates for new shared events.
+#[derive(Debug, Default)]
+pub struct SyncIndex {
+    state: Mutex<IndexState>,
+}
+
+impl SyncIndex {
+    fn catch_up(&self, store: &Store) -> Result<(), String> {
+        let entries = event_schema::event_index_entries_in_timestamp_range(store, 0, u64::MAX)
+            .map_err(|err| format!("load sync index feed: {err}"))?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        for entry in entries {
+            if state.indexed.contains(&entry.event_id) {
+                continue;
+            }
+            state.insert(entry);
+        }
+        Ok(())
+    }
+
+    fn summary(&self, range: TimestampRange) -> Result<RangeSummary, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        Ok(state.summary(range))
+    }
+
+    fn ids_in_range(&self, range: TimestampRange) -> Result<Vec<EventIndexEntry>, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        Ok(state.ids_in_range(range))
+    }
+
+    fn timestamp_bounds(&self, range: TimestampRange) -> Result<Option<(u64, u64)>, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        Ok(state.timestamp_bounds(range))
+    }
+
+    fn has_event(&self, event_id: &EventId) -> Result<bool, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        Ok(state.entries_by_id.contains_key(event_id))
+    }
+
+    fn dependency_closure_entries(
+        &self,
+        store: &Store,
+        roots: &[EventIndexEntry],
+    ) -> Result<Vec<EventIndexEntry>, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        state.dependency_closure_entries(store, roots)
+    }
+
+    fn fresh_have_entries(
+        &self,
+        connection_id: EventId,
+        entries: Vec<EventIndexEntry>,
+    ) -> Result<Vec<EventIndexEntry>, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        Ok(state.fresh_have_entries(connection_id, entries))
+    }
+}
+
+#[derive(Debug, Default)]
+struct IndexState {
+    indexed: HashSet<EventId>,
+    nodes: HashMap<NodeKey, RangeSummary>,
+    ids_by_time: BTreeMap<(u64, EventId), EventIndexEntry>,
+    entries_by_id: HashMap<EventId, EventIndexEntry>,
+    deps_by_event: HashMap<EventId, Vec<EventId>>,
+    advertised_haves_by_connection: HashMap<EventId, HashSet<EventId>>,
+}
+
+impl IndexState {
+    fn insert(&mut self, entry: EventIndexEntry) {
+        let fingerprint = fingerprint_id(&entry.event_id);
+        for depth in 0..=64 {
+            let key = NodeKey::for_timestamp(entry.timestamp, depth);
+            let summary = self.nodes.entry(key).or_default();
+            summary.count += 1;
+            xor_into(&mut summary.fingerprint, &fingerprint);
+        }
+        self.indexed.insert(entry.event_id);
+        self.ids_by_time
+            .insert((entry.timestamp, entry.event_id), entry.clone());
+        self.entries_by_id.insert(entry.event_id, entry);
+    }
+
+    fn summary(&self, range: TimestampRange) -> RangeSummary {
+        let mut out = RangeSummary::default();
+        self.add_summary_for_node(
+            NodeKey {
+                depth: 0,
+                prefix: 0,
+            },
+            0,
+            u64::MAX,
+            range,
+            &mut out,
+        );
+        out
+    }
+
+    fn ids_in_range(&self, range: TimestampRange) -> Vec<EventIndexEntry> {
+        let lower = (range.start, [0; 32]);
+        let upper = (range.end, [0xff; 32]);
+        self.ids_by_time
+            .range(lower..=upper)
+            .map(|(_, entry)| entry.clone())
+            .collect()
+    }
+
+    fn timestamp_bounds(&self, range: TimestampRange) -> Option<(u64, u64)> {
+        let lower = (range.start, [0; 32]);
+        let upper = (range.end, [0xff; 32]);
+        let mut rows = self.ids_by_time.range(lower..=upper);
+        let first = rows.next()?.0 .0;
+        let last = rows.next_back().map(|(key, _)| key.0).unwrap_or(first);
+        Some((first, last))
+    }
+
+    fn dependency_closure_entries(
+        &mut self,
+        store: &Store,
+        roots: &[EventIndexEntry],
+    ) -> Result<Vec<EventIndexEntry>, String> {
+        let root_ids = roots
+            .iter()
+            .map(|entry| entry.event_id)
+            .collect::<HashSet<_>>();
+        let mut seen = root_ids.clone();
+        let mut stack = Vec::new();
+        for entry in roots {
+            stack.extend(self.dependencies_for(store, &entry.event_id)?);
+        }
+        let mut out = BTreeMap::<(u64, EventId), EventIndexEntry>::new();
+
+        while let Some(dep) = stack.pop() {
+            if !seen.insert(dep) {
+                continue;
+            }
+            let Some(entry) = self.entries_by_id.get(&dep) else {
+                continue;
+            };
+            if !root_ids.contains(&dep) {
+                out.insert((entry.timestamp, entry.event_id), entry.clone());
+            }
+            stack.extend(self.dependencies_for(store, &dep)?);
+        }
+
+        Ok(out.into_values().collect())
+    }
+
+    fn dependencies_for(
+        &mut self,
+        store: &Store,
+        event_id: &EventId,
+    ) -> Result<Vec<EventId>, String> {
+        if let Some(dependencies) = self.deps_by_event.get(event_id) {
+            return Ok(dependencies.clone());
+        }
+        if !self.entries_by_id.contains_key(event_id) {
+            return Ok(Vec::new());
+        }
+        let bytes = event_schema::event_bytes(store, event_id)
+            .map_err(|err| format!("load sync dependency event bytes: {err}"))?
+            .ok_or_else(|| "sync index referenced missing dependency event".to_string())?;
+        let record = crate::protocol::event_modules::record_from_bytes(bytes)?;
+        let dependencies = record.dependencies;
+        self.deps_by_event.insert(*event_id, dependencies.clone());
+        Ok(dependencies)
+    }
+
+    fn fresh_have_entries(
+        &mut self,
+        connection_id: EventId,
+        entries: Vec<EventIndexEntry>,
+    ) -> Vec<EventIndexEntry> {
+        let advertised = self
+            .advertised_haves_by_connection
+            .entry(connection_id)
+            .or_default();
+        entries
+            .into_iter()
+            .filter(|entry| advertised.insert(entry.event_id))
+            .collect()
+    }
+
+    fn add_summary_for_node(
+        &self,
+        key: NodeKey,
+        node_start: u64,
+        node_end: u64,
+        query: TimestampRange,
+        out: &mut RangeSummary,
+    ) {
+        if query.end < node_start || node_end < query.start {
+            return;
+        }
+        if query.start <= node_start && node_end <= query.end {
+            if let Some(summary) = self.nodes.get(&key) {
+                out.count += summary.count;
+                xor_into(&mut out.fingerprint, &summary.fingerprint);
+            }
+            return;
+        }
+        if node_start == node_end {
+            return;
+        }
+        let mid = node_start + (node_end - node_start) / 2;
+        self.add_summary_for_node(key.left(), node_start, mid, query, out);
+        self.add_summary_for_node(key.right(), mid + 1, node_end, query, out);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct NodeKey {
+    depth: u8,
+    prefix: u64,
+}
+
+impl NodeKey {
+    fn for_timestamp(timestamp: u64, depth: u8) -> Self {
+        debug_assert!(depth <= 64);
+        let prefix = if depth == 0 {
+            0
+        } else {
+            timestamp >> (64 - depth)
+        };
+        Self { depth, prefix }
+    }
+
+    fn left(self) -> Self {
+        Self {
+            depth: self.depth + 1,
+            prefix: self.prefix << 1,
+        }
+    }
+
+    fn right(self) -> Self {
+        Self {
+            depth: self.depth + 1,
+            prefix: (self.prefix << 1) | 1,
+        }
+    }
+}
+
+fn fingerprint_id(id: &EventId) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"sync-event-id:");
     hasher.update(id);

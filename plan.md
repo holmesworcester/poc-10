@@ -1055,14 +1055,34 @@ connection::worker.run
   -> writes core TCP send queue rows for those bytes
 ```
 
-The current implementation keeps a timestamp-ordered shared-event index in the
-common event schema and computes range summaries from that index. The next
-performance step is to materialize the range tree in `sync/schema.rs`. Once the
-shared-event feed and `sync.index_cursor` exist, the worker must catch up that
-feed before responding to `sync.inbound_events`. Use an apply/feed sequence, not
-event timestamps, as cursor order. Index updates and cursor advancement are one
-transaction; index writes are idempotent with unique `(scope_key, event_id)`
-rows. Prefer per-workspace indexes and aggregate the allowed workspace scopes
+The current implementation keeps a timestamp-ordered shared-event feed in the
+common event schema. `sync/worker.rs` owns an in-memory negentropy index over
+that feed: catch-up inserts only new ids, updates each timestamp leaf-to-root
+path, and then serves compare summaries from the tree instead of recomputing
+hashes for every range. In the current CLI each command is a fresh process, so
+the index may rebuild once at command start. In the intended long-lived control
+loop it stays warm and only receives path updates.
+
+`topo sync` starts at the root timestamp range. `topo sync today` is a narrow
+POC selector: it starts the same compare protocol at the synthetic day bucket
+containing the newest local timestamp. Test-event commands that create
+"recent" roots place them in the next timestamp bucket so old dependencies are
+outside the selected range. When a leaf advertises root ids, the worker also
+advertises the present transitive dependency closure for those roots. The
+worker suppresses duplicate `HaveId`s per connection, so many recent leaves
+that share one old dependency closure do not resend the same closure ids over
+and over. This proves the core dep-aware shape: recent roots can be synced and
+projected even when old dependencies sit outside the selected timestamp range
+and the receiver has none of them yet. It is not the final dep-aware invariant
+because equal root hashes still do not include present external-dep hashes.
+
+The next performance and correctness step is to add a durable shared-event feed
+cursor and the full dep-aware summary state. If that state remains in memory,
+the durable cursor can be just enough to know what must be replayed into the
+warm index after restart; it does not need to make every range node durable.
+Use an apply/feed sequence, not event timestamps, as cursor order. Catch-up
+updates and cursor advancement are one atomic unit from the worker's point of
+view. Prefer per-workspace indexes and aggregate the allowed workspace scopes
 for a connection at response time rather than maintaining per-connection
 negentropy indexes.
 
@@ -1091,31 +1111,32 @@ it defines a real event type. The implementation plan is:
    each admitted shared event in the same transaction that records the event.
    Use a monotonically increasing feed/apply sequence in the row key, not event
    timestamps. Transient sync events and rejected bytes do not enter this feed.
-4. Add materialized plain-negentropy state to `sync/schema.rs`: `sync.index_cursor`,
-   `sync.range_nodes`, `sync.range_members`, and any small helper table needed
-   to map a sync key to its leaf path. These are module-owned row tables with
-   typed row helpers; core store remains a generic row substrate.
-5. Teach `sync/worker.rs` to run index catch-up before response work. It drains
-   the shared-event feed after `sync.index_cursor`, updates leaf-to-root range
-   summaries with path updates, and advances the cursor in the same transaction
-   as the index writes. This is the point where negentropy hashes become cheap:
-   no full tree rebuild on ordinary event arrival.
+4. The current POC already has process-local plain-negentropy state in
+   `sync/worker.rs`. If we need restart-time replay to be bounded, add
+   `sync.index_cursor` to `sync/schema.rs` and a monotonic shared-event feed in
+   the common event schema. Keep range nodes in memory unless measurements show
+   restart rebuild is the real bottleneck.
+5. Keep `sync/worker.rs` responsible for index catch-up before response work.
+   It should drain the shared-event feed after the cursor, update leaf-to-root
+   range summaries with path updates, and advance the cursor in the same
+   transaction as any durable cursor writes. This is the point where negentropy
+   hashes stay cheap: no full tree rebuild on ordinary event arrival.
 6. Keep every newly created sync protocol item on the command/admission path.
    The sync worker may call module commands and return proposed events to the
    common event-module worker; it must not hand bytes to transit or write core
    network rows. Connection transit may batch many outbox ids into one encrypted
    transit blob; core TCP still owns only the outer length frame.
-7. Add dep-aware summaries without changing the worker boundary. While indexing
-   shared events, maintain known and present transitive-dependency closure rows,
+7. Add the full dep-aware invariant without changing the worker boundary. The
+   current POC sends present dependency closure ids with leaf root ids. The next
+   step is to maintain known and present transitive-dependency closure caches,
    dep waiters, and range-node dep summaries. Compare range nodes using root
-   hash plus present external-dep hash. On dep-probe slices, send present
-   closure ids before root ids.
-8. Add `topo sync today` in `sync/cli.rs` as a sync-mode argument after plain
-   range sync is in place. It should select a root range for the current day's
-   sync key while dep-aware sends may include older dependencies outside that
-   root range. If command-generated test events need wall-clock-shaped
-   timestamps, add that control to the closest test-event CLI, not to the
-   harness.
+   hash plus present external-dep hash so "I have the root bytes but lack an old
+   dependency" is still detected.
+8. Replace the synthetic timestamp-day selector with the durable dep-aware
+   selector. It should select a root range for the current day's sync key while
+   dep-aware sends may include older dependencies outside that root range. If
+   command-generated test events need wall-clock-shaped timestamps, add that
+   control to the closest test-event CLI, not to the harness.
 
 New black-box limits should be tiered so ordinary validation remains useful:
 
@@ -1123,9 +1144,13 @@ New black-box limits should be tiered so ordinary validation remains useful:
 - add a default or short `50k x 256B` content sync test if runtime stays low;
 - add ignored heavy `100k` and `500k` content sync tests with events/s and
   MiB/s measured from `sync` command start to receiver count convergence;
-- add a `sync today` one-old-dep test: old dependency outside today's range,
-  new root inside today's range, receiver projects both and does not receive
-  unrelated old roots;
+- keep the default `sync today` shared-closure test: 10k old dependency-cascade
+  events are outside the selected range and absent on the receiver, 10k recent
+  roots across many leaves share that same old closure, and the receiver
+  projects all roots after receiving the deduped closure through real TCP;
+- add a sharper full-invariant test: the receiver already has the recent root
+  bytes blocked but lacks an old dependency; equal root hashes should still
+  trigger dep-aware repair through the external-dep hash;
 - add ignored dep-perf tests for a transitive old chain feeding one recent
   root, with at least `1k` and `10k` chain variants, proving response-time
   request handling reads precomputed closure rows instead of recursively

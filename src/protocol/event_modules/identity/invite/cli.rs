@@ -24,10 +24,7 @@ pub fn commands() -> Vec<CliCommand<Context>> {
 
 fn run_invite_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let public_addr = parse_public_addr(args)?;
-    let output = context
-        .protocol
-        .modules()
-        .create_invite(&context.store, public_addr)
+    let output = super::commands::create_with_local(&context.store, public_addr)
         .map_err(|err| format!("create invite: {err}"))?;
     let (link, _) = worker::run(&context.store, &context.protocol, output)
         .map_err(|err| format!("apply invite: {err}"))?;

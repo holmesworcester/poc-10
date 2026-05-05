@@ -104,14 +104,9 @@ fn run_count_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutp
         event_schema::event_count(&context.store).map_err(|err| format!("count events: {err}"))?;
     let payload_bytes =
         event_schema::body_bytes(&context.store).map_err(|err| format!("count bytes: {err}"))?;
-    let connections = context
-        .protocol
-        .modules()
-        .connection_count(&context.store)?;
-    let connection_events = context
-        .protocol
-        .modules()
-        .connection_event_count(&context.store)?;
+    let connections = event_modules::connection::queries::connection_count(&context.store)?;
+    let connection_events =
+        event_modules::connection::queries::connection_event_count(&context.store)?;
     let statuses = event_schema::status_counts(&context.store)
         .map_err(|err| format!("count event statuses: {err}"))?;
     Ok(CliOutput::lines(

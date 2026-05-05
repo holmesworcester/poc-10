@@ -12,12 +12,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
-use crate::core::network_queues::{InboundNetworkRow, NetworkTarget, OutboundNetworkRow};
+use crate::core::network_queues::{self, InboundNetworkRow, NetworkTarget, OutboundNetworkRow};
 use crate::core::tcp;
 use crate::protocol::cli::Context;
 use crate::protocol::event_modules::worker as event_worker;
 
-use super::super::OutboundSync;
+use super::connection_request;
 use super::worker as connection_worker;
 
 const CONNECT_USAGE: &str = "connect INVITE_LINK";
@@ -50,6 +50,15 @@ pub struct ServeSummary {
     pub received_events: usize,
 }
 
+/// Opaque bytes prepared for one route after draining protocol outbox rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundSync {
+    pub target: NetworkTarget,
+    pub outgoing: Vec<OutboundNetworkRow>,
+    pub sent_outbox: Vec<Vec<Vec<u8>>>,
+    pub sent_events: usize,
+}
+
 impl ServeSummary {
     pub fn lines(&self) -> Vec<String> {
         vec![
@@ -65,11 +74,9 @@ pub fn run_connect_command(context: &mut Context, args: CliArgs<'_>) -> Result<C
 }
 
 pub fn run_connect(context: &mut Context, invite: String) -> Result<Vec<String>, String> {
-    let addr = context.protocol.modules().invite_addr(&invite)?;
-    let output = context
-        .protocol
-        .modules()
-        .create_connection_request(&context.store, &invite)?;
+    let output = connection_request::commands::create_with_local(&context.store, &invite)
+        .map_err(|err| format!("create connection request: {err}"))?;
+    let addr = output.value.addr;
     let request = event_worker::run(&context.store, &context.protocol, output)
         .map_err(|err| format!("record connection request: {err}"))?
         .0;
@@ -137,6 +144,29 @@ pub fn exchange_outbound_route(
     )
 }
 
+pub fn drain_outbox_routes(context: &Context) -> Result<Vec<OutboundSync>, String> {
+    let output = connection_worker::run(
+        &context.store,
+        &context.protocol,
+        connection_worker::Work::DrainOutboxRoutes,
+    )?;
+    let connection_worker::Output::OutboundRoutes(outbound) = output else {
+        return Err("connection worker returned non-outbox-routes output".to_string());
+    };
+    Ok(outbound
+        .into_iter()
+        .map(|outbound| OutboundSync {
+            target: NetworkTarget::new(outbound.target),
+            outgoing: network_queues::outbound_rows(
+                NetworkTarget::new(outbound.target),
+                outbound.outgoing,
+            ),
+            sent_outbox: outbound.sent_outbox,
+            sent_events: 0,
+        })
+        .collect())
+}
+
 fn handle_inbound(
     context: &Context,
     inbound: InboundNetworkRow,
@@ -144,15 +174,10 @@ fn handle_inbound(
     summary: &mut StreamSummary,
     sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<Vec<u8>>>>,
 ) -> Result<Vec<OutboundNetworkRow>, String> {
-    let local = context
-        .protocol
-        .modules()
-        .existing_local_keypair(&context.store)?;
     let ingest = connection_worker::run(
         &context.store,
         &context.protocol,
         connection_worker::Work::IngestNetwork {
-            local,
             inbound,
             remember_origin,
         },
@@ -206,8 +231,17 @@ fn mark_sent_network_rows(
             }
         }
     }
-    context
-        .protocol
-        .modules()
-        .mark_outbox_sent(&context.store, outbox_keys)
+    mark_outbox_sent(context, outbox_keys)
+}
+
+fn mark_outbox_sent(context: &Context, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {
+    let output = connection_worker::run(
+        &context.store,
+        &context.protocol,
+        connection_worker::Work::MarkOutboxSent { sent_outbox },
+    )?;
+    let connection_worker::Output::OutboxMarked = output else {
+        return Err("connection worker returned non-mark-outbox output".to_string());
+    };
+    Ok(())
 }

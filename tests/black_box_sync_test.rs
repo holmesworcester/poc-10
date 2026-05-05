@@ -126,6 +126,10 @@ fn sync(db: &str) -> String {
     assert_success(topo(&["--db", db, "sync"]))
 }
 
+fn sync_today(db: &str) -> String {
+    assert_success(topo(&["--db", db, "sync", "today"]))
+}
+
 fn count(db: &str) -> usize {
     let out = assert_success(topo(&["--db", db, "count"]));
     line_value(&out, "events")
@@ -403,37 +407,93 @@ fn invited_alice_bob_and_carol_sync_but_uninvited_mallory_cannot_connect() {
 }
 
 #[test]
-#[ignore = "dep-aware sync today is the next sync variant; this should fail until that CLI and index exist"]
-fn dep_aware_sync_today_projects_recent_root_with_old_deps_quickly() {
+fn dep_aware_sync_today_many_recent_roots_share_old_dep_closure_reasonably() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
     let port = free_port();
     let bob_invite = invite(&bob, port);
 
-    let listener = start_listener(&bob, port, 3);
+    let listener = start_listener(&bob, port, 2);
     connect_with_retry(&alice, &bob_invite);
 
+    let old_events = 10_000usize;
+    let recent_events = 10_000usize;
     assert_success(topo(&["--db", &alice, "generate-deps", "10000", "10"]));
     assert_success(topo(&["--db", &alice, "replay-deps-reverse"]));
-    let first_sync = sync(&alice);
-    assert!(first_sync.contains("routes_synced: 1"), "{first_sync}");
-    assert_eventually_count(&bob, 10_000, Duration::from_secs(30));
-
-    assert_success(topo(&[
+    let generated = assert_success(topo(&[
         "--db",
         &alice,
-        "generate-deps-recent-root",
-        "10000",
-        "10",
+        "generate-deps-recent-shared-closure",
+        &old_events.to_string(),
+        &recent_events.to_string(),
     ]));
+    assert!(generated.contains("generated_events: 10000"), "{generated}");
     let started = Instant::now();
     let today_sync = assert_success(topo(&["--db", &alice, "sync", "today"]));
     assert!(today_sync.contains("routes_synced: 1"), "{today_sync}");
     wait_success(listener, "dep-aware sync today listener");
-    assert_eventually_count(&bob, 10_001, Duration::from_secs(5));
+    assert_eventually_count(&bob, old_events + recent_events, Duration::from_secs(60));
     eprintln!(
-        "black_box_dep_aware_recent_root_old_deps elapsed_ms={}",
+        "black_box_dep_aware_many_recent_roots_shared_10k_closure recent_events={recent_events} old_events={old_events} elapsed_ms={}",
         started.elapsed().as_millis()
     );
+}
+
+#[test]
+fn dep_aware_sync_today_one_old_dep_after_10k_history_is_incremental() {
+    let elapsed = dep_aware_sync_today_one_old_dep_after_history(10_000, Duration::from_secs(5));
+    eprintln!(
+        "black_box_dep_aware_one_old_dep_10k elapsed_ms={}",
+        elapsed.as_millis()
+    );
+}
+
+#[test]
+#[ignore = "heavy dep-aware performance guard; run explicitly when changing sync"]
+fn dep_aware_sync_today_one_old_dep_after_100k_history_is_incremental() {
+    let elapsed = dep_aware_sync_today_one_old_dep_after_history(100_000, Duration::from_secs(10));
+    eprintln!(
+        "black_box_dep_aware_one_old_dep_100k elapsed_ms={}",
+        elapsed.as_millis()
+    );
+}
+
+fn dep_aware_sync_today_one_old_dep_after_history(
+    old_history_count: usize,
+    incremental_timeout: Duration,
+) -> Duration {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let port = free_port();
+    let bob_invite = invite(&bob, port);
+
+    let listener = start_listener(&bob, port, 2);
+    connect_with_retry(&alice, &bob_invite);
+
+    let generated = generate(&alice, old_history_count, 64);
+    assert!(
+        generated.contains(&format!("generated_events: {old_history_count}")),
+        "{generated}"
+    );
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "generate-deps-recent-root",
+        &old_history_count.to_string(),
+        "1",
+    ]));
+
+    let started = Instant::now();
+    let today_sync = sync_today(&alice);
+    assert!(today_sync.contains("routes_synced: 1"), "{today_sync}");
+    wait_success(listener, "dep-aware one-old-dep listener");
+    assert_eventually_count(&bob, 2, incremental_timeout);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < incremental_timeout,
+        "dep-aware one-old-dep sync took {elapsed:?}, expected under {incremental_timeout:?}"
+    );
+    elapsed
 }

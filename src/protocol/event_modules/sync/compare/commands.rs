@@ -20,8 +20,21 @@ pub trait ReadContext {
     fn summary(&self, range: TimestampRange) -> Result<RangeSummary, String>;
     /// Enumerate ids in one timestamp range when summaries differ.
     fn ids_in_range(&self, range: TimestampRange) -> Result<Vec<EventIndexEntry>, String>;
+    /// Return the first and last local timestamp present in a range.
+    fn timestamp_bounds(&self, range: TimestampRange) -> Result<Option<(u64, u64)>, String>;
     /// Check whether an advertised id is already present locally.
     fn has_event(&self, event_id: &EventId) -> Result<bool, String>;
+    /// Enumerate present transitive dependencies for root ids in a leaf range.
+    fn dependency_closure_entries(
+        &self,
+        roots: &[EventIndexEntry],
+    ) -> Result<Vec<EventIndexEntry>, String>;
+    /// Suppress ids already advertised to this connection in the current worker.
+    fn fresh_have_entries(
+        &self,
+        connection_id: EventId,
+        entries: Vec<EventIndexEntry>,
+    ) -> Result<Vec<EventIndexEntry>, String>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -31,10 +44,13 @@ pub struct SyncReport {
     pub send_event_ids: Vec<EventId>,
 }
 
-pub fn start(context: &impl ReadContext, connection_id: EventId) -> Result<SyncReport, String> {
-    // Manual start sends only the root compare. The rest of the exchange is
-    // driven by projected inbound compare rows.
-    let range = TimestampRange::ROOT;
+pub fn start(
+    context: &impl ReadContext,
+    connection_id: EventId,
+    range: TimestampRange,
+) -> Result<SyncReport, String> {
+    // Manual start sends only one compare over the caller-selected range. The
+    // rest of the exchange is driven by projected inbound compare rows.
     let mut report = SyncReport::default();
     report
         .events
@@ -114,8 +130,7 @@ fn compare_response(
     response_requested: bool,
 ) -> Result<Vec<crate::protocol::event_modules::types::EventRecord>, String> {
     let mut records = Vec::new();
-    let entries = context.ids_in_range(range)?;
-    if entries.is_empty() {
+    if local.count == 0 {
         if response_requested {
             records.push(super::codec::outbound_record(CompareEvent {
                 connection_id,
@@ -127,8 +142,12 @@ fn compare_response(
         return Ok(records);
     }
 
-    if entries.len() <= MAX_HAVE_IDS_PER_RANGE {
-        for entry in entries {
+    if local.count <= MAX_HAVE_IDS_PER_RANGE as u64 {
+        let entries = context.ids_in_range(range)?;
+        let dep_entries = context
+            .fresh_have_entries(connection_id, context.dependency_closure_entries(&entries)?)?;
+        let entries = context.fresh_have_entries(connection_id, entries)?;
+        for entry in dep_entries.into_iter().chain(entries.into_iter()) {
             records.push(have_id::codec::outbound_record(HaveIdEvent {
                 connection_id,
                 timestamp: entry.timestamp,
@@ -146,16 +165,15 @@ fn compare_response(
         return Ok(records);
     }
 
-    let min_timestamp = entries
-        .first()
-        .map(|entry| entry.timestamp)
-        .expect("entries not empty");
-    let max_timestamp = entries
-        .last()
-        .map(|entry| entry.timestamp)
-        .expect("entries not empty");
+    let (min_timestamp, max_timestamp) = context
+        .timestamp_bounds(range)?
+        .ok_or_else(|| "non-empty range summary had no timestamp bounds".to_string())?;
     if min_timestamp == max_timestamp {
-        for entry in entries {
+        let entries = context.ids_in_range(range)?;
+        let dep_entries = context
+            .fresh_have_entries(connection_id, context.dependency_closure_entries(&entries)?)?;
+        let entries = context.fresh_have_entries(connection_id, entries)?;
+        for entry in dep_entries.into_iter().chain(entries.into_iter()) {
             records.push(have_id::codec::outbound_record(HaveIdEvent {
                 connection_id,
                 timestamp: entry.timestamp,

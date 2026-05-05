@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 
 use topo::core::store::Store;
 use topo::protocol::event_modules::schema::{self as event_schema, EventLabel};
+use topo::protocol::event_modules::content::content_event;
 use topo::protocol::event_modules::types::{
     event_id, EventId, EventRecord, EventScope, ReceiveMetadata,
 };
@@ -18,7 +19,7 @@ fn command_admission_returns_event_ids_for_chaining() {
     let store = Protocol::open_store(tmp.path().join("worker.db")).unwrap();
     let modules = Modules::new();
 
-    let output = modules.generate_content(&store, 3, 64).unwrap();
+    let output = content_event::commands::generate(1, 3, 64).unwrap();
     let proposed_ids = output
         .events
         .iter()

@@ -8,6 +8,8 @@
 
 use crate::protocol::event_modules::types::EventId;
 
+pub const TIMESTAMP_DAY: u64 = 1_000_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimestampRange {
     pub start: u64,
@@ -39,6 +41,18 @@ impl TimestampRange {
                 end: self.end,
             },
         ))
+    }
+
+    pub fn containing_day(timestamp: u64) -> Self {
+        let start = (timestamp / TIMESTAMP_DAY) * TIMESTAMP_DAY;
+        Self {
+            start,
+            end: start.saturating_add(TIMESTAMP_DAY - 1),
+        }
+    }
+
+    pub fn next_day_after(timestamp: u64) -> u64 {
+        ((timestamp / TIMESTAMP_DAY) + 1) * TIMESTAMP_DAY
     }
 }
 

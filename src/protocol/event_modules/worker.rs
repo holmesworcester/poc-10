@@ -218,6 +218,12 @@ impl<T> CommandOutput<T> {
     pub fn with_proposed_events(value: T, events: Vec<ProposedEvent>) -> Self {
         Self { value, events }
     }
+
+    pub fn prepend_events(mut self, mut events: Vec<ProposedEvent>) -> Self {
+        events.append(&mut self.events);
+        self.events = events;
+        self
+    }
 }
 
 /// Protocol registry used by the common worker.

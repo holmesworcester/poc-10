@@ -41,6 +41,10 @@ use crate::protocol::event_modules::worker::{
 
 use super::{connection_ack, connection_request, schema, transit, types};
 
+pub trait ConnectionRegistry: EventRegistry {
+    fn sync_index(&self) -> &sync::worker::SyncIndex;
+}
+
 /// Transport metadata attached to one inbound frame.
 ///
 /// `origin` is a concrete route observed by core TCP. `remember_origin` tells
@@ -62,13 +66,10 @@ struct FrameMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
     IngestNetwork {
-        local: endpoint::types::EndpointKeypair,
         inbound: InboundNetworkRow,
         remember_origin: bool,
     },
-    DrainOutboxRoutes {
-        local: endpoint::types::EndpointKeypair,
-    },
+    DrainOutboxRoutes,
     MarkOutboxSent {
         sent_outbox: Vec<Vec<u8>>,
     },
@@ -169,31 +170,30 @@ const TRANSIT_TARGET_PLAINTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// tests one stable surface to check.
 pub fn run<R>(store: &Store, registry: &R, work: Work) -> Result<Output, String>
 where
-    R: EventRegistry,
+    R: ConnectionRegistry,
 {
     match work {
         Work::IngestNetwork {
-            local,
             inbound,
             remember_origin,
-        } => ingest_network(store, registry, local, inbound, remember_origin)
-            .map(Output::NetworkIngest),
-        Work::DrainOutboxRoutes { local } => {
-            drain_outbox_routes(store, local).map(Output::OutboundRoutes)
-        }
+        } => ingest_network(store, registry, inbound, remember_origin).map(Output::NetworkIngest),
+        Work::DrainOutboxRoutes => drain_outbox_routes(store).map(Output::OutboundRoutes),
         Work::MarkOutboxSent { sent_outbox } => {
             mark_outbox_sent(store, sent_outbox).map(|()| Output::OutboxMarked)
         }
     }
 }
 
-fn ingest_network(
+fn ingest_network<R>(
     store: &Store,
-    registry: &impl EventRegistry,
-    local: endpoint::types::EndpointKeypair,
+    registry: &R,
     inbound: InboundNetworkRow,
     remember_origin: bool,
-) -> Result<NetworkIngestResult, String> {
+) -> Result<NetworkIngestResult, String>
+where
+    R: ConnectionRegistry,
+{
+    let local = local_endpoint(store)?;
     let origin = inbound.source.addr();
     let metadata = FrameMetadata {
         origin,
@@ -231,7 +231,7 @@ fn ingest_network(
     )?;
 
     if let Some(connection_id) = report.drain_sync_for {
-        let sync_report = drain_projected_sync_work(store, connection_id)?;
+        let sync_report = drain_projected_sync_work(store, registry.sync_index(), connection_id)?;
         worker::run(
             store,
             registry,
@@ -298,12 +298,14 @@ fn ingest_connection_scoped_sync_event(
 
 fn drain_projected_sync_work(
     store: &Store,
+    index: &sync::worker::SyncIndex,
     connection_id: types::ConnectionId,
 ) -> Result<sync::worker::SyncWorkReport, String> {
     let mut aggregate = sync::worker::SyncWorkReport::default();
     loop {
         let output = sync::worker::run(
             store,
+            index,
             sync::worker::Work::DrainInboundSync {
                 connection_id,
                 limit: sync::worker::DEFAULT_INBOUND_BATCH,
@@ -358,10 +360,8 @@ fn unwrap_transit_bytes(
     Ok(frames)
 }
 
-fn drain_outbox_routes(
-    store: &Store,
-    local: endpoint::types::EndpointKeypair,
-) -> Result<Vec<OutboundTransit>, String> {
+fn drain_outbox_routes(store: &Store) -> Result<Vec<OutboundTransit>, String> {
+    let local = local_endpoint(store)?;
     // Route draining is deliberately route-based, not global "send everything".
     // Slow or absent targets should only starve their own route.
     let routes = routes(store)?;
@@ -378,6 +378,10 @@ fn drain_outbox_routes(
         });
     }
     Ok(outbound)
+}
+
+fn local_endpoint(store: &Store) -> Result<endpoint::types::EndpointKeypair, String> {
+    endpoint::commands::local_keypair(store)?.ok_or_else(|| "local endpoint is missing".to_string())
 }
 
 fn drain_outbox_for_route(
@@ -638,29 +642,22 @@ mod tests {
     #[test]
     fn drain_outbox_routes_removes_rows_whose_bytes_are_gone() {
         let store = Protocol::open_memory_store().expect("open store");
+        let local = endpoint::commands::create_local_keypair().value;
         let connection_id = [3; 32];
         let missing_event_id = [4; 32];
         let addr = "127.0.0.1:41000"
             .parse::<SocketAddr>()
             .expect("test socket addr");
+        let mut rows = endpoint::projector::local_endpoint(local.endpoint, local.secret);
+        rows.extend([
+            schema::transport_target_row(connection_id, addr),
+            schema::outbox_row(connection_id, missing_event_id),
+        ]);
         store
-            .insert_table_rows(vec![
-                schema::transport_target_row(connection_id, addr),
-                schema::outbox_row(connection_id, missing_event_id),
-            ])
+            .insert_table_rows(rows)
             .expect("insert route and stale outbox row");
 
-        let output = run(
-            &store,
-            &Protocol::new(),
-            Work::DrainOutboxRoutes {
-                local: endpoint::types::EndpointKeypair {
-                    endpoint: [8; 32],
-                    secret: [9; 32],
-                },
-            },
-        )
-        .expect("drain outbox");
+        let output = run(&store, &Protocol::new(), Work::DrainOutboxRoutes).expect("drain outbox");
 
         assert_eq!(output, Output::OutboundRoutes(Vec::new()));
         assert_eq!(

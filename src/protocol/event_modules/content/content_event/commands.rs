@@ -16,6 +16,19 @@ pub struct GenerateReport {
     pub last_timestamp: u64,
 }
 
+pub trait GenerateRead {
+    fn max_timestamp(&self) -> Result<u64, String>;
+}
+
+pub fn generate_next(
+    context: &impl GenerateRead,
+    num_events: usize,
+    event_size: usize,
+) -> Result<CommandOutput<GenerateReport>, String> {
+    let start_timestamp = context.max_timestamp()?.saturating_add(1);
+    generate(start_timestamp, num_events, event_size)
+}
+
 pub fn generate(
     start_timestamp: u64,
     num_events: usize,

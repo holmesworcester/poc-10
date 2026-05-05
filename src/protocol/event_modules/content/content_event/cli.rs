@@ -7,6 +7,7 @@
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::protocol::cli::Context;
+use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::worker;
 
 const GENERATE_USAGE: &str = "generate NUM_EVENTS EVENT_SIZE_BYTES";
@@ -45,10 +46,11 @@ fn run_generate_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     args.require_len(2, GENERATE_USAGE)?;
     let num_events = args.parse_positive_usize(0, GENERATE_USAGE)?;
     let event_size = args.parse_positive_usize(1, GENERATE_USAGE)?;
-    let output = context
-        .protocol
-        .modules()
-        .generate_content(&context.store, num_events, event_size)
+    let read = GenerateContext {
+        max_timestamp: event_schema::max_timestamp(&context.store)
+            .map_err(|err| format!("load max timestamp: {err}"))?,
+    };
+    let output = super::commands::generate_next(&read, num_events, event_size)
         .map_err(|err| format!("generate: {err}"))?;
     let (report, admitted) = worker::run(&context.store, &context.protocol, output)
         .map_err(|err| format!("admit generated events: {err}"))?;
@@ -63,4 +65,14 @@ fn run_generate_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
         }
         .lines(),
     ))
+}
+
+struct GenerateContext {
+    max_timestamp: u64,
+}
+
+impl super::commands::GenerateRead for GenerateContext {
+    fn max_timestamp(&self) -> Result<u64, String> {
+        Ok(self.max_timestamp)
+    }
 }

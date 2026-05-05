@@ -8,9 +8,13 @@
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::protocol::cli::Context;
 use crate::protocol::event_modules::schema as event_schema;
+use crate::protocol::event_modules::types::EventIndexEntry;
 use crate::protocol::event_modules::worker::{self, CommandOutput};
 
 const GENERATE_DEPS_USAGE: &str = "generate-deps NUM_EVENTS DEPS_PER_EVENT";
+const GENERATE_DEPS_RECENT_ROOT_USAGE: &str = "generate-deps-recent-root OLD_EVENTS DEPS_PER_EVENT";
+const GENERATE_DEPS_RECENT_SHARED_CLOSURE_USAGE: &str =
+    "generate-deps-recent-shared-closure OLD_EVENTS RECENT_EVENTS";
 const REPLAY_DEPS_REVERSE_USAGE: &str = "replay-deps-reverse";
 
 pub fn commands() -> Vec<CliCommand<Context>> {
@@ -20,6 +24,18 @@ pub fn commands() -> Vec<CliCommand<Context>> {
             usage: GENERATE_DEPS_USAGE,
             help: "Stage dependency-bearing test events.",
             run: run_generate_command,
+        },
+        CliCommand {
+            name: "generate-deps-recent-root",
+            usage: GENERATE_DEPS_RECENT_ROOT_USAGE,
+            help: "Generate one newest dependency-bearing event rooted in old events.",
+            run: run_generate_recent_root_command,
+        },
+        CliCommand {
+            name: "generate-deps-recent-shared-closure",
+            usage: GENERATE_DEPS_RECENT_SHARED_CLOSURE_USAGE,
+            help: "Generate many newest roots that share the same old dependency closure.",
+            run: run_generate_recent_shared_closure_command,
         },
         CliCommand {
             name: "replay-deps-reverse",
@@ -51,14 +67,48 @@ impl EventWithDepsStageSummary {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventWithDepsRecentRootSummary {
+    pub generated_events: usize,
+    pub dep_edges: usize,
+    pub timestamp: u64,
+}
+
+impl EventWithDepsRecentRootSummary {
+    pub fn lines(&self) -> Vec<String> {
+        vec![
+            format!("generated_events: {}", self.generated_events),
+            format!("dep_edges: {}", self.dep_edges),
+            format!("timestamp: {}", self.timestamp),
+        ]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventWithDepsRecentSharedClosureSummary {
+    pub generated_events: usize,
+    pub dep_edges: usize,
+    pub first_timestamp: u64,
+    pub last_timestamp: u64,
+}
+
+impl EventWithDepsRecentSharedClosureSummary {
+    pub fn lines(&self) -> Vec<String> {
+        vec![
+            format!("generated_events: {}", self.generated_events),
+            format!("dep_edges: {}", self.dep_edges),
+            format!("first_timestamp: {}", self.first_timestamp),
+            format!("last_timestamp: {}", self.last_timestamp),
+        ]
+    }
+}
+
 fn run_generate_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(2, GENERATE_DEPS_USAGE)?;
     let num_events = args.parse_positive_usize(0, GENERATE_DEPS_USAGE)?;
     let deps_per_event = args.parse_positive_usize(1, GENERATE_DEPS_USAGE)?;
-    let output = context
-        .protocol
-        .modules()
-        .stage_event_with_deps(&context.store, num_events, deps_per_event)
+    let read = EventWithDepsContext::new(&context.store)?;
+    let output = super::commands::stage_next(&read, num_events, deps_per_event)
         .map_err(|err| format!("stage event_with_deps: {err}"))?;
     let (report, _) = worker::run(&context.store, &context.protocol, output)
         .map_err(|err| format!("admit staged event_with_deps: {err}"))?;
@@ -74,15 +124,79 @@ fn run_generate_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     ))
 }
 
+fn run_generate_recent_root_command(
+    context: &mut Context,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(2, GENERATE_DEPS_RECENT_ROOT_USAGE)?;
+    let old_events = args.parse_positive_usize(0, GENERATE_DEPS_RECENT_ROOT_USAGE)?;
+    let deps_per_event = args.parse_positive_usize(1, GENERATE_DEPS_RECENT_ROOT_USAGE)?;
+    let read = EventWithDepsContext::new(&context.store)?;
+    let output = super::commands::recent_root_from_old_events(&read, old_events, deps_per_event)
+        .map_err(|err| format!("generate recent event_with_deps root: {err}"))?;
+    let (report, admit) = worker::run(&context.store, &context.protocol, output)
+        .map_err(|err| format!("admit recent event_with_deps root: {err}"))?;
+    context
+        .drain_ready_events()
+        .map_err(|err| format!("drain recent event_with_deps root: {err}"))?;
+    if admit.blocked_events > 0 {
+        return Err(format!(
+            "recent event_with_deps root blocked on {} dependencies",
+            admit.blocked_edges
+        ));
+    }
+    Ok(CliOutput::lines(
+        EventWithDepsRecentRootSummary {
+            generated_events: report.generated_events,
+            dep_edges: report.dep_edges,
+            timestamp: report.timestamp,
+        }
+        .lines(),
+    ))
+}
+
+fn run_generate_recent_shared_closure_command(
+    context: &mut Context,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(2, GENERATE_DEPS_RECENT_SHARED_CLOSURE_USAGE)?;
+    let old_events = args.parse_positive_usize(0, GENERATE_DEPS_RECENT_SHARED_CLOSURE_USAGE)?;
+    let recent_events = args.parse_positive_usize(1, GENERATE_DEPS_RECENT_SHARED_CLOSURE_USAGE)?;
+    let read = EventWithDepsContext::new(&context.store)?;
+    let output = super::commands::recent_roots_with_shared_dep_closure_from_old_events(
+        &read,
+        old_events,
+        recent_events,
+    )
+    .map_err(|err| format!("generate recent event_with_deps shared closure: {err}"))?;
+    let (report, admit) = worker::run(&context.store, &context.protocol, output)
+        .map_err(|err| format!("admit recent event_with_deps shared closure: {err}"))?;
+    context
+        .drain_ready_events()
+        .map_err(|err| format!("drain recent event_with_deps shared closure: {err}"))?;
+    if admit.blocked_events > 0 {
+        return Err(format!(
+            "recent event_with_deps shared closure roots blocked on {} dependencies",
+            admit.blocked_edges
+        ));
+    }
+    Ok(CliOutput::lines(
+        EventWithDepsRecentSharedClosureSummary {
+            generated_events: report.generated_events,
+            dep_edges: report.dep_edges,
+            first_timestamp: report.first_timestamp,
+            last_timestamp: report.last_timestamp,
+        }
+        .lines(),
+    ))
+}
+
 fn run_replay_reverse_command(
     context: &mut Context,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     args.require_len(0, REPLAY_DEPS_REVERSE_USAGE)?;
-    let records = context
-        .protocol
-        .modules()
-        .staged_event_with_deps_records(&context.store)
+    let records = super::queries::staged_records(&context.store)
         .map_err(|err| format!("load staged event_with_deps: {err}"))?;
     if records.is_empty() {
         return Err("no staged event_with_deps to replay".to_string());
@@ -132,6 +246,36 @@ fn run_replay_reverse_command(
         }
         .lines(),
     ))
+}
+
+struct EventWithDepsContext {
+    max_timestamp: u64,
+    event_index_entries: Vec<EventIndexEntry>,
+}
+
+impl EventWithDepsContext {
+    fn new(store: &crate::core::store::Store) -> Result<Self, String> {
+        Ok(Self {
+            max_timestamp: event_schema::max_timestamp(store)
+                .map_err(|err| format!("load max timestamp: {err}"))?,
+            event_index_entries: event_schema::event_index_entries_in_timestamp_range(
+                store,
+                0,
+                u64::MAX,
+            )
+            .map_err(|err| format!("load dependency event ids: {err}"))?,
+        })
+    }
+}
+
+impl super::commands::EventWithDepsRead for EventWithDepsContext {
+    fn max_timestamp(&self) -> Result<u64, String> {
+        Ok(self.max_timestamp)
+    }
+
+    fn event_index_entries(&self) -> Result<Vec<EventIndexEntry>, String> {
+        Ok(self.event_index_entries.clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

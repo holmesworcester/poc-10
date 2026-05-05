@@ -18,6 +18,7 @@ the rule is still prose/review only.
 | Protocol event modules own common fact/status/dependency tables. | typed + static | [event_modules/schema.rs](src/protocol/event_modules/schema.rs), `protocol_event_schema_owns_common_fact_indexes`. |
 | Generic Crux and CLI command driving are core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), [CliCommand](src/core/cli.rs), `crux_core_is_isolated_to_core`, core vocabulary checks. |
 | Worker admission/apply is scoped to event modules, not protocol root. | partial | [worker::run](src/protocol/event_modules/worker.rs) is the shared admission/apply entrypoint; there is not yet a typed worker catalog for all worker classes. |
+| `mod.rs` files are plumbing only, not command/work orchestration facades. | static | `leaf_mod_rs_files_are_declarations_only` and `event_module_mod_rs_files_do_not_orchestrate_commands_or_work` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
 | Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `domain_root_cli_requires_cross_child_scope`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
 | `event.rs` is forbidden; semantic types live in `types.rs`; codecs do encode/decode only. | static | `event_modules_do_not_use_event_rs`, `codec_files_do_not_define_public_types`, `codec_modules_have_type_files`. |
 | Workers live at the owning scope and expose one obvious entrypoint. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`, `worker_files_export_only_run_as_public_entrypoint`; no typed worker trait/catalog yet. |
@@ -104,6 +105,15 @@ The following rules should stay mechanically enforced where practical:
   semantics.
 - Protocol worker owns admission/apply plumbing; concrete domain branching
   belongs behind the protocol module registry.
+- `src/protocol/event_modules/mod.rs` is registry plumbing only. It may declare
+  modules, own the protocol module list, aggregate schemas, dispatch
+  parse/project calls by event tag, expose registry state accessors, and
+  implement registry traits. It must not become a convenience facade for user
+  commands or protocol work: no `create_*`, `generate_*`, `start_*`,
+  `drain_*`, `mark_*`, timestamp selection, dependency selection, invite/local
+  endpoint orchestration, route/outbox policy, command-output merging, or
+  worker wake decisions. Put that behavior in the closest owning `commands.rs`
+  or `worker.rs`; keep user parsing and output in the closest `cli.rs`.
 - Sync modules do not own TCP/frame IO, and core/network code does not contain
   sync protocol logic.
 - Event-module commands do not mutate storage directly. Event-module
@@ -159,7 +169,11 @@ projectors, queries, and module-owned tables they operate on.
 
 CLI, RPC, workers, and other adapters should dispatch into module commands
 instead of constructing canonical event bytes directly. Adapters own
-input/output shape; event modules own protocol and domain semantics.
+input/output shape; event modules own protocol and domain semantics. An adapter
+may choose which command to invoke from explicit user input or queued work, but
+it must not invent semantic defaults by querying broad state. If a command needs
+the next timestamp, a local endpoint, a route, a dependency set, or a sync
+range, that read belongs in a narrow command context or in the owning worker.
 
 Commands receive explicit input values plus narrow read context values. They do
 not mutate SQLite, open transactions, drain queues, or call broad apply loops.
@@ -267,6 +281,22 @@ runner to process exactly those proposed events, then runs any query that
 depends on their projection rows. It must not rely on a broad global drain
 unless the command is explicitly a wait/poll command such as sync status or
 assert-eventually.
+
+CLI files are for user interaction, not domain logic. They may parse argv,
+print help, call the closest command or worker entrypoint, submit returned
+proposed events to the generic worker, and format the resulting value/query
+output. They must not compute semantic values such as "next content timestamp",
+"which dependencies should this event use", "ensure/create the local endpoint
+then create an invite/request", "which routes should be drained", or "which
+sync range means today". Those choices belong to `commands.rs` when they create
+events, or to `worker.rs` when they drain queues, wake protocol work, or touch
+module-owned operational state.
+
+`src/protocol/event_modules/mod.rs` is even stricter than CLI. It is the module
+registry and cross-module dispatch point, not a public service layer. Do not add
+new public helpers there just because several callers need them. Move the
+behavior to the closest event/domain module and have callers import that scoped
+API directly.
 
 Custom contexts for commands, projectors, and workers must be narrow DTOs, not
 database-shaped snapshots. If a context can answer arbitrary storage questions,
