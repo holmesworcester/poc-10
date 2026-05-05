@@ -6,6 +6,7 @@
 
 pub mod endpoint;
 pub mod invite;
+pub mod signed;
 
 use crate::protocol::event_modules::worker::ProjectionOutput;
 
