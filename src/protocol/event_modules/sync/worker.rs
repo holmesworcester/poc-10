@@ -26,8 +26,9 @@
 
 use crate::core::store::Store;
 use crate::protocol::event_modules::connection;
+use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
 use crate::protocol::event_modules::schema as event_schema;
-use crate::protocol::event_modules::types::EventRecord;
+use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::{compare, schema};
@@ -100,8 +101,12 @@ fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
     }
     let mut events = Vec::new();
     let mut sent_events = 0;
-    let context = StoreSyncContext { store };
+    let local = local_endpoint(store)?;
     for connection_id in connections {
+        let context = StoreSyncContext::for_connection(store, local.endpoint, connection_id)?;
+        if context.workspace_ids.is_empty() {
+            continue;
+        }
         let report = compare::commands::start(&context, connection_id)?;
         events.extend(report.events);
         sent_events += report.sent_events;
@@ -124,7 +129,12 @@ fn drain_inbound_events(
     let mut consumed = Vec::with_capacity(works.len());
     let mut outbox_rows = Vec::new();
     for work in works {
-        let context = StoreSyncContext { store };
+        let local = local_endpoint(store)?;
+        let context = StoreSyncContext::for_connection(store, local.endpoint, work.connection_id)?;
+        if context.workspace_ids.is_empty() {
+            consumed.push(work.key());
+            continue;
+        }
         let report = compare::commands::handle_inbound_event(
             &context,
             work.connection_id,
@@ -153,13 +163,31 @@ fn drain_inbound_events(
 
 struct StoreSyncContext<'a> {
     store: &'a Store,
+    workspace_ids: Vec<EventId>,
+}
+
+impl<'a> StoreSyncContext<'a> {
+    fn for_connection(
+        store: &'a Store,
+        local_endpoint: EventId,
+        connection_id: connection::types::ConnectionId,
+    ) -> Result<Self, String> {
+        let remote = connection::schema::remote_endpoint(store, connection_id)?;
+        let workspace_ids =
+            endpoint_shared::schema::mutual_workspace_ids(store, local_endpoint, remote)?;
+        Ok(Self {
+            store,
+            workspace_ids,
+        })
+    }
 }
 
 impl compare::commands::ReadContext for StoreSyncContext<'_> {
     fn summary(&self) -> Result<[compare::types::BucketSummary; compare::types::BUCKETS], String> {
         let mut summary = [compare::types::BucketSummary::default(); compare::types::BUCKETS];
-        for header in event_schema::event_index_entries(self.store)
-            .map_err(|err| format!("load event headers: {err}"))?
+        for header in
+            event_schema::event_index_entries_for_workspaces(self.store, &self.workspace_ids)
+                .map_err(|err| format!("load event headers: {err}"))?
         {
             let bucket = &mut summary[usize::from(header.partition)];
             bucket.count += 1;
@@ -172,7 +200,7 @@ impl compare::commands::ReadContext for StoreSyncContext<'_> {
         &self,
         bucket: u8,
     ) -> Result<Vec<crate::protocol::event_modules::types::EventId>, String> {
-        event_schema::event_ids_in_partition(self.store, bucket)
+        event_schema::event_ids_in_partition_for_workspaces(self.store, bucket, &self.workspace_ids)
             .map_err(|err| format!("load bucket ids: {err}"))
     }
 
@@ -180,9 +208,13 @@ impl compare::commands::ReadContext for StoreSyncContext<'_> {
         &self,
         event_id: &crate::protocol::event_modules::types::EventId,
     ) -> Result<bool, String> {
-        event_schema::has_shared_event(self.store, event_id)
+        event_schema::has_shared_event_in_workspaces(self.store, event_id, &self.workspace_ids)
             .map_err(|err| format!("check event presence: {err}"))
     }
+}
+
+fn local_endpoint(store: &Store) -> Result<endpoint::types::EndpointKeypair, String> {
+    endpoint::commands::local_keypair(store)?.ok_or_else(|| "local endpoint is missing".to_string())
 }
 
 fn connection_ids_with_routes(

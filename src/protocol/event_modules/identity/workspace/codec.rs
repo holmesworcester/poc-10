@@ -45,11 +45,13 @@ pub fn decode(bytes: &[u8]) -> Result<WorkspaceEvent, String> {
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     let event = decode(&bytes)?;
+    let workspace_id = crate::protocol::event_modules::types::event_id(&bytes);
     Ok(EventRecord {
         timestamp: event.created_at_ms,
         body_len: WORKSPACE_WIRE_SIZE - 1,
         canonical_bytes: bytes,
         dependencies: Vec::new(),
+        workspace_id: Some(workspace_id),
         scope: EventScope::Shared,
         receive: None,
     })

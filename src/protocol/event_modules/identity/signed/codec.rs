@@ -66,6 +66,7 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         body_len: metadata.body_len,
         canonical_bytes: bytes,
         dependencies: metadata.dependencies,
+        workspace_id: metadata.workspace_id,
         scope: EventScope::Shared,
         receive: None,
     })
@@ -75,6 +76,7 @@ struct InnerMetadata {
     timestamp: u64,
     body_len: usize,
     dependencies: Vec<EventId>,
+    workspace_id: Option<EventId>,
 }
 
 pub fn dependencies(event: &SignedEnvelope) -> Result<Vec<EventId>, String> {
@@ -85,13 +87,14 @@ fn inner_metadata(event: &SignedEnvelope) -> Result<InnerMetadata, String> {
     let mut dependencies = Vec::new();
     push_unique(&mut dependencies, event.signer_event_id);
 
-    let (timestamp, body_len, inner_dependencies) = match event.inner_type {
+    let (timestamp, body_len, inner_dependencies, workspace_id) = match event.inner_type {
         user_invite::codec::TYPE_USER_INVITE => {
             let inner = user_invite::codec::decode(&event.payload)?;
             (
                 inner.created_at_ms,
                 user_invite::codec::USER_INVITE_WIRE_SIZE - 1,
                 vec![inner.workspace_id, inner.authority_event_id],
+                Some(inner.workspace_id),
             )
         }
         user::codec::TYPE_USER => {
@@ -100,6 +103,7 @@ fn inner_metadata(event: &SignedEnvelope) -> Result<InnerMetadata, String> {
                 inner.created_at_ms,
                 user::codec::USER_WIRE_SIZE - 1,
                 Vec::new(),
+                None,
             )
         }
         device_invite::codec::TYPE_DEVICE_INVITE => {
@@ -107,7 +111,8 @@ fn inner_metadata(event: &SignedEnvelope) -> Result<InnerMetadata, String> {
             (
                 inner.created_at_ms,
                 device_invite::codec::DEVICE_INVITE_WIRE_SIZE - 1,
-                vec![inner.workspace_id, inner.user_authority_event_id],
+                device_invite::codec::dependencies(&inner),
+                Some(inner.workspace_id),
             )
         }
         endpoint_shared::codec::TYPE_ENDPOINT_SHARED => {
@@ -116,6 +121,7 @@ fn inner_metadata(event: &SignedEnvelope) -> Result<InnerMetadata, String> {
                 inner.created_at_ms,
                 endpoint_shared::codec::ENDPOINT_SHARED_WIRE_SIZE - 1,
                 vec![inner.workspace_id, inner.user_authority_event_id],
+                Some(inner.workspace_id),
             )
         }
         admin::codec::TYPE_ADMIN => {
@@ -124,9 +130,10 @@ fn inner_metadata(event: &SignedEnvelope) -> Result<InnerMetadata, String> {
                 inner.created_at_ms,
                 admin::codec::ADMIN_WIRE_SIZE - 1,
                 admin::codec::dependencies(&inner),
+                Some(inner.workspace_id),
             )
         }
-        _ => (0, event.payload.len(), Vec::new()),
+        _ => (0, event.payload.len(), Vec::new(), None),
     };
 
     for dependency in inner_dependencies {
@@ -137,6 +144,7 @@ fn inner_metadata(event: &SignedEnvelope) -> Result<InnerMetadata, String> {
         timestamp,
         body_len,
         dependencies,
+        workspace_id,
     })
 }
 

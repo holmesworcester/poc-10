@@ -18,7 +18,7 @@ fn command_admission_returns_event_ids_for_chaining() {
     let store = Protocol::open_store(tmp.path().join("worker.db")).unwrap();
     let modules = Modules::new();
 
-    let output = modules.generate_content(&store, 3, 64).unwrap();
+    let output = modules.generate_content(&store, [1; 32], 3, 64).unwrap();
     let proposed_ids = output
         .events
         .iter()
@@ -86,6 +86,7 @@ fn worker_rejects_blocked_durable_receive_metadata() {
         body_len: bytes.len(),
         canonical_bytes: bytes,
         dependencies: vec![[9; 32]],
+        workspace_id: None,
         scope: EventScope::Shared,
         receive: Some(ReceiveMetadata {
             origin: "127.0.0.1:1".parse::<SocketAddr>().unwrap(),
@@ -126,6 +127,7 @@ impl EventRegistry for RejectReceiveMetadataRegistry {
                 body_len: bytes.len(),
                 canonical_bytes: bytes,
                 dependencies: Vec::new(),
+                workspace_id: None,
                 scope: EventScope::Shared,
                 receive: None,
             })
@@ -151,6 +153,7 @@ impl ContextRegistry {
                 body_len: bytes.len(),
                 canonical_bytes: bytes,
                 dependencies: Vec::new(),
+                workspace_id: None,
                 scope: EventScope::Shared,
                 receive: None,
             });
@@ -161,6 +164,7 @@ impl ContextRegistry {
                 body_len: bytes.len(),
                 canonical_bytes: bytes,
                 dependencies: vec![self.dep_id],
+                workspace_id: None,
                 scope: EventScope::Shared,
                 receive: None,
             });

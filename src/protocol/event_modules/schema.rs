@@ -42,7 +42,7 @@ pub const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("event_modules.labels.v1", EVENT_LABELS),
 ];
 
-const EVENT_ROW_HEADER_BYTES: usize = 8 + 8 + 1 + 1 + 1;
+const EVENT_ROW_HEADER_BYTES: usize = 8 + 8 + 1 + 1 + 1 + 1 + 32;
 const MAX_LABELS_PER_EVENT: usize = 4096;
 const MAX_DEPENDENCY_ROWS_PER_EVENT: usize = 1_000_000;
 
@@ -59,6 +59,7 @@ struct StoredEvent {
     partition: u8,
     scope: EventScope,
     status: EventStatus,
+    workspace_id: Option<EventId>,
     canonical_bytes: Vec<u8>,
 }
 
@@ -80,7 +81,7 @@ pub fn insert_event(
         rows.push(ready_row(event.timestamp, &id));
     }
     if event.scope.is_shared() {
-        rows.push(partition_row(id[0], &id));
+        rows.push(partition_row(event.workspace_id, id[0], &id));
     }
     store.insert_table_rows_in_tx(rows)?;
     Ok(true)
@@ -239,24 +240,95 @@ pub fn event_index_entries(store: &Store) -> rusqlite::Result<Vec<EventIndexEntr
         .table_rows(PARTITION_EVENTS)?
         .into_iter()
         .map(|(key, _)| {
-            let (partition, event_id) = split_partition_key(&key)?;
+            let (workspace_id, partition, event_id) = split_partition_key(&key)?;
             Ok(EventIndexEntry {
                 event_id,
                 partition,
+                workspace_id,
             })
         })
         .collect()
 }
 
 pub fn event_ids_in_partition(store: &Store, partition: u8) -> rusqlite::Result<Vec<EventId>> {
+    Ok(event_index_entries(store)?
+        .into_iter()
+        .filter_map(|entry| (entry.partition == partition).then_some(entry.event_id))
+        .collect())
+}
+
+pub fn event_index_entries_for_workspaces(
+    store: &Store,
+    workspace_ids: &[EventId],
+) -> rusqlite::Result<Vec<EventIndexEntry>> {
+    let mut out = Vec::new();
+    for workspace_id in workspace_ids {
+        for (key, _) in store.table_rows_with_key_prefix(
+            PARTITION_EVENTS,
+            workspace_id,
+            MAX_DEPENDENCY_ROWS_PER_EVENT,
+        )? {
+            let (row_workspace_id, partition, event_id) = split_partition_key(&key)?;
+            out.push(EventIndexEntry {
+                event_id,
+                partition,
+                workspace_id: row_workspace_id,
+            });
+        }
+    }
+    Ok(out)
+}
+
+pub fn event_ids_in_partition_for_workspaces(
+    store: &Store,
+    partition: u8,
+    workspace_ids: &[EventId],
+) -> rusqlite::Result<Vec<EventId>> {
+    let mut out = Vec::new();
+    for workspace_id in workspace_ids {
+        let mut prefix = workspace_id.to_vec();
+        prefix.push(partition);
+        out.extend(
+            store
+                .table_rows_with_key_prefix(
+                    PARTITION_EVENTS,
+                    &prefix,
+                    MAX_DEPENDENCY_ROWS_PER_EVENT,
+                )?
+                .into_iter()
+                .map(|(key, _)| split_partition_key(&key).map(|(_, _, event_id)| event_id))
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+    }
+    Ok(out)
+}
+
+pub fn has_shared_event_in_workspaces(
+    store: &Store,
+    event_id: &EventId,
+    workspace_ids: &[EventId],
+) -> rusqlite::Result<bool> {
+    let Some(event) = read_event(store, event_id)? else {
+        return Ok(false);
+    };
+    Ok(event.scope.is_shared()
+        && event.workspace_id.is_some_and(|workspace_id| {
+            workspace_ids.iter().any(|allowed| allowed == &workspace_id)
+        }))
+}
+
+pub fn event_ids_in_partition_unscoped(
+    store: &Store,
+    partition: u8,
+) -> rusqlite::Result<Vec<EventId>> {
     store
         .table_rows_with_key_prefix(
             PARTITION_EVENTS,
-            &[partition],
+            &partition_key_prefix(None, partition),
             MAX_DEPENDENCY_ROWS_PER_EVENT,
         )?
         .into_iter()
-        .map(|(key, _)| split_partition_key(&key).map(|(_, event_id)| event_id))
+        .map(|(key, _)| split_partition_key(&key).map(|(_, _, event_id)| event_id))
         .collect()
 }
 
@@ -324,6 +396,7 @@ fn event_row(
             event_id[0],
             event.scope,
             status,
+            event.workspace_id,
             &event.canonical_bytes,
         )?,
     })
@@ -339,6 +412,7 @@ fn stored_event_row(event_id: &EventId, event: &StoredEvent) -> rusqlite::Result
             event.partition,
             event.scope,
             event.status,
+            event.workspace_id,
             &event.canonical_bytes,
         )?,
     })
@@ -352,10 +426,10 @@ fn ready_row(timestamp: u64, event_id: &EventId) -> TableRow {
     }
 }
 
-fn partition_row(partition: u8, event_id: &EventId) -> TableRow {
+fn partition_row(workspace_id: Option<EventId>, partition: u8, event_id: &EventId) -> TableRow {
     TableRow {
         table: PARTITION_EVENTS,
-        key: partition_key(partition, event_id),
+        key: partition_key(workspace_id, partition, event_id),
         value: Vec::new(),
     }
 }
@@ -374,6 +448,7 @@ fn encode_event_row_value(
     partition: u8,
     scope: EventScope,
     status: EventStatus,
+    workspace_id: Option<EventId>,
     canonical_bytes: &[u8],
 ) -> rusqlite::Result<Vec<u8>> {
     // Keep the header fixed width so count/status scans can avoid parsing the
@@ -384,6 +459,16 @@ fn encode_event_row_value(
     out.push(partition);
     out.push(scope.durable_tag().map_err(table_error)?);
     out.push(status.as_u8());
+    match workspace_id {
+        Some(workspace_id) => {
+            out.push(1);
+            out.extend_from_slice(&workspace_id);
+        }
+        None => {
+            out.push(0);
+            out.extend_from_slice(&[0; 32]);
+        }
+    }
     out.extend_from_slice(canonical_bytes);
     Ok(out)
 }
@@ -401,6 +486,13 @@ fn decode_event_row_value(value: &[u8]) -> rusqlite::Result<StoredEvent> {
     let partition = read_u8(value, &mut offset)?;
     let scope = EventScope::from_durable_tag(read_u8(value, &mut offset)?).map_err(table_error)?;
     let status = EventStatus::from_u8(read_u8(value, &mut offset)?).map_err(table_error)?;
+    let has_workspace = read_u8(value, &mut offset)?;
+    let workspace_bytes = read_id(value, &mut offset)?;
+    let workspace_id = match has_workspace {
+        0 => None,
+        1 => Some(workspace_bytes),
+        other => return Err(table_error(format!("unknown workspace flag {other}"))),
+    };
     let canonical_bytes = value[offset..].to_vec();
     Ok(StoredEvent {
         timestamp,
@@ -408,6 +500,7 @@ fn decode_event_row_value(value: &[u8]) -> rusqlite::Result<StoredEvent> {
         partition,
         scope,
         status,
+        workspace_id,
         canonical_bytes,
     })
 }
@@ -433,6 +526,19 @@ fn read_u8(bytes: &[u8], offset: &mut usize) -> rusqlite::Result<u8> {
     Ok(value)
 }
 
+fn read_id(bytes: &[u8], offset: &mut usize) -> rusqlite::Result<EventId> {
+    let end = offset
+        .checked_add(32)
+        .ok_or_else(|| table_error("event row offset overflow".to_string()))?;
+    let value = bytes
+        .get(*offset..end)
+        .ok_or_else(|| table_error("event row is truncated".to_string()))?;
+    let mut out = [0; 32];
+    out.copy_from_slice(value);
+    *offset = end;
+    Ok(out)
+}
+
 fn ready_key(timestamp: u64, event_id: &EventId) -> Vec<u8> {
     let mut key = Vec::with_capacity(8 + event_id.len());
     key.extend_from_slice(&timestamp.to_be_bytes());
@@ -440,21 +546,29 @@ fn ready_key(timestamp: u64, event_id: &EventId) -> Vec<u8> {
     key
 }
 
-fn partition_key(partition: u8, event_id: &EventId) -> Vec<u8> {
-    let mut key = Vec::with_capacity(1 + event_id.len());
-    key.push(partition);
+fn partition_key(workspace_id: Option<EventId>, partition: u8, event_id: &EventId) -> Vec<u8> {
+    let mut key = partition_key_prefix(workspace_id, partition);
     key.extend_from_slice(event_id);
     key
 }
 
-fn split_partition_key(key: &[u8]) -> rusqlite::Result<(u8, EventId)> {
-    if key.len() != 33 {
+fn partition_key_prefix(workspace_id: Option<EventId>, partition: u8) -> Vec<u8> {
+    let mut key = Vec::with_capacity(33);
+    key.extend_from_slice(&workspace_id.unwrap_or([0; 32]));
+    key.push(partition);
+    key
+}
+
+fn split_partition_key(key: &[u8]) -> rusqlite::Result<(Option<EventId>, u8, EventId)> {
+    if key.len() != 65 {
         return Err(table_error(format!(
-            "partition key should be 33 bytes, got {}",
+            "partition key should be 65 bytes, got {}",
             key.len()
         )));
     }
-    Ok((key[0], vec_to_id(key[1..].to_vec())?))
+    let workspace_id = vec_to_id(key[..32].to_vec())?;
+    let workspace_id = (workspace_id != [0; 32]).then_some(workspace_id);
+    Ok((workspace_id, key[32], vec_to_id(key[33..].to_vec())?))
 }
 
 fn edge_key(first: &EventId, second: &EventId) -> Vec<u8> {

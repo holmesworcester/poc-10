@@ -69,13 +69,14 @@ impl Modules {
     pub fn generate_content(
         &self,
         store: &Store,
+        workspace_id: types::EventId,
         num_events: usize,
         event_size: usize,
     ) -> Result<CommandOutput<content::content_event::commands::GenerateReport>, String> {
-        let start = schema::max_timestamp(store)
-            .map_err(|err| format!("load max timestamp: {err}"))?
-            .saturating_add(1);
-        content::content_event::commands::generate(start, num_events, event_size)
+        let start =
+            content::content_event::schema::max_timestamp_for_workspace(store, workspace_id)?
+                .saturating_add(1);
+        content::content_event::commands::generate(workspace_id, start, num_events, event_size)
     }
 
     pub fn stage_event_with_deps(
@@ -192,7 +193,7 @@ impl Modules {
         if let Some(output) = sync::project_record(event)? {
             return Ok(output);
         }
-        if let Some(output) = content::project_record(bytes)? {
+        if let Some(output) = content::project_record(event)? {
             return Ok(output);
         }
         if let Some(output) = test_events::project_record(bytes)? {
@@ -251,6 +252,7 @@ pub fn schemas() -> Vec<Schema> {
     out.extend_from_slice(identity::user::schema::SCHEMAS);
     out.extend_from_slice(identity::user_invite::schema::SCHEMAS);
     out.extend_from_slice(identity::workspace::schema::SCHEMAS);
+    out.extend_from_slice(content::content_event::schema::SCHEMAS);
     out.extend_from_slice(connection::schema::SCHEMAS);
     out.extend_from_slice(sync::schema::SCHEMAS);
     out.extend_from_slice(test_events::event_with_deps::schema::SCHEMAS);

@@ -22,6 +22,7 @@ pub struct EventRecord {
     pub body_len: usize,
     pub canonical_bytes: Vec<u8>,
     pub dependencies: Vec<EventId>,
+    pub workspace_id: Option<EventId>,
     pub scope: EventScope,
     pub receive: Option<ReceiveMetadata>,
 }
@@ -138,6 +139,7 @@ impl EventStatus {
 pub struct EventIndexEntry {
     pub event_id: EventId,
     pub partition: u8,
+    pub workspace_id: Option<EventId>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

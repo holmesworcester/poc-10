@@ -7,13 +7,14 @@
 
 pub mod content_event;
 
-use crate::protocol::event_modules::worker::ProjectionOutput;
+use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-pub fn project_record(bytes: &[u8]) -> Result<Option<ProjectionOutput>, String> {
+pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionOutput>, String> {
+    let bytes = &event.record.canonical_bytes;
     match bytes.first().copied() {
         Some(content_event::codec::TYPE_CONTENT) => {
             content_event::codec::validate(bytes)?;
-            Ok(Some(ProjectionOutput::default()))
+            Ok(Some(content_event::projector::project(event)?))
         }
         _ => Ok(None),
     }

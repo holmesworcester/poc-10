@@ -57,6 +57,7 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         body_len: ENDPOINT_SHARED_WIRE_SIZE - 1,
         canonical_bytes: bytes,
         dependencies: vec![event.workspace_id, event.user_authority_event_id],
+        workspace_id: Some(event.workspace_id),
         scope: EventScope::Shared,
         receive: None,
     })
