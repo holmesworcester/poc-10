@@ -17,6 +17,9 @@ pub mod workspace;
 
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
+#[cfg(test)]
+mod cli_tests;
+
 pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionOutput>, String> {
     let bytes = &event.record.canonical_bytes;
     match bytes.first().copied() {
