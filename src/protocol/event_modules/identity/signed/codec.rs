@@ -77,6 +77,10 @@ struct InnerMetadata {
     dependencies: Vec<EventId>,
 }
 
+pub fn dependencies(event: &SignedEnvelope) -> Result<Vec<EventId>, String> {
+    inner_metadata(event).map(|metadata| metadata.dependencies)
+}
+
 fn inner_metadata(event: &SignedEnvelope) -> Result<InnerMetadata, String> {
     let mut dependencies = Vec::new();
     push_unique(&mut dependencies, event.signer_event_id);
