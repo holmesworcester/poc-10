@@ -5,15 +5,18 @@
 //! whether an incoming request is authorized, but they are not shared content
 //! history.
 
+pub mod admin;
 pub mod endpoint;
 pub mod invite;
 pub mod signed;
 pub mod workspace;
 
-use crate::protocol::event_modules::worker::ProjectionOutput;
+use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-pub fn project_record(bytes: &[u8]) -> Result<Option<ProjectionOutput>, String> {
+pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionOutput>, String> {
+    let bytes = &event.record.canonical_bytes;
     match bytes.first().copied() {
+        Some(admin::codec::TYPE_ADMIN) => Ok(Some(admin::projector::project(event)?)),
         Some(endpoint::codec::TYPE_LOCAL_ENDPOINT) => {
             Ok(Some(endpoint::projector::project(bytes)?))
         }
