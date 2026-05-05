@@ -34,6 +34,7 @@ the rule is still prose/review only.
 | Proposed event ids are deterministic from canonical bytes. | typed + static | [ProposedEvent](src/protocol/event_modules/worker.rs), `proposed_event_carries_deterministic_id_and_record`. |
 | Projectors return row-shaped output only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/protocol/event_modules/worker.rs), `projection_output_contains_rows_and_labels_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
 | Every projector has pure functional behavior tests. | static + partial | `projector_files_have_pure_functional_tests` requires each `projector.rs` to carry test code; review verifies the tests cover row/label output, explicit context handling, and rejection paths without storage or worker side effects. |
+| Projector context only contains events already accepted by their own projector. | typed + tested | The generic worker blocks on `EventStatus::Applied` before loading dependency context; Ready/Blocked/Rejected/failed events are invisible to dependent projection. Covered by `worker_never_surfaces_failed_projection_as_dependency_context` in [worker_contract_test.rs](tests/worker_contract_test.rs). |
 | Core is protocol-agnostic queue/storage support. | static | `core_does_not_import_protocol`, `core_does_not_own_protocol_worker_or_wire_codec`, `core_has_no_protocol_io_vocabulary`, `core_has_no_domain_vocabulary`, `event_modules_worker_has_no_domain_branching_vocabulary`, `core_files_do_not_contain_sync_protocol_logic`. |
 | Core stays small and named. | static | `core_file_set_stays_small_and_named`. |
 | Core store is a schema runner and row substrate, not a protocol fact store. | typed + static | [Schema](src/core/store.rs), [SchemaDefinition](src/core/store.rs), [TableName](src/core/store.rs), [TableRow](src/core/store.rs), `core_store_is_row_only_not_protocol_fact_storage`, `core_store_applies_only_declared_schemas`, `store_table_rows_use_typed_table_names`. |
@@ -49,6 +50,7 @@ the rule is still prose/review only.
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
 | Connection route learning is part of connection projection, not a transport-target event module. | typed + static | [ReceiveMetadata](src/protocol/event_modules/types.rs), [connection/schema.rs](src/protocol/event_modules/connection/schema.rs), `connection_routes_are_projected_from_receive_metadata`. |
 | Connection outbox is temporary id-only send work; transit batches canonical inner events. | typed + static + partial | Connection outbox row helpers are visible only inside `protocol::event_modules`; `connection_outbox_is_id_only_and_transit_batches_inner_events` checks the table shape, and connection module tests cover temp restart/stale-row cleanup. Exact batch sizing remains implementation/test coverage. |
+| Connection durable ingress rejects remote local-only events and delegates shared events to the main pipeline. | partial + tested | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs) decodes inbound durable bytes through the registry, rejects non-shared scopes, and admits shared records through the common worker; connection ingress does not perform content-specific validation. Covered by connection worker tests. |
 | Sync direction is connection-scope context, not canonical bytes. | static | `sync_canonical_bytes_do_not_encode_inbound_or_outbound_direction`. |
 | Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_schema_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only CLI/reporting surfaces; worker reads live in workers and command read-context traits live in commands. | static | `event_module_queries_are_read_only`, `worker_and_command_logic_do_not_call_query_modules`. |
@@ -127,6 +129,11 @@ The following rules should stay mechanically enforced where practical:
   semantics.
 - Protocol worker owns admission/apply plumbing; concrete domain branching
   belongs behind the protocol module registry.
+- Generic projector context is a validity boundary. A dependency can appear in
+  `EventWithContext` only after its own projector accepted it and the worker
+  committed its `Applied` status. Events that are merely stored, Ready, Blocked,
+  Rejected, or failed during projection must not be visible to dependent
+  projectors.
 - Sync modules do not own TCP/frame IO, and core/network code does not contain
   sync protocol logic.
 - Event-module commands do not mutate storage directly. Event-module
@@ -612,6 +619,15 @@ Events declare scope explicitly:
 - `Local`: durable private facts such as endpoint keys and invites.
 - `Transient`: non-durable canonical protocol events. The current Topo
   protocol uses connection-scoped transient events for established connections.
+
+Connection transit receive handling must not admit local-only events from a
+remote endpoint. Durable shared events received over a connection go through the
+main event-module admission pipeline, where codecs, dependency blocking,
+signature checks, projectors, and storage constraints decide validity.
+Connection ingress must not grow event-type-specific content authorization. If
+receive-side workspace filtering is added later, it should be generic
+connection/session policy over event `workspace_id`, not per-content special
+casing and not a substitute for projector validation.
 
 Connection-scoped protocol events are real canonical events. Their connection id
 must be inside their canonical bytes, and their id is the normal

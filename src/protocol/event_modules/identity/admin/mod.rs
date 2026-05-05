@@ -39,6 +39,7 @@ mod tests {
             workspace_id,
             root_public_key: workspace_public_key,
             root_user_event_id: workspace_id,
+            signer_private_key: workspace_private_key,
         })
         .expect("create bootstrap admin");
         let bootstrap_record = bootstrap.events[0].record().clone();

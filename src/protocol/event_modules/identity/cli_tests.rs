@@ -29,6 +29,7 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
         workspace_id,
         root_public_key: workspace_public_key,
         root_user_event_id: workspace_id,
+        signer_private_key: workspace_private_key,
     })
     .expect("create bootstrap admin");
     let bootstrap_admin_id = bootstrap.value.admin_id;
@@ -637,6 +638,7 @@ fn create_workspace_with_bootstrap_admin(
         workspace_id,
         root_public_key: workspace_public_key,
         root_user_event_id: workspace_id,
+        signer_private_key: workspace_private_key,
     })
     .expect("create bootstrap admin");
     let bootstrap_admin_id = bootstrap.value.admin_id;

@@ -502,6 +502,11 @@ fn store_durable_event_in_tx(
 /// Projection is coupled to the Ready -> Applied status change. That makes the
 /// operation idempotent under retry: if another caller already claimed the event,
 /// this helper reports no work instead of running the projector twice.
+///
+/// The status change, context load, projector call, row writes, and dependent
+/// unblocking all happen in the caller's transaction. If projection fails, the
+/// Applied status rolls back, so failed events cannot become dependency context
+/// for later projectors.
 fn project_ready_event_in_tx(
     store: &Store,
     modules: &impl EventRegistry,
@@ -558,8 +563,10 @@ fn project_event_with_context_in_tx(
 /// Fetch the generic context shared by all projectors.
 ///
 /// The dependency list comes from the event itself and is safe to load here
-/// because blocked durable events do not reach projection. Labels are generic,
-/// bounded facts attached to this event id by earlier projections.
+/// because blocked durable events do not reach projection. Admission only marks
+/// an event Ready after every dependency is Applied, so context never includes
+/// merely stored or failed events. Labels are generic, bounded facts attached to
+/// this event id by earlier projections.
 fn load_event_context_in_tx(
     store: &Store,
     modules: &impl EventRegistry,

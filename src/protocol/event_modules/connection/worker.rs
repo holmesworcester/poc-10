@@ -213,22 +213,12 @@ fn ingest_network(
                 connection_id,
                 inner,
             } => ingest_connection_scoped_sync_event(connection_id, inner)?,
-            InboundFrame::DurableEvent(inner) => NetworkFrameReport {
-                events: vec![registry.record_from_bytes(inner)?],
-                received_events: 1,
-                ..NetworkFrameReport::default()
-            },
+            InboundFrame::DurableEvent(inner) => ingest_durable_event(registry, inner)?,
         };
         report.merge(next);
     }
 
-    worker::run(
-        store,
-        registry,
-        AdmitRecords {
-            records: report.events,
-        },
-    )?;
+    admit_records_if_any(store, registry, std::mem::take(&mut report.events))?;
 
     if let Some(connection_id) = report.drain_sync_for {
         let sync_report = drain_projected_sync_work(store, connection_id)?;
@@ -292,6 +282,33 @@ fn ingest_connection_scoped_sync_event(
         events: vec![event],
         drain_sync_for: Some(connection_id),
         drain_outbox_for: Some(connection_id),
+        ..NetworkFrameReport::default()
+    })
+}
+
+fn admit_records_if_any(
+    store: &Store,
+    registry: &impl EventRegistry,
+    records: Vec<EventRecord>,
+) -> Result<(), String> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    worker::run(store, registry, AdmitRecords { records })?;
+    Ok(())
+}
+
+fn ingest_durable_event(
+    registry: &impl EventRegistry,
+    inner: Vec<u8>,
+) -> Result<NetworkFrameReport, String> {
+    let record = registry.record_from_bytes(inner)?;
+    if !record.scope.is_shared() {
+        return Err("connection durable ingress only accepts shared events".to_string());
+    }
+    Ok(NetworkFrameReport {
+        events: vec![record],
+        received_events: 1,
         ..NetworkFrameReport::default()
     })
 }
@@ -631,9 +648,55 @@ fn apply_connection_result(
 
 #[cfg(test)]
 mod tests {
+    use crate::core::network_queues::NetworkSource;
+    use crate::protocol::event_modules::content::content_event;
+    use crate::protocol::event_modules::types::event_id;
     use crate::protocol::Protocol;
 
     use super::*;
+
+    fn keypair() -> endpoint::types::EndpointKeypair {
+        endpoint::commands::create_local_keypair().value
+    }
+
+    fn connected_store(
+        connection_id: types::ConnectionId,
+        remote: endpoint::types::EndpointKeypair,
+    ) -> Store {
+        let store = Protocol::open_memory_store().expect("open store");
+        store
+            .insert_table_rows(vec![schema::connection_row(connection_id, remote.endpoint)])
+            .expect("insert connection row");
+        store
+    }
+
+    fn inbound_from_remote(
+        remote: &endpoint::types::EndpointKeypair,
+        local_endpoint: endpoint::types::EndpointId,
+        connection_id: types::ConnectionId,
+        inners: Vec<Vec<u8>>,
+    ) -> InboundNetworkRow {
+        let bytes = transit::commands::create_connection_batch(
+            remote,
+            local_endpoint,
+            connection_id,
+            inners,
+        )
+        .expect("create transit batch");
+        InboundNetworkRow::new(
+            NetworkSource::new("127.0.0.1:41001".parse().expect("test addr")),
+            bytes,
+        )
+    }
+
+    fn signed_content_bytes(workspace_id: [u8; 32]) -> Vec<u8> {
+        content_event::commands::generate(workspace_id, [8; 32], [9; 32], 1, 1, 8)
+            .expect("generate signed content")
+            .events[0]
+            .record()
+            .canonical_bytes
+            .clone()
+    }
 
     #[test]
     fn drain_outbox_routes_removes_rows_whose_bytes_are_gone() {
@@ -670,6 +733,76 @@ mod tests {
                 .table_row_count(schema::OUTBOX)
                 .expect("count outbox rows"),
             0
+        );
+    }
+
+    #[test]
+    fn rejects_local_only_events_received_inside_connection_transit() {
+        let local = keypair();
+        let remote = keypair();
+        let connection_id = [3; 32];
+        let store = connected_store(connection_id, remote);
+        let local_only = endpoint::commands::create_local_keypair().events[0]
+            .record()
+            .canonical_bytes
+            .clone();
+        let local_only_id = event_id(&local_only);
+        let inbound = inbound_from_remote(&remote, local.endpoint, connection_id, vec![local_only]);
+
+        let err = run(
+            &store,
+            &Protocol::new(),
+            Work::IngestNetwork {
+                local,
+                inbound,
+                remember_origin: false,
+            },
+        )
+        .expect_err("remote local-only event must reject");
+
+        assert!(err.contains("connection durable ingress only accepts shared events"));
+        assert!(
+            !event_schema::has_event(&store, &local_only_id).expect("check event table"),
+            "rejected local-only event must not be stored"
+        );
+    }
+
+    #[test]
+    fn admits_remote_shareable_events_to_main_pipeline() {
+        let local = keypair();
+        let remote = keypair();
+        let connection_id = [3; 32];
+        let store = connected_store(connection_id, remote);
+        let content = signed_content_bytes([7; 32]);
+        let content_id = event_id(&content);
+        let inbound = inbound_from_remote(&remote, local.endpoint, connection_id, vec![content]);
+
+        let output = run(
+            &store,
+            &Protocol::new(),
+            Work::IngestNetwork {
+                local,
+                inbound,
+                remember_origin: false,
+            },
+        )
+        .expect("shareable content is admitted");
+
+        assert_eq!(
+            output,
+            Output::NetworkIngest(NetworkIngestResult {
+                received_events: 1,
+                ..NetworkIngestResult::default()
+            })
+        );
+        assert!(
+            event_schema::has_event(&store, &content_id).expect("check event table"),
+            "shareable remote event should enter durable admission"
+        );
+        let counts = event_schema::status_counts(&store).expect("status counts");
+        assert_eq!(
+            counts.blocked, 1,
+            "main pipeline should own dependency blocking"
         );
     }
 }

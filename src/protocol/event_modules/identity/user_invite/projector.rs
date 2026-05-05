@@ -69,9 +69,9 @@ fn validate_admin_signed_invite(
 
     let signer_endpoint = decode_endpoint_shared_record(signer)
         .map_err(|_| "user_invite signer must be workspace or endpoint_shared".to_string())?;
-    if envelope.signer_public_key != signer_endpoint.endpoint_id {
+    if envelope.signer_public_key != signer_endpoint.signing_public_key {
         return Err(
-            "signed user_invite signer key does not match endpoint_shared endpoint".to_string(),
+            "signed user_invite signer key does not match endpoint_shared signing key".to_string(),
         );
     }
     if signer_endpoint.workspace_id != user_invite.workspace_id {
@@ -130,6 +130,7 @@ mod tests {
     const WORKSPACE_PRIVATE: [u8; 32] = [7; 32];
     const OTHER_PRIVATE: [u8; 32] = [8; 32];
     const ENDPOINT_PRIVATE: [u8; 32] = [9; 32];
+    const TRANSPORT_ENDPOINT_PRIVATE: [u8; 32] = [10; 32];
 
     fn signer_public_key(private_key: &[u8; 32]) -> [u8; 32] {
         signed::commands::sign_payload([0; 32], private_key, vec![99])
@@ -193,7 +194,7 @@ mod tests {
             created_at_ms: 6,
             workspace_id,
             user_authority_event_id: admin_user_id,
-            endpoint_id: signer_public_key(endpoint_private_key),
+            endpoint_id: signer_public_key(&TRANSPORT_ENDPOINT_PRIVATE),
             signing_public_key: signer_public_key(endpoint_private_key),
             device_name: "admin-laptop".to_string(),
         };
@@ -347,6 +348,37 @@ mod tests {
             .expect("decode row");
         assert_eq!(row.workspace_id, workspace_id);
         assert_eq!(row.authority_event_id, admin_id);
+    }
+
+    #[test]
+    fn rejects_admin_signed_user_invite_signed_by_transport_endpoint_key() {
+        let (workspace_id, _) = workspace_record(&WORKSPACE_PRIVATE);
+        let admin_user_id = [50; 32];
+        let (admin_id, admin_record) = admin_record(workspace_id, admin_user_id);
+        let (endpoint_shared_id, endpoint_shared_record) =
+            endpoint_shared_record(workspace_id, admin_user_id, &ENDPOINT_PRIVATE);
+        let invite = super::super::types::UserInviteEvent {
+            created_at_ms: 9,
+            public_key: [3; 32],
+            workspace_id,
+            authority_event_id: admin_id,
+        };
+        let record =
+            signed_user_invite_record(endpoint_shared_id, &TRANSPORT_ENDPOINT_PRIVATE, invite);
+
+        let err = project(&context(
+            &record,
+            vec![
+                dependency(endpoint_shared_id, endpoint_shared_record),
+                dependency(admin_id, admin_record),
+            ],
+        ))
+        .expect_err("transport endpoint key must not authorize user_invite");
+
+        assert_eq!(
+            err,
+            "signed user_invite signer key does not match endpoint_shared signing key"
+        );
     }
 
     #[test]

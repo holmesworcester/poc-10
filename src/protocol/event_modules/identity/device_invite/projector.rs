@@ -109,11 +109,18 @@ fn validate_endpoint_shared_authority(
     signer_envelope: &signed::types::SignedEnvelope,
     device_invite: &super::types::DeviceInviteEvent,
 ) -> Result<(), String> {
+    if device_invite.user_invite_event_id.is_some() {
+        return Err(
+            "endpoint_shared-signed device_invite must not include user_invite dependency"
+                .to_string(),
+        );
+    }
     let signer = endpoint_shared::codec::decode(&signer_envelope.payload)
         .map_err(|_| "device_invite endpoint_shared signer payload is invalid".to_string())?;
-    if envelope.signer_public_key != signer.endpoint_id {
+    if envelope.signer_public_key != signer.signing_public_key {
         return Err(
-            "device_invite signer public key does not match endpoint_shared endpoint".to_string(),
+            "device_invite signer public key does not match endpoint_shared signing key"
+                .to_string(),
         );
     }
     if signer.workspace_id != device_invite.workspace_id {
@@ -233,7 +240,7 @@ mod tests {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id: user_id,
-                endpoint_id: public_key(&endpoint_private_key),
+                endpoint_id: public_key(&OTHER_ENDPOINT_PRIVATE),
                 signing_public_key: public_key(&endpoint_private_key),
                 device_name: "laptop".to_string(),
                 device_invite_id: [5; 32],
@@ -463,7 +470,38 @@ mod tests {
 
         assert_eq!(
             project_signed(&envelope, &event).expect_err("wrong endpoint signer must reject"),
-            "device_invite signer public key does not match endpoint_shared endpoint"
+            "device_invite signer public key does not match endpoint_shared signing key"
+        );
+    }
+
+    #[test]
+    fn rejects_endpoint_shared_signed_device_invite_with_user_invite_dependency() {
+        let (workspace_id, workspace_record) = workspace_record(&WORKSPACE_PRIVATE);
+        let (user_invite_id, user_invite_record) = signed_user_invite_record(workspace_id);
+        let (user_id, _) = signed_user_record(workspace_id, user_invite_id);
+        let (endpoint_shared_id, endpoint_shared_record) =
+            signed_endpoint_shared_record(workspace_id, user_id, ENDPOINT_PRIVATE);
+        let (device_invite_id, record, envelope) = signed_device_invite_record(
+            workspace_id,
+            user_id,
+            Some(user_invite_id),
+            endpoint_shared_id,
+            ENDPOINT_PRIVATE,
+        );
+        let event = context_for(
+            &record,
+            device_invite_id,
+            vec![
+                (workspace_id, workspace_record),
+                (endpoint_shared_id, endpoint_shared_record),
+                (user_invite_id, user_invite_record),
+            ],
+        );
+
+        assert_eq!(
+            project_signed(&envelope, &event)
+                .expect_err("endpoint signer must not use user_invite"),
+            "endpoint_shared-signed device_invite must not include user_invite dependency"
         );
     }
 

@@ -60,9 +60,34 @@ fn project_signed_record(event: &EventWithContext<'_>) -> Result<Option<Projecti
 pub fn signed_record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     let envelope = signed::codec::decode(&bytes)?;
     match envelope.inner_type {
+        admin::codec::TYPE_ADMIN
+        | endpoint_shared::codec::TYPE_ENDPOINT_SHARED
+        | user_invite::codec::TYPE_USER_INVITE
+        | user::codec::TYPE_USER => signed::codec::record_from_bytes(bytes),
         device_invite::codec::TYPE_DEVICE_INVITE => {
             device_invite::codec::record_from_signed_bytes(bytes)
         }
-        _ => signed::codec::record_from_bytes(bytes),
+        _ => Err(format!(
+            "signed envelope inner type {} has no identity record",
+            envelope.inner_type
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_signed_identity_payloads_are_rejected_at_admission() {
+        let signed = signed::commands::sign_payload([1; 32], &[2; 32], vec![250, 1, 2, 3])
+            .expect("sign unknown payload");
+
+        let err = crate::protocol::event_modules::record_from_bytes(
+            signed.events[0].record().canonical_bytes.clone(),
+        )
+        .expect_err("unknown signed payload must not be admitted");
+
+        assert_eq!(err, "signed envelope inner type 250 has no identity record");
     }
 }

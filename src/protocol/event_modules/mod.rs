@@ -342,7 +342,7 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         .first()
         .ok_or_else(|| "empty event bytes".to_string())?;
     match *tag {
-        identity::admin::codec::TYPE_ADMIN => identity::admin::codec::record_from_bytes(bytes),
+        identity::admin::codec::TYPE_ADMIN => Err("admin must be signed".to_string()),
         identity::device_invite::codec::TYPE_DEVICE_INVITE => {
             Err("device_invite must be signed".to_string())
         }

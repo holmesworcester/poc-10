@@ -266,4 +266,27 @@ mod tests {
             0
         );
     }
+
+    #[test]
+    fn duplicate_membership_with_different_join_fact_rejects() {
+        let first = endpoint_shared_rows([4; 32], [5; 32], &event()).expect("first rows");
+        let second = endpoint_shared_rows([44; 32], [55; 32], &event()).expect("second rows");
+        let store = Store::open_memory_with_schemas(SCHEMAS).expect("open store");
+
+        assert_eq!(
+            store
+                .insert_table_rows(vec![first[1].clone()])
+                .expect("insert membership"),
+            1
+        );
+        let err = store
+            .insert_table_rows(vec![second[1].clone()])
+            .expect_err("conflicting duplicate membership must reject");
+
+        assert!(
+            err.to_string()
+                .contains("conflicting row for identity.endpoint_memberships"),
+            "{err}"
+        );
+    }
 }

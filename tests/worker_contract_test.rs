@@ -103,6 +103,70 @@ fn worker_fetches_dependency_records_and_labels_before_projection() {
 }
 
 #[test]
+fn worker_never_surfaces_failed_projection_as_dependency_context() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("invalid-context.db")).unwrap();
+
+    let gate_bytes = b"gate".to_vec();
+    let bad_dep_bytes = b"bad-dep".to_vec();
+    let child_bytes = b"child-after-bad-dep".to_vec();
+    let gate_id = event_id(&gate_bytes);
+    let bad_dep_id = event_id(&bad_dep_bytes);
+    let child_id = event_id(&child_bytes);
+    let registry = ValidDependencyContextRegistry {
+        gate_id,
+        bad_dep_id,
+        child_id,
+        gate_bytes: gate_bytes.clone(),
+        bad_dep_bytes: bad_dep_bytes.clone(),
+        child_bytes: child_bytes.clone(),
+        child_saw_context: Cell::new(false),
+    };
+
+    let bad_dep = registry.record_for(bad_dep_bytes).unwrap();
+    let child = registry.record_for(child_bytes).unwrap();
+    let (_, blocked_report) = worker::run(
+        &store,
+        &registry,
+        CommandOutput::with_events((), vec![child, bad_dep]),
+    )
+    .unwrap();
+    assert_eq!(blocked_report.blocked_events, 2);
+    assert_eq!(blocked_report.applied_events, 0);
+
+    let gate = registry.record_for(gate_bytes).unwrap();
+    let (_, gate_report) = worker::run(
+        &store,
+        &registry,
+        CommandOutput::with_events((), vec![gate]),
+    )
+    .unwrap();
+    assert_eq!(gate_report.applied_events, 1);
+
+    let err = worker::run(&store, &registry, worker::DrainUntilIdle { batch_size: 10 })
+        .expect_err("invalid dependency projection must fail");
+    assert!(
+        err.contains("bad dependency rejected by projector"),
+        "{err}"
+    );
+
+    let statuses = event_schema::status_counts(&store).expect("status counts");
+    assert_eq!(statuses.applied, 1, "only the gate event should apply");
+    assert_eq!(statuses.ready, 1, "failed dependency should remain ready");
+    assert_eq!(
+        statuses.blocked, 1,
+        "child should remain blocked on bad dep"
+    );
+    assert_eq!(statuses.blocked_edges, 1);
+    assert!(
+        !registry.child_saw_context.get(),
+        "child projector must not receive failed dependency in context"
+    );
+    assert!(!event_schema::event_is_applied(&store, &bad_dep_id).unwrap());
+    assert!(!event_schema::event_is_applied(&store, &child_id).unwrap());
+}
+
+#[test]
 fn worker_rejects_blocked_durable_receive_metadata() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Protocol::open_store(tmp.path().join("receive-metadata.db")).unwrap();
@@ -141,6 +205,16 @@ struct ContextRegistry {
     dep_id: EventId,
     child_id: EventId,
     dep_bytes: Vec<u8>,
+    child_bytes: Vec<u8>,
+    child_saw_context: Cell<bool>,
+}
+
+struct ValidDependencyContextRegistry {
+    gate_id: EventId,
+    bad_dep_id: EventId,
+    child_id: EventId,
+    gate_bytes: Vec<u8>,
+    bad_dep_bytes: Vec<u8>,
     child_bytes: Vec<u8>,
     child_saw_context: Cell<bool>,
 }
@@ -203,6 +277,45 @@ impl ContextRegistry {
     }
 }
 
+impl ValidDependencyContextRegistry {
+    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        if bytes == self.gate_bytes {
+            return Ok(EventRecord {
+                timestamp: 1,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: Vec::new(),
+                workspace_id: None,
+                scope: EventScope::Shared,
+                receive: None,
+            });
+        }
+        if bytes == self.bad_dep_bytes {
+            return Ok(EventRecord {
+                timestamp: 2,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: vec![self.gate_id],
+                workspace_id: None,
+                scope: EventScope::Shared,
+                receive: None,
+            });
+        }
+        if bytes == self.child_bytes {
+            return Ok(EventRecord {
+                timestamp: 3,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: vec![self.bad_dep_id],
+                workspace_id: None,
+                scope: EventScope::Shared,
+                receive: None,
+            });
+        }
+        Err("unknown test event".to_string())
+    }
+}
+
 impl EventRegistry for ContextRegistry {
     fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
         self.record_for(bytes)
@@ -231,6 +344,39 @@ impl EventRegistry for ContextRegistry {
             assert!(event.context.has_label(b"dep-applied"));
             self.child_saw_context.set(true);
             return Ok(ProjectionOutput::default());
+        }
+        Err("unknown projection".to_string())
+    }
+}
+
+impl EventRegistry for ValidDependencyContextRegistry {
+    fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        self.record_for(bytes)
+    }
+
+    fn project_record(
+        &self,
+        _store: &Store,
+        event: &EventWithContext<'_>,
+    ) -> Result<ProjectionOutput, String> {
+        if event.context.event_id == self.gate_id {
+            assert!(event.context.dependencies.is_empty());
+            return Ok(ProjectionOutput::default());
+        }
+        if event.context.event_id == self.bad_dep_id {
+            assert_eq!(
+                event
+                    .context
+                    .dependency(&self.gate_id)
+                    .expect("gate dependency")
+                    .canonical_bytes,
+                self.gate_bytes
+            );
+            return Err("bad dependency rejected by projector".to_string());
+        }
+        if event.context.event_id == self.child_id {
+            self.child_saw_context.set(true);
+            panic!("child must remain blocked until bad dependency is applied");
         }
         Err("unknown projection".to_string())
     }

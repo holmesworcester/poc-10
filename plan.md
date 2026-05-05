@@ -127,6 +127,48 @@ workspace or existing admin authority
 The precise admin authority rule should come from latest p7 behavior, translated
 into p8 dependency/context checks.
 
+## Endpoint Transport Keys Versus Signing Keys
+
+Every local endpoint has two independent key identities:
+
+- `endpoint_id`: the X25519 public key used for connection/transit identity and
+  route binding.
+- `signing_public_key`: the Ed25519 public key used to authorize signed shared
+  events once an endpoint is a workspace member.
+
+These keys must not be treated as interchangeable. A signed envelope's
+`signer_public_key` is an Ed25519 signing key. When a projector validates an
+endpoint-authorized identity action, it must compare the envelope signer key to
+the signer endpoint's `signing_public_key`, never to the signer endpoint's
+`endpoint_id`.
+
+The bug fixed on this branch was exactly that confusion:
+
+- `user_invite` admin-endpoint authorization compared
+  `envelope.signer_public_key` to the signer endpoint's transport
+  `endpoint_id`.
+- `device_invite` endpoint-shared authorization made the same comparison.
+- The earlier tests masked the bug by constructing endpoint fixtures where the
+  transport id and signing key were both Ed25519-derived bytes.
+
+The implemented fix is:
+
+- `identity/user_invite/projector.rs` now validates admin-endpoint signed
+  invites against `signer_endpoint.signing_public_key`.
+- `identity/device_invite/projector.rs` now validates endpoint-shared signed
+  device invites against `signer.signing_public_key`.
+- Projector fixtures now keep transport endpoint ids distinct from signing
+  public keys.
+- `user_invite` includes a regression test proving a transport endpoint key
+  cannot authorize a signed user invite.
+- `device_invite` keeps the wrong-key rejection test on the endpoint-shared
+  path, now with distinct transport/signing fixture material.
+
+Test rule: auth projector tests must not use a fixture where `endpoint_id` and
+`signing_public_key` are equal unless the test is explicitly about malformed or
+adversarial identity data. Equal fixture keys hide exactly the class of bug this
+section describes.
+
 ## Module Layout
 
 Each imported event family should live under the identity domain and follow the
@@ -299,6 +341,60 @@ Use p6 only for the bootstrap shape lesson:
 Do not import iroh or p7 peering. p8 connection/bootstrap remains the network
 boundary. Identity modules produce and consume authorization facts; connection
 modules own opaque TCP/transit mechanics.
+
+## Receive, Blocking, Signing, And Bootstrap Connections
+
+The connection worker is not a second projector pipeline. After transit unwrap,
+valid shareable event bytes go into the common event-module worker. That worker
+owns parse, dependency blocking, projection, and status transitions. Connection
+ingress rejects remote local-only events, but it does not decide whether a
+content event, identity event, or auth event is semantically valid.
+
+This is the intended receive path:
+
+```text
+core TCP row
+  -> connection worker unwraps transit
+  -> reject non-shared durable event scopes from remote peers
+  -> registry decodes the shareable canonical event
+  -> common event-module worker stores/blocks/applies/rejects
+  -> projectors receive only already-applied dependency context
+```
+
+Do not add an "event id was requested on this connection" requirement as an
+auth invariant for inbound durable events. It is a useful send-side/work-queue
+dedupe concept, not proof that a received event is valid. A peer can send a
+shareable event unsolicited; if it is missing dependencies, unauthorized, or for
+a workspace that cannot make it valid locally, the common worker blocks or
+rejects it.
+
+Mutual-only workspace sync is enforced on outbound disclosure, not by trusting
+inbound bytes. When a peer asks for a durable event id, the sync worker/command
+path must check that the event's workspace is mutually shared by the local
+endpoint and the remote endpoint for that connection before queueing bytes to
+connection outbox. Inbound durable bytes still validate normally after receipt;
+network sync messages can cause work to be attempted, but cannot make invalid
+durable events valid.
+
+Signing has two layers:
+
+- the signed-envelope codec verifies that the signer possessed the Ed25519
+  private key for the canonical payload bytes;
+- the event projector verifies semantic authority from dependency context,
+  labels, and projected rows.
+
+The codec cannot decide that a signer is an admin, workspace member, user, or
+authorized endpoint. That authority belongs in the pure projector for the signed
+event type. Conversely, projectors should not redo primitive signature parsing;
+they should consume signed payloads that have already passed codec verification.
+
+Bootstrap invite connections do not need a separate validation pipeline. A
+bootstrap request proves the remote side knows the invite/bootstrap secret
+needed to establish the connection. Any invite-derived workspace scope should be
+represented as connection/session state when that authorization is wired. The
+inner durable events still enter the same common pipeline as ordinary connection
+traffic, and they become useful only when their dependencies and signatures
+project validly.
 
 ## CLI Locality
 
@@ -1061,8 +1157,9 @@ event-module surface that can advance queued work. They do not return ad hoc
 effects; they write queue rows.
 
 Protocol inbound processing receives `InboundNetworkRow`s from core TCP. The
-connection worker unwraps or rejects the opaque bytes and sends surviving
-canonical bytes through the event-modules worker.
+connection worker unwraps or rejects the opaque bytes, rejects remote local-only
+durable events, and sends surviving shared canonical bytes through the
+event-modules worker.
 
 Boundary tables that need claim/retry ownership are ordinary module-owned tables with status metadata:
 
@@ -1190,32 +1287,57 @@ wrap. This does not imply per-connection core network queues. Per-connection
 dedupe and fairness remain protocol concerns, while physical backpressure
 remains target-scoped in core.
 
-**connection** is an event module. A connection event references two endpoints and carries `shared_workspaces`. Each workspace entry's authority is established by the connection event's own dependencies and signature: deps point at endpoint/bootstrap authorization plus workspace capability events (workspace-membership grant, invite, etc.) that authorize the signer to bind that workspace to that connection, and the ready-event loop's standard signature/dep validation is what makes the entry trustworthy. Rotation, revocation, and expiry are further connection-related events with their own deps/sigs. The same module owns `connection_secrets`: globally-unique `connection_secret_id` → `(key, direction, connection_id, ttl)`, with separate inbound and outbound secrets per connection, each known only to the two endpoints.
+**connection** is an event module. A connection event references two endpoints
+and establishes the transit context between them. Workspace authorization is not
+proved by the transit wrapper itself; it is derived from identity/auth events
+such as workspace, invite, user, admin, and endpoint membership facts that have
+already projected through the common worker. Rotation, revocation, and expiry
+are further connection-related events with their own dependencies and
+signatures. The same module owns `connection_secrets`: globally-unique
+`connection_secret_id` -> `(key, direction, connection_id, ttl)`, with separate
+inbound and outbound secrets per connection, each known only to the two
+endpoints.
 
 The connection module also owns the transit envelope as plain functions, not as a protocol runtime concern (mirroring poc-6's `crypto.wrap` / `crypto.unwrap_transit`):
 
 - `connection.wrap_bootstrap(remote_endpoint_id, inner_events) -> TransitBlob`: encrypts to the endpoint public key. Used for connection establishment and connection-secret repair.
-- `connection.wrap(connection_id, inner_events) -> TransitBlob`: looks up the outbound secret for the connection, asserts every inner event's `workspace_id ∈ shared_workspaces(connection_id)`, pads to a size bucket, encrypts. Used for ordinary sync/control/event traffic.
-- `connection.unwrap(bytes) -> Vec<CanonicalEventBytes>`: a parse-stage transform run by the inbound-byte loop on every inbound frame. Unwraps either endpoint-pubkey bootstrap frames or connection-secret frames. Connection-secret frames recover `connection_id`, drop any inner event whose `workspace_id ∉ shared_workspaces(connection_id)`, and pass the surviving canonical event bytes into canonical-event processing.
+- `connection.wrap(connection_id, inner_events) -> TransitBlob`: looks up the
+  outbound secret for the connection, pads to a size bucket, and encrypts.
+  Send-side workers must only enqueue durable event bytes that pass their own
+  authorization checks, such as mutual workspace membership for sync `NeedId`
+  responses. The wrapper is allowed to assert generic shared-scope constraints,
+  but it must not become a content-specific authorization engine.
+- `connection.unwrap(bytes) -> Vec<CanonicalEventBytes>`: a parse-stage
+  transform run by the inbound-byte loop on every inbound frame. Unwraps either
+  endpoint-pubkey bootstrap frames or connection-secret frames. Connection-secret
+  frames recover `connection_id`; the connection worker rejects local-only
+  durable events from remote peers and passes shared canonical event bytes into
+  canonical-event processing.
 
 Wrapped bytes are never canonical events. They have no event id, no dependencies, and no labels — they are an opaque transit form. Only inner canonical event bytes are ids in the event store.
 
-*Invariants: `shared_workspaces` is authoritative because the connection event's deps + signature have already been validated by the standard ready-event loop — the connection does not authorize itself, its dependencies do; a valid unwrap under one of our inbound secrets is by construction proof that the sender is the remote endpoint of that connection; every wrap is bound to exactly one connection; wrap and unwrap both enforce workspace ↔ connection alignment.*
+*Invariants: a valid unwrap under one of our inbound secrets proves the bytes
+came through the remote endpoint of that connection, not that every inner
+durable fact is semantically valid; every wrap is bound to exactly one
+connection; outbound workers enforce disclosure policy before queueing bytes;
+inbound durable events still validate through codecs, dependency blocking,
+signatures, projectors, and storage constraints.*
 
 **Outbox.** No projector calls `transport.send` or emits a `SendEvent`.
 Projectors write rows to module-owned queues. A sync worker that wants to send a
-durable event — e.g. after reading a queued need from connection C for event E —
-calls a command that creates deterministic `SendEvent(connection_id=C,
-inner_event_id=E)` and admits it through the control loop. The `SendEvent`
-projector only writes `outbox(connection_id, send_event_id)`.
-`connection/worker.rs` claims outbox rows, checks that E's `workspace_id` is in
-`shared_workspaces(C)`, resolves C to a current transport target, calls the
-transit wrap command, and writes a core TCP send queue row. The
-TCP IO worker packs those bytes into TCP frames and writes sockets. A
-slow route backs off its own target; other transport targets continue.
-*Invariant: every ordinary byte on the wire is the product of two independent
-workspace-membership checks (SendEvent projection + `connection.wrap`) plus a
-third symmetric check on the receiving side (`connection.unwrap`).*
+durable event, for example after reading a queued need from connection C for
+event E, must first check that E can be disclosed to C's remote endpoint through
+a mutual workspace. Only then may it write the id-only
+`outbox(connection_id=C, event_id=E)` row. `connection/worker.rs` claims outbox
+rows, resolves C to a current transport target, calls the transit wrap command,
+and writes a core TCP send queue row. The TCP IO worker packs those bytes into
+TCP frames and writes sockets. A slow route backs off its own target; other
+transport targets continue.
+*Invariant: ordinary durable bytes on the wire have passed send-side disclosure
+policy before entering connection outbox. The receiving side does not trust that
+fact; after unwrap it admits only shared-scope durable bytes to the common
+pipeline, which performs dependency, signature, projector, and storage
+validation.*
 
 For the current POC, connection request/ack projection also owns route learning.
 The connection worker attaches receive metadata to accepted inbound handshake

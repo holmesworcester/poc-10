@@ -2,13 +2,12 @@
 //!
 //! The direct admin commands create canonical admin events with explicit
 //! workspace, authority, and user binding inputs. Only the workspace-root
-//! bootstrap grant is allowed unsigned; ongoing grants must be signed by the
-//! authority admin key.
+//! bootstrap grant uses workspace authority; all admin grants are signed.
 
 use crate::core::crypto::Ed25519PrivateKey;
 use crate::protocol::event_modules::identity::signed;
 use crate::protocol::event_modules::types::{event_id, EventId};
-use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
+use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::super::workspace::types::WorkspaceId;
 use super::codec;
@@ -20,6 +19,7 @@ pub struct CreateBootstrapAdmin {
     pub workspace_id: WorkspaceId,
     pub root_public_key: AdminPublicKey,
     pub root_user_event_id: UserId,
+    pub signer_private_key: Ed25519PrivateKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,13 +52,24 @@ pub struct SignedAdminCommandOutput {
 pub fn create_bootstrap(
     input: CreateBootstrapAdmin,
 ) -> Result<CommandOutput<AdminCommandOutput>, String> {
-    propose(AdminEvent {
+    let event = AdminEvent {
         created_at_ms: input.created_at_ms,
         workspace_id: input.workspace_id,
         public_key: input.root_public_key,
         authority_event_id: input.workspace_id,
         user_event_id: input.root_user_event_id,
-    })
+    };
+    let signed = signed::commands::sign_payload(
+        input.workspace_id,
+        &input.signer_private_key,
+        codec::encode(&event),
+    )?;
+    Ok(CommandOutput::with_proposed_events(
+        AdminCommandOutput {
+            admin_id: signed.events[0].event_id(),
+        },
+        signed.events,
+    ))
 }
 
 pub fn grant(input: GrantAdmin) -> Result<CommandOutput<AdminCommandOutput>, String> {
@@ -92,18 +103,6 @@ pub fn sign_grant(
     ))
 }
 
-fn propose(event: AdminEvent) -> Result<CommandOutput<AdminCommandOutput>, String> {
-    let bytes = codec::encode(&event);
-    let record = codec::record_from_bytes(bytes)?;
-    let proposed = ProposedEvent::new(record);
-    Ok(CommandOutput::with_proposed_events(
-        AdminCommandOutput {
-            admin_id: proposed.event_id(),
-        },
-        vec![proposed],
-    ))
-}
-
 fn admin_event_from_grant(input: GrantAdmin) -> AdminEvent {
     AdminEvent {
         created_at_ms: input.created_at_ms,
@@ -123,12 +122,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bootstrap_command_proposes_workspace_authorized_admin_event() {
+    fn bootstrap_command_proposes_workspace_signed_admin_event() {
+        let signer_private_key = [7; crypto::ED25519_PRIVATE_KEY_BYTES];
+        let signer_public_key = crypto::ed25519_public_key(&signer_private_key);
         let output = create_bootstrap(CreateBootstrapAdmin {
             created_at_ms: 70,
             workspace_id: [1; 32],
-            root_public_key: [2; 32],
+            root_public_key: signer_public_key,
             root_user_event_id: [1; 32],
+            signer_private_key,
         })
         .expect("create bootstrap admin");
 
@@ -142,10 +144,15 @@ mod tests {
         assert_eq!(proposed.record().dependencies, vec![[1; 32]]);
         assert_eq!(proposed.record().scope, EventScope::Shared);
 
-        let event = codec::decode(&proposed.record().canonical_bytes).expect("decode admin");
+        let envelope = signed::codec::decode(&proposed.record().canonical_bytes)
+            .expect("decode signed bootstrap admin");
+        assert_eq!(envelope.signer_event_id, [1; 32]);
+        assert_eq!(envelope.signer_public_key, signer_public_key);
+        assert_eq!(envelope.inner_type, codec::TYPE_ADMIN);
+        let event = codec::decode(&envelope.payload).expect("decode admin");
         assert_eq!(event.created_at_ms, 70);
         assert_eq!(event.workspace_id, [1; 32]);
-        assert_eq!(event.public_key, [2; 32]);
+        assert_eq!(event.public_key, signer_public_key);
         assert_eq!(event.authority_event_id, [1; 32]);
         assert_eq!(event.user_event_id, [1; 32]);
     }
