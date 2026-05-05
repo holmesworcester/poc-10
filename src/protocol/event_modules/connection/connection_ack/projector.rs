@@ -51,3 +51,110 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
     Ok(ProjectionOutput::rows(rows))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use crate::protocol::event_modules::connection::connection_ack::types::AckEvent;
+    use crate::protocol::event_modules::connection::{connection_request, schema, types};
+    use crate::protocol::event_modules::types::ReceiveMetadata;
+    use crate::protocol::event_modules::worker::{DependencyContext, EventContext};
+
+    use super::codec;
+    use super::*;
+
+    type Record = crate::protocol::event_modules::types::EventRecord;
+
+    fn request_record() -> Record {
+        connection_request::codec::record_from_bytes(connection_request::codec::encode(
+            &connection_request::types::RequestEvent {
+                from_endpoint: [1; 32],
+                nonce: [2; 32],
+                bootstrap_hash: [3; 32],
+            },
+        ))
+        .expect("request record")
+    }
+
+    fn ack_record(request_id: [u8; 32]) -> Record {
+        let ack = AckEvent {
+            from_endpoint: [4; 32],
+            to_endpoint: [1; 32],
+            request_id,
+            connection_id: types::connection_id(&request_id, &[4; 32]),
+        };
+        codec::record_from_bytes(codec::encode(&ack)).expect("ack record")
+    }
+
+    fn context_for<'a>(
+        record: &'a Record,
+        request_id: [u8; 32],
+        request_record: Record,
+    ) -> EventWithContext<'a> {
+        EventWithContext {
+            record,
+            context: EventContext {
+                event_id: types::event_id(&record.canonical_bytes),
+                dependencies: vec![DependencyContext {
+                    event_id: request_id,
+                    record: request_record,
+                }],
+                labels: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn projects_ack_bytes_with_matching_request_dependency() {
+        let request = request_record();
+        let request_id = types::event_id(&request.canonical_bytes);
+        let ack = ack_record(request_id);
+
+        let output = project(&context_for(&ack, request_id, request)).expect("project ack");
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.rows[0].key, types::event_id(&ack.canonical_bytes));
+        assert_eq!(output.rows[0].value, ack.canonical_bytes);
+    }
+
+    #[test]
+    fn projects_received_ack_connection_and_route_rows() {
+        let request = request_record();
+        let request_id = types::event_id(&request.canonical_bytes);
+        let mut ack = ack_record(request_id);
+        let origin = "127.0.0.1:9001".parse::<SocketAddr>().expect("addr");
+        ack.receive = Some(ReceiveMetadata {
+            origin,
+            local_endpoint: [1; 32],
+            remember_route: true,
+        });
+
+        let output = project(&context_for(&ack, request_id, request)).expect("project ack");
+
+        assert_eq!(output.rows.len(), 3);
+        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.rows[1].table, schema::CONNECTIONS);
+        assert_eq!(output.rows[2].table, schema::TRANSPORT_TARGETS);
+        assert_eq!(output.rows[1].value, [4; 32]);
+        assert_eq!(output.rows[2].value, origin.to_string().into_bytes());
+    }
+
+    #[test]
+    fn rejects_ack_for_another_endpoint_request() {
+        let request = connection_request::codec::record_from_bytes(
+            connection_request::codec::encode(&connection_request::types::RequestEvent {
+                from_endpoint: [8; 32],
+                nonce: [2; 32],
+                bootstrap_hash: [3; 32],
+            }),
+        )
+        .expect("request record");
+        let request_id = types::event_id(&request.canonical_bytes);
+        let ack = ack_record(request_id);
+
+        let err = project(&context_for(&ack, request_id, request)).expect_err("reject");
+        assert!(err.contains("another endpoint"));
+    }
+}

@@ -1229,6 +1229,29 @@ fn projector_files_are_not_empty_placeholders() {
 }
 
 #[test]
+fn projector_files_have_pure_functional_tests() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut violations = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "projector.rs"))
+    {
+        let text = source_text(&path);
+        if !text.contains("#[cfg(test)]")
+            || !(text.contains("mod tests") || text.contains("mod projector_tests"))
+        {
+            violations.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "every projector.rs should carry pure functional behavior tests for row/label output and rejection paths:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn row_table_declarations_use_store_schema_helper() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");

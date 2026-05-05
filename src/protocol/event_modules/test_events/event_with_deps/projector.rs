@@ -22,3 +22,48 @@ pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
     codec::decode(bytes)?;
     Ok(ProjectionOutput::default())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{EventWithDeps, StagedEventWithDeps, PAYLOAD_BYTES};
+    use super::*;
+
+    fn inner_bytes_fixture() -> Vec<u8> {
+        codec::encode(&EventWithDeps {
+            timestamp: 42,
+            dependencies: vec![[1; 32], [2; 32]],
+            payload: [7; PAYLOAD_BYTES],
+        })
+    }
+
+    #[test]
+    fn shared_event_projects_no_rows() {
+        let output = project(&inner_bytes_fixture()).expect("project shared");
+
+        assert!(output.rows.is_empty());
+        assert!(output.labels.is_empty());
+    }
+
+    #[test]
+    fn staged_event_projects_inner_bytes_by_index() {
+        let inner_bytes = inner_bytes_fixture();
+        let staged = codec::encode_staged(&StagedEventWithDeps {
+            index: 17,
+            inner_bytes: inner_bytes.clone(),
+        });
+
+        let output = project(&staged).expect("project staged");
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0].table, schema::STAGED_EVENTS_WITH_DEPS);
+        assert_eq!(output.rows[0].key, 17u64.to_be_bytes());
+        assert_eq!(output.rows[0].value, inner_bytes);
+    }
+
+    #[test]
+    fn rejects_malformed_bytes() {
+        let err = project(&[codec::TYPE_EVENT_WITH_DEPS]).expect_err("reject");
+
+        assert!(err.contains("length mismatch"));
+    }
+}
