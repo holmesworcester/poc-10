@@ -371,6 +371,17 @@ shareable event unsolicited; if it is missing dependencies, unauthorized, or for
 a workspace that cannot make it valid locally, the common worker blocks or
 rejects it.
 
+Solicitation is not the security boundary because sync does not always know
+what it is asking for. `have_id` / `need_id` exchange opaque ids, and dependency
+repair can request an id before the requester has decoded enough of the graph to
+know its workspace, event type, or authority chain. A request proves only that a
+local worker wanted to try resolving an id. It does not prove the remote endpoint
+is allowed to supply that event, and it must not make the received bytes valid.
+The durable ingress boundary is instead: the bytes came from a specific
+connection endpoint, the event is scoped to a workspace that endpoint is allowed
+to participate in, and the event then passes the ordinary codec, dependency,
+signature, projector, and storage checks for that workspace.
+
 Mutual-only workspace sync is enforced on outbound disclosure, not by trusting
 inbound bytes. When a peer asks for a durable event id, the sync worker/command
 path must check that the event's workspace is mutually shared by the local
