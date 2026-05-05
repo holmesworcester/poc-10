@@ -308,6 +308,33 @@ fn scoped_cli_files_do_not_own_transport_or_cross_cli_operations() {
 }
 
 #[test]
+fn sync_cli_routes_network_sync_through_connection_worker() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = source_text(&root.join("src/protocol/event_modules/sync/cli.rs"));
+    let forbidden = [
+        "DrainUntilIdle",
+        "DrainReadyBatch",
+        "sync_worker::run",
+        "Work::ExchangeOutboundRoutes",
+    ];
+    let mut violations = forbidden
+        .into_iter()
+        .filter(|needle| text.contains(needle))
+        .collect::<Vec<_>>();
+    violations.extend(
+        text.lines()
+            .filter(|line| line.contains("worker::run") && !line.contains("connection_worker::run"))
+            .map(str::trim),
+    );
+
+    assert!(
+        violations.is_empty() && text.contains("Work::StartSyncRoutes"),
+        "sync CLI should parse/format only; route sync orchestration belongs behind connection worker StartSyncRoutes:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn domain_root_cli_requires_cross_child_scope() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
     let mut offenders = Vec::new();
