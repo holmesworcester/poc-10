@@ -59,18 +59,34 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
         },
     );
 
-    let alice_endpoint = crypto::ed25519_public_key(&[31; 32]);
-    let bob_endpoint = crypto::ed25519_public_key(&[32; 32]);
     let alice_join = share_endpoint(
         &creator,
         &protocol,
         EndpointJoinInput {
             workspace_id,
             user_id: alice.user_id,
-            endpoint_id: alice_endpoint,
+            user_invite_id: Some(alice.user_invite_id),
+            signer_event_id: alice.user_id,
+            signer_private_key: alice.user_private_key,
+            endpoint_private_key: [31; 32],
             device_name: "alice-laptop",
             timestamp: 30,
             device_invite_private_key: [40; 32],
+        },
+    );
+    let alice_second_join = share_endpoint(
+        &creator,
+        &protocol,
+        EndpointJoinInput {
+            workspace_id,
+            user_id: alice.user_id,
+            user_invite_id: None,
+            signer_event_id: alice_join.endpoint_shared_id,
+            signer_private_key: alice_join.endpoint_private_key,
+            endpoint_private_key: [33; 32],
+            device_name: "alice-tablet",
+            timestamp: 35,
+            device_invite_private_key: [42; 32],
         },
     );
     let bob_join = share_endpoint(
@@ -79,7 +95,10 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
         EndpointJoinInput {
             workspace_id,
             user_id: bob.user_id,
-            endpoint_id: bob_endpoint,
+            user_invite_id: Some(bob.user_invite_id),
+            signer_event_id: bob.user_id,
+            signer_private_key: bob.user_private_key,
+            endpoint_private_key: [32; 32],
             device_name: "bob-phone",
             timestamp: 40,
             device_invite_private_key: [41; 32],
@@ -92,6 +111,7 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
         alice.records,
         bob.records,
         alice_join.records,
+        alice_second_join.records,
         bob_join.records,
     ]);
     let inserted = received.len();
@@ -129,15 +149,15 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
     assert_eq!(row_count(&receiver, user::schema::USERS), 2);
     assert_eq!(
         row_count(&receiver, device_invite::schema::DEVICE_INVITES),
-        2
+        3
     );
     assert_eq!(
         row_count(&receiver, endpoint_shared::schema::ENDPOINT_SHARED),
-        2
+        3
     );
     assert_eq!(
         row_count(&receiver, endpoint_shared::schema::ENDPOINT_MEMBERSHIPS),
-        2
+        3
     );
 
     assert_admin(
@@ -148,8 +168,19 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
     );
     assert_user(&receiver, workspace_id, alice.user_id, "alice");
     assert_user(&receiver, workspace_id, bob.user_id, "bob");
-    assert_membership(&receiver, workspace_id, alice_endpoint, alice.user_id);
-    assert_membership(&receiver, workspace_id, bob_endpoint, bob.user_id);
+    assert_membership(
+        &receiver,
+        workspace_id,
+        alice_join.endpoint_id,
+        alice.user_id,
+    );
+    assert_membership(
+        &receiver,
+        workspace_id,
+        alice_second_join.endpoint_id,
+        alice.user_id,
+    );
+    assert_membership(&receiver, workspace_id, bob_join.endpoint_id, bob.user_id);
 
     let duplicate = endpoint_shared::commands::share_endpoint(
         &receiver,
@@ -157,7 +188,7 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
             created_at_ms: 50,
             workspace_id,
             user_authority_event_id: alice.user_id,
-            endpoint_id: alice_endpoint,
+            endpoint_id: alice_join.endpoint_id,
             device_name: "alice-second-join".to_string(),
             device_invite_id: alice_join.device_invite_id,
             device_invite_private_key: alice_join.device_invite_private_key,
@@ -167,8 +198,153 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
     assert_eq!(duplicate, "endpoint is already joined to workspace");
 }
 
+#[test]
+fn same_user_client_can_link_multiple_workspaces_but_authority_does_not_cross() {
+    let protocol = Protocol::new();
+    let store = Protocol::open_memory_store().expect("open store");
+    let workspace_a_private_key = [71; 32];
+    let workspace_b_private_key = [72; 32];
+    let shared_user_private_key = [73; 32];
+    let shared_endpoint_private_key = [74; 32];
+
+    let workspace_a = workspace::commands::create(workspace::commands::CreateWorkspace {
+        created_at_ms: 1,
+        public_key: crypto::ed25519_public_key(&workspace_a_private_key),
+        name: "Workspace A".to_string(),
+    })
+    .expect("create workspace A");
+    let workspace_a_id = workspace_a.value.workspace_id;
+    admit(&store, &protocol, workspace_a);
+
+    let workspace_b = workspace::commands::create(workspace::commands::CreateWorkspace {
+        created_at_ms: 2,
+        public_key: crypto::ed25519_public_key(&workspace_b_private_key),
+        name: "Workspace B".to_string(),
+    })
+    .expect("create workspace B");
+    let workspace_b_id = workspace_b.value.workspace_id;
+    admit(&store, &protocol, workspace_b);
+
+    let alice_a = create_user(
+        &store,
+        &protocol,
+        UserInput {
+            workspace_id: workspace_a_id,
+            workspace_private_key: workspace_a_private_key,
+            timestamp: 10,
+            username: "alice",
+            invite_private_key: [81; 32],
+            user_private_key: shared_user_private_key,
+        },
+    );
+    let alice_b = create_user(
+        &store,
+        &protocol,
+        UserInput {
+            workspace_id: workspace_b_id,
+            workspace_private_key: workspace_b_private_key,
+            timestamp: 20,
+            username: "alice",
+            invite_private_key: [82; 32],
+            user_private_key: shared_user_private_key,
+        },
+    );
+
+    let join_a = share_endpoint(
+        &store,
+        &protocol,
+        EndpointJoinInput {
+            workspace_id: workspace_a_id,
+            user_id: alice_a.user_id,
+            user_invite_id: Some(alice_a.user_invite_id),
+            signer_event_id: alice_a.user_id,
+            signer_private_key: alice_a.user_private_key,
+            endpoint_private_key: shared_endpoint_private_key,
+            device_name: "alice-laptop-a",
+            timestamp: 30,
+            device_invite_private_key: [83; 32],
+        },
+    );
+    let join_b = share_endpoint(
+        &store,
+        &protocol,
+        EndpointJoinInput {
+            workspace_id: workspace_b_id,
+            user_id: alice_b.user_id,
+            user_invite_id: Some(alice_b.user_invite_id),
+            signer_event_id: alice_b.user_id,
+            signer_private_key: alice_b.user_private_key,
+            endpoint_private_key: shared_endpoint_private_key,
+            device_name: "alice-laptop-b",
+            timestamp: 40,
+            device_invite_private_key: [84; 32],
+        },
+    );
+
+    assert_eq!(join_a.endpoint_id, join_b.endpoint_id);
+    assert_membership(&store, workspace_a_id, join_a.endpoint_id, alice_a.user_id);
+    assert_membership(&store, workspace_b_id, join_b.endpoint_id, alice_b.user_id);
+
+    let cross_workspace_invite = device_invite::commands::create_with_private_key(
+        device_invite::commands::CreateDeviceInvite {
+            created_at_ms: 50,
+            workspace_id: workspace_b_id,
+            user_authority_event_id: alice_b.user_id,
+            user_invite_event_id: None,
+            signer_event_id: join_a.endpoint_shared_id,
+            signer_private_key: join_a.endpoint_private_key,
+        },
+        [85; 32],
+    )
+    .expect("create cross-workspace invite");
+    let err = worker::run(&store, &protocol, cross_workspace_invite)
+        .expect_err("workspace A endpoint_shared must not authorize workspace B invite");
+    assert!(
+        err.contains("endpoint_shared-signed device_invite workspace does not match signer"),
+        "{err}"
+    );
+
+    let cross_workspace_share = endpoint_shared::commands::share_endpoint(
+        &store,
+        endpoint_shared::commands::ShareEndpoint {
+            created_at_ms: 60,
+            workspace_id: workspace_b_id,
+            user_authority_event_id: alice_b.user_id,
+            endpoint_id: crypto::ed25519_public_key(&[86; 32]),
+            device_name: "cross-workspace".to_string(),
+            device_invite_id: join_a.device_invite_id,
+            device_invite_private_key: join_a.device_invite_private_key,
+        },
+    )
+    .expect("create cross-workspace endpoint_shared");
+    let err = worker::run(&store, &protocol, cross_workspace_share)
+        .expect_err("workspace A device_invite must not link workspace B endpoint");
+    assert!(
+        err.contains("endpoint_shared workspace does not match device_invite"),
+        "{err}"
+    );
+}
+
+#[test]
+fn unsigned_device_invite_bytes_are_not_admissible_protocol_events() {
+    let raw = device_invite::types::DeviceInviteEvent {
+        created_at_ms: 1,
+        workspace_id: [1; 32],
+        user_authority_event_id: [2; 32],
+        user_invite_event_id: Some([3; 32]),
+        public_key: crypto::ed25519_public_key(&[4; 32]),
+    };
+
+    let err = crate::protocol::event_modules::record_from_bytes(device_invite::codec::encode(&raw))
+        .expect_err("unsigned device_invite must not decode as a protocol event");
+
+    assert_eq!(err, "device_invite must be signed");
+}
+
 struct CreatedUser {
     user_id: EventId,
+    user_invite_id: EventId,
+    user_private_key: [u8; 32],
     records: Vec<EventRecord>,
 }
 
@@ -182,15 +358,21 @@ struct UserInput {
 }
 
 struct EndpointJoin {
+    endpoint_shared_id: EventId,
+    endpoint_id: [u8; 32],
     device_invite_id: EventId,
     device_invite_private_key: [u8; 32],
+    endpoint_private_key: [u8; 32],
     records: Vec<EventRecord>,
 }
 
 struct EndpointJoinInput {
     workspace_id: EventId,
     user_id: EventId,
-    endpoint_id: [u8; 32],
+    user_invite_id: Option<EventId>,
+    signer_event_id: EventId,
+    signer_private_key: [u8; 32],
+    endpoint_private_key: [u8; 32],
     device_name: &'static str,
     timestamp: u64,
     device_invite_private_key: [u8; 32],
@@ -224,7 +406,12 @@ fn create_user(
     let user_id = user.value.user_id;
     records.extend(admit(store, protocol, user));
 
-    CreatedUser { user_id, records }
+    CreatedUser {
+        user_id,
+        user_invite_id,
+        user_private_key: input.user_private_key,
+        records,
+    }
 }
 
 fn share_endpoint(
@@ -237,6 +424,9 @@ fn share_endpoint(
             created_at_ms: input.timestamp,
             workspace_id: input.workspace_id,
             user_authority_event_id: input.user_id,
+            user_invite_event_id: input.user_invite_id,
+            signer_event_id: input.signer_event_id,
+            signer_private_key: input.signer_private_key,
         },
         input.device_invite_private_key,
     )
@@ -250,18 +440,22 @@ fn share_endpoint(
             created_at_ms: input.timestamp + 1,
             workspace_id: input.workspace_id,
             user_authority_event_id: input.user_id,
-            endpoint_id: input.endpoint_id,
+            endpoint_id: crypto::ed25519_public_key(&input.endpoint_private_key),
             device_name: input.device_name.to_string(),
             device_invite_id,
             device_invite_private_key: input.device_invite_private_key,
         },
     )
     .expect("share endpoint");
+    let endpoint_shared_id = shared.value.endpoint_shared_id;
     records.extend(admit(store, protocol, shared));
 
     EndpointJoin {
+        endpoint_shared_id,
+        endpoint_id: crypto::ed25519_public_key(&input.endpoint_private_key),
         device_invite_id,
         device_invite_private_key: input.device_invite_private_key,
+        endpoint_private_key: input.endpoint_private_key,
         records,
     }
 }

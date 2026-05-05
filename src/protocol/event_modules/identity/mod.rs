@@ -15,6 +15,7 @@ pub mod user;
 pub mod user_invite;
 pub mod workspace;
 
+use crate::protocol::event_modules::types::EventRecord;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
 #[cfg(test)]
@@ -40,6 +41,9 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
 fn project_signed_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionOutput>, String> {
     let envelope = signed::codec::decode(&event.record.canonical_bytes)?;
     match envelope.inner_type {
+        device_invite::codec::TYPE_DEVICE_INVITE => Ok(Some(
+            device_invite::projector::project_signed(&envelope, event)?,
+        )),
         endpoint_shared::codec::TYPE_ENDPOINT_SHARED => Ok(Some(
             endpoint_shared::projector::project_signed(&envelope, event)?,
         )),
@@ -49,5 +53,15 @@ fn project_signed_record(event: &EventWithContext<'_>) -> Result<Option<Projecti
             "signed envelope inner type {} has no identity projector",
             envelope.inner_type
         )),
+    }
+}
+
+pub fn signed_record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
+    let envelope = signed::codec::decode(&bytes)?;
+    match envelope.inner_type {
+        device_invite::codec::TYPE_DEVICE_INVITE => {
+            device_invite::codec::record_from_signed_bytes(bytes)
+        }
+        _ => signed::codec::record_from_bytes(bytes),
     }
 }
