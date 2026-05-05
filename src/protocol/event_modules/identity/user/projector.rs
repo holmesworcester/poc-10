@@ -132,6 +132,7 @@ mod tests {
                     .map(|(event_id, record)| DependencyContext { event_id, record })
                     .collect(),
                 labels: Vec::new(),
+                receive: None,
             },
         }
     }

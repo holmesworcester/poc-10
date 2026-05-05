@@ -36,7 +36,8 @@ use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::sync;
 use crate::protocol::event_modules::types::{EventRecord, ReceiveMetadata};
 use crate::protocol::event_modules::worker::{
-    self, AdmitRecords, CommandOutput, EventRegistry, ProposedEvent,
+    self, AdmitReceivedRecords, AdmitRecords, CommandOutput, EventRegistry, ProposedEvent,
+    ReceivedRecord,
 };
 
 use super::{connection_ack, connection_request, schema, transit, types};
@@ -51,6 +52,12 @@ use super::{connection_ack, connection_request, schema, transit, types};
 struct FrameMetadata {
     pub origin: SocketAddr,
     pub remember_origin: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnwrappedFrameMetadata {
+    pub frame: FrameMetadata,
+    pub sender_endpoint: endpoint::types::EndpointId,
 }
 
 /// Work accepted by the connection worker.
@@ -118,7 +125,7 @@ enum InboundFrame {
 /// establishment is reported separately for CLI output and tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConnectionFrameReport {
-    pub events: Vec<EventRecord>,
+    pub records: Vec<ReceivedRecord>,
     pub outgoing: Vec<Vec<u8>>,
     pub established_routes: usize,
 }
@@ -204,7 +211,7 @@ fn ingest_network(
     for frame in frames {
         let next = match frame {
             InboundFrame::Connection(report) => NetworkFrameReport {
-                events: report.events,
+                received_records: report.records,
                 outgoing: report.outgoing,
                 established_routes: report.established_routes,
                 ..NetworkFrameReport::default()
@@ -218,7 +225,12 @@ fn ingest_network(
         report.merge(next);
     }
 
-    admit_records_if_any(store, registry, std::mem::take(&mut report.events))?;
+    admit_records_if_any(
+        store,
+        registry,
+        std::mem::take(&mut report.events),
+        std::mem::take(&mut report.received_records),
+    )?;
 
     if let Some(connection_id) = report.drain_sync_for {
         let sync_report = drain_projected_sync_work(store, connection_id)?;
@@ -253,6 +265,7 @@ fn ingest_network(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct NetworkFrameReport {
     events: Vec<EventRecord>,
+    received_records: Vec<ReceivedRecord>,
     outgoing: Vec<Vec<u8>>,
     drain_sync_for: Option<types::ConnectionId>,
     drain_outbox_for: Option<types::ConnectionId>,
@@ -264,6 +277,7 @@ struct NetworkFrameReport {
 impl NetworkFrameReport {
     fn merge(&mut self, other: Self) {
         self.events.extend(other.events);
+        self.received_records.extend(other.received_records);
         self.outgoing.extend(other.outgoing);
         self.drain_sync_for = self.drain_sync_for.or(other.drain_sync_for);
         self.drain_outbox_for = self.drain_outbox_for.or(other.drain_outbox_for);
@@ -290,11 +304,20 @@ fn admit_records_if_any(
     store: &Store,
     registry: &impl EventRegistry,
     records: Vec<EventRecord>,
+    received_records: Vec<ReceivedRecord>,
 ) -> Result<(), String> {
-    if records.is_empty() {
-        return Ok(());
+    if !received_records.is_empty() {
+        worker::run(
+            store,
+            registry,
+            AdmitReceivedRecords {
+                records: received_records,
+            },
+        )?;
     }
-    worker::run(store, registry, AdmitRecords { records })?;
+    if !records.is_empty() {
+        worker::run(store, registry, AdmitRecords { records })?;
+    }
     Ok(())
 }
 
@@ -356,7 +379,13 @@ fn unwrap_transit_bytes(
     for inner in transit.inners {
         if types::is_connection_event(&inner) {
             frames.push(InboundFrame::Connection(ingest_connection_frame(
-                store, local, metadata, inner,
+                store,
+                local,
+                UnwrappedFrameMetadata {
+                    frame: metadata,
+                    sender_endpoint: transit.sender_endpoint,
+                },
+                inner,
             )?));
             continue;
         }
@@ -509,7 +538,7 @@ fn outbox_items_for_connection(
     connection_id: types::ConnectionId,
 ) -> Result<OutboxDrain, String> {
     // Outbox rows are id-only. Durable data resolves from the common event
-    // store; connection-scoped protocol events resolve from the temporary
+    // store; connection-scoped protocol events resolve from the in-memory
     // connection byte cache populated by their projectors.
     let prefix = connection_id.to_vec();
     let rows = store
@@ -560,11 +589,23 @@ fn decode_outbox_key(bytes: &[u8]) -> Result<types::OutboxKey, String> {
     })
 }
 
-fn bootstrap_hash_is_authorized(store: &Store, bootstrap_hash: &[u8; 32]) -> Result<bool, String> {
-    store
+fn authorized_invite_secret_event_id(
+    store: &Store,
+    bootstrap_hash: &[u8; 32],
+) -> Result<Option<[u8; 32]>, String> {
+    let Some(secret) = store
         .table_row(invite::schema::INVITE_SECRETS, bootstrap_hash)
-        .map(|row| row.is_some())
-        .map_err(|err| format!("load invite secret: {err}"))
+        .map_err(|err| format!("load invite secret: {err}"))?
+    else {
+        return Ok(None);
+    };
+    if secret.len() != 32 {
+        return Err("stored invite secret is malformed".to_string());
+    }
+    let mut bootstrap_secret = [0; 32];
+    bootstrap_secret.copy_from_slice(&secret);
+    let bytes = invite::codec::encode(&invite::types::InviteSecretEvent::new(bootstrap_secret));
+    Ok(Some(types::event_id(&bytes)))
 }
 
 fn endpoint_id_from_bytes(bytes: &[u8]) -> Result<endpoint::types::EndpointId, String> {
@@ -579,7 +620,7 @@ fn endpoint_id_from_bytes(bytes: &[u8]) -> Result<endpoint::types::EndpointId, S
 fn ingest_connection_frame(
     store: &Store,
     local: endpoint::types::EndpointKeypair,
-    metadata: FrameMetadata,
+    metadata: UnwrappedFrameMetadata,
     bytes: Vec<u8>,
 ) -> Result<ConnectionFrameReport, String> {
     let mut result = ConnectionFrameReport::default();
@@ -588,20 +629,25 @@ fn ingest_connection_frame(
         // producing an ack. The raw request event is also admitted so the
         // connection projector can atomically write the connection row and the
         // route learned from receive metadata.
-        result.events.push(record_with_receive_metadata(
-            connection_request::codec::record_from_bytes(bytes.clone())?,
+        let event = connection_request::codec::decode(&bytes)?;
+        let invite_secret_event_id =
+            authorized_invite_secret_event_id(store, &event.bootstrap_hash)?
+                .ok_or_else(|| "invite private key rejected".to_string())?;
+        let mut record = connection_request::codec::record_from_bytes(bytes.clone())?;
+        record.dependencies.push(invite_secret_event_id);
+        result.records.push(record_with_bootstrap_receive_metadata(
+            record,
             metadata,
             local.endpoint,
+            invite_secret_event_id,
         ));
-        let event = connection_request::codec::decode(&bytes)?;
-        let authorized = bootstrap_hash_is_authorized(store, &event.bootstrap_hash)?;
-        let connection = connection_request::commands::accept(local, authorized, bytes)?;
+        let connection = connection_request::commands::accept(local, true, bytes)?;
         apply_connection_result(connection, &mut result);
     } else if connection_ack::codec::is_ack(&bytes) {
         // Ack projection validates the original request through the ack's
         // declared dependency. The worker only checks local endpoint shape
         // before admitting the ack and reporting the derived connection id.
-        result.events.push(record_with_receive_metadata(
+        result.records.push(record_with_endpoint_receive_metadata(
             connection_ack::codec::record_from_bytes(bytes.clone())?,
             metadata,
             local.endpoint,
@@ -614,17 +660,38 @@ fn ingest_connection_frame(
     Ok(result)
 }
 
-fn record_with_receive_metadata(
-    mut record: EventRecord,
-    metadata: FrameMetadata,
+fn record_with_bootstrap_receive_metadata(
+    record: EventRecord,
+    metadata: UnwrappedFrameMetadata,
     local_endpoint: endpoint::types::EndpointId,
-) -> EventRecord {
-    record.receive = Some(ReceiveMetadata {
-        origin: metadata.origin,
-        local_endpoint,
-        remember_route: metadata.remember_origin,
-    });
-    record
+    invite_secret_event_id: types::ConnectionId,
+) -> ReceivedRecord {
+    ReceivedRecord::with_receive(
+        record,
+        ReceiveMetadata::bootstrap_invite(
+            metadata.frame.origin,
+            local_endpoint,
+            metadata.sender_endpoint,
+            metadata.frame.remember_origin,
+            invite_secret_event_id,
+        ),
+    )
+}
+
+fn record_with_endpoint_receive_metadata(
+    record: EventRecord,
+    metadata: UnwrappedFrameMetadata,
+    local_endpoint: endpoint::types::EndpointId,
+) -> ReceivedRecord {
+    ReceivedRecord::with_receive(
+        record,
+        ReceiveMetadata::endpoint_receive(
+            metadata.frame.origin,
+            local_endpoint,
+            metadata.sender_endpoint,
+            metadata.frame.remember_origin,
+        ),
+    )
 }
 
 fn apply_connection_result(
@@ -634,11 +701,12 @@ fn apply_connection_result(
     // Commands return proposed events. This worker strips the proposal wrapper
     // because its caller will admit every returned record through the common
     // event-module worker.
-    result.events.extend(
+    result.records.extend(
         connection
             .events
             .into_iter()
-            .map(ProposedEvent::into_record),
+            .map(ProposedEvent::into_record)
+            .map(ReceivedRecord::new),
     );
     result.outgoing.extend(connection.value.outgoing);
     if connection.value.connection_id.is_some() {

@@ -11,11 +11,12 @@ use crate::protocol::event_modules::connection::types::ConnectionId;
 use crate::protocol::event_modules::types::EventId;
 
 pub const INBOUND_EVENTS: TableName = TableName::new("sync.inbound_events");
+pub const CONNECTION_ACTIVITY: TableName = TableName::new("sync.connection_activity");
 
-pub const SCHEMAS: &[Schema] = &[Schema::temp_row_table(
-    "sync.inbound_events.v1",
-    INBOUND_EVENTS,
-)];
+pub const SCHEMAS: &[Schema] = &[
+    Schema::memory_row_table("sync.inbound_events.v1", INBOUND_EVENTS),
+    Schema::memory_row_table("sync.connection_activity.v1", CONNECTION_ACTIVITY),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundSyncEvent {
@@ -44,6 +45,21 @@ pub fn inbound_event_row(
 
 pub fn inbound_event_prefix(connection_id: ConnectionId) -> Vec<u8> {
     connection_id.to_vec()
+}
+
+pub fn connection_activity_row(connection_id: ConnectionId, last_activity_ms: u64) -> TableRow {
+    TableRow {
+        table: CONNECTION_ACTIVITY,
+        key: connection_id.to_vec(),
+        value: last_activity_ms.to_be_bytes().to_vec(),
+    }
+}
+
+pub fn decode_connection_activity(bytes: &[u8]) -> Result<u64, String> {
+    let raw: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| "sync activity row must be 8 bytes".to_string())?;
+    Ok(u64::from_be_bytes(raw))
 }
 
 pub fn decode_inbound_event(

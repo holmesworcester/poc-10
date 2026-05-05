@@ -53,7 +53,9 @@
 //! around this path.
 
 use crate::core::store::{Store, TableRow};
-use crate::protocol::event_modules::types::{event_id, EventId, EventRecord, EventStatus};
+use crate::protocol::event_modules::types::{
+    event_id, EventId, EventRecord, EventStatus, ReceiveMetadata,
+};
 
 use super::schema;
 
@@ -76,6 +78,7 @@ pub const DEFAULT_READY_BATCH: usize = 4096;
 pub struct ProposedEvent {
     event_id: EventId,
     record: EventRecord,
+    receive: Option<ReceiveMetadata>,
 }
 
 impl ProposedEvent {
@@ -83,6 +86,15 @@ impl ProposedEvent {
         Self {
             event_id: event_id(&record.canonical_bytes),
             record,
+            receive: None,
+        }
+    }
+
+    fn contextual(record: EventRecord, receive: Option<ReceiveMetadata>) -> Self {
+        Self {
+            event_id: event_id(&record.canonical_bytes),
+            record,
+            receive,
         }
     }
 
@@ -92,6 +104,10 @@ impl ProposedEvent {
 
     pub fn record(&self) -> &EventRecord {
         &self.record
+    }
+
+    fn receive(&self) -> Option<ReceiveMetadata> {
+        self.receive
     }
 
     pub fn into_record(self) -> EventRecord {
@@ -166,6 +182,7 @@ pub struct EventContext {
     pub event_id: EventId,
     pub dependencies: Vec<DependencyContext>,
     pub labels: Vec<Vec<u8>>,
+    pub receive: Option<ReceiveMetadata>,
 }
 
 impl EventContext {
@@ -254,6 +271,38 @@ pub struct AdmitRecords {
     pub records: Vec<EventRecord>,
 }
 
+/// Admit records with receive-boundary context.
+///
+/// Public commands admit canonical records. Connection worker is the boundary
+/// that turns authenticated inbound bytes into receive context, so this work
+/// item and its records are only constructible inside the crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmitReceivedRecords {
+    pub(crate) records: Vec<ReceivedRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedRecord {
+    record: EventRecord,
+    receive: Option<ReceiveMetadata>,
+}
+
+impl ReceivedRecord {
+    pub(crate) fn new(record: EventRecord) -> Self {
+        Self {
+            record,
+            receive: None,
+        }
+    }
+
+    pub(crate) fn with_receive(record: EventRecord, receive: ReceiveMetadata) -> Self {
+        Self {
+            record,
+            receive: Some(receive),
+        }
+    }
+}
+
 /// Drain ready durable events until no ready event remains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrainUntilIdle {
@@ -311,6 +360,24 @@ where
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
         admit_records(store, registry, self.records)
+    }
+}
+
+impl<R> Work<R> for AdmitReceivedRecords
+where
+    R: EventRegistry,
+{
+    type Output = AdmitReport;
+
+    fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
+        run_admission_pipeline(
+            store,
+            registry,
+            self.records
+                .into_iter()
+                .map(|received| ProposedEvent::contextual(received.record, received.receive))
+                .collect(),
+        )
     }
 }
 
@@ -413,15 +480,21 @@ fn process_event_in_tx(
     let record = event.record();
     report.event_ids.push(event.event_id());
     if !record.scope.is_durable() {
-        project_transient_event_in_tx(store, modules, record)?;
+        project_transient_event_in_tx(store, modules, record, event.receive())?;
         report.applied_events += 1;
         return Ok(());
     }
 
     let stored = store_durable_event_in_tx(store, event, report)?;
     if stored.inserted && stored.ready {
-        let apply = if record.receive.is_some() {
-            project_ready_event_record_in_tx(store, modules, &stored.event_id, record)?
+        let apply = if event.receive().is_some() {
+            project_ready_event_record_in_tx(
+                store,
+                modules,
+                &stored.event_id,
+                record,
+                event.receive(),
+            )?
         } else {
             project_ready_event_in_tx(store, modules, &stored.event_id)?
         };
@@ -434,6 +507,7 @@ fn project_transient_event_in_tx(
     store: &Store,
     modules: &impl EventRegistry,
     record: &EventRecord,
+    receive: Option<ReceiveMetadata>,
 ) -> rusqlite::Result<()> {
     // Transient events are canonical enough to project and dedupe inside the
     // current process, but they are not durable facts. Letting them wait on
@@ -445,7 +519,7 @@ fn project_transient_event_in_tx(
         ));
     }
     let event_id = event_id(&record.canonical_bytes);
-    let changes = project_event_with_context_in_tx(store, modules, &event_id, record)?;
+    let changes = project_event_with_context_in_tx(store, modules, &event_id, record, receive)?;
     write_projection_output_in_tx(store, changes)?;
     Ok(())
 }
@@ -469,7 +543,7 @@ fn store_durable_event_in_tx(
     let record = event.record();
     let id = event.event_id();
     let missing = missing_dependencies(store, &record.dependencies)?;
-    if record.receive.is_some() && !missing.is_empty() {
+    if event.receive().is_some() && !missing.is_empty() {
         return Err(module_error(
             "durable receive metadata cannot be preserved while blocked".to_string(),
         ));
@@ -520,7 +594,7 @@ fn project_ready_event_in_tx(
         let bytes =
             schema::event_bytes(store, event_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let record = modules.record_from_bytes(bytes).map_err(module_error)?;
-        let changes = project_event_with_context_in_tx(store, modules, event_id, &record)?;
+        let changes = project_event_with_context_in_tx(store, modules, event_id, &record, None)?;
         write_projection_output_in_tx(store, changes)?;
         report.applied_events = 1;
         report.unblocked_events = unblock_dependents(store, event_id)?;
@@ -533,10 +607,11 @@ fn project_ready_event_record_in_tx(
     modules: &impl EventRegistry,
     event_id: &EventId,
     record: &EventRecord,
+    receive: Option<ReceiveMetadata>,
 ) -> rusqlite::Result<ApplyReadyReport> {
     let mut report = ApplyReadyReport::default();
     if schema::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)? {
-        let changes = project_event_with_context_in_tx(store, modules, event_id, record)?;
+        let changes = project_event_with_context_in_tx(store, modules, event_id, record, receive)?;
         write_projection_output_in_tx(store, changes)?;
         report.applied_events = 1;
         report.unblocked_events = unblock_dependents(store, event_id)?;
@@ -554,8 +629,9 @@ fn project_event_with_context_in_tx(
     modules: &impl EventRegistry,
     event_id: &EventId,
     record: &EventRecord,
+    receive: Option<ReceiveMetadata>,
 ) -> rusqlite::Result<ProjectionOutput> {
-    let context = load_event_context_in_tx(store, modules, event_id, record)?;
+    let context = load_event_context_in_tx(store, modules, event_id, record, receive)?;
     let event = EventWithContext { record, context };
     modules.project_record(store, &event).map_err(module_error)
 }
@@ -572,6 +648,7 @@ fn load_event_context_in_tx(
     modules: &impl EventRegistry,
     event_id: &EventId,
     record: &EventRecord,
+    receive: Option<ReceiveMetadata>,
 ) -> rusqlite::Result<EventContext> {
     let mut dependencies = Vec::with_capacity(record.dependencies.len());
     for dependency in unique_dependencies(&record.dependencies) {
@@ -587,6 +664,7 @@ fn load_event_context_in_tx(
         event_id: *event_id,
         dependencies,
         labels: schema::event_labels(store, event_id).map_err(module_error)?,
+        receive,
     })
 }
 

@@ -20,9 +20,7 @@ pub trait ReadContext {
     /// Check whether an advertised id is already present locally.
     fn has_event(&self, event_id: &EventId) -> Result<bool, String>;
     /// Check whether a locally present id may be served to this connection.
-    fn can_send_event(&self, event_id: &EventId) -> Result<bool, String> {
-        self.has_event(event_id)
-    }
+    fn can_send_event(&self, event_id: &EventId) -> Result<bool, String>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

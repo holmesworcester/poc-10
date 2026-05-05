@@ -34,6 +34,7 @@ use crate::protocol::event_modules::worker::CommandOutput;
 use super::{compare, schema};
 
 pub const DEFAULT_INBOUND_BATCH: usize = 1024;
+pub const DEFAULT_QUIET_MS: u64 = 750;
 
 /// Work accepted by the sync worker.
 ///
@@ -43,6 +44,10 @@ pub const DEFAULT_INBOUND_BATCH: usize = 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
     Start,
+    MaybeStart {
+        now_ms: u64,
+        quiet_ms: u64,
+    },
     DrainInboundSync {
         connection_id: connection::types::ConnectionId,
         limit: usize,
@@ -53,6 +58,7 @@ pub enum Work {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
     Started(CommandOutput<SyncStartReport>),
+    MaybeStarted(CommandOutput<SyncStartReport>),
     DrainedInboundSync(SyncWorkReport),
 }
 
@@ -84,6 +90,9 @@ pub struct SyncWorkReport {
 pub fn run(store: &Store, work: Work) -> Result<Output, String> {
     match work {
         Work::Start => start(store).map(Output::Started),
+        Work::MaybeStart { now_ms, quiet_ms } => {
+            maybe_start(store, now_ms, quiet_ms).map(Output::MaybeStarted)
+        }
         Work::DrainInboundSync {
             connection_id,
             limit,
@@ -99,6 +108,44 @@ fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
     if connections.is_empty() {
         return Ok(CommandOutput::new(SyncStartReport::default()));
     }
+    start_connections(store, connections)
+}
+
+fn maybe_start(
+    store: &Store,
+    now_ms: u64,
+    quiet_ms: u64,
+) -> Result<CommandOutput<SyncStartReport>, String> {
+    let connections = connection_ids_with_routes(store)?;
+    if connections.is_empty() {
+        return Ok(CommandOutput::new(SyncStartReport::default()));
+    }
+    let mut eligible = Vec::new();
+    for connection_id in connections {
+        if !inbound_events_for_connection(store, connection_id, 1)?.is_empty() {
+            record_sync_activity(store, connection_id, now_ms)?;
+            continue;
+        }
+        let last_activity = sync_activity_ms(store, connection_id)?.unwrap_or_default();
+        if quiet_ms > 0 && now_ms.saturating_sub(last_activity) < quiet_ms {
+            continue;
+        }
+        eligible.push(connection_id);
+    }
+
+    let output = start_connections(store, eligible.clone())?;
+    if !output.events.is_empty() {
+        for connection_id in eligible {
+            record_sync_activity(store, connection_id, now_ms)?;
+        }
+    }
+    Ok(output)
+}
+
+fn start_connections(
+    store: &Store,
+    connections: Vec<connection::types::ConnectionId>,
+) -> Result<CommandOutput<SyncStartReport>, String> {
     let mut events = Vec::new();
     let mut sent_events = 0;
     let local = local_endpoint(store)?;
@@ -153,6 +200,7 @@ fn drain_inbound_events(
         store
             .delete_table_rows(schema::INBOUND_EVENTS, consumed)
             .map_err(|err| format!("delete inbound sync events: {err}"))?;
+        record_sync_activity(store, connection_id, current_time_ms())?;
     }
     Ok(result)
 }
@@ -246,6 +294,40 @@ fn inbound_events_for_connection(
         .collect()
 }
 
+fn record_sync_activity(
+    store: &Store,
+    connection_id: connection::types::ConnectionId,
+    now_ms: u64,
+) -> Result<(), String> {
+    store
+        .write_transaction(|store| {
+            store.replace_table_rows_in_tx(vec![schema::connection_activity_row(
+                connection_id,
+                now_ms,
+            )])?;
+            Ok(())
+        })
+        .map_err(|err| format!("record sync activity: {err}"))
+}
+
+fn sync_activity_ms(
+    store: &Store,
+    connection_id: connection::types::ConnectionId,
+) -> Result<Option<u64>, String> {
+    store
+        .table_row(schema::CONNECTION_ACTIVITY, &connection_id)
+        .map_err(|err| format!("load sync activity: {err}"))?
+        .map(|bytes| schema::decode_connection_activity(&bytes))
+        .transpose()
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 fn fingerprint_id(id: &crate::protocol::event_modules::types::EventId) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"sync-event-id:");
@@ -256,5 +338,136 @@ fn fingerprint_id(id: &crate::protocol::event_modules::types::EventId) -> [u8; 3
 fn xor_into(target: &mut [u8; 32], value: &[u8; 32]) {
     for (left, right) in target.iter_mut().zip(value.iter()) {
         *left ^= *right;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::event_modules::identity::endpoint;
+    use crate::protocol::event_modules::sync::{have_id, need_id};
+    use crate::protocol::event_modules::types::{event_id, EventRecord, EventScope, EventStatus};
+    use crate::protocol::event_modules::worker as event_worker;
+    use crate::protocol::Protocol;
+
+    use super::*;
+
+    #[test]
+    fn inbound_have_without_local_mutual_workspace_can_request_unknown_id() {
+        let (store, connection_id) = store_with_unscoped_connection();
+        let wanted_id = [9; 32];
+        let have_bytes = have_id::codec::encode(&have_id::types::HaveIdEvent {
+            connection_id,
+            bucket: wanted_id[0],
+            id: wanted_id,
+        });
+        insert_inbound_sync(&store, connection_id, have_bytes);
+
+        let Output::DrainedInboundSync(report) = run(
+            &store,
+            Work::DrainInboundSync {
+                connection_id,
+                limit: 10,
+            },
+        )
+        .expect("drain inbound sync") else {
+            panic!("unexpected sync output");
+        };
+
+        assert_eq!(report.processed_work, 1);
+        assert_eq!(report.events.len(), 1);
+        let need = need_id::codec::decode(&report.events[0].canonical_bytes).expect("decode need");
+        assert_eq!(need.connection_id, connection_id);
+        assert_eq!(need.id, wanted_id);
+        assert!(report.send_event_ids.is_empty());
+        assert_eq!(
+            store
+                .table_row_count(connection::schema::OUTBOX)
+                .expect("count outbox"),
+            0
+        );
+        assert_eq!(
+            store
+                .table_row_count(schema::INBOUND_EVENTS)
+                .expect("count inbound work"),
+            0
+        );
+    }
+
+    #[test]
+    fn inbound_need_without_local_mutual_workspace_does_not_send_durable_event() {
+        let (store, connection_id) = store_with_unscoped_connection();
+        let workspace_id = [4; 32];
+        let event_bytes = vec![200];
+        let shared_event_id = event_id(&event_bytes);
+        event_schema::insert_event(
+            &store,
+            &EventRecord {
+                timestamp: 1,
+                body_len: 0,
+                canonical_bytes: event_bytes,
+                dependencies: Vec::new(),
+                workspace_id: Some(workspace_id),
+                scope: EventScope::Shared,
+            },
+            EventStatus::Applied,
+        )
+        .expect("insert shared event");
+
+        let need_bytes = need_id::codec::encode(&need_id::types::NeedIdEvent {
+            connection_id,
+            id: shared_event_id,
+        });
+        insert_inbound_sync(&store, connection_id, need_bytes);
+
+        let Output::DrainedInboundSync(report) = run(
+            &store,
+            Work::DrainInboundSync {
+                connection_id,
+                limit: 10,
+            },
+        )
+        .expect("drain inbound sync") else {
+            panic!("unexpected sync output");
+        };
+
+        assert_eq!(report.processed_work, 1);
+        assert!(report.events.is_empty());
+        assert!(report.send_event_ids.is_empty());
+        assert_eq!(
+            store
+                .table_row_count(connection::schema::OUTBOX)
+                .expect("count outbox"),
+            0
+        );
+    }
+
+    fn store_with_unscoped_connection() -> (Store, connection::types::ConnectionId) {
+        let store = Protocol::open_memory_store().expect("open store");
+        let protocol = Protocol::new();
+        let local = endpoint::commands::create_local_keypair();
+        event_worker::run(&store, &protocol, local).expect("admit local endpoint");
+        let remote = endpoint::commands::create_local_keypair().value;
+        let connection_id = [3; 32];
+        store
+            .insert_table_rows(vec![connection::schema::connection_row(
+                connection_id,
+                remote.endpoint,
+            )])
+            .expect("insert connection row");
+        (store, connection_id)
+    }
+
+    fn insert_inbound_sync(
+        store: &Store,
+        connection_id: connection::types::ConnectionId,
+        bytes: Vec<u8>,
+    ) {
+        store
+            .insert_table_rows(vec![schema::inbound_event_row(
+                connection_id,
+                event_id(&bytes),
+                bytes,
+            )])
+            .expect("insert inbound sync row");
     }
 }

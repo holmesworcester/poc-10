@@ -68,7 +68,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         dependencies: metadata.dependencies,
         workspace_id: metadata.workspace_id,
         scope: EventScope::Shared,
-        receive: None,
     })
 }
 

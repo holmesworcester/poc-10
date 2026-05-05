@@ -11,10 +11,11 @@ use super::super::connection_request;
 use super::super::schema as projection;
 use super::super::types;
 use super::codec;
+use crate::protocol::event_modules::types::ReceiveAuthorization;
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let bytes = event.record.canonical_bytes.clone();
-    let receive = event.record.receive;
+    let receive = event.context.receive;
     let ack = codec::decode(&bytes)?;
     let expected_connection_id = types::connection_id(&ack.request_id, &ack.from_endpoint);
     if ack.connection_id != expected_connection_id {
@@ -29,23 +30,32 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     if request.from_endpoint != ack.to_endpoint {
         return Err("connection ack references another endpoint's request".to_string());
     }
+    if request.to_endpoint != ack.from_endpoint {
+        return Err("connection ack sender does not match request recipient".to_string());
+    }
 
     let mut rows = vec![projection::connection_event_row(
         types::event_id(&bytes),
         bytes,
     )];
     if let Some(receive) = receive {
-        if ack.to_endpoint != receive.local_endpoint {
+        if ack.to_endpoint != receive.local_endpoint() {
             return Err("connection ack addressed to a different endpoint".to_string());
+        }
+        if ack.from_endpoint != receive.remote_endpoint() {
+            return Err("connection ack sender does not match receive sender".to_string());
+        }
+        if receive.authorization() != ReceiveAuthorization::EndpointReceive {
+            return Err("connection ack requires endpoint receive authorization".to_string());
         }
         rows.push(projection::connection_row(
             ack.connection_id,
             ack.from_endpoint,
         ));
-        if receive.remember_route {
+        if receive.remember_route() {
             rows.push(projection::transport_target_row(
                 ack.connection_id,
-                receive.origin,
+                receive.origin(),
             ));
         }
     }
@@ -70,6 +80,7 @@ mod tests {
         connection_request::codec::record_from_bytes(connection_request::codec::encode(
             &connection_request::types::RequestEvent {
                 from_endpoint: [1; 32],
+                to_endpoint: [4; 32],
                 nonce: [2; 32],
                 bootstrap_hash: [3; 32],
             },
@@ -101,6 +112,7 @@ mod tests {
                     record: request_record,
                 }],
                 labels: Vec::new(),
+                receive: None,
             },
         }
     }
@@ -123,15 +135,24 @@ mod tests {
     fn projects_received_ack_connection_and_route_rows() {
         let request = request_record();
         let request_id = types::event_id(&request.canonical_bytes);
-        let mut ack = ack_record(request_id);
+        let ack = ack_record(request_id);
         let origin = "127.0.0.1:9001".parse::<SocketAddr>().expect("addr");
-        ack.receive = Some(ReceiveMetadata {
-            origin,
-            local_endpoint: [1; 32],
-            remember_route: true,
-        });
 
-        let output = project(&context_for(&ack, request_id, request)).expect("project ack");
+        let output = project(&EventWithContext {
+            record: &ack,
+            context: EventContext {
+                event_id: types::event_id(&ack.canonical_bytes),
+                dependencies: vec![DependencyContext {
+                    event_id: request_id,
+                    record: request,
+                }],
+                labels: Vec::new(),
+                receive: Some(ReceiveMetadata::endpoint_receive(
+                    origin, [1; 32], [4; 32], true,
+                )),
+            },
+        })
+        .expect("project ack");
 
         assert_eq!(output.rows.len(), 3);
         assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
@@ -146,6 +167,7 @@ mod tests {
         let request = connection_request::codec::record_from_bytes(
             connection_request::codec::encode(&connection_request::types::RequestEvent {
                 from_endpoint: [8; 32],
+                to_endpoint: [4; 32],
                 nonce: [2; 32],
                 bootstrap_hash: [3; 32],
             }),
@@ -156,5 +178,64 @@ mod tests {
 
         let err = project(&context_for(&ack, request_id, request)).expect_err("reject");
         assert!(err.contains("another endpoint"));
+    }
+
+    #[test]
+    fn rejects_received_ack_without_endpoint_receive_authorization() {
+        let request = request_record();
+        let request_id = types::event_id(&request.canonical_bytes);
+        let ack = ack_record(request_id);
+
+        assert_eq!(
+            project(&EventWithContext {
+                record: &ack,
+                context: EventContext {
+                    event_id: types::event_id(&ack.canonical_bytes),
+                    dependencies: vec![DependencyContext {
+                        event_id: request_id,
+                        record: request,
+                    }],
+                    labels: Vec::new(),
+                    receive: Some(ReceiveMetadata::bootstrap_invite(
+                        "127.0.0.1:9001".parse::<SocketAddr>().expect("addr"),
+                        [1; 32],
+                        [4; 32],
+                        true,
+                        [7; 32],
+                    )),
+                },
+            })
+            .expect_err("unauthorized ack receive must fail"),
+            "connection ack requires endpoint receive authorization"
+        );
+    }
+
+    #[test]
+    fn rejects_received_ack_when_receive_sender_does_not_match_ack_sender() {
+        let request = request_record();
+        let request_id = types::event_id(&request.canonical_bytes);
+        let ack = ack_record(request_id);
+
+        assert_eq!(
+            project(&EventWithContext {
+                record: &ack,
+                context: EventContext {
+                    event_id: types::event_id(&ack.canonical_bytes),
+                    dependencies: vec![DependencyContext {
+                        event_id: request_id,
+                        record: request,
+                    }],
+                    labels: Vec::new(),
+                    receive: Some(ReceiveMetadata::endpoint_receive(
+                        "127.0.0.1:9001".parse::<SocketAddr>().expect("addr"),
+                        [1; 32],
+                        [99; 32],
+                        true,
+                    )),
+                },
+            })
+            .expect_err("wrong receive sender must fail"),
+            "connection ack sender does not match receive sender"
+        );
     }
 }

@@ -11,6 +11,7 @@
 //! add its schema beside the rows that encode it, then aggregate it here.
 
 pub mod cli;
+pub mod daemon;
 pub mod event_modules;
 pub mod wire;
 

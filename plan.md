@@ -83,10 +83,11 @@ their semantic context: which canonical bytes are signed, what signer dependency
 is allowed, and what associated data or purpose string is passed to core crypto.
 
 Follow the `poc-6/core/crypto.py` simplification pattern: expose a small core
-facade around real primitives (`hash`, `sign`/`verify`, and later
-`wrap`/`unwrap` or `check`-style helpers) instead of spreading library-specific
-crypto calls through event modules. Keep the facade honest: every helper name
-must match a real cryptographic property it enforces.
+facade around real primitives (`hash`, Ed25519 `sign`/`verify`, X25519 public
+key derivation, nonce generation, and X25519+XChaCha20-Poly1305
+`encrypt`/`decrypt`) instead of spreading library-specific crypto calls through
+event modules. Keep the facade honest: every helper name must match a real
+cryptographic property it enforces.
 
 ## Concept Mapping
 
@@ -222,9 +223,11 @@ Likely row families:
 - `identity.invites_accepted`: local-only acceptance/provenance rows, only if
   commands need durable local join provenance
 
-Rows should use `Schema::durable_row_table` or `Schema::temp_row_table` as
-appropriate. Table names belong in `schema.rs`; row constructors and row decoders
-belong in that module scope.
+Rows should use `Schema::durable_row_table` or `Schema::memory_row_table` as
+appropriate. Memory rows are in-process `Store` maps, not SQLite TEMP tables.
+If another process or a restarted daemon must observe a row, it is durable.
+Table names belong in `schema.rs`; row constructors and row decoders belong in
+that module scope.
 
 Duplicate join rule:
 
@@ -945,13 +948,15 @@ per-event-type SQL queries against arbitrary state just because a dependency or
 label is missing.
 
 Connection handshakes are the important subjective case. A received
-request/ack is canonical event bytes plus local receive metadata:
-`origin`, `local_endpoint`, and whether that origin should be remembered as a
-route. The connection projector consumes those together and writes the
-established connection row plus the current transport-target row only when the
-origin is a route worth dialing later. The route is not a separate durable
-`transport_target` event because it has no independent meaning outside this
-peer's observation of that connection event.
+request/ack is canonical event bytes plus local receive metadata in
+`EventContext`, not in `EventRecord`. Request receive context must carry
+bootstrap-invite authorization backed by an applied invite-secret dependency.
+Ack receive context must carry endpoint-transit authorization from the
+decrypted sender endpoint. The connection projector consumes those together and
+writes the established connection row plus the current transport-target row only
+when the origin is a route worth dialing later. The route is not a separate
+durable `transport_target` event because it has no independent meaning outside
+this peer's observation of that connection event.
 
 Custom typed context is allowed only for module-owned read models that are too
 large or index-shaped to fit the default context. The module owns the context
@@ -1340,8 +1345,8 @@ pipeline, which performs dependency, signature, projector, and storage
 validation.*
 
 For the current POC, connection request/ack projection also owns route learning.
-The connection worker attaches receive metadata to accepted inbound handshake
-records before admitting them. The projector writes:
+The connection worker attaches receive metadata as projector context to accepted
+inbound handshake records before admitting them. The projector writes:
 
 ```
 connection.connections[connection_id] = remote_endpoint
@@ -1365,7 +1370,7 @@ outbox:
   primary key(connection_id, event_id)
 ```
 
-`outbox` is a temporary row table by default and has no per-row claim, lease, or
+`outbox` is a memory row table by default and has no per-row claim, lease, or
 retry status. It is send work, not truth: if the process restarts, sync can
 recreate the same deterministic connection-scoped events and outbox rows. Each
 active connection has exactly one `connection/worker.rs` owner for outbox drain
@@ -1412,6 +1417,41 @@ Every migration of a poc-6 or poc-7 surface must land directly on this design:
 one core substrate, one protocol module family for each domain, projectors that
 write rows only, commands that propose events only, and workers that own active
 queue/cursor work. No compatibility adapters or duplicate engines.
+
+# Daemon runtime plan
+
+`topo start` is the product daemon path. It should be a foreground process that
+owns a long-lived `Store`, a core TCP listener, and a scheduler loop over the
+existing protocol workers. RPC is optional; direct-DB CLI commands are acceptable
+as long as the daemon observes durable committed state and keeps syncing.
+
+Daemon responsibilities:
+
+- accept inbound TCP frames continuously through `core/tcp.rs`
+- hand opaque frames to `connection::worker::Work::IngestNetwork`
+- drain ready durable events through the common event-module worker
+- periodically wake `sync::worker::Work::MaybeStart`, not force-start sync
+- drain connection outbox routes and write framed bytes through the same core TCP
+  pump used by finite CLI tests
+- enforce one daemon per DB with a clear duplicate-start error
+
+Daemon non-responsibilities:
+
+- no auth shortcuts
+- no projector calls outside the common worker
+- no protocol-specific TCP/framing code in core
+- no durable state hidden in memory rows
+
+Sync cadence belongs in `sync::worker`, not in the daemon. The daemon's timer is
+only a wakeup edge. The worker tracks memory-local per-connection activity and
+starts a new round only after inbound/pending sync work has been quiet long
+enough. Duplicate compare/have/need events are correctness-safe, but a live
+daemon should avoid wasteful overlapping rounds.
+
+`topo sync --listen IP PORT --accept N` remains useful as a finite
+test/debug harness. It is not the product daemon, and passing finite-listener
+tests is not enough to claim daemon behavior works. Daemon behavior needs
+black-box coverage through real `topo start` processes.
 
 # Appendix: Negentropy, dependencies, and dedupe
 

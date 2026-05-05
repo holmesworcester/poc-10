@@ -112,7 +112,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         dependencies: decoded.dependencies,
         workspace_id: None,
         scope: EventScope::Shared,
-        receive: None,
     })
 }
 
@@ -125,6 +124,5 @@ pub fn staged_record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         dependencies: Vec::new(),
         workspace_id: None,
         scope: EventScope::Local,
-        receive: None,
     })
 }

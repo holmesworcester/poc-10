@@ -8,8 +8,7 @@
 
 use std::{net::SocketAddr, str::FromStr};
 
-use rand_core::{OsRng, RngCore};
-
+use crate::core::crypto;
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::super::endpoint;
@@ -182,9 +181,7 @@ fn hex_value(byte: u8) -> Result<u8, String> {
 }
 
 fn nonce32() -> [u8; 32] {
-    let mut nonce = [0; 32];
-    OsRng.fill_bytes(&mut nonce);
-    nonce
+    crypto::random_bytes_32()
 }
 
 #[cfg(test)]

@@ -41,6 +41,21 @@ pub struct ServeReport<T> {
     pub value: T,
 }
 
+/// A long-lived nonblocking TCP listener.
+///
+/// Core still owns only the socket mechanics. Callers decide when to poll the
+/// listener and what to do with opaque inbound frames.
+pub struct Listener {
+    listener: TcpListener,
+    local_addr: SocketAddr,
+}
+
+impl Listener {
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+}
+
 /// Open a TCP stream, send initial rows, then react to inbound frames.
 ///
 /// `on_inbound` is the protocol boundary: it receives an opaque inbound row and
@@ -110,6 +125,67 @@ pub fn serve<T>(
 
     Ok(ServeReport {
         local_addr,
+        accepted_connections,
+        value,
+    })
+}
+
+/// Bind a nonblocking listener for a long-lived scheduler.
+pub fn listen(listen: SocketAddr) -> Result<Listener, String> {
+    let listener = TcpListener::bind(listen).map_err(|err| format!("listen: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("set listener nonblocking: {err}"))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|err| format!("listener local addr: {err}"))?;
+    Ok(Listener {
+        listener,
+        local_addr,
+    })
+}
+
+/// Serve up to `accept_limit` currently pending streams from a long-lived
+/// listener.
+///
+/// `WouldBlock` means there is no pending connection right now and is reported
+/// as a successful zero-connection poll. Accepted streams are handled with the
+/// same frame pump used by the finite test listener.
+pub fn serve_available<T>(
+    store: &Store,
+    listener: &Listener,
+    accept_limit: usize,
+    mut value: T,
+    mut on_inbound: impl FnMut(InboundNetworkRow, &mut T) -> Result<Vec<OutboundNetworkRow>, String>,
+    mut on_sent: impl FnMut(&[OutboundNetworkRow], &mut T) -> Result<(), String>,
+) -> Result<ServeReport<T>, String> {
+    let mut accepted_connections = 0;
+    while accepted_connections < accept_limit {
+        let (mut stream, source_addr) = match listener.listener.accept() {
+            Ok(accepted) => accepted,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(format!("accept tcp stream: {err}")),
+        };
+        stream
+            .set_nodelay(true)
+            .map_err(|err| format!("set stream nodelay: {err}"))?;
+        let target = NetworkTarget::new(source_addr);
+        let (_, next_value) = pump_stream(
+            store,
+            &mut stream,
+            target,
+            Vec::new(),
+            value,
+            &mut on_inbound,
+            &mut on_sent,
+        )?;
+        value = next_value;
+        accepted_connections += 1;
+    }
+
+    Ok(ServeReport {
+        local_addr: listener.local_addr,
         accepted_connections,
         value,
     })

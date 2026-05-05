@@ -217,6 +217,7 @@ mod tests {
                 event_id: event_id(&record.canonical_bytes),
                 dependencies,
                 labels: Vec::new(),
+                receive: None,
             },
         }
     }

@@ -2,10 +2,10 @@
 //!
 //! `CONNECTION_EVENTS` stores canonical request/ack bytes that are needed to
 //! validate later connection facts. `CONNECTIONS` maps established connection
-//! ids to remote endpoints. `CONNECTION_SCOPED_EVENTS` is a temporary byte
+//! ids to remote endpoints. `CONNECTION_SCOPED_EVENTS` is an in-memory byte
 //! cache for non-durable connection-scoped events such as sync compare/have/need.
-//! `OUTBOX` is id-only temporary send work: the connection worker resolves each
-//! id to durable or temporary canonical bytes before wrapping, and lost rows are
+//! `OUTBOX` is id-only in-memory send work: the connection worker resolves each
+//! id to durable or in-memory canonical bytes before wrapping, and lost rows are
 //! recreated by later sync. Core network queues only see the wrapped bytes
 //! produced later by the worker. `TRANSPORT_TARGETS` is
 //! receive-derived local state: connection projection writes the latest socket
@@ -36,11 +36,11 @@ pub const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("connection.connection_events.v1", CONNECTION_EVENTS),
     Schema::durable_row_table("connection.connections.v1", CONNECTIONS),
     Schema::durable_row_table("connection.transport_targets.v1", TRANSPORT_TARGETS),
-    Schema::temp_row_table(
+    Schema::memory_row_table(
         "connection.connection_scoped_events.v1",
         CONNECTION_SCOPED_EVENTS,
     ),
-    Schema::temp_row_table("connection.outbox.v1", OUTBOX),
+    Schema::memory_row_table("connection.outbox.v1", OUTBOX),
 ];
 
 pub(crate) fn connection_event_row(event_id: EventId, bytes: Vec<u8>) -> TableRow {
@@ -121,7 +121,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn outbox_rows_are_temp_restart_work() {
+    fn outbox_rows_are_memory_restart_work() {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let path = tmp.path().join("connection-outbox.db");
         {

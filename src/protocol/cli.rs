@@ -16,21 +16,24 @@ use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::core::store::Store;
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::worker::{self, ApplyReadyReport};
-use crate::protocol::{event_modules, Protocol};
+use crate::protocol::{daemon, event_modules, Protocol};
 
 const COUNT_USAGE: &str = "count";
 const STATUS_USAGE: &str = "status";
 
 pub struct Context {
+    pub db_path: std::path::PathBuf,
     pub store: Store,
     pub protocol: Protocol,
 }
 
 impl Context {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, String> {
+        let db_path = db_path.as_ref().to_path_buf();
         Ok(Self {
-            store: Protocol::open_store(db_path).map_err(|err| format!("open store: {err}"))?,
+            store: Protocol::open_store(&db_path).map_err(|err| format!("open store: {err}"))?,
             protocol: Protocol::new(),
+            db_path,
         })
     }
 
@@ -48,6 +51,7 @@ impl Context {
 
 pub fn commands() -> Vec<CliCommand<Context>> {
     let mut out = Vec::new();
+    out.extend(daemon::commands());
     out.extend(event_modules::identity::invite::cli::commands());
     out.extend(event_modules::connection::cli::commands());
     out.extend(event_modules::content::content_event::cli::commands());

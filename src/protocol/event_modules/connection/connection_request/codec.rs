@@ -15,10 +15,11 @@ use super::types::RequestEvent;
 pub const TAG: u8 = 1;
 
 pub fn encode(event: &RequestEvent) -> Vec<u8> {
-    let mut out = Writer::with_capacity(10 + 1 + 32 * 3);
+    let mut out = Writer::with_capacity(10 + 1 + 32 * 4);
     out.raw(EVENT_MAGIC);
     out.u8(TAG);
     out.id(&event.from_endpoint);
+    out.id(&event.to_endpoint);
     out.id(&event.nonce);
     out.id(&event.bootstrap_hash);
     out.finish()
@@ -35,6 +36,7 @@ pub fn decode(bytes: &[u8]) -> Result<RequestEvent, String> {
     }
     let event = RequestEvent {
         from_endpoint: reader.id()?,
+        to_endpoint: reader.id()?,
         nonce: reader.id()?,
         bootstrap_hash: reader.id()?,
     };
@@ -55,6 +57,5 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         dependencies: Vec::new(),
         workspace_id: None,
         scope: EventScope::Local,
-        receive: None,
     })
 }

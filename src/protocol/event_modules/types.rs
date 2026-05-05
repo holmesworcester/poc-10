@@ -24,7 +24,6 @@ pub struct EventRecord {
     pub dependencies: Vec<EventId>,
     pub workspace_id: Option<EventId>,
     pub scope: EventScope,
-    pub receive: Option<ReceiveMetadata>,
 }
 
 /// Subjective metadata attached by a receive boundary.
@@ -37,9 +36,72 @@ pub struct EventRecord {
 /// would block, admission fails instead of silently dropping context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReceiveMetadata {
-    pub origin: SocketAddr,
-    pub local_endpoint: EventId,
-    pub remember_route: bool,
+    origin: SocketAddr,
+    local_endpoint: EventId,
+    remote_endpoint: EventId,
+    remember_route: bool,
+    authorization: ReceiveAuthorization,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiveAuthorization {
+    BootstrapInvite { invite_secret_event_id: EventId },
+    EndpointReceive,
+}
+
+impl ReceiveMetadata {
+    pub(crate) fn bootstrap_invite(
+        origin: SocketAddr,
+        local_endpoint: EventId,
+        remote_endpoint: EventId,
+        remember_route: bool,
+        invite_secret_event_id: EventId,
+    ) -> Self {
+        Self {
+            origin,
+            local_endpoint,
+            remote_endpoint,
+            remember_route,
+            authorization: ReceiveAuthorization::BootstrapInvite {
+                invite_secret_event_id,
+            },
+        }
+    }
+
+    pub(crate) fn endpoint_receive(
+        origin: SocketAddr,
+        local_endpoint: EventId,
+        remote_endpoint: EventId,
+        remember_route: bool,
+    ) -> Self {
+        Self {
+            origin,
+            local_endpoint,
+            remote_endpoint,
+            remember_route,
+            authorization: ReceiveAuthorization::EndpointReceive,
+        }
+    }
+
+    pub fn origin(self) -> SocketAddr {
+        self.origin
+    }
+
+    pub fn local_endpoint(self) -> EventId {
+        self.local_endpoint
+    }
+
+    pub fn remote_endpoint(self) -> EventId {
+        self.remote_endpoint
+    }
+
+    pub fn remember_route(self) -> bool {
+        self.remember_route
+    }
+
+    pub fn authorization(self) -> ReceiveAuthorization {
+        self.authorization
+    }
 }
 
 /// Storage and sharing policy for an event.

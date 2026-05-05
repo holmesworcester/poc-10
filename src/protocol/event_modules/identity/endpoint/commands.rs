@@ -6,9 +6,6 @@
 //! where the data comes from, and this module owns the keypair consistency
 //! check.
 
-use rand_core::{OsRng, RngCore};
-use x25519_dalek::{PublicKey, StaticSecret};
-
 use crate::core::crypto;
 use crate::protocol::event_modules::worker::CommandOutput;
 
@@ -23,11 +20,9 @@ pub trait LocalEndpointRead {
 }
 
 pub fn create_local_keypair() -> CommandOutput<EndpointKeypair> {
-    let secret = StaticSecret::random_from_rng(OsRng);
-    let endpoint = PublicKey::from(&secret).to_bytes();
-    let secret = secret.to_bytes();
-    let mut signing_secret = [0; crypto::ED25519_PRIVATE_KEY_BYTES];
-    OsRng.fill_bytes(&mut signing_secret);
+    let secret = crypto::random_x25519_private_key();
+    let endpoint = crypto::x25519_public_key(&secret);
+    let signing_secret = crypto::random_ed25519_private_key();
     let signing_public_key = crypto::ed25519_public_key(&signing_secret);
     let event = EndpointKeypair {
         endpoint,
@@ -54,7 +49,7 @@ pub fn local_keypair(context: &impl LocalEndpointRead) -> Result<Option<Endpoint
             let endpoint = endpoint_id(&endpoint)?;
             let signing_public_key = endpoint_id(&signing_public_key)?;
             let signing_secret = endpoint_id(&signing_secret)?;
-            let derived = PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+            let derived = crypto::x25519_public_key(&secret);
             if derived != endpoint {
                 return Err("stored endpoint does not match local endpoint secret".to_string());
             }

@@ -49,7 +49,7 @@ the rule is still prose/review only.
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_tests.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
 | Connection route learning is part of connection projection, not a transport-target event module. | typed + static | [ReceiveMetadata](src/protocol/event_modules/types.rs), [connection/schema.rs](src/protocol/event_modules/connection/schema.rs), `connection_routes_are_projected_from_receive_metadata`. |
-| Connection outbox is temporary id-only send work; transit batches canonical inner events. | typed + static + partial | Connection outbox row helpers are visible only inside `protocol::event_modules`; `connection_outbox_is_id_only_and_transit_batches_inner_events` checks the table shape, and connection module tests cover temp restart/stale-row cleanup. Exact batch sizing remains implementation/test coverage. |
+| Connection outbox is memory-local id-only send work; transit batches canonical inner events. | typed + static + partial | Connection outbox row helpers are visible only inside `protocol::event_modules`; `connection_outbox_is_id_only_and_transit_batches_inner_events` checks the table shape, and connection module tests cover memory restart/stale-row cleanup. Exact batch sizing remains implementation/test coverage. |
 | Connection durable ingress rejects remote local-only events and delegates shared events to the main pipeline. | partial + tested | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs) decodes inbound durable bytes through the registry, rejects non-shared scopes, and admits shared records through the common worker; connection ingress does not perform content-specific validation. Covered by connection worker tests. |
 | Sync direction is connection-scope context, not canonical bytes. | static | `sync_canonical_bytes_do_not_encode_inbound_or_outbound_direction`. |
 | Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_schema_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
@@ -58,7 +58,7 @@ the rule is still prose/review only.
 | Codecs use shared binary helpers and reject trailing bytes. | static + partial | `codec_files_use_shared_binary_helpers_and_finish_reads`; this catches common drift but is not a formal fixed-width proof. |
 | `types.rs` does not store encoded/canonical artifacts as semantic fields. | static | `event_module_types_do_not_store_encoded_event_artifacts`. |
 | Production shared events require authority. | partial | Durable shared-state events must be signed by an authorized dependency unless they are self-authenticating root events such as `workspace`. Local-only secrets, connection-scoped protocol work, and test-only event modules are explicit carveouts. Raw `device_invite` and raw content are rejected by registry dispatch; signed identity/content projectors validate signer authority from event context. |
-| Crypto behavior must be real where claimed; transit/crypto naming must not claim fake protection. | static + partial | `source_does_not_contain_fake_crypto_claims`; cryptographic correctness still needs implementation review and tests. |
+| Crypto behavior must be real where claimed and primitive implementations live in core crypto. | static + partial | `source_does_not_contain_fake_crypto_claims`; transit uses `core::crypto` X25519/XChaCha helpers while keeping associated-data and purpose policy in connection code. Cryptographic correctness still needs implementation review and tests. |
 | Functional proof comes from black-box CLI/network tests, except pure projector/command tests. | partial | Existing tests spawn the real `topo` binary for sync/generate/cascade paths; this remains a process/testing rule, not a type guarantee. |
 | Workers with cursors, leases, fairness, and wake declarations are the long-term control loop. | uncovered | Described in [plan.md](plan.md); only the event-modules worker, connection worker, and sync worker exist in the current POC. |
 | Rust idiom and common correctness lints pass. | static | Run `cargo clippy --all-targets -- -D warnings` in addition to `cargo test`; Clippy complements but does not replace [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
@@ -146,8 +146,8 @@ The following rules should stay mechanically enforced where practical:
 - Table names and schemas are declared in the owning `schema.rs` scope as typed
   `TableName` and `Schema` values; projectors and queries use those
   declarations. Ordinary row tables should use `Schema::durable_row_table` or
-  `Schema::temp_row_table` so the module owns the table name while store owns
-  the uniform row shape.
+  `Schema::memory_row_table` so the module owns the table name while store owns
+  the uniform row shape and storage class.
 - `EventRecord` literals are constructed by codecs. Other code asks codecs to
   produce records or proposed events.
 - `codec.rs` uses shared binary helpers and finishes reads so trailing bytes are
@@ -635,8 +635,8 @@ must be inside their canonical bytes, and their id is the normal
 event body. It is `EventScope::Connection(...)` projection context supplied by
 the command path or receive path. They are not durable event-set truth: the
 worker applies their projector output immediately. The outbox row is id-only and
-temporary; it is pending send work, not protocol truth. The connection domain may
-keep a temporary canonical-byte cache for transient events until transport
+memory-local; it is pending send work, not protocol truth. The connection domain may
+keep an in-memory canonical-byte cache for transient events until transport
 confirms send. After send, the outbox row can be deleted; after restart, sync can
 recreate any needed send work by emitting the same deterministic
 connection-scoped events again.
@@ -649,15 +649,18 @@ then wakes the owning domain worker over rows already projected by that event.
 For sync today this means outgoing-scoped compare/have/need events project to
 connection `outbox`, while incoming-scoped compare/have/need events project to
 `sync.inbound_events`.
-Those sync request rows may be temporary; if a debug mode wants durable protocol
+Those sync request rows may be memory-local; if a debug mode wants durable protocol
 trace facts, it should make the storage class explicit instead of treating them
 as shared durable data.
 
 Connection request/ack receive metadata is projection context. When core TCP
 hands an inbound frame to the connection worker, the worker may attach
-`ReceiveMetadata { origin, local_endpoint, remember_route }` to the decoded
-canonical connection event before admission. The request/ack projector then
-writes the connection row and, when the route is worth dialing later, the current
+`ReceiveMetadata` into `EventContext` for a decoded connection event. It is not
+canonical event data and must not be stored in `EventRecord`. Request projection
+requires bootstrap-invite receive authorization whose invite-secret event is an
+applied dependency. Ack projection requires endpoint receive
+authorization from the decrypted sender endpoint. Only then may the projector
+write the connection row and, when the route is worth dialing later, the current
 transport-target row in one projection. Do not model that route observation as a
 separate `transport_target` event module: the address is subjective to this
 peer's receive boundary, and it is meaningful only with the connection event
@@ -703,9 +706,10 @@ authorized, which associated data is passed, and how projection treats a
 verification failure.
 
 Keep the core crypto API small and honest, following the useful `poc-6` shape:
-`hash`, `sign`/`verify`, and later `wrap`/`unwrap` or `check`-style helpers over
-real primitives. Do not leak low-level library calls through event modules, and
-do not name a helper after a property it does not actually enforce.
+`hash`, `sign`/`verify`, X25519 key derivation, nonce generation, and
+`encrypt`/`decrypt`-style helpers over real primitives. Do not leak low-level
+library calls through event modules, and do not name a helper after a property
+it does not actually enforce.
 
 ## No Fake Or Placeholder Encryption
 

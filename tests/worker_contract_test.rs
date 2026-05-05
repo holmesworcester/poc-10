@@ -1,12 +1,9 @@
 use std::cell::Cell;
-use std::net::SocketAddr;
 
 use topo::core::store::Store;
 use topo::protocol::event_modules::identity::{endpoint, endpoint_shared};
 use topo::protocol::event_modules::schema::{self as event_schema, EventLabel};
-use topo::protocol::event_modules::types::{
-    event_id, EventId, EventRecord, EventScope, ReceiveMetadata,
-};
+use topo::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
 use topo::protocol::event_modules::worker::{
     self, CommandOutput, EventRegistry, EventWithContext, ProjectionOutput,
 };
@@ -166,41 +163,6 @@ fn worker_never_surfaces_failed_projection_as_dependency_context() {
     assert!(!event_schema::event_is_applied(&store, &child_id).unwrap());
 }
 
-#[test]
-fn worker_rejects_blocked_durable_receive_metadata() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("receive-metadata.db")).unwrap();
-
-    let bytes = b"durable-with-receive-metadata".to_vec();
-    let registry = RejectReceiveMetadataRegistry {
-        bytes: bytes.clone(),
-    };
-    let event = EventRecord {
-        timestamp: 1,
-        body_len: bytes.len(),
-        canonical_bytes: bytes,
-        dependencies: vec![[9; 32]],
-        workspace_id: None,
-        scope: EventScope::Shared,
-        receive: Some(ReceiveMetadata {
-            origin: "127.0.0.1:1".parse::<SocketAddr>().unwrap(),
-            local_endpoint: [7; 32],
-            remember_route: true,
-        }),
-    };
-
-    let err = worker::run(
-        &store,
-        &registry,
-        CommandOutput::with_events((), vec![event]),
-    )
-    .expect_err("blocked durable receive metadata must be rejected");
-    assert!(
-        err.contains("durable receive metadata cannot be preserved while blocked"),
-        "{err}"
-    );
-}
-
 struct ContextRegistry {
     dep_id: EventId,
     child_id: EventId,
@@ -219,36 +181,6 @@ struct ValidDependencyContextRegistry {
     child_saw_context: Cell<bool>,
 }
 
-struct RejectReceiveMetadataRegistry {
-    bytes: Vec<u8>,
-}
-
-impl EventRegistry for RejectReceiveMetadataRegistry {
-    fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        if bytes == self.bytes {
-            Ok(EventRecord {
-                timestamp: 1,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: Vec::new(),
-                workspace_id: None,
-                scope: EventScope::Shared,
-                receive: None,
-            })
-        } else {
-            Err("unknown test event".to_string())
-        }
-    }
-
-    fn project_record(
-        &self,
-        _store: &Store,
-        _event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String> {
-        panic!("durable receive metadata should be rejected before projection");
-    }
-}
-
 impl ContextRegistry {
     fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
         if bytes == self.dep_bytes {
@@ -259,7 +191,6 @@ impl ContextRegistry {
                 dependencies: Vec::new(),
                 workspace_id: None,
                 scope: EventScope::Shared,
-                receive: None,
             });
         }
         if bytes == self.child_bytes {
@@ -270,7 +201,6 @@ impl ContextRegistry {
                 dependencies: vec![self.dep_id],
                 workspace_id: None,
                 scope: EventScope::Shared,
-                receive: None,
             });
         }
         Err("unknown test event".to_string())
@@ -287,7 +217,6 @@ impl ValidDependencyContextRegistry {
                 dependencies: Vec::new(),
                 workspace_id: None,
                 scope: EventScope::Shared,
-                receive: None,
             });
         }
         if bytes == self.bad_dep_bytes {
@@ -298,7 +227,6 @@ impl ValidDependencyContextRegistry {
                 dependencies: vec![self.gate_id],
                 workspace_id: None,
                 scope: EventScope::Shared,
-                receive: None,
             });
         }
         if bytes == self.child_bytes {
@@ -309,7 +237,6 @@ impl ValidDependencyContextRegistry {
                 dependencies: vec![self.bad_dep_id],
                 workspace_id: None,
                 scope: EventScope::Shared,
-                receive: None,
             });
         }
         Err("unknown test event".to_string())

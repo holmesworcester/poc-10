@@ -5,8 +5,7 @@
 //! decision as a parameter, which keeps policy queries in the worker and keeps
 //! this file a pure transformation over explicit inputs.
 
-use rand_core::RngCore;
-
+use crate::core::crypto;
 use crate::protocol::event_modules::identity::{endpoint, invite};
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
@@ -34,6 +33,7 @@ pub fn create(
     let invite = invite::commands::parse(invite_link)?;
     let event = RequestEvent {
         from_endpoint: local.endpoint,
+        to_endpoint: invite.endpoint,
         nonce: nonce32(),
         bootstrap_hash: invite::commands::secret_hash(&invite.bootstrap_secret),
     };
@@ -60,6 +60,9 @@ pub(in crate::protocol::event_modules::connection) fn accept(
     // state. Once accepted, the response ack is just another proposed event
     // plus immediate return bytes for the caller to send back.
     let event = codec::decode(&bytes)?;
+    if event.to_endpoint != local.endpoint {
+        return Err("connection request addressed to a different endpoint".to_string());
+    }
     if !bootstrap_hash_is_authorized {
         return Err("invite private key rejected".to_string());
     }
@@ -89,7 +92,5 @@ pub(in crate::protocol::event_modules::connection) fn accept(
 }
 
 fn nonce32() -> [u8; 32] {
-    let mut nonce = [0; 32];
-    rand_core::OsRng.fill_bytes(&mut nonce);
-    nonce
+    crypto::random_bytes_32()
 }

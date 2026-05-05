@@ -146,6 +146,26 @@ impl Modules {
             sync::worker::Output::DrainedInboundSync(_) => {
                 Err("sync worker returned non-start output".to_string())
             }
+            sync::worker::Output::MaybeStarted(_) => {
+                Err("sync worker returned maybe-start output".to_string())
+            }
+        }
+    }
+
+    pub fn maybe_start_sync(
+        &self,
+        store: &Store,
+        now_ms: u64,
+        quiet_ms: u64,
+    ) -> Result<CommandOutput<sync::worker::SyncStartReport>, String> {
+        match sync::worker::run(store, sync::worker::Work::MaybeStart { now_ms, quiet_ms })? {
+            sync::worker::Output::MaybeStarted(output) => Ok(output),
+            sync::worker::Output::Started(_) => {
+                Err("sync worker returned force-start output".to_string())
+            }
+            sync::worker::Output::DrainedInboundSync(_) => {
+                Err("sync worker returned non-start output".to_string())
+            }
         }
     }
 

@@ -6,8 +6,6 @@
 //! private key is returned to the caller as invite material so a later
 //! endpoint-shared command can produce a real signed envelope.
 
-use rand_core::{OsRng, RngCore};
-
 use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::protocol::event_modules::identity::signed;
 use crate::protocol::event_modules::types::EventId;
@@ -79,9 +77,7 @@ pub fn create_with_private_key(
 }
 
 fn random_private_key() -> Ed25519PrivateKey {
-    let mut private_key = [0; crypto::ED25519_PRIVATE_KEY_BYTES];
-    OsRng.fill_bytes(&mut private_key);
-    private_key
+    crypto::random_ed25519_private_key()
 }
 
 fn validate_id(name: &str, id: &EventId) -> Result<(), String> {

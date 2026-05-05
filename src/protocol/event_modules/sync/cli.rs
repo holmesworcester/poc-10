@@ -2,9 +2,8 @@
 //!
 //! These counters describe the externally visible sync exchange while keeping
 //! the top-level CLI independent of sync item internals. The `sync` command is
-//! also the temporary POC entrypoint for serving a finite number of inbound TCP
-//! streams; once the long-lived control loop exists, that serving mode should
-//! become runtime wiring rather than sync command syntax.
+//! also the finite test/debug entrypoint for serving a fixed number of inbound
+//! TCP streams. The product daemon path is `topo start`.
 
 use std::net::SocketAddr;
 
@@ -18,7 +17,7 @@ pub fn commands() -> Vec<CliCommand<Context>> {
     vec![CliCommand {
         name: "sync",
         usage: SYNC_USAGE,
-        help: "Start sync, or serve a finite number of inbound sync streams.",
+        help: "Start sync, or serve a finite number of inbound sync streams for tests/debugging.",
         run: run_sync_command,
     }]
 }

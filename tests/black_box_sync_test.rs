@@ -1,5 +1,6 @@
 mod cli_harness;
 
+use std::io::{BufRead, BufReader};
 use std::process::{Child, Output};
 use std::thread;
 use std::time::Duration;
@@ -144,6 +145,75 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
     assert_content_count(&carol, workspace_b.workspace_id, 4);
 }
 
+#[test]
+fn daemons_sync_cli_generated_content_without_manual_sync() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice-daemon.db");
+    let bob = temp_db(&tmp, "bob-daemon.db");
+    let alice_port = free_port();
+    let bob_port = free_port();
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    let _bob_daemon = spawn_daemon(&bob, bob_port);
+
+    let alice_invite = invite(&alice, alice_port);
+    let connected = connect_with_retry(&bob, &alice_invite);
+    assert!(connected.contains("connected:"), "{connected}");
+    let reverse_invite = invite(&bob, bob_port);
+    let reverse_connected = connect_with_retry(&alice, &reverse_invite);
+    assert!(
+        reverse_connected.contains("connected:"),
+        "{reverse_connected}"
+    );
+
+    let alice_endpoint = local_endpoint(&alice);
+    let bob_endpoint = local_endpoint(&bob);
+    let workspace = workspace_graph(
+        &alice,
+        71,
+        "daemon-shared",
+        &[
+            Member::new("alice-daemon", alice_endpoint, 81),
+            Member::new("bob-daemon", bob_endpoint, 82),
+        ],
+    );
+    generate(&alice, workspace.workspace_id, 3, 128);
+
+    wait_for_content_count(&bob, workspace.workspace_id, 3);
+}
+
+#[test]
+fn second_daemon_for_same_db_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice-single-daemon.db");
+    let first_port = free_port();
+    let second_port = free_port();
+    let _daemon = spawn_daemon(&alice, first_port);
+
+    let output = topo(&[
+        "--db",
+        &alice,
+        "start",
+        "--listen",
+        "127.0.0.1",
+        &second_port.to_string(),
+        "--sync-ms",
+        "100",
+        "--quiet-ms",
+        "100",
+    ]);
+    assert!(
+        !output.status.success(),
+        "second daemon unexpectedly started\nstdout={}\nstderr={}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("daemon already running"),
+        "unexpected second-daemon stderr:\n{}",
+        stderr(&output)
+    );
+}
+
 #[derive(Clone, Copy)]
 struct Member {
     name: &'static str,
@@ -270,6 +340,42 @@ fn start_listener(db: &str, port: u16, accept: usize) -> Child {
     ])
 }
 
+struct RunningDaemon {
+    child: Child,
+}
+
+impl Drop for RunningDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
+    let port = port.to_string();
+    let mut child = spawn_topo(&[
+        "--db",
+        db,
+        "start",
+        "--listen",
+        "127.0.0.1",
+        &port,
+        "--sync-ms",
+        "100",
+        "--quiet-ms",
+        "100",
+    ]);
+    let stdout = child.stdout.take().expect("daemon stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read daemon line");
+    assert!(
+        line.starts_with("listening: "),
+        "daemon did not report listening: {line}"
+    );
+    RunningDaemon { child }
+}
+
 fn connect_pair(initiator_db: &str, listener_db: &str, listener_port: u16) {
     let invite = invite(listener_db, listener_port);
     let listener = start_listener(listener_db, listener_port, 1);
@@ -347,8 +453,26 @@ fn assert_content_count(db: &str, workspace_id: EventId, expected: usize) {
     );
 }
 
+fn wait_for_content_count(db: &str, workspace_id: EventId, expected: usize) {
+    let workspace = hex_id(workspace_id);
+    let mut last = String::new();
+    for _ in 0..300 {
+        let out = assert_success(topo(&["--db", db, "content-count", &workspace]));
+        if line_value(&out, "content_events") == expected.to_string() {
+            return;
+        }
+        last = out;
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("content count did not reach {expected}; last output:\n{last}");
+}
+
 fn assert_membership(db: &str, workspace_id: EventId, endpoint_id: EventId) {
-    assert!(has_membership(db, workspace_id, endpoint_id));
+    assert!(
+        has_membership(db, workspace_id, endpoint_id),
+        "missing membership\nstatus:\n{}",
+        assert_success(topo(&["--db", db, "status"]))
+    );
 }
 
 fn assert_no_membership(db: &str, workspace_id: EventId, endpoint_id: EventId) {

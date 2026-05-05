@@ -897,9 +897,9 @@ fn connection_outbox_is_id_only_and_transit_batches_inner_events() {
     let schema = source_text(&root.join("src/protocol/event_modules/connection/schema.rs"));
     assert!(
         schema.contains("fn outbox_row(")
-            && schema.contains("Schema::temp_row_table(\"connection.outbox.v1\", OUTBOX)")
+            && schema.contains("Schema::memory_row_table(\"connection.outbox.v1\", OUTBOX)")
             && schema.contains("value: Vec::new()"),
-        "connection outbox rows should be temp id-only send work; bytes resolve at the connection/transit boundary"
+        "connection outbox rows should be memory-local id-only send work; bytes resolve at the connection/transit boundary"
     );
 
     let transit_commands =
@@ -929,9 +929,9 @@ fn connection_routes_are_projected_from_receive_metadata() {
     let ack_projector = source_text(&connection_root.join("connection_ack/projector.rs"));
     assert!(
         schema.contains("const TRANSPORT_TARGETS")
-            && request_projector.contains("event.record.receive")
+            && request_projector.contains("context.receive")
             && request_projector.contains("transport_target_row")
-            && ack_projector.contains("event.record.receive")
+            && ack_projector.contains("context.receive")
             && ack_projector.contains("transport_target_row"),
         "connection request/ack projection should atomically write route rows from receive metadata"
     );
@@ -1267,7 +1267,7 @@ fn row_table_declarations_use_store_schema_helper() {
     }
     assert!(
         violations.is_empty(),
-        "row table schemas should be declared with Schema::durable_row_table/temp_row_table so modules own names while store owns the generic row shape:\n{}",
+        "row table schemas should be declared with Schema::durable_row_table/memory_row_table so modules own names while store owns the generic row shape:\n{}",
         violations.join("\n")
     );
 }

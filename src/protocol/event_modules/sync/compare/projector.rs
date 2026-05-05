@@ -70,6 +70,7 @@ mod tests {
                 event_id: event_id(&record.canonical_bytes),
                 dependencies: Vec::new(),
                 labels: Vec::new(),
+                receive: None,
             },
         }
     }

@@ -105,6 +105,7 @@ mod tests {
                     record: signer,
                 }],
                 labels: Vec::new(),
+                receive: None,
             },
         }
     }
@@ -147,6 +148,7 @@ mod tests {
                 event_id,
                 dependencies: Vec::new(),
                 labels: Vec::new(),
+                receive: None,
             },
         };
 

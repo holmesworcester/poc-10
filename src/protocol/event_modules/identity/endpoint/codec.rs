@@ -5,8 +5,6 @@
 //! private keys, so corrupted or mismatched identity rows fail before
 //! projection.
 
-use x25519_dalek::{PublicKey, StaticSecret};
-
 use crate::core::crypto;
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
@@ -36,7 +34,7 @@ pub fn decode(bytes: &[u8]) -> Result<EndpointKeypair, String> {
     let signing_public_key = reader.id()?;
     let signing_secret = reader.id()?;
     reader.finish()?;
-    let derived = PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+    let derived = crypto::x25519_public_key(&secret);
     if derived != endpoint {
         return Err("local endpoint secret does not match endpoint".to_string());
     }
@@ -61,7 +59,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         dependencies: Vec::new(),
         workspace_id: None,
         scope: EventScope::Local,
-        receive: None,
     })
 }
 

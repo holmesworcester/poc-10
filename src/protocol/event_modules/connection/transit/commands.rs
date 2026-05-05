@@ -8,15 +8,20 @@
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointKeypair;
 
+use crate::core::crypto;
+
 use super::super::types::ConnectionId;
 use super::codec::{self, TransitEnvelopeRef};
-use super::crypto;
 use super::types::TransitEnvelope;
+
+const BOOTSTRAP_PURPOSE: &[u8] = b"topo-bootstrap-transit-v1";
+const CONNECTION_PURPOSE: &[u8] = b"topo-connection-transit-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnwrappedTransit {
     pub inners: Vec<Vec<u8>>,
     pub connection_id: Option<ConnectionId>,
+    pub sender_endpoint: EndpointId,
 }
 
 pub fn create_bootstrap(
@@ -26,17 +31,17 @@ pub fn create_bootstrap(
 ) -> Result<Vec<u8>, String> {
     // Bootstrap frames are addressed directly to an endpoint because a
     // connection id does not exist yet.
-    let nonce = crypto::nonce();
+    let nonce = crypto::random_xchacha20poly1305_nonce();
     let envelope = TransitEnvelope::Bootstrap {
         sender_endpoint: local.endpoint,
         recipient_endpoint,
         nonce,
         ciphertext: Vec::new(),
     };
-    let ciphertext = crypto::encrypt(
+    let ciphertext = crypto::x25519_xchacha20poly1305_encrypt(
         &local.secret,
         &recipient_endpoint,
-        crypto::BOOTSTRAP_PURPOSE,
+        BOOTSTRAP_PURPOSE,
         &codec::associated_data(&envelope),
         &nonce,
         inner,
@@ -67,10 +72,10 @@ pub fn unwrap(
             if recipient_endpoint != local.endpoint {
                 return Err("bootstrap transit addressed to a different endpoint".to_string());
             }
-            let inner = crypto::decrypt(
+            let inner = crypto::x25519_xchacha20poly1305_decrypt(
                 &local.secret,
                 &sender_endpoint,
-                crypto::BOOTSTRAP_PURPOSE,
+                BOOTSTRAP_PURPOSE,
                 &codec::associated_data_bootstrap(&sender_endpoint, &recipient_endpoint, &nonce),
                 &nonce,
                 ciphertext,
@@ -78,6 +83,7 @@ pub fn unwrap(
             Ok(UnwrappedTransit {
                 inners: vec![inner],
                 connection_id: None,
+                sender_endpoint,
             })
         }
         TransitEnvelopeRef::Connection {
@@ -94,10 +100,10 @@ pub fn unwrap(
             if sender_endpoint != remote {
                 return Err("connection transit sender does not match connection".to_string());
             }
-            let plaintext = crypto::decrypt(
+            let plaintext = crypto::x25519_xchacha20poly1305_decrypt(
                 &local.secret,
                 &sender_endpoint,
-                crypto::CONNECTION_PURPOSE,
+                CONNECTION_PURPOSE,
                 &codec::associated_data_connection(
                     &connection_id,
                     &sender_endpoint,
@@ -110,6 +116,7 @@ pub fn unwrap(
             Ok(UnwrappedTransit {
                 inners: codec::decode_inner_events(&plaintext)?,
                 connection_id: Some(connection_id),
+                sender_endpoint,
             })
         }
     }
@@ -125,7 +132,7 @@ pub fn create_connection_batch(
     // authenticated envelope before encrypting the inner event bytes. The
     // plaintext is a small fixed-format list so one transit envelope can carry a
     // coherent batch of canonical events without making TCP understand them.
-    let nonce = crypto::nonce();
+    let nonce = crypto::random_xchacha20poly1305_nonce();
     let envelope = TransitEnvelope::Connection {
         connection_id,
         sender_endpoint: local.endpoint,
@@ -134,10 +141,10 @@ pub fn create_connection_batch(
         ciphertext: Vec::new(),
     };
     let plaintext = codec::encode_inner_events(&inners)?;
-    let ciphertext = crypto::encrypt(
+    let ciphertext = crypto::x25519_xchacha20poly1305_encrypt(
         &local.secret,
         &recipient_endpoint,
-        crypto::CONNECTION_PURPOSE,
+        CONNECTION_PURPOSE,
         &codec::associated_data(&envelope),
         &nonce,
         &plaintext,

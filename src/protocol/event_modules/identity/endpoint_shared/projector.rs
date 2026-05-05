@@ -149,6 +149,7 @@ mod tests {
                     record: device_invite_record,
                 }],
                 labels: Vec::new(),
+                receive: None,
             },
         }
     }
@@ -187,6 +188,7 @@ mod tests {
                 event_id: endpoint_shared_id,
                 dependencies: Vec::new(),
                 labels: Vec::new(),
+                receive: None,
             },
         };
 

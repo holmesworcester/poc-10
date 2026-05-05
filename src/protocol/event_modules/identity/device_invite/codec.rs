@@ -54,7 +54,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         dependencies: dependencies(&event),
         workspace_id: Some(event.workspace_id),
         scope: EventScope::Shared,
-        receive: None,
     })
 }
 
@@ -76,7 +75,6 @@ pub fn record_from_signed_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         dependencies: deps,
         workspace_id: Some(event.workspace_id),
         scope: EventScope::Shared,
-        receive: None,
     })
 }
 

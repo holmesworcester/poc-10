@@ -135,6 +135,31 @@ pub fn run_serve(
     Ok(lines)
 }
 
+pub fn serve_available(
+    context: &mut Context,
+    listener: &tcp::Listener,
+    accept_limit: usize,
+) -> Result<ServeSummary, String> {
+    let sent_outbox = RefCell::new(HashMap::new());
+    let report = tcp::serve_available(
+        &context.store,
+        listener,
+        accept_limit,
+        ServeSummary::default(),
+        |inbound, summary| {
+            let mut stream_summary = StreamSummary::default();
+            let outgoing =
+                handle_inbound(context, inbound, false, &mut stream_summary, &sent_outbox)?;
+            summary.received_events += stream_summary.received_events;
+            Ok(outgoing)
+        },
+        |rows, _| mark_sent_network_rows(context, rows, &sent_outbox),
+    )?;
+    let mut summary = report.value;
+    summary.accepted_connections = report.accepted_connections;
+    Ok(summary)
+}
+
 pub fn exchange_outbound_route(
     context: &Context,
     outbound: OutboundSync,
