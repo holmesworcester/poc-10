@@ -183,7 +183,7 @@ impl Modules {
         // branch immediately hands control to the owning domain so this registry
         // does not accumulate projector logic.
         let bytes = &event.record.canonical_bytes;
-        if let Some(output) = identity::project_record(bytes)? {
+        if let Some(output) = identity::project_record(event)? {
             return Ok(output);
         }
         if connection::is_projection_record(bytes) {
@@ -231,6 +231,8 @@ pub fn schemas() -> Vec<Schema> {
     out.extend_from_slice(schema::SCHEMAS);
     out.extend_from_slice(identity::endpoint::schema::SCHEMAS);
     out.extend_from_slice(identity::invite::schema::SCHEMAS);
+    out.extend_from_slice(identity::user::schema::SCHEMAS);
+    out.extend_from_slice(identity::user_invite::schema::SCHEMAS);
     out.extend_from_slice(identity::workspace::schema::SCHEMAS);
     out.extend_from_slice(connection::schema::SCHEMAS);
     out.extend_from_slice(sync::schema::SCHEMAS);
@@ -283,6 +285,7 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         identity::invite::codec::TYPE_INVITE_SECRET => {
             identity::invite::codec::record_from_bytes(bytes)
         }
+        identity::signed::codec::TYPE_SIGNED => identity::signed::codec::record_from_bytes(bytes),
         identity::workspace::codec::TYPE_WORKSPACE => {
             identity::workspace::codec::record_from_bytes(bytes)
         }
