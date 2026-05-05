@@ -331,6 +331,14 @@ Leaf module tests should cover:
 - projector rejects malformed fields
 - schema row encoding/decoding
 
+For projector tests, prefer pure tests translated from p7's identity projectors.
+Port row-output and decision assertions into the owning p8 `projector.rs`
+`#[cfg(test)]` module. Do not port p7's top-level projector SQL harness,
+tenant/`recorded_by` scoping, pending bootstrap trust side effects, key-history
+assertions, or projector-emitted command behavior. In p8, projectors prove only
+row-shaped output and local dependency/signer decisions; command scheduling and
+worker effects belong elsewhere.
+
 CLI tests should live beside the module command they prove:
 
 ```text
