@@ -121,7 +121,7 @@ src/protocol/event_modules/identity/<event>/
   schema.rs        # only when the event owns rows
   queries.rs       # only for read-only reporting/CLI surfaces
   cli.rs           # only when this leaf owns CLI commands
-  cli_test.rs      # for CLI tests owned by this leaf
+  cli_tests.rs     # for CLI tests owned by this leaf
 ```
 
 Domain root files should aggregate only shared identity concerns:
@@ -133,7 +133,6 @@ src/protocol/event_modules/identity/
   schema.rs        # only if shared identity rows are cleaner at domain scope
   queries.rs       # only for read-only domain reporting
   worker.rs        # only if active identity-domain queued work is needed
-  test_support.rs  # only if multiple leaf cli_test.rs files need helpers
 ```
 
 Prefer the tightest owner. A command for one event type belongs in that event's
@@ -310,32 +309,32 @@ Leaf module tests should cover:
 CLI tests should live beside the module command they prove:
 
 ```text
-src/protocol/event_modules/identity/workspace/cli_test.rs
-src/protocol/event_modules/identity/user_invite/cli_test.rs
-src/protocol/event_modules/identity/device_invite/cli_test.rs
-src/protocol/event_modules/identity/admin/cli_test.rs
-src/protocol/event_modules/identity/endpoint_shared/cli_test.rs
+src/protocol/event_modules/identity/workspace/cli_tests.rs
+src/protocol/event_modules/identity/user_invite/cli_tests.rs
+src/protocol/event_modules/identity/device_invite/cli_tests.rs
+src/protocol/event_modules/identity/admin/cli_tests.rs
+src/protocol/event_modules/identity/endpoint_shared/cli_tests.rs
 ```
 
 Each module should include its test with:
 
 ```rust
 #[cfg(test)]
-mod cli_test;
+mod cli_tests;
 ```
 
 Later CLI tests may import earlier local scenario helpers when they need to
 build on prior flows. Keep helpers test-only and scoped:
 
 ```rust
-// identity/workspace/cli_test.rs
+// identity/workspace/cli_tests.rs
 pub(crate) fn create_workspace_scenario(...) -> WorkspaceScenario;
 
-// identity/user_invite/cli_test.rs
-use super::super::workspace::cli_test::create_workspace_scenario;
+// identity/user_invite/cli_tests.rs
+use super::super::workspace::cli_tests::create_workspace_scenario;
 
-// identity/device_invite/cli_test.rs
-use super::super::user_invite::cli_test::create_joined_user_scenario;
+// identity/device_invite/cli_tests.rs
+use super::super::user_invite::cli_tests::create_joined_user_scenario;
 ```
 
 If many modules need the same setup helpers, move only helpers to:
@@ -344,7 +343,11 @@ If many modules need the same setup helpers, move only helpers to:
 src/protocol/event_modules/identity/test_support.rs
 ```
 
-Keep assertions in the leaf `cli_test.rs` file whose behavior is being proven.
+That helper file is not allowed by the static boundary today. Add it only with
+an explicit boundary-test update in the same commit that introduces the first
+real shared helper.
+
+Keep assertions in the leaf `cli_tests.rs` file whose behavior is being proven.
 Avoid a top-level scenario dumping ground. Keep `tests/cli_harness` generic and
 process-only.
 
@@ -367,7 +370,7 @@ owned by a leaf module.
 Run tests in this order:
 
 1. focused leaf module tests
-2. identity command and `cli_test.rs` tests
+2. identity command and `cli_tests.rs` tests
 3. p8 boundary tests, especially `cargo test --test rules_boundary_test`
 4. full `cargo test`
 5. `cargo clippy --all-targets -- -D warnings` if the branch is ready for
@@ -651,7 +654,7 @@ domain root, not in the app shell. A generic scenario runner can still execute
 the real `topo` binary and real TCP; the scenario's setup, command sequence,
 and expected output stay local to the behavior being specified.
 
-`cli_test.rs` follows the same scope rule as `cli.rs`. A leaf event module test
+`cli_tests.rs` follows the same scope rule as `cli.rs`. A leaf event module test
 owns scenarios for that event type; a domain-root test owns workflows spanning
 its child event modules; protocol-level tests are only for cross-domain
 end-to-end behavior. The shared CLI harness is deliberately uninteresting:

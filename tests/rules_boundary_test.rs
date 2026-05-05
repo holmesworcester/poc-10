@@ -130,6 +130,7 @@ fn protocol_app_layer_does_not_exist() {
 fn domain_roots_contain_only_children_and_shared_domain_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
     let allowed_domain_files = [
+        "cli_tests.rs",
         "mod.rs",
         "worker.rs",
         "schema.rs",
@@ -195,6 +196,7 @@ fn event_module_files_use_only_standard_concern_names() {
     let event_root = root.join("src/protocol/event_modules");
     let allowed = [
         "cli.rs",
+        "cli_tests.rs",
         "codec.rs",
         "commands.rs",
         "crypto.rs",

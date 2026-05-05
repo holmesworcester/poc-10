@@ -23,7 +23,7 @@ the rule is still prose/review only.
 | Workers live at the owning scope and expose one obvious entrypoint. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`, `worker_files_export_only_run_as_public_entrypoint`; no typed worker trait/catalog yet. |
 | Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs), `sync_worker_drains_projected_rows_not_direct_ingest_work`; static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
 | `protocol/app` is forbidden; CLI behavior is scoped. | typed + static | [CliCommand](src/core/cli.rs), [protocol/cli.rs](src/protocol/cli.rs), `protocol_app_layer_does_not_exist`, `cli_files_live_with_event_modules_or_the_protocol_shell`. |
-| CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_test.rs` migration and typed scenario declarations are still prose/planned. |
+| CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_tests.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
 | Connection route learning is part of connection projection, not a transport-target event module. | typed + static | [ReceiveMetadata](src/protocol/event_modules/types.rs), [connection/schema.rs](src/protocol/event_modules/connection/schema.rs), `connection_routes_are_projected_from_receive_metadata`. |
 | Connection outbox is temporary id-only send work; transit batches canonical inner events. | typed + static + partial | Connection outbox row helpers are visible only inside `protocol::event_modules`; `connection_outbox_is_id_only_and_transit_batches_inner_events` checks the table shape, and connection module tests cover temp restart/stale-row cleanup. Exact batch sizing remains implementation/test coverage. |
@@ -239,12 +239,12 @@ CLI scenario definitions should live beside the closest relevant event module
 or domain root. A generic integration runner may execute those scenarios through
 the real CLI and check expected output.
 
-The intended `cli_test.rs` contract is scoped:
+The intended `cli_tests.rs` contract is scoped:
 
-- `event_modules/<domain>/<event>/cli_test.rs` covers the black-box CLI behavior
+- `event_modules/<domain>/<event>/cli_tests.rs` covers the black-box CLI behavior
   for one leaf event module: command params, created event ids, projection
   visibility, validation failures, and output formatting for that module.
-- `event_modules/<domain>/cli_test.rs` covers workflows spanning child modules in
+- `event_modules/<domain>/cli_tests.rs` covers workflows spanning child modules in
   the same domain, such as invite/bootstrap/connection setup or sync request /
   response behavior.
 - Protocol-level CLI tests cover cross-domain scenarios only, such as multiple
