@@ -128,6 +128,37 @@ fn protocol_app_layer_does_not_exist() {
 }
 
 #[test]
+fn daemon_lives_at_application_layer_not_protocol() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        root.join("src/daemon.rs").exists(),
+        "the long-lived daemon is application runtime orchestration and should live at src/daemon.rs"
+    );
+    assert!(
+        !root.join("src/protocol/daemon.rs").exists(),
+        "daemon runtime orchestration must not be a protocol module"
+    );
+
+    let protocol_mod = source_text(&root.join("src/protocol/mod.rs"));
+    assert!(
+        !protocol_mod.contains("pub mod daemon"),
+        "src/protocol/mod.rs must not export a daemon module"
+    );
+
+    let protocol_cli = source_text(&root.join("src/protocol/cli.rs"));
+    assert!(
+        !protocol_cli.contains("daemon::commands"),
+        "protocol command aggregation should not register application daemon commands"
+    );
+
+    let main = source_text(&root.join("src/main.rs"));
+    assert!(
+        main.contains("daemon::commands()"),
+        "the binary entrypoint should assemble application daemon commands"
+    );
+}
+
+#[test]
 fn domain_roots_contain_only_children_and_shared_domain_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
     let allowed_domain_files = [

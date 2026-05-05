@@ -1,8 +1,8 @@
-//! Foreground protocol daemon.
+//! Foreground application daemon.
 //!
-//! The daemon is a scheduler over existing protocol workers. It owns a
-//! long-lived store handle, a TCP listener, and timing policy. It does not add
-//! auth rules, decode event families inline, or bypass the normal
+//! The daemon is runtime orchestration around existing protocol workers. It
+//! owns a long-lived store handle, a TCP listener, and timing policy. It does
+//! not add auth rules, decode event families inline, or bypass the normal
 //! command/projector/worker path.
 
 use std::fs::{self, File, OpenOptions};

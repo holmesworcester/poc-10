@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 use topo::core::cli;
-use topo::protocol;
+use topo::{daemon, protocol};
 
 fn main() {
     if let Err(err) = run(env::args().skip(1).collect()) {
@@ -14,7 +14,8 @@ fn main() {
 fn run(args: Vec<String>) -> Result<(), String> {
     let (db_path, command_args) = parse_global_args(args)?;
     let mut context = protocol::cli::Context::open(db_path)?;
-    let commands = protocol::cli::commands();
+    let mut commands = daemon::commands();
+    commands.extend(protocol::cli::commands());
     let output = cli::run(&commands, &mut context, &command_args)?;
     for line in output.lines {
         println!("{line}");

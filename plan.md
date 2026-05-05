@@ -1436,6 +1436,10 @@ owns a long-lived `Store`, a core TCP listener, and a scheduler loop over the
 existing protocol workers. RPC is optional; direct-DB CLI commands are acceptable
 as long as the daemon observes durable committed state and keeps syncing.
 
+The daemon module belongs at the application crate root (`src/daemon.rs`), not
+under `src/protocol`. It orchestrates protocol workers; it is not itself
+protocol semantics, an event module, or a protocol command aggregator concern.
+
 Daemon responsibilities:
 
 - accept inbound TCP frames continuously through `core/tcp.rs`
