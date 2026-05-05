@@ -8,6 +8,7 @@
 
 pub mod cli;
 pub mod crux_runner;
+pub mod crypto;
 pub mod network_queues;
 pub mod store;
 pub mod tcp;
