@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_grant_uses_real_signed_envelope_with_signer_dependency() {
+    fn sign_grant_uses_real_signed_envelope_with_inner_dependencies() {
         let signer_private_key = [7; crypto::ED25519_PRIVATE_KEY_BYTES];
         let output = sign_grant(SignGrantAdmin {
             grant: GrantAdmin {
@@ -203,7 +203,10 @@ mod tests {
 
         assert_eq!(output.events.len(), 1);
         let record = output.events[0].record();
-        assert_eq!(record.dependencies, vec![[8; 32]]);
+        assert_eq!(
+            record.dependencies,
+            vec![[8; 32], [1; 32], [9; 32], [5; 32]]
+        );
         assert_eq!(output.value.signed_event_id, output.events[0].event_id());
 
         let envelope =
@@ -215,7 +218,7 @@ mod tests {
             signed::codec::record_from_bytes(record.canonical_bytes.clone())
                 .expect("signed record")
                 .dependencies,
-            vec![[8; 32]]
+            vec![[8; 32], [1; 32], [9; 32], [5; 32]]
         );
     }
 }

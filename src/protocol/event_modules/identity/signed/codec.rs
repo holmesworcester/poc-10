@@ -5,9 +5,10 @@
 //! The signature itself is the final fixed-width field.
 
 use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
-use crate::protocol::event_modules::types::{EventRecord, EventScope};
+use crate::protocol::event_modules::types::{EventId, EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 
+use super::super::{admin, device_invite, endpoint_shared, user, user_invite};
 use super::types::SignedEnvelope;
 
 pub const TYPE_SIGNED: u8 = 130;
@@ -59,14 +60,86 @@ pub fn signing_bytes(event: &SignedEnvelope) -> Vec<u8> {
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     let decoded = decode(&bytes)?;
+    let metadata = inner_metadata(&decoded)?;
     Ok(EventRecord {
-        timestamp: 0,
-        body_len: decoded.payload.len(),
+        timestamp: metadata.timestamp,
+        body_len: metadata.body_len,
         canonical_bytes: bytes,
-        dependencies: vec![decoded.signer_event_id],
+        dependencies: metadata.dependencies,
         scope: EventScope::Shared,
         receive: None,
     })
+}
+
+struct InnerMetadata {
+    timestamp: u64,
+    body_len: usize,
+    dependencies: Vec<EventId>,
+}
+
+fn inner_metadata(event: &SignedEnvelope) -> Result<InnerMetadata, String> {
+    let mut dependencies = Vec::new();
+    push_unique(&mut dependencies, event.signer_event_id);
+
+    let (timestamp, body_len, inner_dependencies) = match event.inner_type {
+        user_invite::codec::TYPE_USER_INVITE => {
+            let inner = user_invite::codec::decode(&event.payload)?;
+            (
+                inner.created_at_ms,
+                user_invite::codec::USER_INVITE_WIRE_SIZE - 1,
+                vec![inner.workspace_id, inner.authority_event_id],
+            )
+        }
+        user::codec::TYPE_USER => {
+            let inner = user::codec::decode(&event.payload)?;
+            (
+                inner.created_at_ms,
+                user::codec::USER_WIRE_SIZE - 1,
+                Vec::new(),
+            )
+        }
+        device_invite::codec::TYPE_DEVICE_INVITE => {
+            let inner = device_invite::codec::decode(&event.payload)?;
+            (
+                inner.created_at_ms,
+                device_invite::codec::DEVICE_INVITE_WIRE_SIZE - 1,
+                vec![inner.workspace_id, inner.user_authority_event_id],
+            )
+        }
+        endpoint_shared::codec::TYPE_ENDPOINT_SHARED => {
+            let inner = endpoint_shared::codec::decode(&event.payload)?;
+            (
+                inner.created_at_ms,
+                endpoint_shared::codec::ENDPOINT_SHARED_WIRE_SIZE - 1,
+                vec![inner.workspace_id, inner.user_authority_event_id],
+            )
+        }
+        admin::codec::TYPE_ADMIN => {
+            let inner = admin::codec::decode(&event.payload)?;
+            (
+                inner.created_at_ms,
+                admin::codec::ADMIN_WIRE_SIZE - 1,
+                admin::codec::dependencies(&inner),
+            )
+        }
+        _ => (0, event.payload.len(), Vec::new()),
+    };
+
+    for dependency in inner_dependencies {
+        push_unique(&mut dependencies, dependency);
+    }
+
+    Ok(InnerMetadata {
+        timestamp,
+        body_len,
+        dependencies,
+    })
+}
+
+fn push_unique(out: &mut Vec<EventId>, id: EventId) {
+    if !out.iter().any(|candidate| candidate == &id) {
+        out.push(id);
+    }
 }
 
 fn write_signing_fields(out: &mut Writer, event: &SignedEnvelope) {
@@ -103,6 +176,7 @@ fn validate_payload(event: &SignedEnvelope) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use crate::core::crypto::{self, ED25519_PRIVATE_KEY_BYTES};
+    use crate::protocol::event_modules::identity::{admin, endpoint_shared, user_invite};
 
     use super::*;
     use crate::protocol::event_modules::types::EventScope;
@@ -111,6 +185,13 @@ mod tests {
         let signer_event_id = [3; 32];
         let private_key = [9; ED25519_PRIVATE_KEY_BYTES];
         super::super::commands::sign_payload(signer_event_id, &private_key, vec![1, 2, 3, 4])
+            .expect("sign payload")
+            .value
+    }
+
+    fn sign(signer_event_id: EventId, payload: Vec<u8>) -> SignedEnvelope {
+        let private_key = [9; ED25519_PRIVATE_KEY_BYTES];
+        super::super::commands::sign_payload(signer_event_id, &private_key, payload)
             .expect("sign payload")
             .value
     }
@@ -126,6 +207,87 @@ mod tests {
         assert_eq!(record.dependencies, vec![[3; 32]]);
         assert_eq!(record.scope, EventScope::Shared);
         assert_eq!(record.body_len, 4);
+    }
+
+    #[test]
+    fn signed_user_invite_uses_inner_timestamp_and_unique_dependencies() {
+        let payload = user_invite::codec::encode(&user_invite::types::UserInviteEvent {
+            created_at_ms: 1234,
+            public_key: [4; 32],
+            workspace_id: [1; 32],
+            authority_event_id: [2; 32],
+        });
+        let bytes = encode(&sign([9; 32], payload));
+
+        let record = record_from_bytes(bytes).expect("signed user_invite record");
+
+        assert_eq!(record.timestamp, 1234);
+        assert_eq!(
+            record.body_len,
+            user_invite::codec::USER_INVITE_WIRE_SIZE - 1
+        );
+        assert_eq!(record.dependencies, vec![[9; 32], [1; 32], [2; 32]]);
+        assert_eq!(record.scope, EventScope::Shared);
+    }
+
+    #[test]
+    fn signed_endpoint_shared_exposes_signer_workspace_and_user_authority_dependencies() {
+        let payload =
+            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+                created_at_ms: 5678,
+                workspace_id: [1; 32],
+                user_authority_event_id: [2; 32],
+                endpoint_id: [3; 32],
+                device_name: "laptop".to_string(),
+            })
+            .expect("encode endpoint_shared");
+        let bytes = encode(&sign([8; 32], payload));
+
+        let record = record_from_bytes(bytes).expect("signed endpoint_shared record");
+
+        assert_eq!(record.timestamp, 5678);
+        assert_eq!(
+            record.body_len,
+            endpoint_shared::codec::ENDPOINT_SHARED_WIRE_SIZE - 1
+        );
+        assert_eq!(record.dependencies, vec![[8; 32], [1; 32], [2; 32]]);
+    }
+
+    #[test]
+    fn signed_admin_uses_inner_timestamp_and_unique_dependencies() {
+        let payload = admin::codec::encode(&admin::types::AdminEvent {
+            created_at_ms: 9012,
+            workspace_id: [1; 32],
+            public_key: [4; 32],
+            authority_event_id: [2; 32],
+            user_event_id: [3; 32],
+        });
+        let bytes = encode(&sign([7; 32], payload));
+
+        let record = record_from_bytes(bytes).expect("signed admin record");
+
+        assert_eq!(record.timestamp, 9012);
+        assert_eq!(record.body_len, admin::codec::ADMIN_WIRE_SIZE - 1);
+        assert_eq!(
+            record.dependencies,
+            vec![[7; 32], [1; 32], [2; 32], [3; 32]]
+        );
+    }
+
+    #[test]
+    fn signed_admin_metadata_deduplicates_signer_and_inner_dependencies() {
+        let payload = admin::codec::encode(&admin::types::AdminEvent {
+            created_at_ms: 9012,
+            workspace_id: [1; 32],
+            public_key: [4; 32],
+            authority_event_id: [1; 32],
+            user_event_id: [1; 32],
+        });
+        let bytes = encode(&sign([1; 32], payload));
+
+        let record = record_from_bytes(bytes).expect("signed admin record");
+
+        assert_eq!(record.dependencies, vec![[1; 32]]);
     }
 
     #[test]
@@ -145,6 +307,22 @@ mod tests {
         bytes[last] ^= 1;
 
         assert!(decode(&bytes)
+            .unwrap_err()
+            .contains("signature verification failed"));
+    }
+
+    #[test]
+    fn signed_envelope_rejects_tampered_payload_before_metadata_extraction() {
+        let payload = user_invite::codec::encode(&user_invite::types::UserInviteEvent {
+            created_at_ms: 1234,
+            public_key: [4; 32],
+            workspace_id: [1; 32],
+            authority_event_id: [2; 32],
+        });
+        let mut bytes = encode(&sign([9; 32], payload));
+        bytes[signing_len(0) + 8] ^= 1;
+
+        assert!(record_from_bytes(bytes)
             .unwrap_err()
             .contains("signature verification failed"));
     }
