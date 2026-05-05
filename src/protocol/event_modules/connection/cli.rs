@@ -21,14 +21,23 @@ use super::super::OutboundSync;
 use super::worker as connection_worker;
 
 const CONNECT_USAGE: &str = "connect INVITE_LINK";
+const ACCEPT_USAGE: &str = "accept INVITE_LINK";
 
 pub fn commands() -> Vec<CliCommand<Context>> {
-    vec![CliCommand {
-        name: "connect",
-        usage: CONNECT_USAGE,
-        help: "Connect to an invite over real TCP.",
-        run: run_connect_command,
-    }]
+    vec![
+        CliCommand {
+            name: "connect",
+            usage: CONNECT_USAGE,
+            help: "Connect to an invite over real TCP.",
+            run: run_connect_command,
+        },
+        CliCommand {
+            name: "accept",
+            usage: ACCEPT_USAGE,
+            help: "Accept an invite over real TCP.",
+            run: run_accept_command,
+        },
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +70,11 @@ impl ServeSummary {
 
 pub fn run_connect_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(1, CONNECT_USAGE)?;
+    run_connect(context, args.get(0).expect("length checked").to_string()).map(CliOutput::lines)
+}
+
+pub fn run_accept_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    args.require_len(1, ACCEPT_USAGE)?;
     run_connect(context, args.get(0).expect("length checked").to_string()).map(CliOutput::lines)
 }
 
