@@ -40,6 +40,7 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
 fn project_signed_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionOutput>, String> {
     let envelope = signed::codec::decode(&event.record.canonical_bytes)?;
     match envelope.inner_type {
+        admin::codec::TYPE_ADMIN => Ok(Some(admin::projector::project_signed(&envelope, event)?)),
         endpoint_shared::codec::TYPE_ENDPOINT_SHARED => Ok(Some(
             endpoint_shared::projector::project_signed(&envelope, event)?,
         )),

@@ -5,9 +5,10 @@
 //! The signature itself is the final fixed-width field.
 
 use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
-use crate::protocol::event_modules::types::{EventRecord, EventScope};
+use crate::protocol::event_modules::types::{EventId, EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 
+use super::super::{admin, user_invite};
 use super::types::SignedEnvelope;
 
 pub const TYPE_SIGNED: u8 = 130;
@@ -59,14 +60,40 @@ pub fn signing_bytes(event: &SignedEnvelope) -> Vec<u8> {
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     let decoded = decode(&bytes)?;
+    let dependencies = dependencies(&decoded)?;
     Ok(EventRecord {
         timestamp: 0,
         body_len: decoded.payload.len(),
         canonical_bytes: bytes,
-        dependencies: vec![decoded.signer_event_id],
+        dependencies,
         scope: EventScope::Shared,
         receive: None,
     })
+}
+
+pub fn dependencies(event: &SignedEnvelope) -> Result<Vec<EventId>, String> {
+    let mut out = Vec::new();
+    push_unique(&mut out, event.signer_event_id);
+    match event.inner_type {
+        user_invite::codec::TYPE_USER_INVITE => {
+            let inner = user_invite::codec::decode(&event.payload)?;
+            push_unique(&mut out, inner.authority_event_id);
+        }
+        admin::codec::TYPE_ADMIN => {
+            let inner = admin::codec::decode(&event.payload)?;
+            for dependency in admin::codec::dependencies(&inner) {
+                push_unique(&mut out, dependency);
+            }
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
+fn push_unique(out: &mut Vec<EventId>, id: EventId) {
+    if !out.iter().any(|candidate| candidate == &id) {
+        out.push(id);
+    }
 }
 
 fn write_signing_fields(out: &mut Writer, event: &SignedEnvelope) {
@@ -126,6 +153,49 @@ mod tests {
         assert_eq!(record.dependencies, vec![[3; 32]]);
         assert_eq!(record.scope, EventScope::Shared);
         assert_eq!(record.body_len, 4);
+    }
+
+    #[test]
+    fn signed_user_invite_exposes_admin_authority_dependency() {
+        let invite = user_invite::types::UserInviteEvent {
+            created_at_ms: 5,
+            public_key: [4; 32],
+            workspace_id: [1; 32],
+            authority_event_id: [2; 32],
+        };
+        let signed = super::super::commands::sign_payload(
+            [3; 32],
+            &[9; ED25519_PRIVATE_KEY_BYTES],
+            user_invite::codec::encode(&invite),
+        )
+        .expect("sign user invite");
+
+        assert_eq!(
+            signed.events[0].record().dependencies,
+            vec![[3; 32], [2; 32]]
+        );
+    }
+
+    #[test]
+    fn signed_admin_exposes_signer_workspace_authority_and_user_dependencies() {
+        let admin = admin::types::AdminEvent {
+            created_at_ms: 6,
+            workspace_id: [1; 32],
+            public_key: [4; 32],
+            authority_event_id: [2; 32],
+            user_event_id: [5; 32],
+        };
+        let signed = super::super::commands::sign_payload(
+            [3; 32],
+            &[9; ED25519_PRIVATE_KEY_BYTES],
+            admin::codec::encode(&admin),
+        )
+        .expect("sign admin");
+
+        assert_eq!(
+            signed.events[0].record().dependencies,
+            vec![[3; 32], [1; 32], [2; 32], [5; 32]]
+        );
     }
 
     #[test]

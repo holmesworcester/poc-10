@@ -167,8 +167,217 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
     assert_eq!(duplicate, "endpoint is already joined to workspace");
 }
 
+#[test]
+fn admin_user_endpoint_authorizes_invites_per_workspace_without_cross_authorizing() {
+    let protocol = Protocol::new();
+    let store = Protocol::open_memory_store().expect("open store");
+    let workspace_a_private_key = [7; 32];
+    let workspace_b_private_key = [17; 32];
+    let admin_user_private_key = [18; 32];
+    let admin_endpoint_private_key = [31; 32];
+    let admin_endpoint_id = crypto::ed25519_public_key(&admin_endpoint_private_key);
+
+    let workspace_a = create_workspace_with_bootstrap_admin(
+        &store,
+        &protocol,
+        1,
+        workspace_a_private_key,
+        "Workspace A",
+    );
+    let workspace_b = create_workspace_with_bootstrap_admin(
+        &store,
+        &protocol,
+        101,
+        workspace_b_private_key,
+        "Workspace B",
+    );
+
+    let admin_user_a = create_user(
+        &store,
+        &protocol,
+        UserInput {
+            workspace_id: workspace_a.workspace_id,
+            workspace_private_key: workspace_a_private_key,
+            timestamp: 10,
+            username: "same-admin-user",
+            invite_private_key: [8; 32],
+            user_private_key: admin_user_private_key,
+        },
+    );
+    let admin_user_b = create_user(
+        &store,
+        &protocol,
+        UserInput {
+            workspace_id: workspace_b.workspace_id,
+            workspace_private_key: workspace_b_private_key,
+            timestamp: 110,
+            username: "same-admin-user",
+            invite_private_key: [9; 32],
+            user_private_key: admin_user_private_key,
+        },
+    );
+
+    let admin_a = grant_admin(
+        &store,
+        &protocol,
+        AdminGrantInput {
+            created_at_ms: 20,
+            workspace_id: workspace_a.workspace_id,
+            authority_admin_id: workspace_a.bootstrap_admin_id,
+            authority_private_key: workspace_a_private_key,
+            target_user_event_id: admin_user_a.user_id,
+            target_user_public_key: admin_user_a.public_key,
+        },
+    );
+    let admin_b = grant_admin(
+        &store,
+        &protocol,
+        AdminGrantInput {
+            created_at_ms: 120,
+            workspace_id: workspace_b.workspace_id,
+            authority_admin_id: workspace_b.bootstrap_admin_id,
+            authority_private_key: workspace_b_private_key,
+            target_user_event_id: admin_user_b.user_id,
+            target_user_public_key: admin_user_b.public_key,
+        },
+    );
+
+    let endpoint_a = share_endpoint(
+        &store,
+        &protocol,
+        EndpointJoinInput {
+            workspace_id: workspace_a.workspace_id,
+            user_id: admin_user_a.user_id,
+            endpoint_id: admin_endpoint_id,
+            device_name: "admin-laptop-a",
+            timestamp: 30,
+            device_invite_private_key: [40; 32],
+        },
+    );
+    let endpoint_b = share_endpoint(
+        &store,
+        &protocol,
+        EndpointJoinInput {
+            workspace_id: workspace_b.workspace_id,
+            user_id: admin_user_b.user_id,
+            endpoint_id: admin_endpoint_id,
+            device_name: "admin-laptop-b",
+            timestamp: 130,
+            device_invite_private_key: [41; 32],
+        },
+    );
+
+    let invited_a = create_user_from_admin_invite(
+        &store,
+        &protocol,
+        AdminInviteUserInput {
+            workspace_id: workspace_a.workspace_id,
+            authority_admin_id: admin_a,
+            signer_endpoint_shared_id: endpoint_a.endpoint_shared_id,
+            signer_endpoint_private_key: admin_endpoint_private_key,
+            timestamp: 40,
+            username: "invited-a",
+            invite_private_key: [50; 32],
+            user_private_key: [60; 32],
+        },
+    );
+    let invited_b = create_user_from_admin_invite(
+        &store,
+        &protocol,
+        AdminInviteUserInput {
+            workspace_id: workspace_b.workspace_id,
+            authority_admin_id: admin_b,
+            signer_endpoint_shared_id: endpoint_b.endpoint_shared_id,
+            signer_endpoint_private_key: admin_endpoint_private_key,
+            timestamp: 140,
+            username: "invited-b",
+            invite_private_key: [51; 32],
+            user_private_key: [61; 32],
+        },
+    );
+
+    assert_user(
+        &store,
+        workspace_a.workspace_id,
+        invited_a.user_id,
+        "invited-a",
+    );
+    assert_user(
+        &store,
+        workspace_b.workspace_id,
+        invited_b.user_id,
+        "invited-b",
+    );
+    assert_membership(
+        &store,
+        workspace_a.workspace_id,
+        admin_endpoint_id,
+        admin_user_a.user_id,
+    );
+    assert_membership(
+        &store,
+        workspace_b.workspace_id,
+        admin_endpoint_id,
+        admin_user_b.user_id,
+    );
+
+    let cross_workspace_invite =
+        user_invite::commands::create(user_invite::commands::CreateUserInvite {
+            created_at_ms: 150,
+            public_key: crypto::ed25519_public_key(&[52; 32]),
+            workspace_id: workspace_b.workspace_id,
+            authority_event_id: admin_a,
+            signer_event_id: endpoint_b.endpoint_shared_id,
+            signer_private_key: admin_endpoint_private_key,
+        })
+        .expect("create cross-workspace invite attempt");
+    let err = worker::run(&store, &protocol, cross_workspace_invite)
+        .expect_err("workspace A admin must not authorize workspace B invite");
+    assert!(
+        err.contains("user_invite admin authority belongs to a different workspace"),
+        "{err}"
+    );
+
+    let cross_workspace_grant = admin::commands::sign_grant(admin::commands::SignGrantAdmin {
+        grant: admin::commands::GrantAdmin {
+            created_at_ms: 160,
+            workspace_id: workspace_b.workspace_id,
+            authority_admin_id: admin_a,
+            target_user_event_id: admin_user_b.user_id,
+            target_user_public_key: admin_user_b.public_key,
+        },
+        signer_event_id: admin_a,
+        signer_private_key: admin_user_private_key,
+    })
+    .expect("create cross-workspace admin grant attempt");
+    let err = worker::run(&store, &protocol, cross_workspace_grant)
+        .expect_err("workspace A admin must not authorize workspace B admin grant");
+    assert!(
+        err.contains("admin authority belongs to a different workspace"),
+        "{err}"
+    );
+
+    assert_eq!(row_count(&store, admin::schema::ADMINS), 4);
+    assert_eq!(row_count(&store, user_invite::schema::USER_INVITES), 4);
+    assert_eq!(row_count(&store, user::schema::USERS), 4);
+    assert_eq!(
+        row_count(&store, endpoint_shared::schema::ENDPOINT_SHARED),
+        2
+    );
+    assert_eq!(
+        row_count(&store, endpoint_shared::schema::ENDPOINT_MEMBERSHIPS),
+        2
+    );
+}
+
+struct WorkspaceBootstrap {
+    workspace_id: EventId,
+    bootstrap_admin_id: EventId,
+}
+
 struct CreatedUser {
     user_id: EventId,
+    public_key: [u8; 32],
     records: Vec<EventRecord>,
 }
 
@@ -182,6 +391,7 @@ struct UserInput {
 }
 
 struct EndpointJoin {
+    endpoint_shared_id: EventId,
     device_invite_id: EventId,
     device_invite_private_key: [u8; 32],
     records: Vec<EventRecord>,
@@ -194,6 +404,117 @@ struct EndpointJoinInput {
     device_name: &'static str,
     timestamp: u64,
     device_invite_private_key: [u8; 32],
+}
+
+struct AdminGrantInput {
+    created_at_ms: u64,
+    workspace_id: EventId,
+    authority_admin_id: EventId,
+    authority_private_key: [u8; 32],
+    target_user_event_id: EventId,
+    target_user_public_key: [u8; 32],
+}
+
+struct AdminInviteUserInput {
+    workspace_id: EventId,
+    authority_admin_id: EventId,
+    signer_endpoint_shared_id: EventId,
+    signer_endpoint_private_key: [u8; 32],
+    timestamp: u64,
+    username: &'static str,
+    invite_private_key: [u8; 32],
+    user_private_key: [u8; 32],
+}
+
+fn create_workspace_with_bootstrap_admin(
+    store: &crate::core::store::Store,
+    protocol: &Protocol,
+    timestamp: u64,
+    workspace_private_key: [u8; 32],
+    name: &str,
+) -> WorkspaceBootstrap {
+    let workspace_public_key = crypto::ed25519_public_key(&workspace_private_key);
+    let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
+        created_at_ms: timestamp,
+        public_key: workspace_public_key,
+        name: name.to_string(),
+    })
+    .expect("create workspace");
+    let workspace_id = workspace.value.workspace_id;
+    admit(store, protocol, workspace);
+
+    let bootstrap = admin::commands::create_bootstrap(admin::commands::CreateBootstrapAdmin {
+        created_at_ms: timestamp + 1,
+        workspace_id,
+        root_public_key: workspace_public_key,
+        root_user_event_id: workspace_id,
+    })
+    .expect("create bootstrap admin");
+    let bootstrap_admin_id = bootstrap.value.admin_id;
+    admit(store, protocol, bootstrap);
+
+    WorkspaceBootstrap {
+        workspace_id,
+        bootstrap_admin_id,
+    }
+}
+
+fn grant_admin(
+    store: &crate::core::store::Store,
+    protocol: &Protocol,
+    input: AdminGrantInput,
+) -> EventId {
+    let grant = admin::commands::sign_grant(admin::commands::SignGrantAdmin {
+        grant: admin::commands::GrantAdmin {
+            created_at_ms: input.created_at_ms,
+            workspace_id: input.workspace_id,
+            authority_admin_id: input.authority_admin_id,
+            target_user_event_id: input.target_user_event_id,
+            target_user_public_key: input.target_user_public_key,
+        },
+        signer_event_id: input.authority_admin_id,
+        signer_private_key: input.authority_private_key,
+    })
+    .expect("sign admin grant");
+    let admin_id = grant.value.signed_event_id;
+    admit(store, protocol, grant);
+    admin_id
+}
+
+fn create_user_from_admin_invite(
+    store: &crate::core::store::Store,
+    protocol: &Protocol,
+    input: AdminInviteUserInput,
+) -> CreatedUser {
+    let invite = user_invite::commands::create(user_invite::commands::CreateUserInvite {
+        created_at_ms: input.timestamp,
+        public_key: crypto::ed25519_public_key(&input.invite_private_key),
+        workspace_id: input.workspace_id,
+        authority_event_id: input.authority_admin_id,
+        signer_event_id: input.signer_endpoint_shared_id,
+        signer_private_key: input.signer_endpoint_private_key,
+    })
+    .expect("create admin-authorized user invite");
+    let user_invite_id = invite.value.user_invite_id;
+    let mut records = admit(store, protocol, invite);
+
+    let user = user::commands::create(user::commands::CreateUser {
+        created_at_ms: input.timestamp + 1,
+        public_key: crypto::ed25519_public_key(&input.user_private_key),
+        username: input.username.to_string(),
+        user_invite_event_id: user_invite_id,
+        user_invite_private_key: input.invite_private_key,
+    })
+    .expect("create invited user");
+    let user_id = user.value.user_id;
+    let public_key = user.value.public_key;
+    records.extend(admit(store, protocol, user));
+
+    CreatedUser {
+        user_id,
+        public_key,
+        records,
+    }
 }
 
 fn create_user(
@@ -222,9 +543,14 @@ fn create_user(
     })
     .expect("create user");
     let user_id = user.value.user_id;
+    let public_key = user.value.public_key;
     records.extend(admit(store, protocol, user));
 
-    CreatedUser { user_id, records }
+    CreatedUser {
+        user_id,
+        public_key,
+        records,
+    }
 }
 
 fn share_endpoint(
@@ -257,9 +583,11 @@ fn share_endpoint(
         },
     )
     .expect("share endpoint");
+    let endpoint_shared_id = shared.value.endpoint_shared_id;
     records.extend(admit(store, protocol, shared));
 
     EndpointJoin {
+        endpoint_shared_id,
         device_invite_id,
         device_invite_private_key: input.device_invite_private_key,
         records,

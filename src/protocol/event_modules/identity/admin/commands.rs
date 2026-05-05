@@ -1,9 +1,9 @@
 //! Commands for creating admin grant events.
 //!
 //! The direct admin commands create canonical admin events with explicit
-//! workspace, authority, and user binding inputs. The signed helper uses the
-//! existing signed envelope module, but signed admin projection is intentionally
-//! left to the signed-admission integration so projection can remain row-only.
+//! workspace, authority, and user binding inputs. Only the workspace-root
+//! bootstrap grant is allowed unsigned; ongoing grants must be signed by the
+//! authority admin key.
 
 use crate::core::crypto::Ed25519PrivateKey;
 use crate::protocol::event_modules::identity::signed;
@@ -65,7 +65,7 @@ pub fn grant(input: GrantAdmin) -> Result<CommandOutput<AdminCommandOutput>, Str
     if input.authority_admin_id == input.workspace_id {
         return Err("ongoing admin grant authority must be an admin event".to_string());
     }
-    propose(admin_event_from_grant(input))
+    Err("ongoing admin grants must be signed by authority admin".to_string())
 }
 
 pub fn sign_grant(
@@ -73,6 +73,9 @@ pub fn sign_grant(
 ) -> Result<CommandOutput<SignedAdminCommandOutput>, String> {
     if input.grant.authority_admin_id == input.grant.workspace_id {
         return Err("ongoing admin grant authority must be an admin event".to_string());
+    }
+    if input.signer_event_id != input.grant.authority_admin_id {
+        return Err("signed admin grant signer must be the authority admin".to_string());
     }
     let event = admin_event_from_grant(input.grant);
     let payload = codec::encode(&event);
@@ -148,27 +151,20 @@ mod tests {
     }
 
     #[test]
-    fn grant_command_proposes_admin_authorized_event_with_target_user_dependency() {
-        let output = grant(GrantAdmin {
+    fn grant_command_rejects_unsigned_ongoing_admin_grants() {
+        let err = grant(GrantAdmin {
             created_at_ms: 80,
             workspace_id: [1; 32],
             authority_admin_id: [9; 32],
             target_user_event_id: [5; 32],
             target_user_public_key: [6; 32],
         })
-        .expect("grant admin");
+        .expect_err("unsigned ongoing grant must fail");
 
-        let proposed = &output.events[0];
-        assert_eq!(output.value.admin_id, proposed.event_id());
         assert_eq!(
-            proposed.record().dependencies,
-            vec![[1; 32], [9; 32], [5; 32]]
+            err,
+            "ongoing admin grants must be signed by authority admin"
         );
-
-        let event = codec::decode(&proposed.record().canonical_bytes).expect("decode admin");
-        assert_eq!(event.public_key, [6; 32]);
-        assert_eq!(event.authority_event_id, [9; 32]);
-        assert_eq!(event.user_event_id, [5; 32]);
     }
 
     #[test]
@@ -196,26 +192,44 @@ mod tests {
                 target_user_event_id: [5; 32],
                 target_user_public_key: [6; 32],
             },
-            signer_event_id: [8; 32],
+            signer_event_id: [9; 32],
             signer_private_key,
         })
         .expect("sign grant");
 
         assert_eq!(output.events.len(), 1);
         let record = output.events[0].record();
-        assert_eq!(record.dependencies, vec![[8; 32]]);
+        assert_eq!(record.dependencies, vec![[9; 32], [1; 32], [5; 32]]);
         assert_eq!(output.value.signed_event_id, output.events[0].event_id());
 
         let envelope =
             signed::codec::decode(&record.canonical_bytes).expect("decode signed envelope");
-        assert_eq!(envelope.signer_event_id, [8; 32]);
+        assert_eq!(envelope.signer_event_id, [9; 32]);
         assert_eq!(envelope.inner_type, codec::TYPE_ADMIN);
         assert_eq!(output.value.inner_admin_id, event_id(&envelope.payload));
         assert_eq!(
             signed::codec::record_from_bytes(record.canonical_bytes.clone())
                 .expect("signed record")
                 .dependencies,
-            vec![[8; 32]]
+            vec![[9; 32], [1; 32], [5; 32]]
         );
+    }
+
+    #[test]
+    fn sign_grant_rejects_signer_that_is_not_authority_admin() {
+        let err = sign_grant(SignGrantAdmin {
+            grant: GrantAdmin {
+                created_at_ms: 90,
+                workspace_id: [1; 32],
+                authority_admin_id: [9; 32],
+                target_user_event_id: [5; 32],
+                target_user_public_key: [6; 32],
+            },
+            signer_event_id: [8; 32],
+            signer_private_key: [7; crypto::ED25519_PRIVATE_KEY_BYTES],
+        })
+        .expect_err("wrong signer must fail");
+
+        assert_eq!(err, "signed admin grant signer must be the authority admin");
     }
 }

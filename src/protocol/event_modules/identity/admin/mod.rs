@@ -1,10 +1,8 @@
 //! Admin identity grants.
 //!
 //! Admin events bind a workspace-scoped user identity to the public key that is
-//! allowed to act as an administrator. In this branch the direct admin event is
-//! fully wired. Signed-envelope projection still needs the broader signed
-//! admission integration so signer endpoint_shared authority can be supplied as
-//! projector context without doing verification work inside projection.
+//! allowed to act as an administrator. The workspace-root bootstrap grant is
+//! direct; ongoing grants are signed by the authority admin key.
 
 pub mod codec;
 pub mod commands;
@@ -14,6 +12,7 @@ pub mod types;
 
 #[cfg(test)]
 mod tests {
+    use crate::core::crypto;
     use crate::protocol::event_modules::identity::workspace;
     use crate::protocol::event_modules::worker;
     use crate::protocol::Protocol;
@@ -24,9 +23,11 @@ mod tests {
     fn receipt_replays_bootstrap_then_admin_authorized_grant_without_daemon() {
         let protocol = Protocol::new();
         let receiver = Protocol::open_memory_store().expect("open receiver");
+        let workspace_private_key = [7; crypto::ED25519_PRIVATE_KEY_BYTES];
+        let workspace_public_key = crypto::ed25519_public_key(&workspace_private_key);
         let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
             created_at_ms: 10,
-            public_key: [7; 32],
+            public_key: workspace_public_key,
             name: "Root".to_string(),
         })
         .expect("create workspace");
@@ -36,23 +37,27 @@ mod tests {
         let bootstrap = commands::create_bootstrap(commands::CreateBootstrapAdmin {
             created_at_ms: 20,
             workspace_id,
-            root_public_key: [7; 32],
+            root_public_key: workspace_public_key,
             root_user_event_id: workspace_id,
         })
         .expect("create bootstrap admin");
         let bootstrap_record = bootstrap.events[0].record().clone();
         let bootstrap_admin_id = bootstrap.value.admin_id;
 
-        let grant = commands::grant(commands::GrantAdmin {
-            created_at_ms: 30,
-            workspace_id,
-            authority_admin_id: bootstrap_admin_id,
-            target_user_event_id: workspace_id,
-            target_user_public_key: [7; 32],
+        let grant = commands::sign_grant(commands::SignGrantAdmin {
+            grant: commands::GrantAdmin {
+                created_at_ms: 30,
+                workspace_id,
+                authority_admin_id: bootstrap_admin_id,
+                target_user_event_id: workspace_id,
+                target_user_public_key: workspace_public_key,
+            },
+            signer_event_id: bootstrap_admin_id,
+            signer_private_key: workspace_private_key,
         })
         .expect("grant admin");
         let grant_record = grant.events[0].record().clone();
-        let grant_admin_id = grant.value.admin_id;
+        let grant_admin_id = grant.value.signed_event_id;
 
         let admit = worker::run(
             &receiver,
@@ -89,6 +94,8 @@ mod tests {
             && row.authority_event_id == bootstrap_admin_id
             && row.user_event_id == workspace_id));
         assert_ne!(bootstrap_admin_id, grant_admin_id);
-        assert!(projected.iter().all(|row| row.public_key == [7; 32]));
+        assert!(projected
+            .iter()
+            .all(|row| row.public_key == workspace_public_key));
     }
 }
