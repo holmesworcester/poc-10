@@ -82,6 +82,7 @@ pub fn decode_endpoint_shared_row(key: &[u8], value: &[u8]) -> Result<EndpointSh
     let mut reader = Reader::new(value, "endpoint shared row");
     let created_at_ms = reader.u64()?;
     let endpoint_id = reader.id()?;
+    let signing_public_key = reader.id()?;
     let user_authority_event_id = reader.id()?;
     let device_invite_id = reader.id()?;
     let device_name =
@@ -93,6 +94,7 @@ pub fn decode_endpoint_shared_row(key: &[u8], value: &[u8]) -> Result<EndpointSh
         endpoint_shared_id,
         created_at_ms,
         endpoint_id,
+        signing_public_key,
         user_authority_event_id,
         device_invite_id,
         device_name,
@@ -115,6 +117,7 @@ pub fn decode_endpoint_membership_row(
     let endpoint_shared_id = reader.id()?;
     let user_authority_event_id = reader.id()?;
     let device_invite_id = reader.id()?;
+    let signing_public_key = reader.id()?;
     let created_at_ms = reader.u64()?;
     reader.finish()?;
 
@@ -124,6 +127,7 @@ pub fn decode_endpoint_membership_row(
         endpoint_shared_id,
         user_authority_event_id,
         device_invite_id,
+        signing_public_key,
         created_at_ms,
     })
 }
@@ -165,9 +169,10 @@ fn encode_endpoint_shared_value(
 ) -> Result<Vec<u8>, String> {
     let device_name = codec::encode_device_name(&event.device_name)?;
     let mut out =
-        Writer::with_capacity(8 + 32 + 32 + 32 + super::types::ENDPOINT_DEVICE_NAME_BYTES);
+        Writer::with_capacity(8 + 32 + 32 + 32 + 32 + super::types::ENDPOINT_DEVICE_NAME_BYTES);
     out.u64(event.created_at_ms);
     out.id(&event.endpoint_id);
+    out.id(&event.signing_public_key);
     out.id(&event.user_authority_event_id);
     out.id(&device_invite_id);
     out.raw(&device_name);
@@ -179,10 +184,11 @@ fn encode_endpoint_membership_value(
     device_invite_id: EventId,
     event: &EndpointSharedEvent,
 ) -> Vec<u8> {
-    let mut out = Writer::with_capacity(32 + 32 + 32 + 8);
+    let mut out = Writer::with_capacity(32 + 32 + 32 + 32 + 8);
     out.id(&endpoint_shared_id);
     out.id(&event.user_authority_event_id);
     out.id(&device_invite_id);
+    out.id(&event.signing_public_key);
     out.u64(event.created_at_ms);
     out.finish()
 }
@@ -199,6 +205,7 @@ mod tests {
             workspace_id: [1; 32],
             user_authority_event_id: [2; 32],
             endpoint_id: [3; 32],
+            signing_public_key: [6; 32],
             device_name: "phone".to_string(),
         }
     }
@@ -220,6 +227,7 @@ mod tests {
                 endpoint_shared_id: [4; 32],
                 created_at_ms: 77,
                 endpoint_id: [3; 32],
+                signing_public_key: [6; 32],
                 user_authority_event_id: [2; 32],
                 device_invite_id: [5; 32],
                 device_name: "phone".to_string(),
@@ -234,6 +242,7 @@ mod tests {
                 endpoint_shared_id: [4; 32],
                 user_authority_event_id: [2; 32],
                 device_invite_id: [5; 32],
+                signing_public_key: [6; 32],
                 created_at_ms: 77,
             }
         );

@@ -9,7 +9,7 @@ use topo::core::crypto;
 use topo::protocol::event_modules::identity::{
     device_invite, endpoint, endpoint_shared, user, user_invite, workspace,
 };
-use topo::protocol::event_modules::types::{EventId, EventRecord};
+use topo::protocol::event_modules::types::EventId;
 use topo::protocol::event_modules::worker::{self, CommandOutput};
 use topo::protocol::Protocol;
 
@@ -24,6 +24,7 @@ fn two_endpoints_sync_multiple_mutual_workspaces() {
     let alice_endpoint = local_endpoint(&alice);
     let bob_endpoint = local_endpoint(&bob);
     let workspace_a = workspace_graph(
+        &alice,
         11,
         "workspace-a",
         &[
@@ -32,6 +33,7 @@ fn two_endpoints_sync_multiple_mutual_workspaces() {
         ],
     );
     let workspace_b = workspace_graph(
+        &alice,
         12,
         "workspace-b",
         &[
@@ -39,15 +41,12 @@ fn two_endpoints_sync_multiple_mutual_workspaces() {
             Member::new("bob-b", bob_endpoint, 24),
         ],
     );
-    install_graph(&alice, &workspace_a.records, false);
-    install_graph(&alice, &workspace_b.records, false);
-    install_graph(&bob, &workspace_a.records, true);
-    install_graph(&bob, &workspace_b.records, true);
-
     generate(&alice, workspace_a.workspace_id, 3, 128);
     generate(&alice, workspace_b.workspace_id, 4, 129);
     sync_once(&alice, &bob, bob_port);
 
+    assert_membership(&bob, workspace_a.workspace_id, bob_endpoint.endpoint);
+    assert_membership(&bob, workspace_b.workspace_id, bob_endpoint.endpoint);
     assert_content_count(&bob, workspace_a.workspace_id, 3);
     assert_content_count(&bob, workspace_b.workspace_id, 4);
 }
@@ -63,6 +62,7 @@ fn two_player_sync_does_not_leak_alice_private_workspace_to_bob() {
     let alice_endpoint = local_endpoint(&alice);
     let bob_endpoint = local_endpoint(&bob);
     let shared = workspace_graph(
+        &alice,
         31,
         "shared-a",
         &[
@@ -70,16 +70,19 @@ fn two_player_sync_does_not_leak_alice_private_workspace_to_bob() {
             Member::new("bob-a", bob_endpoint, 42),
         ],
     );
-    let alice_private =
-        workspace_graph(32, "alice-b", &[Member::new("alice-b", alice_endpoint, 43)]);
-    install_graph(&alice, &shared.records, false);
-    install_graph(&alice, &alice_private.records, false);
-    install_graph(&bob, &shared.records, true);
+    let alice_private = workspace_graph(
+        &alice,
+        32,
+        "alice-b",
+        &[Member::new("alice-b", alice_endpoint, 43)],
+    );
 
     generate(&alice, shared.workspace_id, 2, 128);
     generate(&alice, alice_private.workspace_id, 5, 128);
     sync_once(&alice, &bob, bob_port);
 
+    assert_membership(&bob, shared.workspace_id, bob_endpoint.endpoint);
+    assert_no_membership(&bob, alice_private.workspace_id, bob_endpoint.endpoint);
     assert_content_count(&bob, shared.workspace_id, 2);
     assert_content_count(&bob, alice_private.workspace_id, 0);
 }
@@ -102,6 +105,7 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
     let bob_endpoint = local_endpoint(&bob);
     let carol_endpoint = local_endpoint(&carol);
     let workspace_a = workspace_graph(
+        &alice,
         51,
         "alice-bob-a",
         &[
@@ -110,6 +114,7 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
         ],
     );
     let workspace_b = workspace_graph(
+        &alice,
         52,
         "alice-carol-b",
         &[
@@ -117,10 +122,12 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
             Member::new("carol-b", carol_endpoint, 64),
         ],
     );
-    install_graph(&alice, &workspace_a.records, true);
-    install_graph(&alice, &workspace_b.records, true);
-    install_graph(&bob, &workspace_a.records, false);
-    install_graph(&carol, &workspace_b.records, false);
+    sync_from_alice_to_bob_and_carol(&alice, &bob, bob_port, &carol, carol_port);
+
+    assert_membership(&bob, workspace_a.workspace_id, bob_endpoint.endpoint);
+    assert_no_membership(&bob, workspace_b.workspace_id, bob_endpoint.endpoint);
+    assert_membership(&carol, workspace_b.workspace_id, carol_endpoint.endpoint);
+    assert_no_membership(&carol, workspace_a.workspace_id, carol_endpoint.endpoint);
 
     generate(&bob, workspace_a.workspace_id, 3, 128);
     generate(&carol, workspace_b.workspace_id, 4, 128);
@@ -141,14 +148,16 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
 struct Member {
     name: &'static str,
     endpoint_id: EventId,
+    signing_public_key: [u8; 32],
     seed: u8,
 }
 
 impl Member {
-    fn new(name: &'static str, endpoint_id: EventId, seed: u8) -> Self {
+    fn new(name: &'static str, endpoint: endpoint::types::EndpointKeypair, seed: u8) -> Self {
         Self {
             name,
-            endpoint_id,
+            endpoint_id: endpoint.endpoint,
+            signing_public_key: endpoint.signing_public_key,
             seed,
         }
     }
@@ -156,12 +165,11 @@ impl Member {
 
 struct WorkspaceGraph {
     workspace_id: EventId,
-    records: Vec<EventRecord>,
 }
 
-fn workspace_graph(seed: u8, name: &str, members: &[Member]) -> WorkspaceGraph {
+fn workspace_graph(db: &str, seed: u8, name: &str, members: &[Member]) -> WorkspaceGraph {
     let protocol = Protocol::new();
-    let store = Protocol::open_memory_store().expect("open graph store");
+    let store = Protocol::open_store(db).expect("open graph store");
     let workspace_private = [seed; 32];
     let workspace_public = crypto::ed25519_public_key(&workspace_private);
     let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
@@ -171,7 +179,7 @@ fn workspace_graph(seed: u8, name: &str, members: &[Member]) -> WorkspaceGraph {
     })
     .expect("create workspace");
     let workspace_id = workspace.value.workspace_id;
-    let mut records = admit(&store, &protocol, workspace);
+    admit(&store, &protocol, workspace);
 
     for member in members {
         let user_private = [member.seed; 32];
@@ -186,10 +194,11 @@ fn workspace_graph(seed: u8, name: &str, members: &[Member]) -> WorkspaceGraph {
         })
         .expect("create user invite");
         let user_invite_id = user_invite.value.user_invite_id;
-        records.extend(admit(&store, &protocol, user_invite));
+        admit(&store, &protocol, user_invite);
 
         let user = user::commands::create(user::commands::CreateUser {
             created_at_ms: 200 + member.seed as u64,
+            workspace_id,
             public_key: crypto::ed25519_public_key(&user_private),
             username: member.name.to_string(),
             user_invite_event_id: user_invite_id,
@@ -197,7 +206,7 @@ fn workspace_graph(seed: u8, name: &str, members: &[Member]) -> WorkspaceGraph {
         })
         .expect("create user");
         let user_id = user.value.user_id;
-        records.extend(admit(&store, &protocol, user));
+        admit(&store, &protocol, user);
 
         let device_private = [member.seed.saturating_add(120); 32];
         let device_invite = device_invite::commands::create_with_private_key(
@@ -213,7 +222,7 @@ fn workspace_graph(seed: u8, name: &str, members: &[Member]) -> WorkspaceGraph {
         )
         .expect("create device invite");
         let device_invite_id = device_invite.value.device_invite_id;
-        records.extend(admit(&store, &protocol, device_invite));
+        admit(&store, &protocol, device_invite);
 
         let shared = endpoint_shared::commands::share_endpoint(
             &store,
@@ -222,59 +231,28 @@ fn workspace_graph(seed: u8, name: &str, members: &[Member]) -> WorkspaceGraph {
                 workspace_id,
                 user_authority_event_id: user_id,
                 endpoint_id: member.endpoint_id,
+                signing_public_key: member.signing_public_key,
                 device_name: member.name.to_string(),
                 device_invite_id,
                 device_invite_private_key: device_private,
             },
         )
         .expect("share endpoint");
-        records.extend(admit(&store, &protocol, shared));
+        admit(&store, &protocol, shared);
     }
 
-    WorkspaceGraph {
-        workspace_id,
-        records,
-    }
+    WorkspaceGraph { workspace_id }
 }
 
-fn admit<T>(
-    store: &topo::core::store::Store,
-    protocol: &Protocol,
-    output: CommandOutput<T>,
-) -> Vec<EventRecord> {
-    let records = output
-        .events
-        .iter()
-        .map(|event| event.record().clone())
-        .collect::<Vec<_>>();
+fn admit<T>(store: &topo::core::store::Store, protocol: &Protocol, output: CommandOutput<T>) {
     worker::run(store, protocol, output).expect("admit command output");
-    records
 }
 
-fn install_graph(db: &str, records: &[EventRecord], reverse: bool) {
-    let store = Protocol::open_store(db).expect("open install store");
-    let protocol = Protocol::new();
-    let mut records = records.to_vec();
-    if reverse {
-        records.reverse();
-    }
-    worker::run(&store, &protocol, worker::AdmitRecords { records }).expect("admit graph");
-    worker::run(
-        &store,
-        &protocol,
-        worker::DrainUntilIdle {
-            batch_size: worker::DEFAULT_READY_BATCH,
-        },
-    )
-    .expect("drain graph");
-}
-
-fn local_endpoint(db: &str) -> EventId {
+fn local_endpoint(db: &str) -> endpoint::types::EndpointKeypair {
     let store = Protocol::open_store(db).expect("open endpoint store");
     endpoint::commands::local_keypair(&store)
         .expect("load local endpoint")
         .expect("local endpoint exists")
-        .endpoint
 }
 
 fn start_listener(db: &str, port: u16, accept: usize) -> Child {
@@ -367,6 +345,23 @@ fn assert_content_count(db: &str, workspace_id: EventId, expected: usize) {
         expected.to_string(),
         "content-count output:\n{out}"
     );
+}
+
+fn assert_membership(db: &str, workspace_id: EventId, endpoint_id: EventId) {
+    assert!(has_membership(db, workspace_id, endpoint_id));
+}
+
+fn assert_no_membership(db: &str, workspace_id: EventId, endpoint_id: EventId) {
+    assert!(!has_membership(db, workspace_id, endpoint_id));
+}
+
+fn has_membership(db: &str, workspace_id: EventId, endpoint_id: EventId) -> bool {
+    let store = Protocol::open_store(db).expect("open membership store");
+    let key = endpoint_shared::schema::endpoint_membership_key(endpoint_id, workspace_id);
+    store
+        .table_row(endpoint_shared::schema::ENDPOINT_MEMBERSHIPS, &key)
+        .expect("read endpoint membership")
+        .is_some()
 }
 
 fn hex_id(id: EventId) -> String {

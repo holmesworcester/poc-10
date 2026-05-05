@@ -73,10 +73,38 @@ impl Modules {
         num_events: usize,
         event_size: usize,
     ) -> Result<CommandOutput<content::content_event::commands::GenerateReport>, String> {
+        let local = self.existing_local_keypair(store)?;
+        let membership_key = identity::endpoint_shared::schema::endpoint_membership_key(
+            local.endpoint,
+            workspace_id,
+        );
+        let membership_bytes = store
+            .table_row(
+                identity::endpoint_shared::schema::ENDPOINT_MEMBERSHIPS,
+                &membership_key,
+            )
+            .map_err(|err| format!("load local endpoint membership: {err}"))?
+            .ok_or_else(|| "local endpoint is not joined to workspace".to_string())?;
+        let membership = identity::endpoint_shared::schema::decode_endpoint_membership_row(
+            &membership_key,
+            &membership_bytes,
+        )?;
+        if membership.signing_public_key != local.signing_public_key {
+            return Err(
+                "local endpoint signing key does not match workspace membership".to_string(),
+            );
+        }
         let start =
             content::content_event::schema::max_timestamp_for_workspace(store, workspace_id)?
                 .saturating_add(1);
-        content::content_event::commands::generate(workspace_id, start, num_events, event_size)
+        content::content_event::commands::generate(
+            workspace_id,
+            membership.endpoint_shared_id,
+            local.signing_secret,
+            start,
+            num_events,
+            event_size,
+        )
     }
 
     pub fn stage_event_with_deps(
@@ -222,6 +250,22 @@ impl identity::endpoint::commands::LocalEndpointRead for Store {
         self.table_row(identity::endpoint::schema::LOCAL_ENDPOINT, b"local")
             .map_err(|err| format!("load local endpoint: {err}"))
     }
+
+    fn local_endpoint_signing_public_key(&self) -> Result<Option<Vec<u8>>, String> {
+        self.table_row(
+            identity::endpoint::schema::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY,
+            b"local",
+        )
+        .map_err(|err| format!("load local endpoint signing public key: {err}"))
+    }
+
+    fn local_endpoint_signing_secret(&self) -> Result<Option<Vec<u8>>, String> {
+        self.table_row(
+            identity::endpoint::schema::LOCAL_ENDPOINT_SIGNING_SECRET,
+            b"local",
+        )
+        .map_err(|err| format!("load local endpoint signing secret: {err}"))
+    }
 }
 
 impl identity::endpoint_shared::commands::EndpointMembershipRead for Store {
@@ -315,8 +359,9 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         sync::compare::codec::TYPE_SYNC_COMPARE => sync::compare::codec::record_from_bytes(bytes),
         sync::have_id::codec::TYPE_SYNC_HAVE_ID => sync::have_id::codec::record_from_bytes(bytes),
         sync::need_id::codec::TYPE_SYNC_NEED_ID => sync::need_id::codec::record_from_bytes(bytes),
-        content::content_event::codec::TYPE_CONTENT => {
-            content::content_event::codec::record_from_bytes(bytes)
+        content::content_event::codec::TYPE_CONTENT => Err("content must be signed".to_string()),
+        content::content_event::codec::TYPE_SIGNED_CONTENT => {
+            content::content_event::codec::signed_record_from_bytes(bytes)
         }
         test_events::event_with_deps::codec::TYPE_EVENT_WITH_DEPS => {
             test_events::event_with_deps::codec::record_from_bytes(bytes)

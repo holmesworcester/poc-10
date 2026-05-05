@@ -4,6 +4,7 @@
 //! The signed envelope event id is the durable endpoint-shared id projected into
 //! membership rows.
 
+use crate::core::crypto::Ed25519PublicKey;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::types::EventId;
 
@@ -15,6 +16,7 @@ pub struct EndpointSharedEvent {
     pub workspace_id: EventId,
     pub user_authority_event_id: EventId,
     pub endpoint_id: EndpointId,
+    pub signing_public_key: Ed25519PublicKey,
     pub device_name: String,
 }
 
@@ -24,6 +26,7 @@ pub struct EndpointSharedRow {
     pub endpoint_shared_id: EventId,
     pub created_at_ms: u64,
     pub endpoint_id: EndpointId,
+    pub signing_public_key: Ed25519PublicKey,
     pub user_authority_event_id: EventId,
     pub device_invite_id: EventId,
     pub device_name: String,
@@ -36,5 +39,6 @@ pub struct EndpointMembershipRow {
     pub endpoint_shared_id: EventId,
     pub user_authority_event_id: EventId,
     pub device_invite_id: EventId,
+    pub signing_public_key: Ed25519PublicKey,
     pub created_at_ms: u64,
 }

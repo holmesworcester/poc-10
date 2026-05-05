@@ -18,6 +18,13 @@ pub fn project_signed(
     if endpoint_shared.endpoint_id.iter().all(|byte| *byte == 0) {
         return Err("endpoint_shared endpoint_id cannot be empty".to_string());
     }
+    if endpoint_shared
+        .signing_public_key
+        .iter()
+        .all(|byte| *byte == 0)
+    {
+        return Err("endpoint_shared signing_public_key cannot be empty".to_string());
+    }
     let signer = event
         .context
         .dependency(&envelope.signer_event_id)
@@ -115,6 +122,7 @@ mod tests {
                 workspace_id,
                 user_authority_event_id,
                 endpoint_id: [3; 32],
+                signing_public_key: [4; 32],
                 device_name: "phone".to_string(),
                 device_invite_id,
                 device_invite_private_key: private_key,

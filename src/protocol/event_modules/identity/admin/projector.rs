@@ -107,6 +107,9 @@ fn validate_user_binding(
 
     let user = decode_user_record(user_record)
         .map_err(|_| "admin user dependency must be a user event".to_string())?;
+    if user.workspace_id != admin.workspace_id {
+        return Err("admin user belongs to a different workspace".to_string());
+    }
     if user.public_key == admin.public_key {
         return Ok(());
     }
@@ -180,9 +183,10 @@ mod tests {
         codec::record_from_bytes(codec::encode(&event)).expect("admin record")
     }
 
-    fn signed_user_record(public_key: [u8; 32]) -> (EventId, Record) {
+    fn signed_user_record(workspace_id: EventId, public_key: [u8; 32]) -> (EventId, Record) {
         let user = user::types::UserEvent {
             created_at_ms: 25,
+            workspace_id,
             public_key,
             username: "alice".to_string(),
         };
@@ -339,7 +343,7 @@ mod tests {
             user_event_id: other_workspace_id,
         });
         let authority_id = event_id(&authority.canonical_bytes);
-        let (target_user_id, target_user_record) = signed_user_record([11; 32]);
+        let (target_user_id, target_user_record) = signed_user_record(workspace_id, [11; 32]);
         let (record, envelope) = signed_admin_record(
             authority_id,
             authority_private_key,
@@ -390,7 +394,7 @@ mod tests {
             user_event_id: workspace_id,
         });
         let authority_id = event_id(&authority.canonical_bytes);
-        let (user_id, user_record) = signed_user_record([11; 32]);
+        let (user_id, user_record) = signed_user_record(workspace_id, [11; 32]);
         let (record, envelope) = signed_admin_record(
             authority_id,
             authority_private_key,
@@ -445,7 +449,7 @@ mod tests {
             user_event_id: workspace_id,
         });
         let authority_id = event_id(&authority.canonical_bytes);
-        let (user_id, user_record) = signed_user_record([11; 32]);
+        let (user_id, user_record) = signed_user_record(workspace_id, [11; 32]);
         let (record, envelope) = signed_admin_record(
             authority_id,
             authority_private_key,
@@ -484,6 +488,58 @@ mod tests {
     }
 
     #[test]
+    fn rejects_signed_non_root_admin_when_user_belongs_to_another_workspace() {
+        let authority_private_key = [94; 32];
+        let authority_public_key = signer_public_key(&authority_private_key);
+        let (workspace_id, workspace_record) = make_workspace_record(authority_public_key);
+        let (other_workspace_id, _) = make_workspace_record([13; 32]);
+        let authority = admin_record(AdminEvent {
+            created_at_ms: 20,
+            workspace_id,
+            public_key: authority_public_key,
+            authority_event_id: workspace_id,
+            user_event_id: workspace_id,
+        });
+        let authority_id = event_id(&authority.canonical_bytes);
+        let (user_id, user_record) = signed_user_record(other_workspace_id, [11; 32]);
+        let (record, envelope) = signed_admin_record(
+            authority_id,
+            authority_private_key,
+            AdminEvent {
+                created_at_ms: 30,
+                workspace_id,
+                public_key: [11; 32],
+                authority_event_id: authority_id,
+                user_event_id: user_id,
+            },
+        );
+
+        let err = project_signed(
+            &envelope,
+            &context_for(
+                &record,
+                vec![
+                    DependencyContext {
+                        event_id: authority_id,
+                        record: authority,
+                    },
+                    DependencyContext {
+                        event_id: workspace_id,
+                        record: workspace_record,
+                    },
+                    DependencyContext {
+                        event_id: user_id,
+                        record: user_record,
+                    },
+                ],
+            ),
+        )
+        .expect_err("cross-workspace user must reject");
+
+        assert_eq!(err, "admin user belongs to a different workspace");
+    }
+
+    #[test]
     fn projects_signed_admin_grant_from_authority_admin_key() {
         let authority_private_key = [94; 32];
         let authority_public_key = signer_public_key(&authority_private_key);
@@ -496,7 +552,7 @@ mod tests {
             user_event_id: workspace_id,
         });
         let authority_id = event_id(&authority.canonical_bytes);
-        let (target_user_id, target_user_record) = signed_user_record([11; 32]);
+        let (target_user_id, target_user_record) = signed_user_record(workspace_id, [11; 32]);
         let (record, envelope) = signed_admin_record(
             authority_id,
             authority_private_key,
@@ -552,7 +608,7 @@ mod tests {
             user_event_id: workspace_id,
         });
         let authority_id = event_id(&authority.canonical_bytes);
-        let (target_user_id, target_user_record) = signed_user_record([11; 32]);
+        let (target_user_id, target_user_record) = signed_user_record(workspace_id, [11; 32]);
         let (record, envelope) = signed_admin_record(
             [88; 32],
             authority_private_key,
@@ -604,7 +660,7 @@ mod tests {
             user_event_id: workspace_id,
         });
         let authority_id = event_id(&authority.canonical_bytes);
-        let (target_user_id, target_user_record) = signed_user_record([11; 32]);
+        let (target_user_id, target_user_record) = signed_user_record(workspace_id, [11; 32]);
         let (record, envelope) = signed_admin_record(
             authority_id,
             wrong_private_key,

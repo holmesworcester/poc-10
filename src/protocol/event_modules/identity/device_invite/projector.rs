@@ -206,9 +206,13 @@ mod tests {
         )
     }
 
-    fn signed_user_record(user_invite_id: EventId) -> (EventId, EventRecord) {
+    fn signed_user_record(
+        workspace_id: EventId,
+        user_invite_id: EventId,
+    ) -> (EventId, EventRecord) {
         let user = user::commands::create(user::commands::CreateUser {
             created_at_ms: 3,
+            workspace_id,
             public_key: public_key(&USER_PRIVATE),
             username: "alice".to_string(),
             user_invite_event_id: user_invite_id,
@@ -230,6 +234,7 @@ mod tests {
                 workspace_id,
                 user_authority_event_id: user_id,
                 endpoint_id: public_key(&endpoint_private_key),
+                signing_public_key: public_key(&endpoint_private_key),
                 device_name: "laptop".to_string(),
                 device_invite_id: [5; 32],
                 device_invite_private_key: DEVICE_INVITE_PRIVATE,
@@ -288,7 +293,7 @@ mod tests {
     fn projects_user_signed_device_invite_row() {
         let (workspace_id, workspace_record) = workspace_record(&WORKSPACE_PRIVATE);
         let (user_invite_id, user_invite_record) = signed_user_invite_record(workspace_id);
-        let (user_id, user_record) = signed_user_record(user_invite_id);
+        let (user_id, user_record) = signed_user_record(workspace_id, user_invite_id);
         let (device_invite_id, record, envelope) = signed_device_invite_record(
             workspace_id,
             user_id,
@@ -327,7 +332,7 @@ mod tests {
     fn rejects_unsigned_device_invite_payload() {
         let (workspace_id, workspace_record) = workspace_record(&WORKSPACE_PRIVATE);
         let (user_invite_id, user_invite_record) = signed_user_invite_record(workspace_id);
-        let (user_id, user_record) = signed_user_record(user_invite_id);
+        let (user_id, user_record) = signed_user_record(workspace_id, user_invite_id);
         let raw = super::super::types::DeviceInviteEvent {
             created_at_ms: 5,
             workspace_id,
@@ -357,7 +362,7 @@ mod tests {
     fn rejects_user_signed_device_invite_without_user_invite_dependency() {
         let (workspace_id, workspace_record) = workspace_record(&WORKSPACE_PRIVATE);
         let (user_invite_id, _) = signed_user_invite_record(workspace_id);
-        let (user_id, user_record) = signed_user_record(user_invite_id);
+        let (user_id, user_record) = signed_user_record(workspace_id, user_invite_id);
         let (device_invite_id, record, envelope) =
             signed_device_invite_record(workspace_id, user_id, None, user_id, USER_PRIVATE);
         let event = context_for(
@@ -378,7 +383,7 @@ mod tests {
         let (other_workspace_id, other_workspace_record) =
             workspace_record(&OTHER_WORKSPACE_PRIVATE);
         let (user_invite_id, user_invite_record) = signed_user_invite_record(workspace_id);
-        let (user_id, user_record) = signed_user_record(user_invite_id);
+        let (user_id, user_record) = signed_user_record(workspace_id, user_invite_id);
         let (device_invite_id, record, envelope) = signed_device_invite_record(
             other_workspace_id,
             user_id,
@@ -406,7 +411,7 @@ mod tests {
     fn projects_endpoint_shared_signed_device_invite_row() {
         let (workspace_id, workspace_record) = workspace_record(&WORKSPACE_PRIVATE);
         let (user_invite_id, _) = signed_user_invite_record(workspace_id);
-        let (user_id, _) = signed_user_record(user_invite_id);
+        let (user_id, _) = signed_user_record(workspace_id, user_invite_id);
         let (endpoint_shared_id, endpoint_shared_record) =
             signed_endpoint_shared_record(workspace_id, user_id, ENDPOINT_PRIVATE);
         let (device_invite_id, record, envelope) = signed_device_invite_record(
@@ -437,7 +442,7 @@ mod tests {
     fn rejects_endpoint_shared_signed_device_invite_with_wrong_endpoint_key() {
         let (workspace_id, workspace_record) = workspace_record(&WORKSPACE_PRIVATE);
         let (user_invite_id, _) = signed_user_invite_record(workspace_id);
-        let (user_id, _) = signed_user_record(user_invite_id);
+        let (user_id, _) = signed_user_record(workspace_id, user_invite_id);
         let (endpoint_shared_id, endpoint_shared_record) =
             signed_endpoint_shared_record(workspace_id, user_id, ENDPOINT_PRIVATE);
         let (device_invite_id, record, envelope) = signed_device_invite_record(
@@ -468,7 +473,7 @@ mod tests {
         let (other_workspace_id, other_workspace_record) =
             workspace_record(&OTHER_WORKSPACE_PRIVATE);
         let (user_invite_id, _) = signed_user_invite_record(workspace_id);
-        let (user_id, _) = signed_user_record(user_invite_id);
+        let (user_id, _) = signed_user_record(workspace_id, user_invite_id);
         let (endpoint_shared_id, endpoint_shared_record) =
             signed_endpoint_shared_record(workspace_id, user_id, ENDPOINT_PRIVATE);
         let (device_invite_id, record, envelope) = signed_device_invite_record(

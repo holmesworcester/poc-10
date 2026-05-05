@@ -1,11 +1,13 @@
 //! Codec for the local endpoint event.
 //!
-//! The event stores the endpoint public key and local secret as a local-only
-//! fact. Decoding re-derives the public key from the secret, so corrupted or
-//! mismatched identity rows fail before projection.
+//! The event stores the transit endpoint keypair and the endpoint signing
+//! keypair as a local-only fact. Decoding re-derives both public keys from the
+//! private keys, so corrupted or mismatched identity rows fail before
+//! projection.
 
 use x25519_dalek::{PublicKey, StaticSecret};
 
+use crate::core::crypto;
 use crate::protocol::event_modules::types::{EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 
@@ -14,10 +16,12 @@ use super::types::EndpointKeypair;
 pub const TYPE_LOCAL_ENDPOINT: u8 = 128;
 
 pub fn encode(event: &EndpointKeypair) -> Vec<u8> {
-    let mut out = Writer::with_capacity(1 + 32 + 32);
+    let mut out = Writer::with_capacity(1 + 32 + 32 + 32 + 32);
     out.u8(TYPE_LOCAL_ENDPOINT);
     out.id(&event.endpoint);
     out.id(&event.secret);
+    out.id(&event.signing_public_key);
+    out.id(&event.signing_secret);
     out.finish()
 }
 
@@ -29,12 +33,23 @@ pub fn decode(bytes: &[u8]) -> Result<EndpointKeypair, String> {
     }
     let endpoint = reader.id()?;
     let secret = reader.id()?;
+    let signing_public_key = reader.id()?;
+    let signing_secret = reader.id()?;
     reader.finish()?;
     let derived = PublicKey::from(&StaticSecret::from(secret)).to_bytes();
     if derived != endpoint {
         return Err("local endpoint secret does not match endpoint".to_string());
     }
-    Ok(EndpointKeypair { endpoint, secret })
+    let derived_signing_public_key = crypto::ed25519_public_key(&signing_secret);
+    if derived_signing_public_key != signing_public_key {
+        return Err("local endpoint signing secret does not match signing public key".to_string());
+    }
+    Ok(EndpointKeypair {
+        endpoint,
+        secret,
+        signing_public_key,
+        signing_secret,
+    })
 }
 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
@@ -64,11 +79,32 @@ mod tests {
         let bytes = encode(&EndpointKeypair {
             endpoint: good.endpoint,
             secret: bad.secret,
+            signing_public_key: good.signing_public_key,
+            signing_secret: good.signing_secret,
         });
 
         let err = decode(&bytes).expect_err("mismatched endpoint must fail");
 
         assert_eq!(err, "local endpoint secret does not match endpoint");
+    }
+
+    #[test]
+    fn decode_rejects_signing_public_key_that_does_not_match_secret() {
+        let good = commands::create_local_keypair().value;
+        let bad = commands::create_local_keypair().value;
+        let bytes = encode(&EndpointKeypair {
+            endpoint: good.endpoint,
+            secret: good.secret,
+            signing_public_key: good.signing_public_key,
+            signing_secret: bad.signing_secret,
+        });
+
+        let err = decode(&bytes).expect_err("mismatched signing keypair must fail");
+
+        assert_eq!(
+            err,
+            "local endpoint signing secret does not match signing public key"
+        );
     }
 
     #[test]

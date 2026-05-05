@@ -32,9 +32,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     if envelope.signer_public_key != invite.public_key {
         return Err("signed user signer key does not match user_invite public key".to_string());
     }
+    if user.workspace_id != invite.workspace_id {
+        return Err("user workspace does not match user_invite workspace".to_string());
+    }
 
     Ok(ProjectionOutput::rows(vec![schema::user_row(
-        invite.workspace_id,
+        user.workspace_id,
         event.context.event_id,
         envelope.signer_event_id,
         &user,
@@ -98,10 +101,12 @@ mod tests {
     fn signed_user_record(
         signer_event_id: crate::protocol::event_modules::types::EventId,
         signer_private_key: &[u8; 32],
+        workspace_id: crate::protocol::event_modules::types::EventId,
         username: &str,
     ) -> Record {
         let user = super::super::types::UserEvent {
             created_at_ms: 3,
+            workspace_id,
             public_key: signer_public_key(&[10; 32]),
             username: username.to_string(),
         };
@@ -134,7 +139,7 @@ mod tests {
     #[test]
     fn projects_user_row_scoped_by_user_invite_workspace() {
         let (invite_id, invite_record) = user_invite_record(&INVITE_PRIVATE);
-        let user_record = signed_user_record(invite_id, &INVITE_PRIVATE, "alice");
+        let user_record = signed_user_record(invite_id, &INVITE_PRIVATE, workspace_id(), "alice");
         let output = project(&context(&user_record, Some((invite_id, invite_record))))
             .expect("project user");
 
@@ -152,7 +157,7 @@ mod tests {
     #[test]
     fn rejects_missing_signer_dependency_context() {
         let (invite_id, _) = user_invite_record(&INVITE_PRIVATE);
-        let user_record = signed_user_record(invite_id, &INVITE_PRIVATE, "alice");
+        let user_record = signed_user_record(invite_id, &INVITE_PRIVATE, workspace_id(), "alice");
 
         let err = project(&context(&user_record, None)).expect_err("missing context must fail");
 
@@ -173,7 +178,8 @@ mod tests {
                     .expect("encode workspace"),
             )
             .expect("workspace record");
-        let user_record = signed_user_record(workspace_id, &WORKSPACE_PRIVATE, "alice");
+        let user_record =
+            signed_user_record(workspace_id, &WORKSPACE_PRIVATE, workspace_id, "alice");
 
         let err = project(&context(
             &user_record,
@@ -187,7 +193,7 @@ mod tests {
     #[test]
     fn rejects_user_signed_by_key_not_named_by_invite() {
         let (invite_id, invite_record) = user_invite_record(&INVITE_PRIVATE);
-        let user_record = signed_user_record(invite_id, &OTHER_PRIVATE, "alice");
+        let user_record = signed_user_record(invite_id, &OTHER_PRIVATE, workspace_id(), "alice");
 
         let err = project(&context(&user_record, Some((invite_id, invite_record))))
             .expect_err("wrong signer key must fail");
@@ -201,11 +207,22 @@ mod tests {
     #[test]
     fn rejects_blank_username() {
         let (invite_id, invite_record) = user_invite_record(&INVITE_PRIVATE);
-        let user_record = signed_user_record(invite_id, &INVITE_PRIVATE, "  ");
+        let user_record = signed_user_record(invite_id, &INVITE_PRIVATE, workspace_id(), "  ");
 
         let err = project(&context(&user_record, Some((invite_id, invite_record))))
             .expect_err("blank username must fail");
 
         assert_eq!(err, "username must not be empty");
+    }
+
+    #[test]
+    fn rejects_user_for_different_workspace_than_invite() {
+        let (invite_id, invite_record) = user_invite_record(&INVITE_PRIVATE);
+        let user_record = signed_user_record(invite_id, &INVITE_PRIVATE, [99; 32], "alice");
+
+        let err = project(&context(&user_record, Some((invite_id, invite_record))))
+            .expect_err("workspace mismatch must fail");
+
+        assert_eq!(err, "user workspace does not match user_invite workspace");
     }
 }

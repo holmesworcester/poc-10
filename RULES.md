@@ -7,6 +7,27 @@ express; **static** means a boundary test scans or inspects source; **partial**
 means the guard exists but does not prove the whole rule; **uncovered** means
 the rule is still prose/review only.
 
+## TODO
+
+- Add an explicit rule that commands may only provide ergonomic preflight
+  validation. Any invariant required for accepting shared/received protocol
+  state must be enforced by codecs, pure projectors over event context, or
+  storage/admission constraints that received events cannot bypass.
+- Search the poc-6 and poc-7 RULES/AGENTS-equivalent files and pull in any
+  significant applicable security and safety rules. Ask before importing any
+  rule whose fit with poc-8's event-module boundaries is unclear.
+- Add boundary tests proving receive-only metadata for connection bootstrap
+  records cannot be admitted outside the connection worker path. Invite-secret
+  authorization may live in active connection handling only if raw admission
+  cannot forge the receive context needed to project routes.
+- Add boundary tests for sync exfiltration scope: inbound `need_id` handling may
+  queue bytes only through a worker/command path that checks the requested event
+  is shared with the remote endpoint through a mutual workspace.
+- Add boundary tests that enumerate production shared event tags and prove every
+  durable shared-state mutation is either signed by an authorized dependency,
+  self-authenticating as a workspace root, or explicitly excluded as local /
+  connection-scoped bootstrap work.
+
 | Rule | Status | Enforcement |
 | --- | --- | --- |
 | Commands create new semantic events and return proposed events, not rows/effects/storage writes. | typed + static | [CommandOutput](src/protocol/event_modules/worker.rs), `command_output_contains_events_not_state_changes`, `event_module_commands_do_not_mutate_storage_directly` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
@@ -34,6 +55,7 @@ the rule is still prose/review only.
 | `EventRecord` literals are constructed only by codecs. | static | `event_records_are_constructed_only_by_codecs`. |
 | Codecs use shared binary helpers and reject trailing bytes. | static + partial | `codec_files_use_shared_binary_helpers_and_finish_reads`; this catches common drift but is not a formal fixed-width proof. |
 | `types.rs` does not store encoded/canonical artifacts as semantic fields. | static | `event_module_types_do_not_store_encoded_event_artifacts`. |
+| Production shared events require authority. | partial | Durable shared-state events must be signed by an authorized dependency unless they are self-authenticating root events such as `workspace`. Local-only secrets, connection-scoped protocol work, and test-only event modules are explicit carveouts. Raw `device_invite` and raw content are rejected by registry dispatch; signed identity/content projectors validate signer authority from event context. |
 | Crypto behavior must be real where claimed; transit/crypto naming must not claim fake protection. | static + partial | `source_does_not_contain_fake_crypto_claims`; cryptographic correctness still needs implementation review and tests. |
 | Functional proof comes from black-box CLI/network tests, except pure projector/command tests. | partial | Existing tests spawn the real `topo` binary for sync/generate/cascade paths; this remains a process/testing rule, not a type guarantee. |
 | Workers with cursors, leases, fairness, and wake declarations are the long-term control loop. | uncovered | Described in [plan.md](plan.md); only the event-modules worker, connection worker, and sync worker exist in the current POC. |

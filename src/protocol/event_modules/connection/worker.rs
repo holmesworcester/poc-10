@@ -657,6 +657,8 @@ mod tests {
                 local: endpoint::types::EndpointKeypair {
                     endpoint: [8; 32],
                     secret: [9; 32],
+                    signing_public_key: [10; 32],
+                    signing_secret: [11; 32],
                 },
             },
         )

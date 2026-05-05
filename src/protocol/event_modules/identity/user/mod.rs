@@ -52,6 +52,7 @@ mod tests {
 
         let user = commands::create(CreateUser {
             created_at_ms: 3,
+            workspace_id: workspace_created.workspace_id,
             public_key: user_public_key,
             username: "alice".to_string(),
             user_invite_event_id: invite_created.user_invite_id,
@@ -115,6 +116,7 @@ mod tests {
 
         let user = commands::create(CreateUser {
             created_at_ms: 3,
+            workspace_id: workspace_created.workspace_id,
             public_key: crypto::ed25519_public_key(&[9; 32]),
             username: "alice".to_string(),
             user_invite_event_id: invite_created.user_invite_id,
@@ -200,6 +202,7 @@ mod tests {
 
         let user = commands::create(CreateUser {
             created_at_ms: 3,
+            workspace_id: workspace_created.workspace_id,
             public_key: user_public_key,
             username: "alice".to_string(),
             user_invite_event_id: invite_created.user_invite_id,

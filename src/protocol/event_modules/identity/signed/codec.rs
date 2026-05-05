@@ -102,8 +102,8 @@ fn inner_metadata(event: &SignedEnvelope) -> Result<InnerMetadata, String> {
             (
                 inner.created_at_ms,
                 user::codec::USER_WIRE_SIZE - 1,
-                Vec::new(),
-                None,
+                vec![inner.workspace_id],
+                Some(inner.workspace_id),
             )
         }
         device_invite::codec::TYPE_DEVICE_INVITE => {
@@ -250,6 +250,7 @@ mod tests {
                 workspace_id: [1; 32],
                 user_authority_event_id: [2; 32],
                 endpoint_id: [3; 32],
+                signing_public_key: [4; 32],
                 device_name: "laptop".to_string(),
             })
             .expect("encode endpoint_shared");

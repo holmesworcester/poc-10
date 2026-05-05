@@ -1,6 +1,7 @@
 //! Commands for creating signed endpoint-shared events.
 
 use crate::core::crypto::Ed25519PrivateKey;
+use crate::core::crypto::Ed25519PublicKey;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::identity::signed;
 use crate::protocol::event_modules::types::EventId;
@@ -23,6 +24,7 @@ pub struct ShareEndpoint {
     pub workspace_id: EventId,
     pub user_authority_event_id: EventId,
     pub endpoint_id: EndpointId,
+    pub signing_public_key: Ed25519PublicKey,
     pub device_name: String,
     pub device_invite_id: EventId,
     pub device_invite_private_key: Ed25519PrivateKey,
@@ -40,6 +42,7 @@ pub fn share_endpoint(
     validate_id("workspace_id", &input.workspace_id)?;
     validate_id("user_authority_event_id", &input.user_authority_event_id)?;
     validate_id("endpoint_id", &input.endpoint_id)?;
+    validate_id("signing_public_key", &input.signing_public_key)?;
     validate_id("device_invite_id", &input.device_invite_id)?;
 
     if context
@@ -54,6 +57,7 @@ pub fn share_endpoint(
         workspace_id: input.workspace_id,
         user_authority_event_id: input.user_authority_event_id,
         endpoint_id: input.endpoint_id,
+        signing_public_key: input.signing_public_key,
         device_name: input.device_name,
     })?;
     let signed = signed::commands::sign_payload(
@@ -109,6 +113,7 @@ mod tests {
             workspace_id: [1; 32],
             user_authority_event_id: [2; 32],
             endpoint_id: [3; 32],
+            signing_public_key: [4; 32],
             device_name: "laptop".to_string(),
             device_invite_id,
             device_invite_private_key: private_key,
@@ -165,6 +170,7 @@ mod tests {
         assert_eq!(inner.workspace_id, [1; 32]);
         assert_eq!(inner.user_authority_event_id, [2; 32]);
         assert_eq!(inner.endpoint_id, [3; 32]);
+        assert_eq!(inner.signing_public_key, [4; 32]);
         assert_eq!(inner.device_name, "laptop");
     }
 

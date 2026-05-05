@@ -193,14 +193,31 @@ impl Store {
         let mut inserted = 0;
         for row in rows {
             let table_name = quoted_table_name(row.table)?;
-            inserted += self.conn.execute(
+            let changed = self.conn.execute(
                 &format!(
                     "INSERT OR IGNORE INTO {table_name}
                         (row_key, row_value)
                      VALUES (?1, ?2)"
                 ),
-                params![row.key, row.value],
+                params![row.key.as_slice(), row.value.as_slice()],
             )?;
+            if changed == 0 {
+                let existing = self
+                    .conn
+                    .query_row(
+                        &format!("SELECT row_value FROM {table_name} WHERE row_key = ?1"),
+                        params![row.key.as_slice()],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()?;
+                if existing.as_deref() != Some(row.value.as_slice()) {
+                    return Err(rusqlite::Error::InvalidParameterName(format!(
+                        "conflicting row for {}",
+                        row.table.as_str()
+                    )));
+                }
+            }
+            inserted += changed;
         }
         Ok(inserted)
     }
@@ -420,4 +437,45 @@ fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
         )));
     }
     Ok(format!("\"{name}\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_ROWS: TableName = TableName::new("test.rows");
+
+    #[test]
+    fn duplicate_row_insert_is_idempotent_but_conflicting_value_rejects() {
+        let store = Store::open_memory_with_schemas(&[Schema::durable_row_table(
+            "test.rows.v1",
+            TEST_ROWS,
+        )])
+        .expect("open store");
+        let row = TableRow {
+            table: TEST_ROWS,
+            key: b"k".to_vec(),
+            value: b"one".to_vec(),
+        };
+
+        assert_eq!(
+            store.insert_table_rows(vec![row.clone()]).expect("insert"),
+            1
+        );
+        assert_eq!(
+            store
+                .insert_table_rows(vec![row.clone()])
+                .expect("idempotent insert"),
+            0
+        );
+
+        let err = store
+            .insert_table_rows(vec![TableRow {
+                value: b"two".to_vec(),
+                ..row
+            }])
+            .expect_err("conflicting insert must reject");
+
+        assert!(err.to_string().contains("conflicting row for test.rows"));
+    }
 }

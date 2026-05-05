@@ -194,6 +194,7 @@ mod tests {
             workspace_id,
             user_authority_event_id: admin_user_id,
             endpoint_id: signer_public_key(endpoint_private_key),
+            signing_public_key: signer_public_key(endpoint_private_key),
             device_name: "admin-laptop".to_string(),
         };
         let signed = signed::commands::sign_payload(

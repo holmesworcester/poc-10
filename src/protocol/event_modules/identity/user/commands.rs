@@ -10,6 +10,7 @@ use super::{codec, types::UserEvent};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateUser {
     pub created_at_ms: u64,
+    pub workspace_id: EventId,
     pub public_key: Ed25519PublicKey,
     pub username: String,
     pub user_invite_event_id: EventId,
@@ -29,6 +30,7 @@ pub fn create(input: CreateUser) -> Result<CommandOutput<CreateUserOutput>, Stri
     }
     let event = UserEvent {
         created_at_ms: input.created_at_ms,
+        workspace_id: input.workspace_id,
         public_key: input.public_key,
         username: input.username,
     };
@@ -62,6 +64,7 @@ mod tests {
         let user_public_key = crypto::ed25519_public_key(&[9; 32]);
         let output = create(CreateUser {
             created_at_ms: 12,
+            workspace_id: [1; 32],
             public_key: user_public_key,
             username: "alice".to_string(),
             user_invite_event_id: invite_id,
@@ -76,7 +79,7 @@ mod tests {
             proposed.event_id(),
             event_id(&proposed.record().canonical_bytes)
         );
-        assert_eq!(proposed.record().dependencies, vec![invite_id]);
+        assert_eq!(proposed.record().dependencies, vec![invite_id, [1; 32]]);
 
         let envelope = crate::protocol::event_modules::identity::signed::codec::decode(
             &proposed.record().canonical_bytes,
@@ -87,6 +90,7 @@ mod tests {
 
         let decoded = codec::decode(&envelope.payload).expect("decode user payload");
         assert_eq!(decoded.created_at_ms, 12);
+        assert_eq!(decoded.workspace_id, [1; 32]);
         assert_eq!(decoded.public_key, user_public_key);
         assert_eq!(decoded.username, "alice");
     }
@@ -95,6 +99,7 @@ mod tests {
     fn create_rejects_blank_username_before_proposing_event() {
         let err = create(CreateUser {
             created_at_ms: 12,
+            workspace_id: [1; 32],
             public_key: crypto::ed25519_public_key(&[9; 32]),
             username: " ".to_string(),
             user_invite_event_id: [2; 32],

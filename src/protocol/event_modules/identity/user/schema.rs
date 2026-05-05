@@ -82,6 +82,7 @@ mod tests {
     fn event() -> UserEvent {
         UserEvent {
             created_at_ms: 6,
+            workspace_id: [2; 32],
             public_key: [1; 32],
             username: "alice".to_string(),
         }

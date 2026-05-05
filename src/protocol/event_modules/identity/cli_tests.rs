@@ -189,6 +189,7 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
             workspace_id,
             user_authority_event_id: alice.user_id,
             endpoint_id: alice_join.endpoint_id,
+            signing_public_key: crypto::ed25519_public_key(&alice_join.endpoint_private_key),
             device_name: "alice-second-join".to_string(),
             device_invite_id: alice_join.device_invite_id,
             device_invite_private_key: alice_join.device_invite_private_key,
@@ -311,6 +312,7 @@ fn same_user_client_can_link_multiple_workspaces_but_authority_does_not_cross() 
             workspace_id: workspace_b_id,
             user_authority_event_id: alice_b.user_id,
             endpoint_id: crypto::ed25519_public_key(&[86; 32]),
+            signing_public_key: crypto::ed25519_public_key(&[86; 32]),
             device_name: "cross-workspace".to_string(),
             device_invite_id: join_a.device_invite_id,
             device_invite_private_key: join_a.device_invite_private_key,
@@ -687,6 +689,7 @@ fn create_user_from_admin_invite(
 
     let user = user::commands::create(user::commands::CreateUser {
         created_at_ms: input.timestamp + 1,
+        workspace_id: input.workspace_id,
         public_key: crypto::ed25519_public_key(&input.user_private_key),
         username: input.username.to_string(),
         user_invite_event_id: user_invite_id,
@@ -725,6 +728,7 @@ fn create_user(
 
     let user = user::commands::create(user::commands::CreateUser {
         created_at_ms: input.timestamp + 1,
+        workspace_id: input.workspace_id,
         public_key: crypto::ed25519_public_key(&input.user_private_key),
         username: input.username.to_string(),
         user_invite_event_id: user_invite_id,
@@ -771,6 +775,7 @@ fn share_endpoint(
             workspace_id: input.workspace_id,
             user_authority_event_id: input.user_id,
             endpoint_id: crypto::ed25519_public_key(&input.endpoint_private_key),
+            signing_public_key: crypto::ed25519_public_key(&input.endpoint_private_key),
             device_name: input.device_name.to_string(),
             device_invite_id,
             device_invite_private_key: input.device_invite_private_key,

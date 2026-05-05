@@ -52,6 +52,7 @@ mod tests {
         let user_invite_id = user_invite.value.user_invite_id;
         let user = user::commands::create(user::commands::CreateUser {
             created_at_ms: 3,
+            workspace_id,
             public_key: crypto::ed25519_public_key(&user_private_key),
             username: "alice".to_string(),
             user_invite_event_id: user_invite_id,
@@ -80,6 +81,7 @@ mod tests {
                 workspace_id,
                 user_authority_event_id,
                 endpoint_id: crypto::ed25519_public_key(&endpoint_private_key),
+                signing_public_key: crypto::ed25519_public_key(&endpoint_private_key),
                 device_name: "laptop".to_string(),
                 device_invite_id,
                 device_invite_private_key: private_key,
@@ -133,6 +135,27 @@ mod tests {
         assert_eq!(membership.user_authority_event_id, user_authority_event_id);
         assert_eq!(membership.device_invite_id, device_invite_id);
 
+        let remote_duplicate = commands::share_endpoint(
+            &NoMembership,
+            commands::ShareEndpoint {
+                created_at_ms: 6,
+                workspace_id,
+                user_authority_event_id,
+                endpoint_id,
+                signing_public_key: crypto::ed25519_public_key(&endpoint_private_key),
+                device_name: "second".to_string(),
+                device_invite_id,
+                device_invite_private_key: private_key,
+            },
+        )
+        .expect("construct duplicate as received event");
+        let err = worker::run(&store, &modules, remote_duplicate)
+            .expect_err("remote duplicate endpoint/workspace must fail");
+        assert!(
+            err.contains("conflicting row for identity.endpoint_memberships"),
+            "{err}"
+        );
+
         let duplicate = commands::share_endpoint(
             &store,
             commands::ShareEndpoint {
@@ -140,6 +163,7 @@ mod tests {
                 workspace_id,
                 user_authority_event_id,
                 endpoint_id,
+                signing_public_key: crypto::ed25519_public_key(&endpoint_private_key),
                 device_name: "second".to_string(),
                 device_invite_id,
                 device_invite_private_key: private_key,

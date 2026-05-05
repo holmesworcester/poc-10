@@ -6,9 +6,10 @@
 //! where the data comes from, and this module owns the keypair consistency
 //! check.
 
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use x25519_dalek::{PublicKey, StaticSecret};
 
+use crate::core::crypto;
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
@@ -17,13 +18,23 @@ use super::types::{EndpointId, EndpointKeypair};
 pub trait LocalEndpointRead {
     fn local_endpoint_secret(&self) -> Result<Option<Vec<u8>>, String>;
     fn local_endpoint(&self) -> Result<Option<Vec<u8>>, String>;
+    fn local_endpoint_signing_public_key(&self) -> Result<Option<Vec<u8>>, String>;
+    fn local_endpoint_signing_secret(&self) -> Result<Option<Vec<u8>>, String>;
 }
 
 pub fn create_local_keypair() -> CommandOutput<EndpointKeypair> {
     let secret = StaticSecret::random_from_rng(OsRng);
     let endpoint = PublicKey::from(&secret).to_bytes();
     let secret = secret.to_bytes();
-    let event = EndpointKeypair { endpoint, secret };
+    let mut signing_secret = [0; crypto::ED25519_PRIVATE_KEY_BYTES];
+    OsRng.fill_bytes(&mut signing_secret);
+    let signing_public_key = crypto::ed25519_public_key(&signing_secret);
+    let event = EndpointKeypair {
+        endpoint,
+        secret,
+        signing_public_key,
+        signing_secret,
+    };
     let bytes = codec::encode(&event);
     CommandOutput::with_events(
         event,
@@ -34,20 +45,36 @@ pub fn create_local_keypair() -> CommandOutput<EndpointKeypair> {
 pub fn local_keypair(context: &impl LocalEndpointRead) -> Result<Option<EndpointKeypair>, String> {
     let secret = context.local_endpoint_secret()?;
     let endpoint = context.local_endpoint()?;
+    let signing_public_key = context.local_endpoint_signing_public_key()?;
+    let signing_secret = context.local_endpoint_signing_secret()?;
 
-    match (secret, endpoint) {
-        (Some(secret), Some(endpoint)) => {
+    match (secret, endpoint, signing_public_key, signing_secret) {
+        (Some(secret), Some(endpoint), Some(signing_public_key), Some(signing_secret)) => {
             let secret = endpoint_id(&secret)?;
             let endpoint = endpoint_id(&endpoint)?;
+            let signing_public_key = endpoint_id(&signing_public_key)?;
+            let signing_secret = endpoint_id(&signing_secret)?;
             let derived = PublicKey::from(&StaticSecret::from(secret)).to_bytes();
             if derived != endpoint {
                 return Err("stored endpoint does not match local endpoint secret".to_string());
             }
-            Ok(Some(EndpointKeypair { endpoint, secret }))
+            if crypto::ed25519_public_key(&signing_secret) != signing_public_key {
+                return Err(
+                    "stored endpoint signing key does not match local signing secret".to_string(),
+                );
+            }
+            Ok(Some(EndpointKeypair {
+                endpoint,
+                secret,
+                signing_public_key,
+                signing_secret,
+            }))
         }
-        (None, None) => Ok(None),
-        (None, Some(_)) => Err("local endpoint secret is missing".to_string()),
-        (Some(_), None) => Err("local endpoint public key is missing".to_string()),
+        (None, None, None, None) => Ok(None),
+        (None, _, _, _) => Err("local endpoint secret is missing".to_string()),
+        (_, None, _, _) => Err("local endpoint public key is missing".to_string()),
+        (_, _, None, _) => Err("local endpoint signing public key is missing".to_string()),
+        (_, _, _, None) => Err("local endpoint signing secret is missing".to_string()),
     }
 }
 
@@ -70,6 +97,8 @@ mod tests {
     struct ReadContext {
         endpoint: Option<Vec<u8>>,
         secret: Option<Vec<u8>>,
+        signing_public_key: Option<Vec<u8>>,
+        signing_secret: Option<Vec<u8>>,
     }
 
     impl LocalEndpointRead for ReadContext {
@@ -79,6 +108,14 @@ mod tests {
 
         fn local_endpoint(&self) -> Result<Option<Vec<u8>>, String> {
             Ok(self.endpoint.clone())
+        }
+
+        fn local_endpoint_signing_public_key(&self) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.signing_public_key.clone())
+        }
+
+        fn local_endpoint_signing_secret(&self) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.signing_secret.clone())
         }
     }
 
@@ -103,6 +140,8 @@ mod tests {
         let context = ReadContext {
             endpoint: Some(good.endpoint.to_vec()),
             secret: Some(bad.secret.to_vec()),
+            signing_public_key: Some(good.signing_public_key.to_vec()),
+            signing_secret: Some(good.signing_secret.to_vec()),
         };
 
         let err = local_keypair(&context).expect_err("mismatched keypair must fail");
@@ -111,15 +150,38 @@ mod tests {
     }
 
     #[test]
+    fn local_keypair_rejects_stored_signing_secret_that_does_not_match_public_key() {
+        let good = create_local_keypair().value;
+        let bad = create_local_keypair().value;
+        let context = ReadContext {
+            endpoint: Some(good.endpoint.to_vec()),
+            secret: Some(good.secret.to_vec()),
+            signing_public_key: Some(good.signing_public_key.to_vec()),
+            signing_secret: Some(bad.signing_secret.to_vec()),
+        };
+
+        let err = local_keypair(&context).expect_err("mismatched signing keypair must fail");
+
+        assert_eq!(
+            err,
+            "stored endpoint signing key does not match local signing secret"
+        );
+    }
+
+    #[test]
     fn local_keypair_reports_missing_side_of_local_material() {
         let local = create_local_keypair().value;
         let missing_secret = ReadContext {
             endpoint: Some(local.endpoint.to_vec()),
             secret: None,
+            signing_public_key: Some(local.signing_public_key.to_vec()),
+            signing_secret: Some(local.signing_secret.to_vec()),
         };
         let missing_endpoint = ReadContext {
             endpoint: None,
             secret: Some(local.secret.to_vec()),
+            signing_public_key: Some(local.signing_public_key.to_vec()),
+            signing_secret: Some(local.signing_secret.to_vec()),
         };
 
         assert_eq!(

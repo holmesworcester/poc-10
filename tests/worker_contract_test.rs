@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::net::SocketAddr;
 
 use topo::core::store::Store;
+use topo::protocol::event_modules::identity::{endpoint, endpoint_shared};
 use topo::protocol::event_modules::schema::{self as event_schema, EventLabel};
 use topo::protocol::event_modules::types::{
     event_id, EventId, EventRecord, EventScope, ReceiveMetadata,
@@ -17,8 +18,11 @@ fn command_admission_returns_event_ids_for_chaining() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Protocol::open_store(tmp.path().join("worker.db")).unwrap();
     let modules = Modules::new();
+    let (workspace_id, _) = install_local_content_signer(&store);
 
-    let output = modules.generate_content(&store, [1; 32], 3, 64).unwrap();
+    let output = modules
+        .generate_content(&store, workspace_id, 3, 64)
+        .unwrap();
     let proposed_ids = output
         .events
         .iter()
@@ -33,6 +37,32 @@ fn command_admission_returns_event_ids_for_chaining() {
     for event_id in report.event_ids {
         assert!(event_schema::has_shared_event(&store, &event_id).unwrap());
     }
+}
+
+fn install_local_content_signer(store: &Store) -> (EventId, EventId) {
+    let local = endpoint::commands::create_local_keypair().value;
+    store
+        .insert_table_rows(endpoint::projector::local_endpoint(local))
+        .expect("insert local endpoint");
+    let workspace_id = [1; 32];
+    let endpoint_shared_id = [2; 32];
+    let device_invite_id = [3; 32];
+    let event = endpoint_shared::types::EndpointSharedEvent {
+        created_at_ms: 1,
+        workspace_id,
+        user_authority_event_id: [4; 32],
+        endpoint_id: local.endpoint,
+        signing_public_key: local.signing_public_key,
+        device_name: "worker".to_string(),
+    };
+    store
+        .insert_table_rows(vec![endpoint_shared::schema::endpoint_membership_row(
+            endpoint_shared_id,
+            device_invite_id,
+            &event,
+        )])
+        .expect("insert local membership");
+    (workspace_id, endpoint_shared_id)
 }
 
 #[test]

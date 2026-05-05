@@ -3,7 +3,8 @@
 //! User payloads are signed by the user-invite key before admission:
 //!
 //! ```text
-//! type(1) || created_at_ms(8) || public_key(32) || username_utf8_zero_padded(64)
+//! type(1) || created_at_ms(8) || workspace_id(32)
+//! || public_key(32) || username_utf8_zero_padded(64)
 //! ```
 
 use crate::protocol::wire::{Reader, Writer};
@@ -11,13 +12,14 @@ use crate::protocol::wire::{Reader, Writer};
 use super::types::{UserEvent, USERNAME_BYTES};
 
 pub const TYPE_USER: u8 = 14;
-pub const USER_WIRE_SIZE: usize = 1 + 8 + 32 + USERNAME_BYTES;
+pub const USER_WIRE_SIZE: usize = 1 + 8 + 32 + 32 + USERNAME_BYTES;
 
 pub fn encode(event: &UserEvent) -> Result<Vec<u8>, String> {
     let username = encode_username(&event.username)?;
     let mut out = Writer::with_capacity(USER_WIRE_SIZE);
     out.u8(TYPE_USER);
     out.u64(event.created_at_ms);
+    out.id(&event.workspace_id);
     out.id(&event.public_key);
     out.raw(&username);
     Ok(out.finish())
@@ -30,11 +32,13 @@ pub fn decode(bytes: &[u8]) -> Result<UserEvent, String> {
         return Err("expected user".to_string());
     }
     let created_at_ms = reader.u64()?;
+    let workspace_id = reader.id()?;
     let public_key = reader.id()?;
     let username = decode_username(reader.slice(USERNAME_BYTES)?)?;
     reader.finish()?;
     Ok(UserEvent {
         created_at_ms,
+        workspace_id,
         public_key,
         username,
     })
@@ -74,6 +78,7 @@ mod tests {
     fn event() -> UserEvent {
         UserEvent {
             created_at_ms: 42,
+            workspace_id: [2; 32],
             public_key: [7; 32],
             username: "alice".to_string(),
         }
@@ -100,7 +105,7 @@ mod tests {
     #[test]
     fn rejects_non_canonical_username_padding() {
         let mut encoded = encode(&event()).expect("encode user");
-        let username_start = 1 + 8 + 32;
+        let username_start = 1 + 8 + 32 + 32;
         encoded[username_start + "alice".len() + 1] = b'x';
 
         assert_eq!(
@@ -113,6 +118,7 @@ mod tests {
     fn rejects_usernames_that_do_not_fit_fixed_slot() {
         let err = encode(&UserEvent {
             created_at_ms: 42,
+            workspace_id: [2; 32],
             public_key: [7; 32],
             username: "a".repeat(USERNAME_BYTES + 1),
         })

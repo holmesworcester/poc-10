@@ -5,6 +5,8 @@
 //! fixtures. The command proposes shared events only; storing and projection are
 //! handled by the common worker.
 
+use crate::core::crypto::Ed25519PrivateKey;
+use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
@@ -17,7 +19,9 @@ pub struct GenerateReport {
 }
 
 pub fn generate(
-    workspace_id: crate::protocol::event_modules::types::EventId,
+    workspace_id: EventId,
+    signer_endpoint_shared_id: EventId,
+    signer_private_key: Ed25519PrivateKey,
     start_timestamp: u64,
     num_events: usize,
     event_size: usize,
@@ -32,7 +36,8 @@ pub fn generate(
             timestamp,
             payload,
         });
-        let record = codec::record_from_bytes(bytes)?;
+        let signed = codec::sign(signer_endpoint_shared_id, &signer_private_key, bytes);
+        let record = codec::signed_record_from_bytes(codec::encode_signed(&signed))?;
         records.push(record);
     }
 

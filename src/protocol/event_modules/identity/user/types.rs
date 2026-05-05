@@ -8,6 +8,7 @@ pub const USERNAME_BYTES: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserEvent {
     pub created_at_ms: u64,
+    pub workspace_id: EventId,
     pub public_key: Ed25519PublicKey,
     pub username: String,
 }

@@ -131,10 +131,6 @@ fn drain_inbound_events(
     for work in works {
         let local = local_endpoint(store)?;
         let context = StoreSyncContext::for_connection(store, local.endpoint, work.connection_id)?;
-        if context.workspace_ids.is_empty() {
-            consumed.push(work.key());
-            continue;
-        }
         let report = compare::commands::handle_inbound_event(
             &context,
             work.connection_id,
@@ -208,8 +204,16 @@ impl compare::commands::ReadContext for StoreSyncContext<'_> {
         &self,
         event_id: &crate::protocol::event_modules::types::EventId,
     ) -> Result<bool, String> {
-        event_schema::has_shared_event_in_workspaces(self.store, event_id, &self.workspace_ids)
+        event_schema::has_shared_event(self.store, event_id)
             .map_err(|err| format!("check event presence: {err}"))
+    }
+
+    fn can_send_event(
+        &self,
+        event_id: &crate::protocol::event_modules::types::EventId,
+    ) -> Result<bool, String> {
+        event_schema::has_shared_event_in_workspaces(self.store, event_id, &self.workspace_ids)
+            .map_err(|err| format!("check scoped event presence: {err}"))
     }
 }
 

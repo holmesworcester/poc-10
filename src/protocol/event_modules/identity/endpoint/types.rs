@@ -1,8 +1,10 @@
 //! Local endpoint types.
 //!
-//! Endpoint ids are X25519 public keys. The POC stores the matching secret as a
-//! local event so deterministic tests and replay see identity creation through
-//! the same admission path as other local facts.
+//! Endpoint ids are X25519 public keys used for transit. Endpoints also carry a
+//! distinct Ed25519 signing key used by shared events that are authorized by an
+//! endpoint's workspace membership. Both private keys are local-only facts.
+
+use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};
 
 pub type EndpointId = [u8; 32];
 
@@ -10,4 +12,6 @@ pub type EndpointId = [u8; 32];
 pub struct EndpointKeypair {
     pub endpoint: EndpointId,
     pub secret: [u8; 32],
+    pub signing_public_key: Ed25519PublicKey,
+    pub signing_secret: Ed25519PrivateKey,
 }
