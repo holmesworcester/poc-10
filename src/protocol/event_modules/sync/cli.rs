@@ -10,9 +10,9 @@ use std::net::SocketAddr;
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::protocol::cli::Context;
-use crate::protocol::event_modules::{connection::worker as connection_worker, worker};
+use crate::protocol::event_modules::connection::worker as connection_worker;
 
-use super::worker::{self as sync_worker, SyncSelection};
+use super::worker::SyncSelection;
 
 const SYNC_USAGE: &str = "sync [today] [--listen IP PORT --accept N]";
 
@@ -69,49 +69,21 @@ fn run_sync_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
 }
 
 fn run_sync_routes(context: &mut Context, selection: SyncSelection) -> Result<Vec<String>, String> {
-    worker::run(
+    let output = connection_worker::run(
         &context.store,
         &context.protocol,
-        worker::DrainUntilIdle {
-            batch_size: worker::DEFAULT_READY_BATCH,
-        },
+        connection_worker::Work::StartSyncRoutes { selection },
     )
-    .map_err(|err| format!("drain ready events before sync: {err}"))?;
-
-    let start = match sync_worker::run(
-        &context.store,
-        context.protocol.modules().sync_index(),
-        sync_worker::Work::Start { selection },
-    )
-    .map_err(|err| format!("start sync: {err}"))?
-    {
-        sync_worker::Output::Started(output) => output,
-        sync_worker::Output::DrainedInboundSync(_) => {
-            return Err("sync worker returned non-start output".to_string())
-        }
+    .map_err(|err| format!("sync routes: {err}"))?;
+    let connection_worker::Output::SyncRoutesStarted(report) = output else {
+        return Err("connection worker returned non-sync-routes output".to_string());
     };
-    let (started, _) = worker::run(&context.store, &context.protocol, start)
-        .map_err(|err| format!("record sync events: {err}"))?;
-
-    let mut summary = SyncSummary {
-        sent_events: started.sent_events,
-        ..SyncSummary::default()
-    };
-
-    let exchanged = connection_worker::run(
-        &context.store,
-        &context.protocol,
-        connection_worker::Work::ExchangeOutboundRoutes,
-    )
-    .map_err(|err| format!("exchange sync outbox routes: {err}"))?;
-    let connection_worker::Output::RoutesExchanged(exchanged) = exchanged else {
-        return Err("connection worker returned non-route-exchange output".to_string());
-    };
-    summary.routes_synced += exchanged.routes_synced;
-    summary.sent_events += exchanged.sent_events;
-    summary.received_events += exchanged.received_events;
-
-    Ok(summary.lines())
+    Ok(SyncSummary {
+        routes_synced: report.routes_synced,
+        sent_events: report.sent_events,
+        received_events: report.received_events,
+    }
+    .lines())
 }
 
 struct SyncOptions {

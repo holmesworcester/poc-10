@@ -92,6 +92,9 @@ pub enum Work {
         accept_count: usize,
     },
     ExchangeOutboundRoutes,
+    StartSyncRoutes {
+        selection: sync::worker::SyncSelection,
+    },
     RunDaemon {
         options: DaemonOptions,
     },
@@ -103,6 +106,7 @@ pub enum Output {
     Connected(ConnectReport),
     Served(ServeReport),
     RoutesExchanged(RouteExchangeReport),
+    SyncRoutesStarted(RouteExchangeReport),
     DaemonRan(DaemonReport),
 }
 
@@ -264,6 +268,9 @@ where
         Work::ExchangeOutboundRoutes => {
             exchange_outbound_routes(store, registry, true).map(Output::RoutesExchanged)
         }
+        Work::StartSyncRoutes { selection } => {
+            start_sync_routes(store, registry, selection, true).map(Output::SyncRoutesStarted)
+        }
         Work::RunDaemon { options } => run_daemon(store, registry, options).map(Output::DaemonRan),
     }
 }
@@ -383,7 +390,7 @@ where
         summary.ready_events += ready.applied_events;
         summary.unblocked_events += ready.unblocked_events;
 
-        let sync = run_daemon_sync_round(store, registry)?;
+        let sync = start_sync_routes(store, registry, sync::worker::SyncSelection::All, false)?;
         summary.sync_rounds += 1;
         summary.routes_synced += sync.routes_synced;
         summary.failed_routes += sync.failed_routes;
@@ -400,18 +407,21 @@ where
     }
 }
 
-fn run_daemon_sync_round<R>(store: &Store, registry: &R) -> Result<RouteExchangeReport, String>
+fn start_sync_routes<R>(
+    store: &Store,
+    registry: &R,
+    selection: sync::worker::SyncSelection,
+    fail_on_route_error: bool,
+) -> Result<RouteExchangeReport, String>
 where
     R: ConnectionRegistry,
 {
     let start = match sync::worker::run(
         store,
         registry.sync_index(),
-        sync::worker::Work::Start {
-            selection: sync::worker::SyncSelection::All,
-        },
+        sync::worker::Work::Start { selection },
     )
-    .map_err(|err| format!("start daemon sync: {err}"))?
+    .map_err(|err| format!("start sync: {err}"))?
     {
         sync::worker::Output::Started(output) => output,
         sync::worker::Output::DrainedInboundSync(_) => {
@@ -425,7 +435,11 @@ where
         sent_events: started.sent_events,
         ..RouteExchangeReport::default()
     };
-    summary.merge(exchange_outbound_routes(store, registry, false)?);
+    summary.merge(exchange_outbound_routes(
+        store,
+        registry,
+        fail_on_route_error,
+    )?);
     Ok(summary)
 }
 
