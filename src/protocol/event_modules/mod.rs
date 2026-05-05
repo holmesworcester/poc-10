@@ -243,6 +243,7 @@ pub fn schemas() -> Vec<Schema> {
     // actual declaration in that module's `schema.rs`.
     let mut out = Vec::new();
     out.extend_from_slice(schema::SCHEMAS);
+    out.extend_from_slice(identity::admin::schema::SCHEMAS);
     out.extend_from_slice(identity::device_invite::schema::SCHEMAS);
     out.extend_from_slice(identity::endpoint::schema::SCHEMAS);
     out.extend_from_slice(identity::endpoint_shared::schema::SCHEMAS);
@@ -295,6 +296,7 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         .first()
         .ok_or_else(|| "empty event bytes".to_string())?;
     match *tag {
+        identity::admin::codec::TYPE_ADMIN => identity::admin::codec::record_from_bytes(bytes),
         identity::device_invite::codec::TYPE_DEVICE_INVITE => {
             identity::device_invite::codec::record_from_bytes(bytes)
         }
@@ -305,7 +307,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         identity::invite::codec::TYPE_INVITE_SECRET => {
             identity::invite::codec::record_from_bytes(bytes)
         }
-        identity::signed::codec::TYPE_SIGNED => identity::signed::codec::record_from_bytes(bytes),
         identity::workspace::codec::TYPE_WORKSPACE => {
             identity::workspace::codec::record_from_bytes(bytes)
         }

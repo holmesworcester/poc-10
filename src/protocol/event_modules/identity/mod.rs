@@ -5,6 +5,7 @@
 //! whether an incoming request is authorized, but they are not shared content
 //! history.
 
+pub mod admin;
 pub mod device_invite;
 pub mod endpoint;
 pub mod endpoint_shared;
@@ -19,6 +20,7 @@ use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput}
 pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionOutput>, String> {
     let bytes = &event.record.canonical_bytes;
     match bytes.first().copied() {
+        Some(admin::codec::TYPE_ADMIN) => Ok(Some(admin::projector::project(event)?)),
         Some(device_invite::codec::TYPE_DEVICE_INVITE) => {
             Ok(Some(device_invite::projector::project(event)?))
         }
@@ -27,16 +29,6 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
         }
         Some(signed::codec::TYPE_SIGNED) => project_signed_record(event),
         Some(invite::codec::TYPE_INVITE_SECRET) => Ok(Some(invite::projector::project(bytes)?)),
-        Some(signed::codec::TYPE_SIGNED) => {
-            let envelope = signed::codec::decode(bytes)?;
-            match envelope.inner_type {
-                user_invite::codec::TYPE_USER_INVITE => {
-                    Ok(Some(user_invite::projector::project(event)?))
-                }
-                user::codec::TYPE_USER => Ok(Some(user::projector::project(event)?)),
-                other => Err(format!("unknown signed identity event type {other}")),
-            }
-        }
         Some(workspace::codec::TYPE_WORKSPACE) => Ok(Some(workspace::projector::project(bytes)?)),
         _ => Ok(None),
     }
@@ -48,6 +40,8 @@ fn project_signed_record(event: &EventWithContext<'_>) -> Result<Option<Projecti
         endpoint_shared::codec::TYPE_ENDPOINT_SHARED => Ok(Some(
             endpoint_shared::projector::project_signed(&envelope, event)?,
         )),
+        user_invite::codec::TYPE_USER_INVITE => Ok(Some(user_invite::projector::project(event)?)),
+        user::codec::TYPE_USER => Ok(Some(user::projector::project(event)?)),
         _ => Err(format!(
             "signed envelope inner type {} has no identity projector",
             envelope.inner_type
