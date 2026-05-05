@@ -123,6 +123,9 @@ mod tests {
                 created_at_ms: 70,
                 workspace_id: [1; 32],
                 user_authority_event_id: [2; 32],
+                user_invite_event_id: Some([5; 32]),
+                signer_event_id: [2; 32],
+                signer_private_key: [8; ED25519_PRIVATE_KEY_BYTES],
             },
             private_key,
         )

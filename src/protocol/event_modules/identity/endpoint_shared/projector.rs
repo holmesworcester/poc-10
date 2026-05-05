@@ -2,8 +2,8 @@
 //!
 //! The common worker admits the signed envelope and supplies its signer
 //! dependency. Projection validates that the signer dependency is the matching
-//! device invite, then writes the shared endpoint row plus the local membership
-//! index used by duplicate-join preflight.
+//! signed device invite, then writes the shared endpoint row plus the local
+//! membership index used by duplicate-join preflight.
 
 use crate::protocol::event_modules::identity::{device_invite, signed};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
@@ -15,12 +15,20 @@ pub fn project_signed(
     event: &EventWithContext<'_>,
 ) -> Result<ProjectionOutput, String> {
     let endpoint_shared = codec::decode(&envelope.payload)?;
+    if endpoint_shared.endpoint_id.iter().all(|byte| *byte == 0) {
+        return Err("endpoint_shared endpoint_id cannot be empty".to_string());
+    }
     let signer = event
         .context
         .dependency(&envelope.signer_event_id)
         .ok_or_else(|| "endpoint_shared device_invite dependency is missing".to_string())?;
-    let invite = device_invite::codec::decode(&signer.canonical_bytes)
-        .map_err(|_| "endpoint_shared dependency is not a device_invite".to_string())?;
+    let invite_envelope = signed::codec::decode(&signer.canonical_bytes)
+        .map_err(|_| "endpoint_shared dependency is not a signed device_invite".to_string())?;
+    if invite_envelope.inner_type != device_invite::codec::TYPE_DEVICE_INVITE {
+        return Err("endpoint_shared dependency is not a signed device_invite".to_string());
+    }
+    let invite = device_invite::codec::decode(&invite_envelope.payload)
+        .map_err(|_| "endpoint_shared dependency is not a signed device_invite".to_string())?;
 
     if invite.public_key != envelope.signer_public_key {
         return Err("endpoint_shared signer public key does not match device_invite".to_string());
@@ -62,6 +70,13 @@ mod tests {
         }
     }
 
+    fn public_key(private_key: &[u8; 32]) -> [u8; 32] {
+        signed::commands::sign_payload([0; 32], private_key, vec![99])
+            .expect("derive public key")
+            .value
+            .signer_public_key
+    }
+
     fn device_invite_record(
         private_key: [u8; 32],
         workspace_id: [u8; 32],
@@ -72,6 +87,9 @@ mod tests {
                 created_at_ms: 10,
                 workspace_id,
                 user_authority_event_id,
+                user_invite_event_id: Some([6; 32]),
+                signer_event_id: user_authority_event_id,
+                signer_private_key: [11; 32],
             },
             private_key,
         )
@@ -209,12 +227,36 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unsigned_device_invite_dependency() {
+        let raw_invite = device_invite::types::DeviceInviteEvent {
+            created_at_ms: 10,
+            workspace_id: [1; 32],
+            user_authority_event_id: [2; 32],
+            user_invite_event_id: Some([6; 32]),
+            public_key: public_key(&[7; 32]),
+        };
+        let raw_record =
+            device_invite::codec::record_from_bytes(device_invite::codec::encode(&raw_invite))
+                .expect("raw invite record");
+        let device_invite_id = event_id(&raw_record.canonical_bytes);
+        let (endpoint_shared_id, record, envelope) =
+            signed_endpoint_shared_record(device_invite_id, [7; 32], [1; 32], [2; 32]);
+        let event = signed_context(endpoint_shared_id, &record, device_invite_id, raw_record);
+
+        assert_eq!(
+            project_signed(&envelope, &event).expect_err("unsigned invite must fail"),
+            "endpoint_shared dependency is not a signed device_invite"
+        );
+    }
+
+    #[test]
     fn rejects_non_endpoint_shared_payload() {
         let (device_invite_id, invite_record) = device_invite_record([7; 32], [1; 32], [2; 32]);
         let payload = device_invite::codec::encode(&device_invite::types::DeviceInviteEvent {
             created_at_ms: 30,
             workspace_id: [1; 32],
             user_authority_event_id: [2; 32],
+            user_invite_event_id: Some([6; 32]),
             public_key: [4; 32],
         });
         let signed = signed::commands::sign_payload(device_invite_id, &[7; 32], payload)

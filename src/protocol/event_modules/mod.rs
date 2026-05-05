@@ -298,12 +298,12 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     match *tag {
         identity::admin::codec::TYPE_ADMIN => identity::admin::codec::record_from_bytes(bytes),
         identity::device_invite::codec::TYPE_DEVICE_INVITE => {
-            identity::device_invite::codec::record_from_bytes(bytes)
+            Err("device_invite must be signed".to_string())
         }
         identity::endpoint::codec::TYPE_LOCAL_ENDPOINT => {
             identity::endpoint::codec::record_from_bytes(bytes)
         }
-        identity::signed::codec::TYPE_SIGNED => identity::signed::codec::record_from_bytes(bytes),
+        identity::signed::codec::TYPE_SIGNED => identity::signed_record_from_bytes(bytes),
         identity::invite::codec::TYPE_INVITE_SECRET => {
             identity::invite::codec::record_from_bytes(bytes)
         }

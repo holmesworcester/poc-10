@@ -6,11 +6,12 @@ pub mod types;
 
 #[cfg(test)]
 mod tests {
+    use crate::core::crypto;
     use crate::core::store::Store;
     use crate::protocol::event_modules::worker::{self, AdmitRecords, DrainUntilIdle};
     use crate::protocol::event_modules::Modules;
 
-    use super::super::{device_invite, workspace};
+    use super::super::{device_invite, user, user_invite, workspace};
     use super::*;
 
     #[derive(Default)]
@@ -28,25 +29,44 @@ mod tests {
 
     #[test]
     fn admits_received_device_invite_then_signed_endpoint_shared_join() {
+        let workspace_private_key = [1; 32];
+        let user_invite_private_key = [2; 32];
+        let user_private_key = [3; 32];
+        let endpoint_private_key = [4; 32];
         let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
             created_at_ms: 1,
-            public_key: [1; 32],
+            public_key: crypto::ed25519_public_key(&workspace_private_key),
             name: "Workspace".to_string(),
         })
         .expect("create workspace");
         let workspace_id = workspace.value.workspace_id;
-        let authority = workspace::commands::create(workspace::commands::CreateWorkspace {
+        let user_invite = user_invite::commands::create(user_invite::commands::CreateUserInvite {
             created_at_ms: 2,
-            public_key: [2; 32],
-            name: "Authority".to_string(),
+            public_key: crypto::ed25519_public_key(&user_invite_private_key),
+            workspace_id,
+            authority_event_id: workspace_id,
+            signer_event_id: workspace_id,
+            signer_private_key: workspace_private_key,
         })
-        .expect("create authority");
-        let user_authority_event_id = authority.value.workspace_id;
+        .expect("create user invite");
+        let user_invite_id = user_invite.value.user_invite_id;
+        let user = user::commands::create(user::commands::CreateUser {
+            created_at_ms: 3,
+            public_key: crypto::ed25519_public_key(&user_private_key),
+            username: "alice".to_string(),
+            user_invite_event_id: user_invite_id,
+            user_invite_private_key,
+        })
+        .expect("create user");
+        let user_authority_event_id = user.value.user_id;
         let invite = device_invite::commands::create_with_private_key(
             device_invite::commands::CreateDeviceInvite {
-                created_at_ms: 3,
+                created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id,
+                user_invite_event_id: Some(user_invite_id),
+                signer_event_id: user_authority_event_id,
+                signer_private_key: user_private_key,
             },
             [7; 32],
         )
@@ -56,10 +76,10 @@ mod tests {
         let shared = commands::share_endpoint(
             &NoMembership,
             commands::ShareEndpoint {
-                created_at_ms: 4,
+                created_at_ms: 5,
                 workspace_id,
                 user_authority_event_id,
-                endpoint_id: [3; 32],
+                endpoint_id: crypto::ed25519_public_key(&endpoint_private_key),
                 device_name: "laptop".to_string(),
                 device_invite_id,
                 device_invite_private_key: private_key,
@@ -71,7 +91,8 @@ mod tests {
         let received_records = workspace
             .events
             .into_iter()
-            .chain(authority.events)
+            .chain(user_invite.events)
+            .chain(user.events)
             .chain(invite.events)
             .chain(shared.events)
             .map(|event| event.into_record())
@@ -98,14 +119,15 @@ mod tests {
         )
         .expect("drain ready");
 
-        let membership_key = schema::endpoint_membership_key([3; 32], workspace_id);
+        let endpoint_id = crypto::ed25519_public_key(&endpoint_private_key);
+        let membership_key = schema::endpoint_membership_key(endpoint_id, workspace_id);
         let membership_value = store
             .table_row(schema::ENDPOINT_MEMBERSHIPS, &membership_key)
             .expect("load membership")
             .expect("membership row");
         let membership = schema::decode_endpoint_membership_row(&membership_key, &membership_value)
             .expect("decode membership");
-        assert_eq!(membership.endpoint_id, [3; 32]);
+        assert_eq!(membership.endpoint_id, endpoint_id);
         assert_eq!(membership.workspace_id, workspace_id);
         assert_eq!(membership.endpoint_shared_id, endpoint_shared_id);
         assert_eq!(membership.user_authority_event_id, user_authority_event_id);
@@ -117,7 +139,7 @@ mod tests {
                 created_at_ms: 5,
                 workspace_id,
                 user_authority_event_id,
-                endpoint_id: [3; 32],
+                endpoint_id,
                 device_name: "second".to_string(),
                 device_invite_id,
                 device_invite_private_key: private_key,
