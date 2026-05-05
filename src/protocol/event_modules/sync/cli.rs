@@ -59,9 +59,14 @@ fn run_sync_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
 }
 
 fn run_sync_routes(context: &mut Context, selection: SyncSelection) -> Result<Vec<String>, String> {
-    context
-        .drain_ready_events()
-        .map_err(|err| format!("drain ready events before sync: {err}"))?;
+    worker::run(
+        &context.store,
+        &context.protocol,
+        worker::DrainUntilIdle {
+            batch_size: worker::DEFAULT_READY_BATCH,
+        },
+    )
+    .map_err(|err| format!("drain ready events before sync: {err}"))?;
 
     let range = match selection {
         SyncSelection::All => TimestampRange::ROOT,

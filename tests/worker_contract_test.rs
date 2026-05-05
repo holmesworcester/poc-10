@@ -2,8 +2,8 @@ use std::cell::Cell;
 use std::net::SocketAddr;
 
 use topo::core::store::Store;
-use topo::protocol::event_modules::schema::{self as event_schema, EventLabel};
 use topo::protocol::event_modules::content::content_event;
+use topo::protocol::event_modules::schema::{self as event_schema, EventLabel};
 use topo::protocol::event_modules::types::{
     event_id, EventId, EventRecord, EventScope, ReceiveMetadata,
 };
@@ -74,6 +74,42 @@ fn worker_fetches_dependency_records_and_labels_before_projection() {
 }
 
 #[test]
+fn drain_ready_batch_applies_only_one_batch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("batch.db")).unwrap();
+
+    let registry = BatchRegistry::new();
+    let child_events = registry
+        .child_bytes
+        .iter()
+        .map(|bytes| registry.record_for(bytes.clone()).unwrap())
+        .collect::<Vec<_>>();
+
+    let (_, blocked) = worker::run(
+        &store,
+        &registry,
+        CommandOutput::with_events((), child_events),
+    )
+    .unwrap();
+    assert_eq!(blocked.blocked_events, 2);
+    assert_eq!(registry.children_applied.get(), 0);
+
+    let dep = registry.record_for(registry.dep_bytes.clone()).unwrap();
+    let (_, dep_report) =
+        worker::run(&store, &registry, CommandOutput::with_events((), vec![dep])).unwrap();
+    assert_eq!(dep_report.applied_events, 1);
+    assert_eq!(registry.children_applied.get(), 0);
+
+    let first = worker::run(&store, &registry, worker::DrainReadyBatch { batch_size: 1 }).unwrap();
+    assert_eq!(first.applied_events, 1);
+    assert_eq!(registry.children_applied.get(), 1);
+
+    let second = worker::run(&store, &registry, worker::DrainReadyBatch { batch_size: 1 }).unwrap();
+    assert_eq!(second.applied_events, 1);
+    assert_eq!(registry.children_applied.get(), 2);
+}
+
+#[test]
 fn worker_rejects_blocked_durable_receive_metadata() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Protocol::open_store(tmp.path().join("receive-metadata.db")).unwrap();
@@ -119,6 +155,57 @@ struct RejectReceiveMetadataRegistry {
     bytes: Vec<u8>,
 }
 
+struct BatchRegistry {
+    dep_id: EventId,
+    dep_bytes: Vec<u8>,
+    child_ids: Vec<EventId>,
+    child_bytes: Vec<Vec<u8>>,
+    children_applied: Cell<usize>,
+}
+
+impl BatchRegistry {
+    fn new() -> Self {
+        let dep_bytes = b"batch-dep".to_vec();
+        let child_bytes = vec![b"batch-child-a".to_vec(), b"batch-child-b".to_vec()];
+        let dep_id = event_id(&dep_bytes);
+        let child_ids = child_bytes
+            .iter()
+            .map(|bytes| event_id(bytes))
+            .collect::<Vec<_>>();
+        Self {
+            dep_id,
+            dep_bytes,
+            child_ids,
+            child_bytes,
+            children_applied: Cell::new(0),
+        }
+    }
+
+    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        if bytes == self.dep_bytes {
+            return Ok(EventRecord {
+                timestamp: 1,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: Vec::new(),
+                scope: EventScope::Shared,
+                receive: None,
+            });
+        }
+        if self.child_bytes.iter().any(|candidate| candidate == &bytes) {
+            return Ok(EventRecord {
+                timestamp: 2,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: vec![self.dep_id],
+                scope: EventScope::Shared,
+                receive: None,
+            });
+        }
+        Err("unknown batch event".to_string())
+    }
+}
+
 impl EventRegistry for RejectReceiveMetadataRegistry {
     fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
         if bytes == self.bytes {
@@ -141,6 +228,28 @@ impl EventRegistry for RejectReceiveMetadataRegistry {
         _event: &EventWithContext<'_>,
     ) -> Result<ProjectionOutput, String> {
         panic!("durable receive metadata should be rejected before projection");
+    }
+}
+
+impl EventRegistry for BatchRegistry {
+    fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        self.record_for(bytes)
+    }
+
+    fn project_record(
+        &self,
+        _store: &Store,
+        event: &EventWithContext<'_>,
+    ) -> Result<ProjectionOutput, String> {
+        if event.context.event_id == self.dep_id {
+            return Ok(ProjectionOutput::default());
+        }
+        if self.child_ids.contains(&event.context.event_id) {
+            self.children_applied
+                .set(self.children_applied.get().saturating_add(1));
+            return Ok(ProjectionOutput::default());
+        }
+        Err("unknown batch projection".to_string())
     }
 }
 

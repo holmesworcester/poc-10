@@ -266,6 +266,12 @@ pub struct DrainUntilIdle {
     pub batch_size: usize,
 }
 
+/// Drain at most one batch of ready durable events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainReadyBatch {
+    pub batch_size: usize,
+}
+
 /// Summary of event admission and any immediately-applied events.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdmitReport {
@@ -328,6 +334,17 @@ where
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
         drain_until_idle(store, registry, self.batch_size)
+    }
+}
+
+impl<R> Work<R> for DrainReadyBatch
+where
+    R: EventRegistry,
+{
+    type Output = ApplyReadyReport;
+
+    fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
+        drain_ready(store, registry, self.batch_size)
     }
 }
 

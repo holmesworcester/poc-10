@@ -15,7 +15,6 @@ use std::path::Path;
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::core::store::Store;
 use crate::protocol::event_modules::schema as event_schema;
-use crate::protocol::event_modules::worker::{self, ApplyReadyReport};
 use crate::protocol::{event_modules, Protocol};
 
 const COUNT_USAGE: &str = "count";
@@ -32,17 +31,6 @@ impl Context {
             store: Protocol::open_store(db_path).map_err(|err| format!("open store: {err}"))?,
             protocol: Protocol::new(),
         })
-    }
-
-    pub fn drain_ready_events(&self) -> Result<ApplyReadyReport, String> {
-        worker::run(
-            &self.store,
-            &self.protocol,
-            worker::DrainUntilIdle {
-                batch_size: worker::DEFAULT_READY_BATCH,
-            },
-        )
-        .map_err(|err| format!("drain ready events: {err}"))
     }
 }
 

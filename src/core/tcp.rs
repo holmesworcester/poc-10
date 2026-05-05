@@ -41,6 +41,84 @@ pub struct ServeReport<T> {
     pub value: T,
 }
 
+/// Result of polling a reusable listener once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptReport<T> {
+    pub accepted_connections: usize,
+    pub value: T,
+}
+
+/// Bound TCP listener that can be polled by a caller-owned loop.
+pub struct Listener {
+    listener: TcpListener,
+    local_addr: SocketAddr,
+}
+
+impl Listener {
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Accept and pump at most one available stream.
+    ///
+    /// If no stream is ready, the supplied value is returned unchanged. This
+    /// gives higher-level schedulers a nonblocking accept step without moving
+    /// any byte interpretation into core.
+    pub fn accept_available<T>(
+        &self,
+        store: &Store,
+        value: T,
+        on_inbound: impl FnMut(InboundNetworkRow, &mut T) -> Result<Vec<OutboundNetworkRow>, String>,
+        on_sent: impl FnMut(&[OutboundNetworkRow], &mut T) -> Result<(), String>,
+    ) -> Result<AcceptReport<T>, String> {
+        let (mut stream, source_addr) = match self.listener.accept() {
+            Ok(accepted) => accepted,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(AcceptReport {
+                    accepted_connections: 0,
+                    value,
+                })
+            }
+            Err(err) => return Err(format!("accept tcp stream: {err}")),
+        };
+        stream
+            .set_nonblocking(false)
+            .map_err(|err| format!("set stream blocking: {err}"))?;
+        stream
+            .set_nodelay(true)
+            .map_err(|err| format!("set stream nodelay: {err}"))?;
+        let target = NetworkTarget::new(source_addr);
+        let (_, value) = pump_stream(
+            store,
+            &mut stream,
+            target,
+            Vec::new(),
+            value,
+            on_inbound,
+            on_sent,
+        )?;
+        Ok(AcceptReport {
+            accepted_connections: 1,
+            value,
+        })
+    }
+}
+
+/// Bind a reusable TCP listener for caller-owned scheduling loops.
+pub fn listen(listen: SocketAddr) -> Result<Listener, String> {
+    let listener = TcpListener::bind(listen).map_err(|err| format!("listen: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("set listener nonblocking: {err}"))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|err| format!("listener local addr: {err}"))?;
+    Ok(Listener {
+        listener,
+        local_addr,
+    })
+}
+
 /// Open a TCP stream, send initial rows, then react to inbound frames.
 ///
 /// `on_inbound` is the protocol boundary: it receives an opaque inbound row and

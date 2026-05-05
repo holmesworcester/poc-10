@@ -54,7 +54,14 @@ fn run_generate_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
         .map_err(|err| format!("generate: {err}"))?;
     let (report, admitted) = worker::run(&context.store, &context.protocol, output)
         .map_err(|err| format!("admit generated events: {err}"))?;
-    let drained = context.drain_ready_events()?;
+    let drained = worker::run(
+        &context.store,
+        &context.protocol,
+        worker::DrainUntilIdle {
+            batch_size: worker::DEFAULT_READY_BATCH,
+        },
+    )
+    .map_err(|err| format!("drain generated events: {err}"))?;
     Ok(CliOutput::lines(
         GenerateSummary {
             generated_events: admitted.inserted_events,

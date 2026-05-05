@@ -44,6 +44,46 @@ fn sync_converges_over_real_tcp() {
     );
 }
 
+#[test]
+fn daemon_syncs_multiple_cli_generate_rounds_over_real_tcp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let alice_port = free_port();
+    let bob_port = free_port();
+    let bob_invite = invite(&bob, bob_port);
+
+    let bob_daemon = start_daemon(&bob, bob_port, 10_000);
+    connect_with_retry(&alice, &bob_invite);
+    let alice_daemon = start_daemon(&alice, alice_port, 10_000);
+
+    generate(&alice, 300, 4096);
+    assert_eventually_count(&bob, 300, Duration::from_secs(20));
+
+    generate(&alice, 200, 4096);
+    assert_eventually_count(&bob, 500, Duration::from_secs(20));
+
+    generate(&bob, 250, 4096);
+    assert_eventually_count(&alice, 750, Duration::from_secs(20));
+
+    let alice_out = wait_success(alice_daemon, "alice daemon");
+    let bob_out = wait_success(bob_daemon, "bob daemon");
+    assert!(
+        line_value(&alice_out, "routes_synced")
+            .parse::<usize>()
+            .expect("parse alice daemon routes")
+            > 0,
+        "alice daemon output:\n{alice_out}"
+    );
+    assert!(
+        line_value(&bob_out, "accepted_connections")
+            .parse::<usize>()
+            .expect("parse bob daemon accepts")
+            > 0,
+        "bob daemon output:\n{bob_out}"
+    );
+}
+
 fn start_listener(db: &str, port: u16, accept: usize) -> Child {
     let port = port.to_string();
     let accept = accept.to_string();
@@ -56,6 +96,23 @@ fn start_listener(db: &str, port: u16, accept: usize) -> Child {
         &port,
         "--accept",
         &accept,
+    ])
+}
+
+fn start_daemon(db: &str, port: u16, duration_ms: u64) -> Child {
+    let port = port.to_string();
+    let duration_ms = duration_ms.to_string();
+    spawn_topo(&[
+        "--db",
+        db,
+        "daemon",
+        "--listen",
+        "127.0.0.1",
+        &port,
+        "--duration-ms",
+        &duration_ms,
+        "--idle-ms",
+        "50",
     ])
 }
 

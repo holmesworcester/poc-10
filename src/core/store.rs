@@ -19,7 +19,7 @@
 //! conservative identifier check.
 
 use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 /// A static, trusted row-table name.
 ///
@@ -152,6 +152,7 @@ impl Store {
     }
 
     fn from_connection(conn: SqliteConnection, schemas: &[Schema]) -> rusqlite::Result<Self> {
+        conn.busy_timeout(Duration::from_secs(5))?;
         let store = Self { conn };
         store.apply_schemas(schemas)?;
         Ok(store)
