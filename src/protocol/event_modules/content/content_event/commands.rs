@@ -17,6 +17,7 @@ pub struct GenerateReport {
 }
 
 pub fn generate(
+    workspace_id: crate::protocol::event_modules::types::EventId,
     start_timestamp: u64,
     num_events: usize,
     event_size: usize,
@@ -26,7 +27,11 @@ pub fn generate(
     for offset in 0..num_events {
         let timestamp = start_timestamp + offset as u64;
         let payload = payload(timestamp, event_size);
-        let bytes = codec::encode(&ContentEvent { timestamp, payload });
+        let bytes = codec::encode(&ContentEvent {
+            workspace_id,
+            timestamp,
+            payload,
+        });
         let record = codec::record_from_bytes(bytes)?;
         records.push(record);
     }

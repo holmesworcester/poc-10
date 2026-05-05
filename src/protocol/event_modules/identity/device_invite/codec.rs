@@ -52,6 +52,7 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         body_len: DEVICE_INVITE_WIRE_SIZE - 1,
         canonical_bytes: bytes,
         dependencies: dependencies(&event),
+        workspace_id: Some(event.workspace_id),
         scope: EventScope::Shared,
         receive: None,
     })
@@ -73,6 +74,7 @@ pub fn record_from_signed_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         body_len: envelope.payload.len(),
         canonical_bytes: bytes,
         dependencies: deps,
+        workspace_id: Some(event.workspace_id),
         scope: EventScope::Shared,
         receive: None,
     })

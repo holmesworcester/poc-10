@@ -4,10 +4,11 @@
 //! membership row is keyed by `endpoint_id || workspace_id` so command preflight
 //! can reject joining the same workspace twice from one endpoint.
 
-use crate::core::store::{Schema, TableName, TableRow};
+use crate::core::store::{Schema, Store, TableName, TableRow};
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::wire::{Reader, Writer};
+use std::collections::HashSet;
 
 use super::codec;
 use super::types::{EndpointMembershipRow, EndpointSharedEvent, EndpointSharedRow};
@@ -125,6 +126,37 @@ pub fn decode_endpoint_membership_row(
         device_invite_id,
         created_at_ms,
     })
+}
+
+pub fn workspace_ids_for_endpoint(
+    store: &Store,
+    endpoint_id: EndpointId,
+) -> Result<Vec<EventId>, String> {
+    store
+        .table_rows_with_key_prefix(ENDPOINT_MEMBERSHIPS, &endpoint_id, usize::MAX)
+        .map_err(|err| format!("load endpoint memberships: {err}"))?
+        .into_iter()
+        .map(|(key, value)| {
+            decode_endpoint_membership_row(&key, &value).map(|row| row.workspace_id)
+        })
+        .collect()
+}
+
+pub fn mutual_workspace_ids(
+    store: &Store,
+    local_endpoint: EndpointId,
+    remote_endpoint: EndpointId,
+) -> Result<Vec<EventId>, String> {
+    let remote = workspace_ids_for_endpoint(store, remote_endpoint)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let mut workspaces = workspace_ids_for_endpoint(store, local_endpoint)?
+        .into_iter()
+        .filter(|workspace_id| remote.contains(workspace_id))
+        .collect::<Vec<_>>();
+    workspaces.sort();
+    workspaces.dedup();
+    Ok(workspaces)
 }
 
 fn encode_endpoint_shared_value(

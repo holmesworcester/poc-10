@@ -14,6 +14,7 @@
 
 use std::net::SocketAddr;
 
+use crate::core::store::Store;
 use crate::core::store::{Schema, TableName, TableRow};
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::types::EventId;
@@ -91,6 +92,26 @@ pub(in crate::protocol::event_modules) fn outbox_row(
         key,
         value: Vec::new(),
     }
+}
+
+pub(in crate::protocol::event_modules) fn remote_endpoint(
+    store: &Store,
+    connection_id: ConnectionId,
+) -> Result<EndpointId, String> {
+    let bytes = store
+        .table_row(CONNECTIONS, &connection_id)
+        .map_err(|err| format!("load connection: {err}"))?
+        .ok_or_else(|| "unknown connection".to_string())?;
+    endpoint_id_from_bytes(&bytes)
+}
+
+fn endpoint_id_from_bytes(bytes: &[u8]) -> Result<EndpointId, String> {
+    if bytes.len() != 32 {
+        return Err("stored endpoint id is malformed".to_string());
+    }
+    let mut out = [0; 32];
+    out.copy_from_slice(bytes);
+    Ok(out)
 }
 
 #[cfg(test)]
