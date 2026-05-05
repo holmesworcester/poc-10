@@ -183,7 +183,7 @@ impl Modules {
         // branch immediately hands control to the owning domain so this registry
         // does not accumulate projector logic.
         let bytes = &event.record.canonical_bytes;
-        if let Some(output) = identity::project_record(bytes)? {
+        if let Some(output) = identity::project_record(event)? {
             return Ok(output);
         }
         if connection::is_projection_record(bytes) {
@@ -223,13 +223,29 @@ impl identity::endpoint::commands::LocalEndpointRead for Store {
     }
 }
 
+impl identity::endpoint_shared::commands::EndpointMembershipRead for Store {
+    fn endpoint_membership(
+        &self,
+        endpoint_id: identity::endpoint::types::EndpointId,
+        workspace_id: types::EventId,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.table_row(
+            identity::endpoint_shared::schema::ENDPOINT_MEMBERSHIPS,
+            &identity::endpoint_shared::schema::endpoint_membership_key(endpoint_id, workspace_id),
+        )
+        .map_err(|err| format!("load endpoint membership: {err}"))
+    }
+}
+
 pub fn schemas() -> Vec<Schema> {
     // Schema aggregation is explicit so storage ownership remains visible in
     // review. Adding a module-owned table should add one line here and the
     // actual declaration in that module's `schema.rs`.
     let mut out = Vec::new();
     out.extend_from_slice(schema::SCHEMAS);
+    out.extend_from_slice(identity::device_invite::schema::SCHEMAS);
     out.extend_from_slice(identity::endpoint::schema::SCHEMAS);
+    out.extend_from_slice(identity::endpoint_shared::schema::SCHEMAS);
     out.extend_from_slice(identity::invite::schema::SCHEMAS);
     out.extend_from_slice(identity::workspace::schema::SCHEMAS);
     out.extend_from_slice(connection::schema::SCHEMAS);
@@ -277,9 +293,13 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         .first()
         .ok_or_else(|| "empty event bytes".to_string())?;
     match *tag {
+        identity::device_invite::codec::TYPE_DEVICE_INVITE => {
+            identity::device_invite::codec::record_from_bytes(bytes)
+        }
         identity::endpoint::codec::TYPE_LOCAL_ENDPOINT => {
             identity::endpoint::codec::record_from_bytes(bytes)
         }
+        identity::signed::codec::TYPE_SIGNED => identity::signed::codec::record_from_bytes(bytes),
         identity::invite::codec::TYPE_INVITE_SECRET => {
             identity::invite::codec::record_from_bytes(bytes)
         }
