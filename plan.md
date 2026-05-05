@@ -11,6 +11,396 @@ I want to rewrite topo with clarity on:
 
 See appendix for documentation style rules and references.
 
+# Identity/Auth Graph Port Plan
+
+This branch ports the latest `poc-7` identity and auth graph behavior into
+`poc-8`, but the implementation must be a `poc-8`-native translation. `poc-7`
+is a behavior reference only. `poc-8` module boundaries, storage shape,
+command/projector split, CLI locality, and worker rules are authoritative.
+
+The worktree for this task is:
+
+```text
+/home/holmes/poc-8-identity-auth-graph
+branch: codex/poc8-identity-auth-graph
+```
+
+Do not implement this in the main `/home/holmes/poc-8` worktree.
+
+## Scope
+
+In scope:
+
+- `workspace`
+- `signed`
+- `user_invite`
+- `device_invite`
+- `user`
+- `endpoint_secret`
+- `endpoint_shared`
+- `admin`
+- `invite_secret`
+- `invite_accepted`
+- command flows for workspace creation, user invite creation, user invite
+  acceptance, device-link invite creation, device-link acceptance, and admin
+  grant
+- local-only events for endpoint private keys and invite/bootstrap secrets
+- explicit duplicate-join rejection when one endpoint tries to join the same
+  workspace twice
+
+Out of scope:
+
+- `tenant`
+- `peer_shared` as a concept or module name
+- key history
+- key sharing
+- key rotation
+- key request or key repair
+- content encryption
+- content-key bootstrap
+- iroh
+- p7 transport runtime, p7 peering runtime, or p7 SQL projection pipeline
+
+Do not pull key-history or key-sharing implementation into this slice. If a
+latest p7 identity event contains a `key_history_event_id` field, either omit
+that field in the p8 event shape or keep it only as an inert/reserved zero field
+if an explicit compatibility decision requires it. It must not become a
+dependency in this slice.
+
+## Concept Mapping
+
+`poc-8` identity scope is `workspace + endpoint`. There is no tenant layer.
+This is intentional: a daemon/endpoint may host at most one instance of a given
+workspace. If an endpoint tries to join a workspace it has already joined, the
+command returns an explicit error.
+
+Map p7 concepts as follows:
+
+```text
+p7 workspace       -> p8 workspace
+p7 tenant          -> removed
+p7 recorded_by     -> endpoint-scoped row-key prefix or command context
+p7 peer_shared     -> p8 endpoint_shared
+p7 peer_secret     -> p8 endpoint-local secret/private-key event
+p7 invite_secret   -> p8 local-only invite/bootstrap secret event
+p7 invite_accepted -> p8 local-only acceptance/provenance event
+```
+
+Target identity chain:
+
+```text
+workspace
+  -> user_invite
+  -> user
+  -> device_invite
+  -> endpoint_shared
+```
+
+Target admin chain:
+
+```text
+workspace or existing admin authority
+  -> admin
+```
+
+The precise admin authority rule should come from latest p7 behavior, translated
+into p8 dependency/context checks.
+
+## Module Layout
+
+Each imported event family should live under the identity domain and follow the
+p8 leaf-module shape:
+
+```text
+src/protocol/event_modules/identity/<event>/
+  mod.rs
+  types.rs
+  codec.rs
+  commands.rs      # only when the event has creation logic
+  projector.rs     # only when the event projects rows
+  schema.rs        # only when the event owns rows
+  queries.rs       # only for read-only reporting/CLI surfaces
+  cli.rs           # only when this leaf owns CLI commands
+  cli_test.rs      # for CLI tests owned by this leaf
+```
+
+Domain root files should aggregate only shared identity concerns:
+
+```text
+src/protocol/event_modules/identity/
+  mod.rs
+  cli.rs           # only for commands that truly span child modules
+  schema.rs        # only if shared identity rows are cleaner at domain scope
+  queries.rs       # only for read-only domain reporting
+  worker.rs        # only if active identity-domain queued work is needed
+  test_support.rs  # only if multiple leaf cli_test.rs files need helpers
+```
+
+Prefer the tightest owner. A command for one event type belongs in that event's
+leaf `cli.rs`, not the identity root. The root `cli.rs` exists only for
+cross-child workflows that do not have a clear primary event owner.
+
+## Storage Translation
+
+Translate p7 projection tables into p8 row tables with explicit binary row keys.
+Do not recreate p7's broad SQL schema, `valid_events`, `recorded_events`,
+tenant rows, or projector queue model.
+
+Likely row families:
+
+- `identity.workspaces`: keyed by `workspace_id`
+- `identity.users`: keyed by `workspace_id + user_id`
+- `identity.user_invites`: keyed by `workspace_id + user_invite_id`
+- `identity.device_invites`: keyed by `workspace_id + device_invite_id`
+- `identity.endpoint_shared`: keyed by `workspace_id + endpoint_shared_id`
+- `identity.endpoint_memberships`: keyed by `endpoint_id + workspace_id`
+- `identity.admins`: keyed by `workspace_id + admin_id`
+- `identity.invite_secrets`: local-only, keyed by invite/bootstrap secret hash
+- `identity.endpoint_secrets`: local-only, keyed by endpoint id
+- `identity.invites_accepted`: local-only acceptance/provenance rows, only if
+  commands need durable local join provenance
+
+Rows should use `Schema::durable_row_table` or `Schema::temp_row_table` as
+appropriate. Table names belong in `schema.rs`; row constructors and row decoders
+belong in that module scope.
+
+Duplicate join rule:
+
+- command preflight checks `(endpoint_id, workspace_id)`
+- if a row already exists, return an explicit duplicate-workspace error
+- admitting the exact same previously-created event remains idempotent
+- creating a second join for the same endpoint/workspace is rejected
+
+## Codecs And Records
+
+Port p7 event fields by semantic behavior, not by p7 file shape. Each codec
+constructs its `EventRecord`; other files do not build `EventRecord` literals.
+
+Each leaf event should have:
+
+- fixed tags and deterministic canonical encoding
+- `decode` that rejects malformed/trailing bytes
+- `record_from_bytes` that declares scope and immediate dependencies
+- dependency fields matching p7 auth structure, minus explicit out-of-scope key
+  history/key-sharing dependencies
+
+Signed wrappers should expose the signer event id as a dependency and preserve
+enough inner metadata for the projector/registry to resolve the semantic signer
+type.
+
+## Projector Translation
+
+Projectors stay pure row producers:
+
+- decode current event
+- inspect immediate dependency records and generic event context
+- validate direct fields and authority relationship
+- return `ProjectionOutput` rows/labels
+
+Projectors must not:
+
+- query storage directly
+- write SQL directly
+- emit commands or events
+- call workers
+- perform transport, transit, or crypto side effects beyond validation of
+  explicit event fields
+
+Any p7 projector behavior that depended on SQL lookups or emitted follow-up
+work must become one of:
+
+- an explicit event dependency
+- a command preflight read through a narrow trait
+- a row written by an earlier projection and consumed by a command or worker
+- a narrow context loaded outside projector logic and passed into the pure
+  projection boundary
+
+## Command Flows
+
+Commands return `CommandOutput<T>` with proposed events. They do not mutate
+storage. They may read narrow context through traits or domain helpers.
+
+Planned command flows:
+
+1. `create_workspace`
+   - ensure or create local endpoint secret event
+   - emit shared workspace root
+   - emit bootstrap user invite/user/device or equivalent latest-p7 creator
+     chain, translated without tenant/key-history
+   - emit endpoint_shared for the creator endpoint
+   - emit initial admin if latest p7 grants creator admin
+
+2. `create_user_invite`
+   - require local endpoint/user/admin authority
+   - emit `user_invite`
+   - emit local invite secret/bootstrap secret event
+   - return invite link material
+
+3. `accept_user_invite`
+   - parse invite link
+   - ensure or create local endpoint secret event
+   - preflight duplicate `(endpoint_id, workspace_id)` membership
+   - emit local `invite_accepted`
+   - emit `user`
+   - emit `endpoint_shared`
+   - project endpoint/workspace membership through normal admission
+
+4. `create_device_invite`
+   - require current user/endpoint authority
+   - emit `device_invite`
+   - emit local invite secret/bootstrap secret event
+   - return device-link invite material
+
+5. `accept_device_invite`
+   - parse device invite link
+   - ensure or create local endpoint secret event
+   - preflight duplicate `(endpoint_id, workspace_id)` membership
+   - emit local `invite_accepted`
+   - emit `endpoint_shared` bound to the existing user
+
+6. `grant_admin`
+   - require translated p7 admin authority
+   - emit `admin`
+
+## Bootstrap Boundary
+
+Use p6 only for the bootstrap shape lesson:
+
+- invite link carries out-of-band bootstrap/contact/secret material
+- shared invite event carries durable authorization facts
+- no placeholder ids such as `PENDING` or `SELF`
+- no direct projection-table inserts
+- no forced projection calls
+
+Do not import iroh or p7 peering. p8 connection/bootstrap remains the network
+boundary. Identity modules produce and consume authorization facts; connection
+modules own opaque TCP/transit mechanics.
+
+## CLI Locality
+
+CLI commands should be as event-module-local as possible:
+
+- `workspace/cli.rs`: `create-workspace`, workspace listing/status if local to
+  workspace identity
+- `user_invite/cli.rs`: create user invite and user-invite-specific inspection
+- `device_invite/cli.rs`: create device link and device-link-specific
+  inspection
+- `invite_accepted/cli.rs`: only if accept flows are primarily acceptance-owned
+- `endpoint_shared/cli.rs`: endpoint identity/status/listing commands
+- `admin/cli.rs`: grant admin and admin listing
+- identity root `cli.rs`: only commands that truly span multiple child modules
+  and do not have a single primary event owner
+
+`src/protocol/cli.rs` only aggregates command specs.
+
+## Test Locality
+
+Bring over p7 tests as behavior, not as p7 file structure. Prefer module-local
+tests.
+
+Leaf module tests should cover:
+
+- codec roundtrip
+- malformed/trailing decode rejection
+- projector accepts valid dependency context
+- projector rejects wrong signer/authority
+- projector rejects malformed fields
+- schema row encoding/decoding
+
+CLI tests should live beside the module command they prove:
+
+```text
+src/protocol/event_modules/identity/workspace/cli_test.rs
+src/protocol/event_modules/identity/user_invite/cli_test.rs
+src/protocol/event_modules/identity/device_invite/cli_test.rs
+src/protocol/event_modules/identity/admin/cli_test.rs
+src/protocol/event_modules/identity/endpoint_shared/cli_test.rs
+```
+
+Each module should include its test with:
+
+```rust
+#[cfg(test)]
+mod cli_test;
+```
+
+Later CLI tests may import earlier local scenario helpers when they need to
+build on prior flows. Keep helpers test-only and scoped:
+
+```rust
+// identity/workspace/cli_test.rs
+pub(crate) fn create_workspace_scenario(...) -> WorkspaceScenario;
+
+// identity/user_invite/cli_test.rs
+use super::super::workspace::cli_test::create_workspace_scenario;
+
+// identity/device_invite/cli_test.rs
+use super::super::user_invite::cli_test::create_joined_user_scenario;
+```
+
+If many modules need the same setup helpers, move only helpers to:
+
+```text
+src/protocol/event_modules/identity/test_support.rs
+```
+
+Keep assertions in the leaf `cli_test.rs` file whose behavior is being proven.
+Avoid a top-level scenario dumping ground. Keep `tests/cli_harness` generic and
+process-only.
+
+Command/flow test targets:
+
+- create workspace creates workspace/user/endpoint/admin graph
+- create user invite from authorized endpoint
+- accept user invite creates user and endpoint_shared
+- accepting same workspace twice on same endpoint errors
+- create device invite and accept on a new endpoint
+- wrong invite secret rejected
+- wrong signer rejected
+- non-admin invite/admin grant rejected
+
+Reserve top-level black-box tests for true cross-domain flows that cannot be
+owned by a leaf module.
+
+## Validation
+
+Run tests in this order:
+
+1. focused leaf module tests
+2. identity command and `cli_test.rs` tests
+3. p8 boundary tests, especially `cargo test --test rules_boundary_test`
+4. full `cargo test`
+5. `cargo clippy --all-targets -- -D warnings` if the branch is ready for
+   review
+
+For a doc-only update to this plan, no runtime test is required. State that in
+the handoff.
+
+## Expected Adaptation Points
+
+No p8 structure blocker is expected.
+
+The main adaptation work is:
+
+- remove p7 tenant semantics cleanly
+- map p7 `peer_shared` to p8 `endpoint_shared`
+- keep endpoint private material local-only
+- replace p7 projection-query-heavy auth checks with p8 dependency/context
+  checks
+- convert p7 projector side effects into command-owned or worker-owned work
+- keep key-history/key-sharing fields out of the implementation
+- keep CLI commands and tests at the closest event-module scope
+
+## Required Handoff Step
+
+Commit the completed work on the same worktree branch before handoff or review:
+
+```text
+git -C /home/holmes/poc-8-identity-auth-graph status
+git -C /home/holmes/poc-8-identity-auth-graph add ...
+git -C /home/holmes/poc-8-identity-auth-graph commit -m "<clear summary>"
+```
+
 # Core
 
 `core/` is protocol-agnostic. It provides the generic substrate needed by any
