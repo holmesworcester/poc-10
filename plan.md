@@ -943,7 +943,9 @@ This is the same dep-aware comparison computed by poc-7's session code, but mate
 
 ## Connection-scoped sync events and outbox
 
-Sync protocol messages are connection-scoped events. They are not durable shared events and do not need signatures. The connection already authenticates the endpoint pair; the messages are only hints:
+Sync protocol messages are connection-scoped events. They are not durable shared
+events and do not need signatures. The connection already authenticates the
+endpoint pair; the messages are only hints:
 
 ```
 compare this node
@@ -951,14 +953,26 @@ I have these ids
 I need these ids
 ```
 
-They still use the normal event model: a module `codec.rs` defines canonical bytes, and `event_id = BLAKE3(canonical_event_bytes)`. `connection_id` is part of the canonical sync event, so ids for otherwise identical sync messages do not overlap across connections.
+They still use the normal event model: a module `codec.rs` defines canonical
+bytes, and `event_id = BLAKE3(canonical_event_bytes)`. `connection_id` is part
+of the canonical sync event, so ids for otherwise identical sync messages do not
+overlap across connections.
 
-Plain sync events are fixed-shape:
+The current POC event shape is the deliberately small bucket-sync baseline:
 
 ```
-SyncCompare(connection_id, workspace_id, node, count, fingerprint)
-SyncHaveId(connection_id, workspace_id, node, event_id)
-SyncNeedId(connection_id, workspace_id, event_id)
+SyncCompare(connection_id, [BucketSummary; 256])
+SyncHaveId(connection_id, bucket, event_id)
+SyncNeedId(connection_id, event_id)
+```
+
+The true plain-negentropy target keeps the same module shape but replaces the
+bucket summary with explicit range-tree nodes:
+
+```
+SyncCompare(connection_id, workspace_scope, node, count, fingerprint)
+SyncHaveId(connection_id, workspace_scope, node, event_id)
+SyncNeedId(connection_id, workspace_scope, event_id)
 ```
 
 The current POC uses real connection-scoped sync events: `SyncCompare`,
@@ -993,55 +1007,62 @@ the sync work rows, but that is a storage/debug choice, not protocol truth.
 
 Projectors do not write to sockets and do not emit events. They only maintain
 sync/outbox queue rows. Commands are the only place new semantic events are
-created. Workers may decide that an event should be created, but they express
-that decision by calling a module command and admitting its `ProposedEvent`s.
-Workers may also admit canonical bytes that already exist, such as bytes
-received from a connection, but decoding existing bytes is not event creation.
+created. Workers may decide that a follow-up sync event is needed, but they
+express that decision by calling a module command and admitting its
+`ProposedEvent`s. Workers may also admit canonical bytes that already exist,
+such as bytes received from a connection, but decoding existing bytes is not
+event creation. A worker may write an id-only `connection.outbox` row for an
+already-existing durable shared event requested by `NeedId`; that row is send
+work, not a newly created event.
 
-There is no distinct `SyncStartRequested` event in the base design. Manual sync
-starts by creating a root `SyncCompare`. If the negentropy index is maintained
-synchronously by projection, the CLI command can create the root compare
-directly from command context. If index catch-up is batched through
-`sync.new_events`, `sync/worker.rs` first drains that queue and then calls the
-same root-compare command. Either way, the first protocol event is still
-`SyncCompare(root)`.
+There is no distinct `SyncStartRequested` protocol event in the base design.
+The current CLI wakes `sync::worker::Work::Start`; that wake is local worker
+control, not wire protocol. Today the worker fans out across known routed
+connections, calls `compare::commands::start`, and returns outgoing
+`SyncCompare` plus simple `SyncHaveId` events for admission. In the true
+plain-negentropy version, the same wake first catches the sync index up if
+needed and then calls a root-compare command for each selected connection. The
+first protocol event on the wire is still `SyncCompare(root)`.
 
 ```
-topo sync connection_id
-  -> compare::commands::create_root(params, context(params))
-  -> proposed SyncCompare(connection_id, workspace_id, root, count, fingerprint)
-  -> admit event
+topo sync
+  -> sync::worker::run(Work::Start)
+  -> compare command from current sync index/context
+  -> proposed outgoing SyncCompare / SyncHaveId events
+  -> common event-module worker admits events
 
 Outgoing-scoped SyncCompare / SyncHaveId / SyncNeedId projected
-  -> outbox(connection_id, event_id)
+  -> connection_scoped_events(event_id, bytes)
+  -> temp outbox(connection_id, event_id)
 
-Durable event projected
-  -> sync.new_events(event_id, applied_seq)
+Incoming transit bytes
+  -> connection::worker unwraps bytes
+  -> sync::inbound_record_from_connection_bytes(connection_id, bytes)
+  -> common event-module worker admits incoming connection-scoped event
 
 Incoming-scoped SyncCompare / SyncHaveId / SyncNeedId projected
-  -> sync.work or sync.inbound_events { connection_id, required_frontier, payload }
+  -> temp sync.inbound_events(connection_id, event_id, bytes)
 
 sync::worker.run
-  -> first drains sync.new_events into sync.negentropy.index
-  -> advances sync.negentropy.cursor
-  -> then reads ready sync.work rows
-  -> only answers work with required_frontier <= sync.negentropy.cursor
-  -> command(ctx, params) -> proposed SyncCompare / SyncHaveId / SyncNeedId / SendEvent
-  -> admit(proposed events) -> event_ids
+  -> drains sync.inbound_events by connection
+  -> command(ctx, params) -> proposed SyncCompare / SyncHaveId / SyncNeedId
+  -> or id-only temp outbox row for requested durable event id
+  -> common event-module worker admits proposed sync events
 
 connection::worker.run
-  -> reads outbox(connection_id, event_id)
+  -> prefix-scans temp outbox(connection_id, event_id)
   -> transit_wrap command returns transit bytes
   -> writes core TCP send queue rows for those bytes
 ```
 
-The sync worker's invariant is: never answer sync work against a stale negentropy
-index. It must cover `sync.new_events` before responding to `sync.work`.
-Use `apply_seq`, not event timestamps, as the sync-index cursor order. Index
-updates and cursor advancement are one transaction; index writes are idempotent
-with unique `(scope_key, event_id)` rows. Prefer per-workspace indexes and
-aggregate the allowed workspace scopes for a connection at response time rather
-than maintaining per-connection negentropy indexes.
+The plain-negentropy worker's invariant will be: never answer sync work against
+a stale sync index. Once the shared-event feed and `sync.index_cursor` exist,
+the worker must catch up that feed before responding to `sync.inbound_events`.
+Use an apply/feed sequence, not event timestamps, as cursor order. Index updates
+and cursor advancement are one transaction; index writes are idempotent with
+unique `(scope_key, event_id)` rows. Prefer per-workspace indexes and aggregate
+the allowed workspace scopes for a connection at response time rather than
+maintaining per-connection negentropy indexes.
 
 Duplicate worker output collapses because connection-scoped sync event bytes are
 deterministic and `outbox` is unique on `(connection_id, event_id)`.
@@ -1049,41 +1070,48 @@ deterministic and `outbox` is unique on `(connection_id, event_id)`.
 ## Current-shape negentropy implementation plan
 
 Keep the current file shape. Do not add a separate `negentropy/` module unless
-it defines a real event type. The common event worker, connection worker, and
-sync worker each keep their present scope:
+it defines a real event type. The patch order should be:
 
-1. Extend `protocol/event_modules/schema.rs` with an event-pipeline-owned
-   `shareable_events` log. The common event worker writes this row in the same
-   transaction that records a shared outer-valid event as ready, blocked, or
-   applied. Blocked shared events are shareable; rejected events and transient
-   sync control events are not.
-2. Extend `sync/schema.rs` with request-driven index state:
-   `sync_index_cursor`, `sync_present`, `sync_roots`, direct-dep rows,
-   known/present closure rows, dep waiters, and range-node summaries. Use
-   module-owned schemas and row helpers; core store remains a row substrate.
-3. Teach `sync/worker.rs` to do index catch-up before response work. For each
-   pending request scope, consume `shareable_events` up to the request frontier,
-   update the incremental plain-negentropy summaries first, then later the
-   dep-aware closure summaries, and advance the cursor atomically with those
-   writes.
-4. Keep compare/have/need as transient connection-scoped events. Outgoing scope
-   projection writes connection-scoped byte-cache rows plus id-only outbox rows.
-   Incoming scope projection writes sync-owned work rows. The sync worker parses
-   those projected rows and emits deterministic connection-scoped sync events or id-only
-   outbox rows for requested durable data. Connection transit may batch multiple
-   outbox ids into one encrypted transit blob; core TCP still owns only the
-   outer length frame.
-5. Implement plain negentropy first: root compare over a range tree, split on
-   mismatch, have/need ids at leaves, and id-only sends for requested durable ids.
-   Replace the current whole-set bucket shortcut only after the black-box sync
-   tests still pass.
-6. Add dep-aware summaries without changing the worker boundary: maintain known
-   and present transitive closures incrementally while indexing shareable
-   events; compare range nodes using root hash plus present external-dep hash;
-   on dep-probe slices, send present closure ids before root ids.
-7. Add `topo sync today` in `sync/cli.rs` as a sync-mode argument. It should
-   create or queue a sync request for the current day's `sync_key` suffix while
-   still allowing dep-aware sends to include older dependencies outside that
+1. Preserve the current POC boundary as the baseline. `sync/compare`,
+   `sync/have_id`, and `sync/need_id` stay leaf event modules. Their projectors
+   remain row-only: outgoing scope writes connection-scoped bytes plus temp
+   outbox rows, incoming scope writes `sync.inbound_events`. `sync/worker.rs`
+   remains the only sync component that scans indexes, chooses responses, or
+   queues requested durable ids.
+2. Add a shared-event feed in `protocol/event_modules/schema.rs` or the closest
+   common event-worker schema. The common event worker writes one feed row for
+   each admitted shared event in the same transaction that records the event.
+   Use a monotonically increasing feed/apply sequence in the row key, not event
+   timestamps. Transient sync events and rejected bytes do not enter this feed.
+3. Add plain-negentropy state to `sync/schema.rs`: `sync.index_cursor`,
+   `sync.range_nodes`, `sync.range_members`, and any small helper table needed
+   to map a sync key to its leaf path. These are module-owned row tables with
+   typed row helpers; core store remains a generic row substrate.
+4. Teach `sync/worker.rs` to run index catch-up before response work. It drains
+   the shared-event feed after `sync.index_cursor`, updates leaf-to-root range
+   summaries with path updates, and advances the cursor in the same transaction
+   as the index writes. This is the point where negentropy hashes become cheap:
+   no full tree rebuild on ordinary event arrival.
+5. Replace the current bucket shortcut with recursive range compare. `Work::Start`
+   calls the compare command for the root node. Inbound compare rows cause the
+   worker to compare the named node: if equal, emit nothing; if mismatched and
+   splittable, emit child `SyncCompare` events; if at a leaf, emit `SyncHaveId`
+   events. Inbound `SyncHaveId` emits `SyncNeedId` when missing. Inbound
+   `SyncNeedId` writes an id-only temp outbox row when the durable shared event
+   is present.
+6. Keep every newly created sync protocol item on the command/admission path.
+   The sync worker may call module commands and return proposed events to the
+   common event-module worker; it must not hand bytes to transit or write core
+   network rows. Connection transit may batch many outbox ids into one encrypted
+   transit blob; core TCP still owns only the outer length frame.
+7. Add dep-aware summaries without changing the worker boundary. While indexing
+   shared events, maintain known and present transitive-dependency closure rows,
+   dep waiters, and range-node dep summaries. Compare range nodes using root
+   hash plus present external-dep hash. On dep-probe slices, send present
+   closure ids before root ids.
+8. Add `topo sync today` in `sync/cli.rs` as a sync-mode argument after plain
+   range sync is in place. It should select a root range for the current day's
+   sync key while dep-aware sends may include older dependencies outside that
    root range. If command-generated test events need wall-clock-shaped
    timestamps, add that control to the closest test-event CLI, not to the
    harness.
@@ -1102,20 +1130,22 @@ New black-box limits should be tiered so ordinary validation remains useful:
   request handling reads precomputed closure rows instead of recursively
   walking the graph.
 
-For the first implementation, this can be two storage classes rather than one clever table:
+Keep the storage split explicit:
 
 ```
-durable_events(event_id, canonical_event_bytes, ...)
-connection_events(connection_id, event_id, canonical_event_bytes, expires_at)
-temp_outbox(connection_id, event_id)
+event_modules.events(event_id, canonical_event_bytes, status, ...)
+connection.connection_scoped_events(event_id, canonical_event_bytes)   # temp
+connection.outbox(connection_id, event_id)                             # temp
+sync.inbound_events(connection_id, event_id, canonical_event_bytes)     # temp
+sync.index_*                                                           # future durable sync-owned index tables
 ```
 
-`connection/worker.rs` resolves an outbox `event_id` from transient
-connection-event storage. For sync control events, it wraps their canonical
-bytes. For `SendEvent`, it loads the referenced durable event, checks authority,
-creates a transit blob, resolves the connection to a concrete `NetworkTarget`,
-and writes an `OutboundNetworkRow`. Sync modules do not batch ids into transport
-frames and do not create transit blobs.
+`connection/worker.rs` resolves an outbox `event_id` first from durable shared
+event storage, then from transient connection-scoped event storage. Sync modules
+do not batch ids into transport frames and do not create transit blobs. They
+either propose new connection-scoped sync events through commands or write
+id-only temp outbox rows for already-existing durable event ids requested by the
+peer.
 
 Outgoing dedupe belongs at the temp `outbox` boundary and the per-connection hot
 queue, not in every projector's context. Projectors should not need
