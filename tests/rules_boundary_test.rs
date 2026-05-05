@@ -295,6 +295,8 @@ fn scoped_cli_files_do_not_own_transport_or_cross_cli_operations() {
         "Instant",
         "connect_exchange",
         "accept_available",
+        "DrainUntilIdle",
+        "DrainReadyBatch",
         "::cli::run_",
         "::cli::drain_",
         "::cli::exchange_",
@@ -539,6 +541,33 @@ fn worker_files_export_only_run_as_public_entrypoint() {
         offenders.is_empty(),
         "worker.rs files expose one obvious public entrypoint, run(); helpers stay private:\n{}",
         offenders.join("\n")
+    );
+}
+
+#[test]
+fn worker_files_do_not_own_cli_parsing_or_user_formatting() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "worker.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "crate::core::cli",
+        "CliArgs",
+        "CliCommand",
+        "CliOutput",
+        "pub fn commands()",
+        "usage:",
+        "help:",
+        "println!",
+        "eprintln!",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "worker.rs files manage queued/operational work; CLI parsing, command specs, and user-facing formatting stay in cli.rs:\n{}",
+        violations.join("\n")
     );
 }
 
@@ -1138,6 +1167,41 @@ fn event_module_commands_do_not_mutate_storage_directly() {
     assert!(
         violations.is_empty(),
         "commands receive explicit context and return CommandOutput events only; projectors/workers/store own rows and writes:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn event_module_commands_do_not_drive_workers_cli_or_transport_queues() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "commands.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "worker::run",
+        "DrainUntilIdle",
+        "DrainReadyBatch",
+        "crate::core::cli",
+        "CliArgs",
+        "CliCommand",
+        "CliOutput",
+        "crate::core::tcp",
+        "core::network_queues",
+        "network_queues::",
+        "InboundNetworkRow",
+        "OutboundNetworkRow",
+        "NetworkTarget",
+        "thread::",
+        "Instant",
+        "println!",
+        "eprintln!",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "commands.rs files construct canonical events or transport bytes from explicit params/context; worker driving, CLI, TCP, and queue bookkeeping belong elsewhere:\n{}",
         violations.join("\n")
     );
 }

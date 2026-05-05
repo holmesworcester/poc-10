@@ -9,7 +9,7 @@ use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::protocol::cli::Context;
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventIndexEntry;
-use crate::protocol::event_modules::worker::{self, ApplyReadyReport, CommandOutput};
+use crate::protocol::event_modules::worker::{self, CommandOutput};
 
 const GENERATE_DEPS_USAGE: &str = "generate-deps NUM_EVENTS DEPS_PER_EVENT";
 const GENERATE_DEPS_RECENT_ROOT_USAGE: &str = "generate-deps-recent-root OLD_EVENTS DEPS_PER_EVENT";
@@ -134,20 +134,26 @@ fn run_generate_recent_root_command(
     let read = EventWithDepsContext::new(&context.store)?;
     let output = super::commands::recent_root_from_old_events(&read, old_events, deps_per_event)
         .map_err(|err| format!("generate recent event_with_deps root: {err}"))?;
-    let (report, admit) = worker::run(&context.store, &context.protocol, output)
-        .map_err(|err| format!("admit recent event_with_deps root: {err}"))?;
-    drain_ready_events(context, "drain recent event_with_deps root")?;
-    if admit.blocked_events > 0 {
+    let report = worker::run(
+        &context.store,
+        &context.protocol,
+        worker::AdmitAndDrain {
+            output,
+            batch_size: worker::DEFAULT_READY_BATCH,
+        },
+    )
+    .map_err(|err| format!("admit and drain recent event_with_deps root: {err}"))?;
+    if report.admitted.blocked_events > 0 {
         return Err(format!(
             "recent event_with_deps root blocked on {} dependencies",
-            admit.blocked_edges
+            report.admitted.blocked_edges
         ));
     }
     Ok(CliOutput::lines(
         EventWithDepsRecentRootSummary {
-            generated_events: report.generated_events,
-            dep_edges: report.dep_edges,
-            timestamp: report.timestamp,
+            generated_events: report.value.generated_events,
+            dep_edges: report.value.dep_edges,
+            timestamp: report.value.timestamp,
         }
         .lines(),
     ))
@@ -167,21 +173,27 @@ fn run_generate_recent_shared_closure_command(
         recent_events,
     )
     .map_err(|err| format!("generate recent event_with_deps shared closure: {err}"))?;
-    let (report, admit) = worker::run(&context.store, &context.protocol, output)
-        .map_err(|err| format!("admit recent event_with_deps shared closure: {err}"))?;
-    drain_ready_events(context, "drain recent event_with_deps shared closure")?;
-    if admit.blocked_events > 0 {
+    let report = worker::run(
+        &context.store,
+        &context.protocol,
+        worker::AdmitAndDrain {
+            output,
+            batch_size: worker::DEFAULT_READY_BATCH,
+        },
+    )
+    .map_err(|err| format!("admit and drain recent event_with_deps shared closure: {err}"))?;
+    if report.admitted.blocked_events > 0 {
         return Err(format!(
             "recent event_with_deps shared closure roots blocked on {} dependencies",
-            admit.blocked_edges
+            report.admitted.blocked_edges
         ));
     }
     Ok(CliOutput::lines(
         EventWithDepsRecentSharedClosureSummary {
-            generated_events: report.generated_events,
-            dep_edges: report.dep_edges,
-            first_timestamp: report.first_timestamp,
-            last_timestamp: report.last_timestamp,
+            generated_events: report.value.generated_events,
+            dep_edges: report.value.dep_edges,
+            first_timestamp: report.value.first_timestamp,
+            last_timestamp: report.value.last_timestamp,
         }
         .lines(),
     ))
@@ -217,13 +229,15 @@ fn run_replay_reverse_command(
         .blocked;
 
     let roots = records[..root_count].to_vec();
-    let (_, root_report) = worker::run(
+    let root_report = worker::run(
         &context.store,
         context.protocol.modules(),
-        CommandOutput::with_events((), roots),
+        worker::AdmitAndDrain {
+            output: CommandOutput::with_events((), roots),
+            batch_size: worker::DEFAULT_READY_BATCH,
+        },
     )
-    .map_err(|err| format!("admit event_with_deps roots: {err}"))?;
-    let drain = drain_ready_events(context, "drain event_with_deps replay")?;
+    .map_err(|err| format!("admit and drain event_with_deps roots: {err}"))?;
     let final_counts = event_schema::status_counts(&context.store)
         .map_err(|err| format!("count event_with_deps replay statuses: {err}"))?;
 
@@ -232,25 +246,14 @@ fn run_replay_reverse_command(
             replayed_events: records.len(),
             blocked_after_reverse,
             applied_events: reverse_report.applied_events
-                + root_report.applied_events
-                + drain.applied_events,
+                + root_report.admitted.applied_events
+                + root_report.drained.applied_events,
             ready_events: final_counts.ready,
             blocked_events: final_counts.blocked,
             blocked_edges: final_counts.blocked_edges,
         }
         .lines(),
     ))
-}
-
-fn drain_ready_events(context: &Context, label: &str) -> Result<ApplyReadyReport, String> {
-    worker::run(
-        &context.store,
-        &context.protocol,
-        worker::DrainUntilIdle {
-            batch_size: worker::DEFAULT_READY_BATCH,
-        },
-    )
-    .map_err(|err| format!("{label}: {err}"))
 }
 
 struct EventWithDepsContext {

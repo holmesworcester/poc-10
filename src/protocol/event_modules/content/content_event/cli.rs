@@ -52,23 +52,22 @@ fn run_generate_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     };
     let output = super::commands::generate_next(&read, num_events, event_size)
         .map_err(|err| format!("generate: {err}"))?;
-    let (report, admitted) = worker::run(&context.store, &context.protocol, output)
-        .map_err(|err| format!("admit generated events: {err}"))?;
-    let drained = worker::run(
+    let report = worker::run(
         &context.store,
         &context.protocol,
-        worker::DrainUntilIdle {
+        worker::AdmitAndDrain {
+            output,
             batch_size: worker::DEFAULT_READY_BATCH,
         },
     )
-    .map_err(|err| format!("drain generated events: {err}"))?;
+    .map_err(|err| format!("admit and drain generated events: {err}"))?;
     Ok(CliOutput::lines(
         GenerateSummary {
-            generated_events: admitted.inserted_events,
-            applied_events: admitted.applied_events + drained.applied_events,
+            generated_events: report.admitted.inserted_events,
+            applied_events: report.admitted.applied_events + report.drained.applied_events,
             event_size,
-            first_timestamp: report.first_timestamp,
-            last_timestamp: report.last_timestamp,
+            first_timestamp: report.value.first_timestamp,
+            last_timestamp: report.value.last_timestamp,
         }
         .lines(),
     ))

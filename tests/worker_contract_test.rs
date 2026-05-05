@@ -74,6 +74,49 @@ fn worker_fetches_dependency_records_and_labels_before_projection() {
 }
 
 #[test]
+fn admit_and_drain_admits_command_output_then_drains_ready_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("admit-and-drain.db")).unwrap();
+
+    let dep_bytes = b"admit-drain-dep".to_vec();
+    let child_bytes = b"admit-drain-child".to_vec();
+    let dep_id = event_id(&dep_bytes);
+    let child_id = event_id(&child_bytes);
+    let registry = ContextRegistry {
+        dep_id,
+        child_id,
+        dep_bytes: dep_bytes.clone(),
+        child_bytes: child_bytes.clone(),
+        child_saw_context: Cell::new(false),
+    };
+
+    let child = registry.record_for(child_bytes).unwrap();
+    let (_, child_report) = worker::run(
+        &store,
+        &registry,
+        CommandOutput::with_events((), vec![child]),
+    )
+    .unwrap();
+    assert_eq!(child_report.blocked_events, 1);
+
+    let dep = registry.record_for(dep_bytes).unwrap();
+    let report = worker::run(
+        &store,
+        &registry,
+        worker::AdmitAndDrain {
+            output: CommandOutput::with_events("dependency".to_string(), vec![dep]),
+            batch_size: 10,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.value, "dependency");
+    assert_eq!(report.admitted.applied_events, 1);
+    assert_eq!(report.drained.applied_events, 1);
+    assert!(registry.child_saw_context.get());
+}
+
+#[test]
 fn drain_ready_batch_applies_only_one_batch() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Protocol::open_store(tmp.path().join("batch.db")).unwrap();
