@@ -92,6 +92,7 @@ fn core_file_set_stays_small_and_named() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core");
     let allowed = [
         "cli.rs",
+        "crypto.rs",
         "crux_runner.rs",
         "mod.rs",
         "network_queues.rs",

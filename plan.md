@@ -67,6 +67,21 @@ that field in the p8 event shape or keep it only as an inert/reserved zero field
 if an explicit compatibility decision requires it. It must not become a
 dependency in this slice.
 
+All crypto in this slice must be real production crypto. Signed auth events must
+use real signature primitives and real verification; local secret or private-key
+events must store actual secret material for the primitive they claim. Do not add
+placeholder signatures, mock cryptographic checks, deterministic toy keys, fake
+encryption, or TODO paths that pass auth until a future crypto implementation.
+If a real primitive is not decided or not ready, leave that behavior out of
+scope instead of scaffolding it.
+
+Reusable cryptographic primitives and hash helpers belong in
+`src/core/crypto.rs`. Identity event modules should call core crypto helpers for
+hashing, signing, verification, nonce generation, encryption, or KDF operations
+instead of defining primitive implementations locally. Event modules still own
+their semantic context: which canonical bytes are signed, what signer dependency
+is allowed, and what associated data or purpose string is passed to core crypto.
+
 ## Concept Mapping
 
 `poc-8` identity scope is `workspace + endpoint`. There is no tenant layer.
@@ -186,6 +201,10 @@ Each leaf event should have:
 Signed wrappers should expose the signer event id as a dependency and preserve
 enough inner metadata for the projector/registry to resolve the semantic signer
 type.
+
+Signature codecs and tests should use real keys/signatures. Tests may use fixed
+test vectors or deterministic fixture keys for repeatability, but the signing
+and verification operations themselves must be the production primitive.
 
 ## Projector Translation
 

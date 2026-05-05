@@ -33,7 +33,7 @@ the rule is still prose/review only.
 | `EventRecord` literals are constructed only by codecs. | static | `event_records_are_constructed_only_by_codecs`. |
 | Codecs use shared binary helpers and reject trailing bytes. | static + partial | `codec_files_use_shared_binary_helpers_and_finish_reads`; this catches common drift but is not a formal fixed-width proof. |
 | `types.rs` does not store encoded/canonical artifacts as semantic fields. | static | `event_module_types_do_not_store_encoded_event_artifacts`. |
-| Transit/crypto naming must not claim fake protection. | static + partial | `source_does_not_contain_fake_crypto_claims`; cryptographic correctness still needs implementation review and tests. |
+| Crypto behavior must be real where claimed; transit/crypto naming must not claim fake protection. | static + partial | `source_does_not_contain_fake_crypto_claims`; cryptographic correctness still needs implementation review and tests. |
 | Functional proof comes from black-box CLI/network tests, except pure projector/command tests. | partial | Existing tests spawn the real `topo` binary for sync/generate/cascade paths; this remains a process/testing rule, not a type guarantee. |
 | Workers with cursors, leases, fairness, and wake declarations are the long-term control loop. | uncovered | Described in [plan.md](plan.md); only the event-modules worker, connection worker, and sync worker exist in the current POC. |
 | Rust idiom and common correctness lints pass. | static | Run `cargo clippy --all-targets -- -D warnings` in addition to `cargo test`; Clippy complements but does not replace [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
@@ -653,6 +653,15 @@ Core TCP send queue targets are transport routes, not semantic connection ids.
 Use an address or socket target such as `(ip, port)` or `socket_id`. If a
 module starts from `connection_id`, it must resolve that connection to a
 transport target before writing an `OutboundNetworkRow`.
+
+## Core Crypto
+
+Cryptographic primitives and reusable hash helpers belong in `src/core/crypto.rs`.
+Protocol event modules may call those helpers with domain-specific context, but
+they should not own primitive implementations or duplicate hash/cryptor code.
+Event modules still own semantic decisions: what is signed, what dependency is
+authorized, which associated data is passed, and how projection treats a
+verification failure.
 
 ## No Fake Or Placeholder Encryption
 
