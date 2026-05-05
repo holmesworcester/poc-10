@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(proposed.record().scope, EventScope::Shared);
         assert_eq!(
             proposed.record().dependencies,
-            vec![device_invite.value.device_invite_id]
+            vec![device_invite.value.device_invite_id, [1; 32], [2; 32]]
         );
 
         let envelope =
