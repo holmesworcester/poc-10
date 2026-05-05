@@ -9,7 +9,7 @@
 //! The current POC has two wake shapes:
 //!
 //! ```text
-//! manual sync start -> compare command for each known connection route
+//! manual sync start -> root compare command for each known connection route
 //! projected inbound sync event rows -> compare/have/need handler for that connection
 //! ```
 //!
@@ -24,17 +24,23 @@
 //! sync events; it should not perform TCP IO, mutate content projections, or
 //! bypass normal event admission.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Mutex;
+
 use crate::core::store::Store;
 use crate::protocol::event_modules::connection;
 use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
 use crate::protocol::event_modules::schema as event_schema;
-use crate::protocol::event_modules::types::{EventId, EventRecord};
+use crate::protocol::event_modules::types::{EventId, EventIndexEntry, EventRecord};
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::{compare, schema};
+use super::{
+    compare,
+    compare::types::{RangeSummary, TimestampRange},
+    schema,
+};
 
 pub const DEFAULT_INBOUND_BATCH: usize = 1024;
-pub const DEFAULT_QUIET_MS: u64 = 750;
 
 /// Work accepted by the sync worker.
 ///
@@ -43,10 +49,8 @@ pub const DEFAULT_QUIET_MS: u64 = 750;
 /// from transient inbound sync events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
-    Start,
-    MaybeStart {
-        now_ms: u64,
-        quiet_ms: u64,
+    Start {
+        selection: SyncSelection,
     },
     DrainInboundSync {
         connection_id: connection::types::ConnectionId,
@@ -54,11 +58,17 @@ pub enum Work {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SyncSelection {
+    #[default]
+    All,
+    Today,
+}
+
 /// Result of a sync worker action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
     Started(CommandOutput<SyncStartReport>),
-    MaybeStarted(CommandOutput<SyncStartReport>),
     DrainedInboundSync(SyncWorkReport),
 }
 
@@ -87,20 +97,37 @@ pub struct SyncWorkReport {
 /// The only public entrypoint mirrors the other workers. Adding a new sync wake
 /// should add a `Work` variant and keep the command/query/projection boundary
 /// visible here.
-pub fn run(store: &Store, work: Work) -> Result<Output, String> {
+pub fn run(store: &Store, index: &SyncIndex, work: Work) -> Result<Output, String> {
+    index.catch_up(store)?;
     match work {
-        Work::Start => start(store).map(Output::Started),
-        Work::MaybeStart { now_ms, quiet_ms } => {
-            maybe_start(store, now_ms, quiet_ms).map(Output::MaybeStarted)
+        Work::Start { selection } => {
+            start(store, index, selected_range(store, selection)?).map(Output::Started)
         }
         Work::DrainInboundSync {
             connection_id,
             limit,
-        } => drain_inbound_events(store, connection_id, limit).map(Output::DrainedInboundSync),
+        } => {
+            drain_inbound_events(store, index, connection_id, limit).map(Output::DrainedInboundSync)
+        }
     }
 }
 
-fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
+fn selected_range(store: &Store, selection: SyncSelection) -> Result<TimestampRange, String> {
+    match selection {
+        SyncSelection::All => Ok(TimestampRange::ROOT),
+        SyncSelection::Today => {
+            let timestamp = event_schema::max_timestamp(store)
+                .map_err(|err| format!("load max timestamp for sync today: {err}"))?;
+            Ok(TimestampRange::containing_day(timestamp))
+        }
+    }
+}
+
+fn start(
+    store: &Store,
+    index: &SyncIndex,
+    range: TimestampRange,
+) -> Result<CommandOutput<SyncStartReport>, String> {
     // Manual sync fans out over known routes. The route table is owned by the
     // connection domain; sync only borrows the connection id needed to make a
     // connection-scoped compare event.
@@ -108,53 +135,16 @@ fn start(store: &Store) -> Result<CommandOutput<SyncStartReport>, String> {
     if connections.is_empty() {
         return Ok(CommandOutput::new(SyncStartReport::default()));
     }
-    start_connections(store, connections)
-}
-
-fn maybe_start(
-    store: &Store,
-    now_ms: u64,
-    quiet_ms: u64,
-) -> Result<CommandOutput<SyncStartReport>, String> {
-    let connections = connection_ids_with_routes(store)?;
-    if connections.is_empty() {
-        return Ok(CommandOutput::new(SyncStartReport::default()));
-    }
-    let mut eligible = Vec::new();
-    for connection_id in connections {
-        if !inbound_events_for_connection(store, connection_id, 1)?.is_empty() {
-            record_sync_activity(store, connection_id, now_ms)?;
-            continue;
-        }
-        let last_activity = sync_activity_ms(store, connection_id)?.unwrap_or_default();
-        if quiet_ms > 0 && now_ms.saturating_sub(last_activity) < quiet_ms {
-            continue;
-        }
-        eligible.push(connection_id);
-    }
-
-    let output = start_connections(store, eligible.clone())?;
-    if !output.events.is_empty() {
-        for connection_id in eligible {
-            record_sync_activity(store, connection_id, now_ms)?;
-        }
-    }
-    Ok(output)
-}
-
-fn start_connections(
-    store: &Store,
-    connections: Vec<connection::types::ConnectionId>,
-) -> Result<CommandOutput<SyncStartReport>, String> {
     let mut events = Vec::new();
     let mut sent_events = 0;
     let local = local_endpoint(store)?;
     for connection_id in connections {
-        let context = StoreSyncContext::for_connection(store, local.endpoint, connection_id)?;
+        let context =
+            StoreSyncContext::for_connection(store, index, local.endpoint, connection_id)?;
         if context.workspace_ids.is_empty() {
             continue;
         }
-        let report = compare::commands::start(&context, connection_id)?;
+        let report = compare::commands::start(&context, connection_id, range)?;
         events.extend(report.events);
         sent_events += report.sent_events;
     }
@@ -166,6 +156,7 @@ fn start_connections(
 
 fn drain_inbound_events(
     store: &Store,
+    index: &SyncIndex,
     connection_id: connection::types::ConnectionId,
     limit: usize,
 ) -> Result<SyncWorkReport, String> {
@@ -177,7 +168,8 @@ fn drain_inbound_events(
     let mut outbox_rows = Vec::new();
     for work in works {
         let local = local_endpoint(store)?;
-        let context = StoreSyncContext::for_connection(store, local.endpoint, work.connection_id)?;
+        let context =
+            StoreSyncContext::for_connection(store, index, local.endpoint, work.connection_id)?;
         let report = compare::commands::handle_inbound_event(
             &context,
             work.connection_id,
@@ -200,19 +192,20 @@ fn drain_inbound_events(
         store
             .delete_table_rows(schema::INBOUND_EVENTS, consumed)
             .map_err(|err| format!("delete inbound sync events: {err}"))?;
-        record_sync_activity(store, connection_id, current_time_ms())?;
     }
     Ok(result)
 }
 
 struct StoreSyncContext<'a> {
     store: &'a Store,
+    index: &'a SyncIndex,
     workspace_ids: Vec<EventId>,
 }
 
 impl<'a> StoreSyncContext<'a> {
     fn for_connection(
         store: &'a Store,
+        index: &'a SyncIndex,
         local_endpoint: EventId,
         connection_id: connection::types::ConnectionId,
     ) -> Result<Self, String> {
@@ -221,39 +214,94 @@ impl<'a> StoreSyncContext<'a> {
             endpoint_shared::schema::mutual_workspace_ids(store, local_endpoint, remote)?;
         Ok(Self {
             store,
+            index,
             workspace_ids,
+        })
+    }
+
+    fn entry_is_allowed(&self, entry: &EventIndexEntry) -> bool {
+        entry.workspace_id.is_some_and(|workspace_id| {
+            self.workspace_ids
+                .iter()
+                .any(|allowed| allowed == &workspace_id)
+        })
+    }
+
+    fn entries_in_range(&self, range: TimestampRange) -> Result<Vec<EventIndexEntry>, String> {
+        self.index.ids_in_range(range).map(|entries| {
+            entries
+                .into_iter()
+                .filter(|entry| self.entry_is_allowed(entry))
+                .collect()
         })
     }
 }
 
 impl compare::commands::ReadContext for StoreSyncContext<'_> {
-    fn summary(&self) -> Result<[compare::types::BucketSummary; compare::types::BUCKETS], String> {
-        let mut summary = [compare::types::BucketSummary::default(); compare::types::BUCKETS];
-        for header in
-            event_schema::event_index_entries_for_workspaces(self.store, &self.workspace_ids)
-                .map_err(|err| format!("load event headers: {err}"))?
-        {
-            let bucket = &mut summary[usize::from(header.partition)];
-            bucket.count += 1;
-            xor_into(&mut bucket.fingerprint, &fingerprint_id(&header.event_id));
+    fn summary(
+        &self,
+        range: compare::types::TimestampRange,
+    ) -> Result<compare::types::RangeSummary, String> {
+        let mut summary = RangeSummary::default();
+        for entry in self.entries_in_range(range)? {
+            summary.count += 1;
+            xor_into(&mut summary.fingerprint, &fingerprint_id(&entry.event_id));
         }
         Ok(summary)
     }
 
-    fn ids_in_bucket(
+    fn ids_in_range(
         &self,
-        bucket: u8,
-    ) -> Result<Vec<crate::protocol::event_modules::types::EventId>, String> {
-        event_schema::event_ids_in_partition_for_workspaces(self.store, bucket, &self.workspace_ids)
-            .map_err(|err| format!("load bucket ids: {err}"))
+        range: compare::types::TimestampRange,
+    ) -> Result<Vec<crate::protocol::event_modules::types::EventIndexEntry>, String> {
+        self.entries_in_range(range)
+    }
+
+    fn timestamp_bounds(
+        &self,
+        range: compare::types::TimestampRange,
+    ) -> Result<Option<(u64, u64)>, String> {
+        let entries = self.entries_in_range(range)?;
+        let Some(first) = entries.first() else {
+            return Ok(None);
+        };
+        let last = entries.last().unwrap_or(first);
+        Ok(Some((first.timestamp, last.timestamp)))
     }
 
     fn has_event(
         &self,
         event_id: &crate::protocol::event_modules::types::EventId,
     ) -> Result<bool, String> {
-        event_schema::has_shared_event(self.store, event_id)
-            .map_err(|err| format!("check event presence: {err}"))
+        self.index.has_event(event_id)
+    }
+
+    fn dependency_closure_entries(
+        &self,
+        roots: &[crate::protocol::event_modules::types::EventIndexEntry],
+    ) -> Result<Vec<crate::protocol::event_modules::types::EventIndexEntry>, String> {
+        self.index
+            .dependency_closure_entries(self.store, roots)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .filter(|entry| self.entry_is_allowed(entry))
+                    .collect()
+            })
+    }
+
+    fn fresh_have_entries(
+        &self,
+        connection_id: crate::protocol::event_modules::types::EventId,
+        entries: Vec<crate::protocol::event_modules::types::EventIndexEntry>,
+    ) -> Result<Vec<crate::protocol::event_modules::types::EventIndexEntry>, String> {
+        self.index.fresh_have_entries(
+            connection_id,
+            entries
+                .into_iter()
+                .filter(|entry| self.entry_is_allowed(entry))
+                .collect(),
+        )
     }
 
     fn can_send_event(
@@ -294,41 +342,202 @@ fn inbound_events_for_connection(
         .collect()
 }
 
-fn record_sync_activity(
-    store: &Store,
-    connection_id: connection::types::ConnectionId,
-    now_ms: u64,
-) -> Result<(), String> {
-    store
-        .write_transaction(|store| {
-            store.replace_table_rows_in_tx(vec![schema::connection_activity_row(
-                connection_id,
-                now_ms,
-            )])?;
-            Ok(())
-        })
-        .map_err(|err| format!("record sync activity: {err}"))
+// ---------------------------------------------------------------------------
+// In-memory negentropy index
+// ---------------------------------------------------------------------------
+
+/// Process-local negentropy state owned by the sync worker.
+///
+/// SQLite remains the source of truth for canonical events. This index catches
+/// up from the shared-event feed, updates a timestamp tree along each inserted
+/// event's path, and serves range summaries without rebuilding hashes for every
+/// compare. In the current CLI each command gets a fresh process and may rebuild
+/// once at startup; in the intended long-lived control loop the same structure
+/// stays warm and receives only path updates for new shared events.
+#[derive(Debug, Default)]
+pub struct SyncIndex {
+    state: Mutex<IndexState>,
 }
 
-fn sync_activity_ms(
-    store: &Store,
-    connection_id: connection::types::ConnectionId,
-) -> Result<Option<u64>, String> {
-    store
-        .table_row(schema::CONNECTION_ACTIVITY, &connection_id)
-        .map_err(|err| format!("load sync activity: {err}"))?
-        .map(|bytes| schema::decode_connection_activity(&bytes))
-        .transpose()
+impl SyncIndex {
+    fn catch_up(&self, store: &Store) -> Result<(), String> {
+        let entries = event_schema::event_index_entries_in_timestamp_range(store, 0, u64::MAX)
+            .map_err(|err| format!("load sync index feed: {err}"))?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        for entry in entries {
+            if state.indexed.contains(&entry.event_id) {
+                continue;
+            }
+            state.insert(entry);
+        }
+        Ok(())
+    }
+
+    fn ids_in_range(&self, range: TimestampRange) -> Result<Vec<EventIndexEntry>, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        Ok(state.ids_in_range(range))
+    }
+
+    fn has_event(&self, event_id: &EventId) -> Result<bool, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        Ok(state.entries_by_id.contains_key(event_id))
+    }
+
+    fn dependency_closure_entries(
+        &self,
+        store: &Store,
+        roots: &[EventIndexEntry],
+    ) -> Result<Vec<EventIndexEntry>, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        state.dependency_closure_entries(store, roots)
+    }
+
+    fn fresh_have_entries(
+        &self,
+        connection_id: EventId,
+        entries: Vec<EventIndexEntry>,
+    ) -> Result<Vec<EventIndexEntry>, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        Ok(state.fresh_have_entries(connection_id, entries))
+    }
 }
 
-fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+#[derive(Debug, Default)]
+struct IndexState {
+    indexed: HashSet<EventId>,
+    nodes: HashMap<NodeKey, RangeSummary>,
+    ids_by_time: BTreeMap<(u64, EventId), EventIndexEntry>,
+    entries_by_id: HashMap<EventId, EventIndexEntry>,
+    deps_by_event: HashMap<EventId, Vec<EventId>>,
+    advertised_haves_by_connection: HashMap<EventId, HashSet<EventId>>,
 }
 
-fn fingerprint_id(id: &crate::protocol::event_modules::types::EventId) -> [u8; 32] {
+impl IndexState {
+    fn insert(&mut self, entry: EventIndexEntry) {
+        let fingerprint = fingerprint_id(&entry.event_id);
+        for depth in 0..=64 {
+            let key = NodeKey::for_timestamp(entry.timestamp, depth);
+            let summary = self.nodes.entry(key).or_default();
+            summary.count += 1;
+            xor_into(&mut summary.fingerprint, &fingerprint);
+        }
+        self.indexed.insert(entry.event_id);
+        self.ids_by_time
+            .insert((entry.timestamp, entry.event_id), entry.clone());
+        self.entries_by_id.insert(entry.event_id, entry);
+    }
+
+    fn ids_in_range(&self, range: TimestampRange) -> Vec<EventIndexEntry> {
+        let lower = (range.start, [0; 32]);
+        let upper = (range.end, [0xff; 32]);
+        self.ids_by_time
+            .range(lower..=upper)
+            .map(|(_, entry)| entry.clone())
+            .collect()
+    }
+
+    fn dependency_closure_entries(
+        &mut self,
+        store: &Store,
+        roots: &[EventIndexEntry],
+    ) -> Result<Vec<EventIndexEntry>, String> {
+        let root_ids = roots
+            .iter()
+            .map(|entry| entry.event_id)
+            .collect::<HashSet<_>>();
+        let mut seen = root_ids.clone();
+        let mut stack = Vec::new();
+        for entry in roots {
+            stack.extend(self.dependencies_for(store, &entry.event_id)?);
+        }
+        let mut out = BTreeMap::<(u64, EventId), EventIndexEntry>::new();
+
+        while let Some(dep) = stack.pop() {
+            if !seen.insert(dep) {
+                continue;
+            }
+            let Some(entry) = self.entries_by_id.get(&dep) else {
+                continue;
+            };
+            if !root_ids.contains(&dep) {
+                out.insert((entry.timestamp, entry.event_id), entry.clone());
+            }
+            stack.extend(self.dependencies_for(store, &dep)?);
+        }
+
+        Ok(out.into_values().collect())
+    }
+
+    fn dependencies_for(
+        &mut self,
+        store: &Store,
+        event_id: &EventId,
+    ) -> Result<Vec<EventId>, String> {
+        if let Some(dependencies) = self.deps_by_event.get(event_id) {
+            return Ok(dependencies.clone());
+        }
+        if !self.entries_by_id.contains_key(event_id) {
+            return Ok(Vec::new());
+        }
+        let bytes = event_schema::event_bytes(store, event_id)
+            .map_err(|err| format!("load sync dependency event bytes: {err}"))?
+            .ok_or_else(|| "sync index referenced missing dependency event".to_string())?;
+        let record = crate::protocol::event_modules::record_from_bytes(bytes)?;
+        let dependencies = record.dependencies;
+        self.deps_by_event.insert(*event_id, dependencies.clone());
+        Ok(dependencies)
+    }
+
+    fn fresh_have_entries(
+        &mut self,
+        connection_id: EventId,
+        entries: Vec<EventIndexEntry>,
+    ) -> Vec<EventIndexEntry> {
+        let advertised = self
+            .advertised_haves_by_connection
+            .entry(connection_id)
+            .or_default();
+        entries
+            .into_iter()
+            .filter(|entry| advertised.insert(entry.event_id))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct NodeKey {
+    depth: u8,
+    prefix: u64,
+}
+
+impl NodeKey {
+    fn for_timestamp(timestamp: u64, depth: u8) -> Self {
+        debug_assert!(depth <= 64);
+        let prefix = if depth == 0 {
+            0
+        } else {
+            timestamp >> (64 - depth)
+        };
+        Self { depth, prefix }
+    }
+}
+
+fn fingerprint_id(id: &EventId) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"sync-event-id:");
     hasher.update(id);
@@ -338,136 +547,5 @@ fn fingerprint_id(id: &crate::protocol::event_modules::types::EventId) -> [u8; 3
 fn xor_into(target: &mut [u8; 32], value: &[u8; 32]) {
     for (left, right) in target.iter_mut().zip(value.iter()) {
         *left ^= *right;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::protocol::event_modules::identity::endpoint;
-    use crate::protocol::event_modules::sync::{have_id, need_id};
-    use crate::protocol::event_modules::types::{event_id, EventRecord, EventScope, EventStatus};
-    use crate::protocol::event_modules::worker as event_worker;
-    use crate::protocol::Protocol;
-
-    use super::*;
-
-    #[test]
-    fn inbound_have_without_local_mutual_workspace_can_request_unknown_id() {
-        let (store, connection_id) = store_with_unscoped_connection();
-        let wanted_id = [9; 32];
-        let have_bytes = have_id::codec::encode(&have_id::types::HaveIdEvent {
-            connection_id,
-            bucket: wanted_id[0],
-            id: wanted_id,
-        });
-        insert_inbound_sync(&store, connection_id, have_bytes);
-
-        let Output::DrainedInboundSync(report) = run(
-            &store,
-            Work::DrainInboundSync {
-                connection_id,
-                limit: 10,
-            },
-        )
-        .expect("drain inbound sync") else {
-            panic!("unexpected sync output");
-        };
-
-        assert_eq!(report.processed_work, 1);
-        assert_eq!(report.events.len(), 1);
-        let need = need_id::codec::decode(&report.events[0].canonical_bytes).expect("decode need");
-        assert_eq!(need.connection_id, connection_id);
-        assert_eq!(need.id, wanted_id);
-        assert!(report.send_event_ids.is_empty());
-        assert_eq!(
-            store
-                .table_row_count(connection::schema::OUTBOX)
-                .expect("count outbox"),
-            0
-        );
-        assert_eq!(
-            store
-                .table_row_count(schema::INBOUND_EVENTS)
-                .expect("count inbound work"),
-            0
-        );
-    }
-
-    #[test]
-    fn inbound_need_without_local_mutual_workspace_does_not_send_durable_event() {
-        let (store, connection_id) = store_with_unscoped_connection();
-        let workspace_id = [4; 32];
-        let event_bytes = vec![200];
-        let shared_event_id = event_id(&event_bytes);
-        event_schema::insert_event(
-            &store,
-            &EventRecord {
-                timestamp: 1,
-                body_len: 0,
-                canonical_bytes: event_bytes,
-                dependencies: Vec::new(),
-                workspace_id: Some(workspace_id),
-                scope: EventScope::Shared,
-            },
-            EventStatus::Applied,
-        )
-        .expect("insert shared event");
-
-        let need_bytes = need_id::codec::encode(&need_id::types::NeedIdEvent {
-            connection_id,
-            id: shared_event_id,
-        });
-        insert_inbound_sync(&store, connection_id, need_bytes);
-
-        let Output::DrainedInboundSync(report) = run(
-            &store,
-            Work::DrainInboundSync {
-                connection_id,
-                limit: 10,
-            },
-        )
-        .expect("drain inbound sync") else {
-            panic!("unexpected sync output");
-        };
-
-        assert_eq!(report.processed_work, 1);
-        assert!(report.events.is_empty());
-        assert!(report.send_event_ids.is_empty());
-        assert_eq!(
-            store
-                .table_row_count(connection::schema::OUTBOX)
-                .expect("count outbox"),
-            0
-        );
-    }
-
-    fn store_with_unscoped_connection() -> (Store, connection::types::ConnectionId) {
-        let store = Protocol::open_memory_store().expect("open store");
-        let protocol = Protocol::new();
-        let local = endpoint::commands::create_local_keypair();
-        event_worker::run(&store, &protocol, local).expect("admit local endpoint");
-        let remote = endpoint::commands::create_local_keypair().value;
-        let connection_id = [3; 32];
-        store
-            .insert_table_rows(vec![connection::schema::connection_row(
-                connection_id,
-                remote.endpoint,
-            )])
-            .expect("insert connection row");
-        (store, connection_id)
-    }
-
-    fn insert_inbound_sync(
-        store: &Store,
-        connection_id: connection::types::ConnectionId,
-        bytes: Vec<u8>,
-    ) {
-        store
-            .insert_table_rows(vec![schema::inbound_event_row(
-                connection_id,
-                event_id(&bytes),
-                bytes,
-            )])
-            .expect("insert inbound sync row");
     }
 }

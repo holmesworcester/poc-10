@@ -24,7 +24,7 @@ use event_modules::types::EventRecord;
 use event_modules::worker::{EventRegistry, EventWithContext, ProjectionOutput};
 use event_modules::Modules;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Protocol {
     modules: Modules,
 }
@@ -69,5 +69,11 @@ impl EventRegistry for Protocol {
         event: &EventWithContext<'_>,
     ) -> Result<ProjectionOutput, String> {
         self.modules.project_record(store, event)
+    }
+}
+
+impl event_modules::connection::worker::ConnectionRegistry for Protocol {
+    fn sync_index(&self) -> &event_modules::sync::worker::SyncIndex {
+        self.modules.sync_index()
     }
 }

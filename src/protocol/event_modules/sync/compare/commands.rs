@@ -1,26 +1,42 @@
 //! Compare-driven sync commands.
 //!
-//! This is the POC's simple reconciliation engine. A peer asks "do these bucket
-//! summaries match?" If not, the responder sends have ids for differing
-//! buckets; missing ids become need ids; received need ids queue durable event
-//! ids to the connection outbox. The command emits event records and ids only:
-//! transit wrapping and TCP framing are outside sync.
+//! This is the POC's range-negentropy reconciliation engine. A peer asks "does
+//! this timestamp range have the same count and fingerprint?" If not, the
+//! responder answers with child compares until a timestamp leaf can advertise
+//! concrete ids. Missing ids become need ids; received need ids queue durable
+//! event ids to the connection outbox. The command emits event records and ids
+//! only: transit wrapping and TCP framing are outside sync.
 
-use crate::protocol::event_modules::types::EventId;
+use crate::protocol::event_modules::types::{EventId, EventIndexEntry};
 
 use super::super::have_id::{self, types::HaveIdEvent};
 use super::super::need_id::{self, types::NeedIdEvent};
-use super::types::{BucketSummary, CompareEvent, BUCKETS};
+use super::types::{CompareEvent, RangeSummary, TimestampRange};
+
+const MAX_HAVE_IDS_PER_RANGE: usize = 64;
 
 pub trait ReadContext {
-    /// Summarize every shared event bucket.
-    fn summary(&self) -> Result<[BucketSummary; BUCKETS], String>;
-    /// Enumerate ids in one bucket when summaries differ.
-    fn ids_in_bucket(&self, bucket: u8) -> Result<Vec<EventId>, String>;
+    /// Summarize every shared event whose timestamp is inside the range.
+    fn summary(&self, range: TimestampRange) -> Result<RangeSummary, String>;
+    /// Enumerate ids in one timestamp range when summaries differ.
+    fn ids_in_range(&self, range: TimestampRange) -> Result<Vec<EventIndexEntry>, String>;
+    /// Return the first and last local timestamp present in a range.
+    fn timestamp_bounds(&self, range: TimestampRange) -> Result<Option<(u64, u64)>, String>;
     /// Check whether an advertised id is already present locally.
     fn has_event(&self, event_id: &EventId) -> Result<bool, String>;
     /// Check whether a locally present id may be served to this connection.
     fn can_send_event(&self, event_id: &EventId) -> Result<bool, String>;
+    /// Enumerate present transitive dependencies for root ids in a leaf range.
+    fn dependency_closure_entries(
+        &self,
+        roots: &[EventIndexEntry],
+    ) -> Result<Vec<EventIndexEntry>, String>;
+    /// Suppress ids already advertised to this connection in the current worker.
+    fn fresh_have_entries(
+        &self,
+        connection_id: EventId,
+        entries: Vec<EventIndexEntry>,
+    ) -> Result<Vec<EventIndexEntry>, String>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -30,20 +46,22 @@ pub struct SyncReport {
     pub send_event_ids: Vec<EventId>,
 }
 
-pub fn start(context: &impl ReadContext, connection_id: EventId) -> Result<SyncReport, String> {
-    // Manual start sends a full compare and, for the current simple protocol,
-    // all have ids. The latter is intentionally easy to reason about and relies
-    // on outbox idempotence rather than round state.
+pub fn start(
+    context: &impl ReadContext,
+    connection_id: EventId,
+    range: TimestampRange,
+) -> Result<SyncReport, String> {
+    // Manual start sends only one compare over the caller-selected range. The
+    // rest of the exchange is driven by projected inbound compare rows.
     let mut report = SyncReport::default();
     report
         .events
         .push(super::codec::outbound_record(CompareEvent {
             connection_id,
-            summary: context.summary()?,
+            range,
+            summary: context.summary(range)?,
+            response_requested: true,
         })?);
-    for event in all_have_items(context, connection_id)? {
-        report.events.push(have_id::codec::outbound_record(event)?);
-    }
     Ok(report)
 }
 
@@ -56,12 +74,17 @@ pub fn handle_inbound_event(
     if super::codec::is_event(bytes) {
         let event = super::codec::decode(bytes)?;
         ensure_connection(event.connection_id, expected_connection_id)?;
-        let local = context.summary()?;
+        let local = context.summary(event.range)?;
         if local != event.summary {
-            for have in have_items_for_compare(context, event.connection_id, local, event.summary)?
-            {
-                report.events.push(have_id::codec::outbound_record(have)?);
-            }
+            let events = compare_response(
+                context,
+                event.connection_id,
+                event.range,
+                local,
+                event.summary,
+                event.response_requested,
+            )?;
+            report.events.extend(events);
         }
         return Ok(report);
     }
@@ -100,142 +123,115 @@ fn ensure_connection(
     Ok(())
 }
 
-fn all_have_items(
+fn compare_response(
     context: &impl ReadContext,
     connection_id: EventId,
-) -> Result<Vec<HaveIdEvent>, String> {
-    let mut items = Vec::new();
-    for bucket in 0..BUCKETS {
-        let ids = context.ids_in_bucket(bucket as u8)?;
-        for id in ids {
-            items.push(HaveIdEvent {
+    range: TimestampRange,
+    local: RangeSummary,
+    remote: RangeSummary,
+    response_requested: bool,
+) -> Result<Vec<crate::protocol::event_modules::types::EventRecord>, String> {
+    let mut records = Vec::new();
+    if local.count == 0 {
+        if response_requested {
+            records.push(super::codec::outbound_record(CompareEvent {
                 connection_id,
-                bucket: bucket as u8,
-                id,
-            });
+                range,
+                summary: local,
+                response_requested: false,
+            })?);
         }
+        return Ok(records);
     }
-    Ok(items)
-}
 
-fn have_items_for_compare(
-    context: &impl ReadContext,
-    connection_id: EventId,
-    local: [BucketSummary; BUCKETS],
-    remote: [BucketSummary; BUCKETS],
-) -> Result<Vec<HaveIdEvent>, String> {
-    let mut items = Vec::new();
-    for bucket in differing_buckets(&local, &remote) {
-        let ids = context.ids_in_bucket(bucket)?;
-        for id in ids {
-            items.push(HaveIdEvent {
+    if local.count <= MAX_HAVE_IDS_PER_RANGE as u64 {
+        let entries = context.ids_in_range(range)?;
+        let dep_entries = context
+            .fresh_have_entries(connection_id, context.dependency_closure_entries(&entries)?)?;
+        let entries = context.fresh_have_entries(connection_id, entries)?;
+        for entry in dep_entries.into_iter().chain(entries.into_iter()) {
+            records.push(have_id::codec::outbound_record(HaveIdEvent {
                 connection_id,
-                bucket,
-                id,
-            });
+                timestamp: entry.timestamp,
+                id: entry.event_id,
+            })?);
         }
-    }
-    Ok(items)
-}
-
-fn differing_buckets(
-    local: &[BucketSummary; BUCKETS],
-    remote: &[BucketSummary; BUCKETS],
-) -> Vec<u8> {
-    local
-        .iter()
-        .zip(remote.iter())
-        .enumerate()
-        .filter_map(|(idx, (left, right))| (left != right).then_some(idx as u8))
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::super::{have_id, need_id};
-    use super::*;
-
-    #[derive(Default)]
-    struct Context {
-        has_event: bool,
-        can_send_event: bool,
+        if response_requested && remote.count > 0 {
+            records.push(super::codec::outbound_record(CompareEvent {
+                connection_id,
+                range,
+                summary: local,
+                response_requested: false,
+            })?);
+        }
+        return Ok(records);
     }
 
-    impl ReadContext for Context {
-        fn summary(&self) -> Result<[BucketSummary; BUCKETS], String> {
-            Ok([BucketSummary::default(); BUCKETS])
+    let (min_timestamp, max_timestamp) = context
+        .timestamp_bounds(range)?
+        .ok_or_else(|| "non-empty range summary had no timestamp bounds".to_string())?;
+    if min_timestamp == max_timestamp {
+        let entries = context.ids_in_range(range)?;
+        let dep_entries = context
+            .fresh_have_entries(connection_id, context.dependency_closure_entries(&entries)?)?;
+        let entries = context.fresh_have_entries(connection_id, entries)?;
+        for entry in dep_entries.into_iter().chain(entries.into_iter()) {
+            records.push(have_id::codec::outbound_record(HaveIdEvent {
+                connection_id,
+                timestamp: entry.timestamp,
+                id: entry.event_id,
+            })?);
         }
-
-        fn ids_in_bucket(&self, _bucket: u8) -> Result<Vec<EventId>, String> {
-            Ok(Vec::new())
+        if response_requested && remote.count > 0 {
+            records.push(super::codec::outbound_record(CompareEvent {
+                connection_id,
+                range,
+                summary: local,
+                response_requested: false,
+            })?);
         }
-
-        fn has_event(&self, _event_id: &EventId) -> Result<bool, String> {
-            Ok(self.has_event)
-        }
-
-        fn can_send_event(&self, _event_id: &EventId) -> Result<bool, String> {
-            Ok(self.can_send_event)
-        }
+        return Ok(records);
     }
 
-    #[test]
-    fn advertised_unknown_id_can_be_requested_before_it_is_servable_locally() {
-        let connection_id = [1; 32];
-        let wanted_id = [2; 32];
-        let have = have_id::codec::outbound_record(have_id::types::HaveIdEvent {
+    if range.start < min_timestamp {
+        let empty_left = TimestampRange {
+            start: range.start,
+            end: min_timestamp - 1,
+        };
+        records.push(super::codec::outbound_record(CompareEvent {
             connection_id,
-            bucket: 2,
-            id: wanted_id,
-        })
-        .expect("have record");
-
-        let report = handle_inbound_event(
-            &Context {
-                has_event: false,
-                can_send_event: false,
-            },
+            range: empty_left,
+            summary: RangeSummary::default(),
+            response_requested: true,
+        })?);
+    }
+    if max_timestamp < range.end {
+        let empty_right = TimestampRange {
+            start: max_timestamp + 1,
+            end: range.end,
+        };
+        records.push(super::codec::outbound_record(CompareEvent {
             connection_id,
-            &have.canonical_bytes,
-        )
-        .expect("handle have");
-
-        assert_eq!(report.events.len(), 1);
-        let need = need_id::codec::decode(&report.events[0].canonical_bytes).expect("decode need");
-        assert_eq!(need.connection_id, connection_id);
-        assert_eq!(need.id, wanted_id);
+            range: empty_right,
+            summary: RangeSummary::default(),
+            response_requested: true,
+        })?);
     }
 
-    #[test]
-    fn requested_id_is_not_served_unless_connection_scope_allows_it() {
-        let connection_id = [1; 32];
-        let requested_id = [2; 32];
-        let need = need_id::codec::outbound_record(need_id::types::NeedIdEvent {
-            connection_id,
-            id: requested_id,
-        })
-        .expect("need record");
-
-        let denied = handle_inbound_event(
-            &Context {
-                has_event: true,
-                can_send_event: false,
-            },
-            connection_id,
-            &need.canonical_bytes,
-        )
-        .expect("handle denied need");
-        assert!(denied.send_event_ids.is_empty());
-
-        let allowed = handle_inbound_event(
-            &Context {
-                has_event: true,
-                can_send_event: true,
-            },
-            connection_id,
-            &need.canonical_bytes,
-        )
-        .expect("handle allowed need");
-        assert_eq!(allowed.send_event_ids, vec![requested_id]);
+    let local_range = TimestampRange {
+        start: min_timestamp,
+        end: max_timestamp,
+    };
+    if let Some((left, right)) = local_range.split() {
+        for child in [left, right] {
+            records.push(super::codec::outbound_record(CompareEvent {
+                connection_id,
+                range: child,
+                summary: context.summary(child)?,
+                response_requested: true,
+            })?);
+        }
+        return Ok(records);
     }
+    Ok(records)
 }

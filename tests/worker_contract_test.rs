@@ -1,6 +1,7 @@
 use std::cell::Cell;
 
 use topo::core::store::Store;
+use topo::protocol::event_modules::content::content_event;
 use topo::protocol::event_modules::identity::{endpoint, endpoint_shared};
 use topo::protocol::event_modules::schema::{self as event_schema, EventLabel};
 use topo::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
@@ -15,11 +16,17 @@ fn command_admission_returns_event_ids_for_chaining() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Protocol::open_store(tmp.path().join("worker.db")).unwrap();
     let modules = Modules::new();
-    let (workspace_id, _) = install_local_content_signer(&store);
+    let (workspace_id, endpoint_shared_id, signing_secret) = install_local_content_signer(&store);
 
-    let output = modules
-        .generate_content(&store, workspace_id, 3, 64)
-        .unwrap();
+    let output = content_event::commands::generate(
+        workspace_id,
+        endpoint_shared_id,
+        signing_secret,
+        1,
+        3,
+        64,
+    )
+    .unwrap();
     let proposed_ids = output
         .events
         .iter()
@@ -36,7 +43,7 @@ fn command_admission_returns_event_ids_for_chaining() {
     }
 }
 
-fn install_local_content_signer(store: &Store) -> (EventId, EventId) {
+fn install_local_content_signer(store: &Store) -> (EventId, EventId, [u8; 32]) {
     let local = endpoint::commands::create_local_keypair().value;
     store
         .insert_table_rows(endpoint::projector::local_endpoint(local))
@@ -59,7 +66,7 @@ fn install_local_content_signer(store: &Store) -> (EventId, EventId) {
             &event,
         )])
         .expect("insert local membership");
-    (workspace_id, endpoint_shared_id)
+    (workspace_id, endpoint_shared_id, local.signing_secret)
 }
 
 #[test]
@@ -97,6 +104,85 @@ fn worker_fetches_dependency_records_and_labels_before_projection() {
     let drain = worker::run(&store, &registry, worker::DrainUntilIdle { batch_size: 10 }).unwrap();
     assert_eq!(drain.applied_events, 1);
     assert!(registry.child_saw_context.get());
+}
+
+#[test]
+fn admit_and_drain_admits_command_output_then_drains_ready_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("admit-and-drain.db")).unwrap();
+
+    let dep_bytes = b"admit-drain-dep".to_vec();
+    let child_bytes = b"admit-drain-child".to_vec();
+    let dep_id = event_id(&dep_bytes);
+    let child_id = event_id(&child_bytes);
+    let registry = ContextRegistry {
+        dep_id,
+        child_id,
+        dep_bytes: dep_bytes.clone(),
+        child_bytes: child_bytes.clone(),
+        child_saw_context: Cell::new(false),
+    };
+
+    let child = registry.record_for(child_bytes).unwrap();
+    let (_, child_report) = worker::run(
+        &store,
+        &registry,
+        CommandOutput::with_events((), vec![child]),
+    )
+    .unwrap();
+    assert_eq!(child_report.blocked_events, 1);
+
+    let dep = registry.record_for(dep_bytes).unwrap();
+    let report = worker::run(
+        &store,
+        &registry,
+        worker::AdmitAndDrain {
+            output: CommandOutput::with_events("dependency".to_string(), vec![dep]),
+            batch_size: 10,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.value, "dependency");
+    assert_eq!(report.admitted.applied_events, 1);
+    assert_eq!(report.drained.applied_events, 1);
+    assert!(registry.child_saw_context.get());
+}
+
+#[test]
+fn drain_ready_batch_applies_only_one_batch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("batch.db")).unwrap();
+
+    let registry = BatchRegistry::new();
+    let child_events = registry
+        .child_bytes
+        .iter()
+        .map(|bytes| registry.record_for(bytes.clone()).unwrap())
+        .collect::<Vec<_>>();
+
+    let (_, blocked) = worker::run(
+        &store,
+        &registry,
+        CommandOutput::with_events((), child_events),
+    )
+    .unwrap();
+    assert_eq!(blocked.blocked_events, 2);
+    assert_eq!(registry.children_applied.get(), 0);
+
+    let dep = registry.record_for(registry.dep_bytes.clone()).unwrap();
+    let (_, dep_report) =
+        worker::run(&store, &registry, CommandOutput::with_events((), vec![dep])).unwrap();
+    assert_eq!(dep_report.applied_events, 1);
+    assert_eq!(registry.children_applied.get(), 0);
+
+    let first = worker::run(&store, &registry, worker::DrainReadyBatch { batch_size: 1 }).unwrap();
+    assert_eq!(first.applied_events, 1);
+    assert_eq!(registry.children_applied.get(), 1);
+
+    let second = worker::run(&store, &registry, worker::DrainReadyBatch { batch_size: 1 }).unwrap();
+    assert_eq!(second.applied_events, 1);
+    assert_eq!(registry.children_applied.get(), 2);
 }
 
 #[test]
@@ -169,6 +255,57 @@ struct ContextRegistry {
     dep_bytes: Vec<u8>,
     child_bytes: Vec<u8>,
     child_saw_context: Cell<bool>,
+}
+
+struct BatchRegistry {
+    dep_id: EventId,
+    dep_bytes: Vec<u8>,
+    child_ids: Vec<EventId>,
+    child_bytes: Vec<Vec<u8>>,
+    children_applied: Cell<usize>,
+}
+
+impl BatchRegistry {
+    fn new() -> Self {
+        let dep_bytes = b"batch-dep".to_vec();
+        let child_bytes = vec![b"batch-child-a".to_vec(), b"batch-child-b".to_vec()];
+        let dep_id = event_id(&dep_bytes);
+        let child_ids = child_bytes
+            .iter()
+            .map(|bytes| event_id(bytes))
+            .collect::<Vec<_>>();
+        Self {
+            dep_id,
+            dep_bytes,
+            child_ids,
+            child_bytes,
+            children_applied: Cell::new(0),
+        }
+    }
+
+    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        if bytes == self.dep_bytes {
+            return Ok(EventRecord {
+                timestamp: 1,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: Vec::new(),
+                workspace_id: None,
+                scope: EventScope::Shared,
+            });
+        }
+        if self.child_bytes.iter().any(|candidate| candidate == &bytes) {
+            return Ok(EventRecord {
+                timestamp: 2,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: vec![self.dep_id],
+                workspace_id: None,
+                scope: EventScope::Shared,
+            });
+        }
+        Err("unknown batch event".to_string())
+    }
 }
 
 struct ValidDependencyContextRegistry {
@@ -273,6 +410,28 @@ impl EventRegistry for ContextRegistry {
             return Ok(ProjectionOutput::default());
         }
         Err("unknown projection".to_string())
+    }
+}
+
+impl EventRegistry for BatchRegistry {
+    fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        self.record_for(bytes)
+    }
+
+    fn project_record(
+        &self,
+        _store: &Store,
+        event: &EventWithContext<'_>,
+    ) -> Result<ProjectionOutput, String> {
+        if event.context.event_id == self.dep_id {
+            return Ok(ProjectionOutput::default());
+        }
+        if self.child_ids.contains(&event.context.event_id) {
+            self.children_applied
+                .set(self.children_applied.get().saturating_add(1));
+            return Ok(ProjectionOutput::default());
+        }
+        Err("unknown batch projection".to_string())
     }
 }
 

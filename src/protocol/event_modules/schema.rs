@@ -6,12 +6,13 @@
 //! commands. Keep new protocol meaning here or in a scoped event-module
 //! `schema.rs`; do not push it down into `core::store`.
 //!
-//! The common worker relies on three small indexes. `EVENTS` stores canonical
+//! The common worker relies on small generic indexes. `EVENTS` stores canonical
 //! durable bytes and a compact header. `READY_EVENTS` and the two missing-dep
 //! edge tables make admission incremental: inserting a newly applied dependency
-//! only has to inspect events known to be waiting on that dependency. Labels are
-//! generic, bounded context for projectors; richer read models belong in scoped
-//! module schema files.
+//! only has to inspect events known to be waiting on that dependency.
+//! `TIMESTAMP_EVENTS` gives sync a timestamp-ordered feed of shared event ids
+//! without teaching core what an event is. Labels are generic, bounded context
+//! for projectors; richer read models belong in scoped module schema files.
 
 use crate::core::store::{Schema, Store, TableName, TableRow};
 use crate::protocol::event_modules::types::{
@@ -20,7 +21,7 @@ use crate::protocol::event_modules::types::{
 
 pub const EVENTS: TableName = TableName::new("event_modules.events");
 pub const READY_EVENTS: TableName = TableName::new("event_modules.ready_events");
-pub const PARTITION_EVENTS: TableName = TableName::new("event_modules.partition_events");
+pub const TIMESTAMP_EVENTS: TableName = TableName::new("event_modules.timestamp_events");
 pub const BLOCKED_EVENTS_BY_MISSING_DEP: TableName =
     TableName::new("event_modules.blocked_events_by_missing_dep");
 pub const MISSING_DEPS_BY_BLOCKED_EVENT: TableName =
@@ -30,7 +31,7 @@ pub const EVENT_LABELS: TableName = TableName::new("event_modules.labels");
 pub const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("event_modules.events.v1", EVENTS),
     Schema::durable_row_table("event_modules.ready_events.v1", READY_EVENTS),
-    Schema::durable_row_table("event_modules.partition_events.v1", PARTITION_EVENTS),
+    Schema::durable_row_table("event_modules.timestamp_events.v1", TIMESTAMP_EVENTS),
     Schema::durable_row_table(
         "event_modules.blocked_events_by_missing_dep.v1",
         BLOCKED_EVENTS_BY_MISSING_DEP,
@@ -81,7 +82,7 @@ pub fn insert_event(
         rows.push(ready_row(event.timestamp, &id));
     }
     if event.scope.is_shared() {
-        rows.push(partition_row(event.workspace_id, id[0], &id));
+        rows.push(timestamp_row(event.timestamp, event.workspace_id, &id));
     }
     store.insert_table_rows_in_tx(rows)?;
     Ok(true)
@@ -233,74 +234,31 @@ pub fn body_bytes(store: &Store) -> rusqlite::Result<usize> {
         .sum())
 }
 
-pub fn event_index_entries(store: &Store) -> rusqlite::Result<Vec<EventIndexEntry>> {
-    // The partition index is intentionally simple: a fixed byte prefix lets
-    // sync summarize and enumerate small buckets without decoding every event.
+pub fn event_index_entries_in_timestamp_range(
+    store: &Store,
+    start_timestamp: u64,
+    end_timestamp: u64,
+) -> rusqlite::Result<Vec<EventIndexEntry>> {
+    let lower = timestamp_range_lower_key(start_timestamp);
+    let upper = timestamp_range_upper_key(end_timestamp);
     store
-        .table_rows(PARTITION_EVENTS)?
+        .table_rows_in_key_range(
+            TIMESTAMP_EVENTS,
+            &lower,
+            upper.as_deref(),
+            MAX_DEPENDENCY_ROWS_PER_EVENT,
+        )?
         .into_iter()
-        .map(|(key, _)| {
-            let (workspace_id, partition, event_id) = split_partition_key(&key)?;
+        .map(|(key, value)| {
+            let (timestamp, event_id) = split_timestamp_key(&key)?;
+            let workspace_id = decode_workspace_index_value(&value)?;
             Ok(EventIndexEntry {
                 event_id,
-                partition,
+                timestamp,
                 workspace_id,
             })
         })
         .collect()
-}
-
-pub fn event_ids_in_partition(store: &Store, partition: u8) -> rusqlite::Result<Vec<EventId>> {
-    Ok(event_index_entries(store)?
-        .into_iter()
-        .filter_map(|entry| (entry.partition == partition).then_some(entry.event_id))
-        .collect())
-}
-
-pub fn event_index_entries_for_workspaces(
-    store: &Store,
-    workspace_ids: &[EventId],
-) -> rusqlite::Result<Vec<EventIndexEntry>> {
-    let mut out = Vec::new();
-    for workspace_id in workspace_ids {
-        for (key, _) in store.table_rows_with_key_prefix(
-            PARTITION_EVENTS,
-            workspace_id,
-            MAX_DEPENDENCY_ROWS_PER_EVENT,
-        )? {
-            let (row_workspace_id, partition, event_id) = split_partition_key(&key)?;
-            out.push(EventIndexEntry {
-                event_id,
-                partition,
-                workspace_id: row_workspace_id,
-            });
-        }
-    }
-    Ok(out)
-}
-
-pub fn event_ids_in_partition_for_workspaces(
-    store: &Store,
-    partition: u8,
-    workspace_ids: &[EventId],
-) -> rusqlite::Result<Vec<EventId>> {
-    let mut out = Vec::new();
-    for workspace_id in workspace_ids {
-        let mut prefix = workspace_id.to_vec();
-        prefix.push(partition);
-        out.extend(
-            store
-                .table_rows_with_key_prefix(
-                    PARTITION_EVENTS,
-                    &prefix,
-                    MAX_DEPENDENCY_ROWS_PER_EVENT,
-                )?
-                .into_iter()
-                .map(|(key, _)| split_partition_key(&key).map(|(_, _, event_id)| event_id))
-                .collect::<rusqlite::Result<Vec<_>>>()?,
-        );
-    }
-    Ok(out)
 }
 
 pub fn has_shared_event_in_workspaces(
@@ -315,21 +273,6 @@ pub fn has_shared_event_in_workspaces(
         && event.workspace_id.is_some_and(|workspace_id| {
             workspace_ids.iter().any(|allowed| allowed == &workspace_id)
         }))
-}
-
-pub fn event_ids_in_partition_unscoped(
-    store: &Store,
-    partition: u8,
-) -> rusqlite::Result<Vec<EventId>> {
-    store
-        .table_rows_with_key_prefix(
-            PARTITION_EVENTS,
-            &partition_key_prefix(None, partition),
-            MAX_DEPENDENCY_ROWS_PER_EVENT,
-        )?
-        .into_iter()
-        .map(|(key, _)| split_partition_key(&key).map(|(_, _, event_id)| event_id))
-        .collect()
 }
 
 pub fn has_event(store: &Store, event_id: &EventId) -> rusqlite::Result<bool> {
@@ -426,11 +369,11 @@ fn ready_row(timestamp: u64, event_id: &EventId) -> TableRow {
     }
 }
 
-fn partition_row(workspace_id: Option<EventId>, partition: u8, event_id: &EventId) -> TableRow {
+fn timestamp_row(timestamp: u64, workspace_id: Option<EventId>, event_id: &EventId) -> TableRow {
     TableRow {
-        table: PARTITION_EVENTS,
-        key: partition_key(workspace_id, partition, event_id),
-        value: Vec::new(),
+        table: TIMESTAMP_EVENTS,
+        key: timestamp_key(timestamp, event_id),
+        value: encode_workspace_index_value(workspace_id),
     }
 }
 
@@ -486,13 +429,7 @@ fn decode_event_row_value(value: &[u8]) -> rusqlite::Result<StoredEvent> {
     let partition = read_u8(value, &mut offset)?;
     let scope = EventScope::from_durable_tag(read_u8(value, &mut offset)?).map_err(table_error)?;
     let status = EventStatus::from_u8(read_u8(value, &mut offset)?).map_err(table_error)?;
-    let has_workspace = read_u8(value, &mut offset)?;
-    let workspace_bytes = read_id(value, &mut offset)?;
-    let workspace_id = match has_workspace {
-        0 => None,
-        1 => Some(workspace_bytes),
-        other => return Err(table_error(format!("unknown workspace flag {other}"))),
-    };
+    let workspace_id = read_optional_id(value, &mut offset)?;
     let canonical_bytes = value[offset..].to_vec();
     Ok(StoredEvent {
         timestamp,
@@ -526,6 +463,16 @@ fn read_u8(bytes: &[u8], offset: &mut usize) -> rusqlite::Result<u8> {
     Ok(value)
 }
 
+fn read_optional_id(bytes: &[u8], offset: &mut usize) -> rusqlite::Result<Option<EventId>> {
+    let has_id = read_u8(bytes, offset)?;
+    let id = read_id(bytes, offset)?;
+    match has_id {
+        0 => Ok(None),
+        1 => Ok(Some(id)),
+        other => Err(table_error(format!("unknown workspace flag {other}"))),
+    }
+}
+
 fn read_id(bytes: &[u8], offset: &mut usize) -> rusqlite::Result<EventId> {
     let end = offset
         .checked_add(32)
@@ -546,29 +493,59 @@ fn ready_key(timestamp: u64, event_id: &EventId) -> Vec<u8> {
     key
 }
 
-fn partition_key(workspace_id: Option<EventId>, partition: u8, event_id: &EventId) -> Vec<u8> {
-    let mut key = partition_key_prefix(workspace_id, partition);
+fn timestamp_key(timestamp: u64, event_id: &EventId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(8 + event_id.len());
+    key.extend_from_slice(&timestamp.to_be_bytes());
     key.extend_from_slice(event_id);
     key
 }
 
-fn partition_key_prefix(workspace_id: Option<EventId>, partition: u8) -> Vec<u8> {
-    let mut key = Vec::with_capacity(33);
-    key.extend_from_slice(&workspace_id.unwrap_or([0; 32]));
-    key.push(partition);
+fn timestamp_range_lower_key(timestamp: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(40);
+    key.extend_from_slice(&timestamp.to_be_bytes());
+    key.extend_from_slice(&[0; 32]);
     key
 }
 
-fn split_partition_key(key: &[u8]) -> rusqlite::Result<(Option<EventId>, u8, EventId)> {
-    if key.len() != 65 {
+fn timestamp_range_upper_key(timestamp: u64) -> Option<Vec<u8>> {
+    timestamp.checked_add(1).map(timestamp_range_lower_key)
+}
+
+fn split_timestamp_key(key: &[u8]) -> rusqlite::Result<(u64, EventId)> {
+    if key.len() != 40 {
         return Err(table_error(format!(
-            "partition key should be 65 bytes, got {}",
+            "timestamp key should be 40 bytes, got {}",
             key.len()
         )));
     }
-    let workspace_id = vec_to_id(key[..32].to_vec())?;
-    let workspace_id = (workspace_id != [0; 32]).then_some(workspace_id);
-    Ok((workspace_id, key[32], vec_to_id(key[33..].to_vec())?))
+    let timestamp = u64::from_be_bytes(key[..8].try_into().expect("slice length checked"));
+    Ok((timestamp, vec_to_id(key[8..].to_vec())?))
+}
+
+fn encode_workspace_index_value(workspace_id: Option<EventId>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(33);
+    match workspace_id {
+        Some(workspace_id) => {
+            out.push(1);
+            out.extend_from_slice(&workspace_id);
+        }
+        None => {
+            out.push(0);
+            out.extend_from_slice(&[0; 32]);
+        }
+    }
+    out
+}
+
+fn decode_workspace_index_value(value: &[u8]) -> rusqlite::Result<Option<EventId>> {
+    if value.len() != 33 {
+        return Err(table_error(format!(
+            "workspace index value should be 33 bytes, got {}",
+            value.len()
+        )));
+    }
+    let mut offset = 0;
+    read_optional_id(value, &mut offset)
 }
 
 fn edge_key(first: &EventId, second: &EventId) -> Vec<u8> {

@@ -13,13 +13,14 @@
 //! outbox rows    -> wrap transit   -> opaque bytes for a concrete transport target
 //! ```
 //!
-//! It deliberately does not own generic event projection, sync comparison, TCP
-//! sockets, or length-prefix framing. Accepted connection events and received
-//! durable bytes are admitted through the common event-module worker. When
-//! connection-scoped inner bytes arrive, this worker admits them as transient
-//! inbound protocol events, wakes the owning domain worker over the rows those
-//! events projected, then drains only the outbox needed to answer on the same
-//! transport target.
+//! It deliberately does not implement generic event projection, sync comparison,
+//! TCP sockets, or length-prefix framing. Accepted connection events and
+//! received durable bytes are admitted through the common event-module worker.
+//! When connection-scoped inner bytes arrive, this worker admits them as
+//! transient inbound protocol events, wakes the owning domain worker over the
+//! rows those events projected, then drains only the outbox needed to answer on
+//! the same transport target. The CLI-facing operations may drive the generic
+//! core TCP pump, but framing and socket mechanics remain in core.
 //!
 //! The most important caution is to keep "connection" and "transport target"
 //! separate. A connection id is semantic state established by signed events and
@@ -27,11 +28,14 @@
 //! now. This worker may resolve one to the other, but core must never need to
 //! know that mapping.
 
-use std::{net::SocketAddr, str::FromStr};
+use std::{
+    cell::RefCell, collections::HashMap, net::SocketAddr, str::FromStr, thread, time::Instant,
+};
 
-use crate::core::network_queues::{self, InboundNetworkRow, OutboundNetworkRow};
+use crate::core::network_queues::{self, InboundNetworkRow, NetworkTarget, OutboundNetworkRow};
 use crate::core::store::Store;
-use crate::protocol::event_modules::identity::{endpoint, invite};
+use crate::core::tcp;
+use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, invite};
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::sync;
 use crate::protocol::event_modules::types::{EventRecord, ReceiveMetadata};
@@ -41,6 +45,10 @@ use crate::protocol::event_modules::worker::{
 };
 
 use super::{connection_ack, connection_request, schema, transit, types};
+
+pub trait ConnectionRegistry: EventRegistry {
+    fn sync_index(&self) -> &sync::worker::SyncIndex;
+}
 
 /// Transport metadata attached to one inbound frame.
 ///
@@ -60,33 +68,54 @@ struct UnwrappedFrameMetadata {
     pub sender_endpoint: endpoint::types::EndpointId,
 }
 
+pub const DEFAULT_DAEMON_READY_BATCH: usize = worker::DEFAULT_READY_BATCH;
+
 /// Work accepted by the connection worker.
 ///
-/// Each variant is an active connection-domain operation. The variants name the
-/// boundary actions explicitly so callers do not reach into helper functions:
-/// ingest one opaque network row, drain available outbox routes, or mark
-/// successfully sent outbox rows.
+/// Each variant is an active connection-domain operation. The variants are
+/// intentionally report-oriented so callers do not reach into helper functions
+/// for frame ingestion, route draining, or send confirmation bookkeeping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
-    IngestNetwork {
-        local: endpoint::types::EndpointKeypair,
-        inbound: InboundNetworkRow,
-        remember_origin: bool,
+    ConnectInvite {
+        invite: String,
     },
-    DrainOutboxRoutes {
-        local: endpoint::types::EndpointKeypair,
+    Serve {
+        listen: SocketAddr,
+        accept_count: usize,
     },
-    MarkOutboxSent {
-        sent_outbox: Vec<Vec<u8>>,
+    ExchangeOutboundRoutes,
+    StartSyncRoutes {
+        selection: sync::worker::SyncSelection,
+    },
+    RunDaemon {
+        options: types::DaemonOptions,
     },
 }
 
 /// Result of a connection worker action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
-    NetworkIngest(NetworkIngestResult),
-    OutboundRoutes(Vec<OutboundTransit>),
-    OutboxMarked,
+    Connected(types::ConnectReport),
+    Served(types::ServeReport),
+    RoutesExchanged(types::RouteExchangeReport),
+    SyncRoutesStarted(types::RouteExchangeReport),
+    DaemonRan(types::DaemonReport),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StreamExchangeReport {
+    established_routes: usize,
+    sent_events: usize,
+    received_events: usize,
+}
+
+/// Opaque bytes prepared for one route after draining protocol outbox rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutboundSync {
+    target: NetworkTarget,
+    outgoing: Vec<OutboundNetworkRow>,
+    sent_outbox: Vec<Vec<Vec<u8>>>,
 }
 
 /// Summary of a complete inbound network-row exchange.
@@ -95,12 +124,12 @@ pub enum Output {
 /// opaque rows ready for core TCP, protocol outbox keys represented by those
 /// rows, and small counters used by black-box CLI tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct NetworkIngestResult {
-    pub outgoing: Vec<OutboundNetworkRow>,
-    pub sent_outbox: Vec<Vec<Vec<u8>>>,
-    pub established_routes: usize,
-    pub sent_events: usize,
-    pub received_events: usize,
+struct NetworkIngestResult {
+    outgoing: Vec<OutboundNetworkRow>,
+    sent_outbox: Vec<Vec<Vec<u8>>>,
+    established_routes: usize,
+    sent_events: usize,
+    received_events: usize,
 }
 
 /// Interpretation of one inbound frame after transit unwrapping.
@@ -115,7 +144,10 @@ enum InboundFrame {
         connection_id: types::ConnectionId,
         inner: Vec<u8>,
     },
-    DurableEvent(Vec<u8>),
+    DurableEvent {
+        sender_endpoint: endpoint::types::EndpointId,
+        inner: Vec<u8>,
+    },
 }
 
 /// Records and response bytes produced while accepting a connection frame.
@@ -124,7 +156,7 @@ enum InboundFrame {
 /// connection response traffic that should go back to the frame origin. Route
 /// establishment is reported separately for CLI output and tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ConnectionFrameReport {
+struct ConnectionFrameReport {
     pub records: Vec<ReceivedRecord>,
     pub outgoing: Vec<Vec<u8>>,
     pub established_routes: usize,
@@ -136,10 +168,10 @@ pub struct ConnectionFrameReport {
 /// The caller deletes those rows only after it has committed the corresponding
 /// core outbound network rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutboundTransit {
-    pub target: SocketAddr,
-    pub outgoing: Vec<Vec<u8>>,
-    pub sent_outbox: Vec<Vec<Vec<u8>>>,
+struct OutboundTransit {
+    target: SocketAddr,
+    outgoing: Vec<Vec<u8>>,
+    sent_outbox: Vec<Vec<Vec<u8>>>,
 }
 
 /// Result of draining one connection's protocol outbox.
@@ -176,31 +208,266 @@ const TRANSIT_TARGET_PLAINTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// tests one stable surface to check.
 pub fn run<R>(store: &Store, registry: &R, work: Work) -> Result<Output, String>
 where
-    R: EventRegistry,
+    R: ConnectionRegistry,
 {
     match work {
-        Work::IngestNetwork {
-            local,
-            inbound,
-            remember_origin,
-        } => ingest_network(store, registry, local, inbound, remember_origin)
-            .map(Output::NetworkIngest),
-        Work::DrainOutboxRoutes { local } => {
-            drain_outbox_routes(store, local).map(Output::OutboundRoutes)
+        Work::ConnectInvite { invite } => {
+            run_connect(store, registry, invite).map(Output::Connected)
         }
-        Work::MarkOutboxSent { sent_outbox } => {
-            mark_outbox_sent(store, sent_outbox).map(|()| Output::OutboxMarked)
+        Work::Serve {
+            listen,
+            accept_count,
+        } => run_serve(store, registry, listen, accept_count).map(Output::Served),
+        Work::ExchangeOutboundRoutes => {
+            exchange_outbound_routes(store, registry, true).map(Output::RoutesExchanged)
         }
+        Work::StartSyncRoutes { selection } => {
+            start_sync_routes(store, registry, selection, true).map(Output::SyncRoutesStarted)
+        }
+        Work::RunDaemon { options } => run_daemon(store, registry, options).map(Output::DaemonRan),
     }
 }
 
-fn ingest_network(
+fn run_connect<R>(
     store: &Store,
-    registry: &impl EventRegistry,
-    local: endpoint::types::EndpointKeypair,
+    registry: &R,
+    invite: String,
+) -> Result<types::ConnectReport, String>
+where
+    R: ConnectionRegistry,
+{
+    let output = connection_request::commands::create_with_local(store, &invite)
+        .map_err(|err| format!("create connection request: {err}"))?;
+    let addr = output.value.addr;
+    let request = worker::run(store, registry, output)
+        .map_err(|err| format!("record connection request: {err}"))?
+        .0;
+
+    let target = NetworkTarget::new(addr);
+    let sent_outbox = RefCell::new(HashMap::new());
+    let summary = tcp::connect_exchange(
+        store,
+        target,
+        vec![OutboundNetworkRow::new(target, request.bytes)],
+        StreamExchangeReport::default(),
+        |inbound, summary| handle_inbound(store, registry, inbound, true, summary, &sent_outbox),
+        |rows, _| mark_sent_network_rows(store, rows, &sent_outbox),
+    )?;
+    if summary.established_routes == 0 {
+        return Err("connection was not established".to_string());
+    }
+    Ok(types::ConnectReport {
+        addr,
+        established_routes: summary.established_routes,
+    })
+}
+
+fn run_serve<R>(
+    store: &Store,
+    registry: &R,
+    listen: SocketAddr,
+    accept_count: usize,
+) -> Result<types::ServeReport, String>
+where
+    R: ConnectionRegistry,
+{
+    let sent_outbox = RefCell::new(HashMap::new());
+    let report = tcp::serve(
+        store,
+        listen,
+        accept_count,
+        types::ServeReport::default(),
+        |inbound, summary| {
+            let mut one_stream = StreamExchangeReport::default();
+            let outgoing = handle_inbound(
+                store,
+                registry,
+                inbound,
+                false,
+                &mut one_stream,
+                &sent_outbox,
+            )?;
+            summary.received_events += one_stream.received_events;
+            Ok(outgoing)
+        },
+        |rows, _| mark_sent_network_rows(store, rows, &sent_outbox),
+    )?;
+    let mut summary = report.value;
+    summary.local_addr = Some(report.local_addr);
+    summary.accepted_connections = report.accepted_connections;
+    Ok(summary)
+}
+
+fn run_daemon<R>(
+    store: &Store,
+    registry: &R,
+    options: types::DaemonOptions,
+) -> Result<types::DaemonReport, String>
+where
+    R: ConnectionRegistry,
+{
+    let listener = tcp::listen(options.listen)?;
+    let sent_outbox = RefCell::new(HashMap::new());
+    let mut summary = types::DaemonReport {
+        local_addr: Some(listener.local_addr()),
+        ..types::DaemonReport::default()
+    };
+    let started = Instant::now();
+
+    loop {
+        let accept = listener.accept_available(
+            store,
+            types::ServeReport::default(),
+            |inbound, stream_summary| {
+                let mut one_stream = StreamExchangeReport::default();
+                let outgoing = handle_inbound(
+                    store,
+                    registry,
+                    inbound,
+                    false,
+                    &mut one_stream,
+                    &sent_outbox,
+                )?;
+                stream_summary.received_events += one_stream.received_events;
+                Ok(outgoing)
+            },
+            |rows, _| mark_sent_network_rows(store, rows, &sent_outbox),
+        )?;
+        summary.accepted_connections += accept.accepted_connections;
+        summary.received_events += accept.value.received_events;
+
+        let ready = worker::run(
+            store,
+            registry,
+            worker::DrainReadyBatch {
+                batch_size: options.ready_batch,
+            },
+        )
+        .map_err(|err| format!("drain daemon ready batch: {err}"))?;
+        summary.ready_events += ready.applied_events;
+        summary.unblocked_events += ready.unblocked_events;
+
+        let sync = start_sync_routes(store, registry, sync::worker::SyncSelection::All, false)?;
+        summary.sync_rounds += 1;
+        summary.routes_synced += sync.routes_synced;
+        summary.failed_routes += sync.failed_routes;
+        summary.sent_events += sync.sent_events;
+        summary.received_events += sync.received_events;
+
+        if options
+            .duration
+            .is_some_and(|duration| started.elapsed() >= duration)
+        {
+            return Ok(summary);
+        }
+        thread::sleep(options.idle);
+    }
+}
+
+fn start_sync_routes<R>(
+    store: &Store,
+    registry: &R,
+    selection: sync::worker::SyncSelection,
+    fail_on_route_error: bool,
+) -> Result<types::RouteExchangeReport, String>
+where
+    R: ConnectionRegistry,
+{
+    let start = match sync::worker::run(
+        store,
+        registry.sync_index(),
+        sync::worker::Work::Start { selection },
+    )
+    .map_err(|err| format!("start sync: {err}"))?
+    {
+        sync::worker::Output::Started(output) => output,
+        sync::worker::Output::DrainedInboundSync(_) => {
+            return Err("sync worker returned non-start output".to_string())
+        }
+    };
+    let (started, _) = worker::run(store, registry, start)
+        .map_err(|err| format!("record daemon sync events: {err}"))?;
+
+    let mut summary = types::RouteExchangeReport {
+        sent_events: started.sent_events,
+        ..types::RouteExchangeReport::default()
+    };
+    summary.merge(exchange_outbound_routes(
+        store,
+        registry,
+        fail_on_route_error,
+    )?);
+    Ok(summary)
+}
+
+fn exchange_outbound_routes<R>(
+    store: &Store,
+    registry: &R,
+    fail_on_route_error: bool,
+) -> Result<types::RouteExchangeReport, String>
+where
+    R: ConnectionRegistry,
+{
+    let mut summary = types::RouteExchangeReport::default();
+    for outbound in drain_outbox_routes(store).map_err(|err| format!("drain outbox: {err}"))? {
+        let outbound = outbound_sync(outbound);
+        let target = outbound.target;
+        match exchange_outbound_route(store, registry, outbound) {
+            Ok(stream_summary) => {
+                summary.routes_synced += 1;
+                summary.sent_events += stream_summary.sent_events;
+                summary.received_events += stream_summary.received_events;
+            }
+            Err(err) if fail_on_route_error => {
+                return Err(format!("exchange outbound route {target:?}: {err}"));
+            }
+            Err(_) => {
+                summary.failed_routes += 1;
+            }
+        }
+    }
+    Ok(summary)
+}
+
+fn exchange_outbound_route<R>(
+    store: &Store,
+    registry: &R,
+    outbound: OutboundSync,
+) -> Result<StreamExchangeReport, String>
+where
+    R: ConnectionRegistry,
+{
+    let sent_outbox = RefCell::new(HashMap::new());
+    remember_sent_outbox(&sent_outbox, &outbound.outgoing, &outbound.sent_outbox)?;
+    tcp::connect_exchange(
+        store,
+        outbound.target,
+        outbound.outgoing,
+        StreamExchangeReport::default(),
+        |inbound, summary| handle_inbound(store, registry, inbound, false, summary, &sent_outbox),
+        |rows, _| mark_sent_network_rows(store, rows, &sent_outbox),
+    )
+}
+
+fn outbound_sync(outbound: OutboundTransit) -> OutboundSync {
+    let target = NetworkTarget::new(outbound.target);
+    OutboundSync {
+        target,
+        outgoing: network_queues::outbound_rows(target, outbound.outgoing),
+        sent_outbox: outbound.sent_outbox,
+    }
+}
+
+fn ingest_network<R>(
+    store: &Store,
+    registry: &R,
     inbound: InboundNetworkRow,
     remember_origin: bool,
-) -> Result<NetworkIngestResult, String> {
+) -> Result<NetworkIngestResult, String>
+where
+    R: ConnectionRegistry,
+{
+    let local = local_endpoint(store)?;
     let origin = inbound.source.addr();
     let metadata = FrameMetadata {
         origin,
@@ -220,7 +487,10 @@ fn ingest_network(
                 connection_id,
                 inner,
             } => ingest_connection_scoped_sync_event(connection_id, inner)?,
-            InboundFrame::DurableEvent(inner) => ingest_durable_event(registry, inner)?,
+            InboundFrame::DurableEvent {
+                sender_endpoint,
+                inner,
+            } => ingest_durable_event(store, registry, local.endpoint, sender_endpoint, inner)?,
         };
         report.merge(next);
     }
@@ -233,7 +503,7 @@ fn ingest_network(
     )?;
 
     if let Some(connection_id) = report.drain_sync_for {
-        let sync_report = drain_projected_sync_work(store, connection_id)?;
+        let sync_report = drain_projected_sync_work(store, registry.sync_index(), connection_id)?;
         worker::run(
             store,
             registry,
@@ -322,12 +592,28 @@ fn admit_records_if_any(
 }
 
 fn ingest_durable_event(
+    store: &Store,
     registry: &impl EventRegistry,
+    local_endpoint: endpoint::types::EndpointId,
+    sender_endpoint: endpoint::types::EndpointId,
     inner: Vec<u8>,
 ) -> Result<NetworkFrameReport, String> {
     let record = registry.record_from_bytes(inner)?;
     if !record.scope.is_shared() {
         return Err("connection durable ingress only accepts shared events".to_string());
+    }
+    let workspace_id = record
+        .workspace_id
+        .ok_or_else(|| "connection durable ingress requires a workspace".to_string())?;
+    let allowed_workspaces =
+        endpoint_shared::schema::mutual_workspace_ids(store, local_endpoint, sender_endpoint)?;
+    if !allowed_workspaces
+        .iter()
+        .any(|allowed| allowed == &workspace_id)
+    {
+        return Err(
+            "connection durable ingress rejected event outside sender workspace".to_string(),
+        );
     }
     Ok(NetworkFrameReport {
         events: vec![record],
@@ -338,12 +624,14 @@ fn ingest_durable_event(
 
 fn drain_projected_sync_work(
     store: &Store,
+    index: &sync::worker::SyncIndex,
     connection_id: types::ConnectionId,
 ) -> Result<sync::worker::SyncWorkReport, String> {
     let mut aggregate = sync::worker::SyncWorkReport::default();
     loop {
         let output = sync::worker::run(
             store,
+            index,
             sync::worker::Work::DrainInboundSync {
                 connection_id,
                 limit: sync::worker::DEFAULT_INBOUND_BATCH,
@@ -398,19 +686,23 @@ fn unwrap_transit_bytes(
                 inner,
             });
         } else {
-            frames.push(InboundFrame::DurableEvent(inner));
+            frames.push(InboundFrame::DurableEvent {
+                sender_endpoint: transit.sender_endpoint,
+                inner,
+            });
         }
     }
     Ok(frames)
 }
 
-fn drain_outbox_routes(
-    store: &Store,
-    local: endpoint::types::EndpointKeypair,
-) -> Result<Vec<OutboundTransit>, String> {
+fn drain_outbox_routes(store: &Store) -> Result<Vec<OutboundTransit>, String> {
     // Route draining is deliberately route-based, not global "send everything".
     // Slow or absent targets should only starve their own route.
     let routes = routes(store)?;
+    if routes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let local = local_endpoint(store)?;
     let mut outbound = Vec::new();
     for route in routes {
         let drained = drain_outbox_for_route(store, local, route.connection_id)?;
@@ -424,6 +716,10 @@ fn drain_outbox_routes(
         });
     }
     Ok(outbound)
+}
+
+fn local_endpoint(store: &Store) -> Result<endpoint::types::EndpointKeypair, String> {
+    endpoint::commands::local_keypair(store)?.ok_or_else(|| "local endpoint is missing".to_string())
 }
 
 fn drain_outbox_for_route(
@@ -488,6 +784,74 @@ fn batch_outbox_items(items: Vec<OutboxItem>) -> Vec<Vec<OutboxItem>> {
         batches.push(current);
     }
     batches
+}
+
+fn handle_inbound<R>(
+    store: &Store,
+    registry: &R,
+    inbound: InboundNetworkRow,
+    remember_origin: bool,
+    summary: &mut StreamExchangeReport,
+    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<Vec<u8>>>>,
+) -> Result<Vec<OutboundNetworkRow>, String>
+where
+    R: ConnectionRegistry,
+{
+    let ingest = ingest_network(store, registry, inbound, remember_origin)?;
+    summary.established_routes += ingest.established_routes;
+    summary.sent_events += ingest.sent_events;
+    summary.received_events += ingest.received_events;
+
+    worker::run(
+        store,
+        registry,
+        worker::DrainUntilIdle {
+            batch_size: worker::DEFAULT_READY_BATCH,
+        },
+    )
+    .map_err(|err| format!("drain ready events after inbound network: {err}"))?;
+
+    remember_sent_outbox(sent_outbox, &ingest.outgoing, &ingest.sent_outbox)?;
+    Ok(ingest.outgoing)
+}
+
+fn remember_sent_outbox(
+    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<Vec<u8>>>>,
+    rows: &[OutboundNetworkRow],
+    outbox_keys: &[Vec<Vec<u8>>],
+) -> Result<(), String> {
+    if outbox_keys.is_empty() {
+        return Ok(());
+    }
+    if outbox_keys.len() > rows.len() {
+        return Err("more outbox keys than outbound network rows".to_string());
+    }
+    let first = rows.len() - outbox_keys.len();
+    let mut sent_outbox = sent_outbox.borrow_mut();
+    for (row, row_outbox_keys) in rows[first..].iter().zip(outbox_keys) {
+        sent_outbox
+            .entry(row.key.clone())
+            .or_default()
+            .extend(row_outbox_keys.iter().cloned());
+    }
+    Ok(())
+}
+
+fn mark_sent_network_rows(
+    store: &Store,
+    rows: &[OutboundNetworkRow],
+    sent_outbox: &RefCell<HashMap<Vec<u8>, Vec<Vec<u8>>>>,
+) -> Result<(), String> {
+    let mut outbox_keys = Vec::new();
+    {
+        let mut sent_outbox = sent_outbox.borrow_mut();
+        for row in rows {
+            if let Some(mut row_outbox_keys) = sent_outbox.remove(&row.key) {
+                outbox_keys.append(&mut row_outbox_keys);
+            }
+        }
+    }
+    mark_outbox_sent(store, outbox_keys)
 }
 
 fn mark_outbox_sent(store: &Store, sent_outbox: Vec<Vec<u8>>) -> Result<(), String> {
@@ -729,13 +1093,39 @@ mod tests {
 
     fn connected_store(
         connection_id: types::ConnectionId,
+        local: endpoint::types::EndpointKeypair,
         remote: endpoint::types::EndpointKeypair,
     ) -> Store {
         let store = Protocol::open_memory_store().expect("open store");
+        let mut rows = endpoint::projector::local_endpoint(local);
+        rows.push(schema::connection_row(connection_id, remote.endpoint));
         store
-            .insert_table_rows(vec![schema::connection_row(connection_id, remote.endpoint)])
+            .insert_table_rows(rows)
             .expect("insert connection row");
         store
+    }
+
+    fn add_endpoint_membership(
+        store: &Store,
+        workspace_id: [u8; 32],
+        endpoint_shared_id: [u8; 32],
+        endpoint: endpoint::types::EndpointKeypair,
+    ) {
+        let event = endpoint_shared::types::EndpointSharedEvent {
+            created_at_ms: 1,
+            workspace_id,
+            user_authority_event_id: [44; 32],
+            endpoint_id: endpoint.endpoint,
+            signing_public_key: endpoint.signing_public_key,
+            device_name: "test".to_string(),
+        };
+        store
+            .insert_table_rows(vec![endpoint_shared::schema::endpoint_membership_row(
+                endpoint_shared_id,
+                [45; 32],
+                &event,
+            )])
+            .expect("insert endpoint membership");
     }
 
     fn inbound_from_remote(
@@ -769,33 +1159,28 @@ mod tests {
     #[test]
     fn drain_outbox_routes_removes_rows_whose_bytes_are_gone() {
         let store = Protocol::open_memory_store().expect("open store");
+        let local = endpoint::commands::create_local_keypair().value;
         let connection_id = [3; 32];
         let missing_event_id = [4; 32];
         let addr = "127.0.0.1:41000"
             .parse::<SocketAddr>()
             .expect("test socket addr");
+        let mut rows = endpoint::projector::local_endpoint(local);
+        rows.extend([
+            schema::transport_target_row(connection_id, addr),
+            schema::outbox_row(connection_id, missing_event_id),
+        ]);
         store
-            .insert_table_rows(vec![
-                schema::transport_target_row(connection_id, addr),
-                schema::outbox_row(connection_id, missing_event_id),
-            ])
+            .insert_table_rows(rows)
             .expect("insert route and stale outbox row");
 
-        let output = run(
-            &store,
-            &Protocol::new(),
-            Work::DrainOutboxRoutes {
-                local: endpoint::types::EndpointKeypair {
-                    endpoint: [8; 32],
-                    secret: [9; 32],
-                    signing_public_key: [10; 32],
-                    signing_secret: [11; 32],
-                },
-            },
-        )
-        .expect("drain outbox");
+        let output =
+            run(&store, &Protocol::new(), Work::ExchangeOutboundRoutes).expect("drain outbox");
 
-        assert_eq!(output, Output::OutboundRoutes(Vec::new()));
+        assert_eq!(
+            output,
+            Output::RoutesExchanged(types::RouteExchangeReport::default())
+        );
         assert_eq!(
             store
                 .table_row_count(schema::OUTBOX)
@@ -805,11 +1190,42 @@ mod tests {
     }
 
     #[test]
+    fn daemon_can_idle_without_local_endpoint_or_routes() {
+        let store = Protocol::open_memory_store().expect("open store");
+
+        let output = run(
+            &store,
+            &Protocol::new(),
+            Work::RunDaemon {
+                options: types::DaemonOptions {
+                    listen: "127.0.0.1:0".parse().expect("test listen addr"),
+                    duration: Some(std::time::Duration::from_millis(1)),
+                    idle: std::time::Duration::from_millis(1),
+                    ready_batch: DEFAULT_DAEMON_READY_BATCH,
+                },
+            },
+        )
+        .expect("daemon can idle on an empty store");
+
+        let Output::DaemonRan(report) = output else {
+            panic!("expected daemon report");
+        };
+        assert!(
+            report.local_addr.is_some(),
+            "daemon should bind even before endpoint creation"
+        );
+        assert!(
+            report.sync_rounds > 0,
+            "daemon should keep looping with no endpoint and no routes"
+        );
+    }
+
+    #[test]
     fn rejects_local_only_events_received_inside_connection_transit() {
         let local = keypair();
         let remote = keypair();
         let connection_id = [3; 32];
-        let store = connected_store(connection_id, remote);
+        let store = connected_store(connection_id, local, remote);
         let local_only = endpoint::commands::create_local_keypair().events[0]
             .record()
             .canonical_bytes
@@ -817,16 +1233,8 @@ mod tests {
         let local_only_id = event_id(&local_only);
         let inbound = inbound_from_remote(&remote, local.endpoint, connection_id, vec![local_only]);
 
-        let err = run(
-            &store,
-            &Protocol::new(),
-            Work::IngestNetwork {
-                local,
-                inbound,
-                remember_origin: false,
-            },
-        )
-        .expect_err("remote local-only event must reject");
+        let err = ingest_network(&store, &Protocol::new(), inbound, false)
+            .expect_err("remote local-only event must reject");
 
         assert!(err.contains("connection durable ingress only accepts shared events"));
         assert!(
@@ -836,32 +1244,50 @@ mod tests {
     }
 
     #[test]
-    fn admits_remote_shareable_events_to_main_pipeline() {
+    fn rejects_remote_workspace_event_when_sender_is_not_a_member() {
         let local = keypair();
         let remote = keypair();
         let connection_id = [3; 32];
-        let store = connected_store(connection_id, remote);
+        let store = connected_store(connection_id, local, remote);
         let content = signed_content_bytes([7; 32]);
         let content_id = event_id(&content);
         let inbound = inbound_from_remote(&remote, local.endpoint, connection_id, vec![content]);
 
-        let output = run(
-            &store,
-            &Protocol::new(),
-            Work::IngestNetwork {
-                local,
-                inbound,
-                remember_origin: false,
-            },
-        )
-        .expect("shareable content is admitted");
+        let err = ingest_network(&store, &Protocol::new(), inbound, false)
+            .expect_err("out-of-scope workspace event must reject");
+
+        assert!(
+            err.contains("connection durable ingress rejected event outside sender workspace"),
+            "{err}"
+        );
+        assert!(
+            !event_schema::has_event(&store, &content_id).expect("check event table"),
+            "out-of-scope remote event must not be stored"
+        );
+    }
+
+    #[test]
+    fn admits_remote_shareable_events_to_main_pipeline_after_workspace_check() {
+        let local = keypair();
+        let remote = keypair();
+        let connection_id = [3; 32];
+        let workspace_id = [7; 32];
+        let store = connected_store(connection_id, local, remote);
+        add_endpoint_membership(&store, workspace_id, [20; 32], local);
+        add_endpoint_membership(&store, workspace_id, [21; 32], remote);
+        let content = signed_content_bytes(workspace_id);
+        let content_id = event_id(&content);
+        let inbound = inbound_from_remote(&remote, local.endpoint, connection_id, vec![content]);
+
+        let output = ingest_network(&store, &Protocol::new(), inbound, false)
+            .expect("shareable content is admitted");
 
         assert_eq!(
             output,
-            Output::NetworkIngest(NetworkIngestResult {
+            NetworkIngestResult {
                 received_events: 1,
                 ..NetworkIngestResult::default()
-            })
+            }
         );
         assert!(
             event_schema::has_event(&store, &content_id).expect("check event table"),

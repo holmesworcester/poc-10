@@ -1,11 +1,24 @@
 use crate::core::crypto;
 use crate::protocol::event_modules::identity::{
-    admin, device_invite, endpoint_shared, user, user_invite, workspace,
+    admin, device_invite, endpoint_shared, signed, user, user_invite, workspace,
 };
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{self, CommandOutput};
 use crate::protocol::Protocol;
+
+#[test]
+fn unknown_signed_identity_payloads_are_rejected_at_admission() {
+    let signed = signed::commands::sign_payload([1; 32], &[2; 32], vec![250, 1, 2, 3])
+        .expect("sign unknown payload");
+
+    let err = crate::protocol::event_modules::record_from_bytes(
+        signed.events[0].record().canonical_bytes.clone(),
+    )
+    .expect_err("unknown signed payload must not be admitted");
+
+    assert_eq!(err, "signed envelope inner type 250 has no identity record");
+}
 
 #[test]
 fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {

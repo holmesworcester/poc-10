@@ -30,7 +30,7 @@ the rule is still prose/review only.
 
 | Rule | Status | Enforcement |
 | --- | --- | --- |
-| Commands create new semantic events and return proposed events, not rows/effects/storage writes. | typed + static | [CommandOutput](src/protocol/event_modules/worker.rs), `command_output_contains_events_not_state_changes`, `event_module_commands_do_not_mutate_storage_directly` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
+| Commands create new semantic events or transport bytes from explicit params/context and do not drive workers, CLI, TCP, queues, rows, effects, or storage writes. | typed + static | [CommandOutput](src/protocol/event_modules/worker.rs), `command_output_contains_events_not_state_changes`, `event_module_commands_do_not_mutate_storage_directly`, `event_module_commands_do_not_drive_workers_cli_or_transport_queues` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
 | Proposed event ids are deterministic from canonical bytes. | typed + static | [ProposedEvent](src/protocol/event_modules/worker.rs), `proposed_event_carries_deterministic_id_and_record`. |
 | Projectors return row-shaped output only and do not emit events/effects, query storage, or perform transit/crypto work. | typed + static | [ProjectionOutput](src/protocol/event_modules/worker.rs), `projection_output_contains_rows_and_labels_not_events`, `event_module_projectors_are_row_only_boundaries`, `event_module_projectors_do_not_query_storage_directly`, `event_module_projectors_do_not_do_transit_or_crypto_work`. |
 | Every projector has pure functional behavior tests. | static + partial | `projector_files_have_pure_functional_tests` requires each `projector.rs` to carry test code; review verifies the tests cover row/label output, explicit context handling, and rejection paths without storage or worker side effects. |
@@ -41,16 +41,17 @@ the rule is still prose/review only.
 | Protocol event modules own common fact/status/dependency tables. | typed + static | [event_modules/schema.rs](src/protocol/event_modules/schema.rs), `protocol_event_schema_owns_common_fact_indexes`. |
 | Generic Crux and CLI command driving are core, not protocol. | typed + static | [EffectHandler](src/core/crux_runner.rs), [crux_runner.rs](src/core/crux_runner.rs), [CliCommand](src/core/cli.rs), `crux_core_is_isolated_to_core`, core vocabulary checks. |
 | Worker admission/apply is scoped to event modules, not protocol root. | partial | [worker::run](src/protocol/event_modules/worker.rs) is the shared admission/apply entrypoint; there is not yet a typed worker catalog for all worker classes. |
+| `mod.rs` files are plumbing only, not command/work orchestration facades. | static | `leaf_mod_rs_files_are_declarations_only` and `event_module_mod_rs_files_do_not_orchestrate_commands_or_work` in [rules_boundary_test.rs](tests/rules_boundary_test.rs). |
 | Event modules use canonical directory/file shape. | static | `event_modules_are_directories`, `domain_roots_contain_only_children_and_shared_domain_files`, `domain_root_cli_requires_cross_child_scope`, `event_module_files_use_only_standard_concern_names`, `child_event_module_directories_have_canonical_shape`, `event_modules_do_not_use_dumping_ground_directories`. |
 | `event.rs` is forbidden; semantic types live in `types.rs`; codecs do encode/decode only. | static | `event_modules_do_not_use_event_rs`, `codec_files_do_not_define_public_types`, `codec_modules_have_type_files`. |
-| Workers live at the owning scope and expose one obvious entrypoint. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`, `worker_files_export_only_run_as_public_entrypoint`; no typed worker trait/catalog yet. |
+| Workers live at the owning scope, expose one obvious entrypoint, and do not own CLI parsing or user formatting. | static + partial | `worker_files_live_at_event_module_scope_roots`, `active_components_are_named_worker`, `worker_files_export_only_run_as_public_entrypoint`, `worker_files_do_not_own_cli_parsing_or_user_formatting`; no typed worker trait/catalog yet. |
 | Connection and sync operational logic lives in workers, not app/network/core. | partial | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs), [sync/worker.rs](src/protocol/event_modules/sync/worker.rs), `sync_worker_drains_projected_rows_not_direct_ingest_work`; static checks prevent core/network leaks, but do not yet prove every protocol action is worker-owned. |
-| `protocol/app` is forbidden; CLI behavior is scoped; daemon runtime lives at the application layer. | typed + static | [CliCommand](src/core/cli.rs), [protocol/cli.rs](src/protocol/cli.rs), [daemon.rs](src/daemon.rs), `protocol_app_layer_does_not_exist`, `daemon_lives_at_application_layer_not_protocol`, `cli_files_live_with_event_modules_or_the_protocol_shell`. |
+| `protocol/app` is forbidden; CLI behavior is scoped to parsing, calling commands/queries/named worker work, and formatting results; daemon runtime lives at the application layer. | typed + static | [CliCommand](src/core/cli.rs), [protocol/cli.rs](src/protocol/cli.rs), [daemon.rs](src/daemon.rs), `protocol_app_layer_does_not_exist`, `daemon_lives_at_application_layer_not_protocol`, `cli_files_live_with_event_modules_or_the_protocol_shell`, `scoped_cli_files_do_not_own_transport_or_cross_cli_operations`, `sync_cli_routes_network_sync_through_connection_worker`. |
 | CLI scenario/check/expect definitions live beside relevant event modules. | static + partial | `cli_harness_is_process_only` keeps the shared harness generic; scoped `cli_tests.rs` migration and typed scenario declarations are still prose/planned. |
 | Network boundary is opaque core queues plus core TCP. | typed + static | [NetworkTarget](src/core/network_queues.rs), [OutboundNetworkRow](src/core/network_queues.rs), [InboundNetworkRow](src/core/network_queues.rs), `network_queue_uses_single_target_indexed_outbound_table`, `store_exposes_generic_prefix_scan_not_network_methods`, `tcp_uses_network_queue_helpers_not_table_names`, `protocol_network_module_does_not_exist`, `protocol_cli_does_not_use_socket_primitives`, `core_network_queues_are_opaque_byte_rows`, `core_tcp_is_opaque_frame_transport`. |
 | Connection route learning is part of connection projection, not a transport-target event module. | typed + static | [ReceiveMetadata](src/protocol/event_modules/types.rs), [connection/schema.rs](src/protocol/event_modules/connection/schema.rs), `connection_routes_are_projected_from_receive_metadata`. |
 | Connection outbox is memory-local id-only send work; transit batches canonical inner events. | typed + static + partial | Connection outbox row helpers are visible only inside `protocol::event_modules`; `connection_outbox_is_id_only_and_transit_batches_inner_events` checks the table shape, and connection module tests cover memory restart/stale-row cleanup. Exact batch sizing remains implementation/test coverage. |
-| Connection durable ingress rejects remote local-only events and delegates shared events to the main pipeline. | partial + tested | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs) decodes inbound durable bytes through the registry, rejects non-shared scopes, and admits shared records through the common worker; connection ingress does not perform content-specific validation. Covered by connection worker tests. |
+| Connection durable ingress rejects remote local-only events and rejects shared workspace events unless the transit sender endpoint is mutually in that workspace with the local endpoint before delegating to the main pipeline. | partial + tested | [connection/worker.rs](src/protocol/event_modules/connection/worker.rs) decodes inbound durable bytes through the registry, checks shared scope and sender/workspace membership, then admits records through the common worker; connection ingress does not perform content-specific signature validation. Covered by connection worker tests. |
 | Sync direction is connection-scope context, not canonical bytes. | static | `sync_canonical_bytes_do_not_encode_inbound_or_outbound_direction`. |
 | Table names and schemas are typed and declared in owning module scopes. | typed + static | [Schema](src/core/store.rs), [TableName](src/core/store.rs), `table_names_are_declared_in_schema_files`, `table_declaration_files_declare_schemas`, `row_table_declarations_use_store_schema_helper`, `store_table_rows_use_typed_table_names`. |
 | Query modules are read-only CLI/reporting surfaces; worker reads live in workers and command read-context traits live in commands. | static | `event_module_queries_are_read_only`, `worker_and_command_logic_do_not_call_query_modules`. |
@@ -75,6 +76,23 @@ Prefer enforcement in this order:
 
 The following rules should stay mechanically enforced where practical:
 
+- Every boundary review asks these questions and turns any "yes" into cleanup
+  pressure:
+  - Is a `cli.rs` file doing anything beyond parsing CLI params, calling the
+    closest commands/queries or named worker work items, and formatting results?
+    If it owns transport, queue drains, send bookkeeping, scheduling, semantic
+    selection, or helper APIs for sibling CLIs, move that behavior out.
+  - Is a `mod.rs` file doing anything beyond declarations, schema aggregation,
+    codec/projector dispatch, or registry trait glue? If it is a convenience
+    facade for commands, queries, workers, or storage mutation, move that out.
+  - Is a `worker.rs` file doing anything beyond managing queued/operational
+    work, calling commands, admitting events, draining owned queues, and
+    touching boundary effects it owns? If it parses CLI args or formats
+    user-facing output, move that to `cli.rs`.
+  - Is a `commands.rs` file doing anything beyond constructing canonical events
+    or transport bytes from explicit params and narrow context? If it drives
+    workers, starts queue drains, formats CLI output, opens TCP, or performs
+    storage/row mutation, move that behavior out.
 - Commands return `CommandOutput<T>` with `Vec<ProposedEvent>`, not rows,
   effects, or storage writes. `ProposedEvent` is constructed from an
   `EventRecord` and carries both the deterministic `event_id` and that
@@ -97,6 +115,11 @@ The following rules should stay mechanically enforced where practical:
   at the domain root instead of masquerading as event modules.
 - Event-module files use standard concern names only. New concern files require
   an explicit boundary decision and a static-test update.
+- `mod.rs` files have one job: declare child modules and provide shallow
+  registry/catalog dispatch such as schema aggregation, tag-to-codec decoding,
+  and tag-to-projector routing. They must not own commands, queries, workers,
+  TCP exchange, queue draining, storage mutation, scheduling loops, or send
+  bookkeeping.
 - Files live at the tightest scope that owns the behavior. A domain-root
   `cli.rs` is only for commands spanning multiple child modules; a command for
   one leaf event type belongs in that leaf's `cli.rs`.
@@ -134,6 +157,15 @@ The following rules should stay mechanically enforced where practical:
   committed its `Applied` status. Events that are merely stored, Ready, Blocked,
   Rejected, or failed during projection must not be visible to dependent
   projectors.
+- `src/protocol/event_modules/mod.rs` is registry plumbing only. It may declare
+  modules, own the protocol module list, aggregate schemas, dispatch
+  parse/project calls by event tag, expose registry state accessors, and
+  implement registry traits. It must not become a convenience facade for user
+  commands or protocol work: no `create_*`, `generate_*`, `start_*`,
+  `drain_*`, `mark_*`, timestamp selection, dependency selection, invite/local
+  endpoint orchestration, route/outbox policy, command-output merging, or
+  worker wake decisions. Put that behavior in the closest owning `commands.rs`
+  or `worker.rs`; keep user parsing and output in the closest `cli.rs`.
 - Sync modules do not own TCP/frame IO, and core/network code does not contain
   sync protocol logic.
 - The long-lived daemon is application runtime orchestration. It lives at
@@ -192,7 +224,11 @@ projectors, queries, and module-owned tables they operate on.
 
 CLI, RPC, workers, and other adapters should dispatch into module commands
 instead of constructing canonical event bytes directly. Adapters own
-input/output shape; event modules own protocol and domain semantics.
+input/output shape; event modules own protocol and domain semantics. An adapter
+may choose which command to invoke from explicit user input or queued work, but
+it must not invent semantic defaults by querying broad state. If a command needs
+the next timestamp, a local endpoint, a route, a dependency set, or a sync
+range, that read belongs in a narrow command context or in the owning worker.
 
 Commands receive explicit input values plus narrow read context values. They do
 not mutate SQLite, open transactions, drain queues, or call broad apply loops.
@@ -259,8 +295,10 @@ encode/decode, and event-specific parse validation. Commands belong in
 CLI commands belong in the closest relevant event module or domain root
 `cli.rs`. CLI output structs and formatting live there too. Each scoped CLI file
 exports `CliCommand` specs with command name, usage, help, parsing, worker
-wakes, follow-up queries, and formatting for that scope. `src/protocol/cli.rs`
-only aggregates the current protocol's command surface and owns truly
+work item calls, follow-up queries, and formatting for that scope. It must not
+assemble worker internals such as ready-drain loops; ask a named worker work
+item to do that. `src/protocol/cli.rs` only aggregates the current protocol's
+command surface and owns truly
 whole-protocol commands such as `count`/`status`. `src/core/cli.rs` dispatches
 generic command specs and prints returned output. It must not own domain command
 semantics, help text, post-write queries, worker selection, or formatting.
@@ -295,11 +333,31 @@ it can use the core runner without introducing `protocol/app`, protocol
 `ProtocolMsg`, or protocol effect enums.
 
 A module CLI command may run module queries and format text or JSON output. If
-it creates events, it first calls a pure module command, then asks the generic
-runner to process exactly those proposed events, then runs any query that
-depends on their projection rows. It must not rely on a broad global drain
-unless the command is explicitly a wait/poll command such as sync status or
-assert-eventually.
+it creates events, it first calls a pure module command, then asks a named
+worker work item to admit those proposed events and perform any explicitly
+owned follow-up drain, then runs any query that depends on their projection
+rows. CLI must not directly call broad drain work; commands that wait, poll,
+or drain name that behavior in worker-owned work values.
+
+CLI files are for user interaction, not domain logic. They may parse argv,
+print help, call the closest command or worker entrypoint, submit returned
+proposed events to the generic worker, and format the resulting value/query
+output. They must not compute semantic values such as "next content timestamp",
+"which dependencies should this event use", "ensure/create the local endpoint
+then create an invite/request", "which routes should be drained", or "which
+sync range means today". Those choices belong to `commands.rs` when they create
+events, or to `worker.rs` when they drain queues, wake protocol work, or touch
+module-owned operational state. CLI files must not own TCP exchange, core
+network queue row bookkeeping, daemon scheduling, or operational helper APIs for
+other CLI files. If another command needs that behavior, expose it through the
+owning worker instead of calling a sibling `cli.rs`.
+
+`src/protocol/event_modules/mod.rs` is even stricter than CLI. It is the module
+registry and cross-module dispatch point, not a public service layer. Keep it
+to declarations, schema cataloging, codec selection, projector selection, and
+registry trait glue. Do not add new public helpers there just because several
+callers need them. Move behavior to the closest event/domain module and have
+callers import that scoped API directly.
 
 Custom contexts for commands, projectors, and workers must be narrow DTOs, not
 database-shaped snapshots. If a context can answer arbitrary storage questions,
@@ -349,10 +407,11 @@ dependency absence.
 
 `store.rs` is generic storage mechanics. It applies `Schema` declarations from
 core IO modules and protocol module scopes, then exposes typed table names,
-opaque key/value rows, transactions, exact row reads, and bounded prefix scans.
+opaque key/value rows, transactions, exact row reads, bounded prefix scans, and
+bounded key-range scans.
 It may generate the uniform `(row_key, row_value)` table shape for
 module-declared row tables. It must not expose event ids, event status, labels,
-missing-dep edges, sync buckets, connection/bootstrap schema, content payload
+missing-dep edges, sync ranges, connection/bootstrap schema, content payload
 semantics, or network queue semantics as storage concepts.
 `core/network_queues.rs` owns typed network queue rows and encodes them through
 generic `TableRow`s. Protocol and module `schema.rs` files declare the tables
@@ -566,7 +625,7 @@ Core may:
 - store declared table rows as opaque key/value bytes
 - execute schemas declared by core IO and protocol module scopes
 - run transactions over generic rows
-- expose exact row reads and prefix scans for queues/indexes
+- expose exact row reads, prefix scans, and key-range scans for queues/indexes
 - maintain one opaque outbound network queue with target metadata and one opaque
   inbound network queue with source metadata
 - run generic TCP listener/connect/read-frame/write-frame mechanics over those
@@ -584,7 +643,8 @@ Protocol event modules may:
 Network queues are ordinary core table rows with typed wrappers. There is one
 outbound queue table, not one table per target. `target` is metadata encoded
 into the row key so core can claim a bounded batch for a target with a generic
-key-prefix scan. `Store` may expose `table_rows_with_key_prefix`; it must not
+key-prefix scan. `Store` may expose `table_rows_with_key_prefix` and generic
+key-range scans; it must not
 grow network-specific methods.
 
 Core must not:
@@ -853,7 +913,7 @@ Keep core boring:
 - `core/network_queues.rs` owns one target-indexed outbound byte queue and one
   source-indexed inbound byte queue; it does not define per-target tables.
 - `core/store.rs` owns durable bytes, generic module-owned rows, and generic event-set
-  reads/writes only. It may expose generic prefix scans over table row keys,
+  reads/writes only. It may expose generic prefix and key-range scans over table row keys,
   but it must not know network queue meaning.
 - `protocol/event_modules/content` owns content event construction, codec, and projection.
 - `protocol/event_modules/sync` owns all negentropy, compare/have/need/range decisions,

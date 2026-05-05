@@ -1,12 +1,14 @@
 //! Content-event CLI command and summary.
 //!
 //! `generate` creates this one event type, so its argv shape and output live at
-//! the leaf module rather than the content domain root. If the content domain
-//! later gains commands spanning several event types, those can live in a
-//! separate domain-root `cli.rs`.
+//! the leaf module rather than the content domain root. Authorization material is
+//! read from the local endpoint and endpoint-membership projections, then passed
+//! into the content command explicitly.
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::protocol::cli::Context;
+use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
+use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker;
 
 use super::schema;
@@ -57,21 +59,53 @@ fn run_generate_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), GENERATE_USAGE)?;
     let num_events = args.parse_positive_usize(1, GENERATE_USAGE)?;
     let event_size = args.parse_positive_usize(2, GENERATE_USAGE)?;
-    let output = context
-        .protocol
-        .modules()
-        .generate_content(&context.store, workspace_id, num_events, event_size)
-        .map_err(|err| format!("generate: {err}"))?;
-    let (report, admitted) = worker::run(&context.store, &context.protocol, output)
-        .map_err(|err| format!("admit generated events: {err}"))?;
-    let drained = context.drain_ready_events()?;
+    let local = endpoint::commands::local_keypair(&context.store)?
+        .ok_or_else(|| "local endpoint is missing".to_string())?;
+    let membership_key =
+        endpoint_shared::schema::endpoint_membership_key(local.endpoint, workspace_id);
+    let membership_bytes = context
+        .store
+        .table_row(
+            endpoint_shared::schema::ENDPOINT_MEMBERSHIPS,
+            &membership_key,
+        )
+        .map_err(|err| format!("load local endpoint membership: {err}"))?
+        .ok_or_else(|| "local endpoint is not joined to workspace".to_string())?;
+    let membership = endpoint_shared::schema::decode_endpoint_membership_row(
+        &membership_key,
+        &membership_bytes,
+    )?;
+    if membership.signing_public_key != local.signing_public_key {
+        return Err("local endpoint signing key does not match workspace membership".to_string());
+    }
+
+    let start =
+        schema::max_timestamp_for_workspace(&context.store, workspace_id)?.saturating_add(1);
+    let output = super::commands::generate(
+        workspace_id,
+        membership.endpoint_shared_id,
+        local.signing_secret,
+        start,
+        num_events,
+        event_size,
+    )
+    .map_err(|err| format!("generate: {err}"))?;
+    let report = worker::run(
+        &context.store,
+        &context.protocol,
+        worker::AdmitAndDrain {
+            output,
+            batch_size: worker::DEFAULT_READY_BATCH,
+        },
+    )
+    .map_err(|err| format!("admit and drain generated events: {err}"))?;
     Ok(CliOutput::lines(
         GenerateSummary {
-            generated_events: admitted.inserted_events,
-            applied_events: admitted.applied_events + drained.applied_events,
+            generated_events: report.admitted.inserted_events,
+            applied_events: report.admitted.applied_events + report.drained.applied_events,
             event_size,
-            first_timestamp: report.first_timestamp,
-            last_timestamp: report.last_timestamp,
+            first_timestamp: report.value.first_timestamp,
+            last_timestamp: report.value.last_timestamp,
         }
         .lines(),
     ))
@@ -92,7 +126,7 @@ fn run_content_count_command(
     ]))
 }
 
-fn parse_hex_id(value: &str, usage: &str) -> Result<[u8; 32], String> {
+fn parse_hex_id(value: &str, usage: &str) -> Result<EventId, String> {
     if value.len() != 64 {
         return Err(usage.to_string());
     }

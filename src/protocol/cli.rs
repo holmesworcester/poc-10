@@ -15,7 +15,6 @@ use std::path::Path;
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::core::store::Store;
 use crate::protocol::event_modules::schema as event_schema;
-use crate::protocol::event_modules::worker::{self, ApplyReadyReport};
 use crate::protocol::{event_modules, Protocol};
 
 const COUNT_USAGE: &str = "count";
@@ -35,17 +34,6 @@ impl Context {
             protocol: Protocol::new(),
             db_path,
         })
-    }
-
-    pub fn drain_ready_events(&self) -> Result<ApplyReadyReport, String> {
-        worker::run(
-            &self.store,
-            &self.protocol,
-            worker::DrainUntilIdle {
-                batch_size: worker::DEFAULT_READY_BATCH,
-            },
-        )
-        .map_err(|err| format!("drain ready events: {err}"))
     }
 }
 
@@ -107,14 +95,9 @@ fn run_count_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutp
         event_schema::event_count(&context.store).map_err(|err| format!("count events: {err}"))?;
     let payload_bytes =
         event_schema::body_bytes(&context.store).map_err(|err| format!("count bytes: {err}"))?;
-    let connections = context
-        .protocol
-        .modules()
-        .connection_count(&context.store)?;
-    let connection_events = context
-        .protocol
-        .modules()
-        .connection_event_count(&context.store)?;
+    let connections = event_modules::connection::queries::connection_count(&context.store)?;
+    let connection_events =
+        event_modules::connection::queries::connection_event_count(&context.store)?;
     let statuses = event_schema::status_counts(&context.store)
         .map_err(|err| format!("count event statuses: {err}"))?;
     Ok(CliOutput::lines(

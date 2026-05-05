@@ -235,6 +235,12 @@ impl<T> CommandOutput<T> {
     pub fn with_proposed_events(value: T, events: Vec<ProposedEvent>) -> Self {
         Self { value, events }
     }
+
+    pub fn prepend_events(mut self, mut events: Vec<ProposedEvent>) -> Self {
+        events.append(&mut self.events);
+        self.events = events;
+        self
+    }
 }
 
 /// Protocol registry used by the common worker.
@@ -303,9 +309,22 @@ impl ReceivedRecord {
     }
 }
 
+/// Admit a command output and drain ready durable events after admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmitAndDrain<T> {
+    pub output: CommandOutput<T>,
+    pub batch_size: usize,
+}
+
 /// Drain ready durable events until no ready event remains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrainUntilIdle {
+    pub batch_size: usize,
+}
+
+/// Drain at most one batch of ready durable events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainReadyBatch {
     pub batch_size: usize,
 }
 
@@ -325,6 +344,14 @@ pub struct AdmitReport {
 pub struct ApplyReadyReport {
     pub applied_events: usize,
     pub unblocked_events: usize,
+}
+
+/// Summary of command admission followed by a ready-event drain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmitAndDrainReport<T> {
+    pub value: T,
+    pub admitted: AdmitReport,
+    pub drained: ApplyReadyReport,
 }
 
 /// Run one common event-module worker action.
@@ -349,6 +376,23 @@ where
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
         admit_command_output(store, registry, self)
+    }
+}
+
+impl<T, R> Work<R> for AdmitAndDrain<T>
+where
+    R: EventRegistry,
+{
+    type Output = AdmitAndDrainReport<T>;
+
+    fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
+        let (value, admitted) = admit_command_output(store, registry, self.output)?;
+        let drained = drain_until_idle(store, registry, self.batch_size)?;
+        Ok(AdmitAndDrainReport {
+            value,
+            admitted,
+            drained,
+        })
     }
 }
 
@@ -389,6 +433,17 @@ where
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
         drain_until_idle(store, registry, self.batch_size)
+    }
+}
+
+impl<R> Work<R> for DrainReadyBatch
+where
+    R: EventRegistry,
+{
+    type Output = ApplyReadyReport;
+
+    fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
+        drain_ready(store, registry, self.batch_size)
     }
 }
 

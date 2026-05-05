@@ -37,6 +37,15 @@ pub fn create_local_keypair() -> CommandOutput<EndpointKeypair> {
     )
 }
 
+pub fn local_or_create(
+    context: &impl LocalEndpointRead,
+) -> Result<CommandOutput<EndpointKeypair>, String> {
+    match local_keypair(context)? {
+        Some(local) => Ok(CommandOutput::new(local)),
+        None => Ok(create_local_keypair()),
+    }
+}
+
 pub fn local_keypair(context: &impl LocalEndpointRead) -> Result<Option<EndpointKeypair>, String> {
     let secret = context.local_endpoint_secret()?;
     let endpoint = context.local_endpoint()?;

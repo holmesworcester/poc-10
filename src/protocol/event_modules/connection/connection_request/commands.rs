@@ -51,6 +51,14 @@ pub fn create(
     ))
 }
 
+pub fn create_with_local(
+    context: &impl endpoint::commands::LocalEndpointRead,
+    invite_link: &str,
+) -> Result<CommandOutput<OutboundRequest>, String> {
+    let local = endpoint::commands::local_or_create(context)?;
+    Ok(create(local.value, invite_link)?.prepend_events(local.events))
+}
+
 pub(in crate::protocol::event_modules::connection) fn accept(
     local: endpoint::types::EndpointKeypair,
     bootstrap_hash_is_authorized: bool,

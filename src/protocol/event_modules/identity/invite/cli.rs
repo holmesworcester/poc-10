@@ -1,16 +1,20 @@
 //! Invite CLI command.
 //!
 //! Invite creation is local identity behavior: it may create the local endpoint
-//! first, then records an invite secret and prints the link. Keeping the argv
-//! shape here means the protocol CLI shell does not need to know which option
-//! carries the public address or how an invite is formatted.
+//! first, then records an invite secret and prints the link. The finite
+//! `--listen` form exists for black-box bootstrap tests: it prints the invite
+//! before blocking in the connection worker so a separate CLI process can accept
+//! it over TCP.
 
 use std::io::Write;
 use std::net::SocketAddr;
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::protocol::cli::Context;
-use crate::protocol::event_modules::{connection, worker};
+use crate::protocol::event_modules::connection::{
+    types as connection_types, worker as connection_worker,
+};
+use crate::protocol::event_modules::worker;
 
 const INVITE_USAGE: &str = "invite (--public-addr ADDR | --listen IP PORT [--accept N])";
 
@@ -25,35 +29,42 @@ pub fn commands() -> Vec<CliCommand<Context>> {
 
 fn run_invite_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let options = InviteOptions::parse(args)?;
-    let public_addr = match options.mode {
-        InviteMode::PublicAddr(addr) | InviteMode::Listen { listen: addr } => addr,
-    };
-    let output = context
-        .protocol
-        .modules()
-        .create_invite(&context.store, public_addr)
+    let public_addr = options.public_addr();
+    let output = super::commands::create_with_local(&context.store, public_addr)
         .map_err(|err| format!("create invite: {err}"))?;
     let (link, _) = worker::run(&context.store, &context.protocol, output)
         .map_err(|err| format!("apply invite: {err}"))?;
-
-    match options.mode {
-        InviteMode::PublicAddr(_) => Ok(CliOutput::line(link)),
-        InviteMode::Listen { listen } => {
+    match options {
+        InviteOptions::Print { .. } => Ok(CliOutput::line(link)),
+        InviteOptions::Listen {
+            listen,
+            accept_count,
+        } => {
             print_line_now(&link)?;
-            connection::cli::run_serve(context, listen, options.accept_count).map(CliOutput::lines)
+            let output = connection_worker::run(
+                &context.store,
+                &context.protocol,
+                connection_worker::Work::Serve {
+                    listen,
+                    accept_count,
+                },
+            )?;
+            let connection_worker::Output::Served(report) = output else {
+                return Err("connection worker returned non-serve output".to_string());
+            };
+            Ok(CliOutput::lines(serve_lines(&report)))
         }
     }
 }
 
-struct InviteOptions {
-    mode: InviteMode,
-    accept_count: usize,
-}
-
-#[derive(Clone, Copy)]
-enum InviteMode {
-    PublicAddr(SocketAddr),
-    Listen { listen: SocketAddr },
+enum InviteOptions {
+    Print {
+        public_addr: SocketAddr,
+    },
+    Listen {
+        listen: SocketAddr,
+        accept_count: usize,
+    },
 }
 
 impl InviteOptions {
@@ -61,7 +72,6 @@ impl InviteOptions {
         let mut public_addr = None;
         let mut listen = None;
         let mut accept_count = 1usize;
-        let mut accept_seen = false;
         let mut idx = 0;
         while idx < args.values().len() {
             match args.get(idx).expect("index in bounds") {
@@ -86,26 +96,40 @@ impl InviteOptions {
                 }
                 "--accept" => {
                     accept_count = args.parse_positive_usize(idx + 1, INVITE_USAGE)?;
-                    accept_seen = true;
                     idx += 2;
                 }
                 other => return Err(format!("unknown invite option `{other}`\n{INVITE_USAGE}")),
             }
         }
 
-        let mode = match (public_addr, listen) {
-            (Some(addr), None) => {
-                if accept_seen {
-                    return Err(INVITE_USAGE.to_string());
-                }
-                InviteMode::PublicAddr(addr)
-            }
-            (None, Some(listen)) => InviteMode::Listen { listen },
-            _ => return Err(INVITE_USAGE.to_string()),
-        };
-
-        Ok(Self { mode, accept_count })
+        match (public_addr, listen) {
+            (Some(public_addr), None) => Ok(Self::Print { public_addr }),
+            (None, Some(listen)) => Ok(Self::Listen {
+                listen,
+                accept_count,
+            }),
+            _ => Err(INVITE_USAGE.to_string()),
+        }
     }
+
+    fn public_addr(&self) -> SocketAddr {
+        match self {
+            Self::Print { public_addr } => *public_addr,
+            Self::Listen { listen, .. } => *listen,
+        }
+    }
+}
+
+fn serve_lines(report: &connection_types::ServeReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(local_addr) = report.local_addr {
+        lines.push(format!("listening: {local_addr}"));
+    }
+    lines.extend([
+        format!("accepted_connections: {}", report.accepted_connections),
+        format!("received_events: {}", report.received_events),
+    ]);
+    lines
 }
 
 fn print_line_now(line: &str) -> Result<(), String> {

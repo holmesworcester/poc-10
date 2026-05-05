@@ -58,6 +58,18 @@ fn public_free_function_names(text: &str) -> Vec<String> {
     names
 }
 
+fn meaningful_mod_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("//!")
+                && !line.starts_with("///")
+                && !line.starts_with("//")
+        })
+        .collect()
+}
+
 #[test]
 fn event_modules_do_not_use_event_rs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
@@ -193,6 +205,169 @@ fn domain_roots_contain_only_children_and_shared_domain_files() {
         offenders.is_empty(),
         "domain roots may contain only shared domain files; put leaf commands/codecs/projectors in child event modules:\n{}",
         offenders.join("\n")
+    );
+}
+
+#[test]
+fn leaf_mod_rs_files_are_declarations_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut offenders = Vec::new();
+    for domain in std::fs::read_dir(&event_root).expect("read event modules") {
+        let domain = domain.expect("dir entry").path();
+        if !domain.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&domain).expect("read domain") {
+            let child = entry.expect("dir entry").path();
+            if !child.is_dir() {
+                continue;
+            }
+            let mod_rs = child.join("mod.rs");
+            if !mod_rs.exists() {
+                continue;
+            }
+            let text = source_text(&mod_rs);
+            let bad_lines = meaningful_mod_lines(&text)
+                .into_iter()
+                .filter(|line| {
+                    !(line.starts_with("pub mod ") && line.ends_with(';') && !line.contains('{'))
+                        && *line != "#[cfg(test)]"
+                        && *line != "mod cli_tests;"
+                })
+                .collect::<Vec<_>>();
+            if !bad_lines.is_empty() {
+                offenders.push(format!(
+                    "{} contains non-declaration lines: {}",
+                    mod_rs.strip_prefix(root).unwrap().display(),
+                    bad_lines.join(" | ")
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "leaf event-module mod.rs files are only concern declarations; move adapters/helpers to schema.rs, commands.rs, worker.rs, or cli.rs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn event_module_mod_rs_files_do_not_orchestrate_commands_or_work() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "mod.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "commands::",
+        "queries::",
+        "CommandOutput",
+        "ProposedEvent",
+        "crate::core::tcp",
+        "tcp::",
+        "TcpStream",
+        "TcpListener",
+        "NetworkTarget",
+        "OutboundNetworkRow",
+        "network_queues",
+        "RefCell",
+        "HashMap",
+        "HashSet",
+        "BTreeMap",
+        "thread::",
+        "Duration",
+        "Instant",
+        "connect_exchange",
+        "accept_available",
+        "worker::run",
+        "Work::",
+        "insert_table_rows",
+        "delete_table_rows",
+        "table_rows",
+        "table_row(",
+        "table_row_count",
+        "write_transaction",
+        "pub fn create_",
+        "pub fn generate_",
+        "pub fn stage_",
+        "pub fn start_",
+        "pub fn drain_",
+        "pub fn mark_",
+        "fn local_keypair",
+        "fn existing_local_keypair",
+        "fn merge_outputs",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "mod.rs files are plumbing: declarations, schema aggregation, and shallow codec/projector dispatch only:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn scoped_cli_files_do_not_own_transport_or_cross_cli_operations() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "crate::core::tcp",
+        "core::network_queues",
+        "network_queues::",
+        "InboundNetworkRow",
+        "OutboundNetworkRow",
+        "NetworkTarget",
+        "RefCell",
+        "HashMap",
+        "thread::",
+        "thread::sleep",
+        "Instant",
+        "connect_exchange",
+        "accept_available",
+        "DrainUntilIdle",
+        "DrainReadyBatch",
+        "::cli::run_",
+        "::cli::drain_",
+        "::cli::exchange_",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "scoped cli.rs files parse args, call commands/workers, and format reports; transport, send bookkeeping, and cross-cli operational helpers belong in workers:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn sync_cli_routes_network_sync_through_connection_worker() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = source_text(&root.join("src/protocol/event_modules/sync/cli.rs"));
+    let forbidden = [
+        "DrainUntilIdle",
+        "DrainReadyBatch",
+        "sync_worker::run",
+        "Work::ExchangeOutboundRoutes",
+    ];
+    let mut violations = forbidden
+        .into_iter()
+        .filter(|needle| text.contains(needle))
+        .collect::<Vec<_>>();
+    violations.extend(
+        text.lines()
+            .filter(|line| line.contains("worker::run") && !line.contains("connection_worker::run"))
+            .map(str::trim),
+    );
+
+    assert!(
+        violations.is_empty() && text.contains("Work::StartSyncRoutes"),
+        "sync CLI should parse/format only; route sync orchestration belongs behind connection worker StartSyncRoutes:\n{}",
+        violations.join("\n")
     );
 }
 
@@ -402,6 +577,33 @@ fn worker_files_export_only_run_as_public_entrypoint() {
         offenders.is_empty(),
         "worker.rs files expose one obvious public entrypoint, run(); helpers stay private:\n{}",
         offenders.join("\n")
+    );
+}
+
+#[test]
+fn worker_files_do_not_own_cli_parsing_or_user_formatting() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "worker.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "crate::core::cli",
+        "CliArgs",
+        "CliCommand",
+        "CliOutput",
+        "pub fn commands()",
+        "usage:",
+        "help:",
+        "println!",
+        "eprintln!",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "worker.rs files manage queued/operational work; CLI parsing, command specs, and user-facing formatting stay in cli.rs:\n{}",
+        violations.join("\n")
     );
 }
 
@@ -670,7 +872,7 @@ fn store_uses_generic_storage_vocabulary() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "store owns generic mechanics, not sync buckets, module-row escape hatches, payload semantics, or network queue semantics:\n{}",
+        "store owns generic mechanics, not sync ranges, module-row escape hatches, payload semantics, or network queue semantics:\n{}",
         violations.join("\n")
     );
 }
@@ -727,8 +929,9 @@ fn store_exposes_generic_prefix_scan_not_network_methods() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let text = source_text(&root.join("src/core/store.rs"));
     assert!(
-        text.contains("pub fn table_rows_with_key_prefix("),
-        "store should expose generic key-prefix scans for indexed queue claims"
+        text.contains("pub fn table_rows_with_key_prefix(")
+            && text.contains("pub fn table_rows_in_key_range("),
+        "store should expose generic key-prefix and key-range scans for indexed queue claims"
     );
     for forbidden in [
         "claim_outbound",
@@ -769,7 +972,8 @@ fn core_store_is_row_only_not_protocol_fact_storage() {
         text.contains("pub fn insert_table_rows_in_tx(")
             && text.contains("pub fn replace_table_rows_in_tx(")
             && text.contains("pub fn delete_table_rows_in_tx(")
-            && text.contains("pub fn table_rows_with_key_prefix("),
+            && text.contains("pub fn table_rows_with_key_prefix(")
+            && text.contains("pub fn table_rows_in_key_range("),
         "core/store.rs should expose generic row write/read primitives only"
     );
 }
@@ -807,7 +1011,7 @@ fn protocol_event_schema_owns_common_fact_indexes() {
         "pub const SCHEMAS",
         "pub const EVENTS",
         "pub const READY_EVENTS",
-        "pub const PARTITION_EVENTS",
+        "pub const TIMESTAMP_EVENTS",
         "pub const BLOCKED_EVENTS_BY_MISSING_DEP",
         "pub const MISSING_DEPS_BY_BLOCKED_EVENT",
         "pub const EVENT_LABELS",
@@ -999,6 +1203,41 @@ fn event_module_commands_do_not_mutate_storage_directly() {
     assert!(
         violations.is_empty(),
         "commands receive explicit context and return CommandOutput events only; projectors/workers/store own rows and writes:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn event_module_commands_do_not_drive_workers_cli_or_transport_queues() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let files = rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "commands.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "worker::run",
+        "DrainUntilIdle",
+        "DrainReadyBatch",
+        "crate::core::cli",
+        "CliArgs",
+        "CliCommand",
+        "CliOutput",
+        "crate::core::tcp",
+        "core::network_queues",
+        "network_queues::",
+        "InboundNetworkRow",
+        "OutboundNetworkRow",
+        "NetworkTarget",
+        "thread::",
+        "Instant",
+        "println!",
+        "eprintln!",
+    ];
+    let violations = file_contains_violations(root, &files, &forbidden);
+    assert!(
+        violations.is_empty(),
+        "commands.rs files construct canonical events or transport bytes from explicit params/context; worker driving, CLI, TCP, and queue bookkeeping belong elsewhere:\n{}",
         violations.join("\n")
     );
 }

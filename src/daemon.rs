@@ -9,18 +9,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
-use crate::core::tcp;
 use crate::protocol::cli::Context;
-use crate::protocol::event_modules::{connection, sync, worker};
+use crate::protocol::event_modules::connection::{types, worker as connection_worker};
 
 const START_USAGE: &str = "start --listen IP PORT [--sync-ms N] [--quiet-ms N]";
 const DEFAULT_SYNC_MS: u64 = 250;
-const DEFAULT_ACCEPT_BATCH: usize = 16;
-const IDLE_SLEEP_MS: u64 = 25;
 
 pub fn commands() -> Vec<CliCommand<Context>> {
     vec![CliCommand {
@@ -34,92 +30,35 @@ pub fn commands() -> Vec<CliCommand<Context>> {
 fn run_start_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let options = StartOptions::parse(args)?;
     let _lock = DaemonLock::acquire(&context.db_path)?;
-    let listener = tcp::listen(options.listen)?;
-    print_line_now(&format!("listening: {}", listener.local_addr()))?;
-    run_loop(context, listener, options)
-}
-
-fn run_loop(
-    context: &mut Context,
-    listener: tcp::Listener,
-    options: StartOptions,
-) -> Result<CliOutput, String> {
-    let sync_every = Duration::from_millis(options.sync_ms);
-    let mut last_sync = Instant::now()
-        .checked_sub(sync_every)
-        .unwrap_or_else(Instant::now);
-
-    loop {
-        let served = connection::cli::serve_available(context, &listener, DEFAULT_ACCEPT_BATCH)?;
-        if served.accepted_connections > 0 {
-            let _ = context.drain_ready_events();
-        }
-
-        if last_sync.elapsed() >= sync_every {
-            run_sync_tick(context, options.quiet_ms);
-            last_sync = Instant::now();
-        }
-
-        thread::sleep(Duration::from_millis(IDLE_SLEEP_MS));
-    }
-}
-
-fn run_sync_tick(context: &mut Context, quiet_ms: u64) {
-    if let Err(err) = context.drain_ready_events() {
-        eprintln!("daemon: drain ready events: {err}");
-        return;
-    }
-
-    let start = match context.protocol.modules().maybe_start_sync(
+    print_line_now(&format!("listening: {}", options.listen))?;
+    let output = connection_worker::run(
         &context.store,
-        current_time_ms(),
-        quiet_ms,
-    ) {
-        Ok(start) => start,
-        Err(err) if err.contains("local endpoint is missing") => return,
-        Err(err) => {
-            eprintln!("daemon: start sync: {err}");
-            return;
-        }
+        &context.protocol,
+        connection_worker::Work::RunDaemon {
+            options: types::DaemonOptions {
+                listen: options.listen,
+                duration: None,
+                idle: Duration::from_millis(options.sync_ms),
+                ready_batch: connection_worker::DEFAULT_DAEMON_READY_BATCH,
+            },
+        },
+    )?;
+    let connection_worker::Output::DaemonRan(report) = output else {
+        return Err("connection worker returned non-daemon output".to_string());
     };
-
-    if let Err(err) = worker::run(&context.store, &context.protocol, start) {
-        eprintln!("daemon: record sync events: {err}");
-        return;
-    }
-
-    let routes = match context
-        .protocol
-        .modules()
-        .drain_outbox_routes(&context.store)
-    {
-        Ok(routes) => routes,
-        Err(err) if err.contains("local endpoint is missing") => return,
-        Err(err) => {
-            eprintln!("daemon: drain outbox routes: {err}");
-            return;
-        }
-    };
-
-    for outbound in routes {
-        if let Err(err) = connection::cli::exchange_outbound_route(context, outbound) {
-            eprintln!("daemon: exchange route: {err}");
-        }
-    }
+    Ok(CliOutput::lines(daemon_lines(&report)))
 }
 
 #[derive(Clone, Copy)]
 struct StartOptions {
     listen: SocketAddr,
     sync_ms: u64,
-    quiet_ms: u64,
 }
 
 impl StartOptions {
     fn parse(args: CliArgs<'_>) -> Result<Self, String> {
         let mut listen = None;
         let mut sync_ms = DEFAULT_SYNC_MS;
-        let mut quiet_ms = sync::worker::DEFAULT_QUIET_MS;
         let mut idx = 0;
         while idx < args.values().len() {
             match args.get(idx).expect("index in bounds") {
@@ -138,19 +77,33 @@ impl StartOptions {
                     idx += 2;
                 }
                 "--quiet-ms" => {
-                    quiet_ms = parse_positive_u64(args.get(idx + 1), START_USAGE)?;
+                    let _quiet_ms = parse_positive_u64(args.get(idx + 1), START_USAGE)?;
                     idx += 2;
                 }
                 other => return Err(format!("unknown start option `{other}`\n{START_USAGE}")),
             }
         }
         let listen = listen.ok_or_else(|| START_USAGE.to_string())?;
-        Ok(Self {
-            listen,
-            sync_ms,
-            quiet_ms,
-        })
+        Ok(Self { listen, sync_ms })
     }
+}
+
+fn daemon_lines(report: &types::DaemonReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(local_addr) = report.local_addr {
+        lines.push(format!("listening: {local_addr}"));
+    }
+    lines.extend([
+        format!("accepted_connections: {}", report.accepted_connections),
+        format!("sync_rounds: {}", report.sync_rounds),
+        format!("routes_synced: {}", report.routes_synced),
+        format!("failed_routes: {}", report.failed_routes),
+        format!("sent_events: {}", report.sent_events),
+        format!("received_events: {}", report.received_events),
+        format!("ready_events: {}", report.ready_events),
+        format!("unblocked_events: {}", report.unblocked_events),
+    ]);
+    lines
 }
 
 fn parse_positive_u64(value: Option<&str>, usage: &str) -> Result<u64, String> {
@@ -225,13 +178,6 @@ fn stale_lock_can_be_removed(path: &Path) -> Result<bool, String> {
         return Ok(false);
     };
     Ok(!Path::new(&format!("/proc/{pid}")).exists())
-}
-
-fn current_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 fn print_line_now(line: &str) -> Result<(), String> {

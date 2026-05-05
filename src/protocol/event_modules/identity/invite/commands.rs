@@ -48,6 +48,14 @@ pub fn create(
     )
 }
 
+pub fn create_with_local(
+    context: &impl endpoint::commands::LocalEndpointRead,
+    public_addr: SocketAddr,
+) -> Result<CommandOutput<String>, String> {
+    let local = endpoint::commands::local_or_create(context)?;
+    Ok(create(local.value, public_addr).prepend_events(local.events))
+}
+
 pub fn addr(invite: &str) -> Result<SocketAddr, String> {
     Ok(parse(invite)?.addr)
 }

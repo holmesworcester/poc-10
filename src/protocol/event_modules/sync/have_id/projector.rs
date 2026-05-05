@@ -58,7 +58,7 @@ mod tests {
     fn have_event() -> HaveIdEvent {
         HaveIdEvent {
             connection_id: [4; 32],
-            bucket: 7,
+            timestamp: 7,
             id: [8; 32],
         }
     }

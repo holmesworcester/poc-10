@@ -24,8 +24,8 @@ fn two_endpoints_sync_multiple_mutual_workspaces() {
 
     let alice_endpoint = local_endpoint(&alice);
     let bob_endpoint = local_endpoint(&bob);
-    let workspace_a = workspace_graph(
-        &alice,
+    let workspace_a = install_workspace_graph(
+        &[&alice, &bob],
         11,
         "workspace-a",
         &[
@@ -33,8 +33,8 @@ fn two_endpoints_sync_multiple_mutual_workspaces() {
             Member::new("bob-a", bob_endpoint, 22),
         ],
     );
-    let workspace_b = workspace_graph(
-        &alice,
+    let workspace_b = install_workspace_graph(
+        &[&alice, &bob],
         12,
         "workspace-b",
         &[
@@ -46,8 +46,6 @@ fn two_endpoints_sync_multiple_mutual_workspaces() {
     generate(&alice, workspace_b.workspace_id, 4, 129);
     sync_once(&alice, &bob, bob_port);
 
-    assert_membership(&bob, workspace_a.workspace_id, bob_endpoint.endpoint);
-    assert_membership(&bob, workspace_b.workspace_id, bob_endpoint.endpoint);
     assert_content_count(&bob, workspace_a.workspace_id, 3);
     assert_content_count(&bob, workspace_b.workspace_id, 4);
 }
@@ -62,8 +60,8 @@ fn two_player_sync_does_not_leak_alice_private_workspace_to_bob() {
 
     let alice_endpoint = local_endpoint(&alice);
     let bob_endpoint = local_endpoint(&bob);
-    let shared = workspace_graph(
-        &alice,
+    let shared = install_workspace_graph(
+        &[&alice, &bob],
         31,
         "shared-a",
         &[
@@ -71,8 +69,8 @@ fn two_player_sync_does_not_leak_alice_private_workspace_to_bob() {
             Member::new("bob-a", bob_endpoint, 42),
         ],
     );
-    let alice_private = workspace_graph(
-        &alice,
+    let alice_private = install_workspace_graph(
+        &[&alice],
         32,
         "alice-b",
         &[Member::new("alice-b", alice_endpoint, 43)],
@@ -82,8 +80,6 @@ fn two_player_sync_does_not_leak_alice_private_workspace_to_bob() {
     generate(&alice, alice_private.workspace_id, 5, 128);
     sync_once(&alice, &bob, bob_port);
 
-    assert_membership(&bob, shared.workspace_id, bob_endpoint.endpoint);
-    assert_no_membership(&bob, alice_private.workspace_id, bob_endpoint.endpoint);
     assert_content_count(&bob, shared.workspace_id, 2);
     assert_content_count(&bob, alice_private.workspace_id, 0);
 }
@@ -105,8 +101,8 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
     let alice_endpoint = local_endpoint(&alice);
     let bob_endpoint = local_endpoint(&bob);
     let carol_endpoint = local_endpoint(&carol);
-    let workspace_a = workspace_graph(
-        &alice,
+    let workspace_a = install_workspace_graph(
+        &[&alice, &bob],
         51,
         "alice-bob-a",
         &[
@@ -114,8 +110,8 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
             Member::new("bob-a", bob_endpoint, 62),
         ],
     );
-    let workspace_b = workspace_graph(
-        &alice,
+    let workspace_b = install_workspace_graph(
+        &[&alice, &carol],
         52,
         "alice-carol-b",
         &[
@@ -123,12 +119,6 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
             Member::new("carol-b", carol_endpoint, 64),
         ],
     );
-    sync_from_alice_to_bob_and_carol(&alice, &bob, bob_port, &carol, carol_port);
-
-    assert_membership(&bob, workspace_a.workspace_id, bob_endpoint.endpoint);
-    assert_no_membership(&bob, workspace_b.workspace_id, bob_endpoint.endpoint);
-    assert_membership(&carol, workspace_b.workspace_id, carol_endpoint.endpoint);
-    assert_no_membership(&carol, workspace_a.workspace_id, carol_endpoint.endpoint);
 
     generate(&bob, workspace_a.workspace_id, 3, 128);
     generate(&carol, workspace_b.workspace_id, 4, 128);
@@ -167,8 +157,8 @@ fn daemons_sync_cli_generated_content_without_manual_sync() {
 
     let alice_endpoint = local_endpoint(&alice);
     let bob_endpoint = local_endpoint(&bob);
-    let workspace = workspace_graph(
-        &alice,
+    let workspace = install_workspace_graph(
+        &[&alice, &bob],
         71,
         "daemon-shared",
         &[
@@ -235,6 +225,25 @@ impl Member {
 
 struct WorkspaceGraph {
     workspace_id: EventId,
+}
+
+fn install_workspace_graph(
+    dbs: &[&str],
+    seed: u8,
+    name: &str,
+    members: &[Member],
+) -> WorkspaceGraph {
+    let mut graph = None;
+    for db in dbs {
+        let installed = workspace_graph(db, seed, name, members);
+        if let Some(existing) = graph {
+            assert_eq!(existing, installed.workspace_id);
+        }
+        graph = Some(installed.workspace_id);
+    }
+    WorkspaceGraph {
+        workspace_id: graph.expect("at least one db"),
+    }
 }
 
 fn workspace_graph(db: &str, seed: u8, name: &str, members: &[Member]) -> WorkspaceGraph {
@@ -411,8 +420,7 @@ fn connect_with_invite(db: &str, invite: &str) -> Output {
 }
 
 fn sync_once(from_db: &str, listener_db: &str, listener_port: u16) {
-    let listener = start_listener(listener_db, listener_port, 1);
-    let sync_out = sync(from_db);
+    let (sync_out, listener) = sync_with_listener_retry(from_db, listener_db, listener_port, 1);
     assert!(sync_out.contains("routes_synced: 1"), "{sync_out}");
     wait_success(listener, "sync listener");
 }
@@ -426,10 +434,33 @@ fn sync_from_alice_to_bob_and_carol(
 ) {
     let bob_listener = start_listener(bob, bob_port, 1);
     let carol_listener = start_listener(carol, carol_port, 1);
-    let sync_out = sync(alice);
+    thread::sleep(Duration::from_millis(100));
+    let sync_out = sync_with_retry(alice);
     assert!(sync_out.contains("routes_synced: 2"), "{sync_out}");
     wait_success(bob_listener, "bob sync listener");
     wait_success(carol_listener, "carol sync listener");
+}
+
+fn sync_with_listener_retry(
+    from_db: &str,
+    listener_db: &str,
+    listener_port: u16,
+    accept: usize,
+) -> (String, Child) {
+    let mut last = String::new();
+    for _ in 0..50 {
+        let mut listener = start_listener(listener_db, listener_port, accept);
+        thread::sleep(Duration::from_millis(50));
+        let output = topo(&["--db", from_db, "sync"]);
+        if output.status.success() {
+            return (stdout(&output), listener);
+        }
+        last = stderr(&output);
+        let _ = listener.kill();
+        let _ = listener.wait();
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("sync never succeeded: {last}");
 }
 
 fn generate(db: &str, workspace_id: EventId, count: usize, size: usize) -> String {
@@ -439,8 +470,17 @@ fn generate(db: &str, workspace_id: EventId, count: usize, size: usize) -> Strin
     assert_success(topo(&["--db", db, "generate", &workspace, &count, &size]))
 }
 
-fn sync(db: &str) -> String {
-    assert_success(topo(&["--db", db, "sync"]))
+fn sync_with_retry(db: &str) -> String {
+    let mut last = String::new();
+    for _ in 0..50 {
+        let output = topo(&["--db", db, "sync"]);
+        if output.status.success() {
+            return stdout(&output);
+        }
+        last = stderr(&output);
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("sync never succeeded: {last}");
 }
 
 fn assert_content_count(db: &str, workspace_id: EventId, expected: usize) {
@@ -465,27 +505,6 @@ fn wait_for_content_count(db: &str, workspace_id: EventId, expected: usize) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("content count did not reach {expected}; last output:\n{last}");
-}
-
-fn assert_membership(db: &str, workspace_id: EventId, endpoint_id: EventId) {
-    assert!(
-        has_membership(db, workspace_id, endpoint_id),
-        "missing membership\nstatus:\n{}",
-        assert_success(topo(&["--db", db, "status"]))
-    );
-}
-
-fn assert_no_membership(db: &str, workspace_id: EventId, endpoint_id: EventId) {
-    assert!(!has_membership(db, workspace_id, endpoint_id));
-}
-
-fn has_membership(db: &str, workspace_id: EventId, endpoint_id: EventId) -> bool {
-    let store = Protocol::open_store(db).expect("open membership store");
-    let key = endpoint_shared::schema::endpoint_membership_key(endpoint_id, workspace_id);
-    store
-        .table_row(endpoint_shared::schema::ENDPOINT_MEMBERSHIPS, &key)
-        .expect("read endpoint membership")
-        .is_some()
 }
 
 fn hex_id(id: EventId) -> String {

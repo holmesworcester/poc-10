@@ -53,13 +53,15 @@ mod tests {
     use crate::protocol::event_modules::worker::EventContext;
     use crate::protocol::event_modules::{connection, sync};
 
-    use super::super::types::{BucketSummary, CompareEvent, BUCKETS};
+    use super::super::types::{CompareEvent, RangeSummary, TimestampRange};
     use super::*;
 
     fn compare_event() -> CompareEvent {
         CompareEvent {
             connection_id: [4; 32],
-            summary: [BucketSummary::default(); BUCKETS],
+            range: TimestampRange::ROOT,
+            summary: RangeSummary::default(),
+            response_requested: true,
         }
     }
 

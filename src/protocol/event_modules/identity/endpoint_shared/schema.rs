@@ -35,6 +35,20 @@ pub fn endpoint_membership_key(endpoint_id: EndpointId, workspace_id: EventId) -
     key
 }
 
+impl super::commands::EndpointMembershipRead for Store {
+    fn endpoint_membership(
+        &self,
+        endpoint_id: EndpointId,
+        workspace_id: EventId,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.table_row(
+            ENDPOINT_MEMBERSHIPS,
+            &endpoint_membership_key(endpoint_id, workspace_id),
+        )
+        .map_err(|err| format!("load endpoint membership: {err}"))
+    }
+}
+
 pub fn endpoint_shared_rows(
     endpoint_shared_id: EventId,
     device_invite_id: EventId,
