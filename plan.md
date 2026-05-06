@@ -35,6 +35,34 @@ Do not implement this in the main `/home/holmes/poc-8` worktree.
   events plus durable purge of obsolete event bytes and local secrets after
   durable deletion/frontier facts preserve semantic state.
 
+### Design note: file descriptor `root_hash` is plaintext
+
+In the encrypted file shape, `filename` and `mime` ride in an authenticated
+ciphertext slot keyed by the parent message's content key; `root_hash` (the
+BLAKE3 root of the per-slice ciphertexts) is left plaintext in the descriptor's
+canonical bytes.
+
+**Reasoning**: encrypting `root_hash` would force the slice projector to call
+decrypt before BAO verification, which violates the "projectors do not do
+crypto" rule (`event_module_projectors_do_not_do_transit_or_crypto_work`).
+With `root_hash` plaintext, the slice projector reads it from the descriptor's
+clear-text fields and verifies slice ciphertext directly, no decryption
+needed at projection time.
+
+**Why the leak is benign here**: `root_hash = blake3(ciphertext)` does not
+itself reveal plaintext; it is at most an offline-verifier for guesses
+combined with a recovered key. Pre-delete, the ciphertext is on disk too, so
+`root_hash` adds no information. Post-delete, the entire file event is
+purged through `content_purge`, including `root_hash`, so the
+forward-secrecy property still holds against an on-disk attacker.
+
+**Alternatives considered**: (a) seal `root_hash` and have the slice projector
+decrypt the descriptor — clean from a leak perspective, but breaks the
+projector boundary. (b) duplicate `root_hash` into every slice's canonical
+bytes — preserves the boundary but inflates per-slice canonical bytes by 32
+and creates a content-id encoding circle to reason about. The current shape
+is the right tradeoff for this threat model.
+
 ## Scope
 
 In scope:
