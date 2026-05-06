@@ -248,6 +248,7 @@ fn daemon_runner_is_core_and_protocol_supplies_workers() {
     let workers = source_text(&root.join("src/workers/mod.rs"));
     assert!(
         workers.contains("pub fn daemon_workers")
+            && workers.contains("bootstrap_exchange::daemon_worker")
             && workers.contains("transit_in::daemon_worker")
             && workers.contains("event_admission::daemon_worker")
             && workers.contains("sync::daemon_worker"),
@@ -614,7 +615,9 @@ fn workers_folder_has_standard_catalog_shape() {
         "common/mod.rs",
         "common/event_pipeline.rs",
         "common/retention.rs",
+        "bootstrap_exchange.rs",
         "transit_in.rs",
+        "content_purge.rs",
         "event_admission.rs",
         "event_projection.rs",
         "dependency_unblock.rs",
@@ -635,11 +638,11 @@ fn workers_folder_has_standard_catalog_shape() {
 }
 
 #[test]
-fn transit_receive_is_transit_in_and_outbound_is_transit_out() {
+fn socket_receive_is_bootstrap_exchange_transit_in_and_outbound_is_transit_out() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     assert!(
         !root.join("src/workers/connection_io.rs").exists(),
-        "transit mechanics should live behind transit_in and transit_out"
+        "transit mechanics should live behind bootstrap_exchange, transit_in, and transit_out"
     );
     assert!(
         !root.join("src/workers/connection.rs").exists(),
@@ -649,9 +652,10 @@ fn transit_receive_is_transit_in_and_outbound_is_transit_out() {
     let catalog = source_text(&root.join("src/workers/mod.rs"));
     assert!(
         catalog.contains("transit_in::daemon_worker()")
+            && catalog.contains("bootstrap_exchange::daemon_worker()")
             && catalog.contains("event_admission::daemon_worker()")
             && catalog.contains("transit_out::daemon_worker()"),
-        "the daemon catalog should schedule transit_in, event_admission, and transit_out workers"
+        "the daemon catalog should schedule bootstrap_exchange, transit_in, event_admission, and transit_out workers"
     );
     assert!(
         !catalog.contains("connection_io::daemon_worker()"),

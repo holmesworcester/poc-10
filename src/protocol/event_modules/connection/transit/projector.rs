@@ -18,8 +18,9 @@
 //! ```
 //!
 //! The next admission step classifies those inner bytes under the provenance:
-//! bootstrap transit may only admit connection requests; connection transit may
-//! admit connection-scoped sync events or shared workspace events after the
+//! endpoint bootstrap may only admit connection requests; invite bootstrap may
+//! only admit shared identity facts for the invite workspace; connection transit
+//! may admit connection-scoped sync events or shared workspace events after the
 //! mutual-endpoint workspace check. That split prevents an adversary from
 //! wrapping arbitrary local event bytes and having them projected as if they
 //! came from a trusted connection.
@@ -28,19 +29,19 @@ use crate::core::crypto;
 use crate::core::network_queues::InboundNetworkRow;
 use crate::core::store::Store;
 use crate::protocol::event_modules::connection::types::ConnectionId;
-use crate::protocol::event_modules::identity::endpoint;
 use crate::protocol::event_modules::identity::endpoint::types::{EndpointId, EndpointKeypair};
+use crate::protocol::event_modules::identity::{endpoint, invite};
 use crate::protocol::event_modules::worker::ProjectionOutput;
 use crate::workers::schema::{self as worker_schema, TransitProvenance, TransitUnwrap};
 
 use super::super::schema as connection_schema;
 use super::codec::{self, TransitEnvelopeRef};
-use super::types::{BOOTSTRAP_PURPOSE, CONNECTION_PURPOSE};
+use super::types::{BOOTSTRAP_PURPOSE, CONNECTION_PURPOSE, INVITE_BOOTSTRAP_PURPOSE};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnwrappedTransit {
     inners: Vec<Vec<u8>>,
-    connection_id: Option<ConnectionId>,
+    unwrapped_with: TransitUnwrap,
     sender_endpoint: EndpointId,
 }
 
@@ -56,7 +57,7 @@ pub fn project_network_in(
 ) -> Result<ProjectionOutput, String> {
     let local = local_endpoint(store)?;
     let origin = inbound.source.addr();
-    let transit = unwrap(local, &inbound.bytes, |connection_id| {
+    let transit = unwrap(store, local, &inbound.bytes, |connection_id| {
         connection_schema::remote_endpoint(store, *connection_id)
     })?;
     let mut rows = Vec::with_capacity(transit.inners.len());
@@ -66,10 +67,7 @@ pub fn project_network_in(
             local_endpoint: local.endpoint,
             sender_endpoint: transit.sender_endpoint,
             remember_route,
-            unwrapped_with: match transit.connection_id {
-                Some(connection_id) => TransitUnwrap::Connection { connection_id },
-                None => TransitUnwrap::Bootstrap,
-            },
+            unwrapped_with: transit.unwrapped_with,
         };
         rows.push(worker_schema::transit_canonical_in_row(inner, provenance));
     }
@@ -85,6 +83,7 @@ fn local_endpoint(store: &Store) -> Result<endpoint::types::EndpointKeypair, Str
 }
 
 fn unwrap(
+    store: &Store,
     local: EndpointKeypair,
     bytes: &[u8],
     remote_endpoint: impl FnOnce(&ConnectionId) -> Result<EndpointId, String>,
@@ -111,7 +110,52 @@ fn unwrap(
             )?;
             Ok(UnwrappedTransit {
                 inners: vec![inner],
-                connection_id: None,
+                unwrapped_with: TransitUnwrap::Bootstrap,
+                sender_endpoint,
+            })
+        }
+        TransitEnvelopeRef::InviteBootstrap {
+            sender_endpoint,
+            recipient_endpoint,
+            bootstrap_hash,
+            workspace_id,
+            invite_event_id,
+            nonce,
+            ciphertext,
+        } => {
+            if recipient_endpoint != local.endpoint {
+                return Err(
+                    "invite bootstrap transit addressed to a different endpoint".to_string()
+                );
+            }
+            let invite_secret = invite::schema::invite_secret_by_hash(store, &bootstrap_hash)?;
+            if invite_secret.workspace_id != Some(workspace_id)
+                || invite_secret.invite_event_id != Some(invite_event_id)
+            {
+                return Err("invite bootstrap key is not scoped to envelope invite".to_string());
+            }
+            let associated_data = codec::associated_data_invite_bootstrap(
+                &sender_endpoint,
+                &recipient_endpoint,
+                &bootstrap_hash,
+                &workspace_id,
+                &invite_event_id,
+                &nonce,
+            );
+            let key = crypto::hkdf_sha256_key(
+                &invite_secret.bootstrap_secret,
+                INVITE_BOOTSTRAP_PURPOSE,
+                &associated_data,
+            )?;
+            let plaintext =
+                crypto::xchacha20poly1305_decrypt(&key, &associated_data, &nonce, ciphertext)?;
+            Ok(UnwrappedTransit {
+                inners: codec::decode_inner_events(&plaintext)?,
+                unwrapped_with: TransitUnwrap::InviteBootstrap {
+                    bootstrap_hash,
+                    workspace_id,
+                    invite_event_id,
+                },
                 sender_endpoint,
             })
         }
@@ -144,7 +188,7 @@ fn unwrap(
             )?;
             Ok(UnwrappedTransit {
                 inners: codec::decode_inner_events(&plaintext)?,
-                connection_id: Some(connection_id),
+                unwrapped_with: TransitUnwrap::Connection { connection_id },
                 sender_endpoint,
             })
         }
@@ -155,7 +199,7 @@ fn unwrap(
 mod tests {
     use crate::core::network_queues::{InboundNetworkRow, NetworkSource};
     use crate::protocol::event_modules::connection::transit;
-    use crate::protocol::event_modules::identity::endpoint;
+    use crate::protocol::event_modules::identity::{endpoint, invite};
     use crate::protocol::Protocol;
     use crate::workers::schema::{self as worker_schema, TransitUnwrap};
 
@@ -221,5 +265,65 @@ mod tests {
         let err = project_network_in(&store, &inbound, false).expect_err("wrong endpoint");
 
         assert!(err.contains("addressed to a different endpoint"), "{err}");
+    }
+
+    #[test]
+    fn invite_bootstrap_frame_projects_batched_inner_bytes_with_invite_provenance() {
+        // Invariant: invite bootstrap decrypts with the invite-secret row and
+        // preserves workspace/invite provenance on every recovered event.
+        let local = keypair();
+        let remote = keypair();
+        let bootstrap_secret = [7; 32];
+        let bootstrap_hash = invite::types::bootstrap_secret_hash(&bootstrap_secret);
+        let workspace_id = [8; 32];
+        let invite_event_id = [9; 32];
+        let store = Protocol::open_memory_store().expect("open store");
+        let mut rows = endpoint::projector::local_endpoint(local);
+        rows.extend(invite::projector::invite_secret(
+            bootstrap_hash,
+            bootstrap_secret,
+            Some(workspace_id),
+            Some(invite_event_id),
+        ));
+        store.insert_table_rows(rows).expect("insert local rows");
+        let first = b"first identity bytes".to_vec();
+        let second = b"second identity bytes".to_vec();
+        let frame = transit::commands::create_invite_bootstrap_batch(
+            &remote,
+            local.endpoint,
+            &bootstrap_secret,
+            workspace_id,
+            invite_event_id,
+            vec![first.clone(), second.clone()],
+        )
+        .expect("create invite bootstrap frame");
+        let inbound = InboundNetworkRow::new(
+            NetworkSource::new("127.0.0.1:41001".parse().expect("addr")),
+            frame,
+        );
+
+        let output = project_network_in(&store, &inbound, false).expect("project frame");
+
+        assert_eq!(output.rows.len(), 2);
+        store
+            .insert_table_rows(output.rows)
+            .expect("insert canonical rows");
+        let mut queued = worker_schema::claim_canonical_in(&store, 2).expect("claim canonical");
+        queued.sort_by(|left, right| left.canonical_bytes.cmp(&right.canonical_bytes));
+        assert_eq!(queued[0].canonical_bytes, first);
+        assert_eq!(queued[1].canonical_bytes, second);
+        for row in queued {
+            let provenance = row.provenance.expect("provenance");
+            assert_eq!(provenance.local_endpoint, local.endpoint);
+            assert_eq!(provenance.sender_endpoint, remote.endpoint);
+            assert_eq!(
+                provenance.unwrapped_with,
+                TransitUnwrap::InviteBootstrap {
+                    bootstrap_hash,
+                    workspace_id,
+                    invite_event_id,
+                }
+            );
+        }
     }
 }

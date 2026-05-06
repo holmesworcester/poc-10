@@ -9,10 +9,10 @@
 mod cli_harness;
 
 use std::io::{BufRead, BufReader, Read};
-use std::process::Child;
+use std::process::{Child, Output};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cli_harness::*;
 
@@ -106,6 +106,16 @@ fn workspace_invite_accept_builds_identity_graph_over_two_cli_processes() {
     let host_users = assert_success(topo(&["--db", &host, "users", &workspace_id]));
     assert!(host_users.contains("alice"), "{host_users}");
     assert!(host_users.contains("bob"), "{host_users}");
+    assert_eq!(
+        invite_accepted_count(&joiner),
+        1,
+        "acceptor should persist one local invite_accepted provenance row"
+    );
+    assert_eq!(
+        invite_accepted_count(&host),
+        0,
+        "invite creator stores invite_secret authority, not invite_accepted provenance"
+    );
 
     let duplicate = topo(&[
         "--db",
@@ -127,6 +137,36 @@ fn workspace_invite_accept_builds_identity_graph_over_two_cli_processes() {
         "{}",
         stderr(&duplicate)
     );
+}
+
+#[test]
+fn workspace_invite_accept_against_start_daemon_receives_bootstrap_ancestry_without_sync() {
+    // Invariant: a long-running daemon uses the same bootstrap exchange as a
+    // finite invite listener, so the acceptor receives invite ancestry during
+    // `accept` and does not need a separate manual sync to validate the invite.
+    let tmp = tempfile::tempdir().unwrap();
+    let host = temp_db(&tmp, "host.db");
+    let joiner = temp_db(&tmp, "joiner.db");
+    let port = free_port();
+
+    let created = create_workspace(&host, "Alpha", "alice", "alice-laptop");
+    let workspace_id = line_value(&created, "workspace_id");
+    let invite = workspace_invite_link(&host, &workspace_id, port);
+    let _daemon = spawn_daemon(&host, port);
+
+    let accepted = try_accept_with_identity_timeout(
+        &joiner,
+        &invite,
+        "bob",
+        "bob-phone",
+        Duration::from_secs(10),
+    )
+    .expect("accept against daemon");
+    assert!(accepted.contains("connected:"), "{accepted}");
+    assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
+
+    wait_for_users_containing(&joiner, &workspace_id, &["alice", "bob"]);
+    wait_for_users_containing(&host, &workspace_id, &["alice", "bob"]);
 }
 
 #[test]
@@ -911,6 +951,69 @@ fn try_accept_with_identity_retry(
     Err(last)
 }
 
+fn try_accept_with_identity_timeout(
+    db: &str,
+    invite: &str,
+    username: &str,
+    device_name: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let start = Instant::now();
+    let mut last = String::new();
+    while start.elapsed() < timeout {
+        let output = topo_with_timeout(
+            &[
+                "--db",
+                db,
+                "accept",
+                invite,
+                "--username",
+                username,
+                "--devicename",
+                device_name,
+            ],
+            Duration::from_secs(3),
+        )?;
+        if output.status.success() {
+            return Ok(stdout(&output));
+        }
+        last = stderr(&output);
+        if !last.contains("open tcp stream") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Err(last)
+}
+
+fn topo_with_timeout(args: &[&str], timeout: Duration) -> Result<Output, String> {
+    let mut child = spawn_topo(args);
+    let start = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .map_err(|err| format!("poll topo child: {err}"))?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .map_err(|err| format!("wait topo child: {err}"));
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .map_err(|err| format!("wait killed topo child: {err}"))?;
+            return Err(format!(
+                "topo command timed out\nstdout={}\nstderr={}",
+                stdout(&output),
+                stderr(&output)
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn try_accept_link_with_retry(db: &str, invite: &str, device_name: &str) -> Result<String, String> {
     let mut last = String::new();
     for _ in 0..200 {
@@ -934,12 +1037,35 @@ fn try_accept_link_with_retry(db: &str, invite: &str, device_name: &str) -> Resu
     Err(last)
 }
 
+fn wait_for_users_containing(db: &str, workspace_id: &str, users: &[&str]) {
+    let start = Instant::now();
+    let mut last = String::new();
+    while start.elapsed() < Duration::from_secs(10) {
+        let output = topo(&["--db", db, "users", workspace_id]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if users.iter().all(|user| text.contains(user)) {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("users never contained {users:?}:\n{last}");
+}
+
 fn connection_count(db: &str) -> usize {
     count_value(db, "connections")
 }
 
 fn connection_event_count(db: &str) -> usize {
     count_value(db, "connection_events")
+}
+
+fn invite_accepted_count(db: &str) -> usize {
+    count_value(db, "invite_accepted")
 }
 
 fn user_id_by_name(db: &str, workspace_id: &str, username: &str) -> String {

@@ -3,9 +3,9 @@
 //! Inputs: accepted TCP frames staged as `core.network.inbound`.
 //! State: local endpoint secret material and connection route facts read by the
 //! protocol transit projector.
-//! Step: accept at most one available TCP stream, claim up to `limit` inbound
-//! network rows, ask the protocol registry to unwrap each row, and write the
-//! recovered inner bytes to `canonical.in` with transit provenance.
+//! Step: claim up to `limit` inbound network rows, ask the protocol registry to
+//! unwrap each row, and write the recovered inner bytes to `canonical.in` with
+//! transit provenance. Socket accept/exchange belongs to `bootstrap_exchange`.
 //! Outputs: `canonical.in` rows for the event admission worker.
 //! Consume: accepted network rows are deleted after their projection rows are
 //! written; rejected rows are deleted so malformed transport bytes do not poison
@@ -13,8 +13,7 @@
 //! Failure: unwrap/authentication/projection errors stop the turn after the bad
 //! network row is consumed. The resulting `canonical.in` rows are not decoded
 //! or semantically admitted here.
-//! Fairness: `Work::Drain { limit }` bounds queue drains; TCP accept handles at
-//! most one available stream per daemon call.
+//! Fairness: `Work::Drain { limit }` bounds queue drains.
 
 use crate::core::daemon::{StepContext, Worker};
 use crate::core::store::Store;
@@ -50,11 +49,6 @@ where
     C: DaemonWorkerContext,
 {
     let app = &*ctx.app;
-    let accept = ctx.listener.accept_available(app.store())?;
-    ctx.report
-        .add("accepted_connections", accept.accepted_connections);
-    ctx.report
-        .add("received_frames", accept.value.received_frames);
     let report = run(
         app.store(),
         app,

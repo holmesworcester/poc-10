@@ -9,10 +9,14 @@ use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointKeypair;
 
 use crate::core::crypto;
+use crate::protocol::event_modules::identity::invite;
+use crate::protocol::event_modules::types::EventId;
 
 use super::super::types::ConnectionId;
 use super::codec;
-use super::types::{TransitEnvelope, BOOTSTRAP_PURPOSE, CONNECTION_PURPOSE};
+use super::types::{
+    TransitEnvelope, BOOTSTRAP_PURPOSE, CONNECTION_PURPOSE, INVITE_BOOTSTRAP_PURPOSE,
+};
 
 pub fn create_bootstrap(
     local: &EndpointKeypair,
@@ -39,6 +43,44 @@ pub fn create_bootstrap(
     Ok(codec::encode(&TransitEnvelope::Bootstrap {
         sender_endpoint: local.endpoint,
         recipient_endpoint,
+        nonce,
+        ciphertext,
+    }))
+}
+
+pub fn create_invite_bootstrap_batch(
+    local: &EndpointKeypair,
+    recipient_endpoint: EndpointId,
+    bootstrap_secret: &[u8; 32],
+    workspace_id: EventId,
+    invite_event_id: EventId,
+    inners: Vec<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    // Invite bootstrap is deliberately not an endpoint X25519 handshake. The
+    // copied invite secret is the authority, and the envelope binds it to one
+    // workspace/invite pair before any inner canonical bytes are admitted.
+    let bootstrap_hash = invite::types::bootstrap_secret_hash(bootstrap_secret);
+    let nonce = crypto::random_xchacha20poly1305_nonce();
+    let envelope = TransitEnvelope::InviteBootstrap {
+        sender_endpoint: local.endpoint,
+        recipient_endpoint,
+        bootstrap_hash,
+        workspace_id,
+        invite_event_id,
+        nonce,
+        ciphertext: Vec::new(),
+    };
+    let associated_data = codec::associated_data(&envelope);
+    let key =
+        crypto::hkdf_sha256_key(bootstrap_secret, INVITE_BOOTSTRAP_PURPOSE, &associated_data)?;
+    let plaintext = codec::encode_inner_events(&inners)?;
+    let ciphertext = crypto::xchacha20poly1305_encrypt(&key, &associated_data, &nonce, &plaintext)?;
+    Ok(codec::encode(&TransitEnvelope::InviteBootstrap {
+        sender_endpoint: local.endpoint,
+        recipient_endpoint,
+        bootstrap_hash,
+        workspace_id,
+        invite_event_id,
         nonce,
         ciphertext,
     }))

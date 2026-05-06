@@ -89,6 +89,7 @@ pub fn schemas() -> Vec<Schema> {
     out.extend_from_slice(identity::endpoint::schema::SCHEMAS);
     out.extend_from_slice(identity::endpoint_shared::schema::SCHEMAS);
     out.extend_from_slice(identity::invite::schema::SCHEMAS);
+    out.extend_from_slice(identity::invite_accepted::schema::SCHEMAS);
     out.extend_from_slice(identity::invite_server::schema::SCHEMAS);
     out.extend_from_slice(identity::user::schema::SCHEMAS);
     out.extend_from_slice(identity::user_invite::schema::SCHEMAS);
@@ -151,29 +152,9 @@ fn record_from_transit_canonical_in(
     match provenance.unwrapped_with {
         TransitUnwrap::Bootstrap => {
             if !connection::connection_request::codec::is_request(&bytes) {
-                let record = record_from_bytes(bytes)?;
-                if !record.scope.is_shared() {
-                    return Err("bootstrap transit only accepts shared identity events".to_string());
-                }
-                let workspace_id = record.workspace_id.ok_or_else(|| {
-                    "bootstrap transit shared event requires a workspace".to_string()
-                })?;
-                if !is_identity_bootstrap_event(&record.canonical_bytes)? {
-                    return Err(
-                        "bootstrap transit only accepts identity bootstrap events".to_string()
-                    );
-                }
-                if !connection::schema::bootstrap_endpoint_workspace_exists(
-                    store,
-                    provenance.local_endpoint,
-                    provenance.sender_endpoint,
-                    workspace_id,
-                )? {
-                    return Err(
-                        "bootstrap transit rejected event outside invite workspace".to_string()
-                    );
-                }
-                return Ok(ReceivedRecord::new(record));
+                return Err(
+                    "endpoint bootstrap transit only carries connection requests".to_string(),
+                );
             }
             let record = connection::connection_request::codec::record_from_bytes(bytes)?;
             return Ok(ReceivedRecord::with_receive(
@@ -185,6 +166,23 @@ fn record_from_transit_canonical_in(
                     provenance.remember_route,
                 ),
             ));
+        }
+        TransitUnwrap::InviteBootstrap { workspace_id, .. } => {
+            let record = record_from_bytes(bytes)?;
+            if !record.scope.is_shared() {
+                return Err("invite bootstrap transit only accepts shared events".to_string());
+            }
+            if record.workspace_id != Some(workspace_id) {
+                return Err(
+                    "invite bootstrap transit rejected event outside invite workspace".to_string(),
+                );
+            }
+            if !is_identity_bootstrap_event(&record.canonical_bytes)? {
+                return Err(
+                    "invite bootstrap transit only accepts identity bootstrap events".to_string(),
+                );
+            }
+            return Ok(ReceivedRecord::new(record));
         }
         TransitUnwrap::Connection { connection_id } => {
             if connection::connection_request::codec::is_request(&bytes) {
@@ -209,7 +207,7 @@ fn record_from_transit_canonical_in(
         }
     }
     let TransitUnwrap::Connection { .. } = provenance.unwrapped_with else {
-        return Err("bootstrap transit only carries connection requests".to_string());
+        return Err("transit provenance cannot admit this event".to_string());
     };
     let record = record_from_bytes(bytes)?;
     if !record.scope.is_shared() {
@@ -279,6 +277,9 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         identity::signed::codec::TYPE_SIGNED => identity::signed_record_from_bytes(bytes),
         identity::invite::codec::TYPE_INVITE_SECRET => {
             identity::invite::codec::record_from_bytes(bytes)
+        }
+        identity::invite_accepted::codec::TYPE_INVITE_ACCEPTED => {
+            identity::invite_accepted::codec::record_from_bytes(bytes)
         }
         identity::workspace::codec::TYPE_WORKSPACE => {
             identity::workspace::codec::record_from_bytes(bytes)

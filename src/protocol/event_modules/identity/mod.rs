@@ -1,9 +1,9 @@
 //! Identity domain.
 //!
-//! Identity owns shared workspace roots plus local endpoint material and invite
-//! secrets. Local facts let this node create bootstrap traffic and decide
-//! whether an incoming request is authorized, but they are not shared content
-//! history.
+//! Identity owns shared workspace roots plus local endpoint material,
+//! invite-secret material, and invite-acceptance provenance. Local facts let this
+//! node create bootstrap traffic and remember why it is allowed to decrypt an
+//! invite-key lane, but they are not shared content history or membership grants.
 
 pub mod admin;
 pub mod cli;
@@ -11,6 +11,7 @@ pub mod device_invite;
 pub mod endpoint;
 pub mod endpoint_shared;
 pub mod invite;
+pub mod invite_accepted;
 pub mod invite_server;
 pub mod signed;
 pub mod user;
@@ -35,6 +36,9 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
         }
         Some(signed::codec::TYPE_SIGNED) => project_signed_record(event),
         Some(invite::codec::TYPE_INVITE_SECRET) => Ok(Some(invite::projector::project(bytes)?)),
+        Some(invite_accepted::codec::TYPE_INVITE_ACCEPTED) => {
+            Ok(Some(invite_accepted::projector::project(event)?))
+        }
         Some(workspace::codec::TYPE_WORKSPACE) => Ok(Some(workspace::projector::project(bytes)?)),
         _ => Ok(None),
     }

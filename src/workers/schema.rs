@@ -84,6 +84,12 @@ pub struct TransitProvenance {
 pub enum TransitUnwrap {
     /// Bootstrap envelope addressed directly to the local endpoint key.
     Bootstrap,
+    /// Invite-secret envelope scoped to one workspace invite.
+    InviteBootstrap {
+        bootstrap_hash: EventId,
+        workspace_id: EventId,
+        invite_event_id: EventId,
+    },
     /// Established connection envelope addressed through a connection id.
     Connection { connection_id: ConnectionId },
 }
@@ -429,6 +435,16 @@ fn encode_transit_provenance(writer: &mut Writer, provenance: Option<TransitProv
             writer.u8(1);
             writer.id(&connection_id);
         }
+        TransitUnwrap::InviteBootstrap {
+            bootstrap_hash,
+            workspace_id,
+            invite_event_id,
+        } => {
+            writer.u8(2);
+            writer.id(&bootstrap_hash);
+            writer.id(&workspace_id);
+            writer.id(&invite_event_id);
+        }
     }
 }
 
@@ -457,6 +473,11 @@ fn decode_transit_provenance(reader: &mut Reader<'_>) -> Result<Option<TransitPr
                 0 => TransitUnwrap::Bootstrap,
                 1 => TransitUnwrap::Connection {
                     connection_id: reader.id()?,
+                },
+                2 => TransitUnwrap::InviteBootstrap {
+                    bootstrap_hash: reader.id()?,
+                    workspace_id: reader.id()?,
+                    invite_event_id: reader.id()?,
                 },
                 other => return Err(format!("unknown canonical in transit unwrap tag {other}")),
             };

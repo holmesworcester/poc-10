@@ -74,10 +74,12 @@ for worker in workers:
 The daemon's current worker catalog is:
 
 ```text
+bootstrap_exchange
 transit_in
 event_admission
 event_projection
 dependency_unblock
+content_purge
 sync
 transit_out
 ```
@@ -87,6 +89,14 @@ single route/frame boundary.
 
 ## Current Workers
 
+- `bootstrap_exchange`: accepts daemon or finite-listener TCP streams and runs
+  the pre-route exchange. Unscoped invites carry connection requests. Identity
+  invites carry one invite-key batch of shared identity bootstrap events and, on
+  the invite owner, produce one reply batch containing the invite event's
+  current workspace identity-bootstrap set, excluding the acceptor's
+  just-submitted events. It is a socket adapter over transit projection and the
+  common event pipeline; it does not project identity facts directly or make a
+  normal connection exist.
 - `transit_in`: consumes raw `core.network.inbound` frames. It runs the
   protocol transit projector, unwraps/authenticates transport envelopes using
   explicit local context, and writes recovered inner bytes to `canonical.in`
@@ -104,6 +114,9 @@ single route/frame boundary.
 - `dependency_unblock`: consumes `event_modules.recently_valid_events`, clears
   missing-dependency edges, and writes newly unblocked events to
   `event_modules.ready_events`.
+- `content_purge`: consumes worker-owned local retention work and deletes local
+  payload bytes after durable semantic events preserve what peers need to know.
+  It is not a protocol deletion event and does not authorize remote erasure.
 - `sync`: consumes `event_modules.applied_shared_events`, `sync.in`, and
   explicit sync-start requests. It catches up the protocol-owned warm sync
   index before responding, calls sync commands for compare/have/need decisions,

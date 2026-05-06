@@ -84,31 +84,13 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
                 receive.origin(),
             ));
         }
-        if let Some(workspace_id) = invite_secret.workspace_id {
-            // A scoped invite proves a temporary workspace boundary for this
-            // endpoint pair. That lets the invitee send the identity bootstrap
-            // facts needed to become a normal mutually joined endpoint; after
-            // membership projects, ordinary connection workspace checks take
-            // over.
-            rows.push(projection::bootstrap_workspace_row(
-                connection_id,
-                workspace_id,
-            ));
-            rows.push(projection::bootstrap_endpoint_workspace_row(
-                receive.local_endpoint(),
-                event.from_endpoint,
-                workspace_id,
-            ));
-        }
     } else {
         // Local requests have no receive metadata because this node created
         // them. Admission has already applied the invite-secret dependency, so
         // projection can learn the local view of the connection to the invite
-        // endpoint without another network round trip. Scoped identity invites
-        // also authorize bootstrap identity facts in the opposite direction:
-        // after sending the request, the requester may receive the inviter's
-        // workspace/user/admin facts over bootstrap transit before ordinary
-        // endpoint membership has projected on both sides.
+        // endpoint without another network round trip. Scoped identity
+        // bootstrap is not authorized here; invite-key transit carries that
+        // workspace proof per event.
         let connection_id = types::connection_id(&request_id, &event.to_endpoint);
         rows.push(projection::connection_row(connection_id, event.to_endpoint));
         let invite_secret = envelope
@@ -119,17 +101,6 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
             .map_err(|_| "connection request dependency is not an invite secret".to_string())?;
         if invite_secret.bootstrap_hash != event.bootstrap_hash {
             return Err("connection request bootstrap hash is not authorized".to_string());
-        }
-        if let Some(workspace_id) = invite_secret.workspace_id {
-            rows.push(projection::bootstrap_workspace_row(
-                connection_id,
-                workspace_id,
-            ));
-            rows.push(projection::bootstrap_endpoint_workspace_row(
-                event.from_endpoint,
-                event.to_endpoint,
-                workspace_id,
-            ));
         }
     }
 
@@ -230,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn local_scoped_request_authorizes_bootstrap_identity_facts() {
+    fn local_scoped_request_projects_connection_only_not_bootstrap_authorization() {
         let (record, invite_secret_event_id, invite_record) = scoped_authorized_request_record();
         let output = project(&context_with_dependency(
             &record,
@@ -239,12 +210,9 @@ mod tests {
         ))
         .expect("project local scoped request");
 
-        assert_eq!(output.rows.len(), 4);
+        assert_eq!(output.rows.len(), 2);
         assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
         assert_eq!(output.rows[1].table, schema::CONNECTIONS);
-        assert_eq!(output.rows[2].table, schema::BOOTSTRAP_WORKSPACES);
-        assert_eq!(output.rows[3].table, schema::BOOTSTRAP_ENDPOINT_WORKSPACES);
-        assert_eq!(output.rows[2].value, [6; 32]);
     }
 
     #[test]

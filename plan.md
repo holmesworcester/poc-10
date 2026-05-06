@@ -11,6 +11,46 @@ I want to rewrite topo with clarity on:
 
 See appendix for documentation style rules and references.
 
+# Bootstrap Transit Simplification
+
+Bootstrap for identity invites is an invite-key transit lane, not a
+connection-request subprotocol. The authorization relation is per carried event:
+
+```text
+workspace <=> invite-derived transit key used <=> canonical event bytes
+```
+
+The invite creator stores a local invite-secret row keyed by the bootstrap hash.
+The acceptor learns the same secret from the invite link and stores the same
+local row before opening the bootstrap stream. A bootstrap frame then carries:
+
+- sender endpoint
+- recipient endpoint
+- bootstrap hash
+- workspace id
+- invite event id
+- encrypted batch of canonical shared identity events
+
+The authenticated envelope metadata chooses the invite-secret row and the
+workspace boundary. The decrypted canonical bytes still go through the normal
+event pipeline; there is no alternate admission path. Invite bootstrap may admit
+only shared identity-bootstrap events for the named workspace. It must not admit
+content, sync, local-only facts, or connection-scoped events.
+
+The acceptor sends one invite-bootstrap batch containing the proposed join facts.
+The inviter admits those facts and replies with one invite-bootstrap batch
+containing the current workspace identity-bootstrap set. That is intentionally
+one batch rather than one frame per event, and it is still per-event
+authorization because admission checks every decrypted canonical event against
+the invite envelope workspace. The reply excludes the acceptor's just-submitted
+events because the acceptor admits those local proposals after validating the
+invite. The acceptor then has enough ancestry to validate the invite key against
+the received invite row and admit its own already-proposed facts locally.
+
+Normal connection requests are ordinary connection establishment, separate from
+identity bootstrap. They should not authorize workspace bootstrap events, and
+identity bootstrap should not create connection-route rows as a side effect.
+
 # Identity/Auth Graph Port Plan
 
 This branch ports the latest `poc-7` identity and auth graph behavior into
@@ -115,6 +155,16 @@ p7 peer_secret     -> p8 endpoint-local secret/private-key event
 p7 invite_secret   -> p8 local-only invite/bootstrap secret event
 p7 invite_accepted -> p8 local-only acceptance/provenance event
 ```
+
+The p8 `invite_accepted` event preserves the p6/p7 projector pattern without
+restoring p7 transport-trust machinery. Invite creation records the creator's
+scoped `invite_secret` so the creator can decrypt future accept traffic. Invite
+acceptance records the acceptor's scoped `invite_secret` and a deterministic
+`invite_accepted` event in the same command output. `invite_accepted` depends on
+that local secret event, carries no raw secret, and projects
+`identity.invites_accepted`. It is acceptance/provenance for the out-of-band link,
+not shared membership, route creation, or proof that the shared invite row has
+already been received.
 
 Target identity chain:
 
@@ -228,8 +278,8 @@ Likely row families:
 - `identity.admins`: keyed by `workspace_id + admin_id`
 - `identity.invite_secrets`: local-only, keyed by invite/bootstrap secret hash
 - `identity.endpoint_secrets`: local-only, keyed by endpoint id
-- `identity.invites_accepted`: local-only acceptance/provenance rows, only if
-  commands need durable local join provenance
+- `identity.invites_accepted`: local-only acceptance/provenance rows, keyed by
+  `accepted_endpoint_id + workspace_id + invite_event_id`
 
 Rows should use `Schema::durable_row_table` or `Schema::memory_row_table` as
 appropriate. Memory rows are in-process `Store` maps, not SQLite TEMP tables.
@@ -1171,6 +1221,16 @@ Admission happens before parse context. Known event ids stop at
 `admit_event_id`. Parse failures reject the proposed event and let the
 protocol caller record whatever IO-level failure row it owns. Blocked events
 write `blocked_by_event` rows and stop.
+
+Deterministic replay is a core recovery invariant. Given only durable canonical
+event bytes plus local-only canonical bytes that were intentionally retained, a
+node must be able to restore projected state by replaying those events through
+the same common event pipeline. Replay must be out of order: backup restore,
+sync, negentropy, and queue recovery may hand events to admission in any order,
+so readiness is determined by declared dependencies and semantic blockers, not
+by log/file order or arrival order. A replay that receives children before
+parents must block, then unblock and project deterministically when the missing
+dependencies arrive.
 
 Projectors only write rows. They cannot emit follow-on events. If projection
 discovers work, it writes a module-owned queue row; a worker reads bounded queue

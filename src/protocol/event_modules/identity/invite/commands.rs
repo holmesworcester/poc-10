@@ -1,10 +1,12 @@
 //! Invite creation and parsing.
 //!
 //! An invite is a human-copyable carrier for address, endpoint, workspace id,
-//! and a bootstrap private value. The durable/local state is only the
-//! hash-to-secret event proposed by `create`; parsing a link performs no writes.
-//! This mirrors the event-module rule: commands return events and values, while
-//! workers/projectors decide what becomes rows.
+//! and a bootstrap private value. Invite creation records the creator's
+//! hash-to-secret event so the creator can decrypt future accept traffic.
+//! Accepting a scoped identity invite records the same secret together with
+//! `invite_accepted` provenance in that module's command. Parsing a link performs
+//! no writes. This mirrors the event-module rule: commands return events and
+//! values, while workers/projectors decide what becomes rows.
 
 use std::{net::SocketAddr, str::FromStr};
 

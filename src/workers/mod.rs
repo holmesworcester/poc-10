@@ -39,6 +39,7 @@ where
     C: DaemonWorkerContext,
 {
     vec![
+        bootstrap_exchange::daemon_worker(),
         transit_in::daemon_worker(),
         event_admission::daemon_worker(),
         event_projection::daemon_worker(),

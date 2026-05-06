@@ -120,6 +120,7 @@ pub struct CountSummary {
     pub payload_bytes: usize,
     pub connections: usize,
     pub connection_events: usize,
+    pub invite_accepted: usize,
     pub ready_events: usize,
     pub blocked_events: usize,
     pub applied_events: usize,
@@ -134,6 +135,7 @@ impl CountSummary {
             format!("payload_bytes: {}", self.payload_bytes),
             format!("connections: {}", self.connections),
             format!("connection_events: {}", self.connection_events),
+            format!("invite_accepted: {}", self.invite_accepted),
             format!("ready_events: {}", self.ready_events),
             format!("blocked_events: {}", self.blocked_events),
             format!("applied_events: {}", self.applied_events),
@@ -161,6 +163,8 @@ fn run_count_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutp
     let connections = event_modules::connection::queries::connection_count(&context.store)?;
     let connection_events =
         event_modules::connection::queries::connection_event_count(&context.store)?;
+    let invite_accepted =
+        event_modules::identity::invite_accepted::schema::invite_accepted_count(&context.store)?;
     let statuses = event_schema::status_counts(&context.store)
         .map_err(|err| format!("count event statuses: {err}"))?;
     Ok(CliOutput::lines(
@@ -169,6 +173,7 @@ fn run_count_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutp
             payload_bytes,
             connections,
             connection_events,
+            invite_accepted,
             ready_events: statuses.ready,
             blocked_events: statuses.blocked,
             applied_events: statuses.applied,

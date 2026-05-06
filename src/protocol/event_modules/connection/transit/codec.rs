@@ -14,12 +14,22 @@ const MAGIC: &[u8; 10] = b"TOPOTRANS1";
 const INNER_EVENTS_MAGIC: &[u8; 10] = b"TOPOINNER1";
 const TAG_BOOTSTRAP: u8 = 1;
 const TAG_CONNECTION: u8 = 2;
+const TAG_INVITE_BOOTSTRAP: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransitEnvelopeRef<'a> {
     Bootstrap {
         sender_endpoint: [u8; 32],
         recipient_endpoint: [u8; 32],
+        nonce: TransitNonce,
+        ciphertext: &'a [u8],
+    },
+    InviteBootstrap {
+        sender_endpoint: [u8; 32],
+        recipient_endpoint: [u8; 32],
+        bootstrap_hash: [u8; 32],
+        workspace_id: [u8; 32],
+        invite_event_id: [u8; 32],
         nonce: TransitNonce,
         ciphertext: &'a [u8],
     },
@@ -40,6 +50,22 @@ pub fn associated_data(envelope: &TransitEnvelope) -> Vec<u8> {
             nonce,
             ciphertext: _,
         } => associated_data_bootstrap(sender_endpoint, recipient_endpoint, nonce),
+        TransitEnvelope::InviteBootstrap {
+            sender_endpoint,
+            recipient_endpoint,
+            bootstrap_hash,
+            workspace_id,
+            invite_event_id,
+            nonce,
+            ciphertext: _,
+        } => associated_data_invite_bootstrap(
+            sender_endpoint,
+            recipient_endpoint,
+            bootstrap_hash,
+            workspace_id,
+            invite_event_id,
+            nonce,
+        ),
         TransitEnvelope::Connection {
             connection_id,
             sender_endpoint,
@@ -64,6 +90,26 @@ pub fn associated_data_bootstrap(
     out.u8(TAG_BOOTSTRAP);
     out.id(sender_endpoint);
     out.id(recipient_endpoint);
+    out.raw(nonce);
+    out.finish()
+}
+
+pub fn associated_data_invite_bootstrap(
+    sender_endpoint: &[u8; 32],
+    recipient_endpoint: &[u8; 32],
+    bootstrap_hash: &[u8; 32],
+    workspace_id: &[u8; 32],
+    invite_event_id: &[u8; 32],
+    nonce: &TransitNonce,
+) -> Vec<u8> {
+    let mut out = Writer::with_capacity(MAGIC.len() + 1 + 32 + 32 + 32 + 32 + 32 + 24);
+    out.raw(MAGIC);
+    out.u8(TAG_INVITE_BOOTSTRAP);
+    out.id(sender_endpoint);
+    out.id(recipient_endpoint);
+    out.id(bootstrap_hash);
+    out.id(workspace_id);
+    out.id(invite_event_id);
     out.raw(nonce);
     out.finish()
 }
@@ -97,6 +143,24 @@ pub fn encode(envelope: &TransitEnvelope) -> Vec<u8> {
             out.u8(TAG_BOOTSTRAP);
             out.id(sender_endpoint);
             out.id(recipient_endpoint);
+            out.raw(nonce);
+            out.sized_bytes(ciphertext);
+        }
+        TransitEnvelope::InviteBootstrap {
+            sender_endpoint,
+            recipient_endpoint,
+            bootstrap_hash,
+            workspace_id,
+            invite_event_id,
+            nonce,
+            ciphertext,
+        } => {
+            out.u8(TAG_INVITE_BOOTSTRAP);
+            out.id(sender_endpoint);
+            out.id(recipient_endpoint);
+            out.id(bootstrap_hash);
+            out.id(workspace_id);
+            out.id(invite_event_id);
             out.raw(nonce);
             out.sized_bytes(ciphertext);
         }
@@ -159,6 +223,23 @@ pub fn decode(bytes: &[u8]) -> Result<TransitEnvelope, String> {
             nonce,
             ciphertext: ciphertext.to_vec(),
         },
+        TransitEnvelopeRef::InviteBootstrap {
+            sender_endpoint,
+            recipient_endpoint,
+            bootstrap_hash,
+            workspace_id,
+            invite_event_id,
+            nonce,
+            ciphertext,
+        } => TransitEnvelope::InviteBootstrap {
+            sender_endpoint,
+            recipient_endpoint,
+            bootstrap_hash,
+            workspace_id,
+            invite_event_id,
+            nonce,
+            ciphertext: ciphertext.to_vec(),
+        },
         TransitEnvelopeRef::Connection {
             connection_id,
             sender_endpoint,
@@ -186,6 +267,15 @@ pub(crate) fn decode_ref(bytes: &[u8]) -> Result<TransitEnvelopeRef<'_>, String>
         TAG_BOOTSTRAP => TransitEnvelopeRef::Bootstrap {
             sender_endpoint: reader.id()?,
             recipient_endpoint: reader.id()?,
+            nonce: nonce24(&mut reader)?,
+            ciphertext: reader.sized_slice()?,
+        },
+        TAG_INVITE_BOOTSTRAP => TransitEnvelopeRef::InviteBootstrap {
+            sender_endpoint: reader.id()?,
+            recipient_endpoint: reader.id()?,
+            bootstrap_hash: reader.id()?,
+            workspace_id: reader.id()?,
+            invite_event_id: reader.id()?,
             nonce: nonce24(&mut reader)?,
             ciphertext: reader.sized_slice()?,
         },
