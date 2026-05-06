@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use topo::core::store::Store;
 use topo::protocol::event_modules::content::content_event;
-use topo::protocol::event_modules::identity::{endpoint, endpoint_shared};
+use topo::protocol::event_modules::identity::{endpoint, endpoint_shared, workspace};
 use topo::protocol::event_modules::schema::{self as event_schema, EventLabel};
 use topo::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
 use topo::protocol::event_modules::worker::{
@@ -10,6 +10,8 @@ use topo::protocol::event_modules::worker::{
 };
 use topo::protocol::event_modules::Modules;
 use topo::protocol::Protocol;
+use topo::workers::schema as worker_schema;
+use topo::workers::{dependency_unblock, event_admission, event_projection, sync};
 
 #[test]
 fn command_admission_returns_event_ids_for_chaining() {
@@ -104,6 +106,151 @@ fn worker_fetches_dependency_records_and_labels_before_projection() {
     let drain = worker::run(&store, &registry, worker::DrainUntilIdle { batch_size: 10 }).unwrap();
     assert_eq!(drain.applied_events, 1);
     assert!(registry.child_saw_context.get());
+}
+
+#[test]
+fn event_pipeline_workers_claim_and_consume_explicit_queues() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("explicit-queues.db")).unwrap();
+
+    let dep_bytes = b"queued-dep".to_vec();
+    let child_bytes = b"queued-child".to_vec();
+    let dep_id = event_id(&dep_bytes);
+    let child_id = event_id(&child_bytes);
+    let registry = ContextRegistry {
+        dep_id,
+        child_id,
+        dep_bytes: dep_bytes.clone(),
+        child_bytes: child_bytes.clone(),
+        child_saw_context: Cell::new(false),
+    };
+
+    let child = registry.record_for(child_bytes).unwrap();
+    store
+        .insert_table_rows(vec![worker_schema::canonical_in_row(child, None)])
+        .expect("enqueue child canonical in");
+    let child_admission =
+        event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
+            .expect("admit queued child");
+    assert_eq!(child_admission.blocked_events, 1);
+    assert_eq!(
+        store
+            .table_row_count(worker_schema::CANONICAL_IN)
+            .expect("count canonical in"),
+        0,
+        "admission consumes claimed canonical in rows"
+    );
+
+    let dep = registry.record_for(dep_bytes).unwrap();
+    store
+        .insert_table_rows(vec![worker_schema::canonical_in_row(dep, None)])
+        .expect("enqueue dep canonical in");
+    let dep_admission =
+        event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
+            .expect("admit queued dependency");
+    assert_eq!(dep_admission.applied_events, 1);
+    assert_eq!(
+        store
+            .table_row_count(worker_schema::RECENTLY_VALID_EVENTS)
+            .expect("count recently valid"),
+        1,
+        "projection writes recently-valid unblock input"
+    );
+
+    let unblock = dependency_unblock::run(&store, dependency_unblock::Work::Drain { limit: 1 })
+        .expect("unblock child");
+    assert_eq!(unblock.unblocked_events, 1);
+    assert_eq!(
+        store
+            .table_row_count(worker_schema::RECENTLY_VALID_EVENTS)
+            .expect("count recently valid after unblock"),
+        0,
+        "dependency unblock consumes recently-valid rows"
+    );
+
+    let projected = event_projection::run(
+        &store,
+        &registry,
+        event_projection::Work::Drain { limit: 1 },
+    )
+    .expect("project child");
+    assert_eq!(projected.applied_events, 1);
+    assert!(registry.child_saw_context.get());
+}
+
+#[test]
+fn canonical_in_rejects_are_consumed_and_do_not_poison_later_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("rejected-event-in.db")).unwrap();
+
+    let bad_bytes = b"bad-event-in".to_vec();
+    let good_bytes = b"good-event-in".to_vec();
+    let registry = RejectThenAcceptRegistry {
+        bad_id: event_id(&bad_bytes),
+        good_id: event_id(&good_bytes),
+        bad_bytes: bad_bytes.clone(),
+        good_bytes: good_bytes.clone(),
+        good_applied: Cell::new(false),
+    };
+
+    let bad = registry.record_for(bad_bytes).unwrap();
+    store
+        .insert_table_rows(vec![worker_schema::canonical_in_row(bad, None)])
+        .expect("enqueue rejected canonical in");
+    let err = event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
+        .expect_err("bad event should reject");
+    assert!(err.contains("intentional projection reject"), "{err}");
+    assert_eq!(
+        store
+            .table_row_count(worker_schema::CANONICAL_IN)
+            .expect("count canonical in after reject"),
+        0,
+        "rejected canonical in rows must be consumed"
+    );
+
+    let good = registry.record_for(good_bytes).unwrap();
+    store
+        .insert_table_rows(vec![worker_schema::canonical_in_row(good, None)])
+        .expect("enqueue good canonical in");
+    let report = event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
+        .expect("good event should not be blocked by rejected input");
+    assert_eq!(report.applied_events, 1);
+    assert!(registry.good_applied.get());
+}
+
+#[test]
+fn sync_worker_consumes_applied_shared_event_queue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("sync-index-queue.db")).unwrap();
+    let modules = Modules::new();
+
+    let output = workspace::commands::create(workspace::commands::CreateWorkspace {
+        created_at_ms: 1,
+        public_key: [9; 32],
+        name: "queue-index".to_string(),
+    })
+    .unwrap();
+    worker::run(&store, &modules, output).expect("admit shared event");
+    assert_eq!(
+        store
+            .table_row_count(worker_schema::APPLIED_SHARED_EVENTS)
+            .expect("count sync index queue"),
+        1
+    );
+
+    let index = topo::protocol::event_modules::sync::SyncIndex::default();
+    let output = sync::run(&store, &index, sync::Work::DrainIndex { limit: 16 })
+        .expect("drain sync index queue");
+    let sync::Output::Indexed(report) = output else {
+        panic!("sync worker returned non-index output");
+    };
+    assert_eq!(report.indexed_events, 1);
+    assert_eq!(
+        store
+            .table_row_count(worker_schema::APPLIED_SHARED_EVENTS)
+            .expect("count sync index queue after drain"),
+        0
+    );
 }
 
 #[test]
@@ -318,6 +465,14 @@ struct ValidDependencyContextRegistry {
     child_saw_context: Cell<bool>,
 }
 
+struct RejectThenAcceptRegistry {
+    bad_id: EventId,
+    good_id: EventId,
+    bad_bytes: Vec<u8>,
+    good_bytes: Vec<u8>,
+    good_applied: Cell<bool>,
+}
+
 impl ContextRegistry {
     fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
         if bytes == self.dep_bytes {
@@ -377,6 +532,22 @@ impl ValidDependencyContextRegistry {
             });
         }
         Err("unknown test event".to_string())
+    }
+}
+
+impl RejectThenAcceptRegistry {
+    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        if bytes == self.bad_bytes || bytes == self.good_bytes {
+            return Ok(EventRecord {
+                timestamp: 1,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: Vec::new(),
+                workspace_id: None,
+                scope: EventScope::Shared,
+            });
+        }
+        Err("unknown reject test event".to_string())
     }
 }
 
@@ -465,5 +636,26 @@ impl EventRegistry for ValidDependencyContextRegistry {
             panic!("child must remain blocked until bad dependency is applied");
         }
         Err("unknown projection".to_string())
+    }
+}
+
+impl EventRegistry for RejectThenAcceptRegistry {
+    fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        self.record_for(bytes)
+    }
+
+    fn project_record(
+        &self,
+        _store: &Store,
+        event: &EventWithContext<'_>,
+    ) -> Result<ProjectionOutput, String> {
+        if event.context.event_id == self.bad_id {
+            return Err("intentional projection reject".to_string());
+        }
+        if event.context.event_id == self.good_id {
+            self.good_applied.set(true);
+            return Ok(ProjectionOutput::default());
+        }
+        Err("unknown reject projection".to_string())
     }
 }

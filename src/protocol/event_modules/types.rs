@@ -45,7 +45,7 @@ pub struct ReceiveMetadata {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiveAuthorization {
-    BootstrapInvite { invite_secret_event_id: EventId },
+    BootstrapInvite,
     EndpointReceive,
 }
 
@@ -55,16 +55,13 @@ impl ReceiveMetadata {
         local_endpoint: EventId,
         remote_endpoint: EventId,
         remember_route: bool,
-        invite_secret_event_id: EventId,
     ) -> Self {
         Self {
             origin,
             local_endpoint,
             remote_endpoint,
             remember_route,
-            authorization: ReceiveAuthorization::BootstrapInvite {
-                invite_secret_event_id,
-            },
+            authorization: ReceiveAuthorization::BootstrapInvite,
         }
     }
 

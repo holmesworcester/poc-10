@@ -219,7 +219,7 @@ fn run_replay_reverse_command(
     let reverse_non_roots = records[root_count..].iter().rev().cloned().collect();
     let (_, reverse_report) = worker::run(
         &context.store,
-        context.protocol.modules(),
+        &context.protocol,
         CommandOutput::with_events((), reverse_non_roots),
     )
     .map_err(|err| format!("admit reverse event_with_deps: {err}"))?;
@@ -231,7 +231,7 @@ fn run_replay_reverse_command(
     let roots = records[..root_count].to_vec();
     let root_report = worker::run(
         &context.store,
-        context.protocol.modules(),
+        &context.protocol,
         worker::AdmitAndDrain {
             output: CommandOutput::with_events((), roots),
             batch_size: worker::DEFAULT_READY_BATCH,

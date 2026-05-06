@@ -1,7 +1,10 @@
 mod cli_harness;
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
+use std::net::TcpListener;
 use std::process::{Child, Output};
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -15,93 +18,19 @@ use topo::protocol::event_modules::worker::{self, CommandOutput};
 use topo::protocol::Protocol;
 
 #[test]
-fn two_endpoints_sync_multiple_mutual_workspaces() {
+fn daemons_sync_cli_generated_content_without_manual_sync_and_without_scope_leaks() {
+    let _guard = black_box_guard();
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
-    let bob_port = free_port();
-    connect_pair(&alice, &bob, bob_port);
-
-    let alice_endpoint = local_endpoint(&alice);
-    let bob_endpoint = local_endpoint(&bob);
-    let workspace_a = install_workspace_graph(
-        &[&alice, &bob],
-        11,
-        "workspace-a",
-        &[
-            Member::new("alice-a", alice_endpoint, 21),
-            Member::new("bob-a", bob_endpoint, 22),
-        ],
-    );
-    let workspace_b = install_workspace_graph(
-        &[&alice, &bob],
-        12,
-        "workspace-b",
-        &[
-            Member::new("alice-b", alice_endpoint, 23),
-            Member::new("bob-b", bob_endpoint, 24),
-        ],
-    );
-    generate(&alice, workspace_a.workspace_id, 3, 128);
-    generate(&alice, workspace_b.workspace_id, 4, 129);
-    sync_once(&alice, &bob, bob_port);
-
-    assert_content_count(&bob, workspace_a.workspace_id, 3);
-    assert_content_count(&bob, workspace_b.workspace_id, 4);
-}
-
-#[test]
-fn two_player_sync_does_not_leak_alice_private_workspace_to_bob() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let bob_port = free_port();
-    connect_pair(&alice, &bob, bob_port);
+    let alice_port = daemon_port();
+    let bob_port = daemon_port();
+    ensure_local_endpoint(&alice, alice_port);
+    ensure_local_endpoint(&bob, bob_port);
 
     let alice_endpoint = local_endpoint(&alice);
     let bob_endpoint = local_endpoint(&bob);
     let shared = install_workspace_graph(
-        &[&alice, &bob],
-        31,
-        "shared-a",
-        &[
-            Member::new("alice-a", alice_endpoint, 41),
-            Member::new("bob-a", bob_endpoint, 42),
-        ],
-    );
-    let alice_private = install_workspace_graph(
-        &[&alice],
-        32,
-        "alice-b",
-        &[Member::new("alice-b", alice_endpoint, 43)],
-    );
-
-    generate(&alice, shared.workspace_id, 2, 128);
-    generate(&alice, alice_private.workspace_id, 5, 128);
-    sync_once(&alice, &bob, bob_port);
-
-    assert_content_count(&bob, shared.workspace_id, 2);
-    assert_content_count(&bob, alice_private.workspace_id, 0);
-}
-
-#[test]
-fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let carol = temp_db(&tmp, "carol.db");
-    let alice_port = free_port();
-    let bob_port = free_port();
-    let carol_port = free_port();
-    connect_pair(&bob, &alice, alice_port);
-    connect_pair(&carol, &alice, alice_port);
-    connect_pair(&alice, &bob, bob_port);
-    connect_pair(&alice, &carol, carol_port);
-
-    let alice_endpoint = local_endpoint(&alice);
-    let bob_endpoint = local_endpoint(&bob);
-    let carol_endpoint = local_endpoint(&carol);
-    let workspace_a = install_workspace_graph(
         &[&alice, &bob],
         51,
         "alice-bob-a",
@@ -110,73 +39,36 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
             Member::new("bob-a", bob_endpoint, 62),
         ],
     );
-    let workspace_b = install_workspace_graph(
-        &[&alice, &carol],
+    let alice_private = install_workspace_graph(
+        &[&alice],
         52,
-        "alice-carol-b",
-        &[
-            Member::new("alice-b", alice_endpoint, 63),
-            Member::new("carol-b", carol_endpoint, 64),
-        ],
+        "alice-private-b",
+        &[Member::new("alice-b", alice_endpoint, 63)],
     );
 
-    generate(&bob, workspace_a.workspace_id, 3, 128);
-    generate(&carol, workspace_b.workspace_id, 4, 128);
+    let mut alice_daemon = spawn_daemon(&alice, alice_port);
+    let mut bob_daemon = spawn_daemon(&bob, bob_port);
+    connect_daemons(&bob, &alice, alice_port);
+    connect_daemons(&alice, &bob, bob_port);
+    wait_for_connection_count(&alice, 2);
+    wait_for_connection_count(&bob, 2);
 
-    sync_once(&bob, &alice, alice_port);
-    sync_once(&carol, &alice, alice_port);
-    sync_from_alice_to_bob_and_carol(&alice, &bob, bob_port, &carol, carol_port);
+    generate(&alice, shared.workspace_id, 2, 128);
+    generate(&alice, alice_private.workspace_id, 2, 128);
+    alice_daemon.assert_running();
+    bob_daemon.assert_running();
 
-    assert_content_count(&alice, workspace_a.workspace_id, 3);
-    assert_content_count(&alice, workspace_b.workspace_id, 4);
-    assert_content_count(&bob, workspace_a.workspace_id, 3);
-    assert_content_count(&bob, workspace_b.workspace_id, 0);
-    assert_content_count(&carol, workspace_a.workspace_id, 0);
-    assert_content_count(&carol, workspace_b.workspace_id, 4);
-}
-
-#[test]
-fn daemons_sync_cli_generated_content_without_manual_sync() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice-daemon.db");
-    let bob = temp_db(&tmp, "bob-daemon.db");
-    let alice_port = free_port();
-    let bob_port = free_port();
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
-    let _bob_daemon = spawn_daemon(&bob, bob_port);
-
-    let alice_invite = invite(&alice, alice_port);
-    let connected = connect_with_retry(&bob, &alice_invite);
-    assert!(connected.contains("connected:"), "{connected}");
-    let reverse_invite = invite(&bob, bob_port);
-    let reverse_connected = connect_with_retry(&alice, &reverse_invite);
-    assert!(
-        reverse_connected.contains("connected:"),
-        "{reverse_connected}"
-    );
-
-    let alice_endpoint = local_endpoint(&alice);
-    let bob_endpoint = local_endpoint(&bob);
-    let workspace = install_workspace_graph(
-        &[&alice, &bob],
-        71,
-        "daemon-shared",
-        &[
-            Member::new("alice-daemon", alice_endpoint, 81),
-            Member::new("bob-daemon", bob_endpoint, 82),
-        ],
-    );
-    generate(&alice, workspace.workspace_id, 3, 128);
-
-    wait_for_content_count(&bob, workspace.workspace_id, 3);
+    wait_for_content_count(&bob, shared.workspace_id, 2);
+    assert_content_count(&bob, alice_private.workspace_id, 0);
 }
 
 #[test]
 fn second_daemon_for_same_db_is_rejected() {
+    let _guard = black_box_guard();
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice-single-daemon.db");
-    let first_port = free_port();
-    let second_port = free_port();
+    let first_port = daemon_port();
+    let second_port = daemon_port();
     let _daemon = spawn_daemon(&alice, first_port);
 
     let output = topo(&[
@@ -202,6 +94,13 @@ fn second_daemon_for_same_db_is_rejected() {
         "unexpected second-daemon stderr:\n{}",
         stderr(&output)
     );
+}
+
+fn black_box_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("black-box test lock")
 }
 
 #[derive(Clone, Copy)]
@@ -334,29 +233,47 @@ fn local_endpoint(db: &str) -> endpoint::types::EndpointKeypair {
         .expect("local endpoint exists")
 }
 
-fn start_listener(db: &str, port: u16, accept: usize) -> Child {
-    let port = port.to_string();
-    let accept = accept.to_string();
-    spawn_topo(&[
-        "--db",
-        db,
-        "sync",
-        "--listen",
-        "127.0.0.1",
-        &port,
-        "--accept",
-        &accept,
-    ])
-}
-
 struct RunningDaemon {
-    child: Child,
+    child: Option<Child>,
+    label: String,
 }
 
 impl Drop for RunningDaemon {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = child.kill();
+        match child.wait_with_output() {
+            Ok(output) if !output.stderr.is_empty() => {
+                eprintln!(
+                    "daemon {} stderr:\n{}",
+                    self.label,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            _ => {}
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+impl RunningDaemon {
+    fn assert_running(&mut self) {
+        let child = self.child.as_mut().expect("daemon child present");
+        match child.try_wait().expect("check daemon status") {
+            None => {}
+            Some(status) => {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    let _ = pipe.read_to_string(&mut stderr);
+                }
+                panic!(
+                    "daemon {} exited early with {status}\nstderr:\n{stderr}",
+                    self.label
+                );
+            }
+        }
     }
 }
 
@@ -382,15 +299,30 @@ fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
         line.starts_with("listening: "),
         "daemon did not report listening: {line}"
     );
-    RunningDaemon { child }
+    RunningDaemon {
+        child: Some(child),
+        label: format!("{db}:{port}"),
+    }
 }
 
-fn connect_pair(initiator_db: &str, listener_db: &str, listener_port: u16) {
+fn ensure_local_endpoint(db: &str, port: u16) {
+    let _ = invite(db, port);
+}
+
+fn connect_daemons(initiator_db: &str, listener_db: &str, listener_port: u16) {
     let invite = invite(listener_db, listener_port);
-    let listener = start_listener(listener_db, listener_port, 1);
     let connected = connect_with_retry(initiator_db, &invite);
-    assert!(connected.contains("connected:"));
-    wait_success(listener, "connect listener");
+    assert!(connected.contains("connection requested:"));
+}
+
+fn daemon_port() -> u16 {
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(41000);
+    loop {
+        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 fn invite(db: &str, port: u16) -> String {
@@ -419,68 +351,11 @@ fn connect_with_invite(db: &str, invite: &str) -> Output {
     topo(&["--db", db, "connect", invite])
 }
 
-fn sync_once(from_db: &str, listener_db: &str, listener_port: u16) {
-    let (sync_out, listener) = sync_with_listener_retry(from_db, listener_db, listener_port, 1);
-    assert!(sync_out.contains("routes_synced: 1"), "{sync_out}");
-    wait_success(listener, "sync listener");
-}
-
-fn sync_from_alice_to_bob_and_carol(
-    alice: &str,
-    bob: &str,
-    bob_port: u16,
-    carol: &str,
-    carol_port: u16,
-) {
-    let bob_listener = start_listener(bob, bob_port, 1);
-    let carol_listener = start_listener(carol, carol_port, 1);
-    thread::sleep(Duration::from_millis(100));
-    let sync_out = sync_with_retry(alice);
-    assert!(sync_out.contains("routes_synced: 2"), "{sync_out}");
-    wait_success(bob_listener, "bob sync listener");
-    wait_success(carol_listener, "carol sync listener");
-}
-
-fn sync_with_listener_retry(
-    from_db: &str,
-    listener_db: &str,
-    listener_port: u16,
-    accept: usize,
-) -> (String, Child) {
-    let mut last = String::new();
-    for _ in 0..50 {
-        let mut listener = start_listener(listener_db, listener_port, accept);
-        thread::sleep(Duration::from_millis(50));
-        let output = topo(&["--db", from_db, "sync"]);
-        if output.status.success() {
-            return (stdout(&output), listener);
-        }
-        last = stderr(&output);
-        let _ = listener.kill();
-        let _ = listener.wait();
-        thread::sleep(Duration::from_millis(50));
-    }
-    panic!("sync never succeeded: {last}");
-}
-
 fn generate(db: &str, workspace_id: EventId, count: usize, size: usize) -> String {
     let workspace = hex_id(workspace_id);
     let count = count.to_string();
     let size = size.to_string();
     assert_success(topo(&["--db", db, "generate", &workspace, &count, &size]))
-}
-
-fn sync_with_retry(db: &str) -> String {
-    let mut last = String::new();
-    for _ in 0..50 {
-        let output = topo(&["--db", db, "sync"]);
-        if output.status.success() {
-            return stdout(&output);
-        }
-        last = stderr(&output);
-        thread::sleep(Duration::from_millis(50));
-    }
-    panic!("sync never succeeded: {last}");
 }
 
 fn assert_content_count(db: &str, workspace_id: EventId, expected: usize) {
@@ -491,6 +366,19 @@ fn assert_content_count(db: &str, workspace_id: EventId, expected: usize) {
         expected.to_string(),
         "content-count output:\n{out}"
     );
+}
+
+fn wait_for_connection_count(db: &str, expected: usize) {
+    let mut last = String::new();
+    for _ in 0..100 {
+        let out = assert_success(topo(&["--db", db, "count"]));
+        if line_value(&out, "connections") == expected.to_string() {
+            return;
+        }
+        last = out;
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("connection count did not reach {expected}; last output:\n{last}");
 }
 
 fn wait_for_content_count(db: &str, workspace_id: EventId, expected: usize) {
@@ -504,7 +392,8 @@ fn wait_for_content_count(db: &str, workspace_id: EventId, expected: usize) {
         last = out;
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("content count did not reach {expected}; last output:\n{last}");
+    let status = assert_success(topo(&["--db", db, "count"]));
+    panic!("content count did not reach {expected}; last output:\n{last}\nstatus:\n{status}");
 }
 
 fn hex_id(id: EventId) -> String {

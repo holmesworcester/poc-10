@@ -1,8 +1,8 @@
 //! Event-module registry and cross-domain protocol facade.
 //!
-//! Leaf modules own concrete event syntax and projection rules. Domain workers
-//! own active work such as unwrap, wrap, and sync comparison. This registry is
-//! the narrow place where those independent pieces are selected by tag.
+//! Leaf modules own concrete event syntax and projection rules. Workers own
+//! active work such as unwrap, wrap, and sync comparison. This registry is the
+//! narrow place where those independent pieces are selected by tag.
 //!
 //! The file should read as routing, not implementation. A good addition here
 //! names which module owns a behavior and forwards to it. A suspicious addition
@@ -16,17 +16,20 @@ pub mod schema;
 pub mod sync;
 pub mod test_events;
 pub mod types;
-pub mod worker;
+pub use crate::workers::common_event_pipeline as worker;
 
 use std::sync::Arc;
 
 use crate::core::store::{Schema, Store};
-use crate::protocol::event_modules::worker::{EventRegistry, EventWithContext, ProjectionOutput};
-use types::EventRecord;
+use crate::protocol::event_modules::types::{EventRecord, ReceiveMetadata};
+use crate::protocol::event_modules::worker::{
+    EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord,
+};
+use crate::workers::schema::{TransitProvenance, TransitUnwrap};
 
 #[derive(Debug, Clone, Default)]
 pub struct Modules {
-    sync_index: Arc<sync::worker::SyncIndex>,
+    sync_index: Arc<sync::SyncIndex>,
 }
 
 impl Modules {
@@ -34,7 +37,7 @@ impl Modules {
         Self::default()
     }
 
-    pub(crate) fn sync_index(&self) -> &sync::worker::SyncIndex {
+    pub(crate) fn sync_index(&self) -> &sync::SyncIndex {
         &self.sync_index
     }
 
@@ -71,12 +74,6 @@ impl Modules {
     }
 }
 
-impl connection::worker::ConnectionRegistry for Modules {
-    fn sync_index(&self) -> &sync::worker::SyncIndex {
-        self.sync_index()
-    }
-}
-
 pub fn schemas() -> Vec<Schema> {
     // Schema aggregation is explicit so storage ownership remains visible in
     // review. Adding a module-owned table should add one line here and the
@@ -93,7 +90,6 @@ pub fn schemas() -> Vec<Schema> {
     out.extend_from_slice(identity::workspace::schema::SCHEMAS);
     out.extend_from_slice(content::content_event::schema::SCHEMAS);
     out.extend_from_slice(connection::schema::SCHEMAS);
-    out.extend_from_slice(sync::schema::SCHEMAS);
     out.extend_from_slice(test_events::event_with_deps::schema::SCHEMAS);
     out
 }
@@ -101,6 +97,25 @@ pub fn schemas() -> Vec<Schema> {
 impl EventRegistry for Modules {
     fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
         self.record_from_bytes(bytes)
+    }
+
+    fn record_from_canonical_in(
+        &self,
+        store: &Store,
+        bytes: Vec<u8>,
+        receive: Option<ReceiveMetadata>,
+        provenance: Option<TransitProvenance>,
+    ) -> Result<ReceivedRecord, String> {
+        match provenance {
+            Some(provenance) => record_from_transit_canonical_in(store, bytes, provenance),
+            None => {
+                let record = self.record_from_bytes(bytes)?;
+                Ok(match receive {
+                    Some(receive) => ReceivedRecord::with_receive(record, receive),
+                    None => ReceivedRecord::new(record),
+                })
+            }
+        }
     }
 
     fn project_record(
@@ -112,14 +127,83 @@ impl EventRegistry for Modules {
     }
 }
 
+fn record_from_transit_canonical_in(
+    store: &Store,
+    bytes: Vec<u8>,
+    provenance: TransitProvenance,
+) -> Result<ReceivedRecord, String> {
+    match provenance.unwrapped_with {
+        TransitUnwrap::Bootstrap => {
+            if !connection::connection_request::codec::is_request(&bytes) {
+                return Err("bootstrap transit only carries connection requests".to_string());
+            }
+            let record = connection::connection_request::codec::record_from_bytes(bytes)?;
+            return Ok(ReceivedRecord::with_receive(
+                record,
+                ReceiveMetadata::bootstrap_invite(
+                    provenance.origin,
+                    provenance.local_endpoint,
+                    provenance.sender_endpoint,
+                    provenance.remember_route,
+                ),
+            ));
+        }
+        TransitUnwrap::Connection { connection_id } => {
+            if connection::connection_request::codec::is_request(&bytes) {
+                return Err("connection transit cannot carry connection requests".to_string());
+            }
+            if connection::connection_response::codec::is_response(&bytes) {
+                let record = connection::connection_response::codec::record_from_bytes(bytes)?;
+                return Ok(ReceivedRecord::with_receive(
+                    record,
+                    ReceiveMetadata::endpoint_receive(
+                        provenance.origin,
+                        provenance.local_endpoint,
+                        provenance.sender_endpoint,
+                        provenance.remember_route,
+                    ),
+                ));
+            }
+            if sync::is_connection_scoped_event(&bytes) {
+                return sync::inbound_record_from_connection_bytes(connection_id, bytes)
+                    .map(ReceivedRecord::new);
+            }
+        }
+    }
+    let TransitUnwrap::Connection { .. } = provenance.unwrapped_with else {
+        return Err("bootstrap transit only carries connection requests".to_string());
+    };
+    let record = record_from_bytes(bytes)?;
+    if !record.scope.is_shared() {
+        return Err(
+            "connection transit only accepts shared or connection-scoped events".to_string(),
+        );
+    }
+    let workspace_id = record
+        .workspace_id
+        .ok_or_else(|| "transit shared in requires a workspace".to_string())?;
+    let allowed_workspaces = identity::endpoint_shared::schema::mutual_workspace_ids(
+        store,
+        provenance.local_endpoint,
+        provenance.sender_endpoint,
+    )?;
+    if !allowed_workspaces
+        .iter()
+        .any(|allowed| allowed == &workspace_id)
+    {
+        return Err("transit shared in rejected event outside sender workspace".to_string());
+    }
+    Ok(ReceivedRecord::new(record))
+}
+
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     // Connection bootstrap records use a magic prefix. Ordinary shared/local
     // events and connection-scoped sync events use a single leading type tag.
     if connection::connection_request::codec::is_request(&bytes) {
         return connection::connection_request::codec::record_from_bytes(bytes);
     }
-    if connection::connection_ack::codec::is_ack(&bytes) {
-        return connection::connection_ack::codec::record_from_bytes(bytes);
+    if connection::connection_response::codec::is_response(&bytes) {
+        return connection::connection_response::codec::record_from_bytes(bytes);
     }
     if sync::is_connection_scoped_event(&bytes) {
         return sync::record_from_bytes(bytes);
