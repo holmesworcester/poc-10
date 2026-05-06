@@ -846,7 +846,8 @@ fn cli_files_listing_shows_zero_progress_when_only_descriptor_received() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
-    let workspace_id = create_workspace(&alice, "Zero", "alice", "alice-laptop");    let invite_port = free_port();
+    let workspace_id = create_workspace(&alice, "Zero", "alice", "alice-laptop");
+    let invite_port = free_port();
     let alice_port = free_port();
     let bob_port = free_port();
 
