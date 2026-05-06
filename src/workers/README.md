@@ -60,7 +60,7 @@ Workers are run by explicit synchronous call sites:
 - The worker catalog owns ongoing protocol operation. It exports named daemon
   worker objects. The current core scheduler calls each step once per tick in
   round-robin order; the workers themselves are not "round-robin workers."
-- Compatibility facades in `common_event_pipeline` provide bounded command/test
+- Compatibility facades in `common::event_pipeline` provide bounded command/test
   behavior over the explicit worker modules. Long-lived network behavior belongs
   to daemon workers.
 
@@ -116,7 +116,7 @@ single route/frame boundary.
 - `transit_out`: consumes `transit.out`, loads event bytes,
   enforces route/scope/workspace policy, wraps transit frames, and writes
   outbound transport rows.
-- `common_event_pipeline` is not a daemon worker. It provides the shared
+- `common::event_pipeline` is not a daemon worker. It provides the shared
   admission/projection/block-unblock machinery and finite command/test helpers
   over the explicit workers above. The remaining one-shot connect path only
   sends the initial request and records the invite address as outbound route

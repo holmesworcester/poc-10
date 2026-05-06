@@ -75,12 +75,13 @@
 //! bounded by command event count or caller-provided batch size.
 
 use crate::core::network_queues::{self, InboundNetworkRow};
-use crate::core::store::{Store, TableRow};
+use crate::core::store::{Store, TableName, TableRow};
 use crate::protocol::event_modules::types::{
     event_id, EventId, EventIndexEntry, EventRecord, EventStatus, ReceiveMetadata,
 };
 
 use crate::protocol::event_modules::schema;
+use crate::workers::common::event_store;
 use crate::workers::schema as worker_schema;
 use crate::workers::{dependency_unblock, event_admission};
 
@@ -146,16 +147,28 @@ impl From<EventRecord> for ProposedEvent {
     }
 }
 
+/// One exact row deletion requested by a projector.
+///
+/// This is still row-shaped output, not an imperative storage escape hatch.
+/// Projectors choose keys from event bytes and context; the common worker owns
+/// applying the delete in the same transaction as row/label writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableDelete {
+    pub table: TableName,
+    pub key: Vec<u8>,
+}
+
 /// Declarative output of a projector.
 ///
-/// A projector may only return rows in protocol-owned state: ordinary table rows
-/// and generic event labels. It may not emit more events, call a worker, send
-/// bytes, or query broad state. If projection appears to need one of those
-/// powers, the event module should write a queue row and let its domain worker
-/// perform the active step later.
+/// A projector may only return rows in protocol-owned state: ordinary table
+/// rows, exact row deletes, and generic event labels. It may not emit more
+/// events, call a worker, send bytes, or query broad state. If projection
+/// appears to need one of those powers, the event module should write a queue
+/// row and let its domain worker perform the active step later.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionOutput {
     pub rows: Vec<TableRow>,
+    pub deletes: Vec<TableDelete>,
     pub labels: Vec<schema::EventLabel>,
 }
 
@@ -163,6 +176,15 @@ impl ProjectionOutput {
     pub fn rows(rows: Vec<TableRow>) -> Self {
         Self {
             rows,
+            deletes: Vec::new(),
+            labels: Vec::new(),
+        }
+    }
+
+    pub fn deletes(deletes: Vec<TableDelete>) -> Self {
+        Self {
+            rows: Vec::new(),
+            deletes,
             labels: Vec::new(),
         }
     }
@@ -170,16 +192,30 @@ impl ProjectionOutput {
     pub fn labels(labels: Vec<schema::EventLabel>) -> Self {
         Self {
             rows: Vec::new(),
+            deletes: Vec::new(),
             labels,
         }
     }
 
     pub fn rows_and_labels(rows: Vec<TableRow>, labels: Vec<schema::EventLabel>) -> Self {
-        Self { rows, labels }
+        Self {
+            rows,
+            deletes: Vec::new(),
+            labels,
+        }
+    }
+
+    pub fn deletes_and_labels(deletes: Vec<TableDelete>, labels: Vec<schema::EventLabel>) -> Self {
+        Self {
+            rows: Vec::new(),
+            deletes,
+            labels,
+        }
     }
 
     pub fn append(&mut self, mut other: Self) {
         self.rows.append(&mut other.rows);
+        self.deletes.append(&mut other.deletes);
         self.labels.append(&mut other.labels);
     }
 }
@@ -794,7 +830,7 @@ fn store_durable_canonical_in_tx(
         EventStatus::Blocked
     };
 
-    let inserted = schema::insert_event(store, record, status)?;
+    let inserted = event_store::insert_event(store, record, status)?;
     if inserted {
         report.inserted_events += 1;
         if missing.is_empty() {
@@ -832,7 +868,7 @@ fn project_ready_canonical_in_tx(
     event_id: &EventId,
 ) -> rusqlite::Result<ApplyReadyReport> {
     let mut report = ApplyReadyReport::default();
-    if schema::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)? {
+    if event_store::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)? {
         // The status change is the claim. Projection runs only for the worker
         // that successfully moved Ready -> Applied, which keeps duplicate drain
         // attempts idempotent when callers retry.
@@ -859,7 +895,7 @@ fn project_ready_event_record_in_tx(
     receive: Option<ReceiveMetadata>,
 ) -> rusqlite::Result<ApplyReadyReport> {
     let mut report = ApplyReadyReport::default();
-    if schema::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)? {
+    if event_store::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)? {
         let changes = project_event_with_context_in_tx(store, modules, event_id, record, receive)?;
         write_projection_output_in_tx(store, changes)?;
         write_applied_event_outputs_in_tx(store, event_id, record)?;
@@ -940,7 +976,11 @@ fn write_projection_output_in_tx(
 ) -> rusqlite::Result<usize> {
     let rows = store.insert_table_rows_in_tx(changes.rows)?;
     let labels = store.insert_table_rows_in_tx(schema::event_label_rows(changes.labels))?;
-    Ok(rows + labels)
+    let mut deletes = 0;
+    for delete in changes.deletes {
+        deletes += store.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
+    }
+    Ok(rows + labels + deletes)
 }
 
 fn drain_ready(
@@ -952,7 +992,7 @@ fn drain_ready(
         .write_transaction(|store| {
             let mut total = ApplyReadyReport::default();
             while total.applied_events < limit {
-                let Some(event_id) = schema::next_ready_event(store)? else {
+                let Some(event_id) = event_store::next_ready_event(store)? else {
                     break;
                 };
                 let report = project_ready_canonical_in_tx(store, modules, &event_id)?;
@@ -988,7 +1028,7 @@ fn module_error(err: String) -> rusqlite::Error {
 fn missing_dependencies(store: &Store, dependencies: &[EventId]) -> rusqlite::Result<Vec<EventId>> {
     let mut missing = Vec::new();
     for dependency in unique_dependencies(dependencies) {
-        if !schema::event_is_applied(store, &dependency)? {
+        if !event_store::event_is_applied(store, &dependency)? {
             missing.push(dependency);
         }
     }
@@ -1009,7 +1049,7 @@ fn write_blockers(
 ) -> rusqlite::Result<usize> {
     let mut inserted = 0;
     for dependency in missing {
-        inserted += usize::from(schema::insert_blocked_event_missing_dep(
+        inserted += usize::from(event_store::insert_blocked_event_missing_dep(
             store, dependency, event_id,
         )?);
     }
@@ -1017,16 +1057,16 @@ fn write_blockers(
 }
 
 fn unblock_dependents(store: &Store, applied_event_id: &EventId) -> rusqlite::Result<usize> {
-    let dependents = schema::blocked_events_by_missing_dep(store, applied_event_id)?;
-    schema::delete_blocked_events_by_missing_dep(store, applied_event_id)?;
+    let dependents = event_store::blocked_events_by_missing_dep(store, applied_event_id)?;
+    event_store::delete_blocked_events_by_missing_dep(store, applied_event_id)?;
 
     let mut unblocked = 0;
     for dependent in dependents {
         // Unblocking only changes status. It does not recursively project the
         // newly unblocked canonical inside the same stack frame, which prevents a large
         // dependency cascade from becoming one unbounded transaction.
-        if !schema::blocked_event_has_missing_deps(store, &dependent)?
-            && schema::set_event_status(
+        if !event_store::blocked_event_has_missing_deps(store, &dependent)?
+            && event_store::set_event_status(
                 store,
                 &dependent,
                 EventStatus::Blocked,

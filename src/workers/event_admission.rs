@@ -14,7 +14,7 @@
 
 use crate::core::daemon::{StepContext, Worker};
 use crate::core::store::Store;
-use crate::workers::common_event_pipeline::{self as pipeline, AdmitReport, EventRegistry};
+use crate::workers::common::event_pipeline::{self as pipeline, AdmitReport, EventRegistry};
 use crate::workers::DaemonWorkerContext;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +134,7 @@ mod tests {
             user_authority_event_id: [44; 32],
             endpoint_id: endpoint.endpoint,
             signing_public_key: endpoint.signing_public_key,
+            endpoint_role: endpoint::types::EndpointRole::Device,
             device_name: "test".to_string(),
         };
         store
@@ -194,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_transit_rejects_non_connection_request_inner_event() {
+    fn bootstrap_transit_rejects_non_shared_identity_event() {
         let local = keypair();
         let remote = keypair();
         let store = store();
@@ -209,7 +210,7 @@ mod tests {
             .expect_err("bootstrap non-request must reject");
 
         assert!(
-            err.contains("bootstrap transit only carries connection requests"),
+            err.contains("bootstrap transit only accepts shared identity events"),
             "{err}"
         );
         assert!(

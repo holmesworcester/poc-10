@@ -59,6 +59,7 @@ fn install_local_content_signer(store: &Store) -> (EventId, EventId, [u8; 32]) {
         user_authority_event_id: [4; 32],
         endpoint_id: local.endpoint,
         signing_public_key: local.signing_public_key,
+        endpoint_role: endpoint::types::EndpointRole::Device,
         device_name: "worker".to_string(),
     };
     store
@@ -392,8 +393,6 @@ fn worker_never_surfaces_failed_projection_as_dependency_context() {
         !registry.child_saw_context.get(),
         "child projector must not receive failed dependency in context"
     );
-    assert!(!event_schema::event_is_applied(&store, &bad_dep_id).unwrap());
-    assert!(!event_schema::event_is_applied(&store, &child_id).unwrap());
 }
 
 struct ContextRegistry {

@@ -17,7 +17,7 @@
 
 use crate::core::store::{Schema, Store, TableName, TableRow};
 use crate::protocol::event_modules::types::{
-    event_id, EventId, EventIndexEntry, EventRecord, EventScope, EventStatus, EventStatusCounts,
+    EventId, EventIndexEntry, EventRecord, EventScope, EventStatus, EventStatusCounts,
 };
 
 pub const EVENTS: TableName = TableName::new("event_modules.events");
@@ -46,7 +46,7 @@ pub const SCHEMAS: &[Schema] = &[
 
 const EVENT_ROW_HEADER_BYTES: usize = 8 + 8 + 1 + 1 + 1 + 1 + 32;
 const MAX_LABELS_PER_EVENT: usize = 4096;
-const MAX_DEPENDENCY_ROWS_PER_EVENT: usize = 1_000_000;
+pub(crate) const MAX_DEPENDENCY_ROWS_PER_EVENT: usize = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventLabel {
@@ -55,151 +55,21 @@ pub struct EventLabel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct StoredEvent {
-    timestamp: u64,
-    body_len: usize,
-    partition: u8,
-    scope: EventScope,
-    status: EventStatus,
-    workspace_id: Option<EventId>,
-    canonical_bytes: Vec<u8>,
+pub(crate) struct StoredEvent {
+    pub timestamp: u64,
+    pub body_len: usize,
+    pub partition: u8,
+    pub scope: EventScope,
+    pub status: EventStatus,
+    pub workspace_id: Option<EventId>,
+    pub canonical_bytes: Vec<u8>,
 }
 
-pub fn insert_event(
-    store: &Store,
-    event: &EventRecord,
-    status: EventStatus,
-) -> rusqlite::Result<bool> {
-    // The event id is the row key, so admission is naturally idempotent. The
-    // header is enough for scans and counts; callers load full bytes only when
-    // they need to decode or send the event.
-    let id = event_id(&event.canonical_bytes);
-    if store.table_row(EVENTS, &id)?.is_some() {
-        return Ok(false);
-    }
-
-    let mut rows = vec![event_row(&id, event, status)?];
-    if status == EventStatus::Ready {
-        rows.push(ready_row(event.timestamp, &id));
-    }
-    if event.scope.is_shared() {
-        rows.push(timestamp_row(event.timestamp, event.workspace_id, &id));
-    }
-    store.insert_table_rows_in_tx(rows)?;
-    Ok(true)
-}
-
-pub fn event_is_applied(store: &Store, event_id: &EventId) -> rusqlite::Result<bool> {
-    read_event(store, event_id).map(|event| {
-        event
-            .map(|event| event.status == EventStatus::Applied)
-            .unwrap_or(false)
-    })
-}
-
-pub fn insert_blocked_event_missing_dep(
-    store: &Store,
-    missing_dep_id: &EventId,
-    blocked_event_id: &EventId,
-) -> rusqlite::Result<bool> {
-    // Maintain both directions of the wait graph. The forward table answers
-    // "what can this newly-applied dependency unblock?" and the reverse table
-    // answers "does this event still have any missing dependency?"
-    let primary = edge_row(
-        BLOCKED_EVENTS_BY_MISSING_DEP,
-        missing_dep_id,
-        blocked_event_id,
-    );
-    let inserted = store.insert_table_rows_in_tx(vec![primary])? > 0;
-    store.insert_table_rows_in_tx(vec![edge_row(
-        MISSING_DEPS_BY_BLOCKED_EVENT,
-        blocked_event_id,
-        missing_dep_id,
-    )])?;
-    Ok(inserted)
-}
-
-pub fn next_ready_event(store: &Store) -> rusqlite::Result<Option<EventId>> {
-    let mut rows = store.table_rows_with_key_prefix(READY_EVENTS, &[], 1)?;
-    let Some((_, value)) = rows.pop() else {
-        return Ok(None);
-    };
-    vec_to_id(value).map(Some)
-}
-
-pub fn set_event_status(
-    store: &Store,
-    event_id: &EventId,
-    from: EventStatus,
-    to: EventStatus,
-) -> rusqlite::Result<bool> {
-    let Some(mut event) = read_event(store, event_id)? else {
-        return Ok(false);
-    };
-    if event.status != from {
-        return Ok(false);
-    }
-
-    let old_ready_key = (from == EventStatus::Ready).then(|| ready_key(event.timestamp, event_id));
-    event.status = to;
-    let mut rows = vec![stored_event_row(event_id, &event)?];
-    if to == EventStatus::Ready {
-        rows.push(ready_row(event.timestamp, event_id));
-    }
-
-    store.replace_table_rows_in_tx(rows)?;
-    if let Some(key) = old_ready_key {
-        store.delete_table_rows_in_tx(READY_EVENTS, vec![key])?;
-    }
-    Ok(true)
-}
-
-pub fn delete_blocked_events_by_missing_dep(
-    store: &Store,
-    missing_dep_id: &EventId,
-) -> rusqlite::Result<usize> {
-    // Removing a dependency edge must remove the reverse edge in the same
-    // transaction. Otherwise an event could look permanently blocked even after
-    // all of its dependencies were applied.
-    let rows = store.table_rows_with_key_prefix(
-        BLOCKED_EVENTS_BY_MISSING_DEP,
-        missing_dep_id,
-        MAX_DEPENDENCY_ROWS_PER_EVENT,
-    )?;
-    let mut blocked_keys = Vec::with_capacity(rows.len());
-    let mut reverse_keys = Vec::with_capacity(rows.len());
-    for (key, _) in rows {
-        let (missing_dep, blocked_event_id) = split_edge_key(&key)?;
-        blocked_keys.push(key);
-        reverse_keys.push(edge_key(&blocked_event_id, &missing_dep));
-    }
-    let deleted = store.delete_table_rows_in_tx(BLOCKED_EVENTS_BY_MISSING_DEP, blocked_keys)?;
-    store.delete_table_rows_in_tx(MISSING_DEPS_BY_BLOCKED_EVENT, reverse_keys)?;
-    Ok(deleted)
-}
-
-pub fn blocked_events_by_missing_dep(
-    store: &Store,
-    missing_dep_id: &EventId,
-) -> rusqlite::Result<Vec<EventId>> {
-    store
-        .table_rows_with_key_prefix(
-            BLOCKED_EVENTS_BY_MISSING_DEP,
-            missing_dep_id,
-            MAX_DEPENDENCY_ROWS_PER_EVENT,
-        )?
-        .into_iter()
-        .map(|(key, _)| split_edge_key(&key).map(|(_, blocked_event_id)| blocked_event_id))
-        .collect()
-}
-
-pub fn blocked_event_has_missing_deps(
-    store: &Store,
-    blocked_event_id: &EventId,
-) -> rusqlite::Result<bool> {
-    store
-        .table_rows_with_key_prefix(MISSING_DEPS_BY_BLOCKED_EVENT, blocked_event_id, 1)
-        .map(|rows| !rows.is_empty())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoredEventIndex {
+    pub timestamp: u64,
+    pub scope: EventScope,
+    pub status: EventStatus,
 }
 
 pub fn max_timestamp(store: &Store) -> rusqlite::Result<u64> {
@@ -300,6 +170,14 @@ pub fn event_label_rows(labels: Vec<EventLabel>) -> Vec<TableRow> {
         .collect()
 }
 
+pub(crate) fn decode_stored_event_index(value: &[u8]) -> rusqlite::Result<StoredEventIndex> {
+    decode_event_row_value(value).map(|event| StoredEventIndex {
+        timestamp: event.timestamp,
+        scope: event.scope,
+        status: event.status,
+    })
+}
+
 pub fn event_labels(store: &Store, event_id: &EventId) -> Result<Vec<Vec<u8>>, String> {
     store
         .table_rows_with_key_prefix(EVENT_LABELS, event_id, MAX_LABELS_PER_EVENT)
@@ -319,14 +197,17 @@ fn shared_events(store: &Store) -> rusqlite::Result<Vec<(EventId, StoredEvent)>>
         .collect()
 }
 
-fn read_event(store: &Store, event_id: &EventId) -> rusqlite::Result<Option<StoredEvent>> {
+pub(crate) fn read_event(
+    store: &Store,
+    event_id: &EventId,
+) -> rusqlite::Result<Option<StoredEvent>> {
     store
         .table_row(EVENTS, event_id)?
         .map(|value| decode_event_row_value(&value))
         .transpose()
 }
 
-fn event_row(
+pub(crate) fn event_row(
     event_id: &EventId,
     event: &EventRecord,
     status: EventStatus,
@@ -346,7 +227,10 @@ fn event_row(
     })
 }
 
-fn stored_event_row(event_id: &EventId, event: &StoredEvent) -> rusqlite::Result<TableRow> {
+pub(crate) fn stored_event_row(
+    event_id: &EventId,
+    event: &StoredEvent,
+) -> rusqlite::Result<TableRow> {
     Ok(TableRow {
         table: EVENTS,
         key: event_id.to_vec(),
@@ -362,7 +246,7 @@ fn stored_event_row(event_id: &EventId, event: &StoredEvent) -> rusqlite::Result
     })
 }
 
-fn ready_row(timestamp: u64, event_id: &EventId) -> TableRow {
+pub(crate) fn ready_row(timestamp: u64, event_id: &EventId) -> TableRow {
     TableRow {
         table: READY_EVENTS,
         key: ready_key(timestamp, event_id),
@@ -370,7 +254,11 @@ fn ready_row(timestamp: u64, event_id: &EventId) -> TableRow {
     }
 }
 
-fn timestamp_row(timestamp: u64, workspace_id: Option<EventId>, event_id: &EventId) -> TableRow {
+pub(crate) fn timestamp_row(
+    timestamp: u64,
+    workspace_id: Option<EventId>,
+    event_id: &EventId,
+) -> TableRow {
     TableRow {
         table: TIMESTAMP_EVENTS,
         key: timestamp_key(timestamp, event_id),
@@ -378,7 +266,7 @@ fn timestamp_row(timestamp: u64, workspace_id: Option<EventId>, event_id: &Event
     }
 }
 
-fn edge_row(table: TableName, first: &EventId, second: &EventId) -> TableRow {
+pub(crate) fn edge_row(table: TableName, first: &EventId, second: &EventId) -> TableRow {
     TableRow {
         table,
         key: edge_key(first, second),
@@ -487,14 +375,14 @@ fn read_id(bytes: &[u8], offset: &mut usize) -> rusqlite::Result<EventId> {
     Ok(out)
 }
 
-fn ready_key(timestamp: u64, event_id: &EventId) -> Vec<u8> {
+pub(crate) fn ready_key(timestamp: u64, event_id: &EventId) -> Vec<u8> {
     let mut key = Vec::with_capacity(8 + event_id.len());
     key.extend_from_slice(&timestamp.to_be_bytes());
     key.extend_from_slice(event_id);
     key
 }
 
-fn timestamp_key(timestamp: u64, event_id: &EventId) -> Vec<u8> {
+pub(crate) fn timestamp_key(timestamp: u64, event_id: &EventId) -> Vec<u8> {
     let mut key = Vec::with_capacity(8 + event_id.len());
     key.extend_from_slice(&timestamp.to_be_bytes());
     key.extend_from_slice(event_id);
@@ -549,14 +437,14 @@ fn decode_workspace_index_value(value: &[u8]) -> rusqlite::Result<Option<EventId
     read_optional_id(value, &mut offset)
 }
 
-fn edge_key(first: &EventId, second: &EventId) -> Vec<u8> {
+pub(crate) fn edge_key(first: &EventId, second: &EventId) -> Vec<u8> {
     let mut key = Vec::with_capacity(64);
     key.extend_from_slice(first);
     key.extend_from_slice(second);
     key
 }
 
-fn split_edge_key(key: &[u8]) -> rusqlite::Result<(EventId, EventId)> {
+pub(crate) fn split_edge_key(key: &[u8]) -> rusqlite::Result<(EventId, EventId)> {
     if key.len() != 64 {
         return Err(table_error(format!(
             "dependency key should be 64 bytes, got {}",
