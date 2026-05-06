@@ -305,11 +305,199 @@ fn cli_rotates_recipient_keys_and_tombstones_history_path_nodes() {
         stdout(&from_retired_root),
         stderr(&from_retired_root)
     );
+    // After the tombstone, the retired event's canonical bytes are purged
+    // entirely from event_modules.events for forward secrecy. `source_secret_material`
+    // therefore reports the source as missing instead of tombstoned; both
+    // outcomes correctly reject derivation from a retired path node.
     assert!(
-        stderr(&from_retired_root).contains("history node source has been tombstoned"),
+        stderr(&from_retired_root).contains("history node source event is missing"),
         "{}",
         stderr(&from_retired_root)
     );
+}
+
+#[test]
+fn cli_history_node_tombstone_purges_retired_event_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&alice, "Fs Keys", "alice", "alice-laptop");
+
+    assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
+    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
+    let local_key_secret_id = line_value(&frontier, "local_key_secret_id");
+
+    let root_node = assert_success(topo(&[
+        "--db",
+        &alice,
+        "key-node",
+        &workspace_id,
+        &removal_frontier_id,
+        &local_key_secret_id,
+        "0",
+        "8",
+    ]));
+    let root_node_id = line_value(&root_node, "local_history_node_secret_id");
+    assert_eq!(line_value(&root_node, "purged_event_bytes"), "0");
+
+    // Snapshot the parent's plaintext node_secret bytes BEFORE the tombstone is
+    // applied. The purge happens at the tombstone step; if the production code
+    // only exact-deletes the projection row, the secret bytes would remain in
+    // event_modules.events. The test must read those secret bytes through the
+    // SQLite layer because the public CLI never exposes raw key material.
+    let parent_secret = read_history_node_secret_bytes(&alice, &root_node_id);
+    assert_eq!(parent_secret.len(), 32);
+    assert!(
+        parent_secret.iter().any(|byte| *byte != 0),
+        "captured parent node secret should not be zero",
+    );
+
+    let sibling = assert_success(topo(&[
+        "--db",
+        &alice,
+        "key-node",
+        &workspace_id,
+        &removal_frontier_id,
+        &root_node_id,
+        "4",
+        "4",
+        &root_node_id,
+    ]));
+    assert_eq!(line_value(&sibling, "tombstoned_node_id"), root_node_id);
+    assert_eq!(line_value(&sibling, "purged_event_bytes"), "1");
+
+    let keys = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
+    assert_eq!(line_value(&keys, "local_history_node_secrets"), "1");
+    assert_eq!(line_value(&keys, "local_history_node_tombstones"), "1");
+
+    // SQLite-level: the retired root's event id is gone from `event_modules.events`.
+    let root_event_id = decode_hex_id(&root_node_id);
+    assert!(
+        !event_id_present(&alice, &root_event_id),
+        "retired history node event id must be absent from event_modules.events",
+    );
+
+    // SQLite-level: the parent's plaintext node_secret cannot be recovered from
+    // any row_value in event_modules.events.
+    let payloads = all_event_payloads(&alice);
+    assert!(
+        !payloads.is_empty(),
+        "events table should still hold other rows"
+    );
+    for (key, value) in &payloads {
+        assert!(
+            !contains_subsequence(value, &parent_secret),
+            "no row_value should still embed the retired parent's plaintext node_secret (offending row_key={})",
+            hex(key),
+        );
+    }
+}
+
+fn read_history_node_secret_bytes(db: &str, hex_id: &str) -> Vec<u8> {
+    let event_id = decode_hex_id(hex_id);
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    let bytes: Vec<u8> = conn
+        .query_row(
+            "SELECT row_value FROM \"event_modules.events\" WHERE row_key = ?1",
+            rusqlite::params![event_id],
+            |row| row.get(0),
+        )
+        .expect("event row");
+    // Decode the stored event-row value: timestamp(u64 BE) + body_len(u64 BE)
+    // + first_byte_id(1) + scope(1) + status(1) + workspace_present(1)
+    // + workspace(32 if present) + canonical_bytes(rest). The canonical bytes
+    // start with a 1-byte tag; the local_history_node_secret tag is 145 and
+    // the wire layout puts node_secret as the final 32 bytes of canonical
+    // bytes (per src/protocol/event_modules/encryption/local_history_node_secret/codec.rs).
+    let canonical = canonical_bytes_from_event_row(&bytes);
+    assert_eq!(
+        canonical.first().copied(),
+        Some(145u8),
+        "expected local_history_node_secret tag"
+    );
+    canonical[canonical.len() - 32..].to_vec()
+}
+
+fn canonical_bytes_from_event_row(value: &[u8]) -> Vec<u8> {
+    // The encoded event-row value layout is timestamp(8) + body_len(8) +
+    // first_byte_id(1) + scope(1) + status(1) + has_workspace(1) +
+    // workspace_id(32 if has_workspace) + canonical_bytes(rest). This test
+    // intentionally re-implements the layout decode rather than reaching into
+    // protocol internals: the rules-boundary test forbids those imports from
+    // black-box tests on purpose.
+    let mut offset = 0;
+    offset += 8; // timestamp
+    offset += 8; // body_len
+    offset += 1; // first byte of event id
+    offset += 1; // scope
+    offset += 1; // status
+    let has_workspace = value[offset] != 0;
+    offset += 1;
+    if has_workspace {
+        offset += 32;
+    }
+    value[offset..].to_vec()
+}
+
+fn event_id_present(db: &str, event_id: &[u8]) -> bool {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM \"event_modules.events\" WHERE row_key = ?1",
+            rusqlite::params![event_id],
+            |row| row.get(0),
+        )
+        .expect("count rows");
+    count > 0
+}
+
+fn all_event_payloads(db: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    let mut stmt = conn
+        .prepare("SELECT row_key, row_value FROM \"event_modules.events\"")
+        .expect("prepare");
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query")
+        .map(|item| item.expect("row"))
+        .collect()
+}
+
+fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn decode_hex_id(hex: &str) -> Vec<u8> {
+    assert_eq!(hex.len(), 64, "event ids are 32-byte hex strings");
+    let mut out = Vec::with_capacity(32);
+    let bytes = hex.as_bytes();
+    for chunk in 0..32 {
+        let high = decode_hex_nibble(bytes[chunk * 2]);
+        let low = decode_hex_nibble(bytes[chunk * 2 + 1]);
+        out.push((high << 4) | low);
+    }
+    out
+}
+
+fn decode_hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => panic!("invalid hex digit: {byte}"),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
 }
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {

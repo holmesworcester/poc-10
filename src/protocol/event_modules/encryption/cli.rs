@@ -359,6 +359,7 @@ fn run_key_node_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
             optional_hex_id(report.tombstoned_node_id)
         ),
         format!("admitted_events: {}", report.admitted_events),
+        format!("purged_event_bytes: {}", report.purged_event_bytes),
     ]))
 }
 

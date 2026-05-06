@@ -4,6 +4,14 @@
 //! active step that can follow from those facts. It opens wraps only when the
 //! matching local recipient private material is present, then admits the
 //! resulting local key-secret event through the common event worker.
+//!
+//! History-node derivation is also a worker concern: when a sibling node names
+//! `tombstone_node_id`, the projector exact-deletes the retired projection row,
+//! and this worker follows up by purging the retired path-node's canonical
+//! event bytes through `workers::common::retention`. Without that purge the
+//! plaintext `node_secret` from the retired event would still sit in
+//! `event_modules.events`, defeating the HKDF range tree's forward-secrecy
+//! claim.
 
 use crate::core::crypto;
 use crate::core::logical_clock;
@@ -12,6 +20,7 @@ use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{self, EventRegistry};
+use crate::workers::common::retention;
 
 use crate::protocol::event_modules::encryption::{
     key_wrap, local_history_node_secret, local_key_secret, local_recipient_key, recipient_key,
@@ -65,6 +74,7 @@ pub struct DeriveHistoryNodeReport {
     pub local_history_node_secret_id: Option<EventId>,
     pub tombstoned_node_id: Option<EventId>,
     pub admitted_events: usize,
+    pub purged_event_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,10 +313,31 @@ fn derive_history_node<R: EventRegistry>(
         },
     )
     .map_err(|err| format!("admit local history node secret: {err}"))?;
+    let mut purged_event_bytes = 0;
+    if let Some(retired_node_id) = job.tombstone_node_id {
+        // The retired path-node event carries 32 bytes of plaintext node_secret
+        // in its canonical bytes. The projection row was just exact-deleted by
+        // the local_history_node_secret projector; without also purging the
+        // durable canonical bytes, an on-disk attacker could still read
+        // node_secret and re-derive every descendant secret the projector
+        // pretends to have forgotten. Retention is worker territory because
+        // projectors cannot purge durable event-store rows. The newly admitted
+        // child event itself is intentionally preserved as the durable record
+        // of supersession.
+        let purged = store
+            .write_transaction(|store| {
+                retention::purge_event_storage_in_tx(store, &retired_node_id)
+            })
+            .map_err(|err| format!("purge retired history node bytes: {err}"))?;
+        if purged {
+            purged_event_bytes += 1;
+        }
+    }
     Ok(DeriveHistoryNodeReport {
         local_history_node_secret_id: Some(local_history_node_secret_id),
         tombstoned_node_id: job.tombstone_node_id,
         admitted_events: admitted.admitted.inserted_events,
+        purged_event_bytes,
     })
 }
 
@@ -428,5 +459,198 @@ fn key_wrap_event_from_row(row: &key_wrap::types::KeyWrapRow) -> key_wrap::types
         sender_wrap_public_key: row.sender_wrap_public_key,
         nonce: row.nonce,
         ciphertext: row.ciphertext,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::crypto::{self as core_crypto, Ed25519PrivateKey};
+    use crate::protocol::event_modules::encryption::removal_frontier;
+    use crate::protocol::event_modules::types::{event_id, EventStatus};
+    use crate::protocol::Protocol;
+    use crate::workers::common::event_store;
+
+    use super::*;
+
+    const WORKSPACE: EventId = [1; 32];
+    const KEY_SECRET: [u8; 32] = [7; 32];
+
+    /// Build a real signed `removal_frontier` event so dependency context
+    /// loading can decode it. Signature verification is real (`decode_signed`
+    /// runs ed25519 verify); we sign with a fresh Ed25519 keypair purely to
+    /// satisfy decode. The frontier itself is never re-projected here, so the
+    /// authority/admin chain remains stubbed to fixed bytes.
+    fn build_signed_frontier_record(
+        signer_private_key: &Ed25519PrivateKey,
+    ) -> crate::protocol::event_modules::types::EventRecord {
+        let payload =
+            removal_frontier::codec::encode(&removal_frontier::types::RemovalFrontierEvent {
+                workspace_id: WORKSPACE,
+                created_at_ms: 1,
+                authority_admin_id: [9; 32],
+                removal_event_ids: Vec::new(),
+            })
+            .expect("encode frontier");
+        let envelope = removal_frontier::codec::sign([8; 32], signer_private_key, payload);
+        let bytes = removal_frontier::codec::encode_signed(&envelope);
+        removal_frontier::codec::signed_record_from_bytes(bytes).expect("signed record")
+    }
+
+    fn seed_local_key_secret(store: &Store) -> (EventId, EventId) {
+        let signer_private_key = core_crypto::random_ed25519_private_key();
+        let frontier_record = build_signed_frontier_record(&signer_private_key);
+        let frontier_id = event_id(&frontier_record.canonical_bytes);
+
+        let output =
+            local_key_secret::commands::from_key_secret(WORKSPACE, frontier_id, KEY_SECRET)
+                .expect("local key secret");
+        let local_key_secret_id = output.value.local_key_secret_id;
+        let record = output.events[0].record().clone();
+        // Local key secret events normally arrive through the common worker
+        // after their frontier dependency is applied. This worker test only
+        // exercises history-node derivation, so it short-circuits the prior
+        // identity/admin/frontier chain by seeding the frontier event itself
+        // as `Applied` (with real signed bytes so dependency context loading
+        // can decode it) and the local key secret as `Applied` with its
+        // projection row.
+        store
+            .write_transaction(|store| {
+                event_store::insert_event(store, &frontier_record, EventStatus::Applied)?;
+                event_store::insert_event(store, &record, EventStatus::Applied)?;
+                store.insert_table_rows_in_tx(vec![
+                    local_key_secret::schema::local_key_secret_row(
+                        local_key_secret_id,
+                        &output.value.event,
+                    ),
+                ])?;
+                Ok(())
+            })
+            .expect("seed local key secret");
+        (frontier_id, local_key_secret_id)
+    }
+
+    #[test]
+    fn derive_history_node_purges_retired_event_bytes_after_tombstone() {
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, local_key_secret_id) = seed_local_key_secret(&store);
+
+        // Derive the parent (root) path node from the seeded local key secret.
+        let parent = run(
+            &store,
+            &protocol,
+            Work::DeriveHistoryNode {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                source_secret_id: local_key_secret_id,
+                range_start: 0,
+                range_width: 8,
+                tombstone_node_id: None,
+            },
+        )
+        .expect("derive parent node");
+        let Output::DerivedHistoryNode(parent_report) = parent else {
+            panic!("unexpected worker output");
+        };
+        let parent_id = parent_report
+            .local_history_node_secret_id
+            .expect("parent id");
+        assert_eq!(parent_report.purged_event_bytes, 0);
+
+        // Verify the parent's plaintext node_secret is still on disk before the
+        // tombstone child is admitted, so the test exercises the actual
+        // forward-secrecy pressure point.
+        let pre_purge_bytes = event_schema::event_bytes(&store, &parent_id)
+            .expect("parent bytes")
+            .expect("parent event present");
+        let parent_event =
+            local_history_node_secret::codec::decode(&pre_purge_bytes).expect("decode parent");
+        assert_ne!(parent_event.node_secret, [0; 32]);
+        assert!(
+            pre_purge_bytes
+                .windows(parent_event.node_secret.len())
+                .any(|window| window == parent_event.node_secret),
+            "parent canonical bytes must contain the plaintext node secret",
+        );
+
+        // Derive the right-half child that retires the parent.
+        let child = run(
+            &store,
+            &protocol,
+            Work::DeriveHistoryNode {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                source_secret_id: parent_id,
+                range_start: 4,
+                range_width: 4,
+                tombstone_node_id: Some(parent_id),
+            },
+        )
+        .expect("derive child node");
+        let Output::DerivedHistoryNode(child_report) = child else {
+            panic!("unexpected worker output");
+        };
+        let child_id = child_report.local_history_node_secret_id.expect("child id");
+        assert_eq!(child_report.tombstoned_node_id, Some(parent_id));
+        assert_eq!(child_report.purged_event_bytes, 1);
+
+        // Retired parent event bytes are gone; the child event remains.
+        assert!(
+            event_schema::event_bytes(&store, &parent_id)
+                .expect("parent bytes lookup")
+                .is_none(),
+            "retired parent event bytes must be purged",
+        );
+        assert!(
+            event_schema::event_bytes(&store, &child_id)
+                .expect("child bytes lookup")
+                .is_some(),
+            "child event must remain as the durable record of supersession",
+        );
+
+        // Projection rows reflect the supersession.
+        assert!(
+            local_history_node_secret::schema::get(&store, WORKSPACE, frontier_id, 0, 8)
+                .expect("parent row")
+                .is_none(),
+            "retired parent projection row must be deleted",
+        );
+        assert!(
+            local_history_node_secret::schema::get(&store, WORKSPACE, frontier_id, 4, 4)
+                .expect("child row")
+                .is_some(),
+            "child projection row must exist",
+        );
+    }
+
+    #[test]
+    fn derive_history_node_without_tombstone_does_not_purge() {
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, local_key_secret_id) = seed_local_key_secret(&store);
+
+        let report = run(
+            &store,
+            &protocol,
+            Work::DeriveHistoryNode {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                source_secret_id: local_key_secret_id,
+                range_start: 0,
+                range_width: 8,
+                tombstone_node_id: None,
+            },
+        )
+        .expect("derive without tombstone");
+        let Output::DerivedHistoryNode(report) = report else {
+            panic!("unexpected worker output");
+        };
+        assert_eq!(report.purged_event_bytes, 0);
+        assert_eq!(report.tombstoned_node_id, None);
+        // The seeded local_key_secret event bytes stay; only retired
+        // history node bytes would ever be purged here.
+        assert!(event_schema::event_bytes(&store, &local_key_secret_id)
+            .expect("seeded event bytes")
+            .is_some(),);
     }
 }
