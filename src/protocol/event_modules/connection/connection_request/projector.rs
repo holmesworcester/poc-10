@@ -128,6 +128,7 @@ mod tests {
             nonce: [2; 32],
             bootstrap_hash: [3; 32],
             invite_secret_event_id: [4; 32],
+            from_listen_addr: None,
         }))
         .expect("request record")
     }
@@ -173,6 +174,7 @@ mod tests {
             nonce: [2; 32],
             bootstrap_hash: invite_secret.bootstrap_hash,
             invite_secret_event_id,
+            from_listen_addr: None,
         }))
         .expect("request record");
         (record, invite_secret_event_id, invite_record)
