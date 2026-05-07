@@ -70,7 +70,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     if parent_message.workspace_id != file.workspace_id {
         return Err("file parent message workspace does not match file".to_string());
     }
-    if parent_message.local_key_secret_id != file.local_key_secret_id {
+    if parent_message.local_history_node_secret_id != file.local_key_secret_id {
         return Err(
             "file local key secret id does not match parent message local key secret".to_string(),
         );
@@ -162,14 +162,14 @@ mod tests {
         workspace_id: [u8; 32],
         author_user_id: [u8; 32],
         frontier_id: [u8; 32],
-        local_key_secret_id: [u8; 32],
+        local_history_node_secret_id: [u8; 32],
     ) -> Record {
         let payload = message::codec::encode(&message::types::MessageEvent {
             workspace_id,
             created_at_ms: 1,
             author_user_id,
             removal_frontier_id: frontier_id,
-            local_key_secret_id,
+            local_history_node_secret_id,
             nonce: [32; XCHACHA20_POLY1305_NONCE_BYTES],
             ciphertext: [33; message::types::MESSAGE_CIPHERTEXT_BYTES],
         });

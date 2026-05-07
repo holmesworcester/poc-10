@@ -213,8 +213,8 @@ impl PerfFixture {
             signer_endpoint_shared_id: self.signer_endpoint_shared_id,
             signer_private_key: self.signer_private_key,
             removal_frontier_id: self.removal_frontier_id,
-            local_key_secret_id: self.local_key_secret_id,
-            key_secret: self.key_secret,
+            local_history_node_secret_id: self.local_key_secret_id,
+            leaf_node_secret: self.key_secret,
             text: format!("perf message {sequence}"),
         })
         .expect("create encrypted signed message")

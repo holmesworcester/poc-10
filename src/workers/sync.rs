@@ -67,9 +67,9 @@ pub use crate::protocol::event_modules::sync::commands::{
 use crate::protocol::event_modules::sync::compare;
 use crate::protocol::event_modules::sync::compare::types::{RangeSummary, TimestampRange};
 use crate::protocol::event_modules::types::{EventId, EventIndexEntry};
-use crate::workers::common::event_pipeline::{CommandOutput, ProposedEvent};
+use crate::workers::pipeline_helpers::event_pipeline::{CommandOutput, ProposedEvent};
 use crate::workers::schema as worker_schema;
-use crate::workers::{common::event_pipeline as event_worker, DaemonWorkerContext};
+use crate::workers::{pipeline_helpers::event_pipeline as event_worker, DaemonWorkerContext};
 
 pub const DEFAULT_INBOUND_BATCH: usize = 1024;
 const DEFAULT_INDEX_BATCH: usize = 4096;

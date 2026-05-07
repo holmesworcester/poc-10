@@ -60,7 +60,7 @@ fn production_text_before_unit_tests(text: &str) -> &str {
 }
 
 fn worker_implementation_files(root: &Path) -> Vec<std::path::PathBuf> {
-    let common_root = root.join("src/workers/common");
+    let common_root = root.join("src/workers/pipeline_helpers");
     rust_files(&root.join("src/workers"))
         .into_iter()
         .filter(|path| {
@@ -611,10 +611,11 @@ fn workers_folder_has_standard_catalog_shape() {
     let required = [
         "mod.rs",
         "README.md",
-        "common",
-        "common/mod.rs",
-        "common/event_pipeline.rs",
-        "common/retention.rs",
+        "pipeline_helpers",
+        "pipeline_helpers/mod.rs",
+        "pipeline_helpers/event_pipeline.rs",
+        "pipeline_helpers/event_lifecycle.rs",
+        "pipeline_helpers/purging.rs",
         "bootstrap_exchange.rs",
         "transit_in.rs",
         "content_purge.rs",
@@ -940,7 +941,7 @@ fn core_does_not_own_protocol_worker_or_wire_codec() {
 #[test]
 fn common_event_pipeline_has_no_domain_branching_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = [root.join("src/workers/common/event_pipeline.rs")];
+    let files = [root.join("src/workers/pipeline_helpers/event_pipeline.rs")];
     let forbidden = [
         "connection",
         "sync",
@@ -953,7 +954,7 @@ fn common_event_pipeline_has_no_domain_branching_vocabulary() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "src/workers/common/event_pipeline.rs owns common admission/apply, but concrete branching belongs in event_modules::Modules or domain workers:\n{}",
+        "src/workers/pipeline_helpers/event_pipeline.rs owns common admission/apply, but concrete branching belongs in event_modules::Modules or domain workers:\n{}",
         violations.join("\n")
     );
 }
@@ -1185,11 +1186,12 @@ fn event_store_lifecycle_is_worker_owned_not_schema_owned() {
     ] {
         assert!(
             !protocol_schema.contains(forbidden),
-            "protocol/event_modules/schema.rs should define rows and keys only; event lifecycle belongs in workers/common/event_store.rs"
+            "protocol/event_modules/schema.rs should define rows and keys only; event lifecycle belongs in workers/pipeline_helpers/event_lifecycle.rs"
         );
     }
 
-    let event_store = source_text(&root.join("src/workers/common/event_store.rs"));
+    let event_lifecycle =
+        source_text(&root.join("src/workers/pipeline_helpers/event_lifecycle.rs"));
     for required in [
         "pub(crate) fn insert_event(",
         "pub(crate) fn set_event_status(",
@@ -1197,8 +1199,8 @@ fn event_store_lifecycle_is_worker_owned_not_schema_owned() {
         "pub(crate) fn delete_blocked_events_by_missing_dep(",
     ] {
         assert!(
-            event_store.contains(required),
-            "workers/common/event_store.rs should own generic event lifecycle operation {required}"
+            event_lifecycle.contains(required),
+            "workers/pipeline_helpers/event_lifecycle.rs should own generic event lifecycle operation {required}"
         );
     }
 }
@@ -1212,12 +1214,12 @@ fn local_retention_purge_is_worker_owned_not_schema_owned() {
         "protocol/event_modules/schema.rs declares event-store rows and codecs; local retention purge belongs in workers"
     );
 
-    let worker_common = source_text(&root.join("src/workers/common/retention.rs"));
+    let purging = source_text(&root.join("src/workers/pipeline_helpers/purging.rs"));
     assert!(
-        worker_common.contains("fn purge_event_storage_in_tx")
-            && worker_common.contains("local retention cleanup only")
-            && worker_common.contains("not a protocol deletion event"),
-        "workers/common should own and document event-byte retention cleanup"
+        purging.contains("fn purge_event_storage_in_tx")
+            && purging.contains("local retention cleanup only")
+            && purging.contains("not a protocol deletion event"),
+        "workers/pipeline_helpers should own and document event-byte retention cleanup"
     );
 }
 
@@ -1734,7 +1736,7 @@ fn new_poc8_modules_document_responsibility_boundaries() {
         root.join("src/protocol/event_modules/content/cli.rs"),
         root.join("src/protocol/event_modules/identity/cli.rs"),
         root.join("src/workers/bootstrap_exchange.rs"),
-        root.join("src/workers/common/mod.rs"),
+        root.join("src/workers/pipeline_helpers/mod.rs"),
         root.join("src/workers/content_purge.rs"),
         root.join("src/workers/encryption.rs"),
         root.join("tests/content_cli_test.rs"),
@@ -1912,7 +1914,7 @@ fn event_records_are_constructed_only_by_codecs() {
 #[test]
 fn command_output_contains_events_not_state_changes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(root.join("src/workers/common/event_pipeline.rs"))
+    let text = std::fs::read_to_string(root.join("src/workers/pipeline_helpers/event_pipeline.rs"))
         .expect("read worker");
     let start = text
         .find("pub struct CommandOutput")
@@ -1927,7 +1929,7 @@ fn command_output_contains_events_not_state_changes() {
 #[test]
 fn proposed_event_carries_deterministic_id_and_record() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(root.join("src/workers/common/event_pipeline.rs"))
+    let text = std::fs::read_to_string(root.join("src/workers/pipeline_helpers/event_pipeline.rs"))
         .expect("read worker");
     let start = text
         .find("pub struct ProposedEvent")
@@ -1949,7 +1951,7 @@ fn proposed_event_carries_deterministic_id_and_record() {
 #[test]
 fn projection_output_contains_rows_deletes_and_labels_not_events() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(root.join("src/workers/common/event_pipeline.rs"))
+    let text = std::fs::read_to_string(root.join("src/workers/pipeline_helpers/event_pipeline.rs"))
         .expect("read worker");
     let start = text
         .find("pub struct ProjectionOutput")
@@ -1987,7 +1989,7 @@ fn core_files_do_not_contain_sync_protocol_logic() {
         "src/core/store.rs",
         "src/core/network_queues.rs",
         "src/core/tcp.rs",
-        "src/workers/common/event_pipeline.rs",
+        "src/workers/pipeline_helpers/event_pipeline.rs",
     ];
     let forbidden = ["negentropy", "Compare", "Have", "Need", "differing_buckets"];
     let mut violations = Vec::new();

@@ -14,7 +14,7 @@ use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::core::store::Store;
 use crate::protocol::cli::Context;
 use crate::protocol::event_modules::content::{file_slice, message};
-use crate::protocol::event_modules::encryption::local_key_secret;
+use crate::protocol::event_modules::encryption::{local_history_node_secret, local_key_secret};
 use crate::protocol::event_modules::types::EventId;
 
 use super::codec;
@@ -184,20 +184,18 @@ fn run_save_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         ));
     }
 
-    let secret = local_key_secret::schema::get(
+    let secret_bytes = lookup_content_key_secret(
         &context.store,
         sealed.workspace_id,
         sealed.removal_frontier_id,
+        sealed.local_key_secret_id,
     )?
     .ok_or_else(|| "local content key is missing".to_string())?;
-    if secret.local_key_secret_id != sealed.local_key_secret_id {
-        return Err("file local key secret id mismatch".to_string());
-    }
 
     let mut bytes = Vec::with_capacity(row.blob_bytes as usize);
     for slice in &slices {
         let plaintext = file_slice::codec::open_slice(
-            &secret.key_secret,
+            &secret_bytes,
             &row.workspace_id,
             &row.file_id,
             slice.slice_number,
@@ -287,17 +285,15 @@ pub(crate) fn open_sealed_file_row(
     store: &Store,
     sealed: &SealedFileRow,
 ) -> Result<Option<FileRow>, String> {
-    let Some(secret) = local_key_secret::schema::get(
+    let Some(secret_bytes) = lookup_content_key_secret(
         store,
         sealed.workspace_id,
         sealed.removal_frontier_id,
+        sealed.local_key_secret_id,
     )?
     else {
         return Ok(None);
     };
-    if secret.local_key_secret_id != sealed.local_key_secret_id {
-        return Err("file local key secret id mismatch".to_string());
-    }
     let event = super::types::FileEvent {
         workspace_id: sealed.workspace_id,
         created_at_ms: sealed.created_at_ms,
@@ -315,7 +311,7 @@ pub(crate) fn open_sealed_file_row(
     };
     let aad = codec::descriptor_associated_data(&event, sealed.signer_endpoint_shared_id);
     let plaintext = codec::open_descriptor_slot(
-        &secret.key_secret,
+        &secret_bytes,
         &sealed.nonce,
         &aad,
         &sealed.ciphertext,
@@ -360,6 +356,34 @@ fn resolve_file_selector(
     } else {
         message::cli::parse_hex_id(selector, "FILE_SELECTOR")
     }
+}
+
+/// Resolve the AEAD key bytes for a file by its `local_key_secret_id`. With
+/// per-message FS, files reuse the parent message's leaf node secret, so we
+/// look up `local_history_node_secret` first; if that doesn't match, we fall
+/// back to the workspace-frontier `local_key_secret` for files authored before
+/// per-message FS landed.
+fn lookup_content_key_secret(
+    store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    local_key_secret_id: EventId,
+) -> Result<Option<crate::core::crypto::XChaCha20Poly1305Key>, String> {
+    for row in
+        local_history_node_secret::schema::list_for_workspace(store, workspace_id)?
+    {
+        if row.local_history_node_secret_id == local_key_secret_id {
+            return Ok(Some(row.node_secret));
+        }
+    }
+    if let Some(secret) =
+        local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?
+    {
+        if secret.local_key_secret_id == local_key_secret_id {
+            return Ok(Some(secret.key_secret));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

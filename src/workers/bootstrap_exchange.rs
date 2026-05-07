@@ -41,7 +41,7 @@ use crate::protocol::event_modules::connection::{connection_request, schema, tra
 use crate::protocol::event_modules::identity::{endpoint, invite, invite_accepted};
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::{EventId, EventRecord};
-use crate::workers::common::event_pipeline::{
+use crate::workers::pipeline_helpers::event_pipeline::{
     self as pipeline, DrainUntilIdle, EventRegistry, ProjectionOutput,
 };
 use crate::workers::{event_admission, schema as worker_schema, DaemonWorkerContext};

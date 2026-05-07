@@ -7,5 +7,5 @@
 //! stays in the domain worker or event module that can justify it.
 
 pub mod event_pipeline;
-pub(crate) mod event_store;
-pub(crate) mod retention;
+pub(crate) mod event_lifecycle;
+pub(crate) mod purging;

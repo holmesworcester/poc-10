@@ -5,7 +5,7 @@
 //! schedule by choosing which worker receives the next bounded work item.
 //!
 //! Implementations live in this directory so reviewers can see every active
-//! queue/status/index drain in one place. `common::event_pipeline` is shared
+//! queue/status/index drain in one place. `pipeline_helpers::event_pipeline` is shared
 //! machinery, not a scheduled worker. Event modules own event syntax, semantic
 //! schemas, commands, and projectors; workers own bounded movement between
 //! explicit inputs and outputs.
@@ -18,7 +18,7 @@ use crate::core::store::Store;
 use crate::protocol::event_modules::content::message_deletion;
 
 pub mod bootstrap_exchange;
-pub(crate) mod common;
+pub(crate) mod pipeline_helpers;
 pub mod content_purge;
 pub mod dependency_unblock;
 pub mod encryption;
@@ -39,21 +39,25 @@ pub mod transit_out;
 /// forward-secrecy end state without depending on a separately scheduled
 /// daemon tick. The daemon's belt-and-suspenders worker remains in
 /// `daemon_workers()` for any path this hook misses.
-pub fn drain_post_admission_purge_pending(store: &Store) -> Result<(), String> {
+pub fn drain_post_admission_purge_pending<R>(store: &Store, registry: &R) -> Result<(), String>
+where
+    R: pipeline_helpers::event_pipeline::EventRegistry,
+{
     if !message_deletion::schema::has_purge_pending(store)? {
         return Ok(());
     }
     content_purge::run(
         store,
+        registry,
         content_purge::Work::Drain {
-            limit: common::event_pipeline::DEFAULT_READY_BATCH,
+            limit: pipeline_helpers::event_pipeline::DEFAULT_READY_BATCH,
         },
     )?;
     Ok(())
 }
 
 /// Protocol context required by daemon worker descriptors.
-pub trait DaemonWorkerContext: common::event_pipeline::EventRegistry {
+pub trait DaemonWorkerContext: pipeline_helpers::event_pipeline::EventRegistry {
     fn store(&self) -> &Store;
     fn sync_index(&self) -> &crate::protocol::event_modules::sync::SyncIndex;
 }
@@ -68,6 +72,7 @@ where
         event_admission::daemon_worker(),
         event_projection::daemon_worker(),
         dependency_unblock::daemon_worker(),
+        encryption::daemon_worker(),
         content_purge::daemon_worker(),
         sync::daemon_worker(),
         transit_out::daemon_worker(),

@@ -17,7 +17,7 @@ pub mod schema;
 pub mod sync;
 pub mod test_events;
 pub mod types;
-pub use crate::workers::common::event_pipeline as worker;
+pub use crate::workers::pipeline_helpers::event_pipeline as worker;
 
 use std::sync::Arc;
 
@@ -149,7 +149,7 @@ impl EventRegistry for Modules {
         // catalog. The catalog observes projector-emitted indicator rows and
         // dispatches to the right worker, so this registry stays narrow: it
         // does not branch on event type or own worker dispatch logic.
-        crate::workers::drain_post_admission_purge_pending(store)
+        crate::workers::drain_post_admission_purge_pending(store, self)
     }
 }
 
