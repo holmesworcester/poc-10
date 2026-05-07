@@ -18,11 +18,13 @@
 //!          -> mark newly unblocked events ready
 //! ```
 //!
-//! Transit input follows the same rule from the other side. `transit_in`
-//! interprets opaque inbound bytes with the protocol registry, and any surviving
-//! canonical event records come back here for ordinary admission. Network output
-//! is kept outside projection as well: projectors may write protocol queue rows,
-//! and a domain worker later turns those rows into opaque transport rows.
+//! Transit input follows the same rule from the other side, but through an
+//! explicit queue: `transit_in` interprets opaque inbound bytes with the
+//! protocol registry and writes surviving canonical bytes to `canonical.in`.
+//! The event-admission worker drains that queue back into the same one-event
+//! helper used by local command batches. Network output is kept outside
+//! projection as well: projectors may write protocol queue rows, and a domain
+//! worker later turns those rows into opaque transport rows.
 //!
 //! Future maintainers should be suspicious of changes that make this file more
 //! knowledgeable. Domain-specific branching here is usually a sign that an event
@@ -32,19 +34,21 @@
 //!
 //! If you are trying to understand the code path, start with `run`, then follow
 //! the `Work` implementation for the call site. The heart of the file is
-//! `process_canonical_in_tx`, the one-event pipeline:
+//! `process_proposed_event_tx`, the one-event pipeline:
 //!
 //! ```text
-//! process_canonical_in_tx
+//! process_proposed_event_tx
 //!   if transient:
-//!     project_transient_canonical_in_tx
+//!     project_transient_event_tx
 //!   else:
-//!     store_durable_canonical_in_tx
+//!     store_durable_event_tx
 //!     if newly inserted and ready:
-//!       project_ready_canonical_in_tx
+//!       project_ready_event_tx
 //!         -> load_event_context_in_tx
 //!         -> write_projection_output_in_tx
-//!         -> unblock_dependents
+//!         -> write_applied_event_outputs_in_tx
+//! dependency_unblock later consumes recently-valid rows and marks dependents
+//! ready without recursively projecting inside the admission transaction.
 //! ```
 //!
 //! Every other helper exists to make one of those verbs precise. A good change
@@ -61,8 +65,9 @@
 //! and selected compatibility drain work supplied by CLI/test call sites.
 //! State: durable event rows, ready/blocker indexes, generic labels, and worker
 //! queue rows declared in `workers::schema`.
-//! Step: enqueue/admit canonical records, project ready durable events, or run
-//! bounded compatibility drains according to the supplied work item.
+//! Step: admit local canonical records directly, drain queued canonical transit
+//! records, project ready durable events, or run bounded compatibility drains
+//! according to the supplied work item.
 //! Outputs: durable event rows, projector rows/labels, `canonical.in`,
 //! `event_modules.ready_events`, `event_modules.recently_valid_events`, and
 //! `event_modules.applied_shared_events`.
@@ -82,8 +87,8 @@ use crate::protocol::event_modules::types::{
 
 use crate::protocol::event_modules::schema;
 use crate::workers::common::event_store;
+use crate::workers::dependency_unblock;
 use crate::workers::schema as worker_schema;
-use crate::workers::{dependency_unblock, event_admission};
 
 /// Default upper bound for one ready-event drain.
 ///
@@ -531,7 +536,7 @@ where
                 .record_from_canonical_in(store, bytes.clone(), receive, provenance)
                 .map_err(module_error)?;
             let proposed = ProposedEvent::contextual(received.record, received.receive);
-            process_canonical_in_tx(store, registry, &proposed, &mut report)?;
+            process_proposed_event_tx(store, registry, &proposed, &mut report)?;
             store.delete_table_rows_in_tx(worker_schema::CANONICAL_IN, vec![key.clone()])?;
             Ok(report)
         });
@@ -636,7 +641,7 @@ pub(crate) fn drain_recently_valid_events(
         .map_err(|err| format!("drain recently valid events: {err}"))
 }
 
-fn enqueue_and_drain<R>(
+fn admit_proposed_events<R>(
     store: &Store,
     registry: &R,
     events: Vec<ProposedEvent>,
@@ -644,15 +649,36 @@ fn enqueue_and_drain<R>(
 where
     R: EventRegistry,
 {
-    let mut total = PipelineStepReport::default();
-    for event in events {
-        enqueue_proposed_events(store, vec![event])?;
-        let admitted =
-            event_admission::run(store, registry, event_admission::Work::Drain { limit: 1 })?;
-        merge_admit_report(&mut total.admitted, admitted);
-        let unblock =
-            dependency_unblock::run(store, dependency_unblock::Work::Drain { limit: 4096 })?;
-        total.drained.unblocked_events += unblock.unblocked_events;
+    let admitted = store
+        .write_transaction(|store| {
+            let mut report = AdmitReport::default();
+            for event in events {
+                process_proposed_event_tx(store, registry, &event, &mut report)?;
+            }
+            Ok(report)
+        })
+        .map_err(|err| format!("admit proposed events: {err}"))?;
+    if admitted.inserted_events > 0 || admitted.applied_events > 0 {
+        registry.post_admission_hook(store)?;
+    }
+    let drained = drain_recently_valid_until_empty(store, DEFAULT_READY_BATCH)?;
+    Ok(PipelineStepReport { admitted, drained })
+}
+
+fn drain_recently_valid_until_empty(
+    store: &Store,
+    batch_size: usize,
+) -> Result<ApplyReadyReport, String> {
+    let mut total = ApplyReadyReport::default();
+    let limit = batch_size.max(1);
+    while store
+        .table_row_count(worker_schema::RECENTLY_VALID_EVENTS)
+        .map_err(|err| format!("count recently valid events: {err}"))?
+        > 0
+    {
+        let report = dependency_unblock::run(store, dependency_unblock::Work::Drain { limit })?;
+        total.applied_events += report.applied_events;
+        total.unblocked_events += report.unblocked_events;
     }
     Ok(total)
 }
@@ -675,7 +701,7 @@ where
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
         let value = self.value;
-        let report = enqueue_and_drain(store, registry, self.events)?;
+        let report = admit_proposed_events(store, registry, self.events)?;
         Ok((value, report.admitted))
     }
 }
@@ -688,7 +714,7 @@ where
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
         let value = self.output.value;
-        let report = enqueue_and_drain(store, registry, self.output.events)?;
+        let report = admit_proposed_events(store, registry, self.output.events)?;
         let drained = drain_until_idle(store, registry, self.batch_size)?;
         // Re-run the post-admission hook once after the post-drain since a
         // dependent event may have only become Applied as the closure
@@ -715,7 +741,7 @@ where
     type Output = AdmitReport;
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
-        enqueue_and_drain(
+        admit_proposed_events(
             store,
             registry,
             self.records.into_iter().map(ProposedEvent::new).collect(),
@@ -731,7 +757,7 @@ where
     type Output = AdmitReport;
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
-        enqueue_and_drain(
+        admit_proposed_events(
             store,
             registry,
             self.records
@@ -790,7 +816,7 @@ where
 ///
 /// Duplicate durable events stop after insertion returns `inserted = false`.
 /// They do not re-project, rewrite blockers, or re-run module code.
-fn process_canonical_in_tx(
+fn process_proposed_event_tx(
     store: &Store,
     modules: &impl EventRegistry,
     event: &ProposedEvent,
@@ -799,12 +825,12 @@ fn process_canonical_in_tx(
     let record = event.record();
     report.event_ids.push(event.event_id());
     if !record.scope.is_durable() {
-        project_transient_canonical_in_tx(store, modules, record, event.receive())?;
+        project_transient_event_tx(store, modules, record, event.receive())?;
         report.applied_events += 1;
         return Ok(());
     }
 
-    let stored = store_durable_canonical_in_tx(store, event, report)?;
+    let stored = store_durable_event_tx(store, event, report)?;
     if stored.inserted && stored.ready {
         let apply = if event.receive().is_some() {
             project_ready_event_record_in_tx(
@@ -815,14 +841,14 @@ fn process_canonical_in_tx(
                 event.receive(),
             )?
         } else {
-            project_ready_canonical_in_tx(store, modules, &stored.event_id)?
+            project_ready_event_tx(store, modules, &stored.event_id)?
         };
         report.applied_events += apply.applied_events;
     }
     Ok(())
 }
 
-fn project_transient_canonical_in_tx(
+fn project_transient_event_tx(
     store: &Store,
     modules: &impl EventRegistry,
     record: &EventRecord,
@@ -854,7 +880,7 @@ struct StoredDurableEvent {
 ///
 /// This helper does not project. It only records whether the event is new and
 /// whether it is ready, so the caller can decide if projection is allowed.
-fn store_durable_canonical_in_tx(
+fn store_durable_event_tx(
     store: &Store,
     event: &ProposedEvent,
     report: &mut AdmitReport,
@@ -896,11 +922,11 @@ fn store_durable_canonical_in_tx(
 /// operation idempotent under retry: if another caller already claimed the event,
 /// this helper reports no work instead of running the projector twice.
 ///
-/// The status change, context load, projector call, row writes, and dependent
-/// unblocking all happen in the caller's transaction. If projection fails, the
-/// Applied status rolls back, so failed events cannot become dependency context
-/// for later projectors.
-fn project_ready_canonical_in_tx(
+/// The status change, context load, projector call, row writes, and
+/// recently-valid queue write all happen in the caller's transaction. If
+/// projection fails, the Applied status rolls back, so failed events cannot
+/// become dependency context for later projectors.
+fn project_ready_event_tx(
     store: &Store,
     modules: &impl EventRegistry,
     event_id: &EventId,
@@ -1033,7 +1059,7 @@ fn drain_ready(
                 let Some(event_id) = event_store::next_ready_event(store)? else {
                     break;
                 };
-                let report = project_ready_canonical_in_tx(store, modules, &event_id)?;
+                let report = project_ready_event_tx(store, modules, &event_id)?;
                 total.applied_events += report.applied_events;
                 total.unblocked_events += report.unblocked_events;
             }

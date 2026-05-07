@@ -45,6 +45,50 @@ fn command_admission_returns_event_ids_for_chaining() {
     }
 }
 
+/// Invariant: command-created events are already decoded `EventRecord`s, so
+/// local command admission must process the whole proposed batch directly
+/// instead of scheduling itself through daemon `canonical.in` one event at a
+/// time.
+#[test]
+fn command_admission_processes_local_batch_without_per_event_hook_ticks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("command-batch.db")).unwrap();
+    let registry = BatchHookRegistry {
+        accepted_bytes: vec![
+            b"batch-a".to_vec(),
+            b"batch-b".to_vec(),
+            b"batch-c".to_vec(),
+        ],
+        hook_calls: Cell::new(0),
+    };
+    let records = registry
+        .accepted_bytes
+        .iter()
+        .map(|bytes| registry.record_for(bytes.clone()).unwrap())
+        .collect::<Vec<_>>();
+
+    let (_, report) = worker::run(&store, &registry, CommandOutput::with_events((), records))
+        .expect("admit local command batch");
+
+    assert_eq!(report.inserted_events, 3);
+    assert_eq!(report.applied_events, 3);
+    assert_eq!(registry.hook_calls.get(), 1);
+    assert_eq!(
+        store
+            .table_row_count(worker_schema::CANONICAL_IN)
+            .expect("count canonical in"),
+        0,
+        "local command batches should not enqueue themselves through canonical.in"
+    );
+    assert_eq!(
+        store
+            .table_row_count(worker_schema::RECENTLY_VALID_EVENTS)
+            .expect("count recently valid"),
+        0,
+        "local command batches should consume their recently-valid unblock inputs"
+    );
+}
+
 fn install_local_content_signer(store: &Store) -> (EventId, EventId, [u8; 32]) {
     let local = endpoint::commands::create_local_keypair().value;
     store
@@ -499,6 +543,11 @@ struct HookCountingRegistry {
     hook_calls: Cell<usize>,
 }
 
+struct BatchHookRegistry {
+    accepted_bytes: Vec<Vec<u8>>,
+    hook_calls: Cell<usize>,
+}
+
 impl HookCountingRegistry {
     fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
         if bytes == self.event_bytes {
@@ -529,6 +578,52 @@ impl EventRegistry for HookCountingRegistry {
             return Ok(ProjectionOutput::default());
         }
         Err("unknown hook-counting projection".to_string())
+    }
+
+    fn post_admission_hook(&self, _store: &Store) -> Result<(), String> {
+        self.hook_calls.set(self.hook_calls.get().saturating_add(1));
+        Ok(())
+    }
+}
+
+impl BatchHookRegistry {
+    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        if self
+            .accepted_bytes
+            .iter()
+            .any(|candidate| candidate == &bytes)
+        {
+            return Ok(EventRecord {
+                timestamp: 1,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: Vec::new(),
+                workspace_id: None,
+                scope: EventScope::Shared,
+            });
+        }
+        Err("unknown batch hook event".to_string())
+    }
+}
+
+impl EventRegistry for BatchHookRegistry {
+    fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        self.record_for(bytes)
+    }
+
+    fn project_record(
+        &self,
+        _store: &Store,
+        event: &EventWithContext<'_>,
+    ) -> Result<ProjectionOutput, String> {
+        if self
+            .accepted_bytes
+            .iter()
+            .any(|bytes| event_id(bytes) == event.context.event_id)
+        {
+            return Ok(ProjectionOutput::default());
+        }
+        Err("unknown batch hook projection".to_string())
     }
 
     fn post_admission_hook(&self, _store: &Store) -> Result<(), String> {
