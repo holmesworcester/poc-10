@@ -75,6 +75,58 @@ Do not implement this in the main `/home/holmes/poc-8` worktree.
   events plus durable purge of obsolete event bytes and local secrets after
   durable deletion/frontier facts preserve semantic state.
 
+### Design note: file descriptor `root_hash` is plaintext
+
+In the encrypted file shape, `filename` and `mime` ride in an authenticated
+ciphertext slot keyed by the parent message's content key; `root_hash` (the
+BLAKE3 root of the per-slice ciphertexts) is left plaintext in the descriptor's
+canonical bytes.
+
+**Reasoning**: encrypting `root_hash` would force the slice projector to call
+decrypt before BAO verification, which violates the "projectors do not do
+crypto" rule (`event_module_projectors_do_not_do_transit_or_crypto_work`).
+With `root_hash` plaintext, the slice projector reads it from the descriptor's
+clear-text fields and verifies slice ciphertext directly, no decryption
+needed at projection time.
+
+**Why the leak is benign here**: `root_hash = blake3(ciphertext)` does not
+itself reveal plaintext; it is at most an offline-verifier for guesses
+combined with a recovered key. Pre-delete, the ciphertext is on disk too, so
+`root_hash` adds no information. Post-delete, the entire file event is
+purged through `content_purge`, including `root_hash`, so the
+forward-secrecy property still holds against an on-disk attacker.
+
+**Alternatives considered**: (a) seal `root_hash` and have the slice projector
+decrypt the descriptor — clean from a leak perspective, but breaks the
+projector boundary. (b) duplicate `root_hash` into every slice's canonical
+bytes — preserves the boundary but inflates per-slice canonical bytes by 32
+and creates a content-id encoding circle to reason about. The current shape
+is the right tradeoff for this threat model.
+
+### Design note: encrypted file slice proof slots
+
+The multi-slice file proof slot fix is copied from poc-7 commit
+`a064aa97 Fix atomic bao file sends and large-send RSS`, translated to
+poc-8's encrypted slice shape. A full slice's ciphertext, not its plaintext,
+is capped at 256 KiB; the per-slice plaintext budget is therefore
+`256 KiB - XChaCha20-Poly1305 tag`. That keeps every full-slice BAO range
+aligned after encryption, so the fixed proof slot remains
+`ciphertext budget + BAO overhead` instead of growing unpredictably for
+off-boundary ranges. The descriptor still records plaintext `slice_bytes`, and
+the slice projector derives the ciphertext range as `slice_bytes + tag`.
+
+The coarse performance bisect points at `1b1992a Move daemon to explicit
+worker pipeline`. The small benchmark was `generate-deps 1000 1`: its direct
+parent `59d2b02` ran in about `0.09s` (~11.1k events/s), while `1b1992a` ran
+in about `2.43-2.47s` (~405 events/s), and later heads stayed around the same
+speed. The likely mechanism is that command admission stopped processing a
+proposed event batch in one transaction and instead enqueued through
+`canonical.in`, then drained via `event_admission::run(... limit: 1)` once per
+proposed event. That adds per-event queue encode/decode and transaction
+overhead. This is a coarse common-pipeline benchmark, not the exact encrypted
+message perf harness, but it is enough to identify the first likely throughput
+cliff.
+
 ## Scope
 
 In scope:

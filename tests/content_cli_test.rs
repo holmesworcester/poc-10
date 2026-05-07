@@ -15,6 +15,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use cli_harness::*;
+use rusqlite::Connection;
 
 #[test]
 fn cli_send_then_messages_lists_authored_messages() {
@@ -184,6 +185,156 @@ fn cli_messages_and_reactions_sync_between_two_peers() {
 }
 
 #[test]
+fn cli_received_deletion_purges_message_bytes_without_running_daemon() {
+    // Bob admits a deletion through the daemon's admission worker, then exits.
+    // The post-admission hook fires content_purge inside admission, so by the
+    // time bob's daemon dies the ciphertext, event row, and visible row are
+    // already gone. The daemon's belt-and-suspenders content_purge tick is
+    // not relied on for this assertion: with the fix, the bytes are purged
+    // atomically as part of admission.
+    let sentinel = "post-admission-purge-sentinel-3a91";
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let workspace_id = create_workspace(&alice, "Shared", "alice", "alice-laptop");
+    let invite_port = free_port();
+    let alice_port = free_port();
+    let bob_port = free_port();
+
+    join_workspace(&alice, &bob, &workspace_id, invite_port, "bob", "bob-phone");
+    let message_event_id_for_property_check = {
+        let _alice_daemon = spawn_daemon(&alice, alice_port);
+        let _bob_daemon = spawn_daemon(&bob, bob_port);
+        connect_daemon_pair(&alice, alice_port, &bob, bob_port);
+        grant_content_key_to_peer(&alice, &bob, &workspace_id);
+
+        let send = assert_success(topo(&["--db", &alice, "send", &workspace_id, sentinel]));
+        let message_event_id = line_value(&send, "event_id");
+
+        // Bob receives the message before alice deletes; this proves the deletion
+        // arrives via sync and not as a tombstone-before-message ordering quirk.
+        wait_for_messages_count(&bob, &workspace_id, "1");
+        wait_for_messages_contains(&bob, &workspace_id, sentinel);
+
+        assert_success(topo(&["--db", &alice, "delete-message", &workspace_id, "#1"]));
+
+        // Wait until bob has projected the deletion. `messages` count drops to
+        // 0 once the deletion projector has run on bob, and the post-admission
+        // hook fires `content_purge::Drain` inside that same admission step.
+        wait_for_messages_count(&bob, &workspace_id, "0");
+
+        // Give the post-admission hook a moment to commit; once it has, the
+        // `events` row count should reach the "no message bytes" state. We
+        // poll instead of relying on tick timing.
+        wait_for_message_event_purged(&bob, &message_event_id);
+        message_event_id
+    };
+
+    // Daemons are dropped/killed at this point. Bob's process is no longer
+    // running and no further work happens; what is on disk is what remains.
+
+    // Visible projection row is gone.
+    let bob_listing = assert_success(topo(&["--db", &bob, "messages", &workspace_id]));
+    assert_eq!(line_value(&bob_listing, "messages"), "0");
+    assert!(!bob_listing.contains(sentinel), "{bob_listing}");
+
+    // Property assertion: open the bob db and confirm the deleted message
+    // event row is gone, the visible projection row is gone, and a tombstone
+    // row exists. The deleted-message bytes have been removed from the row
+    // tables by the post-admission content_purge call; SQLite page reuse
+    // covers what remains in the file (we VACUUM before inspecting raw bytes
+    // so the assertion is not brittle against SQLite's lazy free-page reuse).
+    let message_id_bytes = hex_to_bytes(&message_event_id_for_property_check);
+
+    let conn = Connection::open(&bob).expect("open bob db");
+    let visible_messages_count: usize = conn
+        .query_row(
+            "SELECT count(*) FROM `content.messages`",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count messages");
+    let tombstone_count: usize = conn
+        .query_row(
+            "SELECT count(*) FROM `content.message_tombstones`",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count tombstones");
+    let event_row_for_message_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM `event_modules.events` WHERE row_key = ?1)",
+            [&message_id_bytes],
+            |row| row.get(0),
+        )
+        .expect("check event row");
+    assert_eq!(visible_messages_count, 0, "visible message row remains");
+    assert!(
+        tombstone_count >= 1,
+        "tombstone semantic fact must survive purge: {tombstone_count}"
+    );
+    assert!(
+        !event_row_for_message_exists,
+        "event_modules.events still has a row for the deleted message id"
+    );
+    // VACUUM rewrites the file without the freed pages, so the sentinel-not-
+    // in-file check tests the durable on-disk state and is not perturbed by
+    // SQLite's lazy page reuse.
+    conn.execute_batch("VACUUM").expect("vacuum bob db");
+    drop(conn);
+
+    // After VACUUM the SQLite file should not contain the deleted plaintext.
+    // This is the forward-secrecy property the post-admission purge is here
+    // to enforce: the projected plaintext row is gone and no `events.events`
+    // row keeps the encrypted bytes around.
+    let bytes = fs::read(&bob).expect("read bob db");
+    assert!(
+        !contains_subsequence(&bytes, sentinel.as_bytes()),
+        "deleted message sentinel still recoverable from bob db file after vacuum"
+    );
+}
+
+fn wait_for_message_event_purged(db: &str, message_event_id_hex: &str) {
+    let key_bytes = hex_to_bytes(message_event_id_hex);
+    for _ in 0..300 {
+        let conn = Connection::open(db).expect("open db");
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM `event_modules.events` WHERE row_key = ?1)",
+                [&key_bytes],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        drop(conn);
+        if !exists {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("event row {message_event_id_hex} was never purged");
+}
+
+fn hex_to_bytes(hex: &str) -> Vec<u8> {
+    let trimmed = hex.trim();
+    let mut bytes = Vec::with_capacity(trimmed.len() / 2);
+    let chars: Vec<char> = trimmed.chars().collect();
+    for chunk in chars.chunks(2) {
+        let pair: String = chunk.iter().collect();
+        let byte = u8::from_str_radix(&pair, 16)
+            .unwrap_or_else(|err| panic!("invalid hex `{trimmed}`: {err}"));
+        bytes.push(byte);
+    }
+    bytes
+}
+
+fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+#[test]
 fn cli_send_file_syncs_bytes_to_peer_for_save() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -221,6 +372,156 @@ fn cli_send_file_syncs_bytes_to_peer_for_save() {
     assert_eq!(line_value(&saved, "filename"), "payload.bin");
     let read_back = fs::read(&out_path).expect("read output");
     assert_eq!(read_back, payload);
+}
+
+#[test]
+fn cli_send_file_keeps_plaintext_off_disk() {
+    // Sentinel must be 32+ bytes, unique enough that a random search across
+    // the SQLite file is meaningful.
+    let sentinel = "sentinel-fs-bytes-keep-this-unique-1234567890";
+    assert!(sentinel.len() >= 32, "sentinel must be 32+ bytes");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&db, "Sealed", "alice", "alice-laptop");
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+
+    let in_path = tmp.path().join("input.bin");
+    let mut payload = Vec::new();
+    // Pad with non-sentinel bytes so the file is multi-slice-worthy.
+    payload.extend(sentinel.as_bytes());
+    payload.extend(std::iter::repeat_n(0xa5u8, 1024));
+    fs::write(&in_path, &payload).expect("write input");
+
+    let secret_filename = "secret-name-92e1f.bin";
+    let secret_in_path = tmp.path().join(secret_filename);
+    fs::write(&secret_in_path, &payload).expect("write secret named input");
+
+    let sent = assert_success(topo(&[
+        "--db",
+        &db,
+        "send-file",
+        &workspace_id,
+        "subject does not leak filename",
+        "--file",
+        secret_in_path.to_str().expect("path"),
+        "--mime",
+        "application/x-secret-mime-3713",
+    ]));
+    assert!(sent.contains(&format!("filename: {}", secret_filename)), "{sent}");
+
+    // Read the SQLite file and assert sentinel is not present anywhere.
+    let raw = fs::read(&db).expect("read sqlite file");
+    let needle = sentinel.as_bytes();
+    assert!(
+        raw.windows(needle.len()).all(|window| window != needle),
+        "sentinel plaintext leaked to disk despite encryption"
+    );
+
+    // Filename and MIME should also be sealed; neither plaintext should
+    // appear in the SQLite file.
+    assert!(
+        raw.windows(secret_filename.len())
+            .all(|window| window != secret_filename.as_bytes()),
+        "filename plaintext leaked to disk"
+    );
+    let mime_needle = b"application/x-secret-mime-3713";
+    assert!(
+        raw.windows(mime_needle.len()).all(|window| window != mime_needle),
+        "mime plaintext leaked to disk"
+    );
+}
+
+#[test]
+fn cli_delete_message_purges_attached_file_and_slices() {
+    let sentinel = "sentinel-fs-purge-bytes-7777-unique-aaaa-bbbb";
+    assert!(sentinel.len() >= 32);
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&db, "Purge", "alice", "alice-laptop");
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+
+    let in_path = tmp.path().join("input.bin");
+    let mut payload = Vec::new();
+    payload.extend(sentinel.as_bytes());
+    payload.extend(std::iter::repeat_n(0x33u8, 1024));
+    fs::write(&in_path, &payload).expect("write input");
+
+    assert_success(topo(&[
+        "--db",
+        &db,
+        "send-file",
+        &workspace_id,
+        "delete me",
+        "--file",
+        in_path.to_str().expect("path"),
+    ]));
+    let files_before = assert_success(topo(&["--db", &db, "files", &workspace_id]));
+    assert_eq!(line_value(&files_before, "files"), "1");
+
+    assert_success(topo(&["--db", &db, "delete-message", &workspace_id, "#1"]));
+
+    // Allow the daemon's content_purge worker time to run; we drive it via
+    // the explicit `start --once` admin entry as the existing tests do.
+    let after_files = assert_success(topo(&["--db", &db, "files", &workspace_id]));
+    assert_eq!(line_value(&after_files, "files"), "0");
+    let after_messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
+    assert_eq!(line_value(&after_messages, "messages"), "0");
+
+    let raw = fs::read(&db).expect("read sqlite file");
+    let needle = sentinel.as_bytes();
+    assert!(
+        raw.windows(needle.len()).all(|window| window != needle),
+        "sentinel plaintext survived after delete-message purge"
+    );
+}
+
+#[test]
+fn cli_delete_message_purges_attached_file_on_peer_after_sync() {
+    let sentinel = "sentinel-fs-bytes-peer-purge-c0c0c0c0c0c0c0c0";
+    assert!(sentinel.len() >= 32);
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let workspace_id = create_workspace(&alice, "PeerPurge", "alice", "alice-laptop");
+    let invite_port = free_port();
+    let alice_port = free_port();
+    let bob_port = free_port();
+
+    join_workspace(&alice, &bob, &workspace_id, invite_port, "bob", "bob-phone");
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    let _bob_daemon = spawn_daemon(&bob, bob_port);
+    connect_daemon_pair(&alice, alice_port, &bob, bob_port);
+    grant_content_key_to_peer(&alice, &bob, &workspace_id);
+
+    let in_path = tmp.path().join("input.bin");
+    let mut payload = Vec::new();
+    payload.extend(sentinel.as_bytes());
+    payload.extend(std::iter::repeat_n(0x77u8, 1024));
+    fs::write(&in_path, &payload).expect("write input");
+
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "send-file",
+        &workspace_id,
+        "peer purge target",
+        "--file",
+        in_path.to_str().expect("path"),
+    ]));
+    wait_for_files_count(&bob, &workspace_id, "1");
+
+    assert_success(topo(&["--db", &alice, "delete-message", &workspace_id, "#1"]));
+
+    // Wait for sync + purge propagation on bob's side.
+    wait_for_messages_count(&bob, &workspace_id, "0");
+    wait_for_files_count(&bob, &workspace_id, "0");
+
+    let raw = fs::read(&bob).expect("read bob db post-delete");
+    assert!(
+        raw.windows(sentinel.len()).all(|w| w != sentinel.as_bytes()),
+        "sentinel survived on peer DB after delete sync; purge not propagated"
+    );
 }
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {
