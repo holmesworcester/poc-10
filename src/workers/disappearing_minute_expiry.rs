@@ -24,6 +24,8 @@ use crate::protocol::event_modules::content::message::schema as message_schema;
 use crate::protocol::event_modules::content::message::types::{
     message_event_id_in_minute, UNIX_MINUTE_MS,
 };
+use crate::protocol::event_modules::content::reaction::schema as reaction_schema;
+use crate::protocol::event_modules::content::reaction::types::reaction_event_id_in_minute;
 use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
 use crate::protocol::event_modules::types::EventId;
 use crate::workers::encryption as encryption_worker;
@@ -36,6 +38,11 @@ pub struct ExpiryReport {
     pub retired_message_leaves: usize,
     pub purged_event_bytes: usize,
     pub deleted_message_rows: usize,
+    /// Reactions/files/slices reclaimed by the post-expiry
+    /// `content_purge` cascade in the same tick.
+    pub cascaded_reaction_rows: usize,
+    pub cascaded_file_rows: usize,
+    pub cascaded_file_slice_rows: usize,
 }
 
 pub(crate) fn daemon_worker<C>() -> Worker<C>
@@ -128,13 +135,49 @@ where
                 created_at_ms: row.created_at_ms,
                 event_id_in_minute,
                 message_id: row.message_id,
+                author_user_id: row.author_user_id,
             });
         }
     }
 
     let job_count = expired_jobs.len().min(limit);
-    for job in expired_jobs.into_iter().take(job_count) {
+    let processed_jobs: Vec<ExpireMessageJob> = expired_jobs
+        .into_iter()
+        .take(job_count)
+        .collect();
+    for job in processed_jobs.iter().copied() {
         process_job(store, registry, &mut report, job)?;
+    }
+
+    // Slice 4: retire the per-event leaves of any reaction whose target
+    // message we just expired. `content_purge` handles read-model and
+    // sealed-bytes cleanup for reactions but does not call
+    // `RetireDeletedEventLeaf` for the reaction's own leaf, so we do
+    // that here. The reaction's leaf coord is deterministic from its
+    // canonical fields; both peers retire the same coord. Skip if no
+    // messages expired this tick.
+    if !processed_jobs.is_empty() {
+        retire_reaction_leaves_for_expired_messages(store, registry, &processed_jobs, &mut report)?;
+    }
+
+    // Cascade through `content_purge` so reactions/files/slices for
+    // expired messages are reclaimed in the same tick. The message
+    // tombstone rows we just wrote are the trigger:
+    // `purge_reaction_for_deleted_message` and
+    // `purge_file_for_deleted_message_or_file_deletion` both gate on
+    // `message_tombstone_exists(target_message_id)`.
+    if job_count > 0 {
+        let cascade = crate::workers::content_purge::run(
+            store,
+            registry,
+            crate::workers::content_purge::Work::Drain { limit: usize::MAX },
+        )
+        .map_err(|err| format!("content_purge cascade after expiry: {err}"))?;
+        report.cascaded_reaction_rows += cascade.reaction_rows_deleted;
+        report.cascaded_file_rows += cascade.file_rows_deleted;
+        report.cascaded_file_slice_rows += cascade.file_slice_rows_deleted;
+        report.purged_event_bytes += cascade.event_bytes_purged;
+        report.retired_message_leaves += cascade.retired_message_leaves;
     }
 
     Ok(report)
@@ -147,6 +190,7 @@ struct ExpireMessageJob {
     created_at_ms: u64,
     event_id_in_minute: EventId,
     message_id: EventId,
+    author_user_id: EventId,
 }
 
 fn process_job<R: EventRegistry>(
@@ -155,11 +199,12 @@ fn process_job<R: EventRegistry>(
     report: &mut ExpiryReport,
     job: ExpireMessageJob,
 ) -> Result<(), String> {
-    // Delete the read-model and sealed rows + purge canonical bytes for
-    // the expired message in one transaction. Mirrors the post-deletion
-    // cleanup `content_purge` does for `message_deletion` events; the
-    // disappearing path skips writing a deletion-fact event and simply
-    // executes the same retention work driven by the clock.
+    // Delete the read-model and sealed rows, write a `message_tombstones`
+    // row so `content_purge` will cascade to reactions/files/slices on
+    // its next tick (see `content_purge::purge_reaction_for_deleted_message`
+    // and friends, which gate purges on
+    // `message::schema::message_tombstone_exists`), and purge the
+    // message's canonical bytes — all in one transaction.
     let messages_deleted = store
         .write_transaction(|tx_store| {
             let key = message_schema::message_key(job.workspace_id, job.message_id);
@@ -169,6 +214,11 @@ fn process_job<R: EventRegistry>(
                 as usize;
             tx_store
                 .delete_table_rows_in_tx(message_schema::SEALED_MESSAGES, vec![key])?;
+            tx_store.insert_table_rows_in_tx(vec![message_schema::message_tombstone_row(
+                job.workspace_id,
+                job.message_id,
+                job.author_user_id,
+            )])?;
             purging::purge_event_storage_in_tx(tx_store, &job.message_id)?;
             Ok::<_, rusqlite::Error>(deleted)
         })
@@ -207,4 +257,54 @@ fn sealed_messages_for_workspace(
         .into_iter()
         .filter(|row| row.workspace_id == workspace_id)
         .collect())
+}
+
+/// For each just-expired message, find every admitted reaction whose
+/// `target_message_id` matches and call `RetireDeletedEventLeaf` for the
+/// reaction's per-event leaf. Mirrors how the message leaf is retired,
+/// so the reaction's AEAD key cannot be re-derived from any retained
+/// state. The reaction's read-model row, sealed-bytes, and canonical
+/// bytes are reclaimed by the `content_purge` cascade that follows.
+fn retire_reaction_leaves_for_expired_messages<R: EventRegistry>(
+    store: &Store,
+    registry: &R,
+    expired_messages: &[ExpireMessageJob],
+    report: &mut ExpiryReport,
+) -> Result<(), String> {
+    let reactions = reaction_schema::list_sealed(store, usize::MAX)?;
+    for reaction in reactions {
+        let parent = expired_messages.iter().find(|job| {
+            job.workspace_id == reaction.workspace_id
+                && job.message_id == reaction.target_message_id
+        });
+        let Some(_) = parent else {
+            continue;
+        };
+        let event_id_in_minute = reaction_event_id_in_minute(
+            &reaction.workspace_id,
+            &reaction.author_user_id,
+            &reaction.target_message_id,
+            &reaction.removal_frontier_id,
+            reaction.created_at_ms,
+        );
+        let output = encryption_worker::run(
+            store,
+            registry,
+            encryption_worker::Work::RetireDeletedEventLeaf {
+                workspace_id: reaction.workspace_id,
+                removal_frontier_id: reaction.removal_frontier_id,
+                created_at_ms: reaction.created_at_ms,
+                event_id_in_minute,
+            },
+        )
+        .map_err(|err| format!("retire expired-reaction leaf: {err}"))?;
+        let encryption_worker::Output::RetiredDeletedEventLeaf(retired) = output else {
+            return Err("unexpected encryption worker output retiring reaction leaf".to_string());
+        };
+        if retired.leaf_id.is_some() {
+            report.retired_message_leaves += 1;
+        }
+        report.purged_event_bytes += retired.purged_event_bytes;
+    }
+    Ok(())
 }

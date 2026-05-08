@@ -393,6 +393,56 @@ fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_
 }
 
 // ---------------------------------------------------------------------------
+// Test 4 (slice 4): when a parent message expires, its reactions are
+// reclaimed in the same tick via the content_purge cascade. Reactions
+// don't carry their own `expires_at_minute` — they inherit by being
+// authored in the same minute as the parent message, and the
+// disappearing-minute worker writes a `MESSAGE_TOMBSTONES` row that
+// triggers content_purge to drop reaction rows + canonical bytes for
+// any message that's been tombstoned.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let alice_port = free_port();
+
+    let workspace_id =
+        create_workspace_with_ttl(&alice, "Cascade", "alice", "alice-laptop", 1);
+    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+
+    // Author a message and then react to it, both in unix_minute 100.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "secret"]));
+    assert_success(topo(&[
+        "--db", &alice, "react", &workspace_id, "#1", "🌶️",
+    ]));
+
+    // Pre-expiry: one message visible, two leaves materialized (message +
+    // reaction).
+    let pre = keys_value(&alice, &workspace_id);
+    assert_eq!(line_value(&pre, "local_history_leaves"), "2");
+    assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
+
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    // Advance past minute 101 (TTL=1 ⇒ expires_at_minute=101).
+    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+
+    // Wait for both leaves to be retired — the message's by the
+    // disappearing-minute worker, the reaction's by the content_purge
+    // cascade triggered by the message tombstone.
+    wait_for_leaf_count(&alice, &workspace_id, "0");
+
+    // Post-expiry assertions.
+    let post = keys_value(&alice, &workspace_id);
+    assert_eq!(line_value(&post, "local_history_leaves"), "0");
+    assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
+    // Both message and reaction canonical bytes are reclaimed.
+    wait_for_content_count(&alice, &workspace_id, "0");
+}
+
+// ---------------------------------------------------------------------------
 // Helpers (local to this test file).
 // ---------------------------------------------------------------------------
 
