@@ -336,8 +336,61 @@ rotation), which is explicitly *not* what we are landing here.
 Because we cannot get FS for the retired leaf without wiping F, the
 retire walk that materializes sibling cover **does not exist** in this
 model. There is nothing to "preserve" — F still covers everything via
-KDF. The per-deletion cost collapses to read-model cleanup plus a
-single leaf-shaped tombstone:
+KDF. The cost shape splits into two regimes:
+
+There are two distinct retirement events, with very different cost
+shapes. The chop happens at most once per setting tightening; the
+per-message tombstone happens once per disappearance and is the
+dominant ongoing cost.
+
+#### Tightening: one-time chop off the left side of the time tree
+
+A *tightening* setting change advances the monotonic floor to a new,
+later `floor_minute = M`. The chop deletes all messages with authored
+minute `< M`. Geometrically this is a prefix-range deletion of
+`[0, M)` in the time tree (root width `2^57`):
+
+  * **At most ~57 "fully-left subtree" tombstones**, one per bit of
+    `M`'s representation where the boundary places an entire subtree
+    inside `[0, M)`. Each tombstone covers an entire subtree in one
+    row.
+  * **At most ~57 boundary descend-path tombstones** for the
+    `root → M` walk where the boundary cuts the subtree.
+
+~128 B per tombstone → **~14 KB per tightening, constant in the
+number of messages chopped**.
+
+A *loosening* setting change does **not** advance the floor (the
+floor is monotonic non-decreasing). It only updates the TTL that
+*future* messages will stamp themselves with. No chop, no
+retirement, no tombstones at change time.
+
+So: one-shot ~14 KB cost per tightening; zero cost per loosening.
+
+Determinism: the chop is a pure function of `(floor_minute,
+TIME_TREE_ROOT_WIDTH)`. Both peers compute byte-identical tombstone
+rows from byte-identical inputs.
+
+#### Per-message TTL retirement (the dominant ongoing cost)
+
+After (and between) any chops, every message disappears on its own
+stamped `expires_at_minute`. **These cannot be coalesced into a coarse
+range tombstone**, because messages in the same minute can carry
+different stamped TTLs:
+
+  * A message authored under a strict TTL (say, 1 day) stamps
+    `expires_at_minute = authored_minute + 1440`.
+  * A message authored under a permissive TTL (say, 7 days) stamps
+    `expires_at_minute = authored_minute + 10080`.
+  * Both can occur in the same minute if a setting change happened
+    mid-minute, or even just under a permissive policy where some
+    authors choose tighter per-author defaults.
+
+Coalescing all of minute M's leaves into one minute-node tombstone
+would require all messages in M to share a TTL, which is not
+guaranteed under monotonic-floor + per-message-stamping.
+
+Per per-message retirement:
 
 | Component | Bytes |
 |---|---|
@@ -345,17 +398,47 @@ single leaf-shaped tombstone:
 | `MESSAGE_TOMBSTONES` row | ~128 |
 | `MESSAGES` + `SEALED_MESSAGES` row deletes | reclaims storage |
 | Canonical bytes purge | reclaims storage |
-| **Net cover overhead per per-message retirement** | **~256 B** |
+| **Net cover overhead per disappearance** | **~256 B** |
 
-(Plus the cascade cost for each reaction/file/file_slice gated on the
-parent message tombstone, which is the same shape: ~128 B per cascaded
-leaf tombstone.)
+Plus ~128 B per cascaded reaction/file/file_slice leaf tombstone.
+
+These accumulate at the message-disappearance rate. A workspace with
+1000 disappearances/day produces ~256 KB/day of tombstone debris;
+over a year, ~93 MB. **This is the dominant ongoing cost of
+disappearing messages in option 5.**
+
+Determinism: the leaf coord is a deterministic function of the
+message's canonical bytes (`workspace_id`, `author_user_id`,
+`removal_frontier_id`, `created_at_ms`). All peers tombstone the same
+coord with byte-identical tombstone rows; clock skew may stagger the
+firing time but cannot change the result.
+
+#### Bulk GC happens only at tightening, and only for already-debris
+
+When a tightening chop fires, its coarse subtree tombstones subsume
+any pre-existing per-message tombstones whose coords fall within the
+chopped range. The chop projector can exact-delete those subsumed
+rows; their convergence purpose is now served by the coarser
+tombstone. **This is a one-shot reclaim at chop time; it does not
+prevent future accumulation.**
+
+Going forward, debris above the floor accumulates linearly. Only
+*another* tightening can sweep it. Without periodic tightening, the
+tombstone table grows unbounded at the message rate.
+
+Operational implication: the implementation should make periodic
+re-tightening (or an admin-initiated "compact" action that re-issues
+the current floor) cheap and obvious in the UI, since this is the
+only mechanism that bounds tombstone storage.
+
+#### Comparison
 
 Compare to the F-wipe model documented in earlier sections: ~30 KB
 walk per first-retirement-under-frontier and forced rotation. The
-no-rotation model is roughly **two orders of magnitude cheaper per
-retirement** at the cost of dropping crypto-FS for the disappeared
-message.
+no-rotation model is ~two orders of magnitude cheaper *per
+retirement* at the cost of (a) dropping crypto-FS for the disappeared
+message and (b) accepting unbounded tombstone accumulation between
+tightening events.
 
 #### Hypothetical: cost if we *did* walk to full depth
 
@@ -389,23 +472,45 @@ if we kept F-wipe and chased birthday safety via depth. Option 5
 discards the walk entirely, so neither the depth nor the sibling
 materialization is incurred.
 
-### Floor advance cost
+### Setting-change work shape
 
-A floor advance (admin tightens the setting) deletes all messages
-authored before the new floor minute. The work is:
+A setting change admits a new `disappearing_messages_setting`. Its
+shape depends on whether the new setting tightens or loosens:
 
-  * One signed `disappearing_messages_setting` event carrying the new
-    `expires_at_or_before_minute` floor (~few hundred bytes).
-  * For each message older than the floor: the same per-message
-    retirement above (~256 B cover overhead + storage reclaim).
-  * For each minute fully behind the floor with no surviving
-    messages: optionally one minute-node tombstone (~128 B) so the
-    minute-axis cover state is reclaimed.
+**Tightening** (new floor `> latest floor`):
 
-Cost scales with **number of expiring messages**, not depth. The
-worker fans out the per-message retirements within the
-`work_limit` budget per tick, the same way slice 1's expiry worker
-already does for time-driven expiries.
+  1. Admit the setting event.
+  2. Apply the prefix-range deletion `[0, new_floor)` against the
+     time tree: ≤57 fully-left subtree tombstones + ≤57 boundary
+     descend-path tombstones (~14 KB constant time-tree work).
+  3. GC-delete any per-message tombstone rows whose coords fall
+     under one of the new subtree tombstones (subsumed by the
+     coarser tombstone).
+  4. Exact-delete `MESSAGES`, `SEALED_MESSAGES`, `MESSAGE_TOMBSTONES`
+     rows for messages with `created_at_ms / UNIX_MINUTE_MS <
+     new_floor`, and purge their canonical bytes.
+
+**Loosening** (new floor `=` latest floor; only the per-message TTL
+authoring policy changes):
+
+  1. Admit the setting event.
+  2. Done. No chop, no retirement.
+
+The per-message TTL stamping at *authoring time* keys off "the latest
+admitted setting at the moment of authoring", so a loosening setting
+takes effect for new messages immediately. Messages already authored
+under a stricter prior setting keep their stricter stamped
+`expires_at_minute` and continue to disappear on schedule via the
+ordinary per-message expiry worker.
+
+Cost scaling:
+
+  * Tightening: **one-time ~14 KB** time-tree work, plus
+    linear-in-locally-stored-subsumed-rows GC reclaim.
+  * Loosening: **zero** retirement work.
+  * Ongoing per-message TTL expiry (always running, in both regimes):
+    ~256 B per disappearance, accumulating linearly until the next
+    tightening.
 
 ### What slice 5 needs to ship
 
@@ -1182,15 +1287,33 @@ shipping work for this slice is:
 
 16. Add `expires_at_or_before_minute: u64` floor field to
     `disappearing_messages_setting` canonical bytes. Projector
-    enforces monotonic non-decreasing across successive settings.
-17. Add a `RetireDeletedEventLeafBestEffort` (or a flag on the
-    existing primitive) that writes only the leaf tombstone +
+    enforces monotonic non-decreasing across successive settings
+    (tightenings advance the floor; loosenings keep it equal).
+17. Add a `RetireDeletedEventLeafBestEffort` primitive (or a flag on
+    the existing one) that writes only the leaf tombstone +
     read-model deletes + canonical bytes purge — *no F-wipe, no
-    sibling materialization walk*. This is the disappearing-messages
-    retirement path going forward.
-18. Worker fans out per-message best-effort retirements for all
-    messages older than the current latest floor, in addition to the
-    existing time-driven expiry from slice 1.
+    sibling materialization walk*. This is the per-message
+    disappearing-messages retirement path used by the ongoing
+    expiry worker.
+18. Add a `ChopTimeTreePrefix(floor_minute)` primitive that performs
+    the prefix-range deletion `[0, floor_minute)` against the time
+    tree: writes ≤57 subtree tombstones + ≤57 boundary descend
+    tombstones, deterministically derived from `(floor_minute,
+    TIME_TREE_ROOT_WIDTH)`. This fires *only on tightening setting
+    changes* (when the floor strictly advances). Loosenings do not
+    invoke the chop.
+19. Setting projector, on a tightening change, calls
+    `ChopTimeTreePrefix(new_floor)` and then GC-deletes any
+    pre-existing per-message tombstone rows whose coords fall under
+    a new subtree tombstone (subsumed). On a loosening change, the
+    projector only persists the new setting; nothing else fires.
+20. The ongoing expiry worker (slice 1's
+    `disappearing_minute_expiry`) fans out per-message best-effort
+    retirements for messages whose stamped `expires_at_minute` has
+    been crossed by the clock — regardless of whether the message is
+    above or below the floor (it usually is above; the chop already
+    cleared everything below). The F-wipe walk is swapped out for
+    the best-effort primitive from step 17.
 19. Admin UI prompt on tightening:
     > You are about to change to a shorter disappearing messages
     > limit. Messages older than {floor_age} will be deleted now as
