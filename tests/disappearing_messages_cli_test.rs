@@ -1,43 +1,52 @@
 //! Black-box CLI tests for disappearing-messages forward secrecy.
 //!
-//! Slice gate for `disappearing_messages_plan.md`. These tests drive the
-//! real `topo` binary and assert observable forward-secrecy and
-//! convergence behavior through public CLI output. The tests intentionally
-//! do not seed protocol rows or call workers directly. They will fail
-//! until the slice-1 surface lands:
+//! Drives the real `topo` binary and asserts observable forward-secrecy
+//! and convergence behavior through public CLI output. The tests
+//! intentionally do not seed protocol rows or call workers directly.
 //!
+//! The shipped surface tested here:
 //!   * `create-workspace ... --ttl-minutes <u32>` plumbs a workspace-wide
-//!     TTL into authored messages.
+//!     TTL into authored messages (slice 1 fallback).
+//!   * `disappearing-set <ws> <ttl_minutes>` admin-signed setting event
+//!     supersedes the workspace-event TTL for new authoring (slice 2).
 //!   * `MessageEvent` canonical bytes carry `expires_at_minute: u64`
-//!     (`u64::MAX` = no expiry).
-//!   * The `expired_minute` local-only event module exists; its projector
-//!     punctures the minute_node, exact-row-deletes the read-model row,
-//!     purges canonical bytes via `retention::purge_event_storage_in_tx`,
-//!     and writes a tombstone row pointing the retired minute node at the
-//!     `expired_minute` event id.
-//!   * The `disappearing_minute_expiry` worker is registered as a
-//!     daemon-step worker alongside `content_purge` and fires when
-//!     `logical_time` advances past a minute's expiry.
-//!   * The encryption worker exposes a whole-minute retirement variant
-//!     (the TODO at `src/workers/encryption.rs:1147`).
+//!     (`u64::MAX` = no expiry) and `disappearing_setting_id: EventId`
+//!     referencing the policy under which the message was authored.
+//!     The projector validates the stamp against the referenced
+//!     policy's permitted ttl_minutes (slice 3).
+//!   * `disappearing_minute_expiry` daemon-step worker retires
+//!     per-message and per-reaction leaves and triggers `content_purge`
+//!     cascade for reactions/files/slices (slices 1 + 4).
+//!   * The message projector reads `now_unix_minute` from
+//!     `EventContext` and tombstones expired-at-receive messages with a
+//!     deletion label so re-arrivals can't resurrect them.
 //!
-//! Known gaps these tests do NOT close (covered by later slices):
-//!   * A first-class `expired_minute_summary` distinct from the retained
-//!     cover summary (slice 3 "deletion summary monotonicity").
+//! Known gaps these tests do NOT close (covered by future work or
+//! documented as out of scope in `disappearing_messages_plan.md` §6):
+//!   * Latest-setting enforcement — peers can pick any admitted setting
+//!     as the per-message reference, including older more-permissive
+//!     ones. Honest authors always pick the latest; closing the gap
+//!     needs an "epoch" mechanism (time-based, logical-order, or
+//!     counter-based).
 //!   * A canonical-bytes-by-event-id query (`events get <id>`) for a
-//!     direct purge proof. The current strongest signal is `content-count`
-//!     dropping to 0 and `keys` row counts collapsing.
+//!     direct purge proof. The current strongest signal is
+//!     `content-count` dropping to 0 and `keys` row counts collapsing.
 //!   * Offline-expire isolation. With both daemons connected the test
-//!     cannot observe whether each peer's `expired_minute` was derived
-//!     locally or sneaked across the wire. A proper offline-expire test
-//!     needs a harness that suppresses auto-reconnect (the daemon
-//!     periodically reconnects to known peers); that harness change is
-//!     out of scope for this slice gate.
+//!     cannot observe whether each peer's expiry decision was reached
+//!     locally or sneaked across the wire. (No expiry events sync —
+//!     each peer derives retirement from canonical-bytes equality of
+//!     the original messages.)
 //!   * Per-tombstone-row byte-equality across peers. The tests verify
 //!     tombstone-count equality and `cover_summary` equality, but the
 //!     actual `LOCAL_HISTORY_NODE_TOMBSTONES` rows are not surfaced by
-//!     the current `keys` CLI. A future slice should add a per-row
-//!     tombstone listing so peers can be compared row-for-row.
+//!     the current `keys` CLI.
+//!   * Whole-minute leaf retirement. Today the worker calls
+//!     `RetireDeletedEventLeaf` per message + per reaction; the
+//!     `src/workers/encryption.rs:1147` TODO ("whole-minute
+//!     retirement") would consolidate to one tombstone per minute.
+//!     With per-message TTLs, leaves in the same minute can have
+//!     different stamped expiries, so the optimization only pays off
+//!     for a fixed workspace TTL.
 
 mod cli_harness;
 

@@ -61,6 +61,85 @@ union. **The current implementation diverges from that spec**: see the
 "Acknowledged divergence from the plan" section below. This design assumes
 the corrected primitives and surfaces the gap explicitly.
 
+## Implementation Note (Supersedes Sections 1–5)
+
+The slices that shipped on the `task-disappearing-messages` branch do **not**
+introduce an `expired_minute` event, do **not** tombstone whole minutes, and
+do **not** sync any expiry-related fact between peers. The earlier sections
+(1–5) describe an `expired_minute`-event-based design that was abandoned;
+this note records what actually got built and why.
+
+### What ships
+
+  * **Per-message stamping (slices 1 + 3).** Each `MessageEvent` commits in
+    canonical bytes to its own `expires_at_minute: u64` and a
+    `disappearing_setting_id: EventId` — the policy under which it was
+    authored, either a signed `disappearing_messages_setting` or the
+    workspace event id (slice-1 fallback). The projector validates the
+    stamped expiry against the referenced policy.
+  * **Per-peer clock-driven retirement (slice 1).** The
+    `disappearing_minute_expiry` daemon-step worker scans `sealed_messages`
+    every tick. For each row whose `expires_at_minute < now_unix_minute`,
+    it deletes the read-model + sealed rows, writes a
+    `MESSAGE_TOMBSTONES` row (which triggers the existing `content_purge`
+    cascade for reactions/files), purges the message's canonical bytes,
+    and calls `RetireDeletedEventLeaf` for the message's per-event leaf.
+  * **Re-arrival rejection.** The message projector reads
+    `now_unix_minute` from `EventContext` and tombstones expired-at-receive
+    messages with a deletion label so re-arrivals can't resurrect them.
+  * **Cascade through `content_purge` (slice 4).** Reactions, files, and
+    file_slices are reclaimed in the same daemon tick via `content_purge`
+    by gating on the parent message's tombstone. Reaction leaves are
+    additionally retired by the disappearing-minute worker
+    (parent-driven).
+
+### What does *not* ship (deliberate simplifications)
+
+  * **No `expired_minute` event.** Convergence is provided by canonical-bytes
+    equality of the original messages: every peer admits the same bytes,
+    derives the same `expires_at_minute`, and reaches the same retirement
+    decision when its own clock crosses the boundary. There is no shared
+    "expiry fact" event to converge on.
+  * **No whole-minute tombstone.** The encryption-worker TODO at
+    `src/workers/encryption.rs:1147` describes a `RetireExpiredMinute`
+    primitive that consolidates retirement to one tombstone per minute
+    instead of one per leaf. With **mutable per-message TTLs** (slice 2),
+    different messages in the same minute can have *different* stamped
+    expiries, so the optimization only pays off for a fixed workspace
+    TTL across all messages. Until then we accept per-leaf tombstones
+    and rely on key rotation (a new `removal_frontier`) for coarse
+    cleanup of accumulated tombstones.
+  * **No deletion-summary commitment** (the abandoned slice-3
+    `Hset(deleted_set, retained_cover, expired_minute_set)`). Convergence
+    on the cover summary already implies agreement on retained state, and
+    the deletion *path* is implied by canonical-bytes equality of the
+    original messages.
+
+### Mutable-TTL ⇒ dirty-tree consequence
+
+Per-message stamping monotonically fixes each message's expiry at
+authoring; the admin can still flip-flop the policy ("strict" 1 minute
+→ "less strict" 5 minutes → strict again) without retroactively
+changing already-authored messages' stamps. That gives us monotonicity
+*per message*, but loses the property that "all leaves in minute M
+retire together at minute M+TTL" — different leaves in a minute can
+retire at different boundaries. The FS tree therefore accumulates
+per-leaf tombstones over time; pruning that debris requires either:
+
+  1. A future fixed-TTL workspace mode (immutable disappearing setting
+     baked into workspace creation), enabling whole-minute retirement.
+  2. A periodic key rotation (new `removal_frontier`) that starts a
+     fresh subtree, leaving the old debris tombstoned in a frontier
+     nobody authors under anymore.
+
+### Latest-setting trust gap (recap)
+
+Authors pick which admitted setting to reference. A malicious peer can
+reference an *older more-permissive* setting to extend their messages'
+effective TTL. Honest authors always reference the latest. Closing the
+gap requires committing to a specific epoch (time-based, logical
+order, or counter-based — see §6). Out of scope.
+
 ## Acknowledged Divergence From The Plan
 
 The phase-two slice landed in

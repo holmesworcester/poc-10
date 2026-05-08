@@ -372,9 +372,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         }
         encryption::key_wrap::codec::TYPE_KEY_WRAP => Err("key_wrap must be signed".to_string()),
         encryption::key_wrap::codec::TYPE_SIGNED_KEY_WRAP => encryption::record_from_bytes(bytes),
-        encryption::expired_minute::codec::TYPE_EXPIRED_MINUTE => {
-            encryption::record_from_bytes(bytes)
-        }
         encryption::disappearing_messages_setting::codec::TYPE_DISAPPEARING_MESSAGES_SETTING => {
             Err("disappearing_messages_setting must be signed".to_string())
         }
