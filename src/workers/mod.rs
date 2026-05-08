@@ -20,6 +20,7 @@ use crate::protocol::event_modules::content::message_deletion;
 pub mod bootstrap_exchange;
 pub mod content_purge;
 pub mod dependency_unblock;
+pub mod disappearing_floor_dispatcher;
 pub mod disappearing_minute_expiry;
 pub mod encryption;
 pub mod event_admission;
@@ -81,7 +82,12 @@ where
         dependency_unblock::daemon_worker(),
         encryption::daemon_worker(),
         content_purge::daemon_worker(),
+        // Per-message TTL retirements first; the cover-horizon chop in the
+        // next worker subsumes any per-leaf tombstones whose minutes fall
+        // under the new floor, so running expiry first minimizes transient
+        // state.
         disappearing_minute_expiry::daemon_worker(),
+        disappearing_floor_dispatcher::daemon_worker(),
         sync::daemon_worker(),
         transit_out::daemon_worker(),
     ]

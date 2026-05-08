@@ -683,6 +683,202 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
 }
 
 // ---------------------------------------------------------------------------
+// Test 6 (slice 5): the cover-horizon dispatcher seals old subtrees.
+//
+// With workspace TTL = 0 (no per-message expiry), the
+// `disappearing_minute_expiry` worker is a no-op for authored messages.
+// Only the `disappearing_floor_dispatcher` (slice 5) drives retirement,
+// and it does so once the wall-clock has advanced past
+// `authored_minute + COVER_HORIZON_MINUTES` (30 days). The chop primitive
+// it invokes writes time-tree subtree tombstones, materializes right-side
+// sibling cover, and wipes F. The leaves under the chopped prefix can no
+// longer be derived on either peer, even though their per-message rows
+// are not GC'd by the chop (a known accumulation source documented in the
+// slice 5 plan).
+//
+// COVER_HORIZON_MINUTES = 30 * 24 * 60 = 43_200 minutes.
+// To make the horizon strictly above minute 100, the clock must be set to
+// any minute >= 43_301; we use 43_400 with comfortable buffer.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let bob_join_port = free_port();
+    let alice_port = free_port();
+    let bob_port = free_port();
+
+    // TTL=0 means messages have no per-message expiry. The dispatcher's
+    // cover-horizon chop is the ONLY mechanism that can retire their
+    // leaves, which is exactly what this test isolates.
+    let workspace_id =
+        create_workspace_with_ttl(&alice, "Horizon", "alice", "alice-laptop", 0);
+    join_workspace(
+        &alice,
+        &bob,
+        &workspace_id,
+        bob_join_port,
+        "bob",
+        "bob-phone",
+    );
+
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    let _bob_daemon = spawn_daemon(&bob, bob_port);
+    connect_daemon_pair(&alice, alice_port, &bob, bob_port);
+
+    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
+    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
+    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
+    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
+    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
+
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id,
+        &bob_recipient_id,
+    );
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id,
+        &alice_recipient_id,
+    );
+    let _ = wait_for_key_derive(&bob, "1");
+
+    // Pin both clocks to minute 100 (ms = 6_000_000) and author one
+    // message at that minute. With TTL=0 the message has no
+    // expires_at_minute and `disappearing_minute_expiry` will skip it
+    // forever — only the cover-horizon chop retires its leaf.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "ancient-secret"]));
+    wait_for_message_text(&alice, &workspace_id, "alice: ancient-secret");
+    wait_for_message_text(&bob, &workspace_id, "alice: ancient-secret");
+
+    // Pre-chop baseline: both peers see the leaf row, F is alive, no
+    // tombstones yet. Cover summaries must already be byte-equal because
+    // both peers ran the same derive walk.
+    let pre_alice = keys_value(&alice, &workspace_id);
+    let pre_bob = keys_value(&bob, &workspace_id);
+    assert_eq!(line_value(&pre_alice, "local_history_leaves"), "1");
+    assert_eq!(line_value(&pre_bob, "local_history_leaves"), "1");
+    assert_eq!(line_value(&pre_alice, "local_key_secrets"), "1");
+    assert_eq!(line_value(&pre_bob, "local_key_secrets"), "1");
+    assert_eq!(line_value(&pre_alice, "local_history_node_tombstones"), "0");
+    assert_eq!(line_value(&pre_bob, "local_history_node_tombstones"), "0");
+    let pre_summary = cover_summary_value(&pre_alice);
+    assert_eq!(
+        pre_summary,
+        cover_summary_value(&pre_bob),
+        "alice and bob must share a cover summary before the chop"
+    );
+
+    // Advance both clocks to a minute strictly past
+    // `authored_minute + COVER_HORIZON_MINUTES = 100 + 43_200 = 43_300`.
+    // Use minute 43_400 (= 2_604_000_000 ms) for safety. The dispatcher
+    // will compute horizon_floor = 43_400 - 43_200 = 200 > 100, then chop
+    // the time-tree prefix `[0, 200)`, which retires the minute-100 leaf
+    // on each peer independently.
+    assert_success(topo(&["--db", &alice, "clock", "set", "2604000000"]));
+    assert_success(topo(&["--db", &bob, "clock", "set", "2604000000"]));
+
+    // Wait for the chop to take effect. The strongest convergent signals
+    // are: (a) F's row is wiped on each peer (chop wipes F just like
+    // RetireDeletedEventLeaf), and (b) `local_history_node_tombstones`
+    // becomes non-zero. We poll on F's wipe.
+    for _ in 0..300 {
+        let alice_keys = keys_value(&alice, &workspace_id);
+        let bob_keys = keys_value(&bob, &workspace_id);
+        if line_value(&alice_keys, "local_key_secrets") == "0"
+            && line_value(&bob_keys, "local_key_secrets") == "0"
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let post_alice = keys_value(&alice, &workspace_id);
+    let post_bob = keys_value(&bob, &workspace_id);
+    assert_eq!(
+        line_value(&post_alice, "local_key_secrets"),
+        "0",
+        "alice's F row must be wiped by the dispatcher's chop:\n{post_alice}"
+    );
+    assert_eq!(
+        line_value(&post_bob, "local_key_secrets"),
+        "0",
+        "bob's F row must be wiped by the dispatcher's chop:\n{post_bob}"
+    );
+    let alice_tombstones: u64 = line_value(&post_alice, "local_history_node_tombstones")
+        .parse()
+        .expect("parse alice tombstone count");
+    let bob_tombstones: u64 = line_value(&post_bob, "local_history_node_tombstones")
+        .parse()
+        .expect("parse bob tombstone count");
+    assert!(
+        alice_tombstones > 0,
+        "alice must have at least one chop tombstone:\n{post_alice}"
+    );
+    assert!(
+        bob_tombstones > 0,
+        "bob must have at least one chop tombstone:\n{post_bob}"
+    );
+    assert_eq!(
+        alice_tombstones, bob_tombstones,
+        "chop is deterministic — alice and bob must converge on the same \
+         tombstone count after running the same dispatcher independently"
+    );
+    assert_eq!(
+        cover_summary_value(&post_alice),
+        cover_summary_value(&post_bob),
+        "alice and bob's cover summaries must converge after independent chops"
+    );
+    assert_ne!(
+        cover_summary_value(&post_alice),
+        pre_summary,
+        "cover summary must change between pre- and post-chop"
+    );
+
+    // Slice-5 known limitation (option (b) in the dispatcher plan): the
+    // chop does NOT GC per-message rows or the per-coord leaf rows under
+    // the chopped subtree. The forward-secrecy guarantee is carried by
+    // (1) F's wipe and (2) the subtree tombstones above the leaf, which
+    // together prevent any retained-row chain from re-deriving the leaf's
+    // node_secret. So we don't assert `local_history_leaves: 0`; the
+    // surviving leaf row is dead weight, not a recovery vector.
+
+    // Bonus (per the task's step 5): try to author a NEW message at a
+    // minute *below* the horizon. The encryption worker's
+    // `derive_event_leaf` must wedge with the documented "no retained
+    // ancestor covers" message — silently re-deriving from the wiped
+    // sibling cover would defeat the seal. Pin alice's clock back to
+    // minute 100; `next_timestamp` for `send` is the max of the logical
+    // clock and `observed_max + 1`, and `observed_max` is taken from
+    // visible message rows (the chop does not GC them, so the existing
+    // minute-100 message keeps `observed_max` at 6_000_000). The new
+    // send therefore lands at minute 100 + 1 = 100 (a fresh ms tick,
+    // still in minute 100), which is below the chopped floor (200) on
+    // BOTH peers and must wedge.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    let past_attempt = topo(&["--db", &alice, "send", &workspace_id, "z-past"]);
+    assert!(
+        !past_attempt.status.success(),
+        "send below the cover horizon must fail:\nstdout={}\nstderr={}",
+        stdout(&past_attempt),
+        stderr(&past_attempt)
+    );
+    let past_err = stderr(&past_attempt);
+    assert!(
+        past_err.contains("no retained ancestor covers"),
+        "expected wedge error mentioning no retained ancestor; got:\n{past_err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Helpers (local to this test file).
 // ---------------------------------------------------------------------------
 

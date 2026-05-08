@@ -17,10 +17,26 @@ use super::types::ActiveSettingRow;
 
 pub const SETTINGS: TableName = TableName::new("encryption.disappearing_messages_settings");
 
-pub const SCHEMAS: &[Schema] = &[Schema::durable_row_table(
-    "encryption.disappearing_messages_settings.v1",
-    SETTINGS,
-)];
+/// Per-workspace + per-frontier table tracking the highest `floor_minute`
+/// the local `disappearing_floor_dispatcher` worker has already chopped.
+/// Local-only (never propagated): the value is deterministic given the
+/// chain of admitted settings and the local clock state, so all peers
+/// converge independently.
+///
+/// Keyed by `workspace_id || removal_frontier_id` (32 + 32 bytes).
+/// Value: 8 BE bytes encoding `last_chopped_floor: u64`.
+pub const WORKSPACE_CHOP_FLOOR: TableName = TableName::new("encryption.workspace_chop_floor");
+
+pub const SCHEMAS: &[Schema] = &[
+    Schema::durable_row_table(
+        "encryption.disappearing_messages_settings.v1",
+        SETTINGS,
+    ),
+    Schema::durable_row_table(
+        "encryption.workspace_chop_floor.v1",
+        WORKSPACE_CHOP_FLOOR,
+    ),
+];
 
 const KEY_BYTES: usize = 32 + 8 + 32;
 const VALUE_BYTES: usize = 4 + 8 + 8;
@@ -102,6 +118,75 @@ fn pick_later(a: ActiveSettingRow, b: ActiveSettingRow) -> ActiveSettingRow {
     }
 }
 
+const CHOP_FLOOR_KEY_BYTES: usize = 64;
+const CHOP_FLOOR_VALUE_BYTES: usize = 8;
+
+fn chop_floor_key(workspace_id: EventId, removal_frontier_id: EventId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(CHOP_FLOOR_KEY_BYTES);
+    key.extend_from_slice(&workspace_id);
+    key.extend_from_slice(&removal_frontier_id);
+    key
+}
+
+/// Encode a chop-floor row for direct insertion. Most callers should go
+/// through `upsert_last_chopped_floor`; this helper is exported for the
+/// dispatcher and tests that need to inspect the row shape.
+pub fn chop_floor_row(
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    last_chopped_floor: u64,
+) -> TableRow {
+    TableRow {
+        table: WORKSPACE_CHOP_FLOOR,
+        key: chop_floor_key(workspace_id, removal_frontier_id),
+        value: last_chopped_floor.to_be_bytes().to_vec(),
+    }
+}
+
+/// Read the highest `floor_minute` already chopped for this workspace +
+/// frontier. `None` means no chop has run yet (treated as 0 by the
+/// dispatcher).
+pub fn get_last_chopped_floor(
+    store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+) -> Result<Option<u64>, String> {
+    let key = chop_floor_key(workspace_id, removal_frontier_id);
+    let Some(value) = store
+        .table_row(WORKSPACE_CHOP_FLOOR, &key)
+        .map_err(|err| format!("load workspace chop floor: {err}"))?
+    else {
+        return Ok(None);
+    };
+    let bytes: [u8; CHOP_FLOOR_VALUE_BYTES] = value
+        .as_slice()
+        .try_into()
+        .map_err(|_| "workspace chop floor row value must be 8 bytes".to_string())?;
+    Ok(Some(u64::from_be_bytes(bytes)))
+}
+
+/// Persist a new last-chopped-floor for this workspace + frontier. Idempotent
+/// in `floor_minute` because the dispatcher guards `floor > last_chopped`
+/// before calling, but uses replace semantics so a same-value write is a
+/// no-op rather than a duplicate-row error.
+pub fn upsert_last_chopped_floor(
+    store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    last_chopped_floor: u64,
+) -> Result<(), String> {
+    store
+        .write_transaction(|tx_store| {
+            tx_store.replace_table_rows_in_tx(vec![chop_floor_row(
+                workspace_id,
+                removal_frontier_id,
+                last_chopped_floor,
+            )])
+        })
+        .map_err(|err| format!("upsert workspace chop floor: {err}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +234,57 @@ mod tests {
         assert_eq!(decoded.expires_at_or_before_minute, 77);
         assert_eq!(decoded.ttl_minutes, 5);
         assert_eq!(decoded.effective_at_minute, 100);
+    }
+
+    #[test]
+    fn chop_floor_round_trips_through_get_after_upsert() {
+        let store = Store::open_memory_with_schemas(SCHEMAS).expect("open store");
+        assert_eq!(
+            get_last_chopped_floor(&store, [1; 32], [2; 32]).expect("get"),
+            None,
+            "no row yet means None"
+        );
+        upsert_last_chopped_floor(&store, [1; 32], [2; 32], 12_345)
+            .expect("upsert initial floor");
+        assert_eq!(
+            get_last_chopped_floor(&store, [1; 32], [2; 32]).expect("get"),
+            Some(12_345)
+        );
+    }
+
+    #[test]
+    fn chop_floor_upsert_overwrites_existing_row() {
+        let store = Store::open_memory_with_schemas(SCHEMAS).expect("open store");
+        upsert_last_chopped_floor(&store, [1; 32], [2; 32], 100).expect("first upsert");
+        upsert_last_chopped_floor(&store, [1; 32], [2; 32], 250).expect("second upsert");
+        assert_eq!(
+            get_last_chopped_floor(&store, [1; 32], [2; 32]).expect("get"),
+            Some(250),
+            "second upsert must overwrite the first (caller enforces monotonicity)"
+        );
+    }
+
+    #[test]
+    fn chop_floor_is_keyed_by_workspace_and_frontier() {
+        let store = Store::open_memory_with_schemas(SCHEMAS).expect("open store");
+        upsert_last_chopped_floor(&store, [1; 32], [2; 32], 100).expect("ws1+f2");
+        upsert_last_chopped_floor(&store, [1; 32], [3; 32], 200).expect("ws1+f3");
+        upsert_last_chopped_floor(&store, [9; 32], [2; 32], 300).expect("ws9+f2");
+        assert_eq!(
+            get_last_chopped_floor(&store, [1; 32], [2; 32]).expect("get"),
+            Some(100)
+        );
+        assert_eq!(
+            get_last_chopped_floor(&store, [1; 32], [3; 32]).expect("get"),
+            Some(200)
+        );
+        assert_eq!(
+            get_last_chopped_floor(&store, [9; 32], [2; 32]).expect("get"),
+            Some(300)
+        );
+        assert_eq!(
+            get_last_chopped_floor(&store, [9; 32], [3; 32]).expect("get"),
+            None
+        );
     }
 }

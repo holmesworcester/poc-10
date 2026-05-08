@@ -11,6 +11,19 @@
 use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
 use crate::protocol::event_modules::types::EventId;
 
+/// Number of unix-minutes after which a workspace's time-tree subtree is
+/// sealed: no straggler can plausibly deliver messages this old, so the
+/// sibling cover for the range becomes dead weight. Slice 5: the
+/// `disappearing_floor_dispatcher` worker chops the prefix
+/// `[0, now_minute - COVER_HORIZON_MINUTES)` once per workspace per tick
+/// (in addition to chopping for any newly-tightened admin setting).
+///
+/// Set to 30 days. The exact value is a policy knob; the structural cost
+/// is O(log time_tree_root_width) per chop regardless of horizon size, so
+/// shrinking or growing it does not change the per-tick cost — only the
+/// amount of in-tree state retained for late-delivery cover.
+pub const COVER_HORIZON_MINUTES: u64 = 30 * 24 * 60;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisappearingMessagesSettingEvent {
     pub created_at_ms: u64,
