@@ -21,8 +21,10 @@ use crate::core::tcp;
 use crate::protocol::event_modules::connection::{schema, transit, types};
 use crate::protocol::event_modules::identity::endpoint;
 use crate::protocol::event_modules::schema as event_schema;
+use crate::protocol::event_modules::sync::SyncIndex;
+use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
 use crate::workers::schema as worker_schema;
-use crate::workers::DaemonWorkerContext;
+use crate::workers::{transit_in, DaemonWorkerContext};
 
 /// Opaque bytes prepared for one route after draining protocol out rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,16 +94,24 @@ pub enum Work {
     },
 }
 
-pub fn run(store: &Store, work: Work) -> Result<types::RouteExchangeReport, String> {
+pub fn run<R>(
+    store: &Store,
+    registry: &R,
+    sync_index: Option<&SyncIndex>,
+    work: Work,
+) -> Result<types::RouteExchangeReport, String>
+where
+    R: EventRegistry,
+{
     match work {
         Work::SendConnectionRequest {
             connection_id,
             addr,
             bytes,
-        } => send_connection_request(store, connection_id, addr, bytes),
+        } => send_connection_request(store, registry, sync_index, connection_id, addr, bytes),
         Work::ExchangeRoutes {
             fail_on_route_error,
-        } => exchange_outbound_routes(store, fail_on_route_error),
+        } => exchange_outbound_routes(store, registry, sync_index, fail_on_route_error),
         Work::MarkSent { transit_out_keys } => {
             mark_transit_out_sent(store, transit_out_keys)?;
             Ok(types::RouteExchangeReport::default())
@@ -111,6 +121,8 @@ pub fn run(store: &Store, work: Work) -> Result<types::RouteExchangeReport, Stri
 
 fn send_connection_request(
     store: &Store,
+    registry: &impl EventRegistry,
+    sync_index: Option<&SyncIndex>,
     connection_id: types::ConnectionId,
     addr: SocketAddr,
     bytes: Vec<u8>,
@@ -120,16 +132,20 @@ fn send_connection_request(
         .map_err(|err| format!("remember connection route: {err}"))?;
 
     let target = NetworkTarget::new(addr);
-    tcp::send_once(
+    let report = exchange_outbound_route(
         store,
-        target,
-        vec![OutboundNetworkRow::new(target, bytes)],
-        (),
-        |_, _| Ok(()),
+        registry,
+        sync_index,
+        OutboundSync {
+            target,
+            outgoing: vec![OutboundNetworkRow::new(target, bytes)],
+            sent_transit_out: Vec::new(),
+        },
     )?;
     Ok(types::RouteExchangeReport {
         routes_synced: 1,
-        sent_events: 1,
+        sent_events: report.sent_events,
+        received_events: report.received_events,
         ..types::RouteExchangeReport::default()
     })
 }
@@ -151,6 +167,8 @@ where
     let app = &*ctx.app;
     let report = run(
         app.store(),
+        app,
+        Some(app.sync_index()),
         Work::ExchangeRoutes {
             fail_on_route_error: false,
         },
@@ -162,15 +180,20 @@ where
     Ok(())
 }
 
-fn exchange_outbound_routes(
+fn exchange_outbound_routes<R>(
     store: &Store,
+    registry: &R,
+    sync_index: Option<&SyncIndex>,
     fail_on_route_error: bool,
-) -> Result<types::RouteExchangeReport, String> {
+) -> Result<types::RouteExchangeReport, String>
+where
+    R: EventRegistry,
+{
     let mut summary = types::RouteExchangeReport::default();
     for outbound in drain_transit_out_routes(store).map_err(|err| format!("drain out: {err}"))? {
         let outbound = outbound_sync(outbound);
         let target = outbound.target;
-        match exchange_outbound_route(store, outbound) {
+        match exchange_outbound_route(store, registry, sync_index, outbound) {
             Ok(stream_summary) => {
                 summary.routes_synced += 1;
                 summary.sent_events += stream_summary.sent_events;
@@ -187,7 +210,15 @@ fn exchange_outbound_routes(
     Ok(summary)
 }
 
-fn exchange_outbound_route(store: &Store, outbound: OutboundSync) -> Result<SendReport, String> {
+fn exchange_outbound_route<R>(
+    store: &Store,
+    registry: &R,
+    sync_index: Option<&SyncIndex>,
+    outbound: OutboundSync,
+) -> Result<SendReport, String>
+where
+    R: EventRegistry,
+{
     let sent_transit_out = RefCell::new(HashMap::new());
     let sent_events = outbound
         .sent_transit_out
@@ -199,11 +230,27 @@ fn exchange_outbound_route(store: &Store, outbound: OutboundSync) -> Result<Send
         &outbound.outgoing,
         &outbound.sent_transit_out,
     )?;
-    tcp::send_once(
+    let target = outbound.target;
+    tcp::connect_exchange(
         store,
-        outbound.target,
+        target,
         outbound.outgoing,
         SendReport::default(),
+        |inbound, report| {
+            let output = match sync_index {
+                Some(sync_index) => transit_in::process_inbound_exchange_with_sync(
+                    store, registry, sync_index, inbound,
+                )?,
+                None => transit_in::process_inbound_exchange(store, registry, inbound)?,
+            };
+            report.received_events += output.received_events;
+            remember_sent_rows(
+                &sent_transit_out,
+                &output.outbound_rows,
+                &output.sent_transit_out,
+            )?;
+            Ok(output.outbound_rows)
+        },
         |rows, _| mark_sent_network_rows(store, rows, &sent_transit_out),
     )
     .map(|mut report| {
@@ -244,7 +291,7 @@ fn drain_transit_out_routes(store: &Store) -> Result<Vec<OutboundTransit>, Strin
     Ok(outbound)
 }
 
-fn drain_and_wrap_transit_out_for_connection(
+pub(crate) fn drain_and_wrap_transit_out_for_connection(
     store: &Store,
     local: endpoint::types::EndpointKeypair,
     connection_id: types::ConnectionId,
@@ -454,6 +501,8 @@ mod tests {
 
         let output = run(
             &store,
+            &Protocol::new(),
+            None,
             Work::ExchangeRoutes {
                 fail_on_route_error: true,
             },

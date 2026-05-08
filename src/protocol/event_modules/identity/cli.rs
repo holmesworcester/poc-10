@@ -20,10 +20,11 @@ use crate::protocol::event_modules::connection::{
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{self, CommandOutput};
+use crate::workers::transit_in;
 
 use super::{
-    admin, device_invite, endpoint, endpoint_shared, invite, invite_server, user, user_invite,
-    workspace,
+    admin, device_invite, endpoint, endpoint_shared, invite, invite_accepted, invite_server, user,
+    user_invite, workspace,
 };
 
 const CREATE_WORKSPACE_USAGE: &str =
@@ -244,19 +245,6 @@ fn run_accept_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOut
     proposed.extend(endpoint_join.events);
     let initial_records = proposed_records(&proposed);
     let connected = connect_invite_with_initial_records(context, &options.invite, initial_records)?;
-
-    let key = user_invite::schema::user_invite_key(&invite.workspace_id, &invite.invite_event_id);
-    let value = context
-        .store
-        .table_row(user_invite::schema::USER_INVITES, &key)
-        .map_err(|err| format!("load user invite: {err}"))?
-        .ok_or_else(|| "user invite was not received".to_string())?;
-    let row =
-        user_invite::schema::decode_user_invite_row(&key, &value).map_err(|err| err.to_string())?;
-    if row.public_key != crypto::ed25519_public_key(&invite.bootstrap_secret) {
-        return Err("invite private key does not match user invite".to_string());
-    }
-    reject_duplicate_join(&context.store, local.endpoint, invite.workspace_id)?;
     admit_proposed_events(context, proposed)?;
 
     Ok(CliOutput::lines(vec![
@@ -343,18 +331,6 @@ fn run_accept_invite_server_command(
     let endpoint_shared_id = shared.value.endpoint_shared_id;
     let initial_records = proposed_records(&shared.events);
     let connected = connect_invite_with_initial_records(context, &options.invite, initial_records)?;
-    let key =
-        invite_server::schema::invite_server_key(&invite.workspace_id, &invite.invite_event_id);
-    let value = context
-        .store
-        .table_row(invite_server::schema::INVITE_SERVERS, &key)
-        .map_err(|err| format!("load invite_server: {err}"))?
-        .ok_or_else(|| "invite_server was not received".to_string())?;
-    let row = invite_server::schema::decode_invite_server_row(&key, &value)?;
-    if row.public_key != crypto::ed25519_public_key(&invite.bootstrap_secret) {
-        return Err("invite private key does not match invite_server".to_string());
-    }
-    reject_duplicate_join(&context.store, local.endpoint, invite.workspace_id)?;
     admit(context, shared)?;
     Ok(CliOutput::lines(vec![
         format!("connected: {}", connected.addr),
@@ -430,20 +406,6 @@ fn run_accept_link_command(context: &mut Context, args: CliArgs<'_>) -> Result<C
     let endpoint_shared_id = shared.value.endpoint_shared_id;
     let initial_records = proposed_records(&shared.events);
     let connected = connect_invite_with_initial_records(context, &options.invite, initial_records)?;
-    let key = device_invite::schema::device_invite_key(invite.workspace_id, invite.invite_event_id);
-    let value = context
-        .store
-        .table_row(device_invite::schema::DEVICE_INVITES, &key)
-        .map_err(|err| format!("load device invite: {err}"))?
-        .ok_or_else(|| "device invite was not received".to_string())?;
-    let row = device_invite::schema::decode_device_invite_row(&key, &value)?;
-    if row.public_key != crypto::ed25519_public_key(&invite.bootstrap_secret) {
-        return Err("invite private key does not match device invite".to_string());
-    }
-    if row.user_authority_event_id != user_authority_event_id {
-        return Err("device link USER_ID does not match device invite".to_string());
-    }
-    reject_duplicate_join(&context.store, local.endpoint, invite.workspace_id)?;
     admit(context, shared)?;
     Ok(CliOutput::lines(vec![
         format!("connected: {}", connected.addr),
@@ -827,16 +789,17 @@ fn maybe_listen(
             accept_count,
         } => {
             print_line_now(link)?;
-            let output = connection_worker::run(
+            let output = transit_in::run(
                 &context.store,
                 &context.protocol,
-                connection_worker::Work::Serve {
+                Some(context.protocol.sync_index()),
+                transit_in::Work::Serve {
                     listen,
                     accept_count,
                 },
             )?;
-            let connection_worker::Output::Served(report) = output else {
-                return Err("connection worker returned non-serve output".to_string());
+            let transit_in::Output::Served(report) = output else {
+                return Err("transit_in worker returned non-serve output".to_string());
             };
             Ok(CliOutput::lines(serve_lines(&report)))
         }
@@ -876,9 +839,7 @@ fn connect_invite_with_initial_records(
             }
         },
     )?;
-    let connection_worker::Output::Connected(report) = output else {
-        return Err("connection worker returned non-connect output".to_string());
-    };
+    let connection_worker::Output::Connected(report) = output;
     Ok(report)
 }
 
@@ -992,6 +953,20 @@ fn reject_duplicate_join(
         )
         .map_err(|err| format!("load endpoint membership: {err}"))?
         .is_some()
+    {
+        return Err("endpoint is already joined to workspace".to_string());
+    }
+    let mut accepted_prefix = Vec::with_capacity(64);
+    accepted_prefix.extend_from_slice(&endpoint_id);
+    accepted_prefix.extend_from_slice(&workspace_id);
+    if !store
+        .table_rows_with_key_prefix(
+            invite_accepted::schema::INVITES_ACCEPTED,
+            &accepted_prefix,
+            1,
+        )
+        .map_err(|err| format!("load accepted invites: {err}"))?
+        .is_empty()
     {
         return Err("endpoint is already joined to workspace".to_string());
     }

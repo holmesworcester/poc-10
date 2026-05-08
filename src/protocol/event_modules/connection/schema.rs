@@ -2,12 +2,13 @@
 //!
 //! `CONNECTION_EVENTS` stores canonical request/response bytes that are needed to
 //! validate later connection facts. `CONNECTIONS` maps established connection
-//! ids to remote endpoints. `CONNECTION_SCOPED_EVENTS` is an in-memory byte
+//! ids to remote endpoints. `CONNECTION_INVITE_WORKSPACES` records the one
+//! workspace an invite-scoped request authorizes before mutual endpoint
+//! membership has projected. `CONNECTION_SCOPED_EVENTS` is an in-memory byte
 //! cache for non-durable connection-scoped events such as sync compare/have/need.
-//! `TRANSPORT_TARGETS` is receive-derived local state: connection projection
-//! writes the latest socket address observed for a connection, but the address
-//! is not a separate semantic event. Worker-owned send queues live in
-//! `src/workers/schema.rs`.
+//! `TRANSPORT_TARGETS` is local route state: invite accept/connect paths write
+//! the invite address for the resulting connection, but the address is not a
+//! separate semantic event. Worker-owned send queues live in `src/workers/schema.rs`.
 
 use std::net::SocketAddr;
 
@@ -21,6 +22,8 @@ use super::types::ConnectionId;
 pub(in crate::protocol::event_modules) const CONNECTION_EVENTS: TableName =
     TableName::new("connection.connection_events");
 pub(crate) const CONNECTIONS: TableName = TableName::new("connection.connections");
+pub(crate) const CONNECTION_INVITE_WORKSPACES: TableName =
+    TableName::new("connection.invite_workspaces");
 pub(crate) const CONNECTION_SCOPED_EVENTS: TableName =
     TableName::new("connection.connection_scoped_events");
 pub(crate) const TRANSPORT_TARGETS: TableName = TableName::new("connection.transport_targets");
@@ -28,6 +31,10 @@ pub(crate) const TRANSPORT_TARGETS: TableName = TableName::new("connection.trans
 pub const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("connection.connection_events.v1", CONNECTION_EVENTS),
     Schema::durable_row_table("connection.connections.v1", CONNECTIONS),
+    Schema::durable_row_table(
+        "connection.invite_workspaces.v1",
+        CONNECTION_INVITE_WORKSPACES,
+    ),
     Schema::durable_row_table("connection.transport_targets.v1", TRANSPORT_TARGETS),
     Schema::memory_row_table(
         "connection.connection_scoped_events.v1",
@@ -48,6 +55,17 @@ pub(crate) fn connection_row(connection_id: ConnectionId, remote_endpoint: Endpo
         table: CONNECTIONS,
         key: connection_id.to_vec(),
         value: remote_endpoint.to_vec(),
+    }
+}
+
+pub(crate) fn connection_invite_workspace_row(
+    connection_id: ConnectionId,
+    workspace_id: EventId,
+) -> TableRow {
+    TableRow {
+        table: CONNECTION_INVITE_WORKSPACES,
+        key: connection_id.to_vec(),
+        value: workspace_id.to_vec(),
     }
 }
 
@@ -76,6 +94,19 @@ pub(crate) fn remote_endpoint(
         .map_err(|err| format!("load connection: {err}"))?
         .ok_or_else(|| "unknown connection".to_string())?;
     endpoint_id_from_bytes(&bytes)
+}
+
+pub(crate) fn invite_workspace(
+    store: &Store,
+    connection_id: ConnectionId,
+) -> Result<Option<EventId>, String> {
+    let Some(bytes) = store
+        .table_row(CONNECTION_INVITE_WORKSPACES, &connection_id)
+        .map_err(|err| format!("load connection invite workspace: {err}"))?
+    else {
+        return Ok(None);
+    };
+    id_from_bytes(&bytes).map(Some)
 }
 
 fn endpoint_id_from_bytes(bytes: &[u8]) -> Result<EndpointId, String> {

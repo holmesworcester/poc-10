@@ -75,6 +75,12 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
             connection_id,
             event.from_endpoint,
         ));
+        if let Some(workspace_id) = invite_secret.workspace_id {
+            rows.push(projection::connection_invite_workspace_row(
+                connection_id,
+                workspace_id,
+            ));
+        }
         if receive.remember_route() {
             // Route learning is local metadata, not a shared event. The worker
             // only sets this flag when the observed origin is stable enough to
@@ -101,6 +107,12 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
             .map_err(|_| "connection request dependency is not an invite secret".to_string())?;
         if invite_secret.bootstrap_hash != event.bootstrap_hash {
             return Err("connection request bootstrap hash is not authorized".to_string());
+        }
+        if let Some(workspace_id) = invite_secret.workspace_id {
+            rows.push(projection::connection_invite_workspace_row(
+                connection_id,
+                workspace_id,
+            ));
         }
     }
 
@@ -212,9 +224,10 @@ mod tests {
         ))
         .expect("project local scoped request");
 
-        assert_eq!(output.rows.len(), 2);
+        assert_eq!(output.rows.len(), 3);
         assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
         assert_eq!(output.rows[1].table, schema::CONNECTIONS);
+        assert_eq!(output.rows[2].table, schema::CONNECTION_INVITE_WORKSPACES);
     }
 
     #[test]
@@ -247,6 +260,40 @@ mod tests {
         );
         assert_eq!(output.rows[1].value, [1; 32]);
         assert_eq!(output.rows[2].value, origin.to_string().into_bytes());
+    }
+
+    #[test]
+    fn received_scoped_request_projects_invite_workspace_authority() {
+        let (record, invite_secret_event_id, invite_record) = scoped_authorized_request_record();
+        let origin = "127.0.0.1:9000".parse::<SocketAddr>().expect("addr");
+        let output = project(&EventWithContext {
+            record: &record,
+            context: EventContext {
+                event_id: types::event_id(&record.canonical_bytes),
+                dependencies: vec![DependencyContext {
+                    event_id: invite_secret_event_id,
+                    record: invite_record,
+                }],
+                labels: Vec::new(),
+                receive: Some(ReceiveMetadata::bootstrap_invite(
+                    origin, [9; 32], [1; 32], true,
+                )),
+            },
+        })
+        .expect("project received scoped request");
+
+        assert_eq!(output.rows.len(), 4);
+        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.rows[1].table, schema::CONNECTIONS);
+        assert_eq!(output.rows[2].table, schema::CONNECTION_INVITE_WORKSPACES);
+        assert_eq!(output.rows[3].table, schema::TRANSPORT_TARGETS);
+        assert_eq!(
+            output.rows[1].key,
+            types::connection_id(&types::event_id(&record.canonical_bytes), &[9; 32])
+        );
+        assert_eq!(output.rows[1].value, [1; 32]);
+        assert_eq!(output.rows[2].value, [6; 32]);
+        assert_eq!(output.rows[3].value, origin.to_string().into_bytes());
     }
 
     #[test]

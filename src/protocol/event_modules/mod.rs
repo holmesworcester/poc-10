@@ -222,7 +222,7 @@ fn record_from_transit_canonical_in(
             }
         }
     }
-    let TransitUnwrap::Connection { .. } = provenance.unwrapped_with else {
+    let TransitUnwrap::Connection { connection_id } = provenance.unwrapped_with else {
         return Err("transit provenance cannot admit this event".to_string());
     };
     let record = record_from_bytes(bytes)?;
@@ -234,11 +234,16 @@ fn record_from_transit_canonical_in(
     let workspace_id = record
         .workspace_id
         .ok_or_else(|| "transit shared in requires a workspace".to_string())?;
-    let allowed_workspaces = identity::endpoint_shared::schema::mutual_workspace_ids(
-        store,
-        provenance.local_endpoint,
-        provenance.sender_endpoint,
-    )?;
+    let allowed_workspaces =
+        if let Some(workspace_id) = connection::schema::invite_workspace(store, connection_id)? {
+            vec![workspace_id]
+        } else {
+            identity::endpoint_shared::schema::mutual_workspace_ids(
+                store,
+                provenance.local_endpoint,
+                provenance.sender_endpoint,
+            )?
+        };
     if !allowed_workspaces
         .iter()
         .any(|allowed| allowed == &workspace_id)

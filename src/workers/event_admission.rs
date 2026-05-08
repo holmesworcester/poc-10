@@ -63,7 +63,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::core::store::Store;
-    use crate::protocol::event_modules::connection::types;
+    use crate::protocol::event_modules::connection::{self, types};
     use crate::protocol::event_modules::content::content_event;
     use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, workspace};
     use crate::protocol::event_modules::schema as event_schema;
@@ -336,6 +336,47 @@ mod tests {
         assert!(
             !event_schema::has_event(&store, &content_id).expect("check event table"),
             "out-of-scope remote event must not be stored"
+        );
+    }
+
+    #[test]
+    fn invite_scoped_connection_transit_rejects_other_mutual_workspace() {
+        let local = keypair();
+        let remote = keypair();
+        let connection_id = [3; 32];
+        let invite_workspace_id = [7; 32];
+        let other_workspace_id = [8; 32];
+        let store = store();
+        store
+            .insert_table_rows(vec![connection::schema::connection_invite_workspace_row(
+                connection_id,
+                invite_workspace_id,
+            )])
+            .expect("insert invite workspace");
+        add_endpoint_membership(&store, invite_workspace_id, [20; 32], local);
+        add_endpoint_membership(&store, invite_workspace_id, [21; 32], remote);
+        add_endpoint_membership(&store, other_workspace_id, [22; 32], local);
+        add_endpoint_membership(&store, other_workspace_id, [23; 32], remote);
+        let content = signed_content_bytes(other_workspace_id);
+        let content_id = event_id(&content);
+        enqueue_connection_canonical_in(
+            &store,
+            content,
+            local.endpoint,
+            remote.endpoint,
+            connection_id,
+        );
+
+        let err = run(&store, &Protocol::new(), Work::Drain { limit: 1 })
+            .expect_err("invite-scoped connection must not admit other mutual workspace");
+
+        assert!(
+            err.contains("transit shared in rejected event outside sender workspace"),
+            "{err}"
+        );
+        assert!(
+            !event_schema::has_event(&store, &content_id).expect("check event table"),
+            "other-workspace event must not be stored through invite-scoped transit"
         );
     }
 }

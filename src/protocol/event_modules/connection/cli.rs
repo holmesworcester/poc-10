@@ -35,6 +35,8 @@ fn run_connect_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOu
         .map_err(|err| format!("record connection request: {err}"))?;
     let report = transit_out::run(
         &context.store,
+        &context.protocol,
+        None,
         transit_out::Work::SendConnectionRequest {
             connection_id: request.connection_id,
             addr: request.addr,
