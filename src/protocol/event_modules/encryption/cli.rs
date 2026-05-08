@@ -16,8 +16,8 @@ use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker as common_worker;
 
 use super::{
-    key_wrap, local_history_node_secret, local_key_secret, local_recipient_key, recipient_key,
-    recipient_key_tombstone, removal_frontier, worker,
+    disappearing_messages_setting, key_wrap, local_history_node_secret, local_key_secret,
+    local_recipient_key, recipient_key, recipient_key_tombstone, removal_frontier, worker,
 };
 
 const KEY_RECIPIENT_USAGE: &str = "key-recipient WORKSPACE_ID_HEX";
@@ -29,6 +29,7 @@ const KEY_DERIVE_USAGE: &str = "key-derive [LIMIT]";
 const KEY_NODE_USAGE: &str = "key-node WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX SOURCE_SECRET_ID_HEX RANGE_START RANGE_WIDTH [TOMBSTONE_NODE_ID_HEX]";
 const KEY_ACCESS_USAGE: &str = "key-access WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX";
 const KEYS_USAGE: &str = "keys WORKSPACE_ID_HEX";
+const DISAPPEARING_SET_USAGE: &str = "disappearing-set WORKSPACE_ID_HEX TTL_MINUTES";
 
 pub fn commands() -> Vec<CliCommand<Context>> {
     vec![
@@ -79,6 +80,12 @@ pub fn commands() -> Vec<CliCommand<Context>> {
             usage: KEYS_USAGE,
             help: "List key rows and local access for a workspace.",
             run: run_keys_command,
+        },
+        CliCommand {
+            name: "disappearing-set",
+            usage: DISAPPEARING_SET_USAGE,
+            help: "Author an admin-signed disappearing-messages TTL setting.",
+            run: run_disappearing_set_command,
         },
     ]
 }
@@ -554,6 +561,55 @@ fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         ));
     }
     Ok(CliOutput::lines(lines))
+}
+
+fn run_disappearing_set_command(
+    context: &mut Context,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(2, DISAPPEARING_SET_USAGE)?;
+    let workspace_id = parse_hex_id(args.get(0).expect("length checked"), DISAPPEARING_SET_USAGE)?;
+    let ttl_minutes = args
+        .get(1)
+        .expect("length checked")
+        .parse::<u32>()
+        .map_err(|_| DISAPPEARING_SET_USAGE.to_string())?;
+
+    let membership = require_membership(&context.store, workspace_id)?;
+    let local = endpoint::commands::local_keypair(&context.store)?
+        .ok_or_else(|| "local endpoint is missing".to_string())?;
+    let authority_admin_id = admin_for_user(
+        &context.store,
+        workspace_id,
+        membership.user_authority_event_id,
+    )?
+    .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
+
+    let output = disappearing_messages_setting::commands::set(
+        disappearing_messages_setting::commands::SetDisappearingMessages {
+            workspace_id,
+            created_at_ms: next_timestamp(&context.store)?,
+            ttl_minutes,
+            authority_admin_event_id: authority_admin_id,
+            signer_private_key: local.signing_secret,
+        },
+    )?;
+    let report = common_worker::run(
+        &context.store,
+        &context.protocol,
+        common_worker::AdmitAndDrain {
+            output,
+            batch_size: common_worker::DEFAULT_READY_BATCH,
+        },
+    )
+    .map_err(|err| format!("apply disappearing_messages_setting: {err}"))?;
+    Ok(CliOutput::lines(vec![
+        format!(
+            "setting_event_id: {}",
+            hex_id(report.value.setting_event_id)
+        ),
+        format!("ttl_minutes: {ttl_minutes}"),
+    ]))
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {

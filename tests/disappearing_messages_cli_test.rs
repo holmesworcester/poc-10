@@ -22,9 +22,6 @@
 //!     (the TODO at `src/workers/encryption.rs:1147`).
 //!
 //! Known gaps these tests do NOT close (covered by later slices):
-//!   * Order-independent expiry under late-arriving setting events
-//!     (slice 2 "settings events"): tested once `disappearing_messages_setting`
-//!     exists.
 //!   * A first-class `expired_minute_summary` distinct from the retained
 //!     cover summary (slice 3 "deletion summary monotonicity").
 //!   * A canonical-bytes-by-event-id query (`events get <id>`) for a
@@ -302,6 +299,97 @@ fn cli_disappearing_messages_two_peer_convergence() {
     // be confusing the post-purge "have/need" comparison. The convergence
     // claims of slice 1 (cover and tombstone) are already proven by the
     // pre/post-expiry assertions above.
+}
+
+// ---------------------------------------------------------------------------
+// Test 3 (slice 2): admin-signed `disappearing_messages_setting` event
+// supersedes the workspace event's initial TTL. Authoring under one TTL
+// stamps that TTL into the message's canonical bytes; a later admin
+// `disappearing-set` does NOT retroactively rewrite already-stamped
+// messages, but DOES change the TTL stamped into subsequent messages.
+//
+// This is the load-bearing slice-2 invariant from `disappearing_messages_plan.md`:
+// "Late arrivals do not retroactively change message expiry."
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_old_messages() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let alice_port = free_port();
+
+    // Workspace TTL = 1 minute at creation.
+    let workspace_id =
+        create_workspace_with_ttl(&alice, "Setting", "alice", "alice-laptop", 1);
+    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+
+    // Pin the clock and author the first message at minute 100. This is
+    // stamped under the workspace event's TTL of 1, so its
+    // expires_at_minute is 101.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "early"]));
+    assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
+
+    // Admin authors a setting event raising TTL to 5. After the setting
+    // is admitted, subsequent messages are stamped with TTL=5; the
+    // previously-authored "early" message's stamped expiry is unchanged.
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "disappearing-set",
+        &workspace_id,
+        "5",
+    ]));
+
+    // Author the second message at the same minute 100 but after the new
+    // setting. It should be stamped with expires_at_minute = 100 + 5 = 105.
+    // (No clock advance — the setting takes effect immediately for the
+    // next authoring.)
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "late"]));
+    assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
+
+    // Spawn the daemon and advance the clock past minute 101 but before
+    // minute 105: the "early" message must expire, but the "late" message
+    // must remain visible. This is the key claim — the setting did not
+    // retroactively rewrite "early"'s expiry to 105, and the new message
+    // really did pick up the new TTL.
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    assert_success(topo(&["--db", &alice, "clock", "set", "6180000"])); // minute 103
+
+    // Wait for "early" to disappear; "late" should remain.
+    for _ in 0..300 {
+        let lines = message_lines(&alice, &workspace_id);
+        let has_early = lines.iter().any(|line| line.ends_with("alice: early"));
+        let has_late = lines.iter().any(|line| line.ends_with("alice: late"));
+        if !has_early && has_late {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let lines = message_lines(&alice, &workspace_id);
+    assert!(
+        !lines.iter().any(|line| line.ends_with("alice: early")),
+        "`early` (stamped TTL=1) must have expired by minute 103:\n{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.ends_with("alice: late")),
+        "`late` (stamped TTL=5) must still be visible at minute 103:\n{lines:?}"
+    );
+
+    // Advance past minute 105 and the "late" message must also expire.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6360000"])); // minute 106
+    for _ in 0..300 {
+        let lines = message_lines(&alice, &workspace_id);
+        if lines.is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        message_lines(&alice, &workspace_id).len(),
+        0,
+        "`late` (stamped TTL=5) must have expired by minute 106"
+    );
 }
 
 // ---------------------------------------------------------------------------

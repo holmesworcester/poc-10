@@ -1,0 +1,42 @@
+//! Types for the workspace-wide `disappearing_messages_setting` event.
+//!
+//! A setting event is a shared admin-signed fact that supersedes the
+//! workspace event's initial TTL. The active setting is the latest
+//! admitted setting event for a given `workspace_id` under the
+//! deterministic `(created_at_ms, event_id)` ordering. Late-arriving
+//! settings do not retroactively rewrite already-stamped messages —
+//! every authored message commits to its own `expires_at_minute` in
+//! canonical bytes (see slice 1).
+
+use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
+use crate::protocol::event_modules::types::EventId;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisappearingMessagesSettingEvent {
+    pub created_at_ms: u64,
+    pub workspace_id: EventId,
+    pub ttl_minutes: u32,
+    /// Admin event id authorizing this setting. Validated by the projector
+    /// against the workspace admin set so a non-admin signer is rejected.
+    pub authority_admin_event_id: EventId,
+    /// `floor(created_at_ms / 60_000)`. Carried in canonical bytes for
+    /// deterministic comparison without re-deriving from `created_at_ms`.
+    pub effective_at_minute: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedDisappearingMessagesSettingEnvelope {
+    pub authority_admin_event_id: EventId,
+    pub signer_public_key: Ed25519PublicKey,
+    pub payload: Vec<u8>,
+    pub signature: Ed25519Signature,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSettingRow {
+    pub workspace_id: EventId,
+    pub setting_event_id: EventId,
+    pub ttl_minutes: u32,
+    pub effective_at_minute: u64,
+    pub created_at_ms: u64,
+}

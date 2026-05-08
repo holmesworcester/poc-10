@@ -107,6 +107,7 @@ pub fn schemas() -> Vec<Schema> {
     out.extend_from_slice(content::reaction::schema::SCHEMAS);
     out.extend_from_slice(content::file::schema::SCHEMAS);
     out.extend_from_slice(content::file_slice::schema::SCHEMAS);
+    out.extend_from_slice(encryption::disappearing_messages_setting::schema::SCHEMAS);
     out.extend_from_slice(encryption::key_wrap::schema::SCHEMAS);
     out.extend_from_slice(encryption::local_history_node_secret::schema::SCHEMAS);
     out.extend_from_slice(encryption::local_key_secret::schema::SCHEMAS);
@@ -364,6 +365,15 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         }
         encryption::key_wrap::codec::TYPE_KEY_WRAP => Err("key_wrap must be signed".to_string()),
         encryption::key_wrap::codec::TYPE_SIGNED_KEY_WRAP => encryption::record_from_bytes(bytes),
+        encryption::expired_minute::codec::TYPE_EXPIRED_MINUTE => {
+            encryption::record_from_bytes(bytes)
+        }
+        encryption::disappearing_messages_setting::codec::TYPE_DISAPPEARING_MESSAGES_SETTING => {
+            Err("disappearing_messages_setting must be signed".to_string())
+        }
+        encryption::disappearing_messages_setting::codec::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING => {
+            encryption::record_from_bytes(bytes)
+        }
         test_events::event_with_deps::codec::TYPE_EVENT_WITH_DEPS => {
             test_events::event_with_deps::codec::record_from_bytes(bytes)
         }
