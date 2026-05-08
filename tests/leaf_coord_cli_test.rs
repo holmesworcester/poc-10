@@ -59,24 +59,25 @@ fn keys_value(db: &str, workspace_id: &str) -> String {
 }
 
 #[test]
-fn cli_three_messages_in_same_minute_materialize_only_their_leaves() {
-    // Under the binary-tree FS, fresh encryption with no deletes materializes
-    // only the leaf row per event — every interior time-tree and trie node
-    // stays implicit and is derivable on demand from the workspace root.
-    // Three messages in the same minute therefore land as three leaves and
-    // zero internal rows.
+fn cli_minute_node_is_shared_across_messages_in_same_minute() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Minute", "alice", "alice-laptop");
     assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
 
     // Pin the clock so all three messages land in unix_minute = 100.
+    // unix_minute_for(6_000_000) = 100; subsequent sends bump by 1 ms each.
     assert_success(topo(&["--db", &db, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &db, "send", &workspace_id, "first"]));
     assert_success(topo(&["--db", &db, "send", &workspace_id, "second"]));
     assert_success(topo(&["--db", &db, "send", &workspace_id, "third"]));
 
     let keys = keys_value(&db, &workspace_id);
+    // Under the binary-tree FS, fresh encryption with no deletes
+    // materializes only the leaf row per event — every interior time-tree
+    // and trie node stays implicit and is derivable on demand from the
+    // workspace root. Three messages in the same minute therefore land as
+    // three leaves and zero internal rows.
     assert_eq!(line_value(&keys, "local_history_minute_nodes"), "0");
     assert_eq!(line_value(&keys, "local_history_leaves"), "3");
     assert_eq!(line_value(&keys, "local_history_node_secrets"), "3");
@@ -166,12 +167,13 @@ fn cli_message_leaf_coord_is_deterministic_from_canonical_fields() {
         .expect("frontier hex token");
     let frontier_id = parse_hex(frontier_hex);
 
-    let recomputed =
-        message_event_id_in_minute(&workspace_bytes, &author_id, &frontier_id, 6_000_000);
-    assert_eq!(
-        observed_coord, recomputed,
-        "leaf coord must be deterministic"
+    let recomputed = message_event_id_in_minute(
+        &workspace_bytes,
+        &author_id,
+        &frontier_id,
+        6_000_000,
     );
+    assert_eq!(observed_coord, recomputed, "leaf coord must be deterministic");
 
     // Sanity-check the construction is BLAKE3-keyed-hash with the v1 domain.
     let mut info = Vec::with_capacity(32 + 32 + 32 + 8);
@@ -204,17 +206,13 @@ fn hex_nibble(byte: u8) -> u8 {
 }
 
 #[test]
-fn cli_delete_keeps_surviving_leaf_decryptable() {
-    // Two messages in the same minute, then delete the first. The retire
-    // walk materializes time-tree internals along the deletion path plus
-    // sibling time-internals to keep the retained tree covering everything
-    // outside the deleted leaf. Trie internals are added at the divergence
-    // depth between the two leaves' coords.
+fn cli_delete_does_not_retire_minute_node() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Delete", "alice", "alice-laptop");
     assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
 
+    // Two messages in the same minute, then delete the first.
     assert_success(topo(&["--db", &db, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &db, "send", &workspace_id, "first"]));
     assert_success(topo(&["--db", &db, "send", &workspace_id, "second"]));
@@ -227,7 +225,17 @@ fn cli_delete_keeps_surviving_leaf_decryptable() {
     assert_success(topo(&["--db", &db, "delete-message", &workspace_id, "#1"]));
 
     let post = keys_value(&db, &workspace_id);
+    // Post-delete: surviving leaf stays. Time-tree internals + minute_node
+    // siblings are now materialized, but the surviving leaf is the only
+    // remaining trie leaf.
     assert_eq!(line_value(&post, "local_history_leaves"), "1");
+    assert!(
+        post.lines().any(|line| line.contains("history_node:")
+            && line.contains("start=100")
+            && line.contains("width=1")
+            && line.contains("bit_depth=0")),
+        "minute_node for unix_minute=100 must be materialized after delete:\n{post}"
+    );
 
     // The other message in the same minute still decodes.
     let listing = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
@@ -387,7 +395,6 @@ fn cli_delete_file_retires_its_leaf_without_touching_message_leaf() {
 
     let pre = keys_value(&db, &workspace_id);
     assert_eq!(line_value(&pre, "local_history_leaves"), "2");
-    // Pre-delete: minute_node stays implicit.
     assert_eq!(line_value(&pre, "local_history_minute_nodes"), "0");
 
     assert_success(topo(&[
@@ -405,10 +412,15 @@ fn cli_delete_file_retires_its_leaf_without_touching_message_leaf() {
         "1",
         "file leaf must be retired, message leaf must remain:\n{post}"
     );
-    // Post-delete: the retire walk materializes the minute_node so the
-    // surviving message leaf can be reached without re-traversing the
-    // workspace root.
-    // See cli_delete_message_cascades_to_attached_file_leaf for assertion details.
+    // The retire walk materializes the minute_node and its sibling at
+    // unix_minute=101 (both are `(width=1, bit_depth=0)` rows).
+    assert!(
+        post.lines().any(|line| line.contains("history_node:")
+            && line.contains("start=100")
+            && line.contains("width=1")
+            && line.contains("bit_depth=0")),
+        "minute_node for unix_minute=100 must be materialized after delete:\n{post}"
+    );
 
     // Message text still listed.
     let messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
@@ -463,7 +475,13 @@ fn cli_delete_message_cascades_to_attached_file_leaf() {
     );
     // The retire walks materialize the minute_node so future sends can
     // descend from a closer ancestor than the frontier root.
-    // Cascade keeps minute_node materialized for the same reason.
+    assert!(
+        post.lines().any(|line| line.contains("history_node:")
+            && line.contains("start=100")
+            && line.contains("width=1")
+            && line.contains("bit_depth=0")),
+        "minute_node for unix_minute=100 must be materialized after cascade:\n{post}"
+    );
 
     // Both projection rows are gone.
     let messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
