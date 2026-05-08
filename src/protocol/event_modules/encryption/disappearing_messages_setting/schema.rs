@@ -46,7 +46,7 @@ pub fn setting_row(
     }
 }
 
-fn decode_row(key: &[u8], value: &[u8]) -> Result<ActiveSettingRow, String> {
+pub fn decode_active_setting_row(key: &[u8], value: &[u8]) -> Result<ActiveSettingRow, String> {
     if key.len() != KEY_BYTES {
         return Err("disappearing setting row key is malformed".to_string());
     }
@@ -81,7 +81,7 @@ pub fn active_for_workspace(
         .map_err(|err| format!("load disappearing settings: {err}"))?;
     let mut latest: Option<ActiveSettingRow> = None;
     for (key, value) in rows {
-        let row = decode_row(&key, &value)?;
+        let row = decode_active_setting_row(&key, &value)?;
         latest = match latest {
             None => Some(row),
             Some(prev) => Some(pick_later(prev, row)),

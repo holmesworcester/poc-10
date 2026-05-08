@@ -194,6 +194,7 @@ mod tests {
                 ],
                 labels: Vec::new(),
                 receive: None,
+                now_unix_minute: None,
             },
         };
         let output = project(&event).expect("project deletion");
@@ -250,6 +251,7 @@ mod tests {
                 ],
                 labels: Vec::new(),
                 receive: None,
+                now_unix_minute: None,
             },
         };
 

@@ -143,6 +143,7 @@ mod tests {
             }],
             labels: Vec::new(),
             receive: None,
+            now_unix_minute: None,
         };
         (record, context)
     }
@@ -216,6 +217,7 @@ mod tests {
             }],
             labels: Vec::new(),
             receive: None,
+            now_unix_minute: None,
         };
         let event = EventWithContext {
             record: &record,

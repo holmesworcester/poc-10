@@ -88,28 +88,63 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         );
     }
 
-    // Purge-on-project: a deletion event labels its target message id with
-    // `content.deleted:<author_user_id>`. If the tombstone arrived first, the
-    // message is valid but must not leave a visible row behind.
+    // Purge-on-project: drop the message's read-model and sealed rows when
+    // either of the following is true:
+    //   * The author has tombstoned the message (deletion label set).
+    //   * The message's stamped `expires_at_minute` is already past the
+    //     local logical clock — i.e., the message was authored under a TTL
+    //     and arrived (or rearrived after a previous local expiry) after
+    //     the deadline. The check uses the message's own canonical bytes
+    //     plus `now_unix_minute` from `EventContext`; no shared deletion
+    //     event is required, so a slow or replaying peer cannot resurrect
+    //     a message we already retired.
     let is_deleted_by_author = event.context.labels.iter().any(|label| {
         deletion_label_author(label)
             .map(|author| author == message.author_user_id)
             .unwrap_or(false)
     });
-    if is_deleted_by_author {
+    let is_expired_at_receive = match event.context.now_unix_minute {
+        Some(now_minute) => {
+            message.expires_at_minute != super::types::EXPIRES_NEVER
+                && message.expires_at_minute < now_minute
+        }
+        None => false,
+    };
+    if is_deleted_by_author || is_expired_at_receive {
         let key = schema::message_key(message.workspace_id, event.context.event_id);
-        return Ok(ProjectionOutput {
+        let sealed_key = schema::message_key(message.workspace_id, event.context.event_id);
+        let mut output = ProjectionOutput {
             rows: vec![schema::message_tombstone_row(
                 message.workspace_id,
                 event.context.event_id,
                 message.author_user_id,
             )],
-            deletes: vec![TableDelete {
-                table: schema::MESSAGES,
-                key,
-            }],
+            deletes: vec![
+                TableDelete {
+                    table: schema::MESSAGES,
+                    key,
+                },
+                TableDelete {
+                    table: schema::SEALED_MESSAGES,
+                    key: sealed_key,
+                },
+            ],
             labels: Vec::new(),
-        });
+        };
+        // For expired-at-receive, also emit the deletion label so
+        // `content_purge` reclaims the canonical bytes. The label format
+        // matches the existing self-delete label: it names the message
+        // author, and `content_purge` already gates byte purges on it.
+        // For author-driven deletions the label is already on the event
+        // (set by the deletion projector), so we do not double-write.
+        if is_expired_at_receive && !is_deleted_by_author {
+            use crate::protocol::event_modules::content::message_deletion::types::deletion_label;
+            output.labels.push(crate::protocol::event_modules::schema::EventLabel {
+                event_id: event.context.event_id,
+                label: deletion_label(&message.author_user_id),
+            });
+        }
+        return Ok(output);
     }
 
     Ok(ProjectionOutput::rows(vec![schema::sealed_message_row(
@@ -266,6 +301,7 @@ mod tests {
                 ],
                 labels: Vec::new(),
                 receive: None,
+                now_unix_minute: None,
             },
         }
     }
@@ -392,13 +428,150 @@ mod tests {
         let output = project(&event).expect("project deleted message");
         assert_eq!(output.rows.len(), 1);
         assert_eq!(output.rows[0].table, schema::MESSAGE_TOMBSTONES);
+        // For self-deletes the label is already on the event (set by the
+        // deletion projector); we don't double-write it.
         assert!(output.labels.is_empty());
-        assert_eq!(output.deletes.len(), 1);
-        assert_eq!(output.deletes[0].table, schema::MESSAGES);
-        assert_eq!(
-            output.deletes[0].key,
-            schema::message_key(workspace_id, built.message_id)
+        // Two deletes: read-model (MESSAGES) + ciphertext (SEALED_MESSAGES).
+        assert_eq!(output.deletes.len(), 2);
+        let tables: Vec<_> = output.deletes.iter().map(|d| d.table).collect();
+        assert!(tables.contains(&schema::MESSAGES));
+        assert!(tables.contains(&schema::SEALED_MESSAGES));
+    }
+
+    fn build_with_expiry(
+        workspace_id: [u8; 32],
+        author_user_id: [u8; 32],
+        signer_private_key: &[u8; 32],
+        signer_endpoint_shared_id: [u8; 32],
+        expires_at_minute: u64,
+    ) -> BuiltMessage {
+        let created_at_ms = 6_000_000u64;
+        let removal_frontier_id = [30; 32];
+        let event_id_in_minute = super::super::types::message_event_id_in_minute(
+            &workspace_id,
+            &author_user_id,
+            &removal_frontier_id,
+            created_at_ms,
         );
+        let leaf_output =
+            leaf_module::commands::derive_trie_split(leaf_module::commands::DeriveTrieSplit {
+                workspace_id,
+                removal_frontier_id,
+                parent_secret_id: [200; 32],
+                parent_secret: [201; 32],
+                range_start: unix_minute_for(created_at_ms),
+                parent_bit_depth: 0,
+                parent_event_id_prefix: [0; 32],
+                child_side: leaf_module::types::bit_at(&event_id_in_minute, 0),
+                child_bit_depth: leaf_module::types::TRIE_LEAF_BIT_DEPTH,
+                child_event_id_prefix: event_id_in_minute,
+                tombstone_node_id: None,
+            })
+            .expect("derive leaf for projector test");
+        let leaf_record = leaf_output.events[0].record().clone();
+        let leaf_id = leaf_output.value.local_history_node_secret_id;
+        let output = super::super::commands::send(super::super::commands::SendMessage {
+            workspace_id,
+            created_at_ms,
+            author_user_id,
+            signer_endpoint_shared_id,
+            signer_private_key: *signer_private_key,
+            removal_frontier_id,
+            local_history_node_secret_id: leaf_id,
+            leaf_node_secret: KEY_SECRET,
+            expires_at_minute,
+            text: "ttl".to_string(),
+        })
+        .expect("send message");
+        let record = output.events[0].record().clone();
+        BuiltMessage {
+            record,
+            message_id: output.value.message_id,
+            leaf_id,
+            leaf_record,
+        }
+    }
+
+    #[test]
+    fn drops_expired_message_when_now_is_past_stamped_expiry() {
+        // Re-arrival contract: a message stamped with finite expiry that
+        // arrives after the local clock is past `expires_at_minute` must
+        // be tombstoned (no visible row, no sealed row), and a deletion
+        // label must be emitted so `content_purge` reclaims the
+        // canonical bytes on its next tick. Forward secrecy is preserved
+        // by the leaf retirement that `disappearing_minute_expiry`
+        // already performed; this is the belt-and-suspenders byte
+        // reclamation.
+        let workspace_id = [7; 32];
+        let signer_private_key = [9; 32];
+        let signer_pubkey = signing_public_key_for(&signer_private_key);
+        let author_record = user_record(workspace_id);
+        let author_id = event_id(&author_record.canonical_bytes);
+        let signer_record = endpoint_shared_record(workspace_id, author_id, signer_pubkey);
+        let signer_id = event_id(&signer_record.canonical_bytes);
+
+        // unix_minute(6_000_000) = 100; expires_at_minute = 101.
+        let built =
+            build_with_expiry(workspace_id, author_id, &signer_private_key, signer_id, 101);
+        let mut event =
+            context_for(&built, signer_id, signer_record, author_id, author_record);
+        // Pin local clock to minute 102 — past expiry.
+        event.context.now_unix_minute = Some(102);
+
+        let output = project(&event).expect("project expired-at-receive");
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0].table, schema::MESSAGE_TOMBSTONES);
+        let tables: Vec<_> = output.deletes.iter().map(|d| d.table).collect();
+        assert!(tables.contains(&schema::MESSAGES));
+        assert!(tables.contains(&schema::SEALED_MESSAGES));
+        assert_eq!(output.labels.len(), 1);
+        assert_eq!(output.labels[0].event_id, built.message_id);
+    }
+
+    #[test]
+    fn keeps_finite_expiry_message_visible_when_clock_is_before_expiry() {
+        let workspace_id = [7; 32];
+        let signer_private_key = [9; 32];
+        let signer_pubkey = signing_public_key_for(&signer_private_key);
+        let author_record = user_record(workspace_id);
+        let author_id = event_id(&author_record.canonical_bytes);
+        let signer_record = endpoint_shared_record(workspace_id, author_id, signer_pubkey);
+        let signer_id = event_id(&signer_record.canonical_bytes);
+
+        let built =
+            build_with_expiry(workspace_id, author_id, &signer_private_key, signer_id, 105);
+        let mut event =
+            context_for(&built, signer_id, signer_record, author_id, author_record);
+        event.context.now_unix_minute = Some(102);
+
+        let output = project(&event).expect("project before-expiry message");
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0].table, schema::SEALED_MESSAGES);
+        assert!(output.deletes.is_empty());
+        assert!(output.labels.is_empty());
+    }
+
+    #[test]
+    fn keeps_never_expire_message_visible_at_any_clock() {
+        // expires_at_minute == EXPIRES_NEVER must short-circuit the
+        // expiry check regardless of how far the clock has advanced.
+        let workspace_id = [7; 32];
+        let signer_private_key = [9; 32];
+        let signer_pubkey = signing_public_key_for(&signer_private_key);
+        let author_record = user_record(workspace_id);
+        let author_id = event_id(&author_record.canonical_bytes);
+        let signer_record = endpoint_shared_record(workspace_id, author_id, signer_pubkey);
+        let signer_id = event_id(&signer_record.canonical_bytes);
+
+        let built = build(workspace_id, author_id, &signer_private_key, signer_id);
+        let mut event = context_for(&built, signer_id, signer_record, author_id, author_record);
+        event.context.now_unix_minute = Some(u64::MAX - 1);
+
+        let output = project(&event).expect("project never-expire message");
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0].table, schema::SEALED_MESSAGES);
+        assert!(output.deletes.is_empty());
+        assert!(output.labels.is_empty());
     }
 
     #[test]

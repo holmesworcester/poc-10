@@ -156,6 +156,7 @@ mod tests {
                 }],
                 labels: Vec::new(),
                 receive: None,
+                now_unix_minute: None,
             },
         }
     }
@@ -197,6 +198,7 @@ mod tests {
                 receive: Some(ReceiveMetadata::endpoint_receive(
                     origin, [1; 32], [4; 32], true,
                 )),
+                now_unix_minute: None,
             },
         })
         .expect("project response");
@@ -251,6 +253,7 @@ mod tests {
                         [4; 32],
                         true,
                     )),
+                    now_unix_minute: None,
                 },
             })
             .expect_err("unauthorized response receive must fail"),
@@ -280,6 +283,7 @@ mod tests {
                         [99; 32],
                         true,
                     )),
+                    now_unix_minute: None,
                 },
             })
             .expect_err("wrong receive sender must fail"),

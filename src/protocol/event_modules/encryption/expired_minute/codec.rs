@@ -12,7 +12,7 @@ use crate::protocol::wire::{Reader, Writer};
 
 use super::types::ExpiredMinuteEvent;
 
-pub const TYPE_EXPIRED_MINUTE: u8 = 146;
+pub const TYPE_EXPIRED_MINUTE: u8 = 149;
 pub const EXPIRED_MINUTE_WIRE_SIZE: usize = 1 + 32 + 32 + 8 + 32;
 
 pub fn encode(event: &ExpiredMinuteEvent) -> Vec<u8> {

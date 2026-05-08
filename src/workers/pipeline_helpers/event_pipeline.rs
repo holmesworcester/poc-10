@@ -243,12 +243,19 @@ pub struct DependencyContext {
 /// current event id. If a projector seems to need arbitrary SQL, first ask
 /// whether the needed fact should be a dependency, a label, or a module-owned
 /// read model consumed by a worker.
+///
+/// `now_unix_minute` is the local logical clock at projection time, expressed
+/// as `floor(logical_time_ms / UNIX_MINUTE_MS)`. Projectors use it to make
+/// time-sensitive decisions (e.g. message disappearing-expiry) without
+/// reaching into storage themselves. `None` means the clock is not pinned —
+/// projectors must treat that as "no time-based decision is safe to make."
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventContext {
     pub event_id: EventId,
     pub dependencies: Vec<DependencyContext>,
     pub labels: Vec<Vec<u8>>,
     pub receive: Option<ReceiveMetadata>,
+    pub now_unix_minute: Option<u64>,
 }
 
 impl EventContext {
@@ -1026,11 +1033,15 @@ fn load_event_context_in_tx(
             record,
         });
     }
+    let now_unix_minute = crate::core::logical_clock::logical_time(store)
+        .map_err(module_error)?
+        .map(|ms| ms / crate::protocol::event_modules::content::message::types::UNIX_MINUTE_MS);
     Ok(EventContext {
         event_id: *event_id,
         dependencies,
         labels: schema::event_labels(store, event_id).map_err(module_error)?,
         receive,
+        now_unix_minute,
     })
 }
 
