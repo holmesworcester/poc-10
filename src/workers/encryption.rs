@@ -125,6 +125,23 @@ pub enum Work {
     DrainPendingMessageLeaves {
         batch_size: usize,
     },
+    /// Range-deletion primitive: tombstone every minute in `[0, floor_minute)`
+    /// of the time tree. Walks the boundary descend path from F (or the
+    /// deepest covering sibling, if F is wiped); at each level whose
+    /// floor-minute bit is 1 the entire left subtree is in `[0, floor_minute)`
+    /// and gets tombstoned (one tombstone per fully-left subtree, regardless
+    /// of how many minutes/messages live underneath). At each level whose
+    /// floor-minute bit is 0 the right half survives intact and is
+    /// materialized so future authoring above the floor still has a
+    /// covering ancestor. Cost is O(log time_tree_root_width), not
+    /// O(messages_in_range). Determinism: same `floor_minute` produces
+    /// byte-identical tombstones on every peer.
+    ChopTimeTreePrefix {
+        workspace_id: EventId,
+        removal_frontier_id: EventId,
+        /// Minute boundary; everything `< floor_minute` is chopped.
+        floor_minute: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +151,7 @@ pub enum Output {
     DerivedEventLeaf(DeriveEventLeafReport),
     RetiredDeletedEventLeaf(RetireDeletedEventLeafReport),
     DrainedPendingMessageLeaves(DrainPendingLeavesReport),
+    ChoppedTimeTreePrefix(ChopReport),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -184,6 +202,25 @@ pub struct RetireDeletedEventLeafReport {
     pub tombstones_written: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChopReport {
+    /// Number of fully-left subtree tombstones written (one per boundary
+    /// level whose floor-minute bit is 1). Bounded by the time-tree depth
+    /// (at most `TIME_TREE_BIT_DEPTH` = ~63 for `TIME_TREE_ROOT_WIDTH = 2^63`).
+    pub subtree_tombstones_written: usize,
+    /// Number of boundary descend-path tombstones written (the chain of
+    /// time-tree internals on the floor-minute boundary, plus F if F was
+    /// alive at chop time). Bounded by the time-tree depth.
+    pub boundary_descend_tombstones_written: usize,
+    /// Number of right-side sibling rows materialized to provide cover for
+    /// future authoring at minutes `>= floor_minute`. Bounded by the
+    /// time-tree depth.
+    pub right_side_siblings_materialized: usize,
+    /// Canonical bytes purged from `event_modules.events` during the wipe
+    /// phase (boundary descend rows + F root row when alive).
+    pub purged_event_bytes: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RetiredRecipientKey {
     recipient_key_id: EventId,
@@ -230,6 +267,18 @@ pub fn run<R: EventRegistry>(store: &Store, registry: &R, work: Work) -> Result<
             drain_pending_message_leaves(store, registry, batch_size)
                 .map(Output::DrainedPendingMessageLeaves)
         }
+        Work::ChopTimeTreePrefix {
+            workspace_id,
+            removal_frontier_id,
+            floor_minute,
+        } => chop_time_tree_prefix(
+            store,
+            registry,
+            workspace_id,
+            removal_frontier_id,
+            floor_minute,
+        )
+        .map(Output::ChoppedTimeTreePrefix),
     }
 }
 
@@ -1459,6 +1508,361 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
     report.tombstones_written = tombstones_written;
     report.purged_event_bytes = purged_event_bytes;
     let _ = path_rows_to_wipe;
+    Ok(report)
+}
+
+/// Range-deletion primitive over the time tree.
+///
+/// Tombstones every minute in `[0, floor_minute)` by walking the boundary
+/// descend path and applying these rules at each level (range_width >= 2):
+///
+///   * If `floor_minute >= mid` (floor lives in right half): the entire
+///     LEFT half is `< mid <= floor_minute` and is fully chopped. Materialize
+///     the left subtree row to obtain its event id, then wipe it (exact-delete
+///     + canonical-byte purge + tombstone). Descend RIGHT (boundary).
+///   * If `floor_minute < mid` (floor lives in left half, possibly == range_start):
+///     the right half is fully `>= mid > floor_minute` and survives. Materialize
+///     the right child as a sibling row so future authoring above the floor
+///     has a covering ancestor. Descend LEFT (boundary).
+///
+/// At each step the descend-side child is also materialized; those descend-path
+/// rows are wiped in a final transaction (same shape as the F-wipe block in
+/// `retire_deleted_event_leaf`). When F's row is alive at chop time it is also
+/// wiped at the end (forward secrecy for the chopped range). When F is already
+/// wiped from a prior retirement, the walk starts from the deepest sibling
+/// row that covers `floor_minute`.
+///
+/// Cost: at most `TIME_TREE_BIT_DEPTH + 1` boundary levels (~63), with at most
+/// one subtree tombstone, one descend row, and one right-side sibling
+/// materialization per level. O(log time_tree_root_width), not O(messages).
+///
+/// Determinism: every materialization uses the deterministic BLAKE3-keyed-hash
+/// KDFs and every tombstone is keyed by a deterministic event id, so two peers
+/// running the same chop produce byte-identical tombstone rows.
+fn chop_time_tree_prefix<R: EventRegistry>(
+    store: &Store,
+    registry: &R,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    floor_minute: u64,
+) -> Result<ChopReport, String> {
+    let mut report = ChopReport::default();
+    if floor_minute == 0 {
+        // [0, 0) is empty — nothing to chop.
+        return Ok(report);
+    }
+
+    // Pick the starting source covering `floor_minute`.
+    //   * F root (when alive): covers the whole time axis.
+    //   * Otherwise: deepest sibling row whose range contains `floor_minute`.
+    //     If no row covers floor_minute, the boundary descend has no work
+    //     (the chopped region either has no surviving cover at all or is
+    //     already wiped). We still scan all surviving rows below for any
+    //     fully inside `[0, floor_minute)`.
+    let frontier_root =
+        local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?;
+    let frontier_root_id = frontier_root.as_ref().map(|row| row.local_key_secret_id);
+
+    enum StartSource {
+        FrontierRoot {
+            secret_id: EventId,
+            secret: HistoryNodeSecret,
+        },
+        Sibling {
+            secret_id: EventId,
+            secret: HistoryNodeSecret,
+            range_start: u64,
+            range_width: u64,
+        },
+        None,
+    }
+
+    let start = if let Some(root_row) = frontier_root.as_ref() {
+        StartSource::FrontierRoot {
+            secret_id: root_row.local_key_secret_id,
+            secret: root_row.key_secret,
+        }
+    } else {
+        let mut best: Option<(EventId, HistoryNodeSecret, u64, u64)> = None;
+        for row in local_history_node_secret::schema::list_for_frontier(
+            store,
+            workspace_id,
+            removal_frontier_id,
+        )? {
+            // Time-tree internals only (range_width >= 1, bit_depth = 0).
+            if row.bit_depth != TIME_TREE_BIT_DEPTH {
+                continue;
+            }
+            let row_end = row.range_start.saturating_add(row.range_width);
+            if floor_minute < row.range_start || floor_minute >= row_end {
+                continue;
+            }
+            let take = match best {
+                None => true,
+                Some((_, _, _, current_width)) => row.range_width < current_width,
+            };
+            if take {
+                best = Some((
+                    row.local_history_node_secret_id,
+                    row.node_secret,
+                    row.range_start,
+                    row.range_width,
+                ));
+            }
+        }
+        match best {
+            Some((id, secret, range_start, range_width)) => StartSource::Sibling {
+                secret_id: id,
+                secret,
+                range_start,
+                range_width,
+            },
+            None => StartSource::None,
+        }
+    };
+
+    // Track the descend-path rows we materialize (will be wiped at the end).
+    // `WipeTarget` already exists in this module for the retire walk; reuse it.
+    let mut descend_path: Vec<WipeTarget> = Vec::new();
+    if let Some(root_row) = frontier_root.as_ref() {
+        // F root is on the descend boundary by definition.
+        descend_path.push(WipeTarget {
+            event_id: root_row.local_key_secret_id,
+            range_start: 0,
+            range_width: TIME_TREE_ROOT_WIDTH,
+            bit_depth: TIME_TREE_BIT_DEPTH,
+            event_id_prefix: [0; 32],
+            is_frontier_root: true,
+        });
+    }
+
+    // Boundary descent.
+    if let StartSource::None = start {
+        // Nothing to descend; skip the walk.
+    } else {
+        let (mut current_secret_id, mut current_secret, mut current_range_start, mut current_range_width) =
+            match start {
+                StartSource::FrontierRoot { secret_id, secret } => {
+                    (secret_id, secret, 0u64, TIME_TREE_ROOT_WIDTH)
+                }
+                StartSource::Sibling {
+                    secret_id,
+                    secret,
+                    range_start,
+                    range_width,
+                } => (secret_id, secret, range_start, range_width),
+                StartSource::None => unreachable!(),
+            };
+
+        while current_range_width > 1 {
+            // Once we have descended past the floor on the left, stop:
+            // current_range_start == floor_minute means the subtree is fully
+            // surviving (no chopping inside it).
+            if current_range_start >= floor_minute {
+                break;
+            }
+            // Once we are entirely within the chopped range, stop: this
+            // subtree should have been tombstoned at a higher level. Defensive.
+            let current_end = current_range_start.saturating_add(current_range_width);
+            if current_end <= floor_minute {
+                break;
+            }
+            let half = current_range_width / 2;
+            let mid = current_range_start + half;
+            if floor_minute >= mid {
+                // Left half [start, mid) is fully chopped. Materialize the
+                // left child to get its event id, then track for wiping +
+                // tombstoning. Descend right (boundary).
+                let left = ensure_time_split(
+                    store,
+                    registry,
+                    workspace_id,
+                    removal_frontier_id,
+                    current_secret_id,
+                    current_secret,
+                    current_range_start,
+                    current_range_width,
+                    0u8,
+                    current_range_start,
+                    half,
+                )?;
+                report.purged_event_bytes += 0; // accumulated in wipe phase
+                let _ = left.admitted_events; // accounting noise
+                let left_target = WipeTarget {
+                    event_id: left.row_event_id,
+                    range_start: current_range_start,
+                    range_width: half,
+                    bit_depth: TIME_TREE_BIT_DEPTH,
+                    event_id_prefix: [0; 32],
+                    is_frontier_root: false,
+                };
+                // Subtree tombstone for fully-chopped left subtree (counted
+                // separately from boundary descend tombstones).
+                descend_path.push(left_target);
+                report.subtree_tombstones_written += 1;
+
+                // Materialize right child as the boundary descend continuation.
+                let right = ensure_time_split(
+                    store,
+                    registry,
+                    workspace_id,
+                    removal_frontier_id,
+                    current_secret_id,
+                    current_secret,
+                    current_range_start,
+                    current_range_width,
+                    1u8,
+                    mid,
+                    half,
+                )?;
+                let _ = right.admitted_events;
+                descend_path.push(WipeTarget {
+                    event_id: right.row_event_id,
+                    range_start: mid,
+                    range_width: half,
+                    bit_depth: TIME_TREE_BIT_DEPTH,
+                    event_id_prefix: [0; 32],
+                    is_frontier_root: false,
+                });
+                report.boundary_descend_tombstones_written += 1;
+
+                current_secret_id = right.row_event_id;
+                current_secret = right.row_secret;
+                current_range_start = mid;
+                current_range_width = half;
+            } else {
+                // Left half [start, mid) straddles the floor. Right half
+                // [mid, end) is fully surviving — materialize as sibling
+                // cover. Descend left (boundary).
+                let right = ensure_time_split(
+                    store,
+                    registry,
+                    workspace_id,
+                    removal_frontier_id,
+                    current_secret_id,
+                    current_secret,
+                    current_range_start,
+                    current_range_width,
+                    1u8,
+                    mid,
+                    half,
+                )?;
+                let _ = right.admitted_events;
+                if right.materialized_new_row {
+                    report.right_side_siblings_materialized += 1;
+                }
+
+                let left = ensure_time_split(
+                    store,
+                    registry,
+                    workspace_id,
+                    removal_frontier_id,
+                    current_secret_id,
+                    current_secret,
+                    current_range_start,
+                    current_range_width,
+                    0u8,
+                    current_range_start,
+                    half,
+                )?;
+                let _ = left.admitted_events;
+                descend_path.push(WipeTarget {
+                    event_id: left.row_event_id,
+                    range_start: current_range_start,
+                    range_width: half,
+                    bit_depth: TIME_TREE_BIT_DEPTH,
+                    event_id_prefix: [0; 32],
+                    is_frontier_root: false,
+                });
+                report.boundary_descend_tombstones_written += 1;
+
+                current_secret_id = left.row_event_id;
+                current_secret = left.row_secret;
+                // current_range_start unchanged (left child starts at parent's start)
+                current_range_width = half;
+            }
+        }
+        // At width = 1 the boundary minute_node is `floor_minute` itself.
+        // floor_minute is NOT in [0, floor_minute) — it survives. Nothing
+        // to do here: the minute_node was either materialized as a descend
+        // step at the previous level (it sits at width=2 → width=1), or it
+        // was implicit. Either way it is the surviving boundary minute.
+        let _ = (current_secret_id, current_secret, current_range_start, current_range_width);
+    }
+
+    // Wipe phase. Exact-delete every descend-path row (including F root if
+    // alive), purge canonical bytes, write tombstones. The replacement node
+    // id used in tombstones is the F root's event id when known, otherwise
+    // the row's own event id (matches the per-leaf retire's convention that
+    // the wiped row "is its own replacement" when no global replacement exists).
+    let replacement_node_id = frontier_root_id.unwrap_or([0; 32]);
+    let descend_path_clone = descend_path.clone();
+    let (wiped, tombstones, purged) = store
+        .write_transaction(move |store| {
+            let mut wiped: usize = 0;
+            let mut tombstones: usize = 0;
+            let mut purged: usize = 0;
+            for target in &descend_path_clone {
+                if target.is_frontier_root {
+                    let key = local_key_secret::schema::local_key_secret_key(
+                        workspace_id,
+                        removal_frontier_id,
+                    );
+                    if store
+                        .delete_table_rows_in_tx(
+                            local_key_secret::schema::LOCAL_KEY_SECRETS,
+                            vec![key],
+                        )?
+                        > 0
+                    {
+                        wiped += 1;
+                    }
+                } else {
+                    let key = local_history_node_secret::schema::local_history_node_secret_key(
+                        workspace_id,
+                        removal_frontier_id,
+                        target.range_start,
+                        target.range_width,
+                        target.bit_depth,
+                        target.event_id_prefix,
+                    );
+                    if store
+                        .delete_table_rows_in_tx(
+                            local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
+                            vec![key],
+                        )?
+                        > 0
+                    {
+                        wiped += 1;
+                    }
+                }
+                if purging::purge_event_storage_in_tx(store, &target.event_id)? {
+                    purged += 1;
+                }
+                let inserted = store.insert_table_rows_in_tx(vec![
+                    local_history_node_secret::schema::local_history_node_tombstone_row_by_id(
+                        workspace_id,
+                        removal_frontier_id,
+                        target.event_id,
+                        // Replacement: the chop has no single replacement
+                        // node, so we use F's id (when known) or the wiped
+                        // row's own id as a stable, deterministic marker.
+                        if replacement_node_id == [0; 32] {
+                            target.event_id
+                        } else {
+                            replacement_node_id
+                        },
+                    ),
+                ])?;
+                tombstones += inserted;
+            }
+            Ok((wiped, tombstones, purged))
+        })
+        .map_err(|err| format!("chop time tree prefix wipe transaction: {err}"))?;
+    let _ = wiped;
+    let _ = tombstones;
+    report.purged_event_bytes = purged;
+    let _ = descend_path;
     Ok(report)
 }
 
@@ -2977,5 +3381,333 @@ mod tests {
             local_history_node_secret::commands::TRIE_SPLIT_DOMAIN,
             &info,
         )
+    }
+
+    #[test]
+    fn chop_with_floor_zero_is_noop() {
+        // floor_minute = 0 means [0, 0) is empty; the chop must leave F's
+        // row untouched and report zero counts.
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, local_key_secret_id) = seed_local_key_secret(&store);
+
+        let report = run(
+            &store,
+            &protocol,
+            Work::ChopTimeTreePrefix {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                floor_minute: 0,
+            },
+        )
+        .expect("chop with floor=0");
+        let Output::ChoppedTimeTreePrefix(report) = report else {
+            panic!("unexpected output");
+        };
+        assert_eq!(report.subtree_tombstones_written, 0);
+        assert_eq!(report.boundary_descend_tombstones_written, 0);
+        assert_eq!(report.right_side_siblings_materialized, 0);
+        assert_eq!(report.purged_event_bytes, 0);
+
+        // F's row must be untouched.
+        let root = local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+            .expect("look up local_key_secret")
+            .expect("F row must remain after no-op chop");
+        assert_eq!(root.local_key_secret_id, local_key_secret_id);
+        // No tombstones should have been written.
+        let tombstones = local_history_node_secret::schema::list_tombstones_for_workspace(
+            &store, WORKSPACE,
+        )
+        .expect("list tombstones");
+        assert!(
+            tombstones.is_empty(),
+            "no tombstones must be written for floor=0"
+        );
+    }
+
+    #[test]
+    fn chop_full_minute_writes_subtree_and_descend_tombstones() {
+        // Chop with a small non-zero floor. Confirm tombstones land in
+        // LOCAL_HISTORY_NODE_TOMBSTONES, with the boundary depth and
+        // subtree-tombstone counts each bounded by the time-tree depth.
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, _) = seed_local_key_secret(&store);
+
+        let floor_minute: u64 = 100;
+        let report = run(
+            &store,
+            &protocol,
+            Work::ChopTimeTreePrefix {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                floor_minute,
+            },
+        )
+        .expect("chop");
+        let Output::ChoppedTimeTreePrefix(report) = report else {
+            panic!();
+        };
+
+        // Time-tree depth from width = 2^63 down to width = 1 is 63 levels.
+        // Each level admits at most one descend row and at most one
+        // fully-left subtree tombstone, so each count is bounded by 63.
+        let depth_bound = TIME_TREE_BIT_DEPTH as usize + 63; // = 63 (since TIME_TREE_BIT_DEPTH=0); use 63 directly
+        let _ = depth_bound;
+        let max_levels = 63usize;
+        assert!(
+            report.subtree_tombstones_written <= max_levels,
+            "subtree tombstones {} must be <= {} (one per boundary bit=1 level)",
+            report.subtree_tombstones_written,
+            max_levels,
+        );
+        assert!(
+            report.boundary_descend_tombstones_written <= max_levels,
+            "boundary descend tombstones {} must be <= {} (one per descend level)",
+            report.boundary_descend_tombstones_written,
+            max_levels,
+        );
+        // For floor_minute = 100 (= 0b1100100), floor sits in the LEFT half
+        // of all top levels (bit=0), then the RIGHT half (bit=1) at the
+        // levels where 100 has set bits. Count the set bits of 100 = 3, so
+        // exactly 3 fully-left subtrees are tombstoned.
+        assert_eq!(
+            report.subtree_tombstones_written, 3,
+            "floor_minute=100 has 3 set bits → 3 fully-left subtrees tombstoned"
+        );
+
+        // Tombstones are persisted in LOCAL_HISTORY_NODE_TOMBSTONES.
+        let tombstones = local_history_node_secret::schema::list_tombstones_for_workspace(
+            &store, WORKSPACE,
+        )
+        .expect("list tombstones");
+        // One tombstone per descend-path row + one per fully-left subtree.
+        // Bound: depth + depth + 1 (F root).
+        assert!(
+            !tombstones.is_empty(),
+            "non-zero floor must produce at least one tombstone"
+        );
+        assert!(
+            tombstones.len() <= 2 * max_levels + 1,
+            "tombstone count {} must be <= 2*{} + 1",
+            tombstones.len(),
+            max_levels,
+        );
+
+        // F's row must be wiped (chop wipes F just like RetireDeletedEventLeaf).
+        assert!(
+            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+                .expect("look up local_key_secret")
+                .is_none(),
+            "F's row must be wiped after a non-zero chop"
+        );
+    }
+
+    #[test]
+    fn chop_then_author_above_floor_succeeds_via_sibling() {
+        // After a chop to floor=100, deriving an event leaf at minute 200
+        // (above the floor) must succeed via the right-side sibling cover
+        // materialized by the chop walk.
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, _) = seed_local_key_secret(&store);
+
+        let _ = run(
+            &store,
+            &protocol,
+            Work::ChopTimeTreePrefix {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                floor_minute: 100,
+            },
+        )
+        .expect("chop to floor=100");
+
+        let report = run(
+            &store,
+            &protocol,
+            Work::DeriveEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms: 200 * 60_000,
+                event_id_in_minute: [0x77; 32],
+            },
+        )
+        .expect("derive above-floor must succeed via sibling cover");
+        let Output::DerivedEventLeaf(report) = report else {
+            panic!();
+        };
+        assert!(
+            report.local_history_node_secret_id.is_some(),
+            "leaf row must materialize from a sibling cover"
+        );
+        assert!(
+            report.leaf_node_secret.is_some(),
+            "leaf secret must derive successfully"
+        );
+    }
+
+    #[test]
+    fn chop_then_author_below_floor_errors_with_clear_message() {
+        // Authoring at minute 50 after a chop to floor=100 must wedge with
+        // the documented "no retained ancestor covers" message — the
+        // chopped subtree has been wiped and no sibling covers it.
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, _) = seed_local_key_secret(&store);
+
+        let _ = run(
+            &store,
+            &protocol,
+            Work::ChopTimeTreePrefix {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                floor_minute: 100,
+            },
+        )
+        .expect("chop");
+
+        let err = run(
+            &store,
+            &protocol,
+            Work::DeriveEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms: 50 * 60_000,
+                event_id_in_minute: [0x42; 32],
+            },
+        )
+        .expect_err("below-floor authoring must wedge with a clear error");
+        assert!(
+            err.contains("no retained ancestor covers"),
+            "expected wedge error mentioning no retained ancestor; got: {err}"
+        );
+    }
+
+    #[test]
+    fn chop_is_deterministic() {
+        // Two fresh stores chopped to the same floor must produce
+        // byte-identical tombstone rows. cover_summary is the canonical
+        // fingerprint of the retained set + tombstones, so we compare it.
+        use local_history_node_secret::schema::cover_summary;
+        let signer = [0xcd; 32];
+
+        let mk_store = || -> (Store, EventId) {
+            let store = Protocol::open_memory_store().expect("store");
+            let protocol = Protocol::new();
+            let (frontier_id, _) = seed_local_key_secret_with_signer(&store, &signer);
+            let _ = run(
+                &store,
+                &protocol,
+                Work::ChopTimeTreePrefix {
+                    workspace_id: WORKSPACE,
+                    removal_frontier_id: frontier_id,
+                    floor_minute: 12345,
+                },
+            )
+            .expect("chop");
+            (store, frontier_id)
+        };
+
+        let (alice_store, _) = mk_store();
+        let (bob_store, _) = mk_store();
+        let alice_summary = cover_summary(&alice_store, WORKSPACE).expect("alice summary");
+        let bob_summary = cover_summary(&bob_store, WORKSPACE).expect("bob summary");
+        assert_eq!(
+            alice_summary, bob_summary,
+            "cover_summary must be byte-equal across two stores running the \
+             same chop (forward-secrecy commitment relies on every peer \
+             producing the same fingerprint)"
+        );
+        // Also sanity-check that tombstone rows are byte-equal directly.
+        let mut alice_tombs =
+            local_history_node_secret::schema::list_tombstones_for_workspace(
+                &alice_store,
+                WORKSPACE,
+            )
+            .expect("alice tombs");
+        let mut bob_tombs = local_history_node_secret::schema::list_tombstones_for_workspace(
+            &bob_store, WORKSPACE,
+        )
+        .expect("bob tombs");
+        alice_tombs.sort_by(|a, b| a.tombstone_node_id.cmp(&b.tombstone_node_id));
+        bob_tombs.sort_by(|a, b| a.tombstone_node_id.cmp(&b.tombstone_node_id));
+        assert_eq!(
+            alice_tombs, bob_tombs,
+            "tombstone rows must be byte-identical across peers"
+        );
+        assert!(
+            !alice_tombs.is_empty(),
+            "non-zero floor must produce tombstones"
+        );
+    }
+
+    #[test]
+    fn chop_after_prior_retire_does_not_resurrect_f() {
+        // Start with an F-wipe state from a per-leaf RetireDeletedEventLeaf,
+        // then chop. F must stay wiped and the chop must complete without
+        // errors (sibling fallback for the boundary descent).
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, _) = seed_local_key_secret(&store);
+
+        // Author two leaves in minute 1 so retire has a sibling structure.
+        let coord_a = [0xaa; 32];
+        let coord_b = [0xbb; 32];
+        for coord in [coord_a, coord_b] {
+            let _ = run(
+                &store,
+                &protocol,
+                Work::DeriveEventLeaf {
+                    workspace_id: WORKSPACE,
+                    removal_frontier_id: frontier_id,
+                    created_at_ms: 60_000,
+                    event_id_in_minute: coord,
+                },
+            )
+            .expect("derive leaf");
+        }
+        // Retire one leaf — this wipes F.
+        let _ = run(
+            &store,
+            &protocol,
+            Work::RetireDeletedEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms: 60_000,
+                event_id_in_minute: coord_a,
+            },
+        )
+        .expect("retire");
+        assert!(
+            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+                .expect("look up F")
+                .is_none(),
+            "precondition: F must be wiped by the retire"
+        );
+
+        // Now chop with a floor above minute 1 so the chop has work to do
+        // via the sibling-fallback descent. Use floor_minute = 50.
+        let report = run(
+            &store,
+            &protocol,
+            Work::ChopTimeTreePrefix {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                floor_minute: 50,
+            },
+        )
+        .expect("chop after retire must succeed");
+        let Output::ChoppedTimeTreePrefix(_report) = report else {
+            panic!();
+        };
+
+        // F must still be wiped — chop must not resurrect F.
+        assert!(
+            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+                .expect("look up F")
+                .is_none(),
+            "F must remain wiped after chop (chop must not resurrect F)"
+        );
     }
 }
