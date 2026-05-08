@@ -23,7 +23,7 @@ pub const SCHEMAS: &[Schema] = &[Schema::durable_row_table(
 )];
 
 const KEY_BYTES: usize = 32 + 8 + 32;
-const VALUE_BYTES: usize = 4 + 8;
+const VALUE_BYTES: usize = 4 + 8 + 8;
 
 pub fn setting_row(
     workspace_id: EventId,
@@ -31,6 +31,7 @@ pub fn setting_row(
     ttl_minutes: u32,
     effective_at_minute: u64,
     created_at_ms: u64,
+    expires_at_or_before_minute: u64,
 ) -> TableRow {
     let mut key = Vec::with_capacity(KEY_BYTES);
     key.extend_from_slice(&workspace_id);
@@ -39,6 +40,7 @@ pub fn setting_row(
     let mut value = Writer::with_capacity(VALUE_BYTES);
     value.u32(ttl_minutes as usize);
     value.u64(effective_at_minute);
+    value.u64(expires_at_or_before_minute);
     TableRow {
         table: SETTINGS,
         key,
@@ -60,6 +62,7 @@ pub fn decode_active_setting_row(key: &[u8], value: &[u8]) -> Result<ActiveSetti
     let mut reader = Reader::new(value, "disappearing setting row");
     let ttl_minutes = reader.u32()?;
     let effective_at_minute = reader.u64()?;
+    let expires_at_or_before_minute = reader.u64()?;
     reader.finish()?;
     Ok(ActiveSettingRow {
         workspace_id,
@@ -67,6 +70,7 @@ pub fn decode_active_setting_row(key: &[u8], value: &[u8]) -> Result<ActiveSetti
         ttl_minutes,
         effective_at_minute,
         created_at_ms,
+        expires_at_or_before_minute,
     })
 }
 
@@ -105,9 +109,9 @@ mod tests {
     #[test]
     fn active_returns_latest_under_lexicographic_tiebreak() {
         let store = Store::open_memory_with_schemas(SCHEMAS).expect("open store");
-        let row_a = setting_row([1; 32], [2; 32], 5, 100, 6_000_000);
-        let row_b = setting_row([1; 32], [9; 32], 7, 200, 12_000_000);
-        let row_c = setting_row([1; 32], [3; 32], 3, 200, 12_000_000);
+        let row_a = setting_row([1; 32], [2; 32], 5, 100, 6_000_000, 0);
+        let row_b = setting_row([1; 32], [9; 32], 7, 200, 12_000_000, 0);
+        let row_c = setting_row([1; 32], [3; 32], 3, 200, 12_000_000, 0);
         store
             .insert_table_rows(vec![row_a, row_b, row_c])
             .expect("insert");
@@ -131,10 +135,19 @@ mod tests {
     fn active_is_workspace_scoped() {
         let store = Store::open_memory_with_schemas(SCHEMAS).expect("open store");
         store
-            .insert_table_rows(vec![setting_row([1; 32], [2; 32], 5, 100, 6_000_000)])
+            .insert_table_rows(vec![setting_row([1; 32], [2; 32], 5, 100, 6_000_000, 0)])
             .expect("insert");
         assert!(active_for_workspace(&store, [9; 32])
             .expect("active")
             .is_none());
+    }
+
+    #[test]
+    fn round_trips_floor_value() {
+        let row = setting_row([1; 32], [2; 32], 5, 100, 6_000_000, 77);
+        let decoded = decode_active_setting_row(&row.key, &row.value).expect("decode");
+        assert_eq!(decoded.expires_at_or_before_minute, 77);
+        assert_eq!(decoded.ttl_minutes, 5);
+        assert_eq!(decoded.effective_at_minute, 100);
     }
 }

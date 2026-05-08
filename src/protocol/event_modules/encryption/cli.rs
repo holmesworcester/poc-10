@@ -585,6 +585,14 @@ fn run_disappearing_set_command(
     )?
     .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
 
+    // Slice 5: default floor to 0 (no monotonic floor pressure from this CLI
+    // path) and chain to the workspace's currently-active setting (if any) so
+    // the projector can validate floor non-decrease.
+    let previous_setting_id = disappearing_messages_setting::schema::active_for_workspace(
+        &context.store,
+        workspace_id,
+    )?
+    .map(|row| row.setting_event_id);
     let output = disappearing_messages_setting::commands::set(
         disappearing_messages_setting::commands::SetDisappearingMessages {
             workspace_id,
@@ -592,6 +600,8 @@ fn run_disappearing_set_command(
             ttl_minutes,
             authority_admin_event_id: authority_admin_id,
             signer_private_key: local.signing_secret,
+            expires_at_or_before_minute: 0,
+            previous_setting_id,
         },
     )?;
     let report = common_worker::run(

@@ -5,7 +5,13 @@
 //! ```text
 //! type(1) || created_at_ms(8) || workspace_id(32) || ttl_minutes(4)
 //!         || authority_admin_event_id(32) || effective_at_minute(8)
+//!         || expires_at_or_before_minute(8) || previous_setting_id(32)
 //! ```
+//!
+//! `previous_setting_id` is the canonical 32-byte event id of the
+//! predecessor setting whose floor this setting must not regress, or
+//! `[0; 32]` as a sentinel meaning "no predecessor" (only legal when no
+//! setting has yet been admitted for the workspace).
 //!
 //! Raw inner bytes are not admissible; admission goes through the signed
 //! envelope. The envelope's signer must be the workspace admin event
@@ -19,7 +25,12 @@ use super::types::{DisappearingMessagesSettingEvent, SignedDisappearingMessagesS
 
 pub const TYPE_DISAPPEARING_MESSAGES_SETTING: u8 = 147;
 pub const TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING: u8 = 148;
-pub const DISAPPEARING_MESSAGES_SETTING_WIRE_SIZE: usize = 1 + 8 + 32 + 4 + 32 + 8;
+pub const DISAPPEARING_MESSAGES_SETTING_WIRE_SIZE: usize = 1 + 8 + 32 + 4 + 32 + 8 + 8 + 32;
+
+/// Sentinel `previous_setting_id` meaning "no predecessor." Only legal
+/// when no setting has yet been admitted for the workspace; the projector
+/// rejects it otherwise.
+pub const NO_PREVIOUS_SETTING_ID: [u8; 32] = [0; 32];
 
 pub fn encode(event: &DisappearingMessagesSettingEvent) -> Vec<u8> {
     let mut out = Writer::with_capacity(DISAPPEARING_MESSAGES_SETTING_WIRE_SIZE);
@@ -29,6 +40,8 @@ pub fn encode(event: &DisappearingMessagesSettingEvent) -> Vec<u8> {
     out.u32(event.ttl_minutes as usize);
     out.id(&event.authority_admin_event_id);
     out.u64(event.effective_at_minute);
+    out.u64(event.expires_at_or_before_minute);
+    out.id(&event.previous_setting_id.unwrap_or(NO_PREVIOUS_SETTING_ID));
     out.finish()
 }
 
@@ -38,14 +51,28 @@ pub fn decode(bytes: &[u8]) -> Result<DisappearingMessagesSettingEvent, String> 
     if tag != TYPE_DISAPPEARING_MESSAGES_SETTING {
         return Err("expected disappearing_messages_setting".to_string());
     }
-    let event = DisappearingMessagesSettingEvent {
-        created_at_ms: reader.u64()?,
-        workspace_id: reader.id()?,
-        ttl_minutes: reader.u32()?,
-        authority_admin_event_id: reader.id()?,
-        effective_at_minute: reader.u64()?,
-    };
+    let created_at_ms = reader.u64()?;
+    let workspace_id = reader.id()?;
+    let ttl_minutes = reader.u32()?;
+    let authority_admin_event_id = reader.id()?;
+    let effective_at_minute = reader.u64()?;
+    let expires_at_or_before_minute = reader.u64()?;
+    let previous_raw = reader.id()?;
     reader.finish()?;
+    let previous_setting_id = if previous_raw == NO_PREVIOUS_SETTING_ID {
+        None
+    } else {
+        Some(previous_raw)
+    };
+    let event = DisappearingMessagesSettingEvent {
+        created_at_ms,
+        workspace_id,
+        ttl_minutes,
+        authority_admin_event_id,
+        effective_at_minute,
+        expires_at_or_before_minute,
+        previous_setting_id,
+    };
     let expected = event.created_at_ms / 60_000;
     if event.effective_at_minute != expected {
         return Err(
@@ -124,9 +151,12 @@ pub fn signed_record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
                 .to_string(),
         );
     }
-    let mut dependencies = Vec::with_capacity(2);
+    let mut dependencies = Vec::with_capacity(3);
     push_unique(&mut dependencies, inner.authority_admin_event_id);
     push_unique(&mut dependencies, inner.workspace_id);
+    if let Some(previous_setting_id) = inner.previous_setting_id {
+        push_unique(&mut dependencies, previous_setting_id);
+    }
     Ok(EventRecord {
         timestamp: inner.created_at_ms,
         body_len: DISAPPEARING_MESSAGES_SETTING_WIRE_SIZE - 1,
@@ -179,6 +209,8 @@ mod tests {
             ttl_minutes: 5,
             authority_admin_event_id: [2; 32],
             effective_at_minute: 100,
+            expires_at_or_before_minute: 0,
+            previous_setting_id: None,
         }
     }
 
@@ -216,5 +248,27 @@ mod tests {
         assert_eq!(record.dependencies, vec![[2; 32], [1; 32]]);
         assert_eq!(record.workspace_id, Some([1; 32]));
         assert_eq!(record.timestamp, 6_000_000);
+    }
+
+    #[test]
+    fn roundtrips_floor_and_previous_setting_id() {
+        let mut e = event();
+        e.expires_at_or_before_minute = 50;
+        e.previous_setting_id = Some([42; 32]);
+        let bytes = encode(&e);
+        assert_eq!(bytes.len(), DISAPPEARING_MESSAGES_SETTING_WIRE_SIZE);
+        let decoded = decode(&bytes).expect("decode");
+        assert_eq!(decoded.expires_at_or_before_minute, 50);
+        assert_eq!(decoded.previous_setting_id, Some([42; 32]));
+    }
+
+    #[test]
+    fn signed_record_dependencies_include_previous_setting_when_set() {
+        let private_key = [9; crate::core::crypto::ED25519_PRIVATE_KEY_BYTES];
+        let mut e = event();
+        e.previous_setting_id = Some([42; 32]);
+        let bytes = encode_signed(&sign([2; 32], &private_key, encode(&e)));
+        let record = signed_record_from_bytes(bytes).expect("record");
+        assert_eq!(record.dependencies, vec![[2; 32], [1; 32], [42; 32]]);
     }
 }

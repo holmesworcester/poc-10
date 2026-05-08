@@ -4,7 +4,7 @@
 //! workspace event's initial TTL. The active setting is the latest
 //! admitted setting event for a given `workspace_id` under the
 //! deterministic `(created_at_ms, event_id)` ordering. Late-arriving
-//! settings do not retroactively rewrite already-stamped messages —
+//! settings do not retroactively rewrite already-stamped messages -
 //! every authored message commits to its own `expires_at_minute` in
 //! canonical bytes (see slice 1).
 
@@ -22,6 +22,17 @@ pub struct DisappearingMessagesSettingEvent {
     /// `floor(created_at_ms / 60_000)`. Carried in canonical bytes for
     /// deterministic comparison without re-deriving from `created_at_ms`.
     pub effective_at_minute: u64,
+    /// Monotonic deletion floor: any message whose
+    /// `floor(created_at_ms / UNIX_MINUTE_MS) < expires_at_or_before_minute`
+    /// is considered deleted regardless of its per-message stamp. The
+    /// projector validates this is non-decreasing across successive admitted
+    /// settings (chain-checked via `previous_setting_id`).
+    pub expires_at_or_before_minute: u64,
+    /// `Some(id)` names the predecessor setting whose floor this setting
+    /// must not regress. `None` (sentinel `[0; 32]` on the wire) is allowed
+    /// only when no setting has yet been admitted for this workspace; in
+    /// that case the new floor is unconstrained from below.
+    pub previous_setting_id: Option<EventId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,4 +50,5 @@ pub struct ActiveSettingRow {
     pub ttl_minutes: u32,
     pub effective_at_minute: u64,
     pub created_at_ms: u64,
+    pub expires_at_or_before_minute: u64,
 }
