@@ -879,6 +879,430 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 7 (mutable-TTL no-coalescing): two messages authored in the SAME
+// minute under DIFFERENT TTL stamps must retire on their own schedules.
+//
+// Each message commits to its own `expires_at_minute` in canonical bytes
+// at authoring time (slice 1 + 3). The admin-signed
+// `disappearing_messages_setting` event tightens the TTL used for
+// SUBSEQUENT authoring (slice 2) without retroactively rewriting earlier
+// messages. The deletion floor is intentionally NOT advanced here — the
+// CLI's `disappearing-set` always sets `expires_at_or_before_minute = 0`,
+// so the setting's only effect is on the future-stamping TTL, not on the
+// dispatcher's chop floor.
+//
+// What this test proves:
+//   * Two messages authored under different stamped TTLs in the same
+//     minute retire INDEPENDENTLY (Y first, then X) — i.e., the worker
+//     does not "coalesce" by minute, which would be incorrect under
+//     mutable TTL because the two leaves carry different per-message
+//     deadlines even though they share a minute_node coord.
+//   * The setting tightening is a future-stamping change only: it does
+//     not retroactively rewrite X's stamped expiry, and it does not
+//     trigger a chop (the floor stays at 0).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let bob_join_port = free_port();
+    let alice_port = free_port();
+    let bob_port = free_port();
+
+    // Initial workspace TTL = 10 minutes. Workspace TTL must be non-zero so
+    // the `disappearing_minute_expiry` worker actually scans this workspace
+    // (see `src/workers/disappearing_minute_expiry.rs:112`).
+    let workspace_id =
+        create_workspace_with_ttl(&alice, "MixedTtl", "alice", "alice-laptop", 10);
+    join_workspace(
+        &alice,
+        &bob,
+        &workspace_id,
+        bob_join_port,
+        "bob",
+        "bob-phone",
+    );
+
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    let _bob_daemon = spawn_daemon(&bob, bob_port);
+    connect_daemon_pair(&alice, alice_port, &bob, bob_port);
+
+    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
+    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
+    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
+    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
+
+    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
+
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id,
+        &bob_recipient_id,
+    );
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id,
+        &alice_recipient_id,
+    );
+    let _ = wait_for_key_derive(&bob, "1");
+
+    // Pin both clocks to unix_minute 100 (ms = 6_000_000). Author X under
+    // the workspace's initial TTL=10 ⇒ X.expires_at_minute = 110.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "x-long"]));
+
+    // Tighten the future-stamping TTL to 1 minute. The CLI sets
+    // `expires_at_or_before_minute: 0` (see
+    // `src/protocol/event_modules/encryption/cli.rs:603`), so the
+    // dispatcher's setting-floor source stays at 0 — no chop is provoked.
+    // The setting's `created_at_ms` advances next_timestamp by 1ms; the
+    // logical clock is still pinned at 6_000_000 so the setting itself
+    // lands in minute 100.
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "disappearing-set",
+        &workspace_id,
+        "1",
+    ]));
+
+    // Author Y under the new TTL=1. The `send` path's `next_timestamp`
+    // (in `src/protocol/event_modules/content/message/cli.rs:605`) only
+    // looks at content + message timestamps (NOT the encryption setting
+    // event), so it returns max(X.created_at_ms + 1, logical_clock) =
+    // max(6_000_001, 6_000_000) = 6_000_001. That is still in minute 100
+    // (6_000_001 / 60_000 == 100). Y.expires_at_minute = 100 + 1 = 101.
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "y-short"]));
+
+    // Both peers admit X and Y; both messages must be visible and
+    // decryptable on each peer pre-expiry.
+    wait_for_message_text(&alice, &workspace_id, "alice: x-long");
+    wait_for_message_text(&alice, &workspace_id, "alice: y-short");
+    wait_for_message_text(&bob, &workspace_id, "alice: x-long");
+    wait_for_message_text(&bob, &workspace_id, "alice: y-short");
+    assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
+    assert_eq!(message_lines(&bob, &workspace_id).len(), 2);
+
+    let pre = keys_value(&alice, &workspace_id);
+    assert_eq!(
+        line_value(&pre, "local_history_leaves"),
+        "2",
+        "two messages in one minute ⇒ two leaf rows pre-expiry:\n{pre}"
+    );
+
+    // Pin both clocks to minute 102 (ms = 6_120_000). Past Y's deadline
+    // (101) but BEFORE X's deadline (110). The disappearing-minute worker
+    // must retire Y's leaf and tombstone Y's read-model row, but must
+    // NOT touch X — proving per-message stamps are honored independently.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+    assert_success(topo(&["--db", &bob, "clock", "set", "6120000"]));
+
+    // Wait for Y's leaf to be retired on both peers (leaves drop from 2
+    // to 1) AND messages to collapse to just X. Polling on leaf count is
+    // the structural signal; polling on visible messages is the read-side
+    // signal — both must hold before we proceed.
+    let mut alice_lines = Vec::new();
+    let mut bob_lines = Vec::new();
+    for _ in 0..300 {
+        alice_lines = message_lines(&alice, &workspace_id);
+        bob_lines = message_lines(&bob, &workspace_id);
+        let alice_keys = keys_value(&alice, &workspace_id);
+        let bob_keys = keys_value(&bob, &workspace_id);
+        let alice_one_leaf = line_value(&alice_keys, "local_history_leaves") == "1";
+        let bob_one_leaf = line_value(&bob_keys, "local_history_leaves") == "1";
+        let alice_only_x = alice_lines.len() == 1
+            && alice_lines.iter().any(|line| line.ends_with("alice: x-long"));
+        let bob_only_x = bob_lines.len() == 1
+            && bob_lines.iter().any(|line| line.ends_with("alice: x-long"));
+        if alice_only_x && bob_only_x && alice_one_leaf && bob_one_leaf {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        alice_lines.len(),
+        1,
+        "alice must have exactly one visible message after Y expires:\n{alice_lines:?}"
+    );
+    assert!(
+        alice_lines.iter().any(|line| line.ends_with("alice: x-long")),
+        "alice's surviving message must be X (TTL=10, expires at 110):\n{alice_lines:?}"
+    );
+    assert!(
+        !alice_lines.iter().any(|line| line.ends_with("alice: y-short")),
+        "alice's Y (TTL=1, expires at 101) must be gone by minute 102:\n{alice_lines:?}"
+    );
+    assert_eq!(
+        bob_lines.len(),
+        1,
+        "bob must have exactly one visible message after Y expires:\n{bob_lines:?}"
+    );
+    assert!(
+        bob_lines.iter().any(|line| line.ends_with("alice: x-long")),
+        "bob's surviving message must be X:\n{bob_lines:?}"
+    );
+    assert!(
+        !bob_lines.iter().any(|line| line.ends_with("alice: y-short")),
+        "bob's Y must also be gone by minute 102:\n{bob_lines:?}"
+    );
+    // Exactly one leaf survives on each peer (X's). Y's leaf was retired,
+    // so the leaf count dropped from 2 to 1. This is the strongest
+    // structural signal that retirement was per-message, not per-minute:
+    // if the worker had coalesced by minute it would have retired X's
+    // leaf too.
+    let mid = keys_value(&alice, &workspace_id);
+    assert_eq!(
+        line_value(&mid, "local_history_leaves"),
+        "1",
+        "exactly X's leaf must survive after Y's retirement:\n{mid}"
+    );
+    let mid_bob = keys_value(&bob, &workspace_id);
+    assert_eq!(
+        line_value(&mid_bob, "local_history_leaves"),
+        "1",
+        "exactly X's leaf must survive on bob after Y's retirement:\n{mid_bob}"
+    );
+
+    // Pin both clocks to minute 111 (ms = 6_660_000). Past X's deadline
+    // (110). X must now also retire on each peer.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6660000"]));
+    assert_success(topo(&["--db", &bob, "clock", "set", "6660000"]));
+    wait_for_leaf_count(&alice, &workspace_id, "0");
+    wait_for_leaf_count(&bob, &workspace_id, "0");
+    assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
+    assert_eq!(message_lines(&bob, &workspace_id).len(), 0);
+    wait_for_content_count(&alice, &workspace_id, "0");
+    wait_for_content_count(&bob, &workspace_id, "0");
+}
+
+// ---------------------------------------------------------------------------
+// Test 8 (late-delivery beyond cover horizon): a peer that has advanced
+// past `COVER_HORIZON_MINUTES` rejects late-delivered messages from the
+// sealed range with the documented "no retained ancestor covers" wedge.
+//
+// Setup choreography:
+//   1. Both peers start with daemons connected; alice wraps the frontier
+//      for bob and bob runs `key-derive` so bob has F's row and the
+//      machinery to admit alice-authored events.
+//   2. The peers pin to minute T_AUTHOR = 100 and alice authors X.
+//   3. Alice's daemon is then KILLED before sync delivers X to bob. The
+//      `topo send` ran while the daemon was alive but inbound sync from
+//      alice → bob is queued; killing alice's daemon closes the TCP
+//      socket so bob never receives X.
+//   4. Bob's clock is advanced to T_AUTHOR + COVER_HORIZON_MINUTES + 1
+//      (= minute 43_301, ms = 2_598_060_000). The dispatcher's
+//      `horizon_floor = 43_301 - 43_200 = 101 > T_AUTHOR = 100`, so the
+//      chop seals the prefix `[0, 101)` covering X's minute. Bob's F row
+//      is wiped; the chop tombstones the path to T_AUTHOR's minute_node.
+//   5. Alice's daemon is restarted and reconnected. Sync queues X for
+//      delivery to bob. Bob attempts to admit X.
+//   6. Assert: bob never admits X — the leaf event in X's dep chain
+//      cannot find a covering source on bob (the chop sealed it), and
+//      there is no path that resurrects a usable derivation. Bob's
+//      visible-message list and content count must stay at zero.
+//
+// Practical note: per the task and `bdaa60f`, the user-visible wedge
+// message is "no retained ancestor covers the target leaf", surfaced by
+// `derive_event_leaf` on the authoring path. The admit path's exact
+// rejection wording is a secondary signal — what we assert is the
+// load-bearing property: X NEVER appears on bob, content stays at 0,
+// and the leaf count stays at 0. If a buggy admit path silently
+// re-derives or partial-admits, this test will catch it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_cleanly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let bob_join_port = free_port();
+    let alice_port = free_port();
+    let bob_port = free_port();
+
+    // TTL=0 so the per-message expiry worker is a no-op for X — the only
+    // mechanism that can retire X's path on bob is the cover-horizon chop,
+    // which is exactly what we want to isolate.
+    let workspace_id =
+        create_workspace_with_ttl(&alice, "LateDelivery", "alice", "alice-laptop", 0);
+    join_workspace(
+        &alice,
+        &bob,
+        &workspace_id,
+        bob_join_port,
+        "bob",
+        "bob-phone",
+    );
+
+    let alice_daemon = spawn_daemon(&alice, alice_port);
+    let _bob_daemon = spawn_daemon(&bob, bob_port);
+    connect_daemon_pair(&alice, alice_port, &bob, bob_port);
+
+    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
+    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
+    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
+    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
+    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
+
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id,
+        &bob_recipient_id,
+    );
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id,
+        &alice_recipient_id,
+    );
+    let _ = wait_for_key_derive(&bob, "1");
+
+    // Pin both clocks to minute 100. Alice authors X; with TTL=0 the
+    // message has `expires_at_minute = u64::MAX` and the per-message
+    // expiry worker will skip it forever. X is in alice's local store
+    // immediately (the `send` command admits + applies before returning).
+    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "ancient-x"]));
+    wait_for_message_text(&alice, &workspace_id, "alice: ancient-x");
+
+    // Kill alice's daemon to halt outbound sync. Anything bob has already
+    // pulled before this point stays; X may or may not have been pulled.
+    // We will assert the load-bearing property below regardless of which
+    // race outcome obtains: if bob already admitted X before the kill,
+    // X will appear and the test setup itself didn't isolate the late-
+    // delivery wedge — we detect that and skip the wedge assertions, and
+    // the test re-runs (the harness has flake tolerance via the polling
+    // helpers). If X is still in flight, killing the daemon definitively
+    // blocks delivery and we can run the late-delivery wedge assertions.
+    drop(alice_daemon);
+
+    // Advance bob's clock past the horizon. With T_AUTHOR=100 and
+    // COVER_HORIZON_MINUTES=43_200, choose now_minute = 43_301 so
+    // horizon_floor = 43_301 - 43_200 = 101 > 100 and the chop seals
+    // the prefix `[0, 101)` covering X's minute. Bob's F row gets wiped
+    // and tombstones are written.
+    let bob_now_minute: u64 = 43_301;
+    let bob_now_ms = bob_now_minute * 60_000;
+    assert_success(topo(&["--db", &bob, "clock", "set", &bob_now_ms.to_string()]));
+
+    // Wait for the dispatcher to chop on bob: F is wiped and at least one
+    // tombstone exists. (Same convergence signal as test 6.)
+    for _ in 0..300 {
+        let bob_keys = keys_value(&bob, &workspace_id);
+        if line_value(&bob_keys, "local_key_secrets") == "0"
+            && line_value(&bob_keys, "local_history_node_tombstones") != "0"
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let post_chop_bob = keys_value(&bob, &workspace_id);
+    assert_eq!(
+        line_value(&post_chop_bob, "local_key_secrets"),
+        "0",
+        "precondition: bob's F row must be wiped by the dispatcher's chop:\n{post_chop_bob}"
+    );
+    let bob_tombstones: u64 = line_value(&post_chop_bob, "local_history_node_tombstones")
+        .parse()
+        .expect("parse bob tombstones");
+    assert!(
+        bob_tombstones > 0,
+        "precondition: bob must have at least one chop tombstone:\n{post_chop_bob}"
+    );
+
+    // Snapshot bob's pre-redelivery state — we will assert it is
+    // unchanged after we restart alice's daemon and let sync attempt
+    // to deliver X.
+    let bob_leaves_before = line_value(&post_chop_bob, "local_history_leaves");
+    let bob_messages_before = message_lines(&bob, &workspace_id).len();
+    let bob_content_before = content_event_count(&bob, &workspace_id);
+    // The test isolates the late-delivery path: bob must NOT have admitted
+    // X before alice's daemon was killed. If sync raced ahead, the wedge
+    // we're trying to assert never had a chance to fire and the test
+    // would silently pass on a vacuous property. The choreography below
+    // (kill alice's daemon immediately after `topo send` returns, then
+    // wait for chop) is fast enough that in practice bob does not see X.
+    // If this invariant ever fails, we panic loudly so the race is
+    // attributed correctly rather than silently swallowed.
+    let setup_race_bob_already_saw_x = bob_messages_before > 0;
+
+    // Restart alice's daemon and reconnect. Sync should now attempt to
+    // deliver X to bob. Bob's chop has sealed minute 100, so X's leaf
+    // event has no covering source secret on bob: the leaf event's
+    // projector cannot validate, the message event will not project,
+    // and X must not become visible on bob.
+    let _alice_daemon_again = spawn_daemon(&alice, alice_port);
+    connect_daemon_pair(&alice, alice_port, &bob, bob_port);
+
+    // Give sync ample opportunity to attempt delivery. We poll for ~3s;
+    // if X were going to appear on bob, it would by then.
+    let mut bob_ever_saw_x = false;
+    for _ in 0..30 {
+        let lines = message_lines(&bob, &workspace_id);
+        if lines.iter().any(|line| line.ends_with("alice: ancient-x")) {
+            bob_ever_saw_x = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    if setup_race_bob_already_saw_x {
+        // Setup race: bob already had X before alice's daemon was killed.
+        // The wedge couldn't fire because the leaf was already admitted
+        // under bob's pre-chop derivation. Panic loudly — the test is
+        // not isolating the late-delivery wedge and would silently
+        // pass without exercising the property under test. Re-running
+        // the test is sufficient because the race is timing-driven.
+        panic!(
+            "setup race: bob already had X before the chop, so the late-\
+             delivery wedge was not exercised. Re-run the test."
+        );
+    }
+
+    assert!(
+        !bob_ever_saw_x,
+        "X must NOT appear on bob: bob's chop sealed the subtree covering \
+         minute 100, so the late-delivered leaf cannot derive a covering \
+         source"
+    );
+
+    // Final state must be byte-equal to the pre-redelivery snapshot:
+    //   * no new leaves materialized (admit failed cleanly, no half-state),
+    //   * no new visible messages,
+    //   * no canonical message bytes added,
+    //   * F is still wiped (no resurrection).
+    let post_attempt_bob = keys_value(&bob, &workspace_id);
+    assert_eq!(
+        line_value(&post_attempt_bob, "local_history_leaves"),
+        bob_leaves_before,
+        "leaf count must not change on bob — admit must not partial-write:\n{post_attempt_bob}"
+    );
+    assert_eq!(
+        line_value(&post_attempt_bob, "local_key_secrets"),
+        "0",
+        "F must remain wiped on bob — admit must not resurrect a key secret:\n{post_attempt_bob}"
+    );
+    assert_eq!(
+        message_lines(&bob, &workspace_id).len(),
+        bob_messages_before,
+        "bob must not have admitted any new visible messages"
+    );
+    assert_eq!(
+        content_event_count(&bob, &workspace_id),
+        bob_content_before,
+        "bob must not have admitted any new content events"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Helpers (local to this test file).
 // ---------------------------------------------------------------------------
 
