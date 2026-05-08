@@ -120,7 +120,8 @@ fn run_send_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         timestamp,
         event_id_in_minute,
     )?;
-    let expires_at_minute = workspace_expires_at_minute(&context.store, workspace_id, timestamp)?;
+    let (expires_at_minute, disappearing_setting_id) =
+        workspace_expires_at_minute(&context.store, workspace_id, timestamp)?;
     let send = commands::send(commands::SendMessage {
         workspace_id,
         created_at_ms: timestamp,
@@ -131,6 +132,7 @@ fn run_send_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         local_history_node_secret_id: leaf.local_history_node_secret_id,
         leaf_node_secret: leaf.leaf_node_secret,
         expires_at_minute,
+        disappearing_setting_id,
         text,
     })?;
     let report = worker::run(
@@ -310,6 +312,7 @@ fn open_sealed_message_row(
         removal_frontier_id: row.removal_frontier_id,
         local_history_node_secret_id: row.local_history_node_secret_id,
         expires_at_minute: row.expires_at_minute,
+        disappearing_setting_id: row.disappearing_setting_id,
         nonce: row.nonce,
         ciphertext: row.ciphertext,
     };
@@ -603,39 +606,46 @@ fn max_timestamp_for_messages(store: &Store, workspace_id: EventId) -> Result<u6
     Ok(max)
 }
 
-/// Compute the authoring-time `expires_at_minute` for a message in this
-/// workspace. Sources the TTL in this order:
+/// Compute the authoring-time `expires_at_minute` and the
+/// `disappearing_setting_id` reference that produced it. Sources the TTL
+/// in this order:
 ///   1. Active `disappearing_messages_setting` event for the workspace,
-///      if any has been admitted. Uses the latest setting under
+///      if any has been admitted. The setting's event id is returned
+///      as the reference. Uses the latest setting under
 ///      `(created_at_ms, event_id)` ordering — slice 2.
-///   2. The workspace event's `disappearing_ttl_minutes` field — slice 1.
-/// Returns `EXPIRES_NEVER` when the resulting TTL is zero.
+///   2. The workspace event's `disappearing_ttl_minutes` field. The
+///      `workspace_id` is returned as the reference — slice 1 fallback.
+/// Returns `(EXPIRES_NEVER, reference)` when the resulting TTL is zero.
 pub(crate) fn workspace_expires_at_minute(
     store: &Store,
     workspace_id: EventId,
     created_at_ms: u64,
-) -> Result<u64, String> {
+) -> Result<(u64, EventId), String> {
     use crate::protocol::event_modules::content::message::types::{EXPIRES_NEVER, UNIX_MINUTE_MS};
     use crate::protocol::event_modules::encryption::disappearing_messages_setting::schema as setting_schema;
     use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
 
-    let ttl_minutes = if let Some(active) = setting_schema::active_for_workspace(store, workspace_id)? {
-        active.ttl_minutes
-    } else {
-        let key = workspace_id;
-        let value = store
-            .table_row(workspace_schema::WORKSPACES, &key)
-            .map_err(|err| format!("load workspace row: {err}"))?
-            .ok_or_else(|| "workspace row is missing".to_string())?;
-        let row = workspace_schema::decode_workspace_row(&key, &value)?;
-        row.disappearing_ttl_minutes
-    };
+    let (ttl_minutes, reference) =
+        if let Some(active) = setting_schema::active_for_workspace(store, workspace_id)? {
+            (active.ttl_minutes, active.setting_event_id)
+        } else {
+            let key = workspace_id;
+            let value = store
+                .table_row(workspace_schema::WORKSPACES, &key)
+                .map_err(|err| format!("load workspace row: {err}"))?
+                .ok_or_else(|| "workspace row is missing".to_string())?;
+            let row = workspace_schema::decode_workspace_row(&key, &value)?;
+            (row.disappearing_ttl_minutes, workspace_id)
+        };
 
     if ttl_minutes == 0 {
-        return Ok(EXPIRES_NEVER);
+        return Ok((EXPIRES_NEVER, reference));
     }
     let authored_minute = created_at_ms / UNIX_MINUTE_MS;
-    Ok(authored_minute.saturating_add(ttl_minutes as u64))
+    Ok((
+        authored_minute.saturating_add(ttl_minutes as u64),
+        reference,
+    ))
 }
 
 fn user_name(store: &Store, workspace_id: EventId, user_id: EventId) -> Result<String, String> {

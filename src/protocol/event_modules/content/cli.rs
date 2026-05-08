@@ -131,7 +131,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
     )?;
 
     // Send-message event under the message's own content key.
-    let expires_at_minute =
+    let (expires_at_minute, disappearing_setting_id) =
         message::cli::workspace_expires_at_minute(&context.store, parsed.workspace_id, timestamp)?;
     let send = message::commands::send(message::commands::SendMessage {
         workspace_id: parsed.workspace_id,
@@ -143,6 +143,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         local_history_node_secret_id: message_leaf.local_history_node_secret_id,
         leaf_node_secret: message_leaf.leaf_node_secret,
         expires_at_minute,
+        disappearing_setting_id,
         text: parsed.text,
     })?;
     let message_id = send.value.message_id;

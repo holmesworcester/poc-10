@@ -19,21 +19,31 @@ use super::types::{
 
 pub const TYPE_MESSAGE: u8 = 5;
 pub const TYPE_SIGNED_MESSAGE: u8 = 6;
-pub const MESSAGE_ENCRYPTION_PURPOSE: &[u8] = b"topo message text v3";
-/// Message canonical wire size with disappearing-message expiry stamping.
+pub const MESSAGE_ENCRYPTION_PURPOSE: &[u8] = b"topo message text v4";
+/// Message canonical wire size with disappearing-message expiry stamping
+/// and per-message setting reference.
 ///
 /// Layout: type(1) || workspace(32) || created_at_ms(8) || author(32)
 ///       || removal_frontier(32) || local_history_node_secret_id(32)
-///       || expires_at_minute(8)
+///       || expires_at_minute(8) || disappearing_setting_id(32)
 ///       || nonce(24) || ciphertext(MESSAGE_CIPHERTEXT_BYTES)
 ///
 /// `expires_at_minute` is the authored-time expiry; `u64::MAX` means no
-/// expiry. Receivers reject messages whose stamped expiry is already past
-/// at receive time. The leaf coord is still recoverable from
-/// `(workspace, author, frontier, created_at_ms)` alone, so the AAD does
-/// not need a leaf-nonce slot.
-pub const MESSAGE_WIRE_SIZE: usize =
-    1 + 32 + 8 + 32 + 32 + 32 + 8 + XCHACHA20_POLY1305_NONCE_BYTES + MESSAGE_CIPHERTEXT_BYTES;
+/// expiry. `disappearing_setting_id` references the policy under which
+/// the message was authored — either a signed
+/// `disappearing_messages_setting` event id or the workspace event id
+/// when no setting has been authored. The projector validates that
+/// `expires_at_minute` is consistent with the referenced policy.
+pub const MESSAGE_WIRE_SIZE: usize = 1
+    + 32
+    + 8
+    + 32
+    + 32
+    + 32
+    + 8
+    + 32
+    + XCHACHA20_POLY1305_NONCE_BYTES
+    + MESSAGE_CIPHERTEXT_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MessageMetadata {
@@ -43,6 +53,7 @@ struct MessageMetadata {
     removal_frontier_id: EventId,
     local_history_node_secret_id: EventId,
     expires_at_minute: u64,
+    disappearing_setting_id: EventId,
 }
 
 pub fn encode(event: &MessageEvent) -> Vec<u8> {
@@ -54,6 +65,7 @@ pub fn encode(event: &MessageEvent) -> Vec<u8> {
     out.id(&event.removal_frontier_id);
     out.id(&event.local_history_node_secret_id);
     out.u64(event.expires_at_minute);
+    out.id(&event.disappearing_setting_id);
     out.raw(&event.nonce);
     out.raw(&event.ciphertext);
     out.finish()
@@ -71,6 +83,7 @@ pub fn decode(bytes: &[u8]) -> Result<MessageEvent, String> {
     let removal_frontier_id = reader.id()?;
     let local_history_node_secret_id = reader.id()?;
     let expires_at_minute = reader.u64()?;
+    let disappearing_setting_id = reader.id()?;
     let nonce = fixed_nonce(reader.bytes(XCHACHA20_POLY1305_NONCE_BYTES)?)?;
     let ciphertext = fixed_ciphertext(reader.bytes(MESSAGE_CIPHERTEXT_BYTES)?)?;
     reader.finish()?;
@@ -81,6 +94,7 @@ pub fn decode(bytes: &[u8]) -> Result<MessageEvent, String> {
         removal_frontier_id,
         local_history_node_secret_id,
         expires_at_minute,
+        disappearing_setting_id,
         nonce,
         ciphertext,
     };
@@ -149,12 +163,13 @@ pub fn signing_bytes(event: &SignedMessageEnvelope) -> Vec<u8> {
 pub fn signed_record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     let envelope = decode_signed(&bytes)?;
     let metadata = metadata(&envelope.payload)?;
-    let mut dependencies = Vec::with_capacity(5);
+    let mut dependencies = Vec::with_capacity(6);
     push_unique(&mut dependencies, envelope.signer_endpoint_shared_id);
     push_unique(&mut dependencies, metadata.workspace_id);
     push_unique(&mut dependencies, metadata.author_user_id);
     push_unique(&mut dependencies, metadata.removal_frontier_id);
     push_unique(&mut dependencies, metadata.local_history_node_secret_id);
+    push_unique(&mut dependencies, metadata.disappearing_setting_id);
     Ok(EventRecord {
         timestamp: metadata.created_at_ms,
         body_len: MESSAGE_WIRE_SIZE - 1,
@@ -177,6 +192,7 @@ fn metadata(bytes: &[u8]) -> Result<MessageMetadata, String> {
     let removal_frontier_id = reader.id()?;
     let local_history_node_secret_id = reader.id()?;
     let expires_at_minute = reader.u64()?;
+    let disappearing_setting_id = reader.id()?;
     let _nonce = reader.bytes(XCHACHA20_POLY1305_NONCE_BYTES)?;
     let _ciphertext = reader.bytes(MESSAGE_CIPHERTEXT_BYTES)?;
     reader.finish()?;
@@ -187,6 +203,7 @@ fn metadata(bytes: &[u8]) -> Result<MessageMetadata, String> {
         removal_frontier_id,
         local_history_node_secret_id,
         expires_at_minute,
+        disappearing_setting_id,
     };
     validate_id("message workspace", &metadata.workspace_id)?;
     validate_id("message author_user_id", &metadata.author_user_id)?;
@@ -194,6 +211,10 @@ fn metadata(bytes: &[u8]) -> Result<MessageMetadata, String> {
     validate_id(
         "message local_history_node_secret_id",
         &metadata.local_history_node_secret_id,
+    )?;
+    validate_id(
+        "message disappearing_setting_id",
+        &metadata.disappearing_setting_id,
     )?;
     validate_expires_at_minute(metadata.created_at_ms, metadata.expires_at_minute)?;
     Ok(metadata)
@@ -222,7 +243,7 @@ fn validate_expires_at_minute(created_at_ms: u64, expires_at_minute: u64) -> Res
 /// alone (see `message_event_id_in_minute`), so AAD does not need a separate
 /// leaf-nonce slot.
 pub fn associated_data(event: &MessageEvent, signer_endpoint_shared_id: EventId) -> Vec<u8> {
-    let mut out = Writer::with_capacity(1 + 8 + 8 + (32 * 5) + XCHACHA20_POLY1305_NONCE_BYTES);
+    let mut out = Writer::with_capacity(1 + 8 + 8 + (32 * 6) + XCHACHA20_POLY1305_NONCE_BYTES);
     out.u8(TYPE_MESSAGE);
     out.id(&event.workspace_id);
     out.u64(event.created_at_ms);
@@ -230,6 +251,7 @@ pub fn associated_data(event: &MessageEvent, signer_endpoint_shared_id: EventId)
     out.id(&event.removal_frontier_id);
     out.id(&event.local_history_node_secret_id);
     out.u64(event.expires_at_minute);
+    out.id(&event.disappearing_setting_id);
     out.raw(&event.nonce);
     out.id(&signer_endpoint_shared_id);
     out.finish()
@@ -281,6 +303,10 @@ fn validate_event(event: &MessageEvent) -> Result<(), String> {
     validate_id(
         "message local_history_node_secret_id",
         &event.local_history_node_secret_id,
+    )?;
+    validate_id(
+        "message disappearing_setting_id",
+        &event.disappearing_setting_id,
     )?;
     Ok(())
 }
@@ -336,6 +362,7 @@ mod tests {
             removal_frontier_id: [3; 32],
             local_history_node_secret_id: [4; 32],
             expires_at_minute: super::super::types::EXPIRES_NEVER,
+            disappearing_setting_id: [1; 32],
             nonce: [5; XCHACHA20_POLY1305_NONCE_BYTES],
             ciphertext: [6; MESSAGE_CIPHERTEXT_BYTES],
         }

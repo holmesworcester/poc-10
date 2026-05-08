@@ -21,7 +21,7 @@ pub const MESSAGE_TOMBSTONES: TableName = TableName::new("content.message_tombst
 
 pub const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("content.messages.v2", MESSAGES),
-    Schema::durable_row_table("content.sealed_messages.v3", SEALED_MESSAGES),
+    Schema::durable_row_table("content.sealed_messages.v4", SEALED_MESSAGES),
     Schema::durable_row_table("content.message_tombstones.v1", MESSAGE_TOMBSTONES),
 ];
 
@@ -38,6 +38,10 @@ pub struct SealedMessageRow {
     /// the disappearing-minute worker can enumerate expired minutes and the
     /// projector can reject expired-at-receive messages.
     pub expires_at_minute: u64,
+    /// Reference to the disappearing-messages policy this message was
+    /// authored under. Either a signed `disappearing_messages_setting`
+    /// event id or the workspace event id (slice-1 fallback).
+    pub disappearing_setting_id: EventId,
     pub nonce: crate::core::crypto::XChaCha20Poly1305Nonce,
     pub ciphertext: MessageCiphertext,
 }
@@ -89,6 +93,7 @@ pub fn decode_sealed_message_row(key: &[u8], value: &[u8]) -> Result<SealedMessa
     let removal_frontier_id = reader.id()?;
     let local_history_node_secret_id = reader.id()?;
     let expires_at_minute = reader.u64()?;
+    let disappearing_setting_id = reader.id()?;
     let nonce = reader
         .bytes(crate::core::crypto::XCHACHA20_POLY1305_NONCE_BYTES)?
         .try_into()
@@ -107,6 +112,7 @@ pub fn decode_sealed_message_row(key: &[u8], value: &[u8]) -> Result<SealedMessa
         removal_frontier_id,
         local_history_node_secret_id,
         expires_at_minute,
+        disappearing_setting_id,
         nonce,
         ciphertext,
     })
@@ -226,6 +232,7 @@ fn encode_sealed_value(signer_endpoint_shared_id: EventId, event: &MessageEvent)
             + 32
             + 32
             + 8
+            + 32
             + crate::core::crypto::XCHACHA20_POLY1305_NONCE_BYTES
             + MESSAGE_CIPHERTEXT_BYTES,
     );
@@ -235,6 +242,7 @@ fn encode_sealed_value(signer_endpoint_shared_id: EventId, event: &MessageEvent)
     out.id(&event.removal_frontier_id);
     out.id(&event.local_history_node_secret_id);
     out.u64(event.expires_at_minute);
+    out.id(&event.disappearing_setting_id);
     out.raw(&event.nonce);
     out.raw(&event.ciphertext);
     out.finish()

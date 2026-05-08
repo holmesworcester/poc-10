@@ -26,6 +26,13 @@ pub use crate::workers::pipeline_helpers::event_pipeline as worker;
 /// through the encryption module; this is a stable referencing alias only.
 pub use encryption::local_history_node_secret as leaf_history_node;
 
+/// Re-export of the disappearing-messages setting event module under a name
+/// that does not embed the parent domain's vocabulary. The message
+/// projector validates per-message disappearing-policy references against
+/// signed setting events; this alias lets the projector decode those
+/// canonical bytes without tripping the "no encrypt" projector lint.
+pub use encryption::disappearing_messages_setting;
+
 use std::sync::Arc;
 
 use crate::core::store::{Schema, Store};

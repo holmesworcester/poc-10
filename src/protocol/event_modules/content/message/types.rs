@@ -91,6 +91,16 @@ pub struct MessageEvent {
     /// consults this field to reject expired-at-receive messages and to
     /// drive the disappearing-minute worker; admission stays generic.
     pub expires_at_minute: u64,
+    /// Reference to the disappearing-messages policy under which this
+    /// message was authored — either a signed
+    /// `disappearing_messages_setting` event id or the `workspace_id`
+    /// itself when no setting has been admitted yet (the workspace event
+    /// carries the slice-1 fallback `disappearing_ttl_minutes`). Added to
+    /// the message's dependencies so the projector validates the stamped
+    /// `expires_at_minute` against the policy the author claims to have
+    /// honored. See `disappearing_messages_plan.md` §6 for the trust
+    /// model and the latest-setting gap.
+    pub disappearing_setting_id: EventId,
     pub nonce: XChaCha20Poly1305Nonce,
     pub ciphertext: MessageCiphertext,
 }

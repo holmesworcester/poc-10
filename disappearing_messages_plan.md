@@ -507,64 +507,108 @@ existed and is now gone, per RULES.md "purging may remove physical
 evidence, but it must not be the only representation of a semantic
 change".
 
-## 6. Cover Summary And Monotonicity
+## 6. Convergence, Per-Message Setting Reference, And The Trust Model
 
-The deletion summary commits to both individual deletes and expired
-minutes:
+### Convergence comes from per-message stamping, not from a global
+deletion summary
+
+Each message commits to its own `expires_at_minute` in canonical bytes.
+Two peers admitting the same byte sequence reach the same retirement
+decision once their local clocks cross the stamped boundary. There is
+no need for a shared "history of deletions" hash: every peer derives
+identical retirement behavior from the byte-equal admitted set.
+
+This is the load-bearing convergence claim. An earlier draft of this
+section described an `Hset` deletion-summary commitment over
+`(deleted_set, retained_cover, expired_minute_set)`. That commitment is
+not necessary for convergence — it summarizes a state that is already
+implied by canonical-bytes equality. It is preserved at the bottom of
+this section as a future-work option for cross-peer audit / reporting,
+but it is not part of the slice that ships.
+
+### Per-message setting reference
+
+`MessageEvent` carries `disappearing_setting_id: EventId` in canonical
+bytes. The reference is one of:
+
+  * The event id of a signed `disappearing_messages_setting` event for
+    the workspace, when one has been admitted at authoring time. The
+    author records *which setting they honored*.
+  * The workspace event id, as the slice-1 fallback when no setting has
+    been authored yet. The workspace event itself carries
+    `disappearing_ttl_minutes` for this purpose.
+
+The reference is added to the message's dependencies, so the projector
+loads it through normal context. The projector enforces:
+
+  * The reference is either the workspace event for that workspace, or
+    a signed `disappearing_messages_setting` for that workspace; any
+    other dep type is rejected.
+  * `expires_at_minute` matches what the referenced setting permits:
+    - If `permitted_ttl == 0` → `expires_at_minute == EXPIRES_NEVER`
+    - Else → `expires_at_minute == authored_minute + permitted_ttl`
+      where `authored_minute = floor(created_at_ms / 60_000)`
+  * Mismatches are rejected at projection.
+
+This eliminates the trust gap of the prior draft, where authors could
+stamp arbitrary expiry. An author can now only stamp an expiry that
+*some* admin-authored setting (or the workspace creation TTL) explicitly
+permits.
+
+### Trust model and known gap: latest-setting enforcement
+
+A peer can still pick any setting it wants as the reference, including
+an *older* setting whose `ttl_minutes` is larger than the latest. The
+projector accepts any reference that is *some* admitted setting, not
+specifically the *latest*. This is intentional for the slice that
+ships: closing the gap requires an answer to the epoch question.
+
+Concretely, a malicious peer can extend the effective TTL of its own
+messages by referencing a stale setting. They cannot stamp arbitrary
+expiry, but they can pick the maximum TTL ever set for the workspace.
+Honest peers honor the stamped expiry as canonical fact, and
+disappearance still happens; it just happens at the older setting's
+boundary instead of the latest.
+
+### Future work: closing the latest-setting gap with epochs
+
+Three options for upgrading from "best effort" to "strict enforcement"
+of the latest setting:
+
+  * **Time-based** (simplest): the projector enumerates admitted
+    settings for the workspace and rejects a message whose referenced
+    setting was already superseded by a strictly newer setting at
+    `message.created_at_ms`. Trusts admin clocks within a clock-skew
+    bound.
+  * **Logical order**: each setting carries a sequence number signed by
+    the admin, or chains a dep on the prior setting. Eliminates clock
+    trust but requires admins to coordinate.
+  * **Counter-based**: a per-workspace monotonic counter, e.g. derived
+    from a hash chain over admitted settings. Self-converging without
+    clock trust.
+
+All three are out of scope for this slice. The per-message reference
+field gives us the hook for any of them later.
+
+### Future work: optional `Hset` deletion summary commitment
+
+The earlier draft of this section proposed:
 
 ```text
 history_summary_id = Hset(
-    "history-delete-summary",
+    "history-delete-summary v1",
     deleted_set,           // sorted by (unix_minute, event_id)
     retained_cover,        // sorted by canonical node prefix
     expired_minute_set,    // sorted by unix_minute
 )
 ```
 
-`Hset` is a domain-separated BLAKE3 hash over the concatenation of:
-
-```text
-"history-delete-summary v1"
-|| u32_be(deleted_set.len())
-|| (for each entry sorted by (unix_minute, event_id):
-      u64_be(unix_minute) || event_id)
-|| u32_be(retained_cover.len())
-|| (for each entry sorted by node_prefix:
-      u8(width_bits) || u64_be(node_prefix))
-|| u32_be(expired_minute_set.len())
-|| (for each entry sorted by unix_minute:
-      u64_be(unix_minute))
-```
-
-Sorts are bytewise lexicographic. All multi-byte integers are big-endian.
-Set sizes are `u32_be` to fail loudly past 2^32 entries; production-scale
-expiry should never approach that bound.
-
-### Monotonicity claims
-
-1. **Set-equality ⇒ id-equality.** Two peers with the same
-   `(deleted_set, expired_minute_set)` derive the same `retained_cover` and
-   therefore the same `history_summary_id`, regardless of the order in
-   which deletes and minute expiries arrived.
-2. **Idempotent expiry application.** Applying the same `expired_minute`
-   event twice is a no-op: the second admission is a duplicate by event id,
-   the second projection is a no-op because the read-model rows are already
-   gone, and the canonical-bytes purge is a no-op because the bytes are
-   already missing. The summary is unchanged.
-3. **Re-running the worker against the same logical-clock value is
-   idempotent.** The set of candidate minutes the worker enumerates is
-   determined by `now_minute` and the active setting; `expired_minute`
-   events are admitted only when the corresponding row does not yet
-   exist. Running the worker N times at the same logical time yields the
-   same summary as running it once.
-4. **Delete-then-expire and expire-then-delete commute.** A
-   `message_deletion` for an individual message followed by minute-level
-   expiry of that minute, vs. minute-level expiry followed by an arriving
-   `message_deletion`, both reach the same final
-   `(deleted_set, expired_minute_set)`. The deletion-set entry for that
-   single message is redundant once the whole minute is in the expired-set,
-   but it does not change the summary id (the deleted-set is still hashed
-   in).
+with a domain-separated BLAKE3 over the canonical sorted concatenation.
+Useful as an audit primitive — it lets an external observer see two
+peers agree on the entire deletion-and-expiry path that produced the
+current cover, not just on the cover itself. Not required for
+convergence (convergence is implied by canonical-bytes equality of
+admitted messages), so deferred.
 
 ## 7. Edge Cases The Design Must Handle
 

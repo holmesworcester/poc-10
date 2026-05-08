@@ -451,6 +451,7 @@ mod tests {
             local_history_node_secret_id: LEAF_NODE_ID,
             leaf_node_secret: KEY_SECRET,
             expires_at_minute: u64::MAX,
+            disappearing_setting_id: [1; 32],
             text: text.to_string(),
         })
         .expect("message");

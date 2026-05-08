@@ -227,6 +227,7 @@ impl PerfFixture {
             local_history_node_secret_id: self.local_key_secret_id,
             leaf_node_secret: self.key_secret,
             expires_at_minute: u64::MAX,
+            disappearing_setting_id: [1; 32],
             text: format!("perf message {sequence}"),
         })
         .expect("create encrypted signed message")
