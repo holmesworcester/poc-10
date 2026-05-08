@@ -226,6 +226,7 @@ mod tests {
             removal_frontier_id,
             local_history_node_secret_id: leaf_id,
             leaf_node_secret: KEY_SECRET,
+            expires_at_minute: u64::MAX,
             text: "hello".to_string(),
         })
         .expect("send");
@@ -429,6 +430,7 @@ mod tests {
             author_user_id: [2; 32],
             removal_frontier_id: [3; 32],
             local_history_node_secret_id: [4; 32],
+            expires_at_minute: u64::MAX,
             nonce: [5; 24],
             ciphertext: [6; super::super::types::MESSAGE_CIPHERTEXT_BYTES],
         });

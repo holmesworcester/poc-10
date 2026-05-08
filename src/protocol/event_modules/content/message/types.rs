@@ -75,6 +75,9 @@ pub fn message_event_id_in_minute(
     crypto::blake3_keyed_hash(workspace_id, MESSAGE_LEAF_COORD_DOMAIN, &info_bytes)
 }
 
+/// Sentinel for "no expiry" in `MessageEvent::expires_at_minute`.
+pub const EXPIRES_NEVER: u64 = u64::MAX;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageEvent {
     pub workspace_id: EventId,
@@ -82,6 +85,12 @@ pub struct MessageEvent {
     pub author_user_id: EventId,
     pub removal_frontier_id: EventId,
     pub local_history_node_secret_id: EventId,
+    /// Authoring-time expiry. The canonical bytes commit to this value so a
+    /// late-arriving workspace setting cannot retroactively change a
+    /// message's expiry; `EXPIRES_NEVER` means no expiry. The projector
+    /// consults this field to reject expired-at-receive messages and to
+    /// drive the disappearing-minute worker; admission stays generic.
+    pub expires_at_minute: u64,
     pub nonce: XChaCha20Poly1305Nonce,
     pub ciphertext: MessageCiphertext,
 }

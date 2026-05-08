@@ -178,6 +178,7 @@ mod tests {
             author_user_id,
             removal_frontier_id: [30; 32],
             local_history_node_secret_id: [31; 32],
+            expires_at_minute: u64::MAX,
             nonce: [32; crate::core::crypto::XCHACHA20_POLY1305_NONCE_BYTES],
             ciphertext: [33; message::types::MESSAGE_CIPHERTEXT_BYTES],
         });

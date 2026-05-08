@@ -195,6 +195,7 @@ mod tests {
             author_user_id,
             removal_frontier_id: frontier_id,
             local_history_node_secret_id,
+            expires_at_minute: u64::MAX,
             nonce: [32; XCHACHA20_POLY1305_NONCE_BYTES],
             ciphertext: [33; message::types::MESSAGE_CIPHERTEXT_BYTES],
         });

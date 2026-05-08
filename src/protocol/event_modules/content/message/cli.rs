@@ -120,6 +120,7 @@ fn run_send_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         timestamp,
         event_id_in_minute,
     )?;
+    let expires_at_minute = workspace_expires_at_minute(&context.store, workspace_id, timestamp)?;
     let send = commands::send(commands::SendMessage {
         workspace_id,
         created_at_ms: timestamp,
@@ -129,6 +130,7 @@ fn run_send_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         removal_frontier_id,
         local_history_node_secret_id: leaf.local_history_node_secret_id,
         leaf_node_secret: leaf.leaf_node_secret,
+        expires_at_minute,
         text,
     })?;
     let report = worker::run(
@@ -307,6 +309,7 @@ fn open_sealed_message_row(
         author_user_id: row.author_user_id,
         removal_frontier_id: row.removal_frontier_id,
         local_history_node_secret_id: row.local_history_node_secret_id,
+        expires_at_minute: row.expires_at_minute,
         nonce: row.nonce,
         ciphertext: row.ciphertext,
     };
@@ -598,6 +601,31 @@ fn max_timestamp_for_messages(store: &Store, workspace_id: EventId) -> Result<u6
         }
     }
     Ok(max)
+}
+
+/// Compute the authoring-time `expires_at_minute` for a message in this
+/// workspace. Reads the workspace row's `disappearing_ttl_minutes`; returns
+/// `EXPIRES_NEVER` when the TTL is zero. Slice 1 sources the TTL from the
+/// workspace event's canonical bytes; slice 2 will source it from a shared
+/// admin-signed setting event with the same projection contract.
+pub(crate) fn workspace_expires_at_minute(
+    store: &Store,
+    workspace_id: EventId,
+    created_at_ms: u64,
+) -> Result<u64, String> {
+    use crate::protocol::event_modules::content::message::types::{EXPIRES_NEVER, UNIX_MINUTE_MS};
+    use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
+    let key = workspace_id;
+    let value = store
+        .table_row(workspace_schema::WORKSPACES, &key)
+        .map_err(|err| format!("load workspace row: {err}"))?
+        .ok_or_else(|| "workspace row is missing".to_string())?;
+    let row = workspace_schema::decode_workspace_row(&key, &value)?;
+    if row.disappearing_ttl_minutes == 0 {
+        return Ok(EXPIRES_NEVER);
+    }
+    let authored_minute = created_at_ms / UNIX_MINUTE_MS;
+    Ok(authored_minute.saturating_add(row.disappearing_ttl_minutes as u64))
 }
 
 fn user_name(store: &Store, workspace_id: EventId, user_id: EventId) -> Result<String, String> {

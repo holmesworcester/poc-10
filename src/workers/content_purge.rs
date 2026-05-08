@@ -450,6 +450,7 @@ mod tests {
             removal_frontier_id: FRONTIER,
             local_history_node_secret_id: LEAF_NODE_ID,
             leaf_node_secret: KEY_SECRET,
+            expires_at_minute: u64::MAX,
             text: text.to_string(),
         })
         .expect("message");

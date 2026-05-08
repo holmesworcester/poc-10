@@ -20,6 +20,7 @@ use crate::protocol::event_modules::content::message_deletion;
 pub mod bootstrap_exchange;
 pub mod content_purge;
 pub mod dependency_unblock;
+pub mod disappearing_minute_expiry;
 pub mod encryption;
 pub mod event_admission;
 pub mod event_projection;
@@ -80,6 +81,7 @@ where
         dependency_unblock::daemon_worker(),
         encryption::daemon_worker(),
         content_purge::daemon_worker(),
+        disappearing_minute_expiry::daemon_worker(),
         sync::daemon_worker(),
         transit_out::daemon_worker(),
     ]

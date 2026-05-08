@@ -5,6 +5,7 @@
 //! commands, projection rows, and tests.
 
 pub mod cli;
+pub mod expired_minute;
 pub mod key_wrap;
 pub mod local_history_node_secret;
 pub mod local_key_secret;
@@ -29,6 +30,9 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
         Some(local_history_node_secret::codec::TYPE_LOCAL_HISTORY_NODE_SECRET) => {
             Ok(Some(local_history_node_secret::projector::project(event)?))
         }
+        Some(expired_minute::codec::TYPE_EXPIRED_MINUTE) => Ok(Some(
+            expired_minute::projector::project(&event.record.canonical_bytes)?,
+        )),
         Some(recipient_key::codec::TYPE_SIGNED_RECIPIENT_KEY) => {
             Ok(Some(recipient_key::projector::project(event)?))
         }
@@ -58,6 +62,9 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         }
         local_history_node_secret::codec::TYPE_LOCAL_HISTORY_NODE_SECRET => {
             local_history_node_secret::codec::record_from_bytes(bytes)
+        }
+        expired_minute::codec::TYPE_EXPIRED_MINUTE => {
+            expired_minute::codec::record_from_bytes(bytes)
         }
         recipient_key::codec::TYPE_SIGNED_RECIPIENT_KEY => {
             recipient_key::codec::signed_record_from_bytes(bytes)
