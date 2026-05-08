@@ -18,13 +18,12 @@ use crate::core::store::Store;
 use crate::protocol::event_modules::content::message_deletion;
 
 pub mod bootstrap_exchange;
-pub(crate) mod pipeline_helpers;
 pub mod content_purge;
 pub mod dependency_unblock;
 pub mod encryption;
 pub mod event_admission;
 pub mod event_projection;
-pub mod peer_supervisor;
+pub(crate) mod pipeline_helpers;
 pub mod schema;
 pub mod sync;
 pub mod transit_in;
@@ -61,7 +60,6 @@ where
 pub trait DaemonWorkerContext: pipeline_helpers::event_pipeline::EventRegistry {
     fn store(&self) -> &Store;
     fn sync_index(&self) -> &crate::protocol::event_modules::sync::SyncIndex;
-    fn peer_supervisor_cursor(&self) -> &peer_supervisor::PeerCursor;
 }
 
 pub fn daemon_workers<C>() -> Vec<Worker<C>>
@@ -83,12 +81,6 @@ where
         encryption::daemon_worker(),
         content_purge::daemon_worker(),
         sync::daemon_worker(),
-        // Periodic per-peer rotation. The base sync worker's leader rule keeps
-        // a higher-endpoint daemon quiet for new rounds, so the supervisor
-        // claims one of its higher-endpoint peers per tick and starts a sync
-        // round against that peer in fair rotation. Slow peers fail their own
-        // turn without starving the rest of the rotation.
-        peer_supervisor::daemon_worker(),
         transit_out::daemon_worker(),
     ]
 }
@@ -107,7 +99,7 @@ mod tests {
         assert!(names.contains(&"transit_in"));
         assert!(names.contains(&"sync_tick"));
         assert!(names.contains(&"transit_out"));
-        assert!(names.contains(&"peer_supervisor"));
+        assert!(!names.contains(&"peer_supervisor"));
     }
 
     /// Test-only DaemonWorkerContext. Workers are never actually invoked here;
@@ -126,7 +118,8 @@ mod tests {
             &self,
             _store: &Store,
             _inbound: &crate::core::network_queues::InboundNetworkRow,
-        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ProjectionOutput, String> {
+        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ProjectionOutput, String>
+        {
             Err("not implemented".to_string())
         }
 
@@ -136,7 +129,8 @@ mod tests {
             _bytes: Vec<u8>,
             _receive: Option<crate::protocol::event_modules::types::ReceiveMetadata>,
             _provenance: Option<crate::workers::schema::TransitProvenance>,
-        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ReceivedRecord, String> {
+        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ReceivedRecord, String>
+        {
             Err("not implemented".to_string())
         }
 
@@ -144,7 +138,8 @@ mod tests {
             &self,
             _store: &Store,
             _event: &crate::workers::pipeline_helpers::event_pipeline::EventWithContext<'_>,
-        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ProjectionOutput, String> {
+        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ProjectionOutput, String>
+        {
             Err("not implemented".to_string())
         }
     }
@@ -155,10 +150,6 @@ mod tests {
         }
 
         fn sync_index(&self) -> &crate::protocol::event_modules::sync::SyncIndex {
-            unimplemented!()
-        }
-
-        fn peer_supervisor_cursor(&self) -> &peer_supervisor::PeerCursor {
             unimplemented!()
         }
     }

@@ -10,8 +10,9 @@
 //! Inputs:
 //! - `event_modules.applied_shared_events` updates the warm negentropy index.
 //! - `sync.in` holds projected inbound compare/have/need events by connection.
-//! - `Work::Tick` is the daemon input that catches up the index, starts sync,
-//!   and drains projected inbound sync work.
+//! - `Work::Tick` is the daemon input that catches up the index, drains
+//!   projected inbound sync work, and then starts current compares for routed
+//!   peers.
 //! - `Work::Start` is an explicit local worker input for known connection
 //!   routes.
 //!
@@ -30,7 +31,7 @@
 //! The worker has four input shapes:
 //!
 //! ```text
-//! daemon tick -> catch up index -> start sync -> drain projected sync in
+//! daemon tick -> catch up index -> drain projected sync in -> start sync
 //! applied shared events -> update warm index
 //! sync start input -> root compare command per route
 //! projected sync in rows -> compare/have/need handler for that connection
@@ -43,10 +44,10 @@
 //! id for transit out; sync does not build data packets. When an
 //! inbound sync event arrives on a connection without a stored return route, the
 //! response is queued on another routed connection to the same remote endpoint.
-//! Daemon ticks start new rounds only when the local endpoint id sorts before
-//! the remote endpoint id for that connection. That deterministic leader rule
-//! prevents both peers from constantly initiating the same reconciliation; the
-//! non-leader still responds to inbound sync work normally.
+//! Daemon ticks process inbound sync work before starting new compares. Starting
+//! compares from either side is intentionally safe: compare/have/need events are
+//! deterministic connection-scoped facts, and matching summaries produce no
+//! response.
 //!
 //! Sync may query sync-owned indexes and propose sync events through commands.
 //! It does not perform TCP IO, mutate content projections, or bypass normal
@@ -65,6 +66,7 @@ pub use crate::protocol::event_modules::sync::commands::{
     SyncSelection, SyncStartReport, SyncWorkReport,
 };
 use crate::protocol::event_modules::sync::compare;
+use crate::protocol::event_modules::sync::compare::commands::ReadContext;
 use crate::protocol::event_modules::sync::compare::types::{RangeSummary, TimestampRange};
 use crate::protocol::event_modules::types::{EventId, EventIndexEntry};
 use crate::workers::pipeline_helpers::event_pipeline::{CommandOutput, ProposedEvent};
@@ -133,6 +135,50 @@ impl SyncIndex {
             .map_err(|_| "sync index mutex poisoned".to_string())?;
         state.dependency_closure_entries(store, roots)
     }
+
+    fn start_needs_summary(
+        &self,
+        connection_id: connection::types::ConnectionId,
+        range: TimestampRange,
+    ) -> Result<bool, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        let key = start_snapshot_key(connection_id, range);
+        Ok(state
+            .start_snapshots
+            .get(&key)
+            .map(|snapshot| snapshot.generation != state.generation)
+            .unwrap_or(true))
+    }
+
+    fn mark_start_summary(
+        &self,
+        connection_id: connection::types::ConnectionId,
+        range: TimestampRange,
+        summary: RangeSummary,
+    ) -> Result<bool, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        let key = start_snapshot_key(connection_id, range);
+        let changed = state
+            .start_snapshots
+            .get(&key)
+            .map(|snapshot| snapshot.summary != summary)
+            .unwrap_or(true);
+        let generation = state.generation;
+        state.start_snapshots.insert(
+            key,
+            StartSnapshot {
+                generation,
+                summary,
+            },
+        );
+        Ok(changed)
+    }
 }
 
 /// Work accepted by the sync worker.
@@ -151,14 +197,6 @@ pub enum Work {
         limit: usize,
     },
     Start {
-        selection: SyncSelection,
-    },
-    /// Start a sync round against exactly one routed peer. Used by the peer
-    /// supervisor so a single slow peer cannot starve the rotation: `Start`
-    /// fans out across every routed peer in one call, while this variant
-    /// drives one peer per call.
-    StartForConnection {
-        connection_id: connection::types::ConnectionId,
         selection: SyncSelection,
     },
     DrainIn {
@@ -211,19 +249,6 @@ pub fn run(store: &Store, index: &SyncIndex, work: Work) -> Result<Output, Strin
         Work::Start { selection } => {
             prepare_index_for_response(store, index, DEFAULT_INDEX_BATCH)?;
             start(store, index, selected_range(store, selection)?).map(Output::Started)
-        }
-        Work::StartForConnection {
-            connection_id,
-            selection,
-        } => {
-            prepare_index_for_response(store, index, DEFAULT_INDEX_BATCH)?;
-            start_one(
-                store,
-                index,
-                connection_id,
-                selected_range(store, selection)?,
-            )
-            .map(Output::Started)
         }
         Work::DrainIn { limit } => {
             prepare_index_for_response(store, index, DEFAULT_INDEX_BATCH)?;
@@ -288,11 +313,15 @@ fn tick(
     selection: SyncSelection,
 ) -> Result<CommandOutput<SyncTickReport>, String> {
     let indexed = prepare_index_for_response(store, index, index_limit)?;
-    let started = start(store, index, selected_range(store, selection)?)?;
     let inbound = drain_in_events(store, index, inbound_limit)?;
+    let started = start(store, index, selected_range(store, selection)?)?;
 
-    let mut events = started.events;
-    events.extend(inbound.events.into_iter().map(ProposedEvent::new));
+    let mut events = inbound
+        .events
+        .into_iter()
+        .map(ProposedEvent::new)
+        .collect::<Vec<_>>();
+    events.extend(started.events);
     Ok(CommandOutput::with_proposed_events(
         SyncTickReport {
             indexed_events: indexed.indexed_events,
@@ -370,62 +399,25 @@ fn start(
     let mut sent_events = 0;
     let local = local_endpoint(store)?;
     for connection_id in connections {
-        if !local_starts_sync_round(store, local.endpoint, connection_id)? {
-            continue;
-        }
         let context =
             StoreSyncContext::for_connection(store, index, local.endpoint, connection_id)?;
         if context.workspace_ids.is_empty() {
             continue;
         }
-        let output = commands::start_for_connection(&context, connection_id, range)?;
+        if !index.start_needs_summary(connection_id, range)? {
+            continue;
+        }
+        let summary = context.summary(range)?;
+        if !index.mark_start_summary(connection_id, range, summary)? {
+            continue;
+        }
+        let output = commands::start_for_connection_with_summary(connection_id, range, summary)?;
         events.extend(output.events);
         sent_events += output.value.sent_events;
     }
     Ok(CommandOutput::with_proposed_events(
         SyncStartReport { sent_events },
         events,
-    ))
-}
-
-fn local_starts_sync_round(
-    store: &Store,
-    local_endpoint: endpoint::types::EndpointId,
-    connection_id: connection::types::ConnectionId,
-) -> Result<bool, String> {
-    let remote = connection::schema::remote_endpoint(store, connection_id)?;
-    Ok(local_endpoint < remote)
-}
-
-/// Run a sync start command against exactly one routed peer.
-///
-/// The peer supervisor calls this so a single slow peer can fail one tick
-/// without starving the rotation. Unlike `start`, this function does not
-/// apply the leader rule: the supervisor is operating outside the leader
-/// inhibition because its job is to ensure either side periodically pushes
-/// fresh content. The non-leader still suppresses redundant rounds because
-/// the inbound compare events are deterministic in projected state, but it
-/// no longer waits silently for the leader to start every round.
-fn start_one(
-    store: &Store,
-    index: &SyncIndex,
-    connection_id: connection::types::ConnectionId,
-    range: TimestampRange,
-) -> Result<CommandOutput<SyncStartReport>, String> {
-    let local = local_endpoint(store)?;
-    if connection::schema::remote_endpoint(store, connection_id).is_err() {
-        return Ok(CommandOutput::new(SyncStartReport::default()));
-    }
-    let context = StoreSyncContext::for_connection(store, index, local.endpoint, connection_id)?;
-    if context.workspace_ids.is_empty() {
-        return Ok(CommandOutput::new(SyncStartReport::default()));
-    }
-    let output = commands::start_for_connection(&context, connection_id, range)?;
-    Ok(CommandOutput::with_proposed_events(
-        SyncStartReport {
-            sent_events: output.value.sent_events,
-        },
-        output.events,
     ))
 }
 
@@ -635,15 +627,24 @@ fn summarize_entries(entries: &[EventIndexEntry]) -> RangeSummary {
 
 #[derive(Debug, Default)]
 struct IndexState {
+    generation: u64,
     indexed: HashSet<EventId>,
     ids_by_time: BTreeMap<(u64, EventId), EventIndexEntry>,
     entries_by_id: HashMap<EventId, EventIndexEntry>,
     deps_by_event: HashMap<EventId, Vec<EventId>>,
+    start_snapshots: HashMap<(connection::types::ConnectionId, u64, u64), StartSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartSnapshot {
+    generation: u64,
+    summary: RangeSummary,
 }
 
 impl IndexState {
     fn insert(&mut self, entry: EventIndexEntry) {
         self.indexed.insert(entry.event_id);
+        self.generation = self.generation.wrapping_add(1);
         self.ids_by_time
             .insert((entry.timestamp, entry.event_id), entry.clone());
         self.entries_by_id.insert(entry.event_id, entry);
@@ -711,6 +712,13 @@ impl IndexState {
     }
 }
 
+fn start_snapshot_key(
+    connection_id: connection::types::ConnectionId,
+    range: TimestampRange,
+) -> (connection::types::ConnectionId, u64, u64) {
+    (connection_id, range.start, range.end)
+}
+
 fn fingerprint_id(id: &EventId) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"sync-event-id:");
@@ -727,7 +735,7 @@ fn xor_into(target: &mut [u8; 32], value: &[u8; 32]) {
 #[cfg(test)]
 mod tests {
     use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, workspace};
-    use crate::protocol::event_modules::sync::compare;
+    use crate::protocol::event_modules::sync::{compare, have_id};
     use crate::protocol::event_modules::types::{event_id, ConnectionScope, EventId, EventScope};
     use crate::protocol::event_modules::worker as event_worker;
     use crate::protocol::Protocol;
@@ -735,7 +743,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn start_rounds_only_from_lower_endpoint_peer() {
+    fn start_rounds_from_either_routed_endpoint_peer() {
         let first = endpoint::commands::create_local_keypair().value;
         let second = endpoint::commands::create_local_keypair().value;
         let (lower, higher) = if first.endpoint < second.endpoint {
@@ -746,11 +754,12 @@ mod tests {
 
         let lower_store = routed_sync_store(lower, higher);
         let higher_store = routed_sync_store(higher, lower);
-        let index = SyncIndex::default();
+        let lower_index = SyncIndex::default();
+        let higher_index = SyncIndex::default();
 
         let lower_output = run(
             &lower_store,
-            &index,
+            &lower_index,
             Work::Start {
                 selection: SyncSelection::All,
             },
@@ -764,17 +773,73 @@ mod tests {
 
         let higher_output = run(
             &higher_store,
-            &index,
+            &higher_index,
             Work::Start {
                 selection: SyncSelection::All,
             },
         )
-        .expect("higher endpoint does not start sync");
+        .expect("higher endpoint also starts idempotent sync");
         let Output::Started(higher_output) = higher_output else {
             panic!("expected start output");
         };
-        assert_eq!(higher_output.value.sent_events, 0);
-        assert!(higher_output.events.is_empty());
+        assert_eq!(higher_output.value.sent_events, 1);
+        assert_eq!(higher_output.events.len(), 1);
+    }
+
+    #[test]
+    fn repeated_large_start_ticks_skip_until_visible_summary_changes() {
+        let local = endpoint::commands::create_local_keypair().value;
+        let remote = endpoint::commands::create_local_keypair().value;
+        let store = routed_sync_store(local, remote);
+        let index = SyncIndex::default();
+
+        for idx in 0..100_000u64 {
+            index
+                .insert_entry(EventIndexEntry {
+                    event_id: test_event_id(b"large-common", idx),
+                    timestamp: idx.saturating_mul(10).saturating_add(1),
+                    workspace_id: Some([5; 32]),
+                })
+                .expect("insert large index entry");
+        }
+
+        let first = tick_output(&store, &index);
+        assert_eq!(first.value.started_rounds, 1);
+        assert_eq!(first.value.sent_events, 1);
+        assert_eq!(first.events.len(), 1);
+
+        for _ in 0..1_000 {
+            let repeated = tick_output(&store, &index);
+            assert_eq!(repeated.value.started_rounds, 0);
+            assert_eq!(repeated.value.sent_events, 0);
+            assert!(repeated.events.is_empty());
+        }
+
+        index
+            .insert_entry(EventIndexEntry {
+                event_id: test_event_id(b"unrelated-workspace", 1),
+                timestamp: 2_000_001,
+                workspace_id: Some([8; 32]),
+            })
+            .expect("insert unrelated index entry");
+        let unrelated = tick_output(&store, &index);
+        assert_eq!(
+            unrelated.value.started_rounds, 0,
+            "global index churn outside the mutual workspace should refresh the snapshot without sending"
+        );
+        assert_eq!(unrelated.value.sent_events, 0);
+
+        index
+            .insert_entry(EventIndexEntry {
+                event_id: test_event_id(b"visible-change", 1),
+                timestamp: 2_000_002,
+                workspace_id: Some([5; 32]),
+            })
+            .expect("insert visible index entry");
+        let changed = tick_output(&store, &index);
+        assert_eq!(changed.value.started_rounds, 1);
+        assert_eq!(changed.value.sent_events, 1);
+        assert_eq!(changed.events.len(), 1);
     }
 
     #[test]
@@ -845,6 +910,10 @@ mod tests {
             !output.events.is_empty(),
             "local summary should produce response events"
         );
+        assert!(
+            have_id::codec::is_event(&output.events[0].record().canonical_bytes),
+            "tick should drain inbound work before appending a fresh compare start"
+        );
         for event in output.events {
             let event = event.into_record();
             assert_eq!(
@@ -883,6 +952,30 @@ mod tests {
             .insert_table_rows(rows)
             .expect("insert routed sync context");
         store
+    }
+
+    fn tick_output(store: &Store, index: &SyncIndex) -> CommandOutput<SyncTickReport> {
+        let output = run(
+            store,
+            index,
+            Work::Tick {
+                index_limit: DEFAULT_INDEX_BATCH,
+                inbound_limit: DEFAULT_INBOUND_BATCH,
+                selection: SyncSelection::All,
+            },
+        )
+        .expect("tick sync");
+        let Output::Ticked(output) = output else {
+            panic!("expected sync tick output");
+        };
+        output
+    }
+
+    fn test_event_id(domain: &[u8], idx: u64) -> EventId {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(domain);
+        hasher.update(&idx.to_le_bytes());
+        *hasher.finalize().as_bytes()
     }
 
     fn endpoint_membership_row(

@@ -123,9 +123,9 @@ single route/frame boundary.
   writes sync protocol events through canonical in, and writes durable send ids to
   `transit.out`. Inbound sync work is authorized by the receiving
   connection id, but responses are queued on a routed connection to the same
-  remote endpoint so daemon sync does not depend on same-stream replies. New
-  daemon rounds are started only by the endpoint whose id sorts lower than its
-  peer's id.
+  remote endpoint so daemon sync does not depend on same-stream replies. The
+  daemon drains inbound sync work before starting new compares, and either side
+  may start an idempotent compare against its routed peers.
 - `transit_out`: consumes `transit.out`, loads event bytes,
   enforces route/scope/workspace policy, wraps transit frames, and writes
   outbound transport rows.
