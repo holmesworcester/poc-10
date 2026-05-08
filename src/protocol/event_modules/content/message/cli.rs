@@ -514,25 +514,38 @@ pub(crate) struct MessageLeafKey {
 ///
 /// Senders need a frontier id to author messages; receivers do not call this
 /// because they trust the message body to name the frontier id.
+///
+/// A frontier is considered active when EITHER its F root row
+/// (`local_key_secret`) is on disk, OR at least one history-node sibling
+/// row survives under it. The latter case arises after
+/// `retire_deleted_event_leaf` wipes F: the materialized time-tree
+/// siblings still cover authoring for every non-retired coordinate, so
+/// `derive_event_leaf` can keep working without forcing a
+/// `key-frontier` rotation. See `closest_retained_ancestor` in
+/// `src/workers/encryption.rs` for the matching primitive.
 pub(crate) fn require_active_frontier_id(
     store: &Store,
     workspace_id: EventId,
 ) -> Result<EventId, String> {
     let mut candidates = Vec::new();
     for frontier in removal_frontier::schema::list_for_workspace(store, workspace_id)? {
-        let Some(secret) =
+        let root_present =
             local_key_secret::schema::get(store, workspace_id, frontier.removal_frontier_id)?
-        else {
+                .is_some();
+        let has_siblings = !root_present
+            && !local_history_node_secret::schema::list_for_frontier(
+                store,
+                workspace_id,
+                frontier.removal_frontier_id,
+            )?
+            .is_empty();
+        if !root_present && !has_siblings {
             continue;
-        };
-        candidates.push((
-            frontier.created_at_ms,
-            frontier.removal_frontier_id,
-            secret.local_key_secret_id,
-        ));
+        }
+        candidates.push((frontier.created_at_ms, frontier.removal_frontier_id));
     }
     candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-    let Some((_, removal_frontier_id, _)) = candidates.pop() else {
+    let Some((_, removal_frontier_id)) = candidates.pop() else {
         return Err(
             "local content key is missing for workspace; run key-frontier or key-derive"
                 .to_string(),

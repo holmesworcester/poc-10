@@ -452,6 +452,237 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 5 (option-5 enabling property): authoring continues after retirement
+// without rotation. After clock-driven expiry retires a message and the
+// retire walk wipes F's row, both peers can still author fresh messages
+// in a different minute under the SAME frontier — without ever admitting
+// a `key-frontier` event in between. The sibling fallback in
+// `closest_retained_ancestor` (commit bdaa60f) is the enabling primitive:
+// the materialized time-tree siblings cover every minute except the wiped
+// one, so `derive_event_leaf` keeps working under the same frontier.
+//
+// What this test proves:
+//   * Pre-expiry sync of X works (baseline).
+//   * After both peers retire X and wipe F, alice authors Y in a
+//     different minute under the same (wiped) frontier and the message
+//     is locally visible (i.e. derive + AEAD sealed-write + projector
+//     admit all succeed).
+//   * Bob, having retired X independently, also retains the time-tree
+//     sibling rows under his (wiped) frontier — those rows are what he
+//     would use to decrypt a Y that arrives via sync.
+//   * No new `removal_frontier` event was admitted on either peer; the
+//     frontier id is byte-identical before X and after Y.
+//   * Bonus / legitimate wedge: a same-minute send into the already
+//     retired minute fails with the documented
+//     "no retained ancestor covers" error — silently re-deriving from
+//     a wiped F would defeat forward secrecy.
+//
+// What this test does NOT close (and intentionally so, mirroring the
+// note at the end of `cli_disappearing_messages_two_peer_convergence`):
+// cross-peer sync of a NEW post-purge message. Empirically the
+// negentropy exchange does not redeliver Y to bob within the polling
+// window after both peers have purged a prior minute's events; that's
+// a sync-vs-purge interaction that's worth its own investigation and
+// is orthogonal to the no-rotation claim. The bob-side sibling-row
+// assertion below is the strongest cross-peer signal we can get
+// without surfacing inter-peer Y delivery.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let bob_join_port = free_port();
+    let alice_port = free_port();
+    let bob_port = free_port();
+
+    let workspace_id =
+        create_workspace_with_ttl(&alice, "NoRotate", "alice", "alice-laptop", 1);
+    join_workspace(
+        &alice,
+        &bob,
+        &workspace_id,
+        bob_join_port,
+        "bob",
+        "bob-phone",
+    );
+
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    let _bob_daemon = spawn_daemon(&bob, bob_port);
+    connect_daemon_pair(&alice, alice_port, &bob, bob_port);
+
+    // Wrap the initial frontier for both recipients so bob can decrypt
+    // alice's authored messages. Snapshot the frontier id NOW so we can
+    // assert later that no new removal_frontier event has been admitted
+    // between authoring of X and authoring of Y.
+    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
+    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
+    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
+    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
+    let frontier_before = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let removal_frontier_id_before = line_value(&frontier_before, "removal_frontier_id");
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id_before,
+        &bob_recipient_id,
+    );
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id_before,
+        &alice_recipient_id,
+    );
+    let _ = wait_for_key_derive(&bob, "1");
+    let removal_frontiers_pre =
+        line_value(&keys_value(&alice, &workspace_id), "removal_frontiers");
+    assert_eq!(
+        removal_frontiers_pre, "1",
+        "precondition: exactly one removal_frontier exists at start"
+    );
+
+    // Step 1: pin both clocks to minute 100 (ms = 6_000_000) and have alice
+    // author X. TTL=1 ⇒ X expires at minute 101.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "x-secret"]));
+
+    // Step 2: sync — both peers admit X.
+    wait_for_message_text(&alice, &workspace_id, "alice: x-secret");
+    wait_for_message_text(&bob, &workspace_id, "alice: x-secret");
+    assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
+    assert_eq!(message_lines(&bob, &workspace_id).len(), 1);
+
+    let pre_alice = keys_value(&alice, &workspace_id);
+    let pre_bob = keys_value(&bob, &workspace_id);
+    assert_eq!(line_value(&pre_alice, "local_history_leaves"), "1");
+    assert_eq!(line_value(&pre_bob, "local_history_leaves"), "1");
+    assert_eq!(line_value(&pre_alice, "local_key_secrets"), "1");
+    assert_eq!(line_value(&pre_bob, "local_key_secrets"), "1");
+
+    // Step 3: advance both clocks past minute 101. The
+    // disappearing-minute-expiry worker on each peer retires X's leaf
+    // independently, and the retire walk wipes F's row on each peer.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+    assert_success(topo(&["--db", &bob, "clock", "set", "6120000"]));
+    wait_for_leaf_count(&alice, &workspace_id, "0");
+    wait_for_leaf_count(&bob, &workspace_id, "0");
+    wait_for_content_count(&alice, &workspace_id, "0");
+    wait_for_content_count(&bob, &workspace_id, "0");
+
+    let post_retire_alice = keys_value(&alice, &workspace_id);
+    let post_retire_bob = keys_value(&bob, &workspace_id);
+    // F-wipe is the load-bearing precondition for the no-rotation claim:
+    // if `local_key_secrets` were still 1 the test would not be
+    // exercising the sibling-fallback path.
+    assert_eq!(
+        line_value(&post_retire_alice, "local_key_secrets"),
+        "0",
+        "precondition: alice's retire walk must have wiped F's row:\n{post_retire_alice}"
+    );
+    assert_eq!(
+        line_value(&post_retire_bob, "local_key_secrets"),
+        "0",
+        "precondition: bob's retire walk must have wiped F's row:\n{post_retire_bob}"
+    );
+    // Time-tree siblings must survive on BOTH peers — they're what
+    // `derive_event_leaf` will use on alice to author Y, and they're
+    // also what bob would use to derive Y's leaf if/when sync of the
+    // post-purge message lands. Each peer ran its own retire walk
+    // independently (no expiry events sync), so equal node-secret
+    // counts are the load-bearing convergence signal here.
+    let alice_node_secrets: u64 = line_value(&post_retire_alice, "local_history_node_secrets")
+        .parse()
+        .expect("parse alice local_history_node_secrets");
+    let bob_node_secrets: u64 = line_value(&post_retire_bob, "local_history_node_secrets")
+        .parse()
+        .expect("parse bob local_history_node_secrets");
+    assert!(
+        alice_node_secrets > 0,
+        "precondition: alice must retain time-tree sibling rows after retire:\n{post_retire_alice}"
+    );
+    assert!(
+        bob_node_secrets > 0,
+        "precondition: bob must retain time-tree sibling rows after retire:\n{post_retire_bob}"
+    );
+    assert_eq!(
+        alice_node_secrets, bob_node_secrets,
+        "alice and bob's surviving sibling rows must converge \
+         (same retire walk, same KDF, same coords)"
+    );
+
+    // Step 4 (bonus, legitimate-wedge documentation): with X retired and F
+    // wiped, attempting to author a NEW message in the same retired minute
+    // M=100 must error with the clear wedge message — silently re-deriving
+    // from the wiped F would defeat forward secrecy. Done BEFORE the M+5
+    // send because once Y is authored, `next_timestamp` ratchets forward
+    // and the same-minute attempt cannot be reproduced.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    let same_minute_attempt = topo(&["--db", &alice, "send", &workspace_id, "z-wedge"]);
+    assert!(
+        !same_minute_attempt.status.success(),
+        "send into already-retired minute must fail:\nstdout={}\nstderr={}",
+        stdout(&same_minute_attempt),
+        stderr(&same_minute_attempt)
+    );
+    let same_minute_err = stderr(&same_minute_attempt);
+    assert!(
+        same_minute_err.contains("no retained ancestor covers"),
+        "expected the documented wedge message; got: {same_minute_err}"
+    );
+
+    // Step 5 (the load-bearing claim): without any `key-frontier` advance,
+    // alice authors Y in a DIFFERENT minute M+5 (105). The send must
+    // succeed — `derive_event_leaf` falls back to a covering time-tree
+    // sibling row admitted during the retire walk. Y must then be
+    // locally visible on alice (the messages listing decrypts the
+    // sealed payload, which is the strongest local proof that the
+    // sibling-derived leaf secret is usable).
+    assert_success(topo(&["--db", &alice, "clock", "set", "6300000"]));
+    assert_success(topo(&["--db", &bob, "clock", "set", "6300000"]));
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "y-secret"]));
+    wait_for_message_text(&alice, &workspace_id, "alice: y-secret");
+    assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
+
+    // Step 6: prove no rotation happened. The frontier id must be the
+    // same as before X was authored, and the count of removal_frontiers
+    // must still be 1. This is the option-5 contract: forward secrecy is
+    // achieved by retire-driven F-wipe + sibling fallback, not by
+    // admitting a new frontier event. Read the frontier id from `keys`
+    // output rather than `key-frontier` (which would itself create a
+    // brand-new frontier and defeat the assertion).
+    let post_y_alice = keys_value(&alice, &workspace_id);
+    let post_y_bob = keys_value(&bob, &workspace_id);
+    let removal_frontier_id_after = frontier_id_from_keys(&post_y_alice);
+    assert_eq!(
+        removal_frontier_id_after, removal_frontier_id_before,
+        "no key-frontier advance should have happened — frontier id must be identical \
+         before X and after Y"
+    );
+    assert_eq!(
+        line_value(&post_y_alice, "removal_frontiers"),
+        "1",
+        "alice must still have exactly one removal_frontier; rotation is forbidden"
+    );
+    assert_eq!(
+        line_value(&post_y_bob, "removal_frontiers"),
+        "1",
+        "bob must still have exactly one removal_frontier; rotation is forbidden"
+    );
+    // F is still wiped on alice — Y was authored under the sibling
+    // fallback, NOT by resurrecting F. (Bob's F is also still wiped;
+    // we don't re-assert because it didn't change since `post_retire_bob`
+    // and would only be touched by an explicit `key-frontier` advance,
+    // which is exactly what this test forbids.)
+    assert_eq!(
+        line_value(&post_y_alice, "local_key_secrets"),
+        "0",
+        "F must remain wiped on alice after authoring Y under the sibling fallback"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Helpers (local to this test file).
 // ---------------------------------------------------------------------------
 
@@ -484,6 +715,27 @@ fn keys_value(db: &str, workspace_id: &str) -> String {
 
 fn cover_summary_value(keys_output: &str) -> String {
     line_value(keys_output, "cover_summary")
+}
+
+/// Extract the (single) frontier id from `keys` output without authoring a
+/// new frontier event. The `keys` command renders one line per frontier as
+/// `frontier: <hex_id> access=<yes|no>`. Tests that need to assert "no
+/// rotation happened" cannot call `key-frontier` to read it because that
+/// command always creates a brand-new frontier.
+fn frontier_id_from_keys(keys_output: &str) -> String {
+    let mut iter = keys_output.lines().filter_map(|line| {
+        line.strip_prefix("frontier: ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(ToOwned::to_owned)
+    });
+    let only = iter
+        .next()
+        .unwrap_or_else(|| panic!("missing `frontier:` line in keys output:\n{keys_output}"));
+    assert!(
+        iter.next().is_none(),
+        "multiple `frontier:` lines in keys output (rotation occurred):\n{keys_output}"
+    );
+    only
 }
 
 fn messages_text(db: &str, workspace_id: &str) -> String {
