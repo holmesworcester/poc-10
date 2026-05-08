@@ -136,37 +136,119 @@ per-leaf tombstones over time; pruning that debris requires either:
 
 The 2-axis tree (time tree + within-minute trie) is preserved despite
 not exploiting whole-minute retirement under mutable TTLs. The
-arithmetic shows the time axis is **structural overhead** in the
-current mode:
+**actual** reason is per-retirement cover-cost reduction, which I had
+wrong in an earlier draft. Walking through it:
 
-  * Per-retirement walk depth = log₂(active_minutes) +
-    log₂(messages_per_minute) = log₂(total_active_events). The 2-axis
-    split *redistributes* depth between the time and trie axes; it
-    does **not** reduce total depth versus a single trie of the same
-    N.
-  * Cost per retirement scales the same: ~log₂(N) materialized
-    sibling rows + tombstones. Concrete bytes are ~0.5 KB × log₂(N)
-    per retirement.
+The retire walk wipes the **F root** in addition to the descend path
+(see `after_retire_authoring_under_wiped_frontier_errors`). Once F is
+wiped, no future event under F can derive *anything* — F is dead.
+That means the FS guarantee for the retired leaf doesn't depend on
+covering unknown future events; it depends on the trunk being gone.
 
-The reason to keep it is **option preservation**:
+Therefore the retire walk only needs to materialize coverage at
+**actually-existing tree levels** (the path from F root through to the
+leaf), not at every possible bit depth from 0 to 256. The cost is
+**constant per retirement**, set by the **tree's structural depth**:
 
-  * A fixed-TTL workspace mode (no admin-mutable setting; the TTL is
-    set once at workspace creation and immutable) makes
-    whole-minute retirement viable: one tombstone per minute_node
-    collapses every descendant leaf in that minute, regardless of how
-    many messages were in it. The reduction is from O(messages) to
-    O(1) per retired minute.
-  * Without a time axis baked into the tree, switching to a
-    fixed-TTL mode later would require migrating every existing
-    workspace's tree shape. Keeping the time axis preserves the
-    option without a migration.
+  * **Time tree**: depth ≤ log₂(`TIME_TREE_ROOT_WIDTH`) ≈ 57. The
+    walk materializes both descend and sibling at each level
+    (skipping the width-1 sibling). All ~57 sibling internals are
+    retained; all ~57 descend internals are wiped + tombstoned.
+  * **Within-minute trie**: depth = log₂(messages_per_minute). For
+    typical chat workloads this is ≤ 7. Sibling internals at each
+    divergence depth are retained; descend internals are wiped.
 
-So the design choice for this branch is "carry slightly more code now
-for the option to claw back per-retirement cost in a future fixed-TTL
-mode." If poc-8 commits to mutable TTLs forever, the time axis is
-dead weight and a follow-up could simplify to a single trie keyed on
-event_id alone — but that's a one-way door and not worth taking
-without a confirmed product decision against fixed TTLs.
+Per-retirement cost ≈ 30 KB cover state + ~7 KB tombstones in
+practice. **Constant**, set by tree dimensions.
+
+If we collapsed to a single 256-bit trie keyed on event_id, the
+constant would be tree-depth-256 instead of tree-depth-57 + log(N):
+
+  * Per retirement: ~256 sibling internals × 400 B ≈ **130 KB**
+  * Plus ~256 tombstones × 128 B ≈ **33 KB**
+  * Total ≈ **160 KB per retirement**, vs the 2-axis tree's ~30 KB.
+
+The time axis is **paying for itself** in per-retirement cover-state
+reduction (~5× cheaper), independently of whether mutable or fixed
+TTLs are in play. Whole-minute retirement (one tombstone per minute
+instead of per leaf) is an *additional* optimization that fixed-TTL
+workspaces could claw back, but the depth-bound benefit is already
+present.
+
+So the design choice for this branch is unambiguously "keep the time
+axis." Eliminating it would *increase* per-retirement cost, not
+decrease it.
+
+### Frontier rotation cost
+
+Because every retirement wipes F, the workspace must rotate to a new
+removal_frontier before authoring continues. With slice-1's
+clock-driven expiry firing whenever a stamped expiry boundary is
+crossed, the disappearing-messages worker can rapidly trigger
+frontier rotations.
+
+In practice retirements within a single tick under the same
+already-wiped F are cheap (only the leaf row + tombstone, no walk).
+The expensive part is the **first** retirement under each frontier.
+Frontier rotation cadence is therefore a practical operational
+concern: too frequent and the workspace pays the ~30 KB-per-rotation
+cost often; too infrequent and stale debris accumulates under wiped
+frontiers. The cleanup story is mostly amortized via rotation
+itself — once a frontier is dead, its accumulated tombstone debris
+is no longer touched by any walk.
+
+### Future work: compact retirement event
+
+Today the retire walk admits ~57 individual `LocalHistoryNodeSecret`
+events (one per materialized sibling + descend-path internal) plus
+the wipe transaction writes ~58 tombstone rows. The on-disk shape is
+many small records.
+
+A cleaner design batches the entire retirement into **one** local
+event (`retirement_cover` or similar) whose canonical bytes carry
+the compact representation of:
+
+  * The full descend path being wiped (each entry: `range_start`,
+    `range_width`, `bit_depth`, `event_id_prefix`, retired
+    `node_id`).
+  * Every sibling-side internal materialized along that path (each
+    entry: same coords + the retained `node_secret`).
+  * The retired leaf id.
+
+The projector decodes the compact event and writes all rows +
+tombstones in a single projection transaction. Benefits:
+
+  * Single canonical event id for the entire retirement → auditable
+    as one fact, not ~115 facts.
+  * Wire size dropped from ~30 KB (separate events + their
+    canonical-bytes overhead, dependency lists, signing-prefix
+    headers per event) to ~8 KB (one event with packed entries).
+  * Determinism still holds: both peers compute the same retirement
+    walk from the same shared state, yielding byte-identical
+    canonical bytes for the cover event, and therefore the same
+    event id.
+  * Idempotent admission: a re-admit of the same retirement event is
+    a no-op via the standard duplicate-id check.
+
+Implementation requires:
+
+  * A new event type `local_retirement_cover` (or similar) in the
+    encryption module. Local-only scope (each peer derives its own).
+  * Codec encoding for the compact path/sibling/tombstone arrays.
+  * Projector that walks the array and writes
+    `LOCAL_HISTORY_NODE_SECRETS` rows for siblings, exact-deletes
+    descend-path rows, writes
+    `LOCAL_HISTORY_NODE_TOMBSTONES` rows.
+  * Replacing the per-node `ensure_time_split` /
+    `ensure_trie_split` admissions in
+    `retire_deleted_event_leaf` with a single compute-then-admit
+    step.
+
+This is a substantial restructure of `src/workers/encryption.rs`
+(which is ~950 lines today, much of it the per-node walk
+machinery). It deserves its own slice. Documented here so the
+refactor target is clear; not implemented in the
+disappearing-messages branch.
 
 ### Latest-setting trust gap (recap)
 
