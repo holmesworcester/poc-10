@@ -49,11 +49,20 @@
 //! deleted message's AEAD key is therefore enforced against an on-disk
 //! attacker holding the ciphertext.
 //!
-//! Future encryption under the wiped frontier `F` is impossible: the
-//! `local_key_secret(F)` row is gone, so `derive_event_leaf` errors with
-//! "local key secret is missing for removal frontier". The user must call
-//! `key-frontier` to advance to a new frontier `F'` before authoring more
-//! messages.
+//! Future encryption under the wiped frontier `F` continues to work
+//! without explicit rotation: the time-tree siblings admitted along
+//! the descend path collectively cover every minute *except* the
+//! wiped one, so `derive_event_leaf` for a coord in any other minute
+//! falls back to the deepest covering time-axis sibling and walks
+//! down from there. (Same-minute new authoring works only when the
+//! coord's prefix lies under a surviving trie sibling; coords whose
+//! subtree was inside the wiped descend chain legitimately wedge —
+//! that's the "no covering ancestor" branch in
+//! `closest_retained_ancestor`.) Each peer derives the sibling
+//! secrets locally because the KDF is deterministic, so no new wraps
+//! to recipients are required. Rotation can still happen for
+//! unrelated reasons (e.g. recipient turnover via `key-frontier`);
+//! retirement does not force it.
 
 use crate::core::crypto;
 use crate::core::logical_clock;
@@ -405,21 +414,27 @@ struct DerivationSource {
     event_id_prefix: EventId,
 }
 
-fn root_source(
+/// Look up the workspace's `local_key_secret(F)` row and present it as a
+/// `DerivationSource`. Returns `None` when the row has been wiped (e.g. by
+/// a prior `retire_deleted_event_leaf`); callers must then fall back to
+/// the deepest covering sibling row.
+fn try_root_source(
     store: &Store,
     workspace_id: EventId,
     removal_frontier_id: EventId,
-) -> Result<DerivationSource, String> {
-    let root = local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?
-        .ok_or_else(|| "local key secret is missing for removal frontier".to_string())?;
-    Ok(DerivationSource {
+) -> Result<Option<DerivationSource>, String> {
+    let Some(root) = local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(DerivationSource {
         secret_id: root.local_key_secret_id,
         secret: root.key_secret,
         range_start: 0,
         range_width: TIME_TREE_ROOT_WIDTH,
         bit_depth: TIME_TREE_BIT_DEPTH,
         event_id_prefix: [0; 32],
-    })
+    }))
 }
 
 /// Compute (in memory, not stored) the next time-split secret along the path
@@ -520,10 +535,20 @@ fn descend_time_axis_in_memory(
     Ok(current)
 }
 
-/// Find the closest materialized ancestor that covers
-/// `(unix_minute, 1, TRIE_LEAF_BIT_DEPTH, event_id_in_minute)`. Returns the
-/// frontier root's `DerivationSource` if no closer materialized internal
-/// exists.
+/// Find the closest retained ancestor that covers
+/// `(unix_minute, 1, TRIE_LEAF_BIT_DEPTH, event_id_in_minute)`. The starting
+/// candidate is the frontier root's `DerivationSource` when its row is
+/// present; if F's row has been wiped (post-retire), the scan starts with
+/// no candidate and picks the deepest covering sibling row admitted by
+/// an earlier retire walk. The retire walk's time-tree siblings
+/// collectively cover every minute except the wiped one, so any coord
+/// in a different minute has a covering ancestor; for a coord in the
+/// same minute as a prior retirement, coverage depends on whether a
+/// surviving trie sibling shares the coord's prefix.
+///
+/// Errors only when no covering ancestor exists at all (a genuine
+/// wedge — either F has never been seeded, or the target lies inside
+/// a wiped subtree that no sibling covers).
 fn closest_retained_ancestor(
     store: &Store,
     workspace_id: EventId,
@@ -531,7 +556,8 @@ fn closest_retained_ancestor(
     unix_minute: u64,
     event_id_in_minute: EventId,
 ) -> Result<DerivationSource, String> {
-    let mut best = root_source(store, workspace_id, removal_frontier_id)?;
+    let mut best: Option<DerivationSource> =
+        try_root_source(store, workspace_id, removal_frontier_id)?;
     for row in local_history_node_secret::schema::list_for_frontier(
         store,
         workspace_id,
@@ -540,18 +566,26 @@ fn closest_retained_ancestor(
         if !covers(&row, unix_minute, event_id_in_minute) {
             continue;
         }
-        if more_specific_than(&row, &best) {
-            best = DerivationSource {
+        let take = match best.as_ref() {
+            None => true,
+            Some(current) => more_specific_than(&row, current),
+        };
+        if take {
+            best = Some(DerivationSource {
                 secret_id: row.local_history_node_secret_id,
                 secret: row.node_secret,
                 range_start: row.range_start,
                 range_width: row.range_width,
                 bit_depth: row.bit_depth,
                 event_id_prefix: row.event_id_prefix,
-            };
+            });
         }
     }
-    Ok(best)
+    best.ok_or_else(|| {
+        "no retained ancestor covers the target leaf: F is wiped and no \
+         sibling row covers this coordinate"
+            .to_string()
+    })
 }
 
 fn covers(
@@ -1016,9 +1050,15 @@ fn closest_materialized_source(
     unix_minute: u64,
     event_id_in_minute: EventId,
 ) -> Result<MaterializedSource, String> {
-    let root = local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?
-        .ok_or_else(|| "local key secret is missing for removal frontier".to_string())?;
-    let mut best = MaterializedSource {
+    // Start with the F root row when present. If F has been wiped, start
+    // with no candidate and let the sibling scan below pick the deepest
+    // covering sibling — the same fallback as `closest_retained_ancestor`.
+    let mut best: Option<MaterializedSource> = local_key_secret::schema::get(
+        store,
+        workspace_id,
+        removal_frontier_id,
+    )?
+    .map(|root| MaterializedSource {
         secret_id: root.local_key_secret_id,
         secret: root.key_secret,
         range_start: 0,
@@ -1026,7 +1066,7 @@ fn closest_materialized_source(
         bit_depth: TIME_TREE_BIT_DEPTH,
         event_id_prefix: [0; 32],
         is_root: true,
-    };
+    });
     for row in local_history_node_secret::schema::list_for_frontier(
         store,
         workspace_id,
@@ -1044,21 +1084,22 @@ fn closest_materialized_source(
             event_id_prefix: row.event_id_prefix,
             is_root: false,
         };
-        // More specific = smaller range_width OR (equal width and larger bit_depth).
-        let better = if best.is_root {
-            true
-        } else if candidate.range_width < best.range_width {
-            true
-        } else if candidate.range_width > best.range_width {
-            false
-        } else {
-            candidate.bit_depth > best.bit_depth
+        let better = match best.as_ref() {
+            None => true,
+            Some(current) if current.is_root => true,
+            Some(current) if candidate.range_width < current.range_width => true,
+            Some(current) if candidate.range_width > current.range_width => false,
+            Some(current) => candidate.bit_depth > current.bit_depth,
         };
         if better {
-            best = candidate;
+            best = Some(candidate);
         }
     }
-    Ok(best)
+    best.ok_or_else(|| {
+        "no materialized source covers the target leaf: F is wiped and no \
+         sibling row covers this coordinate"
+            .to_string()
+    })
 }
 
 fn next_materialized_trie_step(
@@ -1160,15 +1201,19 @@ struct WipeTarget {
 /// exact-deleted, and BLAKE3 keyed-hash is one-way so siblings cannot
 /// reach the deleted leaf's coord.
 ///
-/// Future encryption under `F` is intentionally impossible after this:
-/// the F root row is gone, so `derive_event_leaf` for new messages will
-/// error. The user must call `key-frontier` to advance to a fresh frontier
-/// before authoring further messages. We chose this option (b) over
-/// "fold a frontier-advance event into retire" because the new frontier
-/// event is signed by the deleter and would be non-deterministic across
-/// peers (different timestamps, different signers). With (b) each peer
-/// independently wipes its own F root and the user explicitly authors
-/// the new frontier as a separate, normal shared event.
+/// Future encryption under `F` keeps working without an explicit
+/// frontier advance: the time-tree siblings admitted at step 2
+/// collectively cover every minute except the wiped one, so
+/// `closest_retained_ancestor` for a coord in any other minute
+/// returns the deepest covering time-axis sibling and
+/// `derive_event_leaf` walks down from there. (Same-minute new
+/// authoring works only when the coord's prefix lies under a
+/// surviving trie sibling admitted at step 3; coords whose prefix was
+/// inside the wiped descend chain legitimately wedge.) Each peer
+/// derives the same sibling secrets locally because the KDF is
+/// deterministic, so no new wraps to recipients are required.
+/// Rotation via `key-frontier` can still happen for unrelated reasons
+/// (recipient turnover); it is not required by retirement.
 ///
 /// TODO(disappearing-messages): whole-minute retirement is a separate
 /// future flow. The time-tree shape supports it: walk the time tree, split
@@ -2725,12 +2770,96 @@ mod tests {
         );
     }
 
-    /// After retire wipes `local_key_secret(F)`, attempting to author a new
-    /// message under F must fail loudly. The user is expected to call
-    /// `key-frontier` to advance to a new frontier `F'` (with a fresh
-    /// `local_key_secret(F')`) before authoring more messages.
+    /// After retire wipes `local_key_secret(F)`, authoring a new message
+    /// under F in a *different minute* must keep working: the retire
+    /// walk's time-tree siblings collectively cover every minute except
+    /// the wiped one, so `derive_event_leaf` falls back to the deepest
+    /// covering time-axis sibling. No explicit `key-frontier` advance is
+    /// required — each peer derives the same sibling secrets locally
+    /// because the KDF is deterministic.
     #[test]
-    fn after_retire_authoring_under_wiped_frontier_errors() {
+    fn after_retire_authoring_under_wiped_frontier_uses_sibling_fallback() {
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, _) = seed_local_key_secret(&store);
+        let coord_a = [0xaa; 32];
+        let coord_b = [0xbb; 32];
+        // Retire-target minute = 1 (created_at_ms = 60_000). Author both
+        // coords there so the trie has a real branching.
+        for coord in [coord_a, coord_b] {
+            let _ = run(
+                &store,
+                &protocol,
+                Work::DeriveEventLeaf {
+                    workspace_id: WORKSPACE,
+                    removal_frontier_id: frontier_id,
+                    created_at_ms: 60_000,
+                    event_id_in_minute: coord,
+                },
+            )
+            .expect("derive leaf");
+        }
+        let _ = run(
+            &store,
+            &protocol,
+            Work::RetireDeletedEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms: 60_000,
+                event_id_in_minute: coord_a,
+            },
+        )
+        .expect("retire");
+
+        // F root row is wiped (the retire walk's wipe phase guarantees this).
+        assert!(
+            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+                .expect("look up local_key_secret")
+                .is_none(),
+            "precondition: retire must have wiped local_key_secret(F)"
+        );
+
+        // Authoring under the SAME (wiped) frontier in a different minute
+        // (minute 2 = 120_000 ms) must succeed via time-axis sibling
+        // fallback: the retire walk admitted time-tree siblings that
+        // collectively cover [0, TIME_TREE_ROOT_WIDTH) minus minute 1.
+        let new_coord = [0xcc; 32];
+        let report = run(
+            &store,
+            &protocol,
+            Work::DeriveEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms: 120_000,
+                event_id_in_minute: new_coord,
+            },
+        )
+        .expect("authoring after retire must succeed via sibling fallback");
+        let Output::DerivedEventLeaf(report) = report else {
+            panic!();
+        };
+        assert!(
+            report.local_history_node_secret_id.is_some(),
+            "sibling fallback must produce a fresh leaf row"
+        );
+        assert!(
+            report.leaf_node_secret.is_some(),
+            "sibling fallback must produce a fresh leaf secret"
+        );
+
+    }
+
+    /// Same-minute authoring for a brand-new coord whose trie subtree is
+    /// not covered by any surviving sibling row legitimately wedges.
+    /// `closest_retained_ancestor` returns a clear error rather than
+    /// silently using F (which has been wiped). This is the documented
+    /// "genuine wedge" branch from the function's docstring — the retire
+    /// walk only admits same-minute trie siblings at divergence depths
+    /// between the deleted coord and surviving leaves, so a new coord
+    /// whose prefix bits sit inside the (now-wiped) descend subtree has
+    /// no covering ancestor.
+    #[test]
+    fn after_retire_same_minute_uncovered_coord_errors_with_clear_message() {
         let store = Protocol::open_memory_store().expect("store");
         let protocol = Protocol::new();
         let (frontier_id, _) = seed_local_key_secret(&store);
@@ -2761,9 +2890,10 @@ mod tests {
         )
         .expect("retire");
 
-        // F root is wiped — `derive_event_leaf` for a new message under F
-        // must error; the user must advance the frontier first.
-        let new_coord = [0xcc; 32];
+        // A new same-minute coord whose subtree falls inside the wiped
+        // descend chain (no surviving sibling covers it) yields a clear
+        // wedge error, not a silent fallback to a wiped F.
+        let uncovered = [0xcc; 32];
         let err = run(
             &store,
             &protocol,
@@ -2771,37 +2901,14 @@ mod tests {
                 workspace_id: WORKSPACE,
                 removal_frontier_id: frontier_id,
                 created_at_ms: 60_000,
-                event_id_in_minute: new_coord,
+                event_id_in_minute: uncovered,
             },
         )
-        .expect_err("authoring after retire must error");
+        .expect_err("uncovered same-minute coord must error with a clear wedge message");
         assert!(
-            err.contains("local key secret is missing for removal frontier"),
-            "expected missing-frontier-secret error, got: {err}",
+            err.contains("no retained ancestor covers"),
+            "expected wedge error mentioning no retained ancestor; got: {err}"
         );
-
-        // After re-seeding a fresh frontier (simulating `key-frontier`), a
-        // brand-new event leaf can be derived again.
-        let (new_frontier_id, _) = seed_local_key_secret(&store);
-        let report = run(
-            &store,
-            &protocol,
-            Work::DeriveEventLeaf {
-                workspace_id: WORKSPACE,
-                removal_frontier_id: new_frontier_id,
-                created_at_ms: 60_000,
-                event_id_in_minute: new_coord,
-            },
-        )
-        .expect("derive under new frontier");
-        let Output::DerivedEventLeaf(report) = report else {
-            panic!();
-        };
-        assert!(
-            report.local_history_node_secret_id.is_some(),
-            "new frontier must permit fresh authoring"
-        );
-        assert!(report.leaf_node_secret.is_some());
     }
 
     /// Walk from the given covering-row's secret down to the leaf at
