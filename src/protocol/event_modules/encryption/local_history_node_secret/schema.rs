@@ -74,6 +74,28 @@ pub fn local_history_node_tombstone_row(
     }
 }
 
+/// Build a tombstone row directly from `(workspace_id, removal_frontier_id,
+/// tombstone_node_id, replacement_node_id)`. Used by the retire walk in the
+/// encryption worker, where tombstones are written without an admitting
+/// `LocalHistoryNodeSecret` event (the wiped node is gone, only its event id
+/// survives as a marker).
+pub fn local_history_node_tombstone_row_by_id(
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    tombstone_node_id: EventId,
+    replacement_node_id: EventId,
+) -> TableRow {
+    TableRow {
+        table: LOCAL_HISTORY_NODE_TOMBSTONES,
+        key: local_history_node_tombstone_key(
+            workspace_id,
+            removal_frontier_id,
+            tombstone_node_id,
+        ),
+        value: encode_tombstone_value(replacement_node_id),
+    }
+}
+
 pub fn local_history_node_secret_key(
     workspace_id: EventId,
     removal_frontier_id: EventId,
@@ -230,25 +252,32 @@ pub fn list_leaves(
 }
 
 /// Canonical, workspace-independent encoding of every retained node-secret
-/// coordinate in this store.
+/// coordinate AND every retire tombstone in this store.
 ///
 /// The encoding is deliberately stable and platform-agnostic:
 ///
 /// ```text
-/// "topo cover summary v3"
-/// || u32_be(rows.len())
-/// || (for each row, sorted by (frontier_id, range_start, range_width,
-///                              bit_depth, event_id_prefix):
+/// "topo cover summary v4"
+/// || u32_be(secret_rows.len())
+/// || (for each secret row, sorted by (frontier_id, range_start, range_width,
+///                                     bit_depth, event_id_prefix):
 ///       removal_frontier_id (32B)
 ///       || u64_be(range_start)
 ///       || u64_be(range_width)
 ///       || u16_be(bit_depth)
 ///       || event_id_prefix (32B; masked to bit_depth)
 ///   )
+/// || u32_be(tombstones.len())
+/// || (for each tombstone, sorted by (frontier_id, tombstone_node_id):
+///       removal_frontier_id (32B)
+///       || tombstone_node_id (32B)
+///   )
 /// ```
 ///
-/// Each row encodes 32 + 8 + 8 + 2 + 32 = **82 bytes**; total summary length
-/// is `21 + 4 + 82 * rows.len()` and therefore O(materialized_rows).
+/// Each secret row encodes 32 + 8 + 8 + 2 + 32 = **82 bytes**; each tombstone
+/// encodes 32 + 32 = **64 bytes**. Total summary length is therefore
+/// `21 + 4 + 82 * secret_rows.len() + 4 + 64 * tombstones.len()` and so
+/// O(materialized_rows + tombstones).
 ///
 /// Two stores that have admitted the same shared event set and run the same
 /// retain/retire operations against it must produce byte-equal cover summaries
@@ -265,10 +294,20 @@ pub fn cover_summary(store: &Store, workspace_id: EventId) -> Result<Vec<u8>, St
             .then_with(|| a.bit_depth.cmp(&b.bit_depth))
             .then_with(|| a.event_id_prefix.cmp(&b.event_id_prefix))
     });
+    let mut tombstones = list_tombstones_for_workspace(store, workspace_id)?;
+    tombstones.sort_by(|a, b| {
+        a.removal_frontier_id
+            .cmp(&b.removal_frontier_id)
+            .then_with(|| a.tombstone_node_id.cmp(&b.tombstone_node_id))
+    });
     let mut out = Writer::with_capacity(
-        b"topo cover summary v3".len() + 4 + rows.len() * COVER_SUMMARY_ROW_LEN,
+        b"topo cover summary v4".len()
+            + 4
+            + rows.len() * COVER_SUMMARY_ROW_LEN
+            + 4
+            + tombstones.len() * COVER_SUMMARY_TOMBSTONE_LEN,
     );
-    out.raw(b"topo cover summary v3");
+    out.raw(b"topo cover summary v4");
     let len = u32::try_from(rows.len()).unwrap_or(u32::MAX);
     out.raw(&len.to_be_bytes());
     for row in &rows {
@@ -278,11 +317,20 @@ pub fn cover_summary(store: &Store, workspace_id: EventId) -> Result<Vec<u8>, St
         out.raw(&row.bit_depth.to_be_bytes());
         out.id(&mask_prefix_to_depth(row.event_id_prefix, row.bit_depth));
     }
+    let tomb_len = u32::try_from(tombstones.len()).unwrap_or(u32::MAX);
+    out.raw(&tomb_len.to_be_bytes());
+    for tomb in &tombstones {
+        out.id(&tomb.removal_frontier_id);
+        out.id(&tomb.tombstone_node_id);
+    }
     Ok(out.finish())
 }
 
-/// Bytes per row in the `cover_summary` encoding.
+/// Bytes per node-secret row in the `cover_summary` encoding.
 pub const COVER_SUMMARY_ROW_LEN: usize = 32 + 8 + 8 + 2 + 32;
+
+/// Bytes per tombstone in the `cover_summary` encoding.
+pub const COVER_SUMMARY_TOMBSTONE_LEN: usize = 32 + 32;
 
 pub fn decode_local_history_node_secret_row(
     key: &[u8],

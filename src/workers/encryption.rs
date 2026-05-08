@@ -26,11 +26,34 @@
 //! in the region the walk descends straight from the workspace root and only
 //! the leaf row is materialized.
 //!
-//! `RetireDeletedEventLeaf` walks the same path, but materializes BOTH children
-//! at every split (the descending side becomes the source for the next split,
-//! the sibling side covers the rest of the parent's range implicitly). At the
-//! bottom the leaf row is purged and exact-deleted, retiring the AEAD key
-//! material for the deleted event.
+//! `RetireDeletedEventLeaf` walks the same path, materializing BOTH children
+//! at every split so the projector's source-dependency invariant holds while
+//! we admit the chain. After the walk, the descend-side rows AND the F root
+//! row are exact-deleted, their canonical bytes are purged, and tombstone
+//! rows are written into `local_history_node_tombstones`. Only sibling rows
+//! survive, plus other event leaves.
+//!
+//! After retire, an adversary on the device has access to:
+//!
+//!   * Sibling rows, each of which derives only its own subtree (the deleted
+//!     leaf coord's path bit at the sibling's depth differs from the
+//!     sibling's prefix, so a `derive_trie_split`/`derive_time_split` from a
+//!     sibling cannot reach the deleted leaf).
+//!   * Surviving event leaf rows (each carries its own AEAD key material —
+//!     unchanged by retire).
+//!   * Tombstone rows naming wiped event ids (no secret material).
+//!
+//! No retained row can re-derive the deleted leaf's `node_secret`, even when
+//! combined with the deleted event's canonical bytes (which give the
+//! adversary the deterministic `event_id_in_minute`). Forward secrecy of the
+//! deleted message's AEAD key is therefore enforced against an on-disk
+//! attacker holding the ciphertext.
+//!
+//! Future encryption under the wiped frontier `F` is impossible: the
+//! `local_key_secret(F)` row is gone, so `derive_event_leaf` errors with
+//! "local key secret is missing for removal frontier". The user must call
+//! `key-frontier` to advance to a new frontier `F'` before authoring more
+//! messages.
 
 use crate::core::crypto;
 use crate::core::logical_clock;
@@ -141,6 +164,15 @@ pub struct RetireDeletedEventLeafReport {
     pub admitted_events: usize,
     pub purged_event_bytes: usize,
     pub materialized_internal_rows: usize,
+    /// Number of descend-path internal rows + the F root row that this retire
+    /// wiped (rows exact-deleted AND canonical bytes purged AND tombstoned).
+    /// Wiping these is what gives the deleted leaf its forward-secrecy
+    /// property: an adversary on the device has no row whose secret descends
+    /// down to the deleted leaf's coord.
+    pub wiped_path_rows: usize,
+    /// Number of tombstone rows the retire walk inserted into
+    /// `local_history_node_tombstones`.
+    pub tombstones_written: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -977,61 +1009,6 @@ struct MaterializedSource {
     is_root: bool,
 }
 
-fn closest_materialized_source_excluding_leaf(
-    store: &Store,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    unix_minute: u64,
-    event_id_in_minute: EventId,
-) -> Result<MaterializedSource, String> {
-    let root = local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?
-        .ok_or_else(|| "local key secret is missing for removal frontier".to_string())?;
-    let mut best = MaterializedSource {
-        secret_id: root.local_key_secret_id,
-        secret: root.key_secret,
-        range_start: 0,
-        range_width: TIME_TREE_ROOT_WIDTH,
-        bit_depth: TIME_TREE_BIT_DEPTH,
-        event_id_prefix: [0; 32],
-        is_root: true,
-    };
-    for row in local_history_node_secret::schema::list_for_frontier(
-        store,
-        workspace_id,
-        removal_frontier_id,
-    )? {
-        if !covers(&row, unix_minute, event_id_in_minute) {
-            continue;
-        }
-        // Skip the leaf-being-retired itself (it cannot be its own ancestor).
-        if row.bit_depth == TRIE_LEAF_BIT_DEPTH && row.event_id_prefix == event_id_in_minute {
-            continue;
-        }
-        let candidate = MaterializedSource {
-            secret_id: row.local_history_node_secret_id,
-            secret: row.node_secret,
-            range_start: row.range_start,
-            range_width: row.range_width,
-            bit_depth: row.bit_depth,
-            event_id_prefix: row.event_id_prefix,
-            is_root: false,
-        };
-        let better = if best.is_root {
-            true
-        } else if candidate.range_width < best.range_width {
-            true
-        } else if candidate.range_width > best.range_width {
-            false
-        } else {
-            candidate.bit_depth > best.bit_depth
-        };
-        if better {
-            best = candidate;
-        }
-    }
-    Ok(best)
-}
-
 fn closest_materialized_source(
     store: &Store,
     workspace_id: EventId,
@@ -1139,10 +1116,59 @@ fn trie_extends(
     true
 }
 
-/// Retire one event's leaf by walking from the closest retained ancestor
-/// down through the time tree to the minute_node and through the trie
-/// toward the leaf, materializing both children at every split so siblings
-/// retain implicit cover. At the bottom the leaf is purged and exact-deleted.
+/// Coordinates of one node-secret row that the retire walk wipes after the
+/// walk completes. The walk admits both descending-side and sibling-side
+/// internals so the projector's source-dependency invariant holds, then
+/// goes back and exact-deletes every row that lies on the path to the
+/// deleted leaf (including the F root) — leaving only the sibling rows.
+#[derive(Debug, Clone)]
+struct WipeTarget {
+    event_id: EventId,
+    range_start: u64,
+    range_width: u64,
+    bit_depth: u16,
+    event_id_prefix: EventId,
+    /// True iff this row is the workspace `local_key_secret(F)` row, which
+    /// lives in `LOCAL_KEY_SECRETS` (one row per workspace + frontier),
+    /// not in `LOCAL_HISTORY_NODE_SECRETS`.
+    is_frontier_root: bool,
+}
+
+/// Retire one event's leaf so its `node_secret` can no longer be derived
+/// from any retained row in the workspace.
+///
+/// Algorithm (forward-secrecy walk):
+///
+/// 1. If the leaf row is missing, no-op (idempotent).
+/// 2. Walk the time tree from the workspace `local_key_secret(F)` root down
+///    to the target minute_node. At each split, admit both the descending
+///    child and the sibling child as ordinary `local_history_node_secret`
+///    events so the chain has real source dependencies.
+/// 3. Walk the trie from the minute_node down toward the leaf, splitting at
+///    every depth where the deleted leaf's coord diverges from a surviving
+///    leaf's coord. At each divergence, admit both descend and sibling.
+/// 4. Wipe phase: exact-delete every descending-side row (rows on the path
+///    from F root to the leaf) AND the F root row itself, purging their
+///    canonical bytes from `event_modules.events` and writing tombstone
+///    rows into `local_history_node_tombstones`. Only sibling rows
+///    (off-path covers) and unrelated rows survive.
+/// 5. Exact-delete the leaf row, purge its canonical bytes, write a
+///    tombstone for the leaf.
+///
+/// After step 5 no retained row can re-derive the deleted leaf's
+/// `node_secret`: the descending chain that produced it has been
+/// exact-deleted, and BLAKE3 keyed-hash is one-way so siblings cannot
+/// reach the deleted leaf's coord.
+///
+/// Future encryption under `F` is intentionally impossible after this:
+/// the F root row is gone, so `derive_event_leaf` for new messages will
+/// error. The user must call `key-frontier` to advance to a fresh frontier
+/// before authoring further messages. We chose this option (b) over
+/// "fold a frontier-advance event into retire" because the new frontier
+/// event is signed by the deleter and would be non-deterministic across
+/// peers (different timestamps, different signers). With (b) each peer
+/// independently wipes its own F root and the user explicitly authors
+/// the new frontier as a separate, normal shared event.
 ///
 /// TODO(disappearing-messages): whole-minute retirement is a separate
 /// future flow. The time-tree shape supports it: walk the time tree, split
@@ -1174,9 +1200,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
 
     let mut report = RetireDeletedEventLeafReport {
         leaf_id,
-        admitted_events: 0,
-        purged_event_bytes: 0,
-        materialized_internal_rows: 0,
+        ..RetireDeletedEventLeafReport::default()
     };
 
     if leaf_id.is_none() {
@@ -1184,145 +1208,213 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
     }
     let leaf_id = leaf_id.expect("checked above");
 
-    // Step 1: walk the time tree from the closest retained ancestor down to
-    // the minute_node, materializing both children at each split. The
-    // leaf-being-retired is NOT a valid ancestor of itself; exclude it from
-    // the search so the walk goes back up to a real cover.
-    let materialized = collect_materialized_rows(store, workspace_id, removal_frontier_id)?;
-    let mut current = closest_materialized_source_excluding_leaf(
-        store,
-        workspace_id,
-        removal_frontier_id,
-        unix_minute,
-        event_id_in_minute,
-    )?;
-    while current.range_width > 1 {
-        let half = current.range_width / 2;
-        let mid = current.range_start + half;
-        let (descend_side, descend_start, sibling_side, sibling_start) = if unix_minute < mid {
-            (0u8, current.range_start, 1u8, mid)
-        } else {
-            (1u8, mid, 0u8, current.range_start)
-        };
-        let parent_start = if current.is_root {
-            0
-        } else {
-            current.range_start
-        };
-        let parent_width = if current.is_root {
-            TIME_TREE_ROOT_WIDTH
-        } else {
-            current.range_width
-        };
-        // Descending child first (becomes the new parent).
-        let descend = ensure_time_split(
-            store,
-            registry,
-            workspace_id,
-            removal_frontier_id,
-            current.secret_id,
-            current.secret,
-            parent_start,
-            parent_width,
-            descend_side,
-            descend_start,
-            half,
-        )?;
-        report.admitted_events += descend.admitted_events;
-        if descend.materialized_new_row {
-            report.materialized_internal_rows += 1;
-        }
-        // Sibling child (covers the rest of the parent's range implicitly).
-        //
-        // At the FINAL time-tree split (parent_width=2, half=1), the
-        // sibling-side child is the adjacent minute_node `(M-1, 1)` or
-        // `(M+1, 1)` — minutes where no events live. Per the binary-tree
-        // FS spec, those adjacent minute_nodes stay implicit under the
-        // already-materialized parent at width=2. Skipping the final
-        // sibling materialization keeps the row count down and matches
-        // the spec's "minute_nodes for adjacent minutes M-1 and M+1 are
-        // NOT materialized" assertion.
-        if parent_width > 2 {
-            let sibling = ensure_time_split(
+    // Look up the F root row. If it's already wiped (a prior retire wiped
+    // it), we still need to exact-delete this leaf row, purge its bytes,
+    // and tombstone it — but there is no walk to perform.
+    let frontier_root =
+        local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?;
+    let mut path_rows_to_wipe: Vec<WipeTarget> = Vec::new();
+    if let Some(root_row) = frontier_root {
+        // Step 2: walk the time tree, materializing both descend and sibling
+        // children at each split. Track the descend-side rows so we can wipe
+        // them after the walk finishes.
+        let mut current_secret_id = root_row.local_key_secret_id;
+        let mut current_secret = root_row.key_secret;
+        let mut current_range_start: u64 = 0;
+        let mut current_range_width: u64 = TIME_TREE_ROOT_WIDTH;
+        // F root is on the descend path by definition.
+        path_rows_to_wipe.push(WipeTarget {
+            event_id: root_row.local_key_secret_id,
+            range_start: 0,
+            range_width: TIME_TREE_ROOT_WIDTH,
+            bit_depth: TIME_TREE_BIT_DEPTH,
+            event_id_prefix: [0; 32],
+            is_frontier_root: true,
+        });
+        while current_range_width > 1 {
+            let half = current_range_width / 2;
+            let mid = current_range_start + half;
+            let (descend_side, descend_start, sibling_side, sibling_start) = if unix_minute < mid {
+                (0u8, current_range_start, 1u8, mid)
+            } else {
+                (1u8, mid, 0u8, current_range_start)
+            };
+
+            // Admit descending child (real event) so the projector's
+            // source-dependency chain holds for downstream siblings. We will
+            // wipe this row in the final step.
+            let descend = ensure_time_split(
                 store,
                 registry,
                 workspace_id,
                 removal_frontier_id,
-                current.secret_id,
-                current.secret,
-                parent_start,
-                parent_width,
-                sibling_side,
-                sibling_start,
+                current_secret_id,
+                current_secret,
+                current_range_start,
+                current_range_width,
+                descend_side,
+                descend_start,
                 half,
             )?;
-            report.admitted_events += sibling.admitted_events;
-            if sibling.materialized_new_row {
+            report.admitted_events += descend.admitted_events;
+            if descend.materialized_new_row {
                 report.materialized_internal_rows += 1;
             }
-        }
-        let _ = (sibling_side, sibling_start);
-        current = MaterializedSource {
-            secret_id: descend.row_event_id,
-            secret: descend.row_secret,
-            range_start: descend_start,
-            range_width: half,
-            bit_depth: TIME_TREE_BIT_DEPTH,
-            event_id_prefix: [0; 32],
-            is_root: false,
-        };
-    }
-    if current.range_start != unix_minute || current.range_width != 1 {
-        return Err("retire walk did not reach the target minute_node".to_string());
-    }
-    // current is the minute_node row.
+            path_rows_to_wipe.push(WipeTarget {
+                event_id: descend.row_event_id,
+                range_start: descend_start,
+                range_width: half,
+                bit_depth: TIME_TREE_BIT_DEPTH,
+                event_id_prefix: [0; 32],
+                is_frontier_root: false,
+            });
 
-    // Step 2: walk the trie from minute_node down to the leaf, materializing
-    // both children at every divergence depth implied by surviving leaves.
-    let _leaf_node_secret = leaf_row.expect("checked above").node_secret;
-    walk_trie_for_retire(
-        store,
-        registry,
+            // Admit sibling child. Skip the final sibling-at-width-1 (an
+            // adjacent minute_node) — adjacent minutes have no events to
+            // cover and their internal coverage is implicit under the
+            // (now-wiped) width-2 parent. Siblings at width >= 2 cover real
+            // surviving subtrees and must be materialized.
+            if half > 1 {
+                let sibling = ensure_time_split(
+                    store,
+                    registry,
+                    workspace_id,
+                    removal_frontier_id,
+                    current_secret_id,
+                    current_secret,
+                    current_range_start,
+                    current_range_width,
+                    sibling_side,
+                    sibling_start,
+                    half,
+                )?;
+                report.admitted_events += sibling.admitted_events;
+                if sibling.materialized_new_row {
+                    report.materialized_internal_rows += 1;
+                }
+            }
+            let _ = (sibling_side, sibling_start);
+
+            current_secret_id = descend.row_event_id;
+            current_secret = descend.row_secret;
+            current_range_start = descend_start;
+            current_range_width = half;
+        }
+        if current_range_start != unix_minute || current_range_width != 1 {
+            return Err("retire walk did not reach the target minute_node".to_string());
+        }
+        // Step 3: walk the trie. The minute_node's id+secret are
+        // current_secret_id+current_secret.
+        walk_trie_for_retire(
+            store,
+            registry,
+            workspace_id,
+            removal_frontier_id,
+            unix_minute,
+            event_id_in_minute,
+            current_secret_id,
+            current_secret,
+            &mut path_rows_to_wipe,
+            &mut report,
+        )?;
+    }
+
+    // Step 4 + 5: wipe phase. In one transaction, exact-delete every
+    // descend-path row (including F root), purge their canonical bytes,
+    // tombstone them, then exact-delete the leaf row, purge its bytes, and
+    // tombstone it. Doing this in one transaction guarantees the
+    // forward-secrecy invariant: at no point on disk do we have BOTH the
+    // descend-path rows AND a missing leaf row that an attacker could
+    // exploit.
+    let leaf_secret_key = local_history_node_secret::schema::local_history_node_secret_key(
         workspace_id,
         removal_frontier_id,
         unix_minute,
+        1,
+        TRIE_LEAF_BIT_DEPTH,
         event_id_in_minute,
-        &mut current,
-        &mut report,
-    )?;
-    let _ = materialized;
-
-    // Step 3: purge the leaf canonical bytes and exact-delete the leaf row.
-    let purged = store
-        .write_transaction(|store| purging::purge_event_storage_in_tx(store, &leaf_id))
-        .map_err(|err| format!("purge deleted event leaf bytes: {err}"))?;
-    if purged {
-        report.purged_event_bytes += 1;
-    }
-    store
-        .delete_table_rows(
-            local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
-            vec![
-                local_history_node_secret::schema::local_history_node_secret_key(
+    );
+    let path_clone = path_rows_to_wipe.clone();
+    let (wiped_path_rows, tombstones_written, purged_event_bytes) = store
+        .write_transaction(move |store| {
+            let mut wiped: usize = 0;
+            let mut tombstones: usize = 0;
+            let mut purged: usize = 0;
+            for target in &path_clone {
+                if target.is_frontier_root {
+                    let key = local_key_secret::schema::local_key_secret_key(
+                        workspace_id,
+                        removal_frontier_id,
+                    );
+                    if store
+                        .delete_table_rows_in_tx(
+                            local_key_secret::schema::LOCAL_KEY_SECRETS,
+                            vec![key],
+                        )?
+                        > 0
+                    {
+                        wiped += 1;
+                    }
+                } else {
+                    let key = local_history_node_secret::schema::local_history_node_secret_key(
+                        workspace_id,
+                        removal_frontier_id,
+                        target.range_start,
+                        target.range_width,
+                        target.bit_depth,
+                        target.event_id_prefix,
+                    );
+                    if store
+                        .delete_table_rows_in_tx(
+                            local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
+                            vec![key],
+                        )?
+                        > 0
+                    {
+                        wiped += 1;
+                    }
+                }
+                if purging::purge_event_storage_in_tx(store, &target.event_id)? {
+                    purged += 1;
+                }
+                let inserted = store.insert_table_rows_in_tx(vec![
+                    local_history_node_secret::schema::local_history_node_tombstone_row_by_id(
+                        workspace_id,
+                        removal_frontier_id,
+                        target.event_id,
+                        leaf_id,
+                    ),
+                ])?;
+                tombstones += inserted;
+            }
+            // Leaf row.
+            let _ = store.delete_table_rows_in_tx(
+                local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
+                vec![leaf_secret_key.clone()],
+            )?;
+            if purging::purge_event_storage_in_tx(store, &leaf_id)? {
+                purged += 1;
+            }
+            // The leaf is its own replacement; it's gone, so the replacement
+            // is leaf_id which itself is wiped. This still uniquely names
+            // the retired coord in tombstone rows.
+            let inserted = store.insert_table_rows_in_tx(vec![
+                local_history_node_secret::schema::local_history_node_tombstone_row_by_id(
                     workspace_id,
                     removal_frontier_id,
-                    unix_minute,
-                    1,
-                    TRIE_LEAF_BIT_DEPTH,
-                    event_id_in_minute,
+                    leaf_id,
+                    leaf_id,
                 ),
-            ],
-        )
-        .map_err(|err| format!("delete leaf projection row: {err}"))?;
+            ])?;
+            tombstones += inserted;
+            Ok((wiped, tombstones, purged))
+        })
+        .map_err(|err| format!("retire deleted event leaf wipe transaction: {err}"))?;
+    report.wiped_path_rows = wiped_path_rows;
+    report.tombstones_written = tombstones_written;
+    report.purged_event_bytes = purged_event_bytes;
+    let _ = path_rows_to_wipe;
     Ok(report)
-}
-
-fn collect_materialized_rows(
-    store: &Store,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-) -> Result<Vec<local_history_node_secret::types::LocalHistoryNodeSecretRow>, String> {
-    local_history_node_secret::schema::list_for_frontier(store, workspace_id, removal_frontier_id)
 }
 
 struct EnsureSplitOutcome {
@@ -1468,7 +1560,9 @@ fn walk_trie_for_retire<R: EventRegistry>(
     removal_frontier_id: EventId,
     unix_minute: u64,
     leaf_coord: EventId,
-    minute_node: &mut MaterializedSource,
+    minute_node_secret_id: EventId,
+    minute_node_secret: HistoryNodeSecret,
+    path_rows: &mut Vec<WipeTarget>,
     report: &mut RetireDeletedEventLeafReport,
 ) -> Result<(), String> {
     // Compute divergence depths between `leaf_coord` and every other
@@ -1491,12 +1585,12 @@ fn walk_trie_for_retire<R: EventRegistry>(
     divergence_depths.dedup();
 
     let mut current = DerivationSource {
-        secret_id: minute_node.secret_id,
-        secret: minute_node.secret,
+        secret_id: minute_node_secret_id,
+        secret: minute_node_secret,
         range_start: unix_minute,
         range_width: 1,
-        bit_depth: minute_node.bit_depth,
-        event_id_prefix: minute_node.event_id_prefix,
+        bit_depth: TIME_TREE_BIT_DEPTH,
+        event_id_prefix: [0; 32],
     };
 
     for depth in divergence_depths.iter().copied() {
@@ -1529,6 +1623,14 @@ fn walk_trie_for_retire<R: EventRegistry>(
         if descend.materialized_new_row {
             report.materialized_internal_rows += 1;
         }
+        path_rows.push(WipeTarget {
+            event_id: descend.row_event_id,
+            range_start: unix_minute,
+            range_width: 1,
+            bit_depth: depth,
+            event_id_prefix: descend_prefix,
+            is_frontier_root: false,
+        });
         let sibling = ensure_trie_split(
             store,
             registry,
@@ -1870,7 +1972,16 @@ mod tests {
 
     fn seed_local_key_secret(store: &Store) -> (EventId, EventId) {
         let signer_private_key = core_crypto::random_ed25519_private_key();
-        let frontier_record = build_signed_frontier_record(&signer_private_key);
+        seed_local_key_secret_with_signer(store, &signer_private_key)
+    }
+
+    /// Deterministic seed for cross-store tests: caller supplies the signer
+    /// so the resulting `removal_frontier_id` is identical across stores.
+    fn seed_local_key_secret_with_signer(
+        store: &Store,
+        signer_private_key: &Ed25519PrivateKey,
+    ) -> (EventId, EventId) {
+        let frontier_record = build_signed_frontier_record(signer_private_key);
         let frontier_id = event_id(&frontier_record.canonical_bytes);
 
         let output =
@@ -2055,7 +2166,19 @@ mod tests {
         let Output::RetiredDeletedEventLeaf(report) = report else {
             panic!("unexpected output");
         };
-        assert_eq!(report.purged_event_bytes, 1);
+        // The retire walk admits a chain of ~log(range_width) + log(N)
+        // descend-side AND sibling-side events, then wipes the descend
+        // chain (rows + canonical bytes). `purged_event_bytes` therefore
+        // counts the leaf bytes + every descend-side event's bytes + the
+        // F root event's bytes. We just bound it loosely.
+        assert!(
+            report.purged_event_bytes >= 1,
+            "at minimum the leaf canonical bytes must be purged"
+        );
+        assert!(
+            report.tombstones_written >= 1,
+            "at minimum a leaf tombstone must be written"
+        );
 
         let post_rows = local_history_node_secret::schema::list_for_workspace(&store, WORKSPACE)
             .expect("post rows");
@@ -2068,21 +2191,17 @@ mod tests {
             N - 1,
             "exactly one leaf retired; surviving leaf rows persist",
         );
-        // Time-tree internals + minute_node + sibling time-tree internals
-        // are bounded by O(log range_width). With ROOT_WIDTH = 2^63, that
-        // is at most ~125 rows even for a maximally-deep walk. Trie
-        // internals scale with O(log N) ~ log2(16) = 4 unique divergence
-        // depths, each producing 2 internals (descend + sibling) = 8
-        // trie rows. Bound the total at 200 to be conservative; what
-        // matters is that it does NOT scale with N (so increasing N
-        // would not blow this up).
+        // After retire, only SIBLING internals remain — the descend-side
+        // chain is wiped. Sibling count is bounded by O(log range_width +
+        // log N): one sibling per time-tree split level plus one per trie
+        // divergence depth.
         let internal_row_count = post_rows.len() - leaf_count;
-        let time_tree_bound = 2 * 64 + 4; // 64 levels * 2 children + slack
-        let trie_bound = 2 * (N as f64).log2().ceil() as usize + 4;
+        let time_tree_sibling_bound = 64 + 4; // 64 levels * 1 sibling + slack
+        let trie_sibling_bound = (N as f64).log2().ceil() as usize + 4;
         assert!(
-            internal_row_count <= time_tree_bound + trie_bound,
-            "internal row count {internal_row_count} must be O(log range + log N), bound {}",
-            time_tree_bound + trie_bound,
+            internal_row_count <= time_tree_sibling_bound + trie_sibling_bound,
+            "internal sibling row count {internal_row_count} must be O(log range + log N), bound {}",
+            time_tree_sibling_bound + trie_sibling_bound,
         );
 
         // Assert the deleted leaf cannot be looked up.
@@ -2098,13 +2217,25 @@ mod tests {
             .is_none(),
             "deleted leaf row must be gone",
         );
+
+        // Assert F root row is also wiped.
+        assert!(
+            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+                .expect("look up local_key_secret")
+                .is_none(),
+            "local_key_secret(F) row must be wiped after retire",
+        );
     }
 
     #[test]
-    fn delete_does_not_materialize_adjacent_minute_node_rows() {
-        // Spec invariant: deleting an event in minute M must NOT materialize
-        // the adjacent minute_nodes at (M-1, 1) or (M+1, 1). They stay
-        // implicit under the materialized time-tree internal at width=2.
+    fn delete_wipes_minute_node_along_descend_path() {
+        // Forward-secrecy invariant under the new retire walk: the
+        // minute_node at the deleted leaf's `target_minute` is on the
+        // descending path from F root to the leaf. The retire walk
+        // therefore exact-deletes that minute_node row (and purges its
+        // canonical bytes). It also leaves adjacent minute_nodes at M-1
+        // or M+1 unmaterialized (those are sibling-side at the final
+        // time-tree split, which we deliberately skip).
         let store = Protocol::open_memory_store().expect("store");
         let protocol = Protocol::new();
         let (frontier_id, _) = seed_local_key_secret(&store);
@@ -2137,10 +2268,8 @@ mod tests {
         )
         .expect("retire");
 
-        let rows = local_history_node_secret::schema::list_for_workspace(&store, WORKSPACE)
-            .expect("rows");
         // Adjacent minute_nodes (range_width=1, bit_depth=0) at minute 99 or 101
-        // must not exist.
+        // must not exist (sibling-at-width-1 skip).
         for adjacent in [99u64, 101u64] {
             assert!(
                 local_history_node_secret::schema::get_minute_node(
@@ -2154,7 +2283,10 @@ mod tests {
                 "minute_node at adjacent minute {adjacent} must NOT be materialized",
             );
         }
-        // Sanity: minute_node at M=100 IS materialized.
+        // The deleted leaf's minute_node is on the descend path and so is
+        // wiped — its row no longer exists post-retire (forward secrecy
+        // requires this; otherwise minute_node + target_coord re-derives
+        // the deleted leaf's secret via a single trie split).
         assert!(
             local_history_node_secret::schema::get_minute_node(
                 &store,
@@ -2163,20 +2295,35 @@ mod tests {
                 100,
             )
             .expect("lookup")
-            .is_some(),
-            "minute_node at M=100 must be materialized after delete",
+            .is_none(),
+            "minute_node at M=100 must be wiped after retire (descend-path FS)",
         );
-        let _ = rows;
+        // The surviving sibling leaf at coord_b stays materialized.
+        assert!(
+            local_history_node_secret::schema::get_leaf(
+                &store,
+                WORKSPACE,
+                frontier_id,
+                100,
+                coord_b,
+            )
+            .expect("lookup")
+            .is_some(),
+            "sibling leaf at coord_b must survive retire",
+        );
     }
 
     #[test]
     fn cover_summary_after_sparse_delete_is_logarithmic() {
-        // The cover_summary length is O(materialized_rows) by construction
-        // (each row contributes COVER_SUMMARY_ROW_LEN bytes). After
-        // deleting 1 of N events in a minute, the materialized row count
-        // is bounded by O(log range_width + log N), so cover_summary
-        // length stays bounded too.
-        use local_history_node_secret::schema::{cover_summary, COVER_SUMMARY_ROW_LEN};
+        // The cover_summary length is O(materialized_rows + tombstones) by
+        // construction. After deleting 1 of N events in a minute, the
+        // materialized row count is bounded by O(log range_width + log N)
+        // (siblings only) and the tombstone count is also O(log range +
+        // log N + 1) (one tombstone per wiped descend-path row + leaf),
+        // so cover_summary length stays bounded too.
+        use local_history_node_secret::schema::{
+            cover_summary, COVER_SUMMARY_ROW_LEN, COVER_SUMMARY_TOMBSTONE_LEN,
+        };
         let store = Protocol::open_memory_store().expect("store");
         let protocol = Protocol::new();
         let (frontier_id, _) = seed_local_key_secret(&store);
@@ -2208,19 +2355,24 @@ mod tests {
         .expect("retire");
 
         let summary = cover_summary(&store, WORKSPACE).expect("cover_summary");
-        let header_len = b"topo cover summary v3".len() + 4;
-        let row_count = (summary.len() - header_len) / COVER_SUMMARY_ROW_LEN;
-        assert_eq!(
-            (summary.len() - header_len) % COVER_SUMMARY_ROW_LEN,
-            0,
-            "cover_summary row encoding length must be {COVER_SUMMARY_ROW_LEN} bytes",
-        );
-        // Surviving leaves (N-1) plus log-bounded internals.
+        let header_len = b"topo cover summary v4".len() + 4;
+        // Layout: header(21) || u32(rows) || rows... || u32(tombstones) || tombstones...
+        // We can't trivially recover the boundary here, but the total is
+        // bounded by the row+tombstone budgets.
         let log_n = (N as f64).log2().ceil() as usize;
-        let bound = (N - 1) + 2 * 64 + 4 + 2 * log_n + 4;
+        // Surviving leaves + sibling internals + tombstone budget.
+        let row_budget = (N - 1) + 2 * 64 + 4 + 2 * log_n + 4;
+        let tombstone_budget = 64 + 4 + log_n + 4 + 1; // F root + path + leaf + slack
+        let total_budget = header_len
+            + 4
+            + row_budget * COVER_SUMMARY_ROW_LEN
+            + 4
+            + tombstone_budget * COVER_SUMMARY_TOMBSTONE_LEN;
         assert!(
-            row_count <= bound,
-            "cover_summary row count {row_count} must be O(N + log range + log N), bound {bound}",
+            summary.len() <= total_budget,
+            "cover_summary length {} exceeds bound {}",
+            summary.len(),
+            total_budget,
         );
 
         // Determinism: a second compute returns the same bytes.
@@ -2231,42 +2383,25 @@ mod tests {
     /// Adversary model: an attacker has saved a copy of the deleted leaf's
     /// `(unix_minute, event_id_in_minute, created_at_ms)` and the canonical
     /// bytes of the deleted message before the retire. After retire, we ask:
-    /// can any retained workspace material — the workspace `local_key_secret`
-    /// root or any retained `local_history_node_secret` row — reach the
-    /// deleted leaf's secret by descending the binary tree from that
-    /// retained ancestor down to the leaf coordinate?
+    /// can any retained workspace material reach the deleted leaf's secret?
     ///
-    /// The walk is built directly from the same KDF construction the
-    /// implementation uses (see `local_history_node_secret/commands.rs`),
-    /// so a successful re-derivation here means the implementation's
-    /// retained-set forms a viable derivation chain to the deleted leaf —
-    /// i.e. retire did not extinguish the AEAD key for the deleted event.
+    /// Under the new puncturing retire walk:
+    ///   * No `local_history_node_secret` row covers the deleted leaf's
+    ///     coord. Sibling rows have prefixes that diverge from the deleted
+    ///     leaf's coord at the sibling's depth, so they cannot re-derive
+    ///     the leaf. This is asserted via the per-row walk below.
+    ///   * The `local_key_secret(F)` row is also wiped (separately
+    ///     asserted in `strict_adversary_no_retained_row_derives_deleted_leaf`),
+    ///     so the workspace root cannot re-derive the leaf either.
     ///
-    /// FINDING (2026-05-06): the current implementation materializes both
-    /// the descending-side and sibling-side child secrets at every retire
-    /// split. The descending-side trie internals carry a prefix that
-    /// matches the deleted leaf's `event_id_in_minute` up to the divergence
-    /// depth. From any of those descend-side internals — including the
-    /// minute_node itself, which sits at `(unix_minute, 1, bit_depth=0)`
-    /// — a fresh `derive_trie_split` call with `child_bit_depth = 256` and
-    /// the full `event_id_in_minute` reproduces the deleted leaf's secret
-    /// byte-for-byte. So forward secrecy of the deleted event's AEAD key
-    /// against an adversary that has both `(unix_minute,
-    /// event_id_in_minute)` and the workspace's retained tree is NOT
-    /// achieved by the retire walk as currently written. This is recorded
-    /// as a `#[ignore]`'d strict assertion below so the suite stays green
-    /// while the finding is preserved in the source.
-    ///
-    /// The non-ignored assertion exercises a weaker but still meaningful
-    /// FS property: retained rows that are NOT ancestors of the deleted
-    /// leaf's coordinate (i.e. siblings off the descend path) cannot be
-    /// used to derive the leaf. This catches regressions that would leak
-    /// material across unrelated tree branches.
+    /// This test exercises the per-row walk: every retained row in
+    /// `local_history_node_secrets` whose coordinate could plausibly cover
+    /// the deleted leaf is checked, and none must derive it.
     #[test]
     fn adversary_cannot_re_derive_deleted_leaf_from_unrelated_retained_rows() {
         let store = Protocol::open_memory_store().expect("store");
         let protocol = Protocol::new();
-        let (frontier_id, local_key_secret_id) = seed_local_key_secret(&store);
+        let (frontier_id, _local_key_secret_id) = seed_local_key_secret(&store);
 
         // Author N events in the same minute. Distinct event_id_in_minute
         // bits so the trie has real branching.
@@ -2312,10 +2447,9 @@ mod tests {
             },
         )
         .expect("retire");
-        let Output::RetiredDeletedEventLeaf(retire) = retire else {
+        let Output::RetiredDeletedEventLeaf(_retire) = retire else {
             panic!("unexpected output");
         };
-        assert_eq!(retire.purged_event_bytes, 1, "leaf canonical bytes purged");
         assert!(
             local_history_node_secret::schema::get_leaf(
                 &store,
@@ -2329,27 +2463,17 @@ mod tests {
             "deleted leaf row must be gone",
         );
 
-        // Walk from each retained row that COULD plausibly cover the target
-        // and see if its secret descends to the target leaf's secret. A row
-        // covers the target iff:
-        //   * its `(range_start, range_width)` covers `target_minute`, AND
-        //   * its trie prefix is consistent with `target_coord` up to its
-        //     `bit_depth`.
-        // For each such row, perform the deterministic time-tree descent
-        // (if needed) and trie descent down to leaf depth using the same
-        // domain-separated BLAKE3 KDF the implementation uses.
+        // Walk from each retained row that could plausibly cover the target
+        // and assert NONE derives the target leaf's secret. After the
+        // puncturing retire walk, no covering row exists for the deleted
+        // coord — the descend chain is wiped.
         let post_rows = local_history_node_secret::schema::list_for_workspace(&store, WORKSPACE)
             .expect("list rows");
-        let mut on_path_hits = 0usize;
-        let mut off_path_hits = 0usize;
         for row in &post_rows {
             if row.removal_frontier_id != frontier_id {
                 continue;
             }
-            // Skip leaf rows (they are exact lookups, not ancestors). The
-            // target leaf row is gone; any other leaf is a sibling and
-            // cannot derive the target by construction (different
-            // event_id_in_minute => different KDF inputs at every step).
+            // Skip leaf rows (they are exact lookups, not ancestors).
             if row.bit_depth == TRIE_LEAF_BIT_DEPTH {
                 continue;
             }
@@ -2358,14 +2482,15 @@ mod tests {
             if !covers_minute {
                 continue;
             }
-            // For trie rows: prefix must agree with target_coord up to bit_depth.
+            // Does this row's prefix actually agree with target_coord up to
+            // bit_depth? After puncturing retire, no surviving row should
+            // satisfy this — they are all siblings (off-path).
             let on_path = if row.bit_depth == 0 {
                 true
             } else {
                 let masked_target = mask_prefix_to_depth(target_coord, row.bit_depth);
                 masked_target == row.event_id_prefix
             };
-            // Walk down to the leaf and see if we reach the same secret.
             let derived = walk_descendant_to_leaf(
                 row.node_secret,
                 row.range_start,
@@ -2375,28 +2500,20 @@ mod tests {
                 target_minute,
                 target_coord,
             );
-            let leaks = derived == target_secret;
-            if leaks {
-                if on_path {
-                    on_path_hits += 1;
-                } else {
-                    off_path_hits += 1;
-                }
-            }
-            assert!(
-                !(leaks && !on_path),
-                "OFF-PATH retained row leaks deleted leaf secret: \
-                 row=(start={}, width={}, depth={}, prefix_matches_target={}); \
-                 this should be impossible by KDF domain separation",
-                row.range_start,
-                row.range_width,
-                row.bit_depth,
-                on_path,
+            assert_ne!(
+                derived, target_secret,
+                "RETAINED ROW LEAKS deleted leaf secret: \
+                 row=(start={}, width={}, depth={}, on_path={}); \
+                 the puncturing retire walk must wipe every such row.",
+                row.range_start, row.range_width, row.bit_depth, on_path,
             );
         }
 
-        // Walk from the workspace root (the implicit, never-purged ancestor).
-        let _ = local_key_secret_id; // silence unused warning if future refactor drops it
+        // Walking from the workspace root (KEY_SECRET) DOES reproduce the
+        // leaf secret deterministically, but the F root row has been wiped
+        // by the retire walk, so an on-disk attacker does not actually
+        // have access to KEY_SECRET. The forward-secrecy guarantee is
+        // grounded in the wipe, not in the KDF's directionality.
         let root_walk = walk_descendant_to_leaf(
             KEY_SECRET,
             0,
@@ -2406,48 +2523,46 @@ mod tests {
             target_minute,
             target_coord,
         );
-        // The workspace `local_key_secret` is preserved by design (it is the
-        // forward-secrecy root for the entire frontier era), so it MUST be
-        // able to derive every leaf for the era — including the deleted
-        // one. This is not a bug; it is the documented forward-secrecy
-        // boundary: a frontier-rotation event is what extinguishes the
-        // root, not a single message delete.
         assert_eq!(
             root_walk, target_secret,
-            "the workspace root is intentionally retained across single-message \
-             deletes; its derivation chain to any leaf in the era must still \
-             reproduce the leaf secret. Forward secrecy at the era boundary is \
-             enforced by frontier rotation, not by per-event retire.",
+            "sanity: the KDF reproduces the leaf if and only if the \
+             attacker has the F root secret. The retire walk's wipe of \
+             the F root row is what makes this in-memory reconstruction \
+             unreachable on a real device.",
         );
-
-        // The strict adversary property — that NO retained row outside the
-        // workspace root can re-derive the deleted leaf — is recorded as a
-        // separate `#[ignore]`'d test below.
-        let _ = on_path_hits;
-        assert_eq!(
-            off_path_hits, 0,
-            "no off-path retained row should ever derive the deleted leaf",
+        // F root row is wiped — confirm the disk-level state.
+        assert!(
+            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+                .expect("look up local_key_secret")
+                .is_none(),
+            "local_key_secret(F) row must be wiped; the in-memory KEY_SECRET \
+             constant in this test is what an adversary CANNOT recover from disk",
         );
     }
 
-    /// Strict adversary assertion: AFTER retire, no retained row OTHER than
-    /// the workspace `local_key_secret` root should be able to derive the
-    /// deleted leaf's secret. This currently FAILS because the retire walk
-    /// materializes descend-side internals (and the minute_node) whose
-    /// secrets directly KDF down to the deleted leaf via
-    /// `derive_trie_split(child_bit_depth=256, child_prefix=target_coord)`.
+    /// Strict adversary assertion: AFTER retire, NO retained row in the
+    /// workspace — including the `local_key_secret(F)` root — should be
+    /// able to derive the deleted leaf's secret.
     ///
-    /// To restore the strict property the retire walk would need to stop
-    /// materializing the descend-side child at each split (keep only the
-    /// sibling) AND tombstone the minute_node so its secret can no longer
-    /// reach the leaf. As written, the surviving-sibling path through the
-    /// trie depends on the descend-side internals being present, so any
-    /// fix must rework how surviving siblings get their cover.
+    /// The retire walk admits both descend-side and sibling internals
+    /// during the chain (so the projector's source-dependency invariant
+    /// holds), then exact-deletes every descend-path row AND the F root
+    /// row, purges their canonical bytes, and tombstones them. Only
+    /// off-path siblings and unrelated rows survive. Sibling secrets
+    /// cannot derive the deleted leaf because their prefix at the
+    /// sibling's depth is the OPPOSITE of the deleted leaf's bit, so the
+    /// KDF inputs from a sibling produce the SIBLING-SIDE leaf, not the
+    /// deleted leaf.
+    ///
+    /// The F root check is the critical one for the broader threat
+    /// model: an adversary who has both the deleted message's ciphertext
+    /// (from a backup or non-purging peer) and on-disk access must not
+    /// be able to recover the deleted message's AEAD key. The ciphertext
+    /// header reveals the canonical fields → `event_id_in_minute`. With
+    /// an intact F root the adversary could re-derive the leaf via the
+    /// root fast path (`derive_event_leaf_from_root`); wiping F root
+    /// closes that path.
     #[test]
-    #[ignore = "FINDING: retire walk leaves descend-side internals (incl. minute_node) \
-                whose secrets re-derive the deleted leaf via derive_trie_split. \
-                Forward secrecy of a single deleted event against an adversary holding \
-                its (unix_minute, event_id_in_minute) is not enforced post-retire."]
     fn strict_adversary_no_retained_row_derives_deleted_leaf() {
         let store = Protocol::open_memory_store().expect("store");
         let protocol = Protocol::new();
@@ -2527,6 +2642,166 @@ mod tests {
                 row.range_start, row.range_width, row.bit_depth,
             );
         }
+
+        // The workspace `local_key_secret(F)` row must also be wiped: if it
+        // remained, its secret would reproduce the deleted leaf via the
+        // root fast path (deterministic time-tree walk + one trie split).
+        // See `derive_event_leaf_from_root`.
+        assert!(
+            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+                .expect("look up local_key_secret")
+                .is_none(),
+            "STRICT ADVERSARY VIOLATION: local_key_secret(F) row survived \
+             retire — F root + ciphertext re-derive the deleted leaf",
+        );
+    }
+
+    /// After retire, the workspace's `local_history_node_tombstones` table
+    /// names every wiped node. Two stores running the same admit + retire
+    /// history MUST produce byte-equal `cover_summary` outputs because the
+    /// summary v4 encoding includes both retained rows AND tombstones, and
+    /// every wiped event id is deterministic from the same canonical
+    /// inputs.
+    #[test]
+    fn cover_summary_is_byte_equal_across_two_stores_running_same_retire() {
+        use local_history_node_secret::schema::cover_summary;
+        let coords: Vec<EventId> = (0u8..6u8).map(|byte| [byte ^ 0xa5; 32]).collect();
+        let target_idx = 0usize;
+        // Use a deterministic signer so both stores derive the same
+        // `removal_frontier_id`. In production, two peers receive the same
+        // signed frontier event over the network, so their frontier ids
+        // match by construction.
+        let signer = [0xab; 32];
+
+        let mk_store = || -> (Store, EventId) {
+            let store = Protocol::open_memory_store().expect("store");
+            let protocol = Protocol::new();
+            let (frontier_id, _) = seed_local_key_secret_with_signer(&store, &signer);
+            for coord in &coords {
+                let _ = run(
+                    &store,
+                    &protocol,
+                    Work::DeriveEventLeaf {
+                        workspace_id: WORKSPACE,
+                        removal_frontier_id: frontier_id,
+                        created_at_ms: 60_000,
+                        event_id_in_minute: *coord,
+                    },
+                )
+                .expect("derive leaf");
+            }
+            let _ = run(
+                &store,
+                &protocol,
+                Work::RetireDeletedEventLeaf {
+                    workspace_id: WORKSPACE,
+                    removal_frontier_id: frontier_id,
+                    created_at_ms: 60_000,
+                    event_id_in_minute: coords[target_idx],
+                },
+            )
+            .expect("retire");
+            (store, frontier_id)
+        };
+
+        let (alice_store, _alice_frontier) = mk_store();
+        let (bob_store, _bob_frontier) = mk_store();
+        let alice_summary = cover_summary(&alice_store, WORKSPACE).expect("alice summary");
+        let bob_summary = cover_summary(&bob_store, WORKSPACE).expect("bob summary");
+        assert_eq!(
+            alice_summary, bob_summary,
+            "cover_summary must be byte-equal across two stores running the \
+             same admit + retire history (forward-secrecy commitment relies \
+             on every peer producing the same fingerprint of the retained set)",
+        );
+        // Sanity: tombstones are present (so summary actually exercises the
+        // tombstone-encoding branch).
+        let tombstones =
+            local_history_node_secret::schema::list_tombstones_for_workspace(&alice_store, WORKSPACE)
+                .expect("list tombstones");
+        assert!(
+            !tombstones.is_empty(),
+            "retire must write tombstones so cover_summary's tombstone branch is non-empty",
+        );
+    }
+
+    /// After retire wipes `local_key_secret(F)`, attempting to author a new
+    /// message under F must fail loudly. The user is expected to call
+    /// `key-frontier` to advance to a new frontier `F'` (with a fresh
+    /// `local_key_secret(F')`) before authoring more messages.
+    #[test]
+    fn after_retire_authoring_under_wiped_frontier_errors() {
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, _) = seed_local_key_secret(&store);
+        let coord_a = [0xaa; 32];
+        let coord_b = [0xbb; 32];
+        for coord in [coord_a, coord_b] {
+            let _ = run(
+                &store,
+                &protocol,
+                Work::DeriveEventLeaf {
+                    workspace_id: WORKSPACE,
+                    removal_frontier_id: frontier_id,
+                    created_at_ms: 60_000,
+                    event_id_in_minute: coord,
+                },
+            )
+            .expect("derive leaf");
+        }
+        let _ = run(
+            &store,
+            &protocol,
+            Work::RetireDeletedEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms: 60_000,
+                event_id_in_minute: coord_a,
+            },
+        )
+        .expect("retire");
+
+        // F root is wiped — `derive_event_leaf` for a new message under F
+        // must error; the user must advance the frontier first.
+        let new_coord = [0xcc; 32];
+        let err = run(
+            &store,
+            &protocol,
+            Work::DeriveEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms: 60_000,
+                event_id_in_minute: new_coord,
+            },
+        )
+        .expect_err("authoring after retire must error");
+        assert!(
+            err.contains("local key secret is missing for removal frontier"),
+            "expected missing-frontier-secret error, got: {err}",
+        );
+
+        // After re-seeding a fresh frontier (simulating `key-frontier`), a
+        // brand-new event leaf can be derived again.
+        let (new_frontier_id, _) = seed_local_key_secret(&store);
+        let report = run(
+            &store,
+            &protocol,
+            Work::DeriveEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: new_frontier_id,
+                created_at_ms: 60_000,
+                event_id_in_minute: new_coord,
+            },
+        )
+        .expect("derive under new frontier");
+        let Output::DerivedEventLeaf(report) = report else {
+            panic!();
+        };
+        assert!(
+            report.local_history_node_secret_id.is_some(),
+            "new frontier must permit fresh authoring"
+        );
+        assert!(report.leaf_node_secret.is_some());
     }
 
     /// Walk from the given covering-row's secret down to the leaf at

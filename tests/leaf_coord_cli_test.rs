@@ -208,7 +208,7 @@ fn hex_nibble(byte: u8) -> u8 {
 }
 
 #[test]
-fn cli_delete_does_not_retire_minute_node() {
+fn cli_delete_wipes_minute_node_along_descend_path() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Delete", "alice", "alice-laptop");
@@ -227,16 +227,25 @@ fn cli_delete_does_not_retire_minute_node() {
     assert_success(topo(&["--db", &db, "delete-message", &workspace_id, "#1"]));
 
     let post = keys_value(&db, &workspace_id);
-    // Post-delete: surviving leaf stays. Time-tree internals + minute_node
-    // siblings are now materialized, but the surviving leaf is the only
-    // remaining trie leaf.
+    // Post-delete: surviving leaf stays. The puncturing retire walk wipes
+    // every node on the descend path from F root to the deleted leaf —
+    // including the minute_node — so no row at `(start=100, width=1,
+    // bit_depth=0)` exists post-retire. Only off-path SIBLINGS remain.
     assert_eq!(line_value(&post, "local_history_leaves"), "1");
+    assert_eq!(
+        line_value(&post, "local_history_minute_nodes"),
+        "0",
+        "minute_node for unix_minute=100 must be WIPED by retire (forward secrecy):\n{post}"
+    );
+    // Tombstones for the wiped path are present.
     assert!(
-        post.lines().any(|line| line.contains("history_node:")
-            && line.contains("start=100")
-            && line.contains("width=1")
-            && line.contains("bit_depth=0")),
-        "minute_node for unix_minute=100 must be materialized after delete:\n{post}"
+        post.lines().any(|line| line.starts_with("local_history_node_tombstones:")),
+        "post-delete keys output must list tombstone count:\n{post}"
+    );
+    assert_ne!(
+        line_value(&post, "local_history_node_tombstones"),
+        "0",
+        "retire must write tombstones:\n{post}"
     );
 
     // The other message in the same minute still decodes.
@@ -414,14 +423,12 @@ fn cli_delete_file_retires_its_leaf_without_touching_message_leaf() {
         "1",
         "file leaf must be retired, message leaf must remain:\n{post}"
     );
-    // The retire walk materializes the minute_node and its sibling at
-    // unix_minute=101 (both are `(width=1, bit_depth=0)` rows).
-    assert!(
-        post.lines().any(|line| line.contains("history_node:")
-            && line.contains("start=100")
-            && line.contains("width=1")
-            && line.contains("bit_depth=0")),
-        "minute_node for unix_minute=100 must be materialized after delete:\n{post}"
+    // The puncturing retire walk wipes the minute_node along with the rest
+    // of the descend path. No `(width=1, bit_depth=0)` row remains.
+    assert_eq!(
+        line_value(&post, "local_history_minute_nodes"),
+        "0",
+        "minute_node for unix_minute=100 must be WIPED by retire (descend-path FS):\n{post}"
     );
 
     // Message text still listed.
@@ -475,14 +482,12 @@ fn cli_delete_message_cascades_to_attached_file_leaf() {
         "0",
         "both message and file leaves must be retired by the cascade:\n{post}"
     );
-    // The retire walks materialize the minute_node so future sends can
-    // descend from a closer ancestor than the frontier root.
-    assert!(
-        post.lines().any(|line| line.contains("history_node:")
-            && line.contains("start=100")
-            && line.contains("width=1")
-            && line.contains("bit_depth=0")),
-        "minute_node for unix_minute=100 must be materialized after cascade:\n{post}"
+    // Each retire wipes the minute_node along with the descend chain. The
+    // minute_node row is therefore gone after the cascade.
+    assert_eq!(
+        line_value(&post, "local_history_minute_nodes"),
+        "0",
+        "minute_node must be WIPED after cascade retire (descend-path FS):\n{post}"
     );
 
     // Both projection rows are gone.
