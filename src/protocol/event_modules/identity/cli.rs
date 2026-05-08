@@ -855,17 +855,24 @@ fn connect_invite_with_initial_records(
     link: &str,
     records: Vec<EventRecord>,
 ) -> Result<connection_types::ConnectReport, String> {
+    // Read the running daemon's bound listener (if any) from the core-owned
+    // lock file so the request body can advertise it to the peer. CLI
+    // processes that run alongside no daemon get `None` here, which is the
+    // correct signal for "do not advertise a listener route".
+    let from_listen_addr = crate::core::daemon::current_listen_addr(&context.db_path)?;
     let output = connection_worker::run(
         &context.store,
         &context.protocol,
         if records.is_empty() {
             connection_worker::Work::ConnectInvite {
                 invite: link.to_string(),
+                from_listen_addr,
             }
         } else {
             connection_worker::Work::ConnectInviteWithInitialEvents {
                 invite: link.to_string(),
                 records,
+                from_listen_addr,
             }
         },
     )?;

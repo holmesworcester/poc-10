@@ -52,10 +52,17 @@ const READY_BATCH: usize = 4096;
 pub enum Work {
     ConnectInvite {
         invite: String,
+        /// Caller-provided steady-state listen address to advertise inside
+        /// the request body. CLI dispatch reads `core::daemon::current_listen_addr`
+        /// from the lock file to populate this; daemons start no `Work` with a
+        /// `Some` here because they would dial peers from their own worker,
+        /// and one-shot CLI accepts on a host without a daemon pass `None`.
+        from_listen_addr: Option<SocketAddr>,
     },
     ConnectInviteWithInitialEvents {
         invite: String,
         records: Vec<EventRecord>,
+        from_listen_addr: Option<SocketAddr>,
     },
     Serve {
         listen: SocketAddr,
@@ -94,10 +101,15 @@ where
     R: EventRegistry,
 {
     match work {
-        Work::ConnectInvite { invite } => connect_transport_invite(store, registry, invite),
-        Work::ConnectInviteWithInitialEvents { invite, records } => {
-            connect_identity_invite(store, registry, invite, records)
-        }
+        Work::ConnectInvite {
+            invite,
+            from_listen_addr,
+        } => connect_transport_invite(store, registry, invite, from_listen_addr),
+        Work::ConnectInviteWithInitialEvents {
+            invite,
+            records,
+            from_listen_addr,
+        } => connect_identity_invite(store, registry, invite, records, from_listen_addr),
         Work::Serve {
             listen,
             accept_count,
@@ -109,11 +121,11 @@ fn connect_transport_invite<R>(
     store: &Store,
     registry: &R,
     invite_link: String,
+    from_listen_addr: Option<SocketAddr>,
 ) -> Result<Output, String>
 where
     R: EventRegistry,
 {
-    let from_listen_addr = schema::local_listen_addr(store)?;
     let output =
         connection_request::commands::create_with_local(store, &invite_link, from_listen_addr)
             .map_err(|err| format!("create connection request: {err}"))?;
@@ -150,6 +162,7 @@ fn connect_identity_invite<R>(
     registry: &R,
     invite_link: String,
     initial_records: Vec<EventRecord>,
+    from_listen_addr: Option<SocketAddr>,
 ) -> Result<Output, String>
 where
     R: EventRegistry,
@@ -160,26 +173,22 @@ where
     }
     let local = ensure_local_invite_acceptance(store, registry, &parsed_invite)?;
 
-    // Author a connection_request advertising this acceptor's daemon listener
-    // and send it after the invite-bootstrap batch on the same stream. The
-    // accept-side (alice) records the advertised listener via
+    // Author a connection_request and send it after the invite-bootstrap batch
+    // on the same stream. The accept-side records the advertised listener via
     // `remember_advertised_listener`, which is what lets her periodic outbound
-    // sync dial the acceptor back after this bootstrap stream closes. The
-    // local transport_target row is also written so this acceptor's daemon can
-    // dial alice directly when alice's invite listener address is the same as
-    // her steady-state daemon listener (the common case for long-lived peers).
-    let from_listen_addr = schema::local_listen_addr(store)?;
+    // sync dial the acceptor back after this stream closes. A local
+    // transport_target row is also written when the caller supplies a
+    // listener (i.e., a daemon is running) so the acceptor's daemon can dial
+    // the host directly.
     let request_output =
         connection_request::commands::create_with_local(store, &invite_link, from_listen_addr)
             .map_err(|err| format!("create connection request: {err}"))?;
     let (request, _) = pipeline::run(store, registry, request_output)
         .map_err(|err| format!("record connection request: {err}"))?;
     if from_listen_addr.is_some() {
-        // Only persist a local route when this acceptor is running as a
-        // daemon. A one-shot CLI accept (no daemon) can't reuse the route
-        // anyway, and skipping the row keeps `two_endpoints_sync_multiple`
-        // and other tests free of stale routes pointing at finite invite
-        // listeners that exit immediately after acceptance.
+        // Skip when no daemon is running locally — a one-shot CLI accept
+        // can't reuse the route, and persisting one risks pointing at a
+        // finite invite listener that exits immediately after acceptance.
         store
             .insert_table_rows(vec![schema::transport_target_row(
                 request.connection_id,
@@ -319,6 +328,18 @@ fn remember_advertised_listener(store: &Store, request_bytes: &[u8]) -> Result<(
     let local = local_endpoint(store)?;
     let request_id = event_id(request_bytes);
     let connection_id = types::connection_id(&request_id, &local.endpoint);
+    // Drop quietly when the request did not project. Admission can mark a
+    // request `Blocked` if its invite-secret dependency has not yet arrived,
+    // in which case no `connection.connections` row exists and writing a
+    // transport target here would orphan that route — the next `sync_tick`
+    // would then iterate transport targets, fail to resolve the connection,
+    // and stop the daemon. Connection requests are local protocol state, not
+    // shared facts; the requester will keep retrying until both sides have
+    // every dependency, so the safe behavior is to skip route persistence
+    // for un-admitted requests and let a future delivery write the row.
+    if schema::remote_endpoint(store, connection_id).is_err() {
+        return Ok(());
+    }
     if endpoint_has_routed_connection(store, &request.from_endpoint)? {
         return Ok(());
     }
