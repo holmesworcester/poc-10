@@ -136,40 +136,37 @@ impl SyncIndex {
         state.dependency_closure_entries(store, roots)
     }
 
-    fn start_needs_summary(
+    fn start_summary_if_changed(
         &self,
         connection_id: connection::types::ConnectionId,
         range: TimestampRange,
-    ) -> Result<bool, String> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| "sync index mutex poisoned".to_string())?;
+        compute: impl FnOnce() -> Result<RangeSummary, String>,
+    ) -> Result<Option<RangeSummary>, String> {
         let key = start_snapshot_key(connection_id, range);
-        Ok(state
-            .start_snapshots
-            .get(&key)
-            .map(|snapshot| snapshot.generation != state.generation)
-            .unwrap_or(true))
-    }
+        let generation = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "sync index mutex poisoned".to_string())?;
+            if matches!(
+                state.start_snapshots.get(&key),
+                Some(snapshot) if snapshot.generation == state.generation
+            ) {
+                return Ok(None);
+            }
+            state.generation
+        };
 
-    fn mark_start_summary(
-        &self,
-        connection_id: connection::types::ConnectionId,
-        range: TimestampRange,
-        summary: RangeSummary,
-    ) -> Result<bool, String> {
+        let summary = compute()?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| "sync index mutex poisoned".to_string())?;
-        let key = start_snapshot_key(connection_id, range);
         let changed = state
             .start_snapshots
             .get(&key)
             .map(|snapshot| snapshot.summary != summary)
             .unwrap_or(true);
-        let generation = state.generation;
         state.start_snapshots.insert(
             key,
             StartSnapshot {
@@ -177,7 +174,7 @@ impl SyncIndex {
                 summary,
             },
         );
-        Ok(changed)
+        Ok(changed.then_some(summary))
     }
 }
 
@@ -404,13 +401,11 @@ fn start(
         if context.workspace_ids.is_empty() {
             continue;
         }
-        if !index.start_needs_summary(connection_id, range)? {
+        let Some(summary) =
+            index.start_summary_if_changed(connection_id, range, || context.summary(range))?
+        else {
             continue;
-        }
-        let summary = context.summary(range)?;
-        if !index.mark_start_summary(connection_id, range, summary)? {
-            continue;
-        }
+        };
         let output = commands::start_for_connection_with_summary(connection_id, range, summary)?;
         events.extend(output.events);
         sent_events += output.value.sent_events;
