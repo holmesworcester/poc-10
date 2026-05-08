@@ -132,6 +132,42 @@ per-leaf tombstones over time; pruning that debris requires either:
      fresh subtree, leaving the old debris tombstoned in a frontier
      nobody authors under anymore.
 
+### Why keep the time axis at all (under mutable TTL)
+
+The 2-axis tree (time tree + within-minute trie) is preserved despite
+not exploiting whole-minute retirement under mutable TTLs. The
+arithmetic shows the time axis is **structural overhead** in the
+current mode:
+
+  * Per-retirement walk depth = log₂(active_minutes) +
+    log₂(messages_per_minute) = log₂(total_active_events). The 2-axis
+    split *redistributes* depth between the time and trie axes; it
+    does **not** reduce total depth versus a single trie of the same
+    N.
+  * Cost per retirement scales the same: ~log₂(N) materialized
+    sibling rows + tombstones. Concrete bytes are ~0.5 KB × log₂(N)
+    per retirement.
+
+The reason to keep it is **option preservation**:
+
+  * A fixed-TTL workspace mode (no admin-mutable setting; the TTL is
+    set once at workspace creation and immutable) makes
+    whole-minute retirement viable: one tombstone per minute_node
+    collapses every descendant leaf in that minute, regardless of how
+    many messages were in it. The reduction is from O(messages) to
+    O(1) per retired minute.
+  * Without a time axis baked into the tree, switching to a
+    fixed-TTL mode later would require migrating every existing
+    workspace's tree shape. Keeping the time axis preserves the
+    option without a migration.
+
+So the design choice for this branch is "carry slightly more code now
+for the option to claw back per-retirement cost in a future fixed-TTL
+mode." If poc-8 commits to mutable TTLs forever, the time axis is
+dead weight and a follow-up could simplify to a single trie keyed on
+event_id alone — but that's a one-way door and not worth taking
+without a confirmed product decision against fixed TTLs.
+
 ### Latest-setting trust gap (recap)
 
 Authors pick which admitted setting to reference. A malicious peer can
