@@ -153,7 +153,14 @@ impl SyncIndex {
         self.has_event(event_id)
     }
 
-    fn catch_up(&self, store: &Store) -> Result<(), String> {
+    /// Catch the in-memory index up from durable timestamp-index rows.
+    ///
+    /// This is the same scan `prepare_index_for_response` runs at the
+    /// start of every sync tick. Exposing it publicly lets the
+    /// `sync-status` CLI command fold an out-of-band query through the
+    /// same path the daemon uses, so a CLI inspection that runs while
+    /// no daemon is up reflects the durable state of the workspace.
+    pub fn catch_up(&self, store: &Store) -> Result<(), String> {
         let entries = event_schema::event_index_entries_in_timestamp_range(store, 0, u64::MAX)
             .map_err(|err| format!("load sync index feed: {err}"))?;
         for entry in entries {

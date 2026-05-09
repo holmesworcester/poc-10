@@ -265,15 +265,22 @@ fn run_sync_status_command(
     let index = context.protocol.sync_index();
     // Catch the in-memory index up from durable rows so a fresh CLI
     // invocation (no running daemon) sees the same state the daemon
-    // would after one `sync_tick` step.
-    let _ = crate::workers::sync::run(
+    // would after one `sync_tick` step. Then run the negentropy purge
+    // drainer so pending purge rows are applied to the index — that
+    // way `root_fingerprint` reflects the post-purge state on a
+    // CLI-only inspection, not just the post-purge state on a
+    // running daemon.
+    index
+        .catch_up(&context.store)
+        .map_err(|err| format!("catch up sync index: {err}"))?;
+    let _ = crate::workers::negentropy_purge_drainer::run(
         &context.store,
         index,
-        crate::workers::sync::Work::DrainIndex {
+        crate::workers::negentropy_purge_drainer::Work::Drain {
             limit: usize::MAX,
         },
     )
-    .map_err(|err| format!("catch up sync index: {err}"))?;
+    .map_err(|err| format!("drain negentropy purges: {err}"))?;
     let summary = index.root_summary()?;
     let count = index.indexed_event_count()?;
     let pending = event_modules::sync::schema::pending_purge_count(&context.store)
