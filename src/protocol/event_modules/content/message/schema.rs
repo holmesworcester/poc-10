@@ -127,6 +127,37 @@ pub fn list_sealed(store: &Store, limit: usize) -> Result<Vec<SealedMessageRow>,
         .collect()
 }
 
+/// Count sealed message rows scoped to one workspace. Sealed rows are
+/// the receive-side projection; opening one to a `MessageRow` requires
+/// the matching local key material. The CLI's `messages` listing folds
+/// sealed + opened rows together, so callers building a "live message"
+/// status display should sum this count with `count_for_workspace` to
+/// get the same total.
+pub fn count_sealed_for_workspace(
+    store: &Store,
+    workspace_id: EventId,
+) -> Result<usize, String> {
+    store
+        .table_rows_with_key_prefix(SEALED_MESSAGES, &workspace_id, usize::MAX)
+        .map(|rows| rows.len())
+        .map_err(|err| format!("count sealed messages: {err}"))
+}
+
+/// Iterate sealed-message rows within one workspace. Surfaces the
+/// per-row `created_at_ms` so a status view can count rows whose
+/// authored minute falls below a deletion floor.
+pub fn list_sealed_for_workspace(
+    store: &Store,
+    workspace_id: EventId,
+) -> Result<Vec<SealedMessageRow>, String> {
+    store
+        .table_rows_with_key_prefix(SEALED_MESSAGES, &workspace_id, usize::MAX)
+        .map_err(|err| format!("load sealed messages: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_sealed_message_row(&key, &value))
+        .collect()
+}
+
 pub fn message_tombstone_row(
     workspace_id: EventId,
     message_id: EventId,
