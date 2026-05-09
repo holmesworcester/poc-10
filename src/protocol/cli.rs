@@ -27,6 +27,7 @@ use crate::workers::DaemonWorkerContext;
 const CLOCK_USAGE: &str = "clock [set TIMESTAMP|advance DELTA|clear]";
 const COUNT_USAGE: &str = "count";
 const STATUS_USAGE: &str = "status";
+const SYNC_STATUS_USAGE: &str = "sync-status";
 
 pub struct Context {
     pub db_path: std::path::PathBuf,
@@ -111,6 +112,7 @@ pub fn commands() -> Vec<CliCommand<Context>> {
         clock_command(),
         count_command("count", COUNT_USAGE),
         count_command("status", STATUS_USAGE),
+        sync_status_command(),
     ]);
     out
 }
@@ -230,4 +232,64 @@ fn clock_output(store: &Store) -> Result<CliOutput, String> {
 
 fn parse_u64(value: &str) -> Result<u64, String> {
     value.parse::<u64>().map_err(|_| CLOCK_USAGE.to_string())
+}
+
+/// Inspect the in-memory negentropy `SyncIndex` and the durable
+/// pending-purge queue.
+///
+/// Returned lines:
+///   * `indexed_events: <usize>` — number of admitted ids in the index
+///   * `root_count: <u64>` — total ids contributing to the root summary
+///   * `root_fingerprint: <hex>` — XOR-fold of per-id fingerprints
+///   * `pending_purges: <usize>` — queued rows the drainer has not run on
+///
+/// Tests for the negentropy purge drainer assert root_fingerprint
+/// equality across two peers and zero pending_purges after a daemon
+/// tick. The catch-up call mirrors `prepare_index_for_response` so a
+/// CLI invocation outside the daemon sees the same index state the
+/// daemon would.
+fn sync_status_command() -> CliCommand<Context> {
+    CliCommand {
+        name: "sync-status",
+        usage: SYNC_STATUS_USAGE,
+        help: "Print the in-memory negentropy index size, root summary, and pending-purge queue size.",
+        run: run_sync_status_command,
+    }
+}
+
+fn run_sync_status_command(
+    context: &mut Context,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, SYNC_STATUS_USAGE)?;
+    let index = context.protocol.sync_index();
+    // Catch the in-memory index up from durable rows so a fresh CLI
+    // invocation (no running daemon) sees the same state the daemon
+    // would after one `sync_tick` step.
+    let _ = crate::workers::sync::run(
+        &context.store,
+        index,
+        crate::workers::sync::Work::DrainIndex {
+            limit: usize::MAX,
+        },
+    )
+    .map_err(|err| format!("catch up sync index: {err}"))?;
+    let summary = index.root_summary()?;
+    let count = index.indexed_event_count()?;
+    let pending = event_modules::sync::schema::pending_purge_count(&context.store)
+        .map_err(|err| format!("count pending purges: {err}"))?;
+    Ok(CliOutput::lines(vec![
+        format!("indexed_events: {count}"),
+        format!("root_count: {}", summary.count),
+        format!("root_fingerprint: {}", hex_bytes(&summary.fingerprint)),
+        format!("pending_purges: {pending}"),
+    ]))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
