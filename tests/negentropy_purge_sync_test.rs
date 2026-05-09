@@ -345,49 +345,43 @@ fn cli_negentropy_asymmetric_purge_alice_does_not_readmit_from_bob() {
     );
 
     // Drive a follow-up sync round by waiting and re-querying. The
-    // SPEC says alice's index should NOT re-admit the purged ids; this
-    // test pins down the OBSERVED behavior (re-admission does happen)
-    // so the suite stays green while flagging the bug for triage.
-    //
-    // The empty content-side state (content_event_count == 0) does
-    // NOT hold post-sync either: alice's projection pipeline accepts
-    // bob's still-live ids and re-creates the message rows, even
-    // though alice's clock would have expired them locally.
+    // admission gate (`content::admission`) drops bob's re-deliveries of
+    // alice's purged message ids before they can re-enter EVENTS or the
+    // SyncIndex, so the post-sync state must equal the post-purge state
+    // byte-for-byte.
     thread::sleep(Duration::from_millis(1500));
     let stable_alice = sync_status(&alice);
     let stable_alice_count: u64 = line_value(&stable_alice, "indexed_events")
         .parse()
         .expect("stable count");
+    let stable_alice_fp = line_value(&stable_alice, "root_fingerprint");
     assert_eq!(
         line_value(&stable_alice, "pending_purges"),
         "0",
         "queue must remain drained across the follow-up sync round"
     );
 
-    // OBSERVED-BUG assertion: re-admission of purged ids from a
-    // lagging-clock peer is currently possible. We do NOT assert
-    // `stable == post_alice_count`; we instead assert the count is
-    // monotone (never goes BELOW the post-purge value) and document
-    // any growth as the bug surface area.
-    assert!(
-        stable_alice_count >= post_alice_count,
-        "alice's indexed_events must not drop below the post-purge value: \
+    // Strict regression: the asymmetric-purge cycle is closed. The gate
+    // drops bob's re-deliveries silently, so neither the indexed count
+    // nor the root fingerprint may move from the post-purge baseline.
+    assert_eq!(
+        stable_alice_count, post_alice_count,
+        "alice must not re-admit any purged ids from bob: \
          post={post_alice_count}, stable={stable_alice_count}"
     );
-    if stable_alice_count > post_alice_count {
-        // Re-admission happened. Pin the magnitude to "exactly the 2
-        // ids alice purged" so a future fix that prevents re-admission
-        // makes this branch dead and the test becomes a stricter
-        // regression test once the production code is patched. Until
-        // then, the test stays informational.
-        eprintln!(
-            "OBSERVED BUG: alice re-admitted {} purged id(s) from bob across a sync round; \
-             post-purge index count was {}, post-sync count is {}.",
-            stable_alice_count - post_alice_count,
-            post_alice_count,
-            stable_alice_count
-        );
-    }
+    assert_eq!(
+        stable_alice_fp, post_alice_fp,
+        "alice's root fingerprint must stay byte-identical across the \
+         follow-up sync round; any change means a purged id was re-admitted:\n\
+         post={post_alice_fp}\nstable={stable_alice_fp}"
+    );
+    // Content read-model must also stay empty — the gate prevents the
+    // sealed/messages projection from re-creating rows for purged ids.
+    assert_eq!(
+        content_event_count(&alice, &workspace_id),
+        "0",
+        "content events must stay at 0 after the follow-up sync round"
+    );
 }
 
 // ---------------------------------------------------------------------------

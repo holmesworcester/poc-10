@@ -7,12 +7,13 @@
 
 use crate::core::store::{Schema, Store, TableName, TableRow};
 use crate::protocol::event_modules::types::EventId;
+use crate::protocol::event_modules::worker::AdmitDecision;
 use crate::protocol::wire::{Reader, Writer};
 
 use super::codec;
 use super::types::{
-    MessageCiphertext, MessageEvent, MessagePlaintext, MessageRow, MESSAGE_CIPHERTEXT_BYTES,
-    MESSAGE_TEXT_BYTES,
+    unix_minute_for, MessageCiphertext, MessageEvent, MessagePlaintext, MessageRow,
+    EXPIRES_NEVER, MESSAGE_CIPHERTEXT_BYTES, MESSAGE_TEXT_BYTES, UNIX_MINUTE_MS,
 };
 
 pub const MESSAGES: TableName = TableName::new("content.messages");
@@ -156,6 +157,41 @@ pub fn list_sealed_for_workspace(
         .into_iter()
         .map(|(key, value)| decode_sealed_message_row(&key, &value))
         .collect()
+}
+
+/// Receive-side admission gate for signed message events.
+///
+/// Runs in the common pipeline's `drain_canonical_in` step before storage,
+/// so message bytes whose id is already tombstoned (a previous TTL expiry or
+/// author deletion has fired) never re-enter `EVENTS` or the in-memory
+/// admitted-event index. If the message's stamped `expires_at_minute` is
+/// past the local logical clock, the gate writes a tombstone row directly
+/// and drops the bytes; this catches re-deliveries after a previous local
+/// expiry, and replaces the projector's old `is_expired_at_receive` branch
+/// (which fired too late, after the bytes were already stored).
+pub fn admit_check_received(store: &Store, bytes: &[u8]) -> Result<AdmitDecision, String> {
+    let envelope = codec::decode_signed(bytes)?;
+    let event = codec::decode(&envelope.payload)?;
+    let event_id = crate::protocol::event_modules::types::event_id(bytes);
+    if message_tombstone_exists(store, event.workspace_id, event_id)? {
+        return Ok(AdmitDecision::Drop);
+    }
+    if event.expires_at_minute == EXPIRES_NEVER {
+        return Ok(AdmitDecision::Admit);
+    }
+    let Some(now_ms) = crate::core::logical_clock::logical_time(store)? else {
+        return Ok(AdmitDecision::Admit);
+    };
+    if event.expires_at_minute >= now_ms / UNIX_MINUTE_MS {
+        return Ok(AdmitDecision::Admit);
+    }
+    let row = message_tombstone_row(
+        event.workspace_id,
+        event_id,
+        event.author_user_id,
+        unix_minute_for(event.created_at_ms),
+    );
+    Ok(AdmitDecision::WriteRowsAndDrop(vec![row]))
 }
 
 pub fn message_tombstone_row(
@@ -337,4 +373,136 @@ fn encode_sealed_value(signer_endpoint_shared_id: EventId, event: &MessageEvent)
     out.raw(&event.nonce);
     out.raw(&event.ciphertext);
     out.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::logical_clock;
+    use crate::protocol::event_modules::types::event_id;
+    use crate::protocol::Protocol;
+
+    use super::*;
+
+    /// Build a signed message canonical record. The bytes are *not* admitted
+    /// to EVENTS — the gate runs before storage, so the tests assert the
+    /// gate's decision against bytes alone.
+    fn signed_message_bytes(
+        workspace_id: [u8; 32],
+        author_user_id: [u8; 32],
+        created_at_ms: u64,
+        expires_at_minute: u64,
+    ) -> Vec<u8> {
+        let inner = MessageEvent {
+            workspace_id,
+            created_at_ms,
+            author_user_id,
+            removal_frontier_id: [30; 32],
+            local_history_node_secret_id: [40; 32],
+            expires_at_minute,
+            disappearing_setting_id: workspace_id,
+            nonce: [0; 24],
+            ciphertext: [0; MESSAGE_CIPHERTEXT_BYTES],
+        };
+        let payload = codec::encode(&inner);
+        let envelope = codec::sign([8; 32], &[7; 32], payload);
+        codec::encode_signed(&envelope)
+    }
+
+    #[test]
+    fn admit_passes_message_with_no_tombstone_and_no_clock() {
+        let store = Protocol::open_memory_store().expect("store");
+        let bytes = signed_message_bytes([1; 32], [2; 32], 0, EXPIRES_NEVER);
+        let decision = admit_check_received(&store, &bytes).expect("admit");
+        assert_eq!(decision, AdmitDecision::Admit);
+    }
+
+    #[test]
+    fn admit_drops_message_with_existing_tombstone_silently() {
+        let store = Protocol::open_memory_store().expect("store");
+        let workspace_id = [7; 32];
+        let author_user_id = [3; 32];
+        let bytes = signed_message_bytes(workspace_id, author_user_id, 0, EXPIRES_NEVER);
+        let id = event_id(&bytes);
+
+        // Pre-write the tombstone exactly as the disappearing-minute worker
+        // or content_purge worker would.
+        store
+            .insert_table_rows(vec![message_tombstone_row(workspace_id, id, author_user_id, 0)])
+            .expect("insert tombstone");
+
+        let decision = admit_check_received(&store, &bytes).expect("admit");
+        assert_eq!(decision, AdmitDecision::Drop);
+
+        // EVENTS must remain unchanged: the canonical bytes were not
+        // inserted by the gate, and no projector ran.
+        assert!(
+            crate::protocol::event_modules::schema::event_bytes(&store, &id)
+                .expect("event bytes")
+                .is_none(),
+            "EVENTS must stay empty when the gate drops"
+        );
+        // The pre-existing tombstone must still be the only one.
+        let tombstones =
+            list_message_tombstones_for_workspace(&store, workspace_id).expect("list");
+        assert_eq!(tombstones.len(), 1);
+    }
+
+    #[test]
+    fn admit_drops_expired_at_receive_message_at_admission() {
+        let store = Protocol::open_memory_store().expect("store");
+        let workspace_id = [9; 32];
+        let author_user_id = [4; 32];
+        let created_at_ms = 100 * UNIX_MINUTE_MS;
+        let bytes = signed_message_bytes(workspace_id, author_user_id, created_at_ms, 101);
+        let id = event_id(&bytes);
+
+        // Pin the local clock past the message's stamped expiry.
+        logical_clock::set_logical_time(&store, 102 * UNIX_MINUTE_MS).expect("set clock");
+
+        let decision = admit_check_received(&store, &bytes).expect("admit");
+        let rows = match decision {
+            AdmitDecision::WriteRowsAndDrop(rows) => rows,
+            other => panic!("expected WriteRowsAndDrop, got {other:?}"),
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].table, MESSAGE_TOMBSTONES);
+
+        // Apply the gate's row writes (drain_canonical_in does this in the
+        // same transaction). After the gate's tombstone is in place, the
+        // EVENTS row must still be absent.
+        store.insert_table_rows(rows).expect("insert tombstone");
+        assert!(
+            crate::protocol::event_modules::schema::event_bytes(&store, &id)
+                .expect("event bytes")
+                .is_none(),
+            "EVENTS must stay empty when the gate drops"
+        );
+        // A subsequent admit attempt now hits the existing-tombstone branch.
+        let again = admit_check_received(&store, &bytes).expect("admit again");
+        assert_eq!(again, AdmitDecision::Drop);
+    }
+
+    #[test]
+    fn admit_passes_finite_expiry_message_when_clock_is_before_expiry() {
+        let store = Protocol::open_memory_store().expect("store");
+        let workspace_id = [11; 32];
+        let author_user_id = [5; 32];
+        let created_at_ms = 100 * UNIX_MINUTE_MS;
+        // Stamped expiry = 105; clock = 102 -> not expired yet.
+        let bytes = signed_message_bytes(workspace_id, author_user_id, created_at_ms, 105);
+        logical_clock::set_logical_time(&store, 102 * UNIX_MINUTE_MS).expect("set clock");
+        let decision = admit_check_received(&store, &bytes).expect("admit");
+        assert_eq!(decision, AdmitDecision::Admit);
+    }
+
+    #[test]
+    fn admit_passes_never_expire_message_at_any_clock() {
+        let store = Protocol::open_memory_store().expect("store");
+        let workspace_id = [13; 32];
+        let author_user_id = [6; 32];
+        let bytes = signed_message_bytes(workspace_id, author_user_id, 0, EXPIRES_NEVER);
+        logical_clock::set_logical_time(&store, u64::MAX - 1).expect("set clock");
+        let decision = admit_check_received(&store, &bytes).expect("admit");
+        assert_eq!(decision, AdmitDecision::Admit);
+    }
 }

@@ -316,6 +316,32 @@ impl<T> CommandOutput<T> {
     }
 }
 
+/// Decision returned by the registry's receive-side admission gate.
+///
+/// The gate runs after `record_from_canonical_in` has decoded a receive-side
+/// event into an `EventRecord` but before any storage write. It exists to let
+/// modules drop events that should not be re-admitted — for example, message
+/// events whose ids are already tombstoned, or whose stamped expiry is past.
+/// Locally-authored events do not pass through this gate.
+///
+/// The `WriteRowsAndDrop` variant lets a module record the drop (e.g. by
+/// writing a tombstone row) while still skipping the canonical-bytes /
+/// admitted-event-index insert. Rows are inserted in the same transaction as
+/// the queue consume, so a crash before commit replays the drop on the next
+/// tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmitDecision {
+    /// Continue the normal admit path: store canonical bytes, project, etc.
+    Admit,
+    /// Drop the event silently. No storage writes; the canonical_in row is
+    /// still consumed so the queue makes progress.
+    Drop,
+    /// Drop the event, but first insert these rows in the same transaction.
+    /// Used to write a `MESSAGE_TOMBSTONES` row when the gate decides an
+    /// expired-at-receive message should never have been admitted.
+    WriteRowsAndDrop(Vec<TableRow>),
+}
+
 /// Protocol registry used by the common worker.
 ///
 /// This trait is the only place where the generic admission/apply loop touches
@@ -326,6 +352,29 @@ impl<T> CommandOutput<T> {
 /// learning event-type vocabulary.
 pub trait EventRegistry {
     fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String>;
+
+    /// Receive-side admission gate.
+    ///
+    /// Called by the common pipeline for every received record after the
+    /// codec has decoded canonical bytes into an `EventRecord` but before
+    /// the record has been stored or projected. The gate returns `Admit`
+    /// for the normal path; `Drop` to silently discard; or
+    /// `WriteRowsAndDrop(rows)` to record the drop with a row write
+    /// (e.g. a tombstone) and then discard.
+    ///
+    /// Locally-authored events do not pass through this gate. Their
+    /// canonical-bytes hash already dedupes double-admit attempts; the
+    /// gate's job is to defend the receive side from re-admitting events
+    /// that local state has already retired.
+    ///
+    /// The default returns `Admit`.
+    fn admit_received_record(
+        &self,
+        _store: &Store,
+        _record: &EventRecord,
+    ) -> Result<AdmitDecision, String> {
+        Ok(AdmitDecision::Admit)
+    }
 
     /// Project one opaque network row into ordinary worker rows.
     ///
@@ -542,8 +591,23 @@ where
             let received = registry
                 .record_from_canonical_in(store, bytes.clone(), receive, provenance)
                 .map_err(module_error)?;
-            let proposed = ProposedEvent::contextual(received.record, received.receive);
-            process_proposed_event_tx(store, registry, &proposed, &mut report)?;
+            let decision = registry
+                .admit_received_record(store, &received.record)
+                .map_err(module_error)?;
+            match decision {
+                AdmitDecision::Admit => {
+                    let proposed =
+                        ProposedEvent::contextual(received.record, received.receive);
+                    process_proposed_event_tx(store, registry, &proposed, &mut report)?;
+                }
+                AdmitDecision::Drop => {
+                    report.event_ids.push(event_id(&received.record.canonical_bytes));
+                }
+                AdmitDecision::WriteRowsAndDrop(rows) => {
+                    report.event_ids.push(event_id(&received.record.canonical_bytes));
+                    store.insert_table_rows_in_tx(rows)?;
+                }
+            }
             store.delete_table_rows_in_tx(worker_schema::CANONICAL_IN, vec![key.clone()])?;
             Ok(report)
         });

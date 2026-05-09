@@ -31,7 +31,9 @@ use crate::core::{
     store::{Schema, Store},
 };
 use event_modules::types::{EventRecord, ReceiveMetadata};
-use event_modules::worker::{EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord};
+use event_modules::worker::{
+    AdmitDecision, EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord,
+};
 use event_modules::Modules;
 
 #[derive(Debug, Clone, Default)]
@@ -101,6 +103,14 @@ impl EventRegistry for Protocol {
         event: &EventWithContext<'_>,
     ) -> Result<ProjectionOutput, String> {
         self.modules.project_record(store, event)
+    }
+
+    fn admit_received_record(
+        &self,
+        store: &Store,
+        record: &EventRecord,
+    ) -> Result<AdmitDecision, String> {
+        self.modules.admit_received_record(store, record)
     }
 
     fn post_admission_hook(&self, store: &Store) -> Result<(), String> {

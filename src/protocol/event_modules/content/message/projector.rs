@@ -119,31 +119,22 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
 
     // Purge-on-project: drop the message's read-model and sealed rows when
-    // either of the following is true:
-    //   * The author has tombstoned the message (deletion label set).
-    //   * The message's stamped `expires_at_minute` is already past the
-    //     local logical clock — i.e., the message was authored under a TTL
-    //     and arrived (or rearrived after a previous local expiry) after
-    //     the deadline. The check uses the message's own canonical bytes
-    //     plus `now_unix_minute` from `EventContext`; no shared deletion
-    //     event is required, so a slow or replaying peer cannot resurrect
-    //     a message we already retired.
+    // the author has tombstoned the message (deletion label set on the
+    // event by the deletion projector).
+    //
+    // Past-TTL re-deliveries are caught earlier, by the receive-side
+    // admission gate (`schema::admit_check_received`), so by the time
+    // projection runs the only remaining tombstone trigger is the
+    // author-driven deletion label.
     let is_deleted_by_author = event.context.labels.iter().any(|label| {
         deletion_label_author(label)
             .map(|author| author == message.author_user_id)
             .unwrap_or(false)
     });
-    let is_expired_at_receive = match event.context.now_unix_minute {
-        Some(now_minute) => {
-            message.expires_at_minute != super::types::EXPIRES_NEVER
-                && message.expires_at_minute < now_minute
-        }
-        None => false,
-    };
-    if is_deleted_by_author || is_expired_at_receive {
+    if is_deleted_by_author {
         let key = schema::message_key(message.workspace_id, event.context.event_id);
         let sealed_key = schema::message_key(message.workspace_id, event.context.event_id);
-        let mut output = ProjectionOutput {
+        let output = ProjectionOutput {
             rows: vec![schema::message_tombstone_row(
                 message.workspace_id,
                 event.context.event_id,
@@ -162,19 +153,6 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
             ],
             labels: Vec::new(),
         };
-        // For expired-at-receive, also emit the deletion label so
-        // `content_purge` reclaims the canonical bytes. The label format
-        // matches the existing self-delete label: it names the message
-        // author, and `content_purge` already gates byte purges on it.
-        // For author-driven deletions the label is already on the event
-        // (set by the deletion projector), so we do not double-write.
-        if is_expired_at_receive && !is_deleted_by_author {
-            use crate::protocol::event_modules::content::message_deletion::types::deletion_label;
-            output.labels.push(crate::protocol::event_modules::schema::EventLabel {
-                event_id: event.context.event_id,
-                label: deletion_label(&message.author_user_id),
-            });
-        }
         return Ok(output);
     }
 
@@ -642,48 +620,6 @@ mod tests {
     }
 
     #[test]
-    fn drops_expired_message_when_now_is_past_stamped_expiry() {
-        // Re-arrival contract: a message stamped with finite expiry that
-        // arrives after the local clock is past `expires_at_minute` must
-        // be tombstoned (no visible row, no sealed row), and a deletion
-        // label must be emitted so `content_purge` reclaims the
-        // canonical bytes on its next tick. Forward secrecy is preserved
-        // by the leaf retirement that `disappearing_minute_expiry`
-        // already performed; this is the belt-and-suspenders byte
-        // reclamation.
-        let workspace_id = [7; 32];
-        let signer_private_key = [9; 32];
-        let signer_pubkey = signing_public_key_for(&signer_private_key);
-        let author_record = user_record(workspace_id);
-        let author_id = event_id(&author_record.canonical_bytes);
-        let signer_record = endpoint_shared_record(workspace_id, author_id, signer_pubkey);
-        let signer_id = event_id(&signer_record.canonical_bytes);
-
-        // unix_minute(6_000_000) = 100; expires_at_minute = 101 (TTL=1).
-        let built =
-            build_with_expiry(workspace_id, author_id, &signer_private_key, signer_id, 101);
-        let mut event = context_for_with_workspace_ttl(
-            &built,
-            signer_id,
-            signer_record,
-            author_id,
-            author_record,
-            1,
-        );
-        // Pin local clock to minute 102 — past expiry.
-        event.context.now_unix_minute = Some(102);
-
-        let output = project(&event).expect("project expired-at-receive");
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::MESSAGE_TOMBSTONES);
-        let tables: Vec<_> = output.deletes.iter().map(|d| d.table).collect();
-        assert!(tables.contains(&schema::MESSAGES));
-        assert!(tables.contains(&schema::SEALED_MESSAGES));
-        assert_eq!(output.labels.len(), 1);
-        assert_eq!(output.labels[0].event_id, built.message_id);
-    }
-
-    #[test]
     fn keeps_finite_expiry_message_visible_when_clock_is_before_expiry() {
         let workspace_id = [7; 32];
         let signer_private_key = [9; 32];
@@ -814,4 +750,5 @@ mod tests {
             "message must be signed"
         );
     }
+
 }

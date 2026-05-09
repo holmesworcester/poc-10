@@ -38,7 +38,7 @@ use std::sync::Arc;
 use crate::core::store::{Schema, Store};
 use crate::protocol::event_modules::types::{EventRecord, ReceiveMetadata};
 use crate::protocol::event_modules::worker::{
-    EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord,
+    AdmitDecision, EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord,
 };
 use crate::workers::schema::{TransitProvenance, TransitUnwrap};
 
@@ -158,6 +158,17 @@ impl EventRegistry for Modules {
         event: &EventWithContext<'_>,
     ) -> Result<ProjectionOutput, String> {
         self.project_record(store, event)
+    }
+
+    fn admit_received_record(
+        &self,
+        store: &Store,
+        record: &EventRecord,
+    ) -> Result<AdmitDecision, String> {
+        // Only the content domain currently has receive-side admission
+        // gates (drop re-deliveries of tombstoned messages and their
+        // dependents). Other domains opt in by adding a branch here.
+        content::admit_check_received(store, record)
     }
 
     fn post_admission_hook(&self, store: &Store) -> Result<(), String> {
