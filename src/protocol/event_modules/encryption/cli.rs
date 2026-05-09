@@ -482,6 +482,11 @@ fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         &context.store,
         workspace_id,
     )?;
+    let message_tombstones =
+        crate::protocol::event_modules::content::message::schema::list_message_tombstones_for_workspace(
+            &context.store,
+            workspace_id,
+        )?;
     let cover_summary =
         local_history_node_secret::schema::cover_summary(&context.store, workspace_id)?;
     use local_history_node_secret::types::{
@@ -523,6 +528,7 @@ fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
             "local_history_node_tombstones: {}",
             history_tombstones.len()
         ),
+        format!("message_tombstones: {}", message_tombstones.len()),
         format!("cover_summary: {}", hex_bytes(&cover_summary)),
     ];
     for frontier in frontiers {

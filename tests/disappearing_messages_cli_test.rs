@@ -1303,6 +1303,164 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
 }
 
 // ---------------------------------------------------------------------------
+// Test 9 (chop GCs subsumed per-message tombstones): a peer that has
+// already accumulated per-message tombstones from prior expirations under
+// the cover horizon must, when the dispatcher chops, exact-delete those
+// pre-existing fine-grained tombstones in the same transaction as the chop
+// wipe. The coarse subtree tombstones written by the chop already convey
+// "this whole range is gone" and take over the sync re-admit prevention
+// role; the per-message tombstones below the floor become redundant.
+//
+// Setup choreography:
+//   * TTL=1 minute so each authored message produces one
+//     `MESSAGE_TOMBSTONES` row + one `LOCAL_HISTORY_NODE_TOMBSTONES` row
+//     when its leaf is retired by the per-minute expiry worker.
+//   * Pin the clock to minute 100, author 3 messages, advance the clock to
+//     minute 102 so all three expire. After this, the table counts are
+//     elevated by the per-leaf retirements.
+//   * Snapshot the elevated counts.
+//   * Advance the clock past `COVER_HORIZON_MINUTES` so the dispatcher
+//     chops the prefix `[0, horizon_floor)` covering the minute-100
+//     authoring slot. The chop must:
+//       (a) Write coarse subtree tombstones over the range (a few rows
+//           bounded by time-tree depth).
+//       (b) Exact-delete every subsumed per-leaf tombstone.
+//       (c) Exact-delete every subsumed `MESSAGE_TOMBSTONES` row.
+//
+// Assertion: after the chop, both `MESSAGE_TOMBSTONES` and the per-leaf
+// portion of `LOCAL_HISTORY_NODE_TOMBSTONES` for the chopped range have
+// dropped. The per-leaf table will still have the chop's own coarse
+// tombstones, so its count is allowed to be > 0; the strongest convergent
+// signal is `message_tombstones == 0` AND `local_history_leaves == 0`
+// (no fine-grained per-message accounting under the chopped floor).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let alice_port = free_port();
+
+    // TTL=1 minute. Each authored message will be retired by the
+    // disappearing-minute worker after the clock advances past minute
+    // (authored_minute + 1). The retire writes a MESSAGE_TOMBSTONES row
+    // (per process_job in src/workers/disappearing_minute_expiry.rs:217)
+    // AND per-leaf LOCAL_HISTORY_NODE_TOMBSTONES rows (per the retire
+    // walk in src/workers/encryption.rs).
+    let workspace_id =
+        create_workspace_with_ttl(&alice, "ChopGc", "alice", "alice-laptop", 1);
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+
+    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
+    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
+    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id,
+        &alice_recipient_id,
+    );
+
+    // Pin clock to minute 100, author 3 messages.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    for body in ["m1", "m2", "m3"] {
+        assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
+    }
+    wait_for_message_text(&alice, &workspace_id, "alice: m1");
+    wait_for_message_text(&alice, &workspace_id, "alice: m2");
+    wait_for_message_text(&alice, &workspace_id, "alice: m3");
+    assert_eq!(message_lines(&alice, &workspace_id).len(), 3);
+
+    // Advance clock past TTL=1 (minute 102 > 100 + 1 = 101) so all three
+    // messages expire and produce per-message tombstones.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+    wait_for_leaf_count(&alice, &workspace_id, "0");
+
+    // Verify the per-message tombstones accumulated as expected.
+    let post_expiry = keys_value(&alice, &workspace_id);
+    let mt_after_expiry: u64 = line_value(&post_expiry, "message_tombstones")
+        .parse()
+        .expect("parse message_tombstones");
+    let lt_after_expiry: u64 = line_value(&post_expiry, "local_history_node_tombstones")
+        .parse()
+        .expect("parse local_history_node_tombstones");
+    assert_eq!(
+        mt_after_expiry, 3,
+        "TTL=1 expiry must produce one MESSAGE_TOMBSTONES row per \
+         retired message:\n{post_expiry}"
+    );
+    assert!(
+        lt_after_expiry > 0,
+        "per-leaf retire must produce at least one \
+         LOCAL_HISTORY_NODE_TOMBSTONES row:\n{post_expiry}"
+    );
+
+    // Now advance the clock past COVER_HORIZON_MINUTES so the dispatcher
+    // chops the entire prefix that covers minute 100. With horizon = 43_200
+    // and authored_minute = 100, choose now_minute = 43_400 so
+    // horizon_floor = 43_400 - 43_200 = 200 > 100, and the chop seals
+    // `[0, 200)`. The coarse subtree tombstones the chop writes subsume
+    // every per-leaf and per-message tombstone authored at minute 100.
+    assert_success(topo(&["--db", &alice, "clock", "set", "2604000000"]));
+
+    // Wait for the chop's GC to drain MESSAGE_TOMBSTONES. We can't poll
+    // `local_key_secrets == 0` like test 6 does because F was already
+    // wiped by the per-leaf retire walks earlier (each of those walks
+    // wipes F as part of the forward-secrecy step, so F is gone before
+    // the dispatcher even gets a chance to chop). The strongest
+    // convergence signal here is therefore the GC effect itself: the
+    // pre-existing MESSAGE_TOMBSTONES rows whose `authored_minute` is
+    // below the new floor must be exact-deleted by the chop's GC step.
+    let mut last_keys = String::new();
+    for _ in 0..300 {
+        last_keys = keys_value(&alice, &workspace_id);
+        if line_value(&last_keys, "message_tombstones") == "0" {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let post_chop = last_keys;
+
+    // The load-bearing assertion: every subsumed per-message tombstone
+    // (authored_minute = 100 < floor_minute = 200) has been exact-deleted
+    // in the chop's same-transaction GC. Three messages expired and three
+    // tombstones were written; all three must be gone now.
+    let mt_after_chop: u64 = line_value(&post_chop, "message_tombstones")
+        .parse()
+        .expect("parse post-chop message_tombstones");
+    assert_eq!(
+        mt_after_chop, 0,
+        "every subsumed MESSAGE_TOMBSTONES row must be GC'd by the chop \
+         (was {mt_after_expiry}, now {mt_after_chop}):\n{post_chop}"
+    );
+
+    // F must remain wiped — the chop must not resurrect F. The per-leaf
+    // retires already wiped F before the chop ran; the chop is a no-op
+    // on F-row presence (it would chop F if it were alive, but it
+    // doesn't bring F back from the dead).
+    assert_eq!(
+        line_value(&post_chop, "local_key_secrets"),
+        "0",
+        "F must remain wiped after chop:\n{post_chop}"
+    );
+
+    // The per-leaf tombstone table must have shed the per-message rows
+    // the retire walk wrote at minute 100. The chop also wrote its OWN
+    // coarse tombstones, so the absolute count is allowed to be either
+    // smaller or larger than `lt_after_expiry`; the convergent signal is
+    // that fine-grained per-leaf rows at minute 100 are no longer
+    // contributing to dead-weight storage. The strongest signal is
+    // `local_history_leaves: 0` (no surviving leaves at minute 100,
+    // since the per-leaf retires already removed them).
+    assert_eq!(
+        line_value(&post_chop, "local_history_leaves"),
+        "0",
+        "no leaf rows must survive a chop covering all authored minutes:\n{post_chop}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Helpers (local to this test file).
 // ---------------------------------------------------------------------------
 

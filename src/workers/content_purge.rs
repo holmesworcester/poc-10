@@ -205,6 +205,7 @@ fn purge_deleted_message(
             event.workspace_id,
             message_id,
             event.author_user_id,
+            event.created_at_ms / message::types::UNIX_MINUTE_MS,
         )])
         .map_err(|err| format!("write message tombstone: {err}"))?;
     report.tombstones_written += inserted;

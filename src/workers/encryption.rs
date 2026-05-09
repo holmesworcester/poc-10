@@ -219,6 +219,17 @@ pub struct ChopReport {
     /// Canonical bytes purged from `event_modules.events` during the wipe
     /// phase (boundary descend rows + F root row when alive).
     pub purged_event_bytes: usize,
+    /// Pre-existing per-leaf `LOCAL_HISTORY_NODE_TOMBSTONES` rows whose
+    /// `(range_start + range_width) <= floor_minute` AND whose
+    /// `removal_frontier_id` matches the chopped frontier — exact-deleted
+    /// in the same transaction as the chop's wipe. Subsumed by the
+    /// coarse subtree tombstones the chop just wrote.
+    pub subsumed_leaf_tombstones_gcd: usize,
+    /// Pre-existing `MESSAGE_TOMBSTONES` rows whose `authored_minute <
+    /// floor_minute` — exact-deleted in the same transaction as the
+    /// chop's wipe. Subsumed by the coarse subtree tombstones the chop
+    /// just wrote.
+    pub subsumed_message_tombstones_gcd: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1477,6 +1488,8 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
                         removal_frontier_id,
                         target.event_id,
                         leaf_id,
+                        target.range_start,
+                        target.range_width,
                     ),
                 ])?;
                 tombstones += inserted;
@@ -1491,13 +1504,16 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
             }
             // The leaf is its own replacement; it's gone, so the replacement
             // is leaf_id which itself is wiped. This still uniquely names
-            // the retired coord in tombstone rows.
+            // the retired coord in tombstone rows. The leaf covers exactly
+            // `(unix_minute, 1)` on the time axis.
             let inserted = store.insert_table_rows_in_tx(vec![
                 local_history_node_secret::schema::local_history_node_tombstone_row_by_id(
                     workspace_id,
                     removal_frontier_id,
                     leaf_id,
                     leaf_id,
+                    unix_minute,
+                    1,
                 ),
             ])?;
             tombstones += inserted;
@@ -1852,6 +1868,8 @@ fn chop_time_tree_prefix<R: EventRegistry>(
                         } else {
                             replacement_node_id
                         },
+                        target.range_start,
+                        target.range_width,
                     ),
                 ])?;
                 tombstones += inserted;
@@ -1863,7 +1881,122 @@ fn chop_time_tree_prefix<R: EventRegistry>(
     let _ = tombstones;
     report.purged_event_bytes = purged;
     let _ = descend_path;
+
+    // GC pre-existing per-message tombstones subsumed by this chop's range.
+    // The coarse subtree tombstones written above already convey
+    // "everything in [0, floor_minute) is gone"; fine-grained per-message
+    // tombstones below that floor are redundant and can be exact-deleted.
+    //
+    // For LOCAL_HISTORY_NODE_TOMBSTONES we only GC tombstones whose
+    // `removal_frontier_id` matches AND whose `range_start + range_width
+    // <= floor_minute`. Tombstones from a different removal_frontier
+    // belong to a different tree and must not be touched. Tombstones we
+    // just inserted above for the chop itself satisfy
+    // `range_start + range_width <= floor_minute` only for the
+    // fully-left subtrees (subtree tombstones); the boundary descend
+    // tombstones span ranges that include `floor_minute` and so are
+    // preserved (range_end > floor_minute). The F-root tombstone covers
+    // the entire time axis (range_end = TIME_TREE_ROOT_WIDTH > floor),
+    // so it is also preserved.
+    //
+    // For MESSAGE_TOMBSTONES we GC every row whose `authored_minute <
+    // floor_minute`. The MESSAGE_TOMBSTONES table is keyed by
+    // `(workspace_id, message_id)` and not partitioned by frontier, so
+    // any subsumed authored_minute is fair game once the chop covers
+    // it on this workspace.
+    let subsumed = gc_subsumed_tombstones(
+        store,
+        workspace_id,
+        removal_frontier_id,
+        floor_minute,
+    )?;
+    report.subsumed_leaf_tombstones_gcd = subsumed.leaf_tombstones;
+    report.subsumed_message_tombstones_gcd = subsumed.message_tombstones;
     Ok(report)
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SubsumedTombstones {
+    leaf_tombstones: usize,
+    message_tombstones: usize,
+}
+
+/// Scan tombstone tables for `workspace_id` and exact-delete every row whose
+/// covered range is fully under `[0, floor_minute)` (so the coarse chop
+/// tombstones written above already convey that the range is gone).
+///
+/// LOCAL_HISTORY_NODE_TOMBSTONES is filtered by `removal_frontier_id` to
+/// avoid GC'ing tombstones from other trees. MESSAGE_TOMBSTONES has no
+/// frontier component in its key so all subsumed authored_minutes within
+/// the workspace are fair game.
+///
+/// Both deletes happen in a single `write_transaction` so the GC is atomic
+/// with respect to readers.
+fn gc_subsumed_tombstones(
+    store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    floor_minute: u64,
+) -> Result<SubsumedTombstones, String> {
+    if floor_minute == 0 {
+        return Ok(SubsumedTombstones::default());
+    }
+    // Collect leaf-tombstone keys that are subsumed.
+    let leaf_keys_to_delete: Vec<Vec<u8>> = local_history_node_secret::schema::list_tombstones_for_workspace(
+        store,
+        workspace_id,
+    )?
+    .into_iter()
+    .filter(|row| row.removal_frontier_id == removal_frontier_id)
+    .filter(|row| row.range_start.saturating_add(row.range_width) <= floor_minute)
+    .map(|row| {
+        local_history_node_secret::schema::local_history_node_tombstone_key(
+            row.workspace_id,
+            row.removal_frontier_id,
+            row.tombstone_node_id,
+        )
+    })
+    .collect();
+    // Collect message-tombstone keys whose authored_minute is subsumed.
+    let message_keys_to_delete: Vec<Vec<u8>> =
+        crate::protocol::event_modules::content::message::schema::list_message_tombstones_for_workspace(
+            store,
+            workspace_id,
+        )?
+        .into_iter()
+        .filter(|row| row.authored_minute < floor_minute)
+        .map(|row| {
+            crate::protocol::event_modules::content::message::schema::message_key(
+                row.workspace_id,
+                row.message_id,
+            )
+        })
+        .collect();
+    if leaf_keys_to_delete.is_empty() && message_keys_to_delete.is_empty() {
+        return Ok(SubsumedTombstones::default());
+    }
+    let leaf_table = local_history_node_secret::schema::LOCAL_HISTORY_NODE_TOMBSTONES;
+    let message_table =
+        crate::protocol::event_modules::content::message::schema::MESSAGE_TOMBSTONES;
+    let (leaf_deleted, message_deleted) = store
+        .write_transaction(move |tx_store| {
+            let mut leaf_deleted = 0usize;
+            if !leaf_keys_to_delete.is_empty() {
+                leaf_deleted += tx_store
+                    .delete_table_rows_in_tx(leaf_table, leaf_keys_to_delete)?;
+            }
+            let mut message_deleted = 0usize;
+            if !message_keys_to_delete.is_empty() {
+                message_deleted += tx_store
+                    .delete_table_rows_in_tx(message_table, message_keys_to_delete)?;
+            }
+            Ok((leaf_deleted, message_deleted))
+        })
+        .map_err(|err| format!("gc subsumed tombstones transaction: {err}"))?;
+    Ok(SubsumedTombstones {
+        leaf_tombstones: leaf_deleted,
+        message_tombstones: message_deleted,
+    })
 }
 
 struct EnsureSplitOutcome {
@@ -3709,5 +3842,314 @@ mod tests {
                 .is_none(),
             "F must remain wiped after chop (chop must not resurrect F)"
         );
+    }
+
+    #[test]
+    fn chop_subsumes_and_gcs_pre_existing_leaf_tombstones() {
+        // Author two leaves in minute 50 (so retire has a sibling structure
+        // and writes a non-trivial set of per-leaf tombstones), retire one
+        // of them. Then chop with floor_minute = 100. The pre-existing
+        // per-leaf tombstones written by the retire all live under
+        // minute 50 (range_start + range_width <= 51 <= 100), so the chop
+        // must GC them in the same transaction as its wipe and report
+        // `subsumed_leaf_tombstones_gcd >= 1`.
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, _) = seed_local_key_secret(&store);
+
+        let coord_a = [0xaa; 32];
+        let coord_b = [0xbb; 32];
+        for coord in [coord_a, coord_b] {
+            let _ = run(
+                &store,
+                &protocol,
+                Work::DeriveEventLeaf {
+                    workspace_id: WORKSPACE,
+                    removal_frontier_id: frontier_id,
+                    created_at_ms: 50 * 60_000,
+                    event_id_in_minute: coord,
+                },
+            )
+            .expect("derive leaf");
+        }
+        let _ = run(
+            &store,
+            &protocol,
+            Work::RetireDeletedEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms: 50 * 60_000,
+                event_id_in_minute: coord_a,
+            },
+        )
+        .expect("retire leaf at minute 50");
+
+        // Snapshot the pre-chop tombstone set so we can assert the GC
+        // strictly removes the subsumed ones.
+        let pre_tombs = local_history_node_secret::schema::list_tombstones_for_workspace(
+            &store, WORKSPACE,
+        )
+        .expect("pre-chop tombs");
+        let subsumed_pre: Vec<_> = pre_tombs
+            .iter()
+            .filter(|t| t.removal_frontier_id == frontier_id)
+            .filter(|t| t.range_start.saturating_add(t.range_width) <= 100)
+            .cloned()
+            .collect();
+        assert!(
+            !subsumed_pre.is_empty(),
+            "precondition: retire at minute 50 must produce at least one \
+             tombstone whose range fits under floor_minute=100; got {pre_tombs:?}"
+        );
+
+        // Now chop to floor=100.
+        let report = run(
+            &store,
+            &protocol,
+            Work::ChopTimeTreePrefix {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                floor_minute: 100,
+            },
+        )
+        .expect("chop");
+        let Output::ChoppedTimeTreePrefix(report) = report else {
+            panic!();
+        };
+        assert!(
+            report.subsumed_leaf_tombstones_gcd >= 1,
+            "chop must report at least one subsumed leaf tombstone \
+             (subsumed_pre.len() = {}, report = {report:?})",
+            subsumed_pre.len(),
+        );
+        assert!(
+            report.subsumed_leaf_tombstones_gcd >= subsumed_pre.len(),
+            "chop must GC every subsumed pre-existing tombstone (had {}, \
+             report claims {})",
+            subsumed_pre.len(),
+            report.subsumed_leaf_tombstones_gcd,
+        );
+
+        // Verify each pre-existing subsumed tombstone is truly gone from
+        // the table.
+        let post_tombs = local_history_node_secret::schema::list_tombstones_for_workspace(
+            &store, WORKSPACE,
+        )
+        .expect("post-chop tombs");
+        for old in &subsumed_pre {
+            assert!(
+                !post_tombs.iter().any(|t| {
+                    t.removal_frontier_id == old.removal_frontier_id
+                        && t.tombstone_node_id == old.tombstone_node_id
+                }),
+                "subsumed tombstone {:?} must be exact-deleted by the chop GC",
+                old.tombstone_node_id,
+            );
+        }
+    }
+
+    #[test]
+    fn chop_does_not_gc_tombstones_above_floor() {
+        // Retire a leaf at minute 50 AND a leaf at minute 150 (so each
+        // produces per-leaf tombstones rooted at their respective minute).
+        // Chop with floor_minute = 100. The minute-50 tombstones must be
+        // GC'd; the minute-150 tombstones must survive.
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let (frontier_id, _) = seed_local_key_secret(&store);
+
+        let coord_at_50_a = [0xa1; 32];
+        let coord_at_50_b = [0xa2; 32];
+        let coord_at_150_a = [0xb1; 32];
+        let coord_at_150_b = [0xb2; 32];
+        for coord in [coord_at_50_a, coord_at_50_b] {
+            let _ = run(
+                &store,
+                &protocol,
+                Work::DeriveEventLeaf {
+                    workspace_id: WORKSPACE,
+                    removal_frontier_id: frontier_id,
+                    created_at_ms: 50 * 60_000,
+                    event_id_in_minute: coord,
+                },
+            )
+            .expect("derive leaf at 50");
+        }
+        for coord in [coord_at_150_a, coord_at_150_b] {
+            let _ = run(
+                &store,
+                &protocol,
+                Work::DeriveEventLeaf {
+                    workspace_id: WORKSPACE,
+                    removal_frontier_id: frontier_id,
+                    created_at_ms: 150 * 60_000,
+                    event_id_in_minute: coord,
+                },
+            )
+            .expect("derive leaf at 150");
+        }
+        let _ = run(
+            &store,
+            &protocol,
+            Work::RetireDeletedEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms: 50 * 60_000,
+                event_id_in_minute: coord_at_50_a,
+            },
+        )
+        .expect("retire leaf at minute 50");
+        let _ = run(
+            &store,
+            &protocol,
+            Work::RetireDeletedEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms: 150 * 60_000,
+                event_id_in_minute: coord_at_150_a,
+            },
+        )
+        .expect("retire leaf at minute 150");
+
+        // Snapshot tombstones that should NOT be GC'd: those whose range
+        // contains a minute >= 100. The minute-150 leaf tombstone has
+        // range_start=150, range_width=1, so range_end=151 > 100 and it
+        // must survive the chop.
+        let pre_tombs = local_history_node_secret::schema::list_tombstones_for_workspace(
+            &store, WORKSPACE,
+        )
+        .expect("pre-chop tombs");
+        let above_floor: Vec<_> = pre_tombs
+            .iter()
+            .filter(|t| t.removal_frontier_id == frontier_id)
+            .filter(|t| t.range_start.saturating_add(t.range_width) > 100)
+            .cloned()
+            .collect();
+        assert!(
+            !above_floor.is_empty(),
+            "precondition: retire at minute 150 must produce at least one \
+             tombstone whose range_end > 100; got {pre_tombs:?}"
+        );
+
+        let _ = run(
+            &store,
+            &protocol,
+            Work::ChopTimeTreePrefix {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                floor_minute: 100,
+            },
+        )
+        .expect("chop");
+
+        // Each above-floor tombstone must still be present after the chop.
+        let post_tombs = local_history_node_secret::schema::list_tombstones_for_workspace(
+            &store, WORKSPACE,
+        )
+        .expect("post-chop tombs");
+        for survivor in &above_floor {
+            assert!(
+                post_tombs.iter().any(|t| {
+                    t.removal_frontier_id == survivor.removal_frontier_id
+                        && t.tombstone_node_id == survivor.tombstone_node_id
+                }),
+                "tombstone for range [{},{}) must survive a chop to floor=100; \
+                 got post={:?}",
+                survivor.range_start,
+                survivor.range_start + survivor.range_width,
+                post_tombs.iter().map(|t| (t.range_start, t.range_width)).collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[test]
+    fn chop_does_not_gc_tombstones_from_other_frontier() {
+        // Seed two distinct removal frontiers under the same workspace.
+        // Author + retire a leaf under each to produce per-frontier
+        // tombstones. Chop only frontier A. Frontier B's tombstones must
+        // be untouched even though they are byte-located under the same
+        // workspace prefix.
+        let store = Protocol::open_memory_store().expect("store");
+        let protocol = Protocol::new();
+        let signer_a = core_crypto::random_ed25519_private_key();
+        let signer_b = core_crypto::random_ed25519_private_key();
+        let (frontier_a, _) = seed_local_key_secret_with_signer(&store, &signer_a);
+        let (frontier_b, _) = seed_local_key_secret_with_signer(&store, &signer_b);
+        assert_ne!(
+            frontier_a, frontier_b,
+            "precondition: two distinct frontiers under the same workspace"
+        );
+
+        // Author and retire one leaf under each frontier in minute 50.
+        for frontier_id in [frontier_a, frontier_b] {
+            for coord in [[0xaa; 32], [0xbb; 32]] {
+                let _ = run(
+                    &store,
+                    &protocol,
+                    Work::DeriveEventLeaf {
+                        workspace_id: WORKSPACE,
+                        removal_frontier_id: frontier_id,
+                        created_at_ms: 50 * 60_000,
+                        event_id_in_minute: coord,
+                    },
+                )
+                .expect("derive leaf");
+            }
+            let _ = run(
+                &store,
+                &protocol,
+                Work::RetireDeletedEventLeaf {
+                    workspace_id: WORKSPACE,
+                    removal_frontier_id: frontier_id,
+                    created_at_ms: 50 * 60_000,
+                    event_id_in_minute: [0xaa; 32],
+                },
+            )
+            .expect("retire leaf");
+        }
+
+        let pre_tombs_b: Vec<_> =
+            local_history_node_secret::schema::list_tombstones_for_workspace(&store, WORKSPACE)
+                .expect("pre-chop tombs")
+                .into_iter()
+                .filter(|t| t.removal_frontier_id == frontier_b)
+                .collect();
+        assert!(
+            !pre_tombs_b.is_empty(),
+            "precondition: frontier B's retire must produce at least one tombstone"
+        );
+
+        let _ = run(
+            &store,
+            &protocol,
+            Work::ChopTimeTreePrefix {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_a,
+                floor_minute: 100,
+            },
+        )
+        .expect("chop frontier A");
+
+        // Every frontier-B tombstone must survive.
+        let post_tombs_b: Vec<_> =
+            local_history_node_secret::schema::list_tombstones_for_workspace(&store, WORKSPACE)
+                .expect("post-chop tombs")
+                .into_iter()
+                .filter(|t| t.removal_frontier_id == frontier_b)
+                .collect();
+        assert_eq!(
+            pre_tombs_b.len(),
+            post_tombs_b.len(),
+            "chop on frontier A must not touch any frontier-B tombstone"
+        );
+        for old in &pre_tombs_b {
+            assert!(
+                post_tombs_b
+                    .iter()
+                    .any(|t| t.tombstone_node_id == old.tombstone_node_id),
+                "frontier-B tombstone {:?} must survive a chop on frontier A",
+                old.tombstone_node_id,
+            );
+        }
     }
 }

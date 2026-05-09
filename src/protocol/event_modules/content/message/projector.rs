@@ -148,6 +148,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                 message.workspace_id,
                 event.context.event_id,
                 message.author_user_id,
+                authored_minute,
             )],
             deletes: vec![
                 TableDelete {

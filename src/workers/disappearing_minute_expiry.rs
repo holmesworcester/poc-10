@@ -218,6 +218,7 @@ fn process_job<R: EventRegistry>(
                 job.workspace_id,
                 job.message_id,
                 job.author_user_id,
+                job.created_at_ms / UNIX_MINUTE_MS,
             )])?;
             purging::purge_event_storage_in_tx(tx_store, &job.message_id)?;
             Ok::<_, rusqlite::Error>(deleted)

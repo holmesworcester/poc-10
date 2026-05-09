@@ -22,7 +22,7 @@ pub const MESSAGE_TOMBSTONES: TableName = TableName::new("content.message_tombst
 pub const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("content.messages.v2", MESSAGES),
     Schema::durable_row_table("content.sealed_messages.v4", SEALED_MESSAGES),
-    Schema::durable_row_table("content.message_tombstones.v1", MESSAGE_TOMBSTONES),
+    Schema::durable_row_table("content.message_tombstones.v2", MESSAGE_TOMBSTONES),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,11 +131,15 @@ pub fn message_tombstone_row(
     workspace_id: EventId,
     message_id: EventId,
     author_user_id: EventId,
+    authored_minute: u64,
 ) -> TableRow {
+    let mut value = Vec::with_capacity(32 + 8);
+    value.extend_from_slice(&author_user_id);
+    value.extend_from_slice(&authored_minute.to_be_bytes());
     TableRow {
         table: MESSAGE_TOMBSTONES,
         key: message_key(workspace_id, message_id),
-        value: author_user_id.to_vec(),
+        value,
     }
 }
 
@@ -149,6 +153,62 @@ pub fn message_tombstone_exists(
         .table_row(MESSAGE_TOMBSTONES, &key)
         .map(|row| row.is_some())
         .map_err(|err| format!("load message tombstone: {err}"))
+}
+
+/// Decoded view of a `MESSAGE_TOMBSTONES` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageTombstoneRow {
+    pub workspace_id: EventId,
+    pub message_id: EventId,
+    pub author_user_id: EventId,
+    /// Authoring minute = `created_at_ms / UNIX_MINUTE_MS`. Stored so the
+    /// chop GC can decide whether this tombstone is subsumed by a new
+    /// chop floor.
+    pub authored_minute: u64,
+}
+
+pub fn decode_message_tombstone_row(
+    key: &[u8],
+    value: &[u8],
+) -> Result<MessageTombstoneRow, String> {
+    if key.len() != 64 {
+        return Err("message tombstone row key is malformed".to_string());
+    }
+    let mut workspace_id = [0; 32];
+    workspace_id.copy_from_slice(&key[..32]);
+    let mut message_id = [0; 32];
+    message_id.copy_from_slice(&key[32..64]);
+    if value.len() != 40 {
+        return Err(format!(
+            "message tombstone row value length {} expected 40",
+            value.len()
+        ));
+    }
+    let mut author_user_id = [0; 32];
+    author_user_id.copy_from_slice(&value[..32]);
+    let authored_minute = u64::from_be_bytes(
+        value[32..40]
+            .try_into()
+            .map_err(|_| "message tombstone authored minute malformed".to_string())?,
+    );
+    Ok(MessageTombstoneRow {
+        workspace_id,
+        message_id,
+        author_user_id,
+        authored_minute,
+    })
+}
+
+pub fn list_message_tombstones_for_workspace(
+    store: &Store,
+    workspace_id: EventId,
+) -> Result<Vec<MessageTombstoneRow>, String> {
+    store
+        .table_rows_with_key_prefix(MESSAGE_TOMBSTONES, &workspace_id, usize::MAX)
+        .map_err(|err| format!("load message tombstones: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_message_tombstone_row(&key, &value))
+        .collect()
 }
 
 pub fn decode_message_row(key: &[u8], value: &[u8]) -> Result<MessageRow, String> {

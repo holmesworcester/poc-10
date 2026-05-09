@@ -30,7 +30,7 @@ pub const SCHEMAS: &[Schema] = &[
         LOCAL_HISTORY_NODE_SECRETS,
     ),
     Schema::durable_row_table(
-        "encryption.local_history_node_tombstones.v1",
+        "encryption.local_history_node_tombstones.v2",
         LOCAL_HISTORY_NODE_TOMBSTONES,
     ),
 ];
@@ -70,20 +70,28 @@ pub fn local_history_node_tombstone_row(
             event.removal_frontier_id,
             tombstone_node_id,
         ),
-        value: encode_tombstone_value(replacement_node_id),
+        value: encode_tombstone_value(replacement_node_id, event.range_start, event.range_width),
     }
 }
 
 /// Build a tombstone row directly from `(workspace_id, removal_frontier_id,
-/// tombstone_node_id, replacement_node_id)`. Used by the retire walk in the
-/// encryption worker, where tombstones are written without an admitting
-/// `LocalHistoryNodeSecret` event (the wiped node is gone, only its event id
-/// survives as a marker).
+/// tombstone_node_id, replacement_node_id, range_start, range_width)`.
+///
+/// Used by the retire walk and the chop walk in the encryption worker, where
+/// tombstones are written without an admitting `LocalHistoryNodeSecret` event
+/// (the wiped node is gone, only its event id survives as a marker).
+///
+/// `range_start + range_width` together name the time-axis interval the
+/// tombstoned node covers; the chop GC uses this to decide which subsumed
+/// per-leaf tombstones to exact-delete in the same transaction as the chop
+/// wipe.
 pub fn local_history_node_tombstone_row_by_id(
     workspace_id: EventId,
     removal_frontier_id: EventId,
     tombstone_node_id: EventId,
     replacement_node_id: EventId,
+    range_start: u64,
+    range_width: u64,
 ) -> TableRow {
     TableRow {
         table: LOCAL_HISTORY_NODE_TOMBSTONES,
@@ -92,7 +100,7 @@ pub fn local_history_node_tombstone_row_by_id(
             removal_frontier_id,
             tombstone_node_id,
         ),
-        value: encode_tombstone_value(replacement_node_id),
+        value: encode_tombstone_value(replacement_node_id, range_start, range_width),
     }
 }
 
@@ -402,12 +410,16 @@ pub fn decode_local_history_node_tombstone_row(
     tombstone_node_id.copy_from_slice(&key[64..96]);
     let mut reader = Reader::new(value, "local history node tombstone row");
     let replacement_node_id = reader.id()?;
+    let range_start = reader.u64()?;
+    let range_width = reader.u64()?;
     reader.finish()?;
     Ok(LocalHistoryNodeTombstoneRow {
         workspace_id,
         removal_frontier_id,
         tombstone_node_id,
         replacement_node_id,
+        range_start,
+        range_width,
     })
 }
 
@@ -423,9 +435,15 @@ fn encode_secret_value(
     out.finish()
 }
 
-fn encode_tombstone_value(replacement_node_id: EventId) -> Vec<u8> {
-    let mut out = Writer::with_capacity(32);
+fn encode_tombstone_value(
+    replacement_node_id: EventId,
+    range_start: u64,
+    range_width: u64,
+) -> Vec<u8> {
+    let mut out = Writer::with_capacity(32 + 8 + 8);
     out.id(&replacement_node_id);
+    out.u64(range_start);
+    out.u64(range_width);
     out.finish()
 }
 
