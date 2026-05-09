@@ -123,6 +123,7 @@ pub fn schemas() -> Vec<Schema> {
     out.extend_from_slice(encryption::recipient_key_tombstone::schema::SCHEMAS);
     out.extend_from_slice(encryption::removal_frontier::schema::SCHEMAS);
     out.extend_from_slice(connection::schema::SCHEMAS);
+    out.extend_from_slice(sync::schema::SCHEMAS);
     out.extend_from_slice(test_events::event_with_deps::schema::SCHEMAS);
     out
 }
