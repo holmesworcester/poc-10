@@ -6,28 +6,27 @@
 //! ```text
 //! local request, no receive metadata
 //!   -> store request bytes
-//!   -> project local connection(request_id, request.to_endpoint)
+//!   -> verify local ephemeral dependency matches request public key
 //!
 //! received bootstrap request, with receive metadata
 //!   -> verify receive endpoint/sender/authorization
 //!   -> verify invite-secret dependency authorizes bootstrap hash
 //!   -> store request bytes
-//!   -> project local connection(request_id, receive.local_endpoint)
-//!   -> optionally remember the observed route
 //! ```
 //!
 //! The distinction is important. A local request is this node's own intent to
-//! connect to the invite endpoint, so it can project a local connection row
-//! after admission has applied its declared invite-secret dependency. A received
-//! request is untrusted network input until the receive context proves which
-//! endpoint unwrapped it and the dependency context proves that the request
-//! knows a locally stored invite secret.
+//! connect to the invite endpoint, but it is not a connection until a response
+//! event arrives and projects. A received request is untrusted network input
+//! until the receive context proves which endpoint unwrapped it and the
+//! dependency context proves that the request knows a locally stored invite
+//! secret.
 //!
 //! This projector does not create response events, send bytes, query storage,
 //! or reconstruct invite dependencies. Transit supplies local receive context;
 //! the codec supplies canonical dependency ids; the common worker supplies only
 //! dependencies that already reached `Applied`.
 
+use super::super::connection_ephemeral;
 use super::super::schema as projection;
 use super::super::types;
 use super::codec;
@@ -43,7 +42,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
     // Always cache the canonical request bytes. Later connection response facts
     // use the request as dependency context to prove they answer this exact
     // request, not merely the same endpoints.
-    let mut rows = vec![projection::connection_event_row(request_id, bytes)];
+    let rows = vec![projection::connection_event_row(request_id, bytes)];
     if let Some(receive) = receive {
         // Network receive context is subjective and therefore must match the
         // canonical request fields before it can become local connection state.
@@ -68,37 +67,24 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
         if invite_secret.bootstrap_hash != event.bootstrap_hash {
             return Err("connection request bootstrap hash is not authorized".to_string());
         }
-        // Both peers derive the connection id from the request id and accepting
-        // endpoint. On receive, the accepting endpoint is this local endpoint.
-        let connection_id = types::connection_id(&request_id, &receive.local_endpoint());
-        rows.push(projection::connection_row(
-            connection_id,
-            event.from_endpoint,
-        ));
-        if let Some(workspace_id) = invite_secret.workspace_id {
-            rows.push(projection::connection_invite_workspace_row(
-                connection_id,
-                workspace_id,
-            ));
-        }
-        if receive.remember_route() {
-            // Route learning is local metadata, not a shared event. The worker
-            // only sets this flag when the observed origin is stable enough to
-            // be used for later sends.
-            rows.push(projection::transport_target_row(
-                connection_id,
-                receive.origin(),
-            ));
-        }
     } else {
-        // Local requests have no receive metadata because this node created
-        // them. Admission has already applied the invite-secret dependency, so
-        // projection can learn the local view of the connection to the invite
-        // endpoint without another network round trip. Scoped identity
-        // bootstrap is not authorized here; invite-key transit carries that
-        // workspace proof per event.
-        let connection_id = types::connection_id(&request_id, &event.to_endpoint);
-        rows.push(projection::connection_row(connection_id, event.to_endpoint));
+        // Local requests have the private ephemeral event as ordinary
+        // dependency context. The receiver cannot have that dependency; it
+        // validates the public key through the bootstrap receive proof instead.
+        let ephemeral = envelope
+            .context
+            .dependency(&event.initiator_ephemeral_secret_event_id)
+            .ok_or_else(|| "connection request missing ephemeral dependency".to_string())?;
+        let ephemeral = connection_ephemeral::codec::decode(&ephemeral.canonical_bytes)
+            .map_err(|_| "connection request dependency is not an ephemeral secret".to_string())?;
+        if ephemeral.owner_endpoint != event.from_endpoint {
+            return Err("connection request ephemeral owner does not match sender".to_string());
+        }
+        if ephemeral.ephemeral_public_key != event.initiator_ephemeral_public_key {
+            return Err(
+                "connection request ephemeral public key does not match dependency".to_string(),
+            );
+        }
         let invite_secret = envelope
             .context
             .dependency(&event.invite_secret_event_id)
@@ -107,12 +93,6 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
             .map_err(|_| "connection request dependency is not an invite secret".to_string())?;
         if invite_secret.bootstrap_hash != event.bootstrap_hash {
             return Err("connection request bootstrap hash is not authorized".to_string());
-        }
-        if let Some(workspace_id) = invite_secret.workspace_id {
-            rows.push(projection::connection_invite_workspace_row(
-                connection_id,
-                workspace_id,
-            ));
         }
     }
 
@@ -123,6 +103,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
 mod tests {
     use std::net::SocketAddr;
 
+    use crate::protocol::event_modules::connection::connection_ephemeral;
     use crate::protocol::event_modules::connection::connection_request::types::RequestEvent;
     use crate::protocol::event_modules::connection::{schema, types};
     use crate::protocol::event_modules::types::ReceiveMetadata;
@@ -140,6 +121,8 @@ mod tests {
             nonce: [2; 32],
             bootstrap_hash: [3; 32],
             invite_secret_event_id: [4; 32],
+            initiator_ephemeral_secret_event_id: [5; 32],
+            initiator_ephemeral_public_key: [6; 32],
             from_listen_addr: None,
         }))
         .expect("request record")
@@ -149,26 +132,34 @@ mod tests {
         record: &'a Record,
         invite_secret_event_id: [u8; 32],
         invite_record: Record,
+        ephemeral_secret_event_id: [u8; 32],
+        ephemeral_record: Record,
     ) -> EventWithContext<'a> {
         EventWithContext {
             record,
             context: EventContext {
                 event_id: types::event_id(&record.canonical_bytes),
-                dependencies: vec![DependencyContext {
-                    event_id: invite_secret_event_id,
-                    record: invite_record,
-                }],
+                dependencies: vec![
+                    DependencyContext {
+                        event_id: invite_secret_event_id,
+                        record: invite_record,
+                    },
+                    DependencyContext {
+                        event_id: ephemeral_secret_event_id,
+                        record: ephemeral_record,
+                    },
+                ],
                 labels: Vec::new(),
                 receive: None,
             },
         }
     }
 
-    fn authorized_request_record() -> (Record, [u8; 32], Record) {
+    fn authorized_request_record() -> (Record, [u8; 32], Record, [u8; 32], Record) {
         authorized_request_record_for(invite::types::InviteSecretEvent::new([7; 32]))
     }
 
-    fn scoped_authorized_request_record() -> (Record, [u8; 32], Record) {
+    fn scoped_authorized_request_record() -> (Record, [u8; 32], Record, [u8; 32], Record) {
         authorized_request_record_for(invite::types::InviteSecretEvent::scoped(
             [7; 32], [6; 32], [5; 32],
         ))
@@ -176,63 +167,80 @@ mod tests {
 
     fn authorized_request_record_for(
         invite_secret: invite::types::InviteSecretEvent,
-    ) -> (Record, [u8; 32], Record) {
+    ) -> (Record, [u8; 32], Record, [u8; 32], Record) {
         let invite_record = invite::codec::record_from_bytes(invite::codec::encode(&invite_secret))
             .expect("invite record");
         let invite_secret_event_id = types::event_id(&invite_record.canonical_bytes);
+        let ephemeral = connection_ephemeral::types::EphemeralSecretEvent {
+            owner_endpoint: [1; 32],
+            ephemeral_private_key: [8; 32],
+            ephemeral_public_key: crate::core::crypto::x25519_public_key(&[8; 32]),
+            created_at_ms: 0,
+        };
+        let ephemeral_record = connection_ephemeral::codec::record_from_bytes(
+            connection_ephemeral::codec::encode(&ephemeral),
+        )
+        .expect("ephemeral record");
+        let ephemeral_secret_event_id = types::event_id(&ephemeral_record.canonical_bytes);
         let record = codec::record_from_bytes(codec::encode(&RequestEvent {
             from_endpoint: [1; 32],
             to_endpoint: [9; 32],
             nonce: [2; 32],
             bootstrap_hash: invite_secret.bootstrap_hash,
             invite_secret_event_id,
+            initiator_ephemeral_secret_event_id: ephemeral_secret_event_id,
+            initiator_ephemeral_public_key: ephemeral.ephemeral_public_key,
             from_listen_addr: None,
         }))
         .expect("request record");
-        (record, invite_secret_event_id, invite_record)
+        (
+            record,
+            invite_secret_event_id,
+            invite_record,
+            ephemeral_secret_event_id,
+            ephemeral_record,
+        )
     }
 
     #[test]
     fn projects_request_bytes_without_receive_metadata() {
-        let (record, invite_secret_event_id, invite_record) = authorized_request_record();
+        let (record, invite_secret_event_id, invite_record, ephemeral_id, ephemeral_record) =
+            authorized_request_record();
         let output = project(&context_with_dependency(
             &record,
             invite_secret_event_id,
             invite_record,
+            ephemeral_id,
+            ephemeral_record,
         ))
         .expect("project request");
 
-        assert_eq!(output.rows.len(), 2);
+        assert_eq!(output.rows.len(), 1);
         assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
         assert_eq!(output.rows[0].key, types::event_id(&record.canonical_bytes));
         assert_eq!(output.rows[0].value, record.canonical_bytes);
-        assert_eq!(output.rows[1].table, schema::CONNECTIONS);
-        assert_eq!(
-            output.rows[1].key,
-            types::connection_id(&types::event_id(&record.canonical_bytes), &[9; 32])
-        );
-        assert_eq!(output.rows[1].value, [9; 32]);
     }
 
     #[test]
-    fn local_scoped_request_projects_connection_only_not_bootstrap_authorization() {
-        let (record, invite_secret_event_id, invite_record) = scoped_authorized_request_record();
+    fn local_scoped_request_only_caches_request_bytes() {
+        let (record, invite_secret_event_id, invite_record, ephemeral_id, ephemeral_record) =
+            scoped_authorized_request_record();
         let output = project(&context_with_dependency(
             &record,
             invite_secret_event_id,
             invite_record,
+            ephemeral_id,
+            ephemeral_record,
         ))
         .expect("project local scoped request");
 
-        assert_eq!(output.rows.len(), 3);
+        assert_eq!(output.rows.len(), 1);
         assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
-        assert_eq!(output.rows[1].table, schema::CONNECTIONS);
-        assert_eq!(output.rows[2].table, schema::CONNECTION_INVITE_WORKSPACES);
     }
 
     #[test]
-    fn projects_received_request_connection_and_route_rows() {
-        let (record, invite_secret_event_id, invite_record) = authorized_request_record();
+    fn projects_received_request_bytes_without_private_ephemeral_dependency() {
+        let (record, invite_secret_event_id, invite_record, _, _) = authorized_request_record();
         let origin = "127.0.0.1:9000".parse::<SocketAddr>().expect("addr");
         let output = project(&EventWithContext {
             record: &record,
@@ -250,21 +258,14 @@ mod tests {
         })
         .expect("project received request");
 
-        assert_eq!(output.rows.len(), 3);
+        assert_eq!(output.rows.len(), 1);
         assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
-        assert_eq!(output.rows[1].table, schema::CONNECTIONS);
-        assert_eq!(output.rows[2].table, schema::TRANSPORT_TARGETS);
-        assert_eq!(
-            output.rows[1].key,
-            types::connection_id(&types::event_id(&record.canonical_bytes), &[9; 32])
-        );
-        assert_eq!(output.rows[1].value, [1; 32]);
-        assert_eq!(output.rows[2].value, origin.to_string().into_bytes());
     }
 
     #[test]
-    fn received_scoped_request_projects_invite_workspace_authority() {
-        let (record, invite_secret_event_id, invite_record) = scoped_authorized_request_record();
+    fn received_scoped_request_only_caches_request_bytes() {
+        let (record, invite_secret_event_id, invite_record, _, _) =
+            scoped_authorized_request_record();
         let origin = "127.0.0.1:9000".parse::<SocketAddr>().expect("addr");
         let output = project(&EventWithContext {
             record: &record,
@@ -282,18 +283,8 @@ mod tests {
         })
         .expect("project received scoped request");
 
-        assert_eq!(output.rows.len(), 4);
+        assert_eq!(output.rows.len(), 1);
         assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
-        assert_eq!(output.rows[1].table, schema::CONNECTIONS);
-        assert_eq!(output.rows[2].table, schema::CONNECTION_INVITE_WORKSPACES);
-        assert_eq!(output.rows[3].table, schema::TRANSPORT_TARGETS);
-        assert_eq!(
-            output.rows[1].key,
-            types::connection_id(&types::event_id(&record.canonical_bytes), &[9; 32])
-        );
-        assert_eq!(output.rows[1].value, [1; 32]);
-        assert_eq!(output.rows[2].value, [6; 32]);
-        assert_eq!(output.rows[3].value, origin.to_string().into_bytes());
     }
 
     #[test]
@@ -322,7 +313,7 @@ mod tests {
 
     #[test]
     fn rejects_received_request_when_invite_secret_dependency_is_missing() {
-        let (record, _, _) = authorized_request_record();
+        let (record, _, _, _, _) = authorized_request_record();
 
         assert_eq!(
             project(&EventWithContext {
@@ -346,7 +337,7 @@ mod tests {
 
     #[test]
     fn rejects_received_request_when_invite_secret_hash_does_not_match() {
-        let (record, invite_secret_event_id, _) = authorized_request_record();
+        let (record, invite_secret_event_id, _, _, _) = authorized_request_record();
         let wrong_invite = invite::types::InviteSecretEvent::new([8; 32]);
         let wrong_invite_record =
             invite::codec::record_from_bytes(invite::codec::encode(&wrong_invite))

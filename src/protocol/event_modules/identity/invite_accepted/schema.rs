@@ -79,6 +79,18 @@ pub fn invite_accepted_count(store: &Store) -> Result<usize, String> {
         .map_err(|err| format!("count invite_accepted rows: {err}"))
 }
 
+pub fn accepted_workspace_ids(
+    store: &Store,
+    accepted_endpoint_id: EndpointId,
+) -> Result<Vec<EventId>, String> {
+    store
+        .table_rows_with_key_prefix(INVITES_ACCEPTED, &accepted_endpoint_id, usize::MAX)
+        .map_err(|err| format!("load accepted invites: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_invite_accepted_row(&key, &value).map(|row| row.workspace_id))
+        .collect()
+}
+
 fn encode_invite_accepted_value(
     invite_accepted_event_id: EventId,
     event: &InviteAcceptedEvent,

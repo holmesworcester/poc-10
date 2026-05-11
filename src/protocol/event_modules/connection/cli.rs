@@ -38,7 +38,7 @@ fn run_connect_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOu
         &context.protocol,
         None,
         transit_out::Work::SendConnectionRequest {
-            connection_id: request.connection_id,
+            request_id: request.request_id,
             addr: request.addr,
             bytes: request.bytes,
         },

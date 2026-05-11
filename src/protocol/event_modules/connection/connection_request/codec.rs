@@ -24,7 +24,7 @@ const ADDR_FAMILY_V6: u8 = 6;
 const ADDR_BLOCK_BYTES: usize = 1 + 16 + 2;
 
 pub fn encode(event: &RequestEvent) -> Vec<u8> {
-    let mut out = Writer::with_capacity(10 + 1 + 32 * 5 + ADDR_BLOCK_BYTES);
+    let mut out = Writer::with_capacity(10 + 1 + 32 * 7 + ADDR_BLOCK_BYTES);
     out.raw(EVENT_MAGIC);
     out.u8(TAG);
     out.id(&event.from_endpoint);
@@ -32,6 +32,8 @@ pub fn encode(event: &RequestEvent) -> Vec<u8> {
     out.id(&event.nonce);
     out.id(&event.bootstrap_hash);
     out.id(&event.invite_secret_event_id);
+    out.id(&event.initiator_ephemeral_secret_event_id);
+    out.id(&event.initiator_ephemeral_public_key);
     encode_optional_addr(&mut out, event.from_listen_addr);
     out.finish()
 }
@@ -51,6 +53,8 @@ pub fn decode(bytes: &[u8]) -> Result<RequestEvent, String> {
         nonce: reader.id()?,
         bootstrap_hash: reader.id()?,
         invite_secret_event_id: reader.id()?,
+        initiator_ephemeral_secret_event_id: reader.id()?,
+        initiator_ephemeral_public_key: reader.id()?,
         from_listen_addr: decode_optional_addr(&mut reader)?,
     };
     reader.finish()?;
@@ -125,6 +129,21 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         timestamp: 0,
         body_len: 0,
         canonical_bytes: bytes,
+        dependencies: vec![
+            event.invite_secret_event_id,
+            event.initiator_ephemeral_secret_event_id,
+        ],
+        workspace_id: None,
+        scope: EventScope::Local,
+    })
+}
+
+pub fn received_record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
+    let event = decode(&bytes)?;
+    Ok(EventRecord {
+        timestamp: 0,
+        body_len: 0,
+        canonical_bytes: bytes,
         dependencies: vec![event.invite_secret_event_id],
         workspace_id: None,
         scope: EventScope::Local,
@@ -142,6 +161,8 @@ mod tests {
             nonce: [3; 32],
             bootstrap_hash: [4; 32],
             invite_secret_event_id: [5; 32],
+            initiator_ephemeral_secret_event_id: [6; 32],
+            initiator_ephemeral_public_key: [7; 32],
             from_listen_addr: None,
         }
     }
@@ -149,6 +170,14 @@ mod tests {
     #[test]
     fn record_declares_invite_secret_dependency() {
         let record = record_from_bytes(encode(&request())).expect("record");
+
+        assert_eq!(record.scope, EventScope::Local);
+        assert_eq!(record.dependencies, vec![[5; 32], [6; 32]]);
+    }
+
+    #[test]
+    fn received_record_declares_only_invite_secret_dependency() {
+        let record = received_record_from_bytes(encode(&request())).expect("record");
 
         assert_eq!(record.scope, EventScope::Local);
         assert_eq!(record.dependencies, vec![[5; 32]]);
@@ -160,8 +189,7 @@ mod tests {
         let bytes_none = encode(&request);
         assert_eq!(decode(&bytes_none).expect("decode"), request);
 
-        request.from_listen_addr =
-            Some("127.0.0.1:55555".parse().expect("ipv4 socket addr"));
+        request.from_listen_addr = Some("127.0.0.1:55555".parse().expect("ipv4 socket addr"));
         let bytes_v4 = encode(&request);
         assert_eq!(decode(&bytes_v4).expect("decode"), request);
         assert_eq!(bytes_none.len(), bytes_v4.len());

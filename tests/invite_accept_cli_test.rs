@@ -32,8 +32,8 @@ fn invite_listens_and_accept_connects_two_cli_processes() {
     assert!(host_out.contains("accepted_connections: 1"), "{host_out}");
     assert_eq!(connection_count(&host), 1);
     assert_eq!(connection_count(&joiner), 1);
-    assert_eq!(connection_event_count(&host), 1);
-    assert_eq!(connection_event_count(&joiner), 1);
+    assert_eq!(connection_event_count(&host), 2);
+    assert_eq!(connection_event_count(&joiner), 2);
 }
 
 #[test]
@@ -57,9 +57,9 @@ fn invite_listens_for_two_separate_accepting_cli_processes() {
     assert_eq!(connection_count(&host), 2);
     assert_eq!(connection_count(&joiner_a), 1);
     assert_eq!(connection_count(&joiner_b), 1);
-    assert_eq!(connection_event_count(&host), 2);
-    assert_eq!(connection_event_count(&joiner_a), 1);
-    assert_eq!(connection_event_count(&joiner_b), 1);
+    assert_eq!(connection_event_count(&host), 4);
+    assert_eq!(connection_event_count(&joiner_a), 2);
+    assert_eq!(connection_event_count(&joiner_b), 2);
 }
 
 #[test]

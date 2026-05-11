@@ -4,25 +4,22 @@
 //! `[u32 length][bytes]` frames, records inbound bytes in the core queue, and
 //! drains outbound bytes for the connected route.
 //!
-//! The protocol boundary is the stored queue rows in `core/network_queues.rs`.
-//! On receive, TCP wraps each frame in an `InboundNetworkRow` keyed by the
-//! observed `NetworkSource` and inserts it into the inbound queue. An
-//! upper-layer worker later claims that row and writes any accepted protocol
-//! bytes to its own input queues. On send, callers provide `OutboundNetworkRow`s
-//! keyed by one `NetworkTarget`; TCP inserts them into the outbound queue,
-//! claims rows for that same target, writes their opaque bytes as frames,
-//! deletes the sent core rows, and then reports the sent rows back through
-//! `on_sent` so protocol-owned bookkeeping can advance. Core never interprets
-//! or constructs protocol bytes.
+//! The protocol boundary is either a stored queue row or an explicit exchange
+//! callback. One-way receive paths wrap each frame in an `InboundNetworkRow`
+//! and insert it into the inbound queue for a later worker. Exchange paths hand
+//! the row directly to the caller so another daemon worker sharing the same DB
+//! cannot claim the frame between enqueue and same-stream response handling. On
+//! send, callers provide `OutboundNetworkRow`s keyed by one `NetworkTarget`;
+//! TCP inserts them into the outbound queue, claims rows for that same target,
+//! writes their opaque bytes as frames, deletes the sent core rows, and then
+//! reports the sent rows back through `on_sent` so protocol-owned bookkeeping
+//! can advance. Core never interprets or constructs protocol bytes.
 //!
 //! The invariant is routing correctness: each outbound row is sent only on the
-//! stream for its `NetworkTarget`, and each inbound row is recorded with the
-//! `NetworkSource` observed from the socket before any worker sees the bytes. A
-//! frame is first written to a core queue row and then left for admission. The
-//! same shape is used on send: callers provide opaque rows, this pump writes
-//! those rows in caller order, and then calls back so the caller can update its
-//! own send bookkeeping. Keep this file boring; cleverness here usually means a
-//! domain worker is missing.
+//! stream for its `NetworkTarget`, and each inbound row carries the
+//! `NetworkSource` observed from the socket before protocol code sees the
+//! bytes. Keep this file boring; cleverness here usually means a domain worker
+//! is missing.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -284,9 +281,7 @@ fn pump_stream<T>(
         report.received_frames += 1;
 
         let inbound = InboundNetworkRow::new(NetworkSource::new(target.addr()), bytes);
-        network_queues::enqueue_inbound(store, std::slice::from_ref(&inbound))?;
-        let outbound = on_inbound(inbound.clone(), &mut value)?;
-        network_queues::delete_inbound(store, std::slice::from_ref(&inbound))?;
+        let outbound = on_inbound(inbound, &mut value)?;
 
         if outbound.is_empty() {
             if write_open {

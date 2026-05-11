@@ -26,19 +26,24 @@ use crate::core::daemon::{StepContext, Worker};
 use crate::core::network_queues::{self, InboundNetworkRow, NetworkTarget, OutboundNetworkRow};
 use crate::core::store::Store;
 use crate::core::tcp;
-use crate::protocol::event_modules::connection::types::ConnectionId;
-use crate::protocol::event_modules::identity::endpoint;
+use crate::protocol::event_modules::connection::{
+    connection_request, connection_response, schema as connection_schema, types::ConnectionId,
+};
+use crate::protocol::event_modules::identity::{endpoint, invite};
+use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::sync::SyncIndex;
 use crate::workers::pipeline_helpers::event_pipeline::{
     self as pipeline, EventRegistry, ProjectionOutput, TransitInReport,
 };
-use crate::workers::{event_admission, schema as worker_schema, sync, transit_out, DaemonWorkerContext};
+use crate::workers::{schema as worker_schema, sync, transit_out, DaemonWorkerContext};
 
 const READY_BATCH: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Work {
-    Drain { limit: usize },
+    Drain {
+        limit: usize,
+    },
     Serve {
         listen: SocketAddr,
         accept_count: usize,
@@ -67,6 +72,8 @@ pub(crate) struct InboundExchangeOutput {
 
 #[derive(Debug)]
 struct DecodedCanonical {
+    canonical_bytes: Vec<u8>,
+    receive: Option<crate::protocol::event_modules::types::ReceiveMetadata>,
     provenance: Option<worker_schema::TransitProvenance>,
 }
 
@@ -108,12 +115,14 @@ where
         |inbound, state| process_stream_inbound(store, registry, sync_index, inbound, state),
         |rows, state| transit_out::mark_sent_network_rows(store, rows, &state.sent_transit_out),
     )?;
-    Ok(crate::protocol::event_modules::connection::types::ServeReport {
-        local_addr: report.local_addr,
-        accepted_connections: report.accepted_connections,
-        sent_events: report.value.sent_events,
-        received_events: report.value.received_events,
-    })
+    Ok(
+        crate::protocol::event_modules::connection::types::ServeReport {
+            local_addr: report.local_addr,
+            accepted_connections: report.accepted_connections,
+            sent_events: report.value.sent_events,
+            received_events: report.value.received_events,
+        },
+    )
 }
 
 fn process_stream_inbound<R>(
@@ -173,17 +182,8 @@ where
     let output = registry.project_network_in(store, &inbound)?;
     let decoded = decoded_canonical_rows(&output)?;
     let connection_ids = connection_ids(&decoded);
-    let canonical_rows = decoded.len();
-    store
-        .insert_table_rows(output.rows)
-        .map_err(|err| format!("stage canonical input: {err}"))?;
-    let admitted = event_admission::run(
-        store,
-        registry,
-        event_admission::Work::Drain {
-            limit: canonical_rows.max(1),
-        },
-    )?;
+    let request_ids = bootstrap_request_ids(&decoded);
+    let admitted = admit_decoded_canonical(store, registry, decoded)?;
     pipeline::run(
         store,
         registry,
@@ -196,23 +196,54 @@ where
         received_events: admitted.event_ids.len(),
         ..InboundExchangeOutput::default()
     };
+    let response_frames = connection_response_frames(store, registry, &request_ids)?;
+    out.outbound_rows
+        .extend(network_queues::outbound_rows(target, response_frames));
     if let Some(sync_index) = sync_index {
         let (frames, sent_transit_out) =
             same_stream_sync_responses(store, registry, sync_index, &connection_ids)?;
         out.sent_transit_out.extend(sent_transit_out);
-        out.outbound_rows.extend(network_queues::outbound_rows(target, frames));
+        out.outbound_rows
+            .extend(network_queues::outbound_rows(target, frames));
     }
     Ok(out)
+}
+
+fn admit_decoded_canonical<R>(
+    store: &Store,
+    registry: &R,
+    decoded: Vec<DecodedCanonical>,
+) -> Result<pipeline::AdmitReport, String>
+where
+    R: EventRegistry,
+{
+    let mut records = Vec::with_capacity(decoded.len());
+    for row in decoded {
+        records.push(registry.record_from_canonical_in(
+            store,
+            row.canonical_bytes,
+            row.receive,
+            row.provenance,
+        )?);
+    }
+    pipeline::run(store, registry, pipeline::AdmitReceivedRecords { records })
 }
 
 fn decoded_canonical_rows(output: &ProjectionOutput) -> Result<Vec<DecodedCanonical>, String> {
     output
         .rows
         .iter()
-        .filter(|row| row.table == worker_schema::CANONICAL_IN)
         .map(|row| {
-            let (_, _, provenance) = worker_schema::decode_canonical_in(&row.value)?;
-            Ok(DecodedCanonical { provenance })
+            if row.table != worker_schema::CANONICAL_IN {
+                return Err("transit projector returned a non-canonical row".to_string());
+            }
+            let (canonical_bytes, receive, provenance) =
+                worker_schema::decode_canonical_in(&row.value)?;
+            Ok(DecodedCanonical {
+                canonical_bytes,
+                receive,
+                provenance,
+            })
         })
         .collect()
 }
@@ -229,6 +260,26 @@ fn connection_ids(decoded: &[DecodedCanonical]) -> Vec<ConnectionId> {
         };
         if !out.iter().any(|known| known == &connection_id) {
             out.push(connection_id);
+        }
+    }
+    out
+}
+
+fn bootstrap_request_ids(decoded: &[DecodedCanonical]) -> Vec<[u8; 32]> {
+    let mut out = Vec::new();
+    for row in decoded {
+        let Some(provenance) = row.provenance else {
+            continue;
+        };
+        if provenance.unwrapped_with != worker_schema::TransitUnwrap::Bootstrap {
+            continue;
+        }
+        if !connection_request::codec::is_request(&row.canonical_bytes) {
+            continue;
+        }
+        let request_id = crate::protocol::event_modules::types::event_id(&row.canonical_bytes);
+        if !out.iter().any(|known| known == &request_id) {
+            out.push(request_id);
         }
     }
     out
@@ -287,6 +338,68 @@ fn local_endpoint(store: &Store) -> Result<endpoint::types::EndpointKeypair, Str
     endpoint::commands::local_keypair(store)?.ok_or_else(|| "local endpoint is missing".to_string())
 }
 
+fn connection_response_frames<R>(
+    store: &Store,
+    registry: &R,
+    request_ids: &[[u8; 32]],
+) -> Result<Vec<Vec<u8>>, String>
+where
+    R: EventRegistry,
+{
+    let mut frames = Vec::new();
+    let local = local_endpoint(store)?;
+    for request_id in request_ids {
+        let Some(request) = connection_request_for_response(store, *request_id)? else {
+            continue;
+        };
+        let invite_secret = invite_secret_for_response(store, &request.invite_secret_event_id)?;
+        let output = connection_response::commands::create_for_request(
+            connection_response::commands::CreateForRequest {
+                local,
+                request_id: *request_id,
+                request: &request,
+                invite_secret: &invite_secret,
+            },
+        )?;
+        let frame = output.value.bytes.clone();
+        pipeline::run(store, registry, output)
+            .map_err(|err| format!("record connection response: {err}"))?;
+        pipeline::run(
+            store,
+            registry,
+            pipeline::DrainUntilIdle {
+                batch_size: READY_BATCH,
+            },
+        )?;
+        frames.push(frame);
+    }
+    Ok(frames)
+}
+
+fn connection_request_for_response(
+    store: &Store,
+    request_id: [u8; 32],
+) -> Result<Option<connection_request::types::RequestEvent>, String> {
+    let Some(bytes) = event_schema::event_bytes(store, &request_id)
+        .map_err(|err| format!("load connection request event: {err}"))?
+        .or_else(|| connection_schema::connection_event(store, request_id).ok())
+    else {
+        return Ok(None);
+    };
+    connection_request::codec::decode(&bytes).map(Some)
+}
+
+fn invite_secret_for_response(
+    store: &Store,
+    invite_secret_event_id: &[u8; 32],
+) -> Result<invite::types::InviteSecretEvent, String> {
+    let bytes = event_schema::event_bytes(store, invite_secret_event_id)
+        .map_err(|err| format!("load invite secret event: {err}"))?
+        .ok_or_else(|| "missing invite secret event".to_string())?;
+    invite::codec::decode(&bytes)
+        .map_err(|_| "connection dependency is not an invite secret".to_string())
+}
+
 pub(crate) fn daemon_worker<C>() -> Worker<C>
 where
     C: DaemonWorkerContext,
@@ -314,7 +427,8 @@ where
     )?;
     ctx.report
         .add("accepted_connections", accept.accepted_connections);
-    ctx.report.add("received_events", accept.value.received_events);
+    ctx.report
+        .add("received_events", accept.value.received_events);
     ctx.report.add("sent_events", accept.value.sent_events);
 
     let report = match run(
@@ -338,9 +452,12 @@ where
 #[cfg(test)]
 mod tests {
     use crate::core::network_queues::{self, InboundNetworkRow, NetworkSource};
-    use crate::protocol::event_modules::connection::{schema, transit, types};
-    use crate::protocol::event_modules::identity::endpoint;
+    use crate::protocol::event_modules::connection::{
+        connection_request, connection_response, schema, transit, types,
+    };
+    use crate::protocol::event_modules::identity::{endpoint, invite};
     use crate::protocol::Protocol;
+    use crate::workers::pipeline_helpers::event_pipeline as pipeline;
     use crate::workers::schema as worker_schema;
 
     use super::*;
@@ -355,16 +472,32 @@ mod tests {
         let remote = keypair();
         let connection_id: types::ConnectionId = [3; 32];
         let store = Protocol::open_memory_store().expect("open store");
+        let connection = connection_response::types::ResponseEvent {
+            from_endpoint: remote.endpoint,
+            to_endpoint: local.endpoint,
+            request_id: [9; 32],
+            invite_secret_event_id: [8; 32],
+            initiator_ephemeral_secret_event_id: [7; 32],
+            responder_ephemeral_secret_event_id: [6; 32],
+            responder_ephemeral_public_key: [5; 32],
+            handshake_hash: [4; 32],
+            connection_secret: [5; 32],
+        };
         let mut rows = endpoint::projector::local_endpoint(local);
         rows.push(schema::connection_row(connection_id, remote.endpoint));
+        rows.push(schema::connection_event_row(
+            connection_id,
+            connection_response::codec::encode(&connection),
+        ));
         store
             .insert_table_rows(rows)
             .expect("insert connection rows");
         let inner = b"inner canonical bytes".to_vec();
         let frame = transit::commands::create_connection_batch(
-            &remote,
+            remote.endpoint,
             local.endpoint,
             connection_id,
+            &connection.connection_secret,
             vec![inner.clone()],
         )
         .expect("create transit frame");
@@ -396,6 +529,57 @@ mod tests {
         assert!(
             queued[0].provenance.is_some(),
             "canonical admission receives transit provenance as queue metadata"
+        );
+    }
+
+    #[test]
+    fn same_stream_bootstrap_response_is_not_starved_by_stale_canonical_queue() {
+        let alice = keypair();
+        let bob = keypair();
+        let store = Protocol::open_memory_store().expect("open store");
+        let protocol = Protocol::new();
+        store
+            .insert_table_rows(endpoint::projector::local_endpoint(alice))
+            .expect("insert alice endpoint");
+        let invite_output =
+            invite::commands::create(alice, "127.0.0.1:41000".parse().expect("invite addr"));
+        let invite_link = invite_output.value.clone();
+        pipeline::run(&store, &protocol, invite_output).expect("admit invite secret");
+        let stale = invite::codec::record_from_bytes(invite::codec::encode(
+            &invite::types::InviteSecretEvent::new([99; 32]),
+        ))
+        .expect("stale canonical record");
+        store
+            .insert_table_rows(vec![worker_schema::canonical_in_row(stale, None)])
+            .expect("insert stale canonical row");
+        let request = connection_request::commands::create(
+            bob,
+            &invite_link,
+            Some("127.0.0.1:41001".parse().expect("bob listen")),
+        )
+        .expect("create request");
+        let request_id = request.value.request_id;
+        let inbound = InboundNetworkRow::new(
+            NetworkSource::new("127.0.0.1:41001".parse().expect("source addr")),
+            request.value.bytes,
+        );
+
+        let output = process_inbound_exchange(&store, &protocol, inbound)
+            .expect("process same-stream bootstrap request");
+
+        assert_eq!(output.outbound_rows.len(), 1);
+        assert!(
+            schema::connection_id_for_request(&store, request_id)
+                .expect("load request connection")
+                .is_some(),
+            "the just-received request should be admitted before building the response"
+        );
+        assert_eq!(
+            store
+                .table_row_count(worker_schema::CANONICAL_IN)
+                .expect("count canonical queue"),
+            1,
+            "same-stream admission should not consume unrelated queued rows"
         );
     }
 }

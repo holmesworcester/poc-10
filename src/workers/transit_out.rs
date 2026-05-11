@@ -82,7 +82,7 @@ const TRANSIT_TARGET_PLAINTEXT_BYTES: usize = 32 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
     SendConnectionRequest {
-        connection_id: types::ConnectionId,
+        request_id: [u8; 32],
         addr: SocketAddr,
         bytes: Vec<u8>,
     },
@@ -105,10 +105,10 @@ where
 {
     match work {
         Work::SendConnectionRequest {
-            connection_id,
+            request_id,
             addr,
             bytes,
-        } => send_connection_request(store, registry, sync_index, connection_id, addr, bytes),
+        } => send_connection_request(store, registry, sync_index, request_id, addr, bytes),
         Work::ExchangeRoutes {
             fail_on_route_error,
         } => exchange_outbound_routes(store, registry, sync_index, fail_on_route_error),
@@ -123,14 +123,10 @@ fn send_connection_request(
     store: &Store,
     registry: &impl EventRegistry,
     sync_index: Option<&SyncIndex>,
-    connection_id: types::ConnectionId,
+    request_id: [u8; 32],
     addr: SocketAddr,
     bytes: Vec<u8>,
 ) -> Result<types::RouteExchangeReport, String> {
-    store
-        .insert_table_rows(vec![schema::transport_target_row(connection_id, addr)])
-        .map_err(|err| format!("remember connection route: {err}"))?;
-
     let target = NetworkTarget::new(addr);
     let report = exchange_outbound_route(
         store,
@@ -142,6 +138,11 @@ fn send_connection_request(
             sent_transit_out: Vec::new(),
         },
     )?;
+    if let Some(connection_id) = schema::connection_id_for_request(store, request_id)? {
+        store
+            .insert_table_rows(vec![schema::transport_target_row(connection_id, addr)])
+            .map_err(|err| format!("remember connection route: {err}"))?;
+    }
     Ok(types::RouteExchangeReport {
         routes_synced: 1,
         sent_events: report.sent_events,
@@ -307,6 +308,12 @@ pub(crate) fn drain_and_wrap_transit_out_for_connection(
         return Ok(DrainedTransitOut::default());
     }
     let remote = schema::remote_endpoint(store, connection_id)?;
+    let connection_event = schema::connection_event(store, connection_id)?;
+    let connection =
+        crate::protocol::event_modules::connection::connection_response::codec::decode(
+            &connection_event,
+        )
+        .map_err(|_| "connection transit dependency is not a connection event".to_string())?;
     let batches = batch_transit_out_items(items);
     let mut outgoing = Vec::with_capacity(batches.len());
     let mut sent_transit_out = Vec::with_capacity(batches.len());
@@ -321,9 +328,10 @@ pub(crate) fn drain_and_wrap_transit_out_for_connection(
             batch_transit_out.push(item.key.to_bytes());
         }
         outgoing.push(transit::commands::create_connection_batch(
-            &local,
+            local.endpoint,
             remote,
             connection_id,
+            &connection.connection_secret,
             inner_events,
         )?);
         sent_transit_out.push(batch_transit_out);

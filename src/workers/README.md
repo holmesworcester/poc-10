@@ -97,10 +97,11 @@ single route/frame boundary.
 - `transit_in`: accepts daemon or finite-listener TCP streams and consumes raw
   `core.network.inbound` frames. It runs the protocol transit projector,
   unwraps/authenticates transport envelopes using explicit local context, and
-  writes recovered inner bytes to `canonical.in` with provenance. It does not
-  decode the inner event type or admit semantic facts. Same-stream replies are
-  ordinary connection sync responses produced after a normal connection frame,
-  not invite bootstrap shortcuts.
+  feeds recovered inner bytes to the common admission pipeline with provenance
+  (queued drain paths use `canonical.in`; same-stream exchange paths admit the
+  just-decoded rows directly so unrelated queued rows cannot starve a handshake
+  response). Same-stream replies are ordinary connection sync responses produced
+  after a normal connection frame, not invite bootstrap shortcuts.
 - `event_admission`: consumes `canonical.in` rows. It inserts/dedupes events,
   performs the initial dependency check, keeps receive metadata beside blocked
   received events, and writes `event_modules.ready_events` or blocker indexes.
@@ -121,8 +122,10 @@ single route/frame boundary.
   index before responding, calls sync commands for compare/have/need decisions,
   writes sync protocol events through canonical in, and writes durable send ids to
   `transit.out`. Inbound sync work is authorized by the receiving connection id.
-  The daemon drains inbound sync work before starting new compares, and either
-  side may start an idempotent compare against its routed peers.
+  The daemon drains inbound sync work before starting new compares. For
+  invite-scoped connections, the invite acceptor starts compares; for plain
+  connections, a deterministic endpoint ordering chooses the starter. That
+  avoids both daemons dialing each other and then waiting on unread sockets.
 - `transit_out`: consumes `transit.out`, loads event bytes,
   enforces route/scope/workspace policy, wraps transit frames, and writes
   outbound transport rows.

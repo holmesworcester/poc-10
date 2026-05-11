@@ -14,7 +14,9 @@
 
 use crate::core::daemon::{StepContext, Worker};
 use crate::core::store::Store;
-use crate::workers::pipeline_helpers::event_pipeline::{self as pipeline, AdmitReport, EventRegistry};
+use crate::workers::pipeline_helpers::event_pipeline::{
+    self as pipeline, AdmitReport, EventRegistry,
+};
 use crate::workers::DaemonWorkerContext;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn invite_scoped_connection_transit_rejects_other_mutual_workspace() {
+    fn invite_scoped_connection_transit_allows_other_mutual_workspace() {
         let local = keypair();
         let remote = keypair();
         let connection_id = [3; 32];
@@ -367,16 +369,13 @@ mod tests {
             connection_id,
         );
 
-        let err = run(&store, &Protocol::new(), Work::Drain { limit: 1 })
-            .expect_err("invite-scoped connection must not admit other mutual workspace");
+        let report = run(&store, &Protocol::new(), Work::Drain { limit: 1 })
+            .expect("mutual workspace may use an invite-scoped connection");
 
+        assert_eq!(report.inserted_events, 1);
         assert!(
-            err.contains("transit shared in rejected event outside sender workspace"),
-            "{err}"
-        );
-        assert!(
-            !event_schema::has_event(&store, &content_id).expect("check event table"),
-            "other-workspace event must not be stored through invite-scoped transit"
+            event_schema::has_event(&store, &content_id).expect("check event table"),
+            "other mutual workspace event should enter normal dependency admission"
         );
     }
 }

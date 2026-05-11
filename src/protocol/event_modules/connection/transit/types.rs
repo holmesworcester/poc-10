@@ -34,6 +34,14 @@ pub enum TransitEnvelope {
         nonce: TransitNonce,
         ciphertext: Vec<u8>,
     },
+    ConnectionHandshakeResponse {
+        request_id: EventId,
+        sender_endpoint: EndpointId,
+        recipient_endpoint: EndpointId,
+        responder_ephemeral_public_key: EndpointId,
+        nonce: TransitNonce,
+        ciphertext: Vec<u8>,
+    },
     Connection {
         connection_id: ConnectionId,
         sender_endpoint: EndpointId,

@@ -87,9 +87,10 @@ pub fn create_invite_bootstrap_batch(
 }
 
 pub fn create_connection_batch(
-    local: &EndpointKeypair,
+    sender_endpoint: EndpointId,
     recipient_endpoint: EndpointId,
     connection_id: ConnectionId,
+    connection_secret: &[u8; 32],
     inners: Vec<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
     // Ordinary frames bind sender, recipient, and connection id into the
@@ -99,25 +100,56 @@ pub fn create_connection_batch(
     let nonce = crypto::random_xchacha20poly1305_nonce();
     let envelope = TransitEnvelope::Connection {
         connection_id,
-        sender_endpoint: local.endpoint,
+        sender_endpoint,
         recipient_endpoint,
         nonce,
         ciphertext: Vec::new(),
     };
     let plaintext = codec::encode_inner_events(&inners)?;
-    let ciphertext = crypto::x25519_xchacha20poly1305_encrypt(
-        &local.secret,
-        &recipient_endpoint,
-        CONNECTION_PURPOSE,
-        &codec::associated_data(&envelope),
-        &nonce,
-        &plaintext,
-    )?;
+    let associated_data = codec::associated_data(&envelope);
+    let key = crypto::hkdf_sha256_key(connection_secret, CONNECTION_PURPOSE, &associated_data)?;
+    let ciphertext = crypto::xchacha20poly1305_encrypt(&key, &associated_data, &nonce, &plaintext)?;
     Ok(codec::encode(&TransitEnvelope::Connection {
         connection_id,
-        sender_endpoint: local.endpoint,
+        sender_endpoint,
         recipient_endpoint,
         nonce,
         ciphertext,
     }))
+}
+
+pub(crate) fn create_connection_handshake_response(
+    sender_endpoint: EndpointId,
+    recipient_endpoint: EndpointId,
+    request_id: EventId,
+    responder_ephemeral_public_key: EndpointId,
+    response_key: &[u8; 32],
+    connection_event_bytes: &[u8],
+) -> Result<Vec<u8>, String> {
+    let nonce = crypto::random_xchacha20poly1305_nonce();
+    let envelope = TransitEnvelope::ConnectionHandshakeResponse {
+        request_id,
+        sender_endpoint,
+        recipient_endpoint,
+        responder_ephemeral_public_key,
+        nonce,
+        ciphertext: Vec::new(),
+    };
+    let associated_data = codec::associated_data(&envelope);
+    let ciphertext = crypto::xchacha20poly1305_encrypt(
+        response_key,
+        &associated_data,
+        &nonce,
+        connection_event_bytes,
+    )?;
+    Ok(codec::encode(
+        &TransitEnvelope::ConnectionHandshakeResponse {
+            request_id,
+            sender_endpoint,
+            recipient_endpoint,
+            responder_ephemeral_public_key,
+            nonce,
+            ciphertext,
+        },
+    ))
 }

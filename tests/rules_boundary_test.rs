@@ -1388,11 +1388,11 @@ fn connection_routes_are_projected_from_receive_metadata() {
     let response_projector = source_text(&connection_root.join("connection_response/projector.rs"));
     assert!(
         schema.contains("const TRANSPORT_TARGETS")
-            && request_projector.contains("context.receive")
-            && request_projector.contains("transport_target_row")
+            && !request_projector.contains("transport_target_row")
             && response_projector.contains("context.receive")
+            && response_projector.contains("request.from_listen_addr")
             && response_projector.contains("transport_target_row"),
-        "connection request/response projection should atomically write route rows from receive metadata"
+        "connection response projection should atomically write route rows from validated response receive metadata or request-advertised invite routes"
     );
 }
 

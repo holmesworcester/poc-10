@@ -172,7 +172,7 @@ fn record_from_transit_canonical_in(
                     "endpoint bootstrap transit only carries connection requests".to_string(),
                 );
             }
-            let record = connection::connection_request::codec::record_from_bytes(bytes)?;
+            let record = connection::connection_request::codec::received_record_from_bytes(bytes)?;
             return Ok(ReceivedRecord::with_receive(
                 record,
                 ReceiveMetadata::bootstrap_invite(
@@ -199,6 +199,25 @@ fn record_from_transit_canonical_in(
                 );
             }
             return Ok(ReceivedRecord::new(record));
+        }
+        TransitUnwrap::ConnectionHandshake { request_id } => {
+            if !connection::connection_response::codec::is_response(&bytes) {
+                return Err(
+                    "connection handshake response only carries connection events".to_string(),
+                );
+            }
+            let record = connection::connection_response::codec::received_record_from_bytes(
+                store, bytes, request_id,
+            )?;
+            return Ok(ReceivedRecord::with_receive(
+                record,
+                ReceiveMetadata::endpoint_receive(
+                    provenance.origin,
+                    provenance.local_endpoint,
+                    provenance.sender_endpoint,
+                    true,
+                ),
+            ));
         }
         TransitUnwrap::Connection { connection_id } => {
             if connection::connection_request::codec::is_request(&bytes) {
@@ -234,16 +253,19 @@ fn record_from_transit_canonical_in(
     let workspace_id = record
         .workspace_id
         .ok_or_else(|| "transit shared in requires a workspace".to_string())?;
-    let allowed_workspaces =
-        if let Some(workspace_id) = connection::schema::invite_workspace(store, connection_id)? {
-            vec![workspace_id]
-        } else {
-            identity::endpoint_shared::schema::mutual_workspace_ids(
-                store,
-                provenance.local_endpoint,
-                provenance.sender_endpoint,
-            )?
-        };
+    let mut allowed_workspaces = Vec::new();
+    if let Some(workspace_id) = connection::schema::invite_workspace(store, connection_id)? {
+        allowed_workspaces.push(workspace_id);
+    }
+    allowed_workspaces.extend(identity::invite_accepted::schema::accepted_workspace_ids(
+        store,
+        provenance.local_endpoint,
+    )?);
+    allowed_workspaces.extend(identity::endpoint_shared::schema::mutual_workspace_ids(
+        store,
+        provenance.local_endpoint,
+        provenance.sender_endpoint,
+    )?);
     if !allowed_workspaces
         .iter()
         .any(|allowed| allowed == &workspace_id)
@@ -275,6 +297,9 @@ pub(crate) fn is_identity_bootstrap_event(bytes: &[u8]) -> Result<bool, String> 
 pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     // Connection bootstrap records use a magic prefix. Ordinary shared/local
     // events and connection-scoped sync events use a single leading type tag.
+    if connection::connection_ephemeral::codec::is_ephemeral_secret(&bytes) {
+        return connection::connection_ephemeral::codec::record_from_bytes(bytes);
+    }
     if connection::connection_request::codec::is_request(&bytes) {
         return connection::connection_request::codec::record_from_bytes(bytes);
     }

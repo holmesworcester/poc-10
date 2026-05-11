@@ -1,4 +1,4 @@
-//! Outbound invite bootstrap exchange.
+//! Outbound invite bootstrap connection attempts.
 //!
 //! This worker owns the active TCP behavior needed by the peer accepting an
 //! invite before a steady-state connection route has done useful work. It does
@@ -111,7 +111,7 @@ where
             Ok(())
         },
     )?;
-    remember_connection_route(store, request.connection_id, request.addr)?;
+    remember_request_connection_route(store, request.request_id, request.addr)?;
     Ok(Output::Connected(types::ConnectReport {
         addr: request.addr,
         sent_events: state.sent_events,
@@ -144,7 +144,6 @@ where
             .map_err(|err| format!("create connection request: {err}"))?;
     let (request, _) = pipeline::run(store, registry, request_output)
         .map_err(|err| format!("record connection request: {err}"))?;
-    remember_connection_route(store, request.connection_id, parsed_invite.addr)?;
     let inners = initial_bootstrap_inner_bytes(initial_records);
     let frame = transit::commands::create_invite_bootstrap_batch(
         &local,
@@ -159,7 +158,7 @@ where
     let state = tcp::connect_exchange(
         store,
         target,
-        network_queues::outbound_rows(target, vec![frame, request.bytes]),
+        network_queues::outbound_rows(target, vec![request.bytes, frame]),
         ExchangeState::default(),
         |inbound, state| process_inbound(store, registry, inbound, state),
         |rows, state| {
@@ -168,6 +167,7 @@ where
         },
     )?;
     let _ = from_listen_addr;
+    remember_request_connection_route(store, request.request_id, parsed_invite.addr)?;
     Ok(Output::Connected(types::ConnectReport {
         addr: parsed_invite.addr,
         sent_events: state.sent_events,
@@ -198,6 +198,17 @@ fn remember_connection_route(
         .insert_table_rows(vec![schema::transport_target_row(connection_id, addr)])
         .map(|_| ())
         .map_err(|err| format!("remember connection route: {err}"))
+}
+
+fn remember_request_connection_route(
+    store: &Store,
+    request_id: [u8; 32],
+    addr: SocketAddr,
+) -> Result<(), String> {
+    let Some(connection_id) = schema::connection_id_for_request(store, request_id)? else {
+        return Ok(());
+    };
+    remember_connection_route(store, connection_id, addr)
 }
 
 fn ensure_local_invite_acceptance<R>(

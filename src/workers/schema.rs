@@ -90,6 +90,8 @@ pub enum TransitUnwrap {
         workspace_id: EventId,
         invite_event_id: EventId,
     },
+    /// Response to a native connection handshake request.
+    ConnectionHandshake { request_id: EventId },
     /// Established connection envelope addressed through a connection id.
     Connection { connection_id: ConnectionId },
 }
@@ -445,6 +447,10 @@ fn encode_transit_provenance(writer: &mut Writer, provenance: Option<TransitProv
             writer.id(&workspace_id);
             writer.id(&invite_event_id);
         }
+        TransitUnwrap::ConnectionHandshake { request_id } => {
+            writer.u8(3);
+            writer.id(&request_id);
+        }
     }
 }
 
@@ -478,6 +484,9 @@ fn decode_transit_provenance(reader: &mut Reader<'_>) -> Result<Option<TransitPr
                     bootstrap_hash: reader.id()?,
                     workspace_id: reader.id()?,
                     invite_event_id: reader.id()?,
+                },
+                3 => TransitUnwrap::ConnectionHandshake {
+                    request_id: reader.id()?,
                 },
                 other => return Err(format!("unknown canonical in transit unwrap tag {other}")),
             };

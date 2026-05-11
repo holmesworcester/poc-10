@@ -28,9 +28,13 @@
 use crate::core::crypto;
 use crate::core::network_queues::InboundNetworkRow;
 use crate::core::store::Store;
-use crate::protocol::event_modules::connection::types::ConnectionId;
+use crate::protocol::event_modules::connection::{
+    connection_ephemeral, connection_request, connection_response, types::ConnectionId,
+};
 use crate::protocol::event_modules::identity::endpoint::types::{EndpointId, EndpointKeypair};
 use crate::protocol::event_modules::identity::{endpoint, invite};
+use crate::protocol::event_modules::schema as event_schema;
+use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::ProjectionOutput;
 use crate::workers::schema::{self as worker_schema, TransitProvenance, TransitUnwrap};
 
@@ -159,6 +163,56 @@ fn unwrap(
                 sender_endpoint,
             })
         }
+        TransitEnvelopeRef::ConnectionHandshakeResponse {
+            request_id,
+            sender_endpoint,
+            recipient_endpoint,
+            responder_ephemeral_public_key,
+            nonce,
+            ciphertext,
+        } => {
+            if recipient_endpoint != local.endpoint {
+                return Err(
+                    "connection handshake response addressed to a different endpoint".to_string(),
+                );
+            }
+            let associated_data = codec::associated_data_connection_handshake_response(
+                &request_id,
+                &sender_endpoint,
+                &recipient_endpoint,
+                &responder_ephemeral_public_key,
+                &nonce,
+            );
+            let Some((request, invite_secret, initiator_ephemeral)) =
+                handshake_response_dependencies(store, request_id)?
+            else {
+                return Ok(UnwrappedTransit {
+                    inners: Vec::new(),
+                    unwrapped_with: TransitUnwrap::ConnectionHandshake { request_id },
+                    sender_endpoint,
+                });
+            };
+            let inner = match connection_response::commands::decrypt_handshake_response(
+                connection_response::commands::DecryptHandshakeResponse {
+                    request_id,
+                    request: &request,
+                    invite_secret: &invite_secret,
+                    initiator_ephemeral: &initiator_ephemeral,
+                    responder_ephemeral_public_key,
+                    associated_data: &associated_data,
+                    nonce: &nonce,
+                    ciphertext,
+                },
+            ) {
+                Ok(inner) => inner,
+                Err(err) => return Err(err),
+            };
+            Ok(UnwrappedTransit {
+                inners: vec![inner],
+                unwrapped_with: TransitUnwrap::ConnectionHandshake { request_id },
+                sender_endpoint,
+            })
+        }
         TransitEnvelopeRef::Connection {
             connection_id,
             sender_endpoint,
@@ -173,19 +227,24 @@ fn unwrap(
             if sender_endpoint != remote {
                 return Err("connection transit sender does not match connection".to_string());
             }
-            let plaintext = crypto::x25519_xchacha20poly1305_decrypt(
-                &local.secret,
+            let connection_event = connection_schema::connection_event(store, connection_id)?;
+            let connection =
+                connection_response::codec::decode(&connection_event).map_err(|_| {
+                    "connection transit dependency is not a connection event".to_string()
+                })?;
+            let associated_data = codec::associated_data_connection(
+                &connection_id,
                 &sender_endpoint,
-                CONNECTION_PURPOSE,
-                &codec::associated_data_connection(
-                    &connection_id,
-                    &sender_endpoint,
-                    &recipient_endpoint,
-                    &nonce,
-                ),
+                &recipient_endpoint,
                 &nonce,
-                ciphertext,
+            );
+            let key = crypto::hkdf_sha256_key(
+                &connection.connection_secret,
+                CONNECTION_PURPOSE,
+                &associated_data,
             )?;
+            let plaintext =
+                crypto::xchacha20poly1305_decrypt(&key, &associated_data, &nonce, ciphertext)?;
             Ok(UnwrappedTransit {
                 inners: codec::decode_inner_events(&plaintext)?,
                 unwrapped_with: TransitUnwrap::Connection { connection_id },
@@ -193,6 +252,38 @@ fn unwrap(
             })
         }
     }
+}
+
+fn handshake_response_dependencies(
+    store: &Store,
+    request_id: EventId,
+) -> Result<
+    Option<(
+        connection_request::types::RequestEvent,
+        invite::types::InviteSecretEvent,
+        connection_ephemeral::types::EphemeralSecretEvent,
+    )>,
+    String,
+> {
+    let Some(request_bytes) = event_schema::event_bytes(store, &request_id)
+        .map_err(|err| format!("load connection request event: {err}"))?
+        .or_else(|| connection_schema::connection_event(store, request_id).ok())
+    else {
+        return Ok(None);
+    };
+    let request = connection_request::codec::decode(&request_bytes)?;
+    let invite_secret_bytes = event_schema::event_bytes(store, &request.invite_secret_event_id)
+        .map_err(|err| format!("load invite secret event: {err}"))?
+        .ok_or_else(|| "missing invite secret event".to_string())?;
+    let invite_secret = invite::codec::decode(&invite_secret_bytes)
+        .map_err(|_| "connection dependency is not an invite secret".to_string())?;
+    let initiator_bytes =
+        event_schema::event_bytes(store, &request.initiator_ephemeral_secret_event_id)
+            .map_err(|err| format!("load connection ephemeral event: {err}"))?
+            .ok_or_else(|| "missing connection ephemeral event".to_string())?;
+    let initiator_ephemeral = connection_ephemeral::codec::decode(&initiator_bytes)
+        .map_err(|_| "connection dependency is not an ephemeral secret".to_string())?;
+    Ok(Some((request, invite_secret, initiator_ephemeral)))
 }
 
 #[cfg(test)]
