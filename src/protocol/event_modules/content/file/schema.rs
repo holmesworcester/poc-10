@@ -19,9 +19,7 @@ use crate::protocol::event_modules::worker::AdmitDecision;
 use crate::protocol::wire::{Reader, Writer};
 
 use super::codec;
-use super::types::{
-    FileEvent, SealedFileRow, FILE_DESCRIPTOR_CIPHERTEXT_BYTES,
-};
+use super::types::{FileEvent, SealedFileRow, FILE_DESCRIPTOR_CIPHERTEXT_BYTES};
 use crate::core::crypto::XCHACHA20_POLY1305_NONCE_BYTES;
 
 /// Receive-side admission gate for signed file descriptors.
