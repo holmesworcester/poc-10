@@ -331,6 +331,7 @@ mod tests {
                 receive: Some(ReceiveMetadata::bootstrap_invite(
                     origin, [9; 32], [1; 32], true,
                 )),
+                now_unix_minute: None,
             },
         })
         .expect("project received request");
@@ -359,6 +360,7 @@ mod tests {
                 receive: Some(ReceiveMetadata::bootstrap_invite(
                     origin, [9; 32], [1; 32], true,
                 )),
+                now_unix_minute: None,
             },
         })
         .expect("project received scoped request");
@@ -473,6 +475,7 @@ mod tests {
                         [1; 32],
                         true,
                     )),
+                    now_unix_minute: None,
                 },
             })
             .expect_err("wrong invite id must fail"),
@@ -503,6 +506,7 @@ mod tests {
                         [1; 32],
                         true,
                     )),
+                    now_unix_minute: None,
                 },
             })
             .expect_err("wrong invite signature must fail"),

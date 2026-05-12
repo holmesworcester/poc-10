@@ -19,10 +19,9 @@
 
 mod cli_harness;
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::process::Child;
-use std::sync::mpsc::{self, Receiver};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
 
 use cli_harness::*;
@@ -569,14 +568,12 @@ fn cli_concurrent_peer_send_survives_sibling_delete() {
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
     let workspace_id = create_workspace(&alice, "Concurrent", "alice", "alice-laptop");
-    let invite_port = free_port();
     let alice_port = free_port();
     let bob_port = free_port();
 
-    join_workspace(&alice, &bob, &workspace_id, invite_port, "bob", "bob-phone");
     let _alice_daemon = spawn_pair_daemon(&alice, alice_port);
     let _bob_daemon = spawn_pair_daemon(&bob, bob_port);
-    connect_daemon_pair(&alice, alice_port, &bob, bob_port);
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
     grant_content_key_to_peer(&alice, &bob, &workspace_id);
 
     // Pin both clocks so authoring lands in the same `unix_minute`.
@@ -680,128 +677,77 @@ fn join_workspace(
     username: &str,
     device_name: &str,
 ) {
-    let mut listener = spawn_workspace_invite_listener(host, workspace_id, port, 1);
-    let invite = listener.invite_link();
+    let invite = workspace_invite_for_addr(host, workspace_id, port);
     let accepted = match try_accept_with_identity_retry(joiner, &invite, username, device_name) {
         Ok(output) => output,
-        Err(err) => listener.fail("workspace invite accept failed", err),
+        Err(err) => panic!("workspace invite accept failed: {err}"),
     };
     assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
-    let host_out = listener.wait_success("workspace invite listener");
-    assert!(host_out.contains("accepted_connections: 1"), "{host_out}");
+    wait_for_local_workspace_join(joiner, workspace_id, username);
+    wait_for_users_contains(host, workspace_id, username);
 }
 
-struct ListeningInvite {
-    child: Child,
-    invite_rx: Receiver<Result<String, String>>,
-    stdout: JoinHandle<String>,
-    stderr: JoinHandle<String>,
-}
-
-impl ListeningInvite {
-    fn invite_link(&mut self) -> String {
-        match self.invite_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok(line)) => {
-                assert!(
-                    line.starts_with("topo://invite/"),
-                    "missing invite link: {line}"
-                );
-                thread::sleep(Duration::from_millis(50));
-                line
-            }
-            Ok(Err(err)) => {
-                let _ = self.child.kill();
-                panic!("listener did not print invite link: {err}");
-            }
-            Err(err) => {
-                let _ = self.child.kill();
-                panic!("timed out waiting for invite link: {err}");
-            }
-        }
-    }
-
-    fn wait_success(mut self, label: &str) -> String {
-        let status = self.child.wait().expect("wait for listener");
-        let stdout = self.stdout.join().expect("join stdout reader");
-        let stderr = self.stderr.join().expect("join stderr reader");
-        assert!(
-            status.success(),
-            "{label} failed\nstdout={stdout}\nstderr={stderr}"
-        );
-        stdout
-    }
-
-    fn fail(mut self, label: &str, err: String) -> ! {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let stdout = self.stdout.join().expect("join stdout reader");
-        let stderr = self.stderr.join().expect("join stderr reader");
-        panic!("{label}: {err}\nlistener stdout:\n{stdout}\nlistener stderr:\n{stderr}");
-    }
-}
-
-fn spawn_workspace_invite_listener(
-    db: &str,
-    workspace_id: &str,
-    port: u16,
-    accept: usize,
-) -> ListeningInvite {
-    let port = port.to_string();
-    let accept = accept.to_string();
-    let child = spawn_topo(&[
+fn workspace_invite_for_addr(db: &str, workspace_id: &str, port: u16) -> String {
+    let addr = format!("127.0.0.1:{port}");
+    let out = assert_success(topo(&[
         "--db",
         db,
         "invite",
         "--workspace",
         workspace_id,
-        "--listen",
-        "127.0.0.1",
-        &port,
-        "--accept",
-        &accept,
-    ]);
-    listening_invite_from_child(child)
+        "--public-addr",
+        &addr,
+    ]));
+    invite_link_from_output(&out)
 }
 
-fn listening_invite_from_child(mut child: Child) -> ListeningInvite {
-    let stdout = child.stdout.take().expect("listener stdout");
-    let stderr = child.stderr.take().expect("listener stderr");
-    let (invite_tx, invite_rx) = mpsc::channel();
-    let stdout = thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut output = String::new();
-        let mut first = String::new();
-        match reader.read_line(&mut first) {
-            Ok(0) => {
-                let _ = invite_tx.send(Err("stdout closed before first line".to_string()));
+fn invite_link_from_output(output: &str) -> String {
+    output
+        .lines()
+        .find(|line| line.starts_with("topo://invite/"))
+        .unwrap_or_else(|| panic!("missing invite link in output:\n{output}"))
+        .to_string()
+}
+
+fn wait_for_local_workspace_join(db: &str, workspace_id: &str, username: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let recipient = topo(&["--db", db, "key-recipient", workspace_id]);
+        let users = topo(&["--db", db, "users", workspace_id]);
+        if recipient.status.success() && users.status.success() {
+            let users = stdout(&users);
+            if users.contains(username) {
+                return;
             }
-            Ok(_) => {
-                output.push_str(&first);
-                let link = first.trim_end_matches(['\r', '\n']).to_string();
-                let _ = invite_tx.send(Ok(link));
-            }
-            Err(err) => {
-                let _ = invite_tx.send(Err(err.to_string()));
-            }
+            last = users;
+        } else {
+            last = format!(
+                "key-recipient stderr:\n{}\nusers stderr:\n{}",
+                stderr(&recipient),
+                stderr(&users)
+            );
         }
-        let mut rest = String::new();
-        if reader.read_to_string(&mut rest).is_ok() {
-            output.push_str(&rest);
-        }
-        output
-    });
-    let stderr = thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut output = String::new();
-        let _ = reader.read_to_string(&mut output);
-        output
-    });
-    ListeningInvite {
-        child,
-        invite_rx,
-        stdout,
-        stderr,
+        thread::sleep(Duration::from_millis(100));
     }
+    panic!("workspace join never projected for {username}: {last}");
+}
+
+fn wait_for_users_contains(db: &str, workspace_id: &str, username: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let users = topo(&["--db", db, "users", workspace_id]);
+        if users.status.success() {
+            let users = stdout(&users);
+            if users.contains(username) {
+                return;
+            }
+            last = users;
+        } else {
+            last = stderr(&users);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("user {username} never appeared in {db}: {last}");
 }
 
 fn try_accept_with_identity_retry(
@@ -861,37 +807,6 @@ fn spawn_pair_daemon(db: &str, port: u16) -> RunningDaemon {
     RunningDaemon { child }
 }
 
-fn connect_daemon_pair(left_db: &str, left_port: u16, right_db: &str, right_port: u16) {
-    let left_invite = transport_invite(left_db, left_port);
-    let right_invite = transport_invite(right_db, right_port);
-    let right_to_left = connect_with_retry(right_db, &left_invite);
-    assert!(right_to_left.contains("connected:"), "{right_to_left}");
-    let left_to_right = connect_with_retry(left_db, &right_invite);
-    assert!(left_to_right.contains("connected:"), "{left_to_right}");
-}
-
-fn transport_invite(db: &str, port: u16) -> String {
-    let addr = format!("127.0.0.1:{port}");
-    let out = assert_success(topo(&["--db", db, "invite", "--public-addr", &addr]));
-    out.lines()
-        .find(|line| line.starts_with("topo://invite/"))
-        .unwrap_or_else(|| panic!("missing invite link in output:\n{out}"))
-        .to_string()
-}
-
-fn connect_with_retry(db: &str, invite: &str) -> String {
-    let mut last = String::new();
-    for _ in 0..200 {
-        let output = topo(&["--db", db, "connect", invite]);
-        if output.status.success() {
-            return stdout(&output);
-        }
-        last = stderr(&output);
-        thread::sleep(Duration::from_millis(50));
-    }
-    panic!("connect never succeeded: {last}");
-}
-
 fn grant_content_key_to_peer(alice: &str, peer: &str, workspace_id: &str) {
     let recipient = assert_success(topo(&["--db", peer, "key-recipient", workspace_id]));
     let recipient_key_id = line_value(&recipient, "recipient_key_id");
@@ -899,8 +814,30 @@ fn grant_content_key_to_peer(alice: &str, peer: &str, workspace_id: &str) {
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
     let wrapped = key_wrap_with_retry(alice, workspace_id, &removal_frontier_id, &recipient_key_id);
     assert_eq!(line_value(&wrapped, "recipient_key_id"), recipient_key_id);
-    let derived = wait_for_key_derive(peer, "1");
-    assert_eq!(line_value(&derived, "derived_key_secrets"), "1");
+    wait_for_key_access(peer, workspace_id, &removal_frontier_id, "yes");
+}
+
+fn wait_for_key_access(
+    db: &str,
+    workspace_id: &str,
+    removal_frontier_id: &str,
+    expected: &str,
+) -> String {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "key-access", workspace_id, removal_frontier_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, "access") == expected {
+                return out;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("key access did not reach {expected}: {last}");
 }
 
 fn key_wrap_with_retry(
@@ -928,23 +865,6 @@ fn key_wrap_with_retry(
     panic!("key-wrap never succeeded: {last}");
 }
 
-fn wait_for_key_derive(db: &str, expected: &str) -> String {
-    let mut last = String::new();
-    for _ in 0..300 {
-        let output = topo(&["--db", db, "key-derive"]);
-        if output.status.success() {
-            let out = stdout(&output);
-            if line_value(&out, "derived_key_secrets") == expected {
-                return out;
-            }
-            last = out;
-        } else {
-            last = stderr(&output);
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("key derive did not reach {expected}: {last}");
-}
 
 fn wait_for_messages_to_contain(db: &str, workspace_id: &str, expected: &str) {
     let mut last = String::new();

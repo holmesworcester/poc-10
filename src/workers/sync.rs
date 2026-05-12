@@ -1149,6 +1149,7 @@ mod tests {
         let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
             created_at_ms: 1,
             public_key: [9; 32],
+            disappearing_ttl_minutes: 0,
             name: "sync-route-prefer-inbound".to_string(),
         })
         .expect("create workspace");
