@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(first.chops_issued, 1);
 
         let pre_tombstones =
-            local_history_node_secret::schema::list_tombstones_for_workspace(&store, WORKSPACE)
+            local_history_node_secret::queries::list_tombstones_for_workspace(&store, WORKSPACE)
                 .expect("pre tombstones")
                 .len();
 
@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(second.frontiers_visited, 1);
 
         let post_tombstones =
-            local_history_node_secret::schema::list_tombstones_for_workspace(&store, WORKSPACE)
+            local_history_node_secret::queries::list_tombstones_for_workspace(&store, WORKSPACE)
                 .expect("post tombstones")
                 .len();
         assert_eq!(

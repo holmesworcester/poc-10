@@ -630,7 +630,7 @@ fn closest_retained_ancestor(
 ) -> Result<DerivationSource, String> {
     let mut best: Option<DerivationSource> =
         try_root_source(store, workspace_id, removal_frontier_id)?;
-    for row in local_history_node_secret::schema::list_for_frontier(
+    for row in local_history_node_secret::queries::list_for_frontier(
         store,
         workspace_id,
         removal_frontier_id,
@@ -716,7 +716,7 @@ fn derive_event_leaf<R: EventRegistry>(
     let unix_minute =
         crate::protocol::event_modules::content::message::types::unix_minute_for(created_at_ms);
 
-    if let Some(existing) = local_history_node_secret::schema::get_leaf(
+    if let Some(existing) = local_history_node_secret::queries::get_leaf(
         store,
         workspace_id,
         removal_frontier_id,
@@ -1015,7 +1015,7 @@ fn admit_time_path_then_leaf<R: EventRegistry>(
     while current.range_width > 1 {
         // Skip if the next minute_node row for this minute already exists
         // (some other concurrent path built it). Look up by full coordinate.
-        if let Some(existing) = local_history_node_secret::schema::get_minute_node(
+        if let Some(existing) = local_history_node_secret::queries::get_minute_node(
             store,
             workspace_id,
             removal_frontier_id,
@@ -1139,7 +1139,7 @@ fn closest_materialized_source(
         event_id_prefix: [0; 32],
         is_root: true,
     });
-    for row in local_history_node_secret::schema::list_for_frontier(
+    for row in local_history_node_secret::queries::list_for_frontier(
         store,
         workspace_id,
         removal_frontier_id,
@@ -1184,7 +1184,7 @@ fn next_materialized_trie_step(
 ) -> Result<Option<local_history_node_secret::types::LocalHistoryNodeSecretRow>, String> {
     // Look at all trie rows in this minute and pick the closest descendant
     // of `current` along the path of `event_id_in_minute`.
-    let rows = local_history_node_secret::schema::list_for_frontier(
+    let rows = local_history_node_secret::queries::list_for_frontier(
         store,
         workspace_id,
         removal_frontier_id,
@@ -1304,7 +1304,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
 ) -> Result<RetireDeletedEventLeafReport, String> {
     let unix_minute =
         crate::protocol::event_modules::content::message::types::unix_minute_for(created_at_ms);
-    let leaf_row = local_history_node_secret::schema::get_leaf(
+    let leaf_row = local_history_node_secret::queries::get_leaf(
         store,
         workspace_id,
         removal_frontier_id,
@@ -1612,7 +1612,7 @@ fn chop_time_tree_prefix<R: EventRegistry>(
         }
     } else {
         let mut best: Option<(EventId, HistoryNodeSecret, u64, u64)> = None;
-        for row in local_history_node_secret::schema::list_for_frontier(
+        for row in local_history_node_secret::queries::list_for_frontier(
             store,
             workspace_id,
             removal_frontier_id,
@@ -1954,7 +1954,7 @@ fn gc_subsumed_tombstones(
         return Ok(SubsumedTombstones::default());
     }
     // Collect leaf-tombstone keys that are subsumed.
-    let leaf_keys_to_delete: Vec<Vec<u8>> = local_history_node_secret::schema::list_tombstones_for_workspace(
+    let leaf_keys_to_delete: Vec<Vec<u8>> = local_history_node_secret::queries::list_tombstones_for_workspace(
         store,
         workspace_id,
     )?
@@ -2032,7 +2032,7 @@ fn ensure_time_split<R: EventRegistry>(
     child_range_start: u64,
     child_range_width: u64,
 ) -> Result<EnsureSplitOutcome, String> {
-    if let Some(existing) = local_history_node_secret::schema::get(
+    if let Some(existing) = local_history_node_secret::queries::get(
         store,
         workspace_id,
         removal_frontier_id,
@@ -2096,7 +2096,7 @@ fn ensure_trie_split<R: EventRegistry>(
     child_bit_depth: u16,
     child_event_id_prefix: EventId,
 ) -> Result<EnsureSplitOutcome, String> {
-    if let Some(existing) = local_history_node_secret::schema::get(
+    if let Some(existing) = local_history_node_secret::queries::get(
         store,
         workspace_id,
         removal_frontier_id,
@@ -2163,7 +2163,7 @@ fn walk_trie_for_retire<R: EventRegistry>(
     // materialized leaf in this minute. Each unique divergence depth
     // requires a sibling internal at that depth (covering the surviving
     // events on the opposite side of the leaf path).
-    let trie_rows: Vec<_> = local_history_node_secret::schema::list_leaves(store, workspace_id)?
+    let trie_rows: Vec<_> = local_history_node_secret::queries::list_leaves(store, workspace_id)?
         .into_iter()
         .filter(|row| {
             row.removal_frontier_id == removal_frontier_id
@@ -2871,7 +2871,7 @@ mod tests {
             )
             .expect("derive leaf");
         }
-        let pre_rows = local_history_node_secret::schema::list_for_workspace(&store, WORKSPACE)
+        let pre_rows = local_history_node_secret::queries::list_for_workspace(&store, WORKSPACE)
             .expect("pre rows");
         assert_eq!(
             pre_rows.len(),
@@ -2914,7 +2914,7 @@ mod tests {
             "at minimum a leaf tombstone must be written"
         );
 
-        let post_rows = local_history_node_secret::schema::list_for_workspace(&store, WORKSPACE)
+        let post_rows = local_history_node_secret::queries::list_for_workspace(&store, WORKSPACE)
             .expect("post rows");
         let leaf_count = post_rows
             .iter()
@@ -2940,7 +2940,7 @@ mod tests {
 
         // Assert the deleted leaf cannot be looked up.
         assert!(
-            local_history_node_secret::schema::get_leaf(
+            local_history_node_secret::queries::get_leaf(
                 &store,
                 WORKSPACE,
                 frontier_id,
@@ -3006,7 +3006,7 @@ mod tests {
         // must not exist (sibling-at-width-1 skip).
         for adjacent in [99u64, 101u64] {
             assert!(
-                local_history_node_secret::schema::get_minute_node(
+                local_history_node_secret::queries::get_minute_node(
                     &store,
                     WORKSPACE,
                     frontier_id,
@@ -3022,7 +3022,7 @@ mod tests {
         // requires this; otherwise minute_node + target_coord re-derives
         // the deleted leaf's secret via a single trie split).
         assert!(
-            local_history_node_secret::schema::get_minute_node(
+            local_history_node_secret::queries::get_minute_node(
                 &store,
                 WORKSPACE,
                 frontier_id,
@@ -3034,7 +3034,7 @@ mod tests {
         );
         // The surviving sibling leaf at coord_b stays materialized.
         assert!(
-            local_history_node_secret::schema::get_leaf(
+            local_history_node_secret::queries::get_leaf(
                 &store,
                 WORKSPACE,
                 frontier_id,
@@ -3055,9 +3055,8 @@ mod tests {
         // (siblings only) and the tombstone count is also O(log range +
         // log N + 1) (one tombstone per wiped descend-path row + leaf),
         // so cover_summary length stays bounded too.
-        use local_history_node_secret::schema::{
-            cover_summary, COVER_SUMMARY_ROW_LEN, COVER_SUMMARY_TOMBSTONE_LEN,
-        };
+        use local_history_node_secret::queries::cover_summary;
+        use local_history_node_secret::schema::{COVER_SUMMARY_ROW_LEN, COVER_SUMMARY_TOMBSTONE_LEN};
         let store = Protocol::open_memory_store().expect("store");
         let protocol = Protocol::new();
         let (frontier_id, _) = seed_local_key_secret(&store);
@@ -3185,7 +3184,7 @@ mod tests {
             panic!("unexpected output");
         };
         assert!(
-            local_history_node_secret::schema::get_leaf(
+            local_history_node_secret::queries::get_leaf(
                 &store,
                 WORKSPACE,
                 frontier_id,
@@ -3201,7 +3200,7 @@ mod tests {
         // and assert NONE derives the target leaf's secret. After the
         // puncturing retire walk, no covering row exists for the deleted
         // coord — the descend chain is wiped.
-        let post_rows = local_history_node_secret::schema::list_for_workspace(&store, WORKSPACE)
+        let post_rows = local_history_node_secret::queries::list_for_workspace(&store, WORKSPACE)
             .expect("list rows");
         for row in &post_rows {
             if row.removal_frontier_id != frontier_id {
@@ -3343,7 +3342,7 @@ mod tests {
         )
         .expect("retire");
 
-        let post_rows = local_history_node_secret::schema::list_for_workspace(&store, WORKSPACE)
+        let post_rows = local_history_node_secret::queries::list_for_workspace(&store, WORKSPACE)
             .expect("list rows");
         for row in &post_rows {
             if row.bit_depth == TRIE_LEAF_BIT_DEPTH {
@@ -3398,7 +3397,7 @@ mod tests {
     /// inputs.
     #[test]
     fn cover_summary_is_byte_equal_across_two_stores_running_same_retire() {
-        use local_history_node_secret::schema::cover_summary;
+        use local_history_node_secret::queries::cover_summary;
         let coords: Vec<EventId> = (0u8..6u8).map(|byte| [byte ^ 0xa5; 32]).collect();
         let target_idx = 0usize;
         // Use a deterministic signer so both stores derive the same
@@ -3451,7 +3450,7 @@ mod tests {
         // Sanity: tombstones are present (so summary actually exercises the
         // tombstone-encoding branch).
         let tombstones =
-            local_history_node_secret::schema::list_tombstones_for_workspace(&alice_store, WORKSPACE)
+            local_history_node_secret::queries::list_tombstones_for_workspace(&alice_store, WORKSPACE)
                 .expect("list tombstones");
         assert!(
             !tombstones.is_empty(),
@@ -3700,7 +3699,7 @@ mod tests {
             .expect("F row must remain after no-op chop");
         assert_eq!(root.local_key_secret_id, local_key_secret_id);
         // No tombstones should have been written.
-        let tombstones = local_history_node_secret::schema::list_tombstones_for_workspace(
+        let tombstones = local_history_node_secret::queries::list_tombstones_for_workspace(
             &store, WORKSPACE,
         )
         .expect("list tombstones");
@@ -3762,7 +3761,7 @@ mod tests {
         );
 
         // Tombstones are persisted in LOCAL_HISTORY_NODE_TOMBSTONES.
-        let tombstones = local_history_node_secret::schema::list_tombstones_for_workspace(
+        let tombstones = local_history_node_secret::queries::list_tombstones_for_workspace(
             &store, WORKSPACE,
         )
         .expect("list tombstones");
@@ -3874,7 +3873,7 @@ mod tests {
         // Two fresh stores chopped to the same floor must produce
         // byte-identical tombstone rows. cover_summary is the canonical
         // fingerprint of the retained set + tombstones, so we compare it.
-        use local_history_node_secret::schema::cover_summary;
+        use local_history_node_secret::queries::cover_summary;
         let signer = [0xcd; 32];
 
         let mk_store = || -> (Store, EventId) {
@@ -3906,12 +3905,12 @@ mod tests {
         );
         // Also sanity-check that tombstone rows are byte-equal directly.
         let mut alice_tombs =
-            local_history_node_secret::schema::list_tombstones_for_workspace(
+            local_history_node_secret::queries::list_tombstones_for_workspace(
                 &alice_store,
                 WORKSPACE,
             )
             .expect("alice tombs");
-        let mut bob_tombs = local_history_node_secret::schema::list_tombstones_for_workspace(
+        let mut bob_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
             &bob_store, WORKSPACE,
         )
         .expect("bob tombs");
@@ -4038,7 +4037,7 @@ mod tests {
 
         // Snapshot the pre-chop tombstone set so we can assert the GC
         // strictly removes the subsumed ones.
-        let pre_tombs = local_history_node_secret::schema::list_tombstones_for_workspace(
+        let pre_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
             &store, WORKSPACE,
         )
         .expect("pre-chop tombs");
@@ -4084,7 +4083,7 @@ mod tests {
 
         // Verify each pre-existing subsumed tombstone is truly gone from
         // the table.
-        let post_tombs = local_history_node_secret::schema::list_tombstones_for_workspace(
+        let post_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
             &store, WORKSPACE,
         )
         .expect("post-chop tombs");
@@ -4167,7 +4166,7 @@ mod tests {
         // contains a minute >= 100. The minute-150 leaf tombstone has
         // range_start=150, range_width=1, so range_end=151 > 100 and it
         // must survive the chop.
-        let pre_tombs = local_history_node_secret::schema::list_tombstones_for_workspace(
+        let pre_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
             &store, WORKSPACE,
         )
         .expect("pre-chop tombs");
@@ -4195,7 +4194,7 @@ mod tests {
         .expect("chop");
 
         // Each above-floor tombstone must still be present after the chop.
-        let post_tombs = local_history_node_secret::schema::list_tombstones_for_workspace(
+        let post_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
             &store, WORKSPACE,
         )
         .expect("post-chop tombs");
@@ -4261,7 +4260,7 @@ mod tests {
         }
 
         let pre_tombs_b: Vec<_> =
-            local_history_node_secret::schema::list_tombstones_for_workspace(&store, WORKSPACE)
+            local_history_node_secret::queries::list_tombstones_for_workspace(&store, WORKSPACE)
                 .expect("pre-chop tombs")
                 .into_iter()
                 .filter(|t| t.removal_frontier_id == frontier_b)
@@ -4284,7 +4283,7 @@ mod tests {
 
         // Every frontier-B tombstone must survive.
         let post_tombs_b: Vec<_> =
-            local_history_node_secret::schema::list_tombstones_for_workspace(&store, WORKSPACE)
+            local_history_node_secret::queries::list_tombstones_for_workspace(&store, WORKSPACE)
                 .expect("post-chop tombs")
                 .into_iter()
                 .filter(|t| t.removal_frontier_id == frontier_b)

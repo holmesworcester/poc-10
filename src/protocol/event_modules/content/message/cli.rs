@@ -290,7 +290,7 @@ fn open_sealed_message_row(
         &row.removal_frontier_id,
         row.created_at_ms,
     );
-    let Some(leaf) = local_history_node_secret::schema::get_leaf(
+    let Some(leaf) = local_history_node_secret::queries::get_leaf(
         store,
         row.workspace_id,
         row.removal_frontier_id,
@@ -419,7 +419,7 @@ fn open_sealed_reaction_row(
         &row.removal_frontier_id,
         row.created_at_ms,
     );
-    let Some(leaf) = local_history_node_secret::schema::get_leaf(
+    let Some(leaf) = local_history_node_secret::queries::get_leaf(
         store,
         row.workspace_id,
         row.removal_frontier_id,
@@ -533,7 +533,7 @@ pub(crate) fn require_active_frontier_id(
             local_key_secret::schema::get(store, workspace_id, frontier.removal_frontier_id)?
                 .is_some();
         let has_siblings = !root_present
-            && !local_history_node_secret::schema::list_for_frontier(
+            && !local_history_node_secret::queries::list_for_frontier(
                 store,
                 workspace_id,
                 frontier.removal_frontier_id,

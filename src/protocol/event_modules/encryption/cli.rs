@@ -482,7 +482,7 @@ fn load_time_tree_parent(
         .ok_or_else(|| "history node source event is missing".to_string())?;
     let node = local_history_node_secret::codec::decode(&node_bytes)
         .map_err(|_| "history node source event is not key material".to_string())?;
-    let row = local_history_node_secret::schema::get(
+    let row = local_history_node_secret::queries::get(
         store,
         workspace_id,
         removal_frontier_id,
@@ -526,8 +526,8 @@ fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         local_recipient_key::schema::list_for_workspace(&context.store, workspace_id)?;
     let key_wraps = key_wrap::schema::list_for_workspace(&context.store, workspace_id)?;
     let history_nodes =
-        local_history_node_secret::schema::list_for_workspace(&context.store, workspace_id)?;
-    let history_tombstones = local_history_node_secret::schema::list_tombstones_for_workspace(
+        local_history_node_secret::queries::list_for_workspace(&context.store, workspace_id)?;
+    let history_tombstones = local_history_node_secret::queries::list_tombstones_for_workspace(
         &context.store,
         workspace_id,
     )?;
@@ -537,7 +537,7 @@ fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
             workspace_id,
         )?;
     let cover_summary =
-        local_history_node_secret::schema::cover_summary(&context.store, workspace_id)?;
+        local_history_node_secret::queries::cover_summary(&context.store, workspace_id)?;
     use local_history_node_secret::types::{
         is_leaf_row, is_minute_node_row, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH,
     };
@@ -818,7 +818,7 @@ fn run_disappearing_status_command(
     let message_tombstones =
         message_schema::list_message_tombstones_for_workspace(&context.store, workspace_id)?
             .len();
-    let leaf_tombstones = local_history_node_secret::schema::list_tombstones_for_workspace(
+    let leaf_tombstones = local_history_node_secret::queries::list_tombstones_for_workspace(
         &context.store,
         workspace_id,
     )?

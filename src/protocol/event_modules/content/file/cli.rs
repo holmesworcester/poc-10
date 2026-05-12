@@ -359,7 +359,7 @@ fn lookup_content_key_secret(
     _removal_frontier_id: EventId,
     local_history_node_secret_id: EventId,
 ) -> Result<Option<crate::core::crypto::XChaCha20Poly1305Key>, String> {
-    for row in local_history_node_secret::schema::list_for_workspace(store, workspace_id)? {
+    for row in local_history_node_secret::queries::list_for_workspace(store, workspace_id)? {
         if row.local_history_node_secret_id == local_history_node_secret_id {
             return Ok(Some(row.node_secret));
         }
