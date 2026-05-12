@@ -17,49 +17,53 @@ use std::time::{Duration, Instant};
 use cli_harness::*;
 
 #[test]
-fn invite_listens_and_accept_connects_two_cli_processes() {
+fn invite_daemons_accept_and_connect_two_cli_processes() {
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let joiner = temp_db(&tmp, "joiner.db");
     let host_port = free_port();
+    let joiner_port = free_port();
 
-    let mut listener = spawn_invite_listener(&host, host_port, 1);
-    let invite = listener.invite_link();
+    let _host_daemon = spawn_daemon(&host, host_port);
+    let _joiner_daemon = spawn_daemon(&joiner, joiner_port);
+    let invite = transport_invite_link(&host, host_port);
     let accepted = accept_with_retry(&joiner, &invite);
     assert!(accepted.contains("connected:"), "{accepted}");
 
-    let host_out = listener.wait_success("single invite listener");
-    assert!(host_out.contains("accepted_connections: 1"), "{host_out}");
+    wait_for_connection_count(&host, 1);
     assert_eq!(connection_count(&host), 1);
     assert_eq!(connection_count(&joiner), 1);
-    assert_eq!(connection_event_count(&host), 1);
-    assert_eq!(connection_event_count(&joiner), 1);
+    assert_eq!(connection_event_count(&host), 2);
+    assert_eq!(connection_event_count(&joiner), 2);
 }
 
 #[test]
-fn invite_listens_for_two_separate_accepting_cli_processes() {
+fn invite_daemons_accept_two_separate_cli_processes() {
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let joiner_a = temp_db(&tmp, "joiner-a.db");
     let joiner_b = temp_db(&tmp, "joiner-b.db");
     let port = free_port();
+    let joiner_a_port = free_port();
+    let joiner_b_port = free_port();
 
-    let mut listener = spawn_invite_listener(&host, port, 2);
-    let invite = listener.invite_link();
+    let _host_daemon = spawn_daemon(&host, port);
+    let _joiner_a_daemon = spawn_daemon(&joiner_a, joiner_a_port);
+    let _joiner_b_daemon = spawn_daemon(&joiner_b, joiner_b_port);
+    let invite = transport_invite_link(&host, port);
 
     let accepted_a = accept_with_retry(&joiner_a, &invite);
     assert!(accepted_a.contains("connected:"), "{accepted_a}");
     let accepted_b = accept_with_retry(&joiner_b, &invite);
     assert!(accepted_b.contains("connected:"), "{accepted_b}");
 
-    let host_out = listener.wait_success("two-accept invite listener");
-    assert!(host_out.contains("accepted_connections: 2"), "{host_out}");
+    wait_for_connection_count(&host, 2);
     assert_eq!(connection_count(&host), 2);
     assert_eq!(connection_count(&joiner_a), 1);
     assert_eq!(connection_count(&joiner_b), 1);
-    assert_eq!(connection_event_count(&host), 2);
-    assert_eq!(connection_event_count(&joiner_a), 1);
-    assert_eq!(connection_event_count(&joiner_b), 1);
+    assert_eq!(connection_event_count(&host), 4);
+    assert_eq!(connection_event_count(&joiner_a), 2);
+    assert_eq!(connection_event_count(&joiner_b), 2);
 }
 
 #[test]
@@ -82,21 +86,15 @@ fn workspace_invite_accept_builds_identity_graph_over_two_cli_processes() {
     ]));
     let workspace_id = line_value(&created, "workspace_id");
 
-    let mut listener = spawn_workspace_invite_listener(&host, &workspace_id, host_port, 1);
-    let invite = listener.invite_link();
+    let _host_daemon = spawn_daemon(&host, host_port);
+    let _joiner_daemon = spawn_daemon(&joiner, joiner_port);
+    let invite = workspace_invite_link(&host, &workspace_id, host_port);
     let accepted = match try_accept_with_identity_retry(&joiner, &invite, "bob", "bob-phone") {
         Ok(output) => output,
-        Err(err) => {
-            listener.fail("bob accept failed", err);
-        }
+        Err(err) => panic!("bob accept failed: {err}"),
     };
     assert!(accepted.contains("connected:"), "{accepted}");
     assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
-
-    let host_out = listener.wait_success("workspace invite listener");
-    assert!(host_out.contains("accepted_connections: 1"), "{host_out}");
-    let _host_daemon = spawn_daemon(&host, host_port);
-    let _joiner_daemon = spawn_daemon(&joiner, joiner_port);
 
     wait_for_workspaces_containing(&joiner, &["Alpha", &workspace_id]);
     wait_for_users_containing(&joiner, &workspace_id, &["alice", "bob"]);
@@ -186,31 +184,22 @@ fn workspace_invite_is_multi_use_for_two_accepting_users() {
     ]));
     let workspace_id = line_value(&created, "workspace_id");
 
-    let mut listener = spawn_workspace_invite_listener(&host, &workspace_id, port, 2);
-    let invite = listener.invite_link();
+    let _host_daemon = spawn_daemon(&host, port);
+    let _bob_daemon = spawn_daemon(&bob, free_port());
+    let _carol_daemon = spawn_daemon(&carol, free_port());
+    let invite = workspace_invite_link(&host, &workspace_id, port);
     let accepted_bob = match try_accept_with_identity_retry(&bob, &invite, "bob", "bob-phone") {
         Ok(output) => output,
-        Err(err) => {
-            listener.fail("bob accept failed", err);
-        }
+        Err(err) => panic!("bob accept failed: {err}"),
     };
     assert_eq!(line_value(&accepted_bob, "workspace_id"), workspace_id);
     thread::sleep(Duration::from_millis(50));
     let accepted_carol =
         match try_accept_with_identity_retry(&carol, &invite, "carol", "carol-phone") {
             Ok(output) => output,
-            Err(err) => {
-                listener.fail("carol accept failed", err);
-            }
+            Err(err) => panic!("carol accept failed: {err}"),
         };
     assert_eq!(line_value(&accepted_carol, "workspace_id"), workspace_id);
-
-    let host_out = listener.wait_success("multi-use workspace invite listener");
-    assert!(host_out.contains("accepted_connections: 2"), "{host_out}");
-
-    let _host_daemon = spawn_daemon(&host, port);
-    let _bob_daemon = spawn_daemon(&bob, free_port());
-    let _carol_daemon = spawn_daemon(&carol, free_port());
 
     wait_for_users_containing(&bob, &workspace_id, &["alice", "bob"]);
     wait_for_users_containing(&carol, &workspace_id, &["alice", "carol"]);
@@ -229,8 +218,11 @@ fn workspace_invite_reuse_inducts_three_users() {
     let created = create_workspace(&host, "Alpha", "alice", "alice-laptop");
     let workspace_id = line_value(&created, "workspace_id");
 
-    let mut listener = spawn_workspace_invite_listener(&host, &workspace_id, port, 3);
-    let invite = listener.invite_link();
+    let _host_daemon = spawn_daemon(&host, port);
+    let _bob_daemon = spawn_daemon(&bob, free_port());
+    let _carol_daemon = spawn_daemon(&carol, free_port());
+    let _dave_daemon = spawn_daemon(&dave, free_port());
+    let invite = workspace_invite_link(&host, &workspace_id, port);
     for (db, username, device_name) in [
         (&bob, "bob", "bob-phone"),
         (&carol, "carol", "carol-phone"),
@@ -238,18 +230,10 @@ fn workspace_invite_reuse_inducts_three_users() {
     ] {
         let accepted = match try_accept_with_identity_retry(db, &invite, username, device_name) {
             Ok(output) => output,
-            Err(err) => listener.fail("reused workspace invite accept failed", err),
+            Err(err) => panic!("reused workspace invite accept failed: {err}"),
         };
         assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
     }
-
-    let host_out = listener.wait_success("three-use workspace invite listener");
-    assert!(host_out.contains("accepted_connections: 3"), "{host_out}");
-
-    let _host_daemon = spawn_daemon(&host, port);
-    let _bob_daemon = spawn_daemon(&bob, free_port());
-    let _carol_daemon = spawn_daemon(&carol, free_port());
-    let _dave_daemon = spawn_daemon(&dave, free_port());
 
     wait_for_users_containing(&host, &workspace_id, &["alice", "bob", "carol", "dave"]);
     wait_for_users_containing(&dave, &workspace_id, &["alice", "dave"]);
@@ -262,42 +246,38 @@ fn workspace_invites_mix_reuse_and_fresh_creation() {
     let bob = temp_db(&tmp, "bob.db");
     let carol = temp_db(&tmp, "carol.db");
     let dave = temp_db(&tmp, "dave.db");
-    let old_port = free_port();
-    let fresh_port = free_port();
+    let port = free_port();
 
     let created = create_workspace(&host, "Alpha", "alice", "alice-laptop");
     let workspace_id = line_value(&created, "workspace_id");
 
-    let mut old_listener = spawn_workspace_invite_listener(&host, &workspace_id, old_port, 2);
-    let old_invite = old_listener.invite_link();
+    let _host_daemon = spawn_daemon(&host, port);
+    let _bob_daemon = spawn_daemon(&bob, free_port());
+    let _carol_daemon = spawn_daemon(&carol, free_port());
+    let _dave_daemon = spawn_daemon(&dave, free_port());
+    let old_invite = workspace_invite_link(&host, &workspace_id, port);
     let accepted_bob = match try_accept_with_identity_retry(&bob, &old_invite, "bob", "bob-phone") {
         Ok(output) => output,
-        Err(err) => old_listener.fail("old invite bob accept failed", err),
+        Err(err) => panic!("old invite bob accept failed: {err}"),
     };
     assert_eq!(line_value(&accepted_bob, "workspace_id"), workspace_id);
 
-    let mut fresh_listener = spawn_workspace_invite_listener(&host, &workspace_id, fresh_port, 1);
-    let fresh_invite = fresh_listener.invite_link();
+    let fresh_invite = workspace_invite_link(&host, &workspace_id, port);
     let accepted_carol =
         match try_accept_with_identity_retry(&carol, &fresh_invite, "carol", "carol-phone") {
             Ok(output) => output,
-            Err(err) => fresh_listener.fail("fresh invite carol accept failed", err),
+            Err(err) => panic!("fresh invite carol accept failed: {err}"),
         };
     assert_eq!(line_value(&accepted_carol, "workspace_id"), workspace_id);
-    let fresh_out = fresh_listener.wait_success("fresh workspace invite listener");
-    assert!(fresh_out.contains("accepted_connections: 1"), "{fresh_out}");
 
     let accepted_dave =
         match try_accept_with_identity_retry(&dave, &old_invite, "dave", "dave-phone") {
             Ok(output) => output,
-            Err(err) => old_listener.fail("old invite dave accept failed", err),
+            Err(err) => panic!("old invite dave accept failed: {err}"),
         };
     assert_eq!(line_value(&accepted_dave, "workspace_id"), workspace_id);
-    let old_out = old_listener.wait_success("reused workspace invite listener");
-    assert!(old_out.contains("accepted_connections: 2"), "{old_out}");
 
-    let host_users = assert_success(topo(&["--db", &host, "users", &workspace_id]));
-    assert_contains_all(&host_users, &["alice", "bob", "carol", "dave"]);
+    wait_for_users_containing(&host, &workspace_id, &["alice", "bob", "carol", "dave"]);
 }
 
 #[test]
@@ -627,47 +607,12 @@ impl ListeningInvite {
         }
     }
 
-    fn wait_success(mut self, label: &str) -> String {
-        let status = self.child.wait().expect("wait for listener");
-        let stdout = self.stdout.join().expect("join stdout reader");
-        let stderr = self.stderr.join().expect("join stderr reader");
-        assert!(
-            status.success(),
-            "{label} failed\nstdout={stdout}\nstderr={stderr}"
-        );
-        stdout
-    }
-
-    fn fail(mut self, label: &str, err: String) -> ! {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let stdout = self.stdout.join().expect("join stdout reader");
-        let stderr = self.stderr.join().expect("join stderr reader");
-        panic!("{label}: {err}\nlistener stdout:\n{stdout}\nlistener stderr:\n{stderr}");
-    }
-
     fn stop(mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = self.stdout.join();
         let _ = self.stderr.join();
     }
-}
-
-fn spawn_invite_listener(db: &str, port: u16, accept: usize) -> ListeningInvite {
-    let port = port.to_string();
-    let accept = accept.to_string();
-    let child = spawn_topo(&[
-        "--db",
-        db,
-        "invite",
-        "--listen",
-        "127.0.0.1",
-        &port,
-        "--accept",
-        &accept,
-    ]);
-    listening_invite_from_child(child)
 }
 
 fn spawn_workspace_invite_listener(
@@ -834,6 +779,12 @@ fn workspace_invite_link(db: &str, workspace_id: &str, port: u16) -> String {
         "--public-addr",
         &addr,
     ]));
+    invite_link_from_output(&out)
+}
+
+fn transport_invite_link(db: &str, port: u16) -> String {
+    let addr = format!("127.0.0.1:{port}");
+    let out = assert_success(topo(&["--db", db, "invite", "--public-addr", &addr]));
     invite_link_from_output(&out)
 }
 
@@ -1068,6 +1019,19 @@ fn connection_count(db: &str) -> usize {
     count_value(db, "connections")
 }
 
+fn wait_for_connection_count(db: &str, expected: usize) {
+    for _ in 0..100 {
+        if connection_count(db) == expected {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "connection count never reached {expected}; current {}",
+        connection_count(db)
+    );
+}
+
 fn connection_event_count(db: &str) -> usize {
     count_value(db, "connection_events")
 }
@@ -1105,12 +1069,6 @@ fn replace_invite_workspace(invite: &str, workspace_id: &str) -> String {
         .collect::<Vec<_>>();
     assert!(replaced, "invite missing WORKSPACE part: {invite}");
     parts.join("/")
-}
-
-fn assert_contains_all(text: &str, needles: &[&str]) {
-    for needle in needles {
-        assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
-    }
 }
 
 fn count_value(db: &str, key: &str) -> usize {

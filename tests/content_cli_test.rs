@@ -988,8 +988,8 @@ fn cli_delete_message_purges_attached_file_and_slices() {
 
     assert_success(topo(&["--db", &db, "delete-message", &workspace_id, "#1"]));
 
-    // Allow the daemon's content_purge worker time to run; we drive it via
-    // the explicit `start --once` admin entry as the existing tests do.
+    // `delete-message` admits the deletion through the normal command path,
+    // whose post-admission hook runs the purge before the command returns.
     let after_files = assert_success(topo(&["--db", &db, "files", &workspace_id]));
     assert_eq!(files_total(&after_files), "0");
     let after_messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
@@ -1053,7 +1053,8 @@ fn cli_delete_message_purges_attached_file_on_peer_after_sync() {
         raw.windows(sentinel.len())
             .all(|w| w != sentinel.as_bytes()),
         "sentinel survived on peer DB after delete sync; purge not propagated"
-    );}
+    );
+}
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {
     let out = assert_success(topo(&[
@@ -1233,8 +1234,7 @@ fn grant_content_key_to_peer(alice: &str, peer: &str, workspace_id: &str) {
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
     let wrapped = key_wrap_with_retry(alice, workspace_id, &removal_frontier_id, &recipient_key_id);
     assert_eq!(line_value(&wrapped, "recipient_key_id"), recipient_key_id);
-    let derived = wait_for_key_derive(peer, "1");
-    assert_eq!(line_value(&derived, "derived_key_secrets"), "1");
+    wait_for_key_access(peer, workspace_id, &removal_frontier_id, "yes");
 }
 
 fn key_wrap_with_retry(
@@ -1262,13 +1262,18 @@ fn key_wrap_with_retry(
     panic!("key-wrap never succeeded: {last}");
 }
 
-fn wait_for_key_derive(db: &str, expected: &str) -> String {
+fn wait_for_key_access(
+    db: &str,
+    workspace_id: &str,
+    removal_frontier_id: &str,
+    expected: &str,
+) -> String {
     let mut last = String::new();
     for _ in 0..300 {
-        let output = topo(&["--db", db, "key-derive"]);
+        let output = topo(&["--db", db, "key-access", workspace_id, removal_frontier_id]);
         if output.status.success() {
             let out = stdout(&output);
-            if line_value(&out, "derived_key_secrets") == expected {
+            if line_value(&out, "access") == expected {
                 return out;
             }
             last = out;
@@ -1277,7 +1282,7 @@ fn wait_for_key_derive(db: &str, expected: &str) -> String {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("key derive did not reach {expected}: {last}");
+    panic!("key access did not reach {expected}: {last}");
 }
 
 fn invite_link_from_output(output: &str) -> String {

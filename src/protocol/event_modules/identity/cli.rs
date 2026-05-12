@@ -8,19 +8,18 @@
 
 use std::io::Write;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::core::crypto;
 use crate::core::logical_clock;
 use crate::core::store::Store;
 use crate::protocol::cli::Context;
-use crate::protocol::event_modules::connection::{
-    types as connection_types, worker as connection_worker,
-};
+use crate::protocol::event_modules::connection::connection_request;
 use crate::protocol::event_modules::schema as event_schema;
-use crate::protocol::event_modules::types::{EventId, EventRecord};
+use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{self, CommandOutput};
-use crate::workers::transit_in;
+use crate::workers::{connection as connection_worker, transit_in};
 
 use super::{
     admin, device_invite, endpoint, endpoint_shared, invite, invite_accepted, invite_server, user,
@@ -40,6 +39,7 @@ const LINK_USAGE: &str =
 const ACCEPT_LINK_USAGE: &str = "accept-link INVITE_LINK [--devicename DEVICE]";
 const WORKSPACES_USAGE: &str = "workspaces";
 const IDENTITY_USAGE: &str = "identity";
+const CONNECT_WAIT: Duration = Duration::from_secs(2);
 
 pub fn commands() -> Vec<CliCommand<Context>> {
     vec![
@@ -217,6 +217,7 @@ fn run_accept_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOut
         reject_duplicate_join(&context.store, local.endpoint, invite.workspace_id)?;
     }
     let local = ensure_local_endpoint(context)?;
+    let accepted_endpoint_id = local.endpoint;
     let timestamp = next_timestamp(&context.store)?;
     let user = user::commands::create(user::commands::CreateUser {
         created_at_ms: timestamp,
@@ -243,8 +244,8 @@ fn run_accept_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOut
     )?;
     let mut proposed = user.events;
     proposed.extend(endpoint_join.events);
-    let initial_records = proposed_records(&proposed);
-    let connected = connect_invite_with_initial_records(context, &options.invite, initial_records)?;
+    let connected = connect_invite(context, &options.invite)?;
+    record_invite_acceptance(context, &invite, accepted_endpoint_id)?;
     admit_proposed_events(context, proposed)?;
 
     Ok(CliOutput::lines(vec![
@@ -329,8 +330,8 @@ fn run_accept_invite_server_command(
         },
     )?;
     let endpoint_shared_id = shared.value.endpoint_shared_id;
-    let initial_records = proposed_records(&shared.events);
-    let connected = connect_invite_with_initial_records(context, &options.invite, initial_records)?;
+    let connected = connect_invite(context, &options.invite)?;
+    record_invite_acceptance(context, &invite, local.endpoint)?;
     admit(context, shared)?;
     Ok(CliOutput::lines(vec![
         format!("connected: {}", connected.addr),
@@ -404,8 +405,8 @@ fn run_accept_link_command(context: &mut Context, args: CliArgs<'_>) -> Result<C
         },
     )?;
     let endpoint_shared_id = shared.value.endpoint_shared_id;
-    let initial_records = proposed_records(&shared.events);
-    let connected = connect_invite_with_initial_records(context, &options.invite, initial_records)?;
+    let connected = connect_invite(context, &options.invite)?;
+    record_invite_acceptance(context, &invite, local.endpoint)?;
     admit(context, shared)?;
     Ok(CliOutput::lines(vec![
         format!("connected: {}", connected.addr),
@@ -806,41 +807,37 @@ fn maybe_listen(
     }
 }
 
-fn connect_invite(
-    context: &mut Context,
-    link: &str,
-) -> Result<connection_types::ConnectReport, String> {
-    connect_invite_with_initial_records(context, link, Vec::new())
-}
-
-fn connect_invite_with_initial_records(
-    context: &mut Context,
-    link: &str,
-    records: Vec<EventRecord>,
-) -> Result<connection_types::ConnectReport, String> {
+fn connect_invite(context: &mut Context, link: &str) -> Result<ConnectReport, String> {
     // Read the running daemon's bound listener (if any) from the core-owned
     // lock file so the request body can advertise it to the peer. CLI
     // processes that run alongside no daemon get `None` here, which is the
     // correct signal for "do not advertise a listener route".
     let from_listen_addr = crate::core::daemon::current_listen_addr(&context.db_path)?;
-    let output = connection_worker::run(
+    let output =
+        connection_request::commands::create_with_local(&context.store, link, from_listen_addr)?;
+    let (request, _) = worker::run(&context.store, &context.protocol, output)
+        .map_err(|err| format!("record connection request: {err}"))?;
+    let report = connection_worker::run(
         &context.store,
         &context.protocol,
-        if records.is_empty() {
-            connection_worker::Work::ConnectInvite {
-                invite: link.to_string(),
-                from_listen_addr,
-            }
-        } else {
-            connection_worker::Work::ConnectInviteWithInitialEvents {
-                invite: link.to_string(),
-                records,
-                from_listen_addr,
-            }
+        connection_worker::Work::DrainUntilConnected {
+            request_id: request.request_id,
+            timeout: CONNECT_WAIT,
+            fail_on_route_error: true,
         },
     )?;
-    let connection_worker::Output::Connected(report) = output;
-    Ok(report)
+    Ok(ConnectReport {
+        addr: request.addr,
+        sent_events: report.sent_events,
+        received_events: 0,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectReport {
+    addr: SocketAddr,
+    sent_events: usize,
+    received_events: usize,
 }
 
 fn create_user_invite_link(
@@ -941,6 +938,21 @@ fn ensure_local_endpoint(
     Ok(local)
 }
 
+fn record_invite_acceptance(
+    context: &mut Context,
+    invite: &invite::types::Invite,
+    accepted_endpoint_id: endpoint::types::EndpointId,
+) -> Result<(), String> {
+    let output = invite_accepted::commands::accept(invite_accepted::commands::AcceptInvite {
+        accepted_endpoint_id,
+        bootstrap_secret: invite.bootstrap_secret,
+        addr: invite.addr,
+        workspace_id: invite.workspace_id,
+        invite_event_id: invite.invite_event_id,
+    })?;
+    admit(context, output).map(|_| ())
+}
+
 fn reject_duplicate_join(
     store: &Store,
     endpoint_id: endpoint::types::EndpointId,
@@ -1033,11 +1045,7 @@ fn admit_proposed_events(
     admit(context, CommandOutput::with_proposed_events((), events))
 }
 
-fn proposed_records(events: &[worker::ProposedEvent]) -> Vec<EventRecord> {
-    events.iter().map(|event| event.record().clone()).collect()
-}
-
-fn serve_lines(report: &connection_types::ServeReport) -> Vec<String> {
+fn serve_lines(report: &transit_in::ServeReport) -> Vec<String> {
     let mut lines = vec![format!("listening: {}", report.local_addr)];
     lines.extend([
         format!("accepted_connections: {}", report.accepted_connections),

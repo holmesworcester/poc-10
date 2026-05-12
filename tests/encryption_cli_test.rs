@@ -2,8 +2,8 @@
 //!
 //! Setup goes through the real `topo` binary: workspace creation, invite
 //! listening, invite acceptance, transport connection learning, sync, key
-//! publication, wrap creation, and derivation. The tests intentionally do not
-//! seed protocol rows or call workers directly; the CLI boundary is the
+//! publication, wrap creation, and automatic derivation. The tests intentionally
+//! do not seed protocol rows or call workers directly; the CLI boundary is the
 //! invariant under test.
 
 mod cli_harness;
@@ -29,14 +29,7 @@ fn cli_key_wrap_derives_access_only_for_wrapped_recipient() {
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
     let _carol_daemon = spawn_daemon(&carol, carol_port);
-    join_workspace_on_daemons(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace_on_daemons(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
     join_workspace_on_daemons(
         &alice,
         &carol,
@@ -102,24 +95,9 @@ fn cli_key_wrap_derives_access_only_for_wrapped_recipient() {
     );
     assert_eq!(line_value(&wrapped, "recipient_key_id"), bob_recipient_id);
 
-    let bob_derive = wait_for_key_derive(&bob, "1");
-    assert_eq!(line_value(&bob_derive, "derived_key_secrets"), "1");
-    assert_eq!(
-        line_value(
-            &assert_success(topo(&[
-                "--db",
-                &bob,
-                "key-access",
-                &workspace_id,
-                &removal_frontier_id,
-            ])),
-            "access",
-        ),
-        "yes"
-    );
+    let bob_access = wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
+    assert_eq!(line_value(&bob_access, "access"), "yes");
 
-    let carol_derive = assert_success(topo(&["--db", &carol, "key-derive"]));
-    assert_eq!(line_value(&carol_derive, "derived_key_secrets"), "0");
     assert_eq!(
         line_value(
             &assert_success(topo(&[
@@ -179,8 +157,6 @@ fn cli_invite_server_syncs_but_cannot_be_a_key_recipient() {
     let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
     thread::sleep(Duration::from_millis(1200));
-    let server_derive = assert_success(topo(&["--db", &server, "key-derive"]));
-    assert_eq!(line_value(&server_derive, "derived_key_secrets"), "0");
     assert_eq!(
         line_value(
             &assert_success(topo(&[
@@ -858,13 +834,18 @@ fn key_wrap_with_retry(
     panic!("key-wrap never succeeded: {last}");
 }
 
-fn wait_for_key_derive(db: &str, expected: &str) -> String {
+fn wait_for_key_access(
+    db: &str,
+    workspace_id: &str,
+    removal_frontier_id: &str,
+    expected: &str,
+) -> String {
     let mut last = String::new();
     for _ in 0..300 {
-        let output = topo(&["--db", db, "key-derive"]);
+        let output = topo(&["--db", db, "key-access", workspace_id, removal_frontier_id]);
         if output.status.success() {
             let out = stdout(&output);
-            if line_value(&out, "derived_key_secrets") == expected {
+            if line_value(&out, "access") == expected {
                 return out;
             }
             last = out;
@@ -873,7 +854,7 @@ fn wait_for_key_derive(db: &str, expected: &str) -> String {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("key derive did not reach {expected}: {last}");
+    panic!("key access did not reach {expected}: {last}");
 }
 
 fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {

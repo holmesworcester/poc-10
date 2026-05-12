@@ -195,7 +195,7 @@ fn cli_two_long_running_daemons_converge_messages_without_manual_sync() {
     );
     assert_eq!(line_value(&wrap, "recipient_key_id"), bob_recipient_id);
 
-    poll_for_derived_key_secrets(&bob, "1", 10_000);
+    poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 10_000);
 
     let alice_send = assert_success(topo(&["--db", &alice, "send", &workspace, "hello"]));
     assert_eq!(line_value(&alice_send, "text"), "hello");
@@ -270,8 +270,8 @@ fn cli_three_long_running_daemons_converge_messages_among_late_joiner() {
         &carol_recipient_id,
         10_000,
     );
-    poll_for_derived_key_secrets(&bob, "1", 10_000);
-    poll_for_derived_key_secrets(&carol, "1", 10_000);
+    poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 10_000);
+    poll_for_key_access(&carol, &workspace, &removal_frontier_id, "yes", 10_000);
 
     let alice_send = assert_success(topo(&["--db", &alice, "send", &workspace, "from-alice"]));
     assert_eq!(line_value(&alice_send, "text"), "from-alice");
@@ -306,12 +306,7 @@ fn invite_link_from_output(output: &str) -> String {
         .to_string()
 }
 
-fn accept_with_identity_retry(
-    db: &str,
-    invite: &str,
-    username: &str,
-    device_name: &str,
-) -> String {
+fn accept_with_identity_retry(db: &str, invite: &str, username: &str, device_name: &str) -> String {
     let mut last = String::new();
     for _ in 0..200 {
         let output = topo(&[
@@ -401,14 +396,20 @@ fn poll_for_wrap_eligibility(
     panic!("key-wrap never succeeded in {db}; last error:\n{last}");
 }
 
-fn poll_for_derived_key_secrets(db: &str, expected: &str, timeout_ms: u64) {
+fn poll_for_key_access(
+    db: &str,
+    workspace_id: &str,
+    removal_frontier_id: &str,
+    expected: &str,
+    timeout_ms: u64,
+) {
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     let mut last = String::new();
     while std::time::Instant::now() < deadline {
-        let out = topo(&["--db", db, "key-derive"]);
+        let out = topo(&["--db", db, "key-access", workspace_id, removal_frontier_id]);
         if out.status.success() {
             let text = stdout(&out);
-            if line_value(&text, "derived_key_secrets") == expected {
+            if line_value(&text, "access") == expected {
                 return;
             }
             last = text;
@@ -417,7 +418,7 @@ fn poll_for_derived_key_secrets(db: &str, expected: &str, timeout_ms: u64) {
         }
         thread::sleep(Duration::from_millis(250));
     }
-    panic!("key-derive did not reach {expected} in {db}; last output:\n{last}");
+    panic!("key-access did not reach {expected} in {db}; last output:\n{last}");
 }
 
 fn poll_for_message_text(db: &str, workspace_id: &str, expected_text: &str, timeout_ms: u64) {
@@ -519,11 +520,7 @@ impl Drop for RunningDaemon {
         if let Some(stderr) = self.stderr.take() {
             if let Ok(text) = stderr.join() {
                 if !text.trim().is_empty() {
-                    eprintln!(
-                        "[daemon-stderr label={}] {}",
-                        self.label,
-                        text.trim_end()
-                    );
+                    eprintln!("[daemon-stderr label={}] {}", self.label, text.trim_end());
                 }
             }
         }

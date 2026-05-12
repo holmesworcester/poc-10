@@ -62,6 +62,7 @@ mod tests {
         let event = InviteSecretEvent {
             bootstrap_hash: [9; 32],
             bootstrap_secret: [7; 32],
+            addr: None,
             workspace_id: None,
             invite_event_id: None,
         };

@@ -17,7 +17,7 @@ use crate::core::daemon::Worker;
 use crate::core::store::Store;
 use crate::protocol::event_modules::content::message_deletion;
 
-pub mod bootstrap_connect;
+pub mod connection;
 pub mod content_purge;
 pub mod dependency_unblock;
 pub mod encryption;
@@ -73,6 +73,7 @@ where
         dependency_unblock::daemon_worker(),
         encryption::daemon_worker(),
         content_purge::daemon_worker(),
+        connection::daemon_worker(),
         sync::daemon_worker(),
         transit_out::daemon_worker(),
     ]
@@ -89,6 +90,8 @@ mod tests {
             .map(|w| w.name)
             .collect();
         assert!(names.contains(&"transit_in"));
+        assert!(names.contains(&"connection"));
+        assert!(names.contains(&"encryption"));
         assert!(names.contains(&"sync_tick"));
         assert!(names.contains(&"transit_out"));
         assert!(!names.contains(&"peer_supervisor"));

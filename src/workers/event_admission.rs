@@ -14,7 +14,9 @@
 
 use crate::core::daemon::{StepContext, Worker};
 use crate::core::store::Store;
-use crate::workers::pipeline_helpers::event_pipeline::{self as pipeline, AdmitReport, EventRegistry};
+use crate::workers::pipeline_helpers::event_pipeline::{
+    self as pipeline, AdmitReport, EventRegistry,
+};
 use crate::workers::DaemonWorkerContext;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +67,7 @@ mod tests {
     use crate::core::store::Store;
     use crate::protocol::event_modules::connection::{self, types};
     use crate::protocol::event_modules::content::content_event;
-    use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, workspace};
+    use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
     use crate::protocol::event_modules::schema as event_schema;
     use crate::protocol::event_modules::types::event_id;
     use crate::protocol::Protocol;
@@ -91,13 +93,13 @@ mod tests {
         store
             .insert_table_rows(vec![worker_schema::transit_canonical_in_row(
                 inner,
-                worker_schema::TransitProvenance {
-                    origin: "127.0.0.1:41001".parse().expect("origin"),
+                worker_schema::TransitProvenance::connection(
+                    "127.0.0.1:41001".parse().expect("origin"),
                     local_endpoint,
                     sender_endpoint,
-                    remember_route: false,
-                    unwrapped_with: worker_schema::TransitUnwrap::Connection { connection_id },
-                },
+                    false,
+                    connection_id,
+                ),
             )])
             .expect("enqueue connection canonical in");
     }
@@ -111,41 +113,14 @@ mod tests {
         store
             .insert_table_rows(vec![worker_schema::transit_canonical_in_row(
                 inner,
-                worker_schema::TransitProvenance {
-                    origin: "127.0.0.1:41001".parse().expect("origin"),
+                worker_schema::TransitProvenance::bootstrap(
+                    "127.0.0.1:41001".parse().expect("origin"),
                     local_endpoint,
                     sender_endpoint,
-                    remember_route: false,
-                    unwrapped_with: worker_schema::TransitUnwrap::Bootstrap,
-                },
+                    false,
+                ),
             )])
             .expect("enqueue bootstrap canonical in");
-    }
-
-    fn enqueue_invite_bootstrap_canonical_in(
-        store: &Store,
-        inner: Vec<u8>,
-        local_endpoint: endpoint::types::EndpointId,
-        sender_endpoint: endpoint::types::EndpointId,
-        workspace_id: [u8; 32],
-        invite_event_id: [u8; 32],
-    ) {
-        store
-            .insert_table_rows(vec![worker_schema::transit_canonical_in_row(
-                inner,
-                worker_schema::TransitProvenance {
-                    origin: "127.0.0.1:41001".parse().expect("origin"),
-                    local_endpoint,
-                    sender_endpoint,
-                    remember_route: false,
-                    unwrapped_with: worker_schema::TransitUnwrap::InviteBootstrap {
-                        bootstrap_hash: [6; 32],
-                        workspace_id,
-                        invite_event_id,
-                    },
-                },
-            )])
-            .expect("enqueue invite bootstrap canonical in");
     }
 
     fn add_endpoint_membership(
@@ -246,42 +221,6 @@ mod tests {
     }
 
     #[test]
-    fn invite_bootstrap_transit_admits_identity_event_for_envelope_workspace() {
-        // Invariant: invite bootstrap provenance is sufficient for the
-        // workspace boundary, but the inner bytes still enter durable admission
-        // through the ordinary event pipeline.
-        let local = keypair();
-        let remote = keypair();
-        let store = store();
-        let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
-            created_at_ms: 1,
-            public_key: [9; 32],
-            name: "invite-bootstrap".to_string(),
-        })
-        .expect("create workspace");
-        let record = workspace.events[0].record().clone();
-        let workspace_id = workspace.value.workspace_id;
-        let event_id = event_id(&record.canonical_bytes);
-        enqueue_invite_bootstrap_canonical_in(
-            &store,
-            record.canonical_bytes,
-            local.endpoint,
-            remote.endpoint,
-            workspace_id,
-            [8; 32],
-        );
-
-        let admitted = run(&store, &Protocol::new(), Work::Drain { limit: 1 })
-            .expect("invite bootstrap workspace should admit");
-
-        assert_eq!(admitted.applied_events, 1);
-        assert!(
-            event_schema::has_event(&store, &event_id).expect("check event table"),
-            "invite bootstrap shared identity event should be stored"
-        );
-    }
-
-    #[test]
     fn connection_transit_admits_shared_event_only_after_workspace_check() {
         let local = keypair();
         let remote = keypair();
@@ -340,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn invite_scoped_connection_transit_rejects_other_mutual_workspace() {
+    fn invite_scoped_connection_transit_allows_other_mutual_workspace() {
         let local = keypair();
         let remote = keypair();
         let connection_id = [3; 32];
@@ -367,16 +306,13 @@ mod tests {
             connection_id,
         );
 
-        let err = run(&store, &Protocol::new(), Work::Drain { limit: 1 })
-            .expect_err("invite-scoped connection must not admit other mutual workspace");
+        let report = run(&store, &Protocol::new(), Work::Drain { limit: 1 })
+            .expect("mutual workspace may use an invite-scoped connection");
 
+        assert_eq!(report.inserted_events, 1);
         assert!(
-            err.contains("transit shared in rejected event outside sender workspace"),
-            "{err}"
-        );
-        assert!(
-            !event_schema::has_event(&store, &content_id).expect("check event table"),
-            "other-workspace event must not be stored through invite-scoped transit"
+            event_schema::has_event(&store, &content_id).expect("check event table"),
+            "other mutual workspace event should enter normal dependency admission"
         );
     }
 }
