@@ -11,6 +11,7 @@
 //! behavior starts appearing here, move it back to the owning module.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::core::logical_clock;
@@ -34,6 +35,7 @@ pub struct Context {
     pub db_path: std::path::PathBuf,
     pub store: Store,
     pub protocol: Protocol,
+    sync_index: Arc<event_modules::sync::SyncIndex>,
 }
 
 impl Context {
@@ -42,6 +44,7 @@ impl Context {
         Ok(Self {
             store: Protocol::open_store(&db_path).map_err(|err| format!("open store: {err}"))?,
             protocol: Protocol::new(),
+            sync_index: Arc::new(event_modules::sync::SyncIndex::default()),
             db_path,
         })
     }
@@ -96,7 +99,7 @@ impl DaemonWorkerContext for Context {
     }
 
     fn sync_index(&self) -> &event_modules::sync::SyncIndex {
-        self.protocol.sync_index()
+        &self.sync_index
     }
 }
 
@@ -272,7 +275,7 @@ fn run_sync_status_command(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     args.require_len(0, SYNC_STATUS_USAGE)?;
-    let index = context.protocol.sync_index();
+    let index = context.sync_index();
     // Catch the in-memory index up from durable rows so a fresh CLI
     // invocation (no running daemon) sees the same state the daemon
     // would after one `sync_tick` step. Then run the negentropy purge
@@ -345,7 +348,7 @@ fn run_negentropy_drain_command(
             .map_err(|_| NEGENTROPY_DRAIN_USAGE.to_string())?,
         None => crate::workers::negentropy_purge_drainer::DEFAULT_DRAIN_LIMIT,
     };
-    let index = context.protocol.sync_index();
+    let index = context.sync_index();
     // Same sequencing as `sync-status`: catch the in-memory index up
     // from durable rows so a CLI invocation outside the daemon sees
     // the same starting state the daemon would.

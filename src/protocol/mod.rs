@@ -22,6 +22,7 @@ pub mod event_modules;
 pub mod wire;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::core::{
     app::ProtocolSpec,
@@ -39,12 +40,14 @@ use event_modules::Modules;
 #[derive(Debug, Clone, Default)]
 pub struct Protocol {
     modules: Modules,
+    sync_index: Arc<event_modules::sync::SyncIndex>,
 }
 
 impl Protocol {
     pub fn new() -> Self {
         Self {
             modules: Modules::new(),
+            sync_index: Arc::new(event_modules::sync::SyncIndex::default()),
         }
     }
 
@@ -56,8 +59,12 @@ impl Protocol {
         Store::open_memory_with_schemas(&schemas())
     }
 
-    pub(crate) fn sync_index(&self) -> &event_modules::sync::SyncIndex {
-        self.modules.sync_index()
+    /// Protocol-wide negentropy sync index. Exposed so callers running the
+    /// protocol directly (without a `cli::Context`) can pass it into the
+    /// sync/transit workers; the daemon path obtains the same kind of
+    /// reference through `DaemonWorkerContext::sync_index` on `Context`.
+    pub fn sync_index(&self) -> &event_modules::sync::SyncIndex {
+        &self.sync_index
     }
 }
 
