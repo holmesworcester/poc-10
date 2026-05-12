@@ -19,7 +19,7 @@ use crate::protocol::event_modules::connection::connection_request;
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{self, CommandOutput};
-use crate::protocol::workers::{connection as connection_worker, transit_in};
+use crate::workers::{connection as connection_worker, transit_in};
 
 use super::{
     admin, device_invite, endpoint, endpoint_shared, invite, invite_accepted, invite_server, user,

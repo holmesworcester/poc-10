@@ -10,7 +10,7 @@
 //! schemas, commands, and projectors; workers own bounded movement between
 //! explicit inputs and outputs.
 //!
-//! See `src/protocol/workers/README.md` for the universal worker contract, queue list,
+//! See `src/workers/README.md` for the universal worker contract, queue list,
 //! and caller-owned scheduling rules.
 
 use crate::core::daemon::Worker;
@@ -143,7 +143,7 @@ mod tests {
     /// the list is built only to surface their `name` field.
     struct TestContext;
 
-    impl crate::protocol::workers::pipeline_helpers::event_pipeline::EventRegistry for TestContext {
+    impl crate::workers::pipeline_helpers::event_pipeline::EventRegistry for TestContext {
         fn record_from_bytes(
             &self,
             _bytes: Vec<u8>,
@@ -155,7 +155,7 @@ mod tests {
             &self,
             _store: &Store,
             _inbound: &crate::core::network_queues::InboundNetworkRow,
-        ) -> Result<crate::protocol::workers::pipeline_helpers::event_pipeline::ProjectionOutput, String>
+        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ProjectionOutput, String>
         {
             Err("not implemented".to_string())
         }
@@ -165,8 +165,8 @@ mod tests {
             _store: &Store,
             _bytes: Vec<u8>,
             _receive: Option<crate::protocol::event_modules::types::ReceiveMetadata>,
-            _provenance: Option<crate::protocol::workers::schema::TransitProvenance>,
-        ) -> Result<crate::protocol::workers::pipeline_helpers::event_pipeline::ReceivedRecord, String>
+            _provenance: Option<crate::workers::schema::TransitProvenance>,
+        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ReceivedRecord, String>
         {
             Err("not implemented".to_string())
         }
@@ -174,8 +174,8 @@ mod tests {
         fn project_record(
             &self,
             _store: &Store,
-            _event: &crate::protocol::workers::pipeline_helpers::event_pipeline::EventWithContext<'_>,
-        ) -> Result<crate::protocol::workers::pipeline_helpers::event_pipeline::ProjectionOutput, String>
+            _event: &crate::workers::pipeline_helpers::event_pipeline::EventWithContext<'_>,
+        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ProjectionOutput, String>
         {
             Err("not implemented".to_string())
         }

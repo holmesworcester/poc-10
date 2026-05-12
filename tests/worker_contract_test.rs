@@ -10,8 +10,8 @@ use topo::protocol::event_modules::worker::{
 };
 use topo::protocol::event_modules::Modules;
 use topo::protocol::Protocol;
-use topo::protocol::workers::schema as worker_schema;
-use topo::protocol::workers::{dependency_unblock, event_admission, event_projection, sync};
+use topo::workers::schema as worker_schema;
+use topo::workers::{dependency_unblock, event_admission, event_projection, sync};
 
 #[test]
 fn command_admission_returns_event_ids_for_chaining() {

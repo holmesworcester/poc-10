@@ -17,7 +17,7 @@ pub mod schema;
 pub mod sync;
 pub mod test_events;
 pub mod types;
-pub use crate::protocol::workers::pipeline_helpers::event_pipeline as worker;
+pub use crate::workers::pipeline_helpers::event_pipeline as worker;
 
 /// Re-export of the local history-node leaf event module under a name that
 /// does not embed the parent domain's vocabulary, so consumer projectors that
@@ -40,7 +40,7 @@ use crate::protocol::event_modules::types::{EventRecord, ReceiveMetadata};
 use crate::protocol::event_modules::worker::{
     AdmitDecision, EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord,
 };
-use crate::protocol::workers::schema::TransitProvenance;
+use crate::workers::schema::TransitProvenance;
 
 #[derive(Debug, Clone, Default)]
 pub struct Modules {
@@ -178,7 +178,7 @@ impl EventRegistry for Modules {
         // catalog. The catalog observes projector-emitted indicator rows and
         // dispatches to the right worker, so this registry stays narrow: it
         // does not branch on event type or own worker dispatch logic.
-        crate::protocol::workers::drain_post_admission_purge_pending(store, self)
+        crate::workers::drain_post_admission_purge_pending(store, self)
     }
 }
 

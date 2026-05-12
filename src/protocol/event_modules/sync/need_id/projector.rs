@@ -8,7 +8,7 @@
 use crate::protocol::event_modules::connection;
 use crate::protocol::event_modules::types::{ConnectionScope, EventScope};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
-use crate::protocol::workers::schema as worker_schema;
+use crate::workers::schema as worker_schema;
 
 use super::codec;
 
@@ -53,7 +53,7 @@ mod tests {
     use crate::protocol::event_modules::connection;
     use crate::protocol::event_modules::types::{event_id, EventRecord};
     use crate::protocol::event_modules::worker::EventContext;
-    use crate::protocol::workers::schema as worker_schema;
+    use crate::workers::schema as worker_schema;
 
     use super::super::types::NeedIdEvent;
     use super::*;

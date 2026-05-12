@@ -71,7 +71,7 @@ use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{self, EventRegistry};
-use crate::protocol::workers::pipeline_helpers::purging;
+use crate::workers::pipeline_helpers::purging;
 
 use crate::protocol::event_modules::encryption::{
     key_wrap, local_history_node_secret, local_key_secret, local_recipient_key, recipient_key,
@@ -2379,12 +2379,12 @@ fn drain_pending_message_leaves<R: EventRegistry>(
 
 pub(crate) fn daemon_worker<C>() -> crate::core::daemon::Worker<C>
 where
-    C: crate::protocol::workers::DaemonWorkerContext,
+    C: crate::workers::DaemonWorkerContext,
 {
     use crate::core::daemon::{StepContext, Worker};
     fn step<C>(ctx: &mut StepContext<'_, C>) -> Result<(), String>
     where
-        C: crate::protocol::workers::DaemonWorkerContext,
+        C: crate::workers::DaemonWorkerContext,
     {
         let app = &*ctx.app;
         let store = app.store();
@@ -2550,7 +2550,7 @@ mod tests {
     use crate::protocol::event_modules::encryption::removal_frontier;
     use crate::protocol::event_modules::types::{event_id, EventStatus};
     use crate::protocol::Protocol;
-    use crate::protocol::workers::pipeline_helpers::event_lifecycle;
+    use crate::workers::pipeline_helpers::event_lifecycle;
 
     use super::*;
 

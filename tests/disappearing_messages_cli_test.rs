@@ -42,7 +42,7 @@
 //!     the current `keys` CLI.
 //!   * Whole-minute leaf retirement. Today the worker calls
 //!     `RetireDeletedEventLeaf` per message + per reaction; the
-//!     `src/protocol/workers/encryption.rs:1147` TODO ("whole-minute
+//!     `src/workers/encryption.rs:1147` TODO ("whole-minute
 //!     retirement") would consolidate to one tombstone per minute.
 //!     With per-message TTLs, leaves in the same minute can have
 //!     different stamped expiries, so the optimization only pays off
@@ -902,7 +902,7 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
 
     // Initial workspace TTL = 10 minutes. Workspace TTL must be non-zero so
     // the `disappearing_minute_expiry` worker actually scans this workspace
-    // (see `src/protocol/workers/disappearing_minute_expiry.rs:112`).
+    // (see `src/workers/disappearing_minute_expiry.rs:112`).
     let workspace_id =
         create_workspace_with_ttl(&alice, "MixedTtl", "alice", "alice-laptop", 10);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
@@ -1328,9 +1328,9 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
     // TTL=1 minute. Each authored message will be retired by the
     // disappearing-minute worker after the clock advances past minute
     // (authored_minute + 1). The retire writes a MESSAGE_TOMBSTONES row
-    // (per process_job in src/protocol/workers/disappearing_minute_expiry.rs:217)
+    // (per process_job in src/workers/disappearing_minute_expiry.rs:217)
     // AND per-leaf LOCAL_HISTORY_NODE_TOMBSTONES rows (per the retire
-    // walk in src/protocol/workers/encryption.rs).
+    // walk in src/workers/encryption.rs).
     let workspace_id =
         create_workspace_with_ttl(&alice, "ChopGc", "alice", "alice-laptop", 1);
     let _alice_daemon = spawn_daemon(&alice, alice_port);

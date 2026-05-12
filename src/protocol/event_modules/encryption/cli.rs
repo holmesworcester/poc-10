@@ -437,7 +437,7 @@ fn run_key_node_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
         let purged = context
             .store
             .write_transaction(|store| {
-                crate::protocol::workers::pipeline_helpers::purging::purge_event_storage_in_tx(
+                crate::workers::pipeline_helpers::purging::purge_event_storage_in_tx(
                     store,
                     &retired_node_id,
                 )
@@ -473,7 +473,7 @@ fn load_time_tree_parent(
             return Ok((
                 row.key_secret,
                 0,
-                crate::protocol::workers::encryption::TIME_TREE_ROOT_WIDTH,
+                crate::workers::encryption::TIME_TREE_ROOT_WIDTH,
             ));
         }
     }

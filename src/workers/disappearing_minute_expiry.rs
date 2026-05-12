@@ -28,10 +28,10 @@ use crate::protocol::event_modules::content::reaction::schema as reaction_schema
 use crate::protocol::event_modules::content::reaction::types::reaction_event_id_in_minute;
 use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
 use crate::protocol::event_modules::types::EventId;
-use crate::protocol::workers::encryption as encryption_worker;
-use crate::protocol::workers::pipeline_helpers::event_pipeline::EventRegistry;
-use crate::protocol::workers::pipeline_helpers::purging;
-use crate::protocol::workers::DaemonWorkerContext;
+use crate::workers::encryption as encryption_worker;
+use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
+use crate::workers::pipeline_helpers::purging;
+use crate::workers::DaemonWorkerContext;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExpiryReport {
@@ -167,10 +167,10 @@ where
     // `purge_file_for_deleted_message_or_file_deletion` both gate on
     // `message_tombstone_exists(target_message_id)`.
     if job_count > 0 {
-        let cascade = crate::protocol::workers::content_purge::run(
+        let cascade = crate::workers::content_purge::run(
             store,
             registry,
-            crate::protocol::workers::content_purge::Work::Drain { limit: usize::MAX },
+            crate::workers::content_purge::Work::Drain { limit: usize::MAX },
         )
         .map_err(|err| format!("content_purge cascade after expiry: {err}"))?;
         report.cascaded_reaction_rows += cascade.reaction_rows_deleted;

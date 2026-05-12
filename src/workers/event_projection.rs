@@ -14,10 +14,10 @@
 
 use crate::core::daemon::{StepContext, Worker};
 use crate::core::store::Store;
-use crate::protocol::workers::pipeline_helpers::event_pipeline::{
+use crate::workers::pipeline_helpers::event_pipeline::{
     self as pipeline, ApplyReadyReport, EventRegistry,
 };
-use crate::protocol::workers::DaemonWorkerContext;
+use crate::workers::DaemonWorkerContext;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Work {
