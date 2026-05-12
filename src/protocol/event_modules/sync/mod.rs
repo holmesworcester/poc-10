@@ -56,6 +56,14 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     Err("not a sync event".to_string())
 }
 
+/// Decode a connection-scoped sync event into an `EventRecord`.
+///
+/// Sync events use a single leading type tag and are gated by
+/// `is_connection_scoped_event` at the top-level dispatcher.
+pub fn event_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
+    record_from_bytes(bytes)
+}
+
 pub fn inbound_record_from_connection_bytes(
     connection_id: connection::types::ConnectionId,
     bytes: Vec<u8>,
