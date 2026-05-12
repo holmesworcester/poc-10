@@ -669,7 +669,7 @@ impl<'a> StoreSyncContext<'a> {
         if let Some(workspace_id) = connection_invite_workspace(store, connection_id)? {
             workspace_ids.push(workspace_id);
         } else {
-            workspace_ids.extend(invite_accepted::schema::accepted_workspace_ids(
+            workspace_ids.extend(invite_accepted::queries::accepted_workspace_ids(
                 store,
                 local_endpoint,
             )?);

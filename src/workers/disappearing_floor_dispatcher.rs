@@ -51,7 +51,7 @@ use crate::protocol::event_modules::content::message::types::UNIX_MINUTE_MS;
 use crate::protocol::event_modules::encryption::disappearing_messages_setting::queries as setting_queries;
 use crate::protocol::event_modules::encryption::disappearing_messages_setting::schema as setting_schema;
 use crate::protocol::event_modules::encryption::disappearing_messages_setting::types::COVER_HORIZON_MINUTES;
-use crate::protocol::event_modules::encryption::removal_frontier::schema as frontier_schema;
+use crate::protocol::event_modules::encryption::removal_frontier::queries as frontier_queries;
 use crate::protocol::event_modules::identity::workspace::queries as workspace_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::workers::encryption as encryption_worker;
@@ -151,7 +151,7 @@ where
             .unwrap_or(0);
         let effective_floor = max(setting_floor, horizon_floor);
 
-        for frontier in frontier_schema::list_for_workspace(store, workspace.workspace_id)? {
+        for frontier in frontier_queries::list_for_workspace(store, workspace.workspace_id)? {
             if report.chops_issued >= limit {
                 // Bound work per tick. The next tick picks up where we left
                 // off because the floor is monotonic and `last_chopped_floor`
@@ -428,7 +428,7 @@ mod tests {
         );
         // F must be wiped after a non-zero chop (the chop primitive's contract).
         assert!(
-            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+            local_key_secret::queries::get(&store, WORKSPACE, frontier_id)
                 .expect("look up F")
                 .is_none(),
             "F's row must be wiped by the dispatcher-issued chop"

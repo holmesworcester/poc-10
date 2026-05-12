@@ -306,7 +306,7 @@ fn run_key_wrap_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
     let key_secret =
-        local_key_secret::schema::get(&context.store, workspace_id, removal_frontier_id)?
+        local_key_secret::queries::get(&context.store, workspace_id, removal_frontier_id)?
             .ok_or_else(|| "local key secret is missing for removal frontier".to_string())?;
     let recipient_key = load_recipient_key(&context.store, workspace_id, recipient_key_id)?
         .ok_or_else(|| "recipient key is missing".to_string())?;
@@ -468,7 +468,7 @@ fn load_time_tree_parent(
     removal_frontier_id: EventId,
     source_secret_id: EventId,
 ) -> Result<(crate::core::crypto::XChaCha20Poly1305Key, u64, u64), String> {
-    if let Some(row) = local_key_secret::schema::get(store, workspace_id, removal_frontier_id)? {
+    if let Some(row) = local_key_secret::queries::get(store, workspace_id, removal_frontier_id)? {
         if row.local_key_secret_id == source_secret_id {
             return Ok((
                 row.key_secret,
@@ -499,7 +499,7 @@ fn run_key_access_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cl
     args.require_len(2, KEY_ACCESS_USAGE)?;
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), KEY_ACCESS_USAGE)?;
     let removal_frontier_id = parse_hex_id(args.get(1).expect("length checked"), KEY_ACCESS_USAGE)?;
-    let access = local_key_secret::schema::get(&context.store, workspace_id, removal_frontier_id)?;
+    let access = local_key_secret::queries::get(&context.store, workspace_id, removal_frontier_id)?;
     let mut lines = Vec::new();
     lines.push(format!(
         "access: {}",
@@ -517,13 +517,13 @@ fn run_key_access_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cl
 fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(1, KEYS_USAGE)?;
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), KEYS_USAGE)?;
-    let frontiers = removal_frontier::schema::list_for_workspace(&context.store, workspace_id)?;
-    let local_secrets = local_key_secret::schema::list_for_workspace(&context.store, workspace_id)?;
-    let recipient_keys = recipient_key::schema::list_for_workspace(&context.store, workspace_id)?;
+    let frontiers = removal_frontier::queries::list_for_workspace(&context.store, workspace_id)?;
+    let local_secrets = local_key_secret::queries::list_for_workspace(&context.store, workspace_id)?;
+    let recipient_keys = recipient_key::queries::list_for_workspace(&context.store, workspace_id)?;
     let recipient_key_tombstones =
-        recipient_key_tombstone::schema::list_for_workspace(&context.store, workspace_id)?;
+        recipient_key_tombstone::queries::list_for_workspace(&context.store, workspace_id)?;
     let local_recipient_keys =
-        local_recipient_key::schema::list_for_workspace(&context.store, workspace_id)?;
+        local_recipient_key::queries::list_for_workspace(&context.store, workspace_id)?;
     let key_wraps = key_wrap::queries::list_for_workspace(&context.store, workspace_id)?;
     let history_nodes =
         local_history_node_secret::queries::list_for_workspace(&context.store, workspace_id)?;
@@ -581,7 +581,7 @@ fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         format!("cover_summary: {}", hex_bytes(&cover_summary)),
     ];
     for frontier in frontiers {
-        let access = local_key_secret::schema::get(
+        let access = local_key_secret::queries::get(
             &context.store,
             workspace_id,
             frontier.removal_frontier_id,
@@ -784,7 +784,7 @@ fn run_disappearing_status_command(
         .unwrap_or(0);
     let effective_floor = std::cmp::max(setting_floor, horizon_floor);
 
-    let frontiers = removal_frontier::schema::list_for_workspace(&context.store, workspace_id)?;
+    let frontiers = removal_frontier::queries::list_for_workspace(&context.store, workspace_id)?;
     // Report the highest `last_chopped_floor` across this workspace's
     // frontiers. One frontier is the norm; on a rotated workspace the
     // highest value is the meaningful signal because the dispatcher
@@ -1066,7 +1066,7 @@ fn run_chop_now_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     // mirrors what the dispatcher's per-frontier loop reaches today, but
     // surfaces the choice explicitly so an operator can verify which
     // frontier got chopped.
-    let frontiers = removal_frontier::schema::list_for_workspace(&context.store, workspace_id)?;
+    let frontiers = removal_frontier::queries::list_for_workspace(&context.store, workspace_id)?;
     let target = frontiers
         .into_iter()
         .max_by_key(|row| (row.created_at_ms, row.removal_frontier_id))

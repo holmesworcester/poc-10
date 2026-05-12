@@ -528,9 +528,9 @@ pub(crate) fn require_active_frontier_id(
     workspace_id: EventId,
 ) -> Result<EventId, String> {
     let mut candidates = Vec::new();
-    for frontier in removal_frontier::schema::list_for_workspace(store, workspace_id)? {
+    for frontier in removal_frontier::queries::list_for_workspace(store, workspace_id)? {
         let root_present =
-            local_key_secret::schema::get(store, workspace_id, frontier.removal_frontier_id)?
+            local_key_secret::queries::get(store, workspace_id, frontier.removal_frontier_id)?
                 .is_some();
         let has_siblings = !root_present
             && !local_history_node_secret::queries::list_for_frontier(
@@ -605,7 +605,7 @@ where
 pub(crate) fn next_timestamp(store: &Store, workspace_id: EventId) -> Result<u64, String> {
     let from_messages = max_timestamp_for_messages(store, workspace_id)?;
     let from_content =
-        super::super::content_event::schema::max_timestamp_for_workspace(store, workspace_id)?;
+        super::super::content_event::queries::max_timestamp_for_workspace(store, workspace_id)?;
     logical_clock::next_timestamp(store, from_messages.max(from_content))
 }
 

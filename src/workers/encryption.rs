@@ -313,7 +313,7 @@ fn derive_key_secrets<R: EventRegistry>(
             continue;
         }
         report.scanned_key_wraps += 1;
-        if local_key_secret::schema::get(store, row.workspace_id, row.removal_frontier_id)?
+        if local_key_secret::queries::get(store, row.workspace_id, row.removal_frontier_id)?
             .is_some()
         {
             consumed_pending.push(pending.key);
@@ -324,7 +324,7 @@ fn derive_key_secrets<R: EventRegistry>(
             continue;
         };
         let Some(local_recipient) =
-            local_recipient_key::schema::list_for_workspace(store, row.workspace_id)?
+            local_recipient_key::queries::list_for_workspace(store, row.workspace_id)?
                 .into_iter()
                 .find(|candidate| candidate.recipient_key == recipient.recipient_key)
         else {
@@ -499,7 +499,7 @@ fn try_root_source(
     workspace_id: EventId,
     removal_frontier_id: EventId,
 ) -> Result<Option<DerivationSource>, String> {
-    let Some(root) = local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?
+    let Some(root) = local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?
     else {
         return Ok(None);
     };
@@ -1129,7 +1129,7 @@ fn closest_materialized_source(
     // Start with the F root row when present. If F has been wiped, start
     // with no candidate and let the sibling scan below pick the deepest
     // covering sibling — the same fallback as `closest_retained_ancestor`.
-    let mut best: Option<MaterializedSource> = local_key_secret::schema::get(
+    let mut best: Option<MaterializedSource> = local_key_secret::queries::get(
         store,
         workspace_id,
         removal_frontier_id,
@@ -1333,7 +1333,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
     // it), we still need to exact-delete this leaf row, purge its bytes,
     // and tombstone it — but there is no walk to perform.
     let frontier_root =
-        local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?;
+        local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?;
     let mut path_rows_to_wipe: Vec<WipeTarget> = Vec::new();
     if let Some(root_row) = frontier_root {
         // Step 2: walk the time tree, materializing both descend and sibling
@@ -1592,7 +1592,7 @@ fn chop_time_tree_prefix<R: EventRegistry>(
     //     already wiped). We still scan all surviving rows below for any
     //     fully inside `[0, floor_minute)`.
     let frontier_root =
-        local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?;
+        local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?;
     let frontier_root_id = frontier_root.as_ref().map(|row| row.local_key_secret_id);
 
     enum StartSource {
@@ -2354,7 +2354,7 @@ fn drain_pending_message_leaves<R: EventRegistry>(
                 _ => continue,
             };
         report.scanned_events += 1;
-        if local_key_secret::schema::get(store, workspace_id, removal_frontier_id)?.is_none() {
+        if local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?.is_none() {
             continue;
         }
         if event_schema::has_event(store, &leaf_id)
@@ -2440,9 +2440,9 @@ fn active_local_recipient_keys(
     workspace_id: EventId,
     endpoint_shared_id: EventId,
 ) -> Result<Vec<RetiredRecipientKey>, String> {
-    let local_keys = local_recipient_key::schema::list_for_workspace(store, workspace_id)?;
+    let local_keys = local_recipient_key::queries::list_for_workspace(store, workspace_id)?;
     let mut active = Vec::new();
-    for row in recipient_key::schema::list_for_workspace(store, workspace_id)? {
+    for row in recipient_key::queries::list_for_workspace(store, workspace_id)? {
         if row.endpoint_shared_id != endpoint_shared_id {
             continue;
         }
@@ -2452,7 +2452,7 @@ fn active_local_recipient_keys(
         else {
             continue;
         };
-        if recipient_key_tombstone::schema::get(store, workspace_id, row.recipient_key_id)?
+        if recipient_key_tombstone::queries::get(store, workspace_id, row.recipient_key_id)?
             .is_some()
         {
             continue;
@@ -2715,7 +2715,7 @@ mod tests {
         assert_eq!(report.failed_key_wraps, 0);
         assert_eq!(report.admitted_events, 1);
 
-        let local = local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+        let local = local_key_secret::queries::get(&store, WORKSPACE, frontier_id)
             .expect("local key secret")
             .expect("local key secret row");
         assert_eq!(
@@ -2958,7 +2958,7 @@ mod tests {
 
         // Assert F root row is also wiped.
         assert!(
-            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+            local_key_secret::queries::get(&store, WORKSPACE, frontier_id)
                 .expect("look up local_key_secret")
                 .is_none(),
             "local_key_secret(F) row must be wiped after retire",
@@ -3269,7 +3269,7 @@ mod tests {
         );
         // F root row is wiped — confirm the disk-level state.
         assert!(
-            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+            local_key_secret::queries::get(&store, WORKSPACE, frontier_id)
                 .expect("look up local_key_secret")
                 .is_none(),
             "local_key_secret(F) row must be wiped; the in-memory KEY_SECRET \
@@ -3385,7 +3385,7 @@ mod tests {
         // root fast path (deterministic time-tree walk + one trie split).
         // See `derive_event_leaf_from_root`.
         assert!(
-            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+            local_key_secret::queries::get(&store, WORKSPACE, frontier_id)
                 .expect("look up local_key_secret")
                 .is_none(),
             "STRICT ADVERSARY VIOLATION: local_key_secret(F) row survived \
@@ -3505,7 +3505,7 @@ mod tests {
 
         // F root row is wiped (the retire walk's wipe phase guarantees this).
         assert!(
-            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+            local_key_secret::queries::get(&store, WORKSPACE, frontier_id)
                 .expect("look up local_key_secret")
                 .is_none(),
             "precondition: retire must have wiped local_key_secret(F)"
@@ -3698,7 +3698,7 @@ mod tests {
         assert_eq!(report.purged_event_bytes, 0);
 
         // F's row must be untouched.
-        let root = local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+        let root = local_key_secret::queries::get(&store, WORKSPACE, frontier_id)
             .expect("look up local_key_secret")
             .expect("F row must remain after no-op chop");
         assert_eq!(root.local_key_secret_id, local_key_secret_id);
@@ -3784,7 +3784,7 @@ mod tests {
 
         // F's row must be wiped (chop wipes F just like RetireDeletedEventLeaf).
         assert!(
-            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+            local_key_secret::queries::get(&store, WORKSPACE, frontier_id)
                 .expect("look up local_key_secret")
                 .is_none(),
             "F's row must be wiped after a non-zero chop"
@@ -3968,7 +3968,7 @@ mod tests {
         )
         .expect("retire");
         assert!(
-            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+            local_key_secret::queries::get(&store, WORKSPACE, frontier_id)
                 .expect("look up F")
                 .is_none(),
             "precondition: F must be wiped by the retire"
@@ -3992,7 +3992,7 @@ mod tests {
 
         // F must still be wiped — chop must not resurrect F.
         assert!(
-            local_key_secret::schema::get(&store, WORKSPACE, frontier_id)
+            local_key_secret::queries::get(&store, WORKSPACE, frontier_id)
                 .expect("look up F")
                 .is_none(),
             "F must remain wiped after chop (chop must not resurrect F)"

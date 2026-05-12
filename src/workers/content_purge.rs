@@ -176,7 +176,7 @@ fn drain_in_tx(store: &Store, limit: usize) -> Result<(PurgeReport, Vec<RetireLe
     // The drain ran a full scan, so the purge_pending trigger queue is now
     // satisfied for whatever projection wrote into it. Clearing it keeps the
     // post-admission hook from looping on the same trigger forever.
-    message_deletion_schema::delete_all_purge_pending_in_tx(store)
+    drain_purge_pending(store)
         .map_err(|err| format!("clear purge pending: {err}"))?;
     Ok((report, retire_jobs))
 }
@@ -420,6 +420,21 @@ fn has_file_deletion_label(
 
 fn table_error(err: String) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(err)
+}
+
+/// Drain all queued purge markers in the current transaction. Called once
+/// the content-purge scan has run, so a successful drain leaves the
+/// trigger queue empty.
+fn drain_purge_pending(store: &Store) -> rusqlite::Result<usize> {
+    let keys: Vec<Vec<u8>> = store
+        .table_rows_with_key_prefix(message_deletion_schema::CONTENT_PURGE_PENDING, &[], usize::MAX)?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    store.delete_table_rows_in_tx(message_deletion_schema::CONTENT_PURGE_PENDING, keys)
 }
 
 #[cfg(test)]

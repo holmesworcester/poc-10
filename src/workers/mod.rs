@@ -45,7 +45,7 @@ pub fn drain_post_admission_purge_pending<R>(store: &Store, registry: &R) -> Res
 where
     R: pipeline_helpers::event_pipeline::EventRegistry,
 {
-    if !message_deletion::schema::has_purge_pending(store)? {
+    if !message_deletion::queries::has_purge_pending(store)? {
         return Ok(());
     }
     content_purge::run(

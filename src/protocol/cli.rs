@@ -180,7 +180,7 @@ fn run_count_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutp
     let connection_events =
         event_modules::connection::queries::connection_event_count(&context.store)?;
     let invite_accepted =
-        event_modules::identity::invite_accepted::schema::invite_accepted_count(&context.store)?;
+        event_modules::identity::invite_accepted::queries::invite_accepted_count(&context.store)?;
     let statuses = event_schema::status_counts(&context.store)
         .map_err(|err| format!("count event statuses: {err}"))?;
     Ok(CliOutput::lines(
