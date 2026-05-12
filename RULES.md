@@ -1068,6 +1068,6 @@ The standard for "current code" is: a reader who has never seen the plan
 documents, the commit history, or any prior architecture should be able to
 read a doc comment and understand what the code does and why, by name only.
 
-Plan documents (`plan.md`, `disappearing_messages_plan.md`, etc.) are the
-right home for slice numbers, sequencing, and historical decisions. They
-must not leak into `src/`.
+Plan documents (`plan.md`, `encryption.md`, etc.) are the right home for
+slice numbers, sequencing, and historical decisions. They must not leak
+into `src/`.
