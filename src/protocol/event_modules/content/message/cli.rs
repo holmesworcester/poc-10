@@ -635,11 +635,11 @@ pub(crate) fn workspace_expires_at_minute(
     created_at_ms: u64,
 ) -> Result<(u64, EventId), String> {
     use crate::protocol::event_modules::content::message::types::{EXPIRES_NEVER, UNIX_MINUTE_MS};
-    use crate::protocol::event_modules::encryption::disappearing_messages_setting::schema as setting_schema;
+    use crate::protocol::event_modules::encryption::disappearing_messages_setting::queries as setting_queries;
     use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
 
     let (ttl_minutes, reference) =
-        if let Some(active) = setting_schema::active_for_workspace(store, workspace_id)? {
+        if let Some(active) = setting_queries::active_for_workspace(store, workspace_id)? {
             (active.ttl_minutes, active.setting_event_id)
         } else {
             let key = workspace_id;

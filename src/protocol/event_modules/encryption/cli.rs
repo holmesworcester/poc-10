@@ -636,7 +636,7 @@ fn run_disappearing_set_command(
     )?
     .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
 
-    let previous = disappearing_messages_setting::schema::active_for_workspace(
+    let previous = disappearing_messages_setting::queries::active_for_workspace(
         &context.store,
         workspace_id,
     )?;
@@ -757,7 +757,7 @@ fn run_disappearing_status_command(
     let workspace_id =
         parse_hex_id(args.get(0).expect("length checked"), DISAPPEARING_STATUS_USAGE)?;
 
-    let active = disappearing_messages_setting::schema::active_for_workspace(
+    let active = disappearing_messages_setting::queries::active_for_workspace(
         &context.store,
         workspace_id,
     )?;
@@ -793,7 +793,7 @@ fn run_disappearing_status_command(
     let mut last_chopped_floor: u64 = 0;
     let mut last_chopped_present = false;
     for frontier in &frontiers {
-        if let Some(value) = disappearing_messages_setting::schema::get_last_chopped_floor(
+        if let Some(value) = disappearing_messages_setting::queries::get_last_chopped_floor(
             &context.store,
             workspace_id,
             frontier.removal_frontier_id,
@@ -861,7 +861,7 @@ fn run_disappearing_tighten_command(
     )?
     .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
 
-    let previous = disappearing_messages_setting::schema::active_for_workspace(
+    let previous = disappearing_messages_setting::queries::active_for_workspace(
         &context.store,
         workspace_id,
     )?;
@@ -1000,7 +1000,7 @@ fn run_disappearing_compact_command(
     )?
     .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
 
-    let active = disappearing_messages_setting::schema::active_for_workspace(
+    let active = disappearing_messages_setting::queries::active_for_workspace(
         &context.store,
         workspace_id,
     )?
