@@ -296,7 +296,7 @@ fn run_sync_status_command(
     .map_err(|err| format!("drain negentropy purges: {err}"))?;
     let summary = index.root_summary()?;
     let count = index.indexed_event_count()?;
-    let pending = event_modules::sync::schema::pending_purge_count(&context.store)
+    let pending = event_modules::sync::queries::pending_purge_count(&context.store)
         .map_err(|err| format!("count pending purges: {err}"))?;
     Ok(CliOutput::lines(vec![
         format!("indexed_events: {count}"),
@@ -366,7 +366,7 @@ fn run_negentropy_drain_command(
         _ => return Err("sync worker returned non-drain-pending-purges output".to_string()),
     };
     let summary = index.root_summary()?;
-    let remaining = event_modules::sync::schema::pending_purge_count(&context.store)
+    let remaining = event_modules::sync::queries::pending_purge_count(&context.store)
         .map_err(|err| format!("count pending purges: {err}"))?;
     Ok(CliOutput::lines(vec![
         format!("drained: {}", report.drained_rows),

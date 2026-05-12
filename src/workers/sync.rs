@@ -466,27 +466,41 @@ fn drain_pending_purges_in_tick(
     index: &SyncIndex,
     limit: usize,
 ) -> Result<DrainPurgesReport, String> {
-    let limit = limit.max(1);
-    let pending = negentropy_purges::drain_pending_purges(store, limit)?;
-    if pending.is_empty() {
+    let limit = limit.max(1).min(usize::MAX);
+    let rows = store
+        .table_rows_with_key_prefix(negentropy_purges::NEGENTROPY_PENDING_PURGES, &[], limit)
+        .map_err(|err| format!("load negentropy pending purges: {err}"))?;
+    if rows.is_empty() {
         return Ok(DrainPurgesReport::default());
     }
+    let pending = rows
+        .into_iter()
+        .map(|(key, _)| {
+            let (_workspace_id, event_id) =
+                negentropy_purges::decode_pending_purge_key(&key)?;
+            Ok::<_, String>((key, event_id))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut report = DrainPurgesReport::default();
     let mut keys_to_clear = Vec::with_capacity(pending.len());
-    for entry in &pending {
+    for (key, event_id) in &pending {
         report.drained_rows += 1;
         // Index removal runs first; if it fails we keep the queue row so
         // the next tick retries. `SyncIndex::remove_event` is
         // intentionally idempotent — a false return means the id was
         // already absent (e.g. a daemon restart drained rows after a
         // previous tick had already updated the in-memory index).
-        if index.remove_event(&entry.event_id)? {
+        if index.remove_event(event_id)? {
             report.removed_from_index += 1;
         }
-        keys_to_clear.push(entry.key.clone());
+        keys_to_clear.push(key.clone());
     }
-    let _ = negentropy_purges::clear_pending_purges(store, keys_to_clear)?;
+    if !keys_to_clear.is_empty() {
+        store
+            .delete_table_rows(negentropy_purges::NEGENTROPY_PENDING_PURGES, keys_to_clear)
+            .map_err(|err| format!("delete negentropy pending purges: {err}"))?;
+    }
     Ok(report)
 }
 
@@ -982,6 +996,7 @@ mod tests {
     use crate::protocol::event_modules::identity::{
         endpoint, endpoint_shared, invite_accepted, workspace,
     };
+    use crate::protocol::event_modules::sync::queries as negentropy_purge_queries;
     use crate::protocol::event_modules::sync::{compare, have_id};
     use crate::protocol::event_modules::types::{event_id, ConnectionScope, EventId, EventScope};
     use crate::protocol::event_modules::worker as event_worker;
@@ -1454,8 +1469,11 @@ mod tests {
     fn enqueue_purge(store: &Store, workspace_id: EventId, event_id: EventId) {
         store
             .write_transaction(|store| {
-                negentropy_purges::enqueue_purge_in_tx(store, Some(workspace_id), &event_id)
-                    .map_err(|err| rusqlite::Error::InvalidParameterName(err.to_string()))
+                store.insert_table_rows_in_tx(vec![negentropy_purges::pending_purge_row(
+                    workspace_id,
+                    event_id,
+                )])?;
+                Ok(())
             })
             .expect("enqueue purge");
     }
@@ -1503,7 +1521,7 @@ mod tests {
         assert!(!index.contains_event(&id_c).expect("contains c"));
         assert!(index.contains_event(&id_b).expect("contains b"));
         assert_eq!(
-            negentropy_purges::pending_purge_count(&store).expect("count"),
+            negentropy_purge_queries::pending_purge_count(&store).expect("count"),
             0,
             "queue must be empty after drain"
         );
@@ -1636,7 +1654,7 @@ mod tests {
         assert_eq!(report.drained_rows, 1);
         assert_eq!(report.removed_from_index, 0);
         assert_eq!(
-            negentropy_purges::pending_purge_count(&store).expect("count"),
+            negentropy_purge_queries::pending_purge_count(&store).expect("count"),
             0
         );
     }
@@ -1678,7 +1696,7 @@ mod tests {
         assert!(!index.contains_event(&id_drop).expect("contains"));
         assert!(index.contains_event(&id_keep).expect("contains"));
         assert_eq!(
-            negentropy_purges::pending_purge_count(&store).expect("count"),
+            negentropy_purge_queries::pending_purge_count(&store).expect("count"),
             0
         );
     }

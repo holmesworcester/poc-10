@@ -824,7 +824,7 @@ fn run_disappearing_status_command(
     )?
     .len();
     let pending_purges =
-        crate::protocol::event_modules::sync::schema::pending_purge_count(&context.store)
+        crate::protocol::event_modules::sync::queries::pending_purge_count(&context.store)
             .map_err(|err| format!("count pending purges: {err}"))?;
 
     Ok(CliOutput::lines(vec![
