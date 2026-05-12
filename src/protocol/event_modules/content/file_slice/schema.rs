@@ -34,7 +34,7 @@ pub fn admit_check_received(store: &Store, bytes: &[u8]) -> Result<AdmitDecision
     };
     let descriptor_envelope = file::codec::decode_signed(&descriptor_bytes)?;
     let descriptor = file::codec::decode(&descriptor_envelope.payload)?;
-    if message::schema::message_tombstone_exists(
+    if message::queries::message_tombstone_exists(
         store,
         descriptor.workspace_id,
         descriptor.message_id,

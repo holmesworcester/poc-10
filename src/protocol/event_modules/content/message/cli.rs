@@ -25,7 +25,7 @@ use crate::workers::encryption as encryption_worker;
 
 use super::types::message_event_id_in_minute;
 
-use super::{commands, schema};
+use super::{commands, queries, schema};
 
 const SEND_USAGE: &str = "send WORKSPACE_ID_HEX TEXT";
 const MESSAGES_USAGE: &str = "messages WORKSPACE_ID_HEX [LIMIT]";
@@ -242,7 +242,7 @@ fn visible_message_rows(
     workspace_id: EventId,
 ) -> Result<Vec<super::types::MessageRow>, String> {
     let mut by_id = BTreeMap::new();
-    for row in schema::list_for_workspace(store, workspace_id)? {
+    for row in queries::list_for_workspace(store, workspace_id)? {
         by_id.insert(row.message_id, row);
     }
     for sealed in sealed_message_rows_for_workspace(store, workspace_id)? {

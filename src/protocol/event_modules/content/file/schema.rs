@@ -30,7 +30,7 @@ use crate::core::crypto::XCHACHA20_POLY1305_NONCE_BYTES;
 pub fn admit_check_received(store: &Store, bytes: &[u8]) -> Result<AdmitDecision, String> {
     let envelope = codec::decode_signed(bytes)?;
     let file = codec::decode(&envelope.payload)?;
-    if message::schema::message_tombstone_exists(store, file.workspace_id, file.message_id)? {
+    if message::queries::message_tombstone_exists(store, file.workspace_id, file.message_id)? {
         return Ok(AdmitDecision::Drop);
     }
     Ok(AdmitDecision::Admit)

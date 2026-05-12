@@ -28,7 +28,7 @@ use super::types::{
 pub fn admit_check_received(store: &Store, bytes: &[u8]) -> Result<AdmitDecision, String> {
     let envelope = codec::decode_signed(bytes)?;
     let reaction = codec::decode(&envelope.payload)?;
-    if message::schema::message_tombstone_exists(
+    if message::queries::message_tombstone_exists(
         store,
         reaction.workspace_id,
         reaction.target_message_id,
