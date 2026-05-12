@@ -300,11 +300,11 @@ fn derive_key_secrets<R: EventRegistry>(
 ) -> Result<DeriveReport, String> {
     let mut report = DeriveReport::default();
     let mut consumed_pending = Vec::new();
-    for pending in key_wrap::schema::list_pending_unwraps(store, batch_size.max(1))? {
+    for pending in key_wrap::queries::list_pending_unwraps(store, batch_size.max(1))? {
         if report.scanned_key_wraps >= batch_size {
             break;
         }
-        let Some(row) = key_wrap::schema::key_wrap_for_pending(store, &pending)? else {
+        let Some(row) = key_wrap::queries::key_wrap_for_pending(store, &pending)? else {
             consumed_pending.push(pending.key);
             continue;
         };
@@ -378,7 +378,11 @@ fn derive_key_secrets<R: EventRegistry>(
         report.admitted_events += admitted.admitted.inserted_events;
         consumed_pending.push(pending.key);
     }
-    key_wrap::schema::delete_pending_unwraps(store, consumed_pending)?;
+    if !consumed_pending.is_empty() {
+        store
+            .delete_table_rows(key_wrap::schema::PENDING_KEY_UNWRAPS, consumed_pending)
+            .map_err(|err| format!("delete pending key unwraps: {err}"))?;
+    }
     Ok(report)
 }
 
@@ -2469,7 +2473,7 @@ fn purge_retired_recipient_material(
     if retired.is_empty() {
         return Ok(());
     }
-    let workspace_wraps = key_wrap::schema::list_for_workspace(store, workspace_id)?;
+    let workspace_wraps = key_wrap::queries::list_for_workspace(store, workspace_id)?;
     let mut wraps_to_purge = Vec::new();
     for wrap in workspace_wraps {
         if retired
@@ -2697,7 +2701,7 @@ mod tests {
             })
             .expect("seed projected wrap");
 
-        let pending = key_wrap::schema::list_pending_unwraps(&store, usize::MAX)
+        let pending = key_wrap::queries::list_pending_unwraps(&store, usize::MAX)
             .expect("pending before derive");
         assert_eq!(pending.len(), 1);
 
@@ -2720,7 +2724,7 @@ mod tests {
         );
         assert_eq!(local.key_secret, KEY_SECRET);
         assert!(
-            key_wrap::schema::list_pending_unwraps(&store, usize::MAX)
+            key_wrap::queries::list_pending_unwraps(&store, usize::MAX)
                 .expect("pending after derive")
                 .is_empty(),
             "successful unwrap must consume its queue row"

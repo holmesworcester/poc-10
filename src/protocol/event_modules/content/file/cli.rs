@@ -172,7 +172,7 @@ fn run_save_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
     }
     let row = open_sealed_file_row(&context.store, &sealed)?
         .ok_or_else(|| "file local content key is missing; cannot decode".to_string())?;
-    let slices = file_slice::schema::list_for_file(&context.store, workspace_id, row.file_id)?;
+    let slices = file_slice::queries::list_for_file(&context.store, workspace_id, row.file_id)?;
     if slices.len() < row.total_slices as usize {
         return Err(format!(
             "file incomplete: have {}/{} slices",
@@ -237,7 +237,7 @@ pub fn list_summaries(
     rows.drain(..start);
     let mut summaries = Vec::with_capacity(rows.len());
     for (idx, row) in rows.into_iter().enumerate() {
-        let slices = file_slice::schema::list_for_file(store, workspace_id, row.file_id)?;
+        let slices = file_slice::queries::list_for_file(store, workspace_id, row.file_id)?;
         let slices_received = u32::try_from(slices.len()).unwrap_or(u32::MAX);
         let bytes_received: u64 = slices.iter().map(|slice| slice.plaintext_len as u64).sum();
         summaries.push(FileSummary {

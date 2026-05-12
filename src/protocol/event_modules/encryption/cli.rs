@@ -524,7 +524,7 @@ fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         recipient_key_tombstone::schema::list_for_workspace(&context.store, workspace_id)?;
     let local_recipient_keys =
         local_recipient_key::schema::list_for_workspace(&context.store, workspace_id)?;
-    let key_wraps = key_wrap::schema::list_for_workspace(&context.store, workspace_id)?;
+    let key_wraps = key_wrap::queries::list_for_workspace(&context.store, workspace_id)?;
     let history_nodes =
         local_history_node_secret::queries::list_for_workspace(&context.store, workspace_id)?;
     let history_tombstones = local_history_node_secret::queries::list_tombstones_for_workspace(

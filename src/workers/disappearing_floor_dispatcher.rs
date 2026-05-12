@@ -52,7 +52,7 @@ use crate::protocol::event_modules::encryption::disappearing_messages_setting::q
 use crate::protocol::event_modules::encryption::disappearing_messages_setting::schema as setting_schema;
 use crate::protocol::event_modules::encryption::disappearing_messages_setting::types::COVER_HORIZON_MINUTES;
 use crate::protocol::event_modules::encryption::removal_frontier::schema as frontier_schema;
-use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
+use crate::protocol::event_modules::identity::workspace::queries as workspace_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::workers::encryption as encryption_worker;
 use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
@@ -144,7 +144,7 @@ where
     let now_minute = now_ms / UNIX_MINUTE_MS;
     let horizon_floor = now_minute.saturating_sub(COVER_HORIZON_MINUTES);
 
-    let workspaces = workspace_schema::list_all(store)?;
+    let workspaces = workspace_queries::list_all(store)?;
     'workspaces: for workspace in workspaces {
         let setting_floor = setting_queries::active_for_workspace(store, workspace.workspace_id)?
             .map(|row| row.expires_at_or_before_minute)
@@ -319,7 +319,7 @@ mod tests {
     }
 
     /// Insert a workspace projection row (without going through the codec /
-    /// projector) so the dispatcher's `workspace_schema::list_all` finds it.
+    /// projector) so the dispatcher's `workspace_queries::list_all` finds it.
     fn seed_workspace_row(store: &Store) {
         let row = workspace_schema::workspace_row(
             WORKSPACE,

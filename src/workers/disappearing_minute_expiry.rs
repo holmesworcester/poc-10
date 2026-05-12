@@ -27,7 +27,7 @@ use crate::protocol::event_modules::content::message::types::{
 };
 use crate::protocol::event_modules::content::reaction::queries as reaction_queries;
 use crate::protocol::event_modules::content::reaction::types::reaction_event_id_in_minute;
-use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
+use crate::protocol::event_modules::identity::workspace::queries as workspace_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::workers::encryption as encryption_worker;
 use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
@@ -106,7 +106,7 @@ where
     };
     let now_minute = now_ms / UNIX_MINUTE_MS;
 
-    let workspaces = workspace_schema::list_all(store)?;
+    let workspaces = workspace_queries::list_all(store)?;
     let mut expired_jobs: Vec<ExpireMessageJob> = Vec::new();
 
     for workspace in workspaces {
