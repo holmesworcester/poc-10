@@ -25,7 +25,7 @@ use crate::protocol::event_modules::content::message::schema as message_schema;
 use crate::protocol::event_modules::content::message::types::{
     message_event_id_in_minute, UNIX_MINUTE_MS,
 };
-use crate::protocol::event_modules::content::reaction::schema as reaction_schema;
+use crate::protocol::event_modules::content::reaction::queries as reaction_queries;
 use crate::protocol::event_modules::content::reaction::types::reaction_event_id_in_minute;
 use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
 use crate::protocol::event_modules::types::EventId;
@@ -273,7 +273,7 @@ fn retire_reaction_leaves_for_expired_messages<R: EventRegistry>(
     expired_messages: &[ExpireMessageJob],
     report: &mut ExpiryReport,
 ) -> Result<(), String> {
-    let reactions = reaction_schema::list_sealed(store, usize::MAX)?;
+    let reactions = reaction_queries::list_sealed(store, usize::MAX)?;
     for reaction in reactions {
         let parent = expired_messages.iter().find(|job| {
             job.workspace_id == reaction.workspace_id

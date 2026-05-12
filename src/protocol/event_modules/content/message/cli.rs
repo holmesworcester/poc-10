@@ -373,7 +373,7 @@ pub fn visible_reaction_rows(
     workspace_id: EventId,
 ) -> Result<Vec<reaction::types::ReactionRow>, String> {
     let mut by_id = BTreeMap::new();
-    for row in reaction::schema::list_for_workspace(store, workspace_id)? {
+    for row in reaction::queries::list_for_workspace(store, workspace_id)? {
         by_id.insert(row.reaction_id, row);
     }
     for sealed in sealed_reaction_rows_for_workspace(store, workspace_id)? {

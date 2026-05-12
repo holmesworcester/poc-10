@@ -18,7 +18,7 @@ use crate::protocol::event_modules::encryption::local_history_node_secret;
 use crate::protocol::event_modules::types::EventId;
 
 use super::codec;
-use super::schema;
+use super::queries;
 use super::types::{FileRow, SealedFileRow};
 
 const FILES_USAGE: &str = "files WORKSPACE_ID_HEX [LIMIT]";
@@ -161,7 +161,7 @@ fn run_save_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
     )?;
     let out_path = PathBuf::from(args.get(2).expect("length checked"));
 
-    let sealed = schema::sealed_file_row_by_id(&context.store, workspace_id, file_event_id)?
+    let sealed = queries::sealed_file_row_by_id(&context.store, workspace_id, file_event_id)?
         .ok_or_else(|| "file does not exist".to_string())?;
     if message::cli::is_deleted_by_author(
         &context.store,
@@ -260,7 +260,7 @@ pub(crate) fn visible_file_rows(
     store: &Store,
     workspace_id: EventId,
 ) -> Result<Vec<FileRow>, String> {
-    let sealed_rows = schema::list_sealed_for_workspace(store, workspace_id)?;
+    let sealed_rows = queries::list_sealed_for_workspace(store, workspace_id)?;
     let mut out = Vec::with_capacity(sealed_rows.len());
     for sealed in sealed_rows {
         if message::cli::is_deleted_by_author(store, &sealed.message_id, &sealed.author_user_id)? {

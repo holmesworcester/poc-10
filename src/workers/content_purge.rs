@@ -345,7 +345,7 @@ fn purge_file_slice_for_deleted_file(
         // The descriptor was already purged. We rely on the file_id index
         // also being gone: confirm by looking up by file_id; if the
         // descriptor row is still present we honor it as live.
-        file::schema::file_event_id_for_file_id(store, slice.workspace_id, slice.file_id)?.is_none()
+        file::queries::file_event_id_for_file_id(store, slice.workspace_id, slice.file_id)?.is_none()
     } else {
         // Descriptor still exists. Look up its message_id and check whether
         // that message has a tombstone; if yes, this slice should also be
@@ -549,7 +549,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            reaction::schema::list_for_workspace(&store, WORKSPACE)
+            reaction::queries::list_for_workspace(&store, WORKSPACE)
                 .expect("reactions")
                 .len(),
             0
