@@ -81,8 +81,8 @@ pub fn schemas() -> Vec<Schema> {
 // Workers use this trait boundary to decode/project events without depending
 // on the concrete module registry layout.
 impl EventRegistry for Protocol {
-    fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        self.modules.record_from_bytes(bytes)
+    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        self.modules.event_from_bytes(bytes)
     }
 
     fn project_network_in(

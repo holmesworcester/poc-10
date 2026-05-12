@@ -43,7 +43,11 @@ pub fn is_connection_scoped_event(bytes: &[u8]) -> bool {
         || need_id::codec::is_event(bytes)
 }
 
-pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
+/// Decode a connection-scoped sync event into an `EventRecord`.
+///
+/// Sync events use a single leading type tag and are gated by
+/// `is_connection_scoped_event` at the top-level dispatcher.
+pub fn event_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     if compare::codec::is_event(&bytes) {
         return compare::codec::record_from_bytes(bytes);
     }
@@ -54,14 +58,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         return need_id::codec::record_from_bytes(bytes);
     }
     Err("not a sync event".to_string())
-}
-
-/// Decode a connection-scoped sync event into an `EventRecord`.
-///
-/// Sync events use a single leading type tag and are gated by
-/// `is_connection_scoped_event` at the top-level dispatcher.
-pub fn event_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
-    record_from_bytes(bytes)
 }
 
 pub fn inbound_record_from_connection_bytes(

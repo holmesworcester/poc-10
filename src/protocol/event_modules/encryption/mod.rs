@@ -49,37 +49,6 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
     }
 }
 
-pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
-    let tag = bytes
-        .first()
-        .ok_or_else(|| "empty encryption event bytes".to_string())?;
-    match *tag {
-        local_recipient_key::codec::TYPE_LOCAL_RECIPIENT_KEY => {
-            local_recipient_key::codec::record_from_bytes(bytes)
-        }
-        local_key_secret::codec::TYPE_LOCAL_KEY_SECRET => {
-            local_key_secret::codec::record_from_bytes(bytes)
-        }
-        local_history_node_secret::codec::TYPE_LOCAL_HISTORY_NODE_SECRET => {
-            local_history_node_secret::codec::record_from_bytes(bytes)
-        }
-        recipient_key::codec::TYPE_SIGNED_RECIPIENT_KEY => {
-            recipient_key::codec::signed_record_from_bytes(bytes)
-        }
-        recipient_key_tombstone::codec::TYPE_SIGNED_RECIPIENT_KEY_TOMBSTONE => {
-            recipient_key_tombstone::codec::signed_record_from_bytes(bytes)
-        }
-        removal_frontier::codec::TYPE_SIGNED_REMOVAL_FRONTIER => {
-            removal_frontier::codec::signed_record_from_bytes(bytes)
-        }
-        key_wrap::codec::TYPE_SIGNED_KEY_WRAP => key_wrap::codec::signed_record_from_bytes(bytes),
-        disappearing_messages_setting::codec::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING => {
-            disappearing_messages_setting::codec::signed_record_from_bytes(bytes)
-        }
-        other => Err(format!("unknown encryption event type {other}")),
-    }
-}
-
 /// Tags owned by this domain. Used by the top-level dispatcher to route
 /// ordinary tag-leading event bytes to `event_from_bytes`.
 pub fn is_encryption_tag(tag: u8) -> bool {
@@ -109,17 +78,39 @@ pub fn event_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         .first()
         .ok_or_else(|| "empty encryption event bytes".to_string())?;
     match *tag {
+        local_recipient_key::codec::TYPE_LOCAL_RECIPIENT_KEY => {
+            local_recipient_key::codec::record_from_bytes(bytes)
+        }
+        local_key_secret::codec::TYPE_LOCAL_KEY_SECRET => {
+            local_key_secret::codec::record_from_bytes(bytes)
+        }
+        local_history_node_secret::codec::TYPE_LOCAL_HISTORY_NODE_SECRET => {
+            local_history_node_secret::codec::record_from_bytes(bytes)
+        }
         recipient_key::codec::TYPE_RECIPIENT_KEY => Err("recipient_key must be signed".to_string()),
+        recipient_key::codec::TYPE_SIGNED_RECIPIENT_KEY => {
+            recipient_key::codec::signed_record_from_bytes(bytes)
+        }
         recipient_key_tombstone::codec::TYPE_RECIPIENT_KEY_TOMBSTONE => {
             Err("recipient_key_tombstone must be signed".to_string())
+        }
+        recipient_key_tombstone::codec::TYPE_SIGNED_RECIPIENT_KEY_TOMBSTONE => {
+            recipient_key_tombstone::codec::signed_record_from_bytes(bytes)
         }
         removal_frontier::codec::TYPE_REMOVAL_FRONTIER => {
             Err("removal_frontier must be signed".to_string())
         }
+        removal_frontier::codec::TYPE_SIGNED_REMOVAL_FRONTIER => {
+            removal_frontier::codec::signed_record_from_bytes(bytes)
+        }
         key_wrap::codec::TYPE_KEY_WRAP => Err("key_wrap must be signed".to_string()),
+        key_wrap::codec::TYPE_SIGNED_KEY_WRAP => key_wrap::codec::signed_record_from_bytes(bytes),
         disappearing_messages_setting::codec::TYPE_DISAPPEARING_MESSAGES_SETTING => {
             Err("disappearing_messages_setting must be signed".to_string())
         }
-        _ => record_from_bytes(bytes),
+        disappearing_messages_setting::codec::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING => {
+            disappearing_messages_setting::codec::signed_record_from_bytes(bytes)
+        }
+        other => Err(format!("unknown encryption event type {other}")),
     }
 }

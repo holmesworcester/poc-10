@@ -25,10 +25,6 @@ pub use crate::workers::pipeline_helpers::event_pipeline as worker;
 pub use event_from_bytes::event_from_bytes;
 pub use modules::{schemas, Modules};
 
-/// Compatibility alias for the old name. Callers should prefer
-/// `event_from_bytes`.
-pub use self::event_from_bytes::event_from_bytes as record_from_bytes;
-
 /// Re-export of the local history-node leaf event module under a name that
 /// does not embed the parent domain's vocabulary, so consumer projectors that
 /// cannot mention transit/crypto by name can still decode and validate leaf

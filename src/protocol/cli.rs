@@ -53,8 +53,8 @@ impl Context {
 // The shared CLI/daemon context delegates protocol behavior to `Protocol` while
 // exposing the store and persistent worker state required by the generic runner.
 impl EventRegistry for Context {
-    fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        self.protocol.record_from_bytes(bytes)
+    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        self.protocol.event_from_bytes(bytes)
     }
 
     fn project_network_in(

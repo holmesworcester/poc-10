@@ -851,7 +851,7 @@ impl IndexState {
         let bytes = event_schema::event_bytes(store, event_id)
             .map_err(|err| format!("load sync dependency event bytes: {err}"))?
             .ok_or_else(|| "sync index referenced missing dependency event".to_string())?;
-        let record = crate::protocol::event_modules::record_from_bytes(bytes)?;
+        let record = crate::protocol::event_modules::event_from_bytes(bytes)?;
         let dependencies = record.dependencies;
         self.deps_by_event.insert(*event_id, dependencies.clone());
         Ok(dependencies)

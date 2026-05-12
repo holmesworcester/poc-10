@@ -144,7 +144,7 @@ mod tests {
     struct TestContext;
 
     impl crate::workers::pipeline_helpers::event_pipeline::EventRegistry for TestContext {
-        fn record_from_bytes(
+        fn event_from_bytes(
             &self,
             _bytes: Vec<u8>,
         ) -> Result<crate::protocol::event_modules::types::EventRecord, String> {

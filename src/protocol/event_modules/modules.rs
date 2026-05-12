@@ -30,7 +30,7 @@ impl Modules {
 }
 
 impl EventRegistry for Modules {
-    fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
         event_from_bytes(bytes)
     }
 
