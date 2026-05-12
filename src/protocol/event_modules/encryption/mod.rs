@@ -13,7 +13,7 @@ pub mod local_recipient_key;
 pub mod recipient_key;
 pub mod recipient_key_tombstone;
 pub mod removal_frontier;
-pub use crate::workers::encryption as worker;
+pub use crate::protocol::workers::encryption as worker;
 
 use crate::protocol::event_modules::types::EventRecord;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};

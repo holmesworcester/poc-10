@@ -22,7 +22,7 @@ use crate::protocol::event_modules::worker::{
     AdmitDecision, EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord,
 };
 use crate::protocol::{event_modules, Protocol};
-use crate::workers::DaemonWorkerContext;
+use crate::protocol::workers::DaemonWorkerContext;
 
 const CLOCK_USAGE: &str = "clock [set TIMESTAMP|advance DELTA|clear]";
 const COUNT_USAGE: &str = "count";
@@ -67,7 +67,7 @@ impl EventRegistry for Context {
         store: &Store,
         bytes: Vec<u8>,
         receive: Option<ReceiveMetadata>,
-        provenance: Option<crate::workers::schema::TransitProvenance>,
+        provenance: Option<crate::protocol::workers::schema::TransitProvenance>,
     ) -> Result<ReceivedRecord, String> {
         self.protocol
             .record_from_canonical_in(store, bytes, receive, provenance)
@@ -283,10 +283,10 @@ fn run_sync_status_command(
     index
         .catch_up(&context.store)
         .map_err(|err| format!("catch up sync index: {err}"))?;
-    let _ = crate::workers::negentropy_purge_drainer::run(
+    let _ = crate::protocol::workers::negentropy_purge_drainer::run(
         &context.store,
         index,
-        crate::workers::negentropy_purge_drainer::Work::Drain {
+        crate::protocol::workers::negentropy_purge_drainer::Work::Drain {
             limit: usize::MAX,
         },
     )
@@ -343,7 +343,7 @@ fn run_negentropy_drain_command(
         Some(value) => value
             .parse::<usize>()
             .map_err(|_| NEGENTROPY_DRAIN_USAGE.to_string())?,
-        None => crate::workers::negentropy_purge_drainer::DEFAULT_DRAIN_LIMIT,
+        None => crate::protocol::workers::negentropy_purge_drainer::DEFAULT_DRAIN_LIMIT,
     };
     let index = context.protocol.sync_index();
     // Same sequencing as `sync-status`: catch the in-memory index up
@@ -352,10 +352,10 @@ fn run_negentropy_drain_command(
     index
         .catch_up(&context.store)
         .map_err(|err| format!("catch up sync index: {err}"))?;
-    let report = crate::workers::negentropy_purge_drainer::run(
+    let report = crate::protocol::workers::negentropy_purge_drainer::run(
         &context.store,
         index,
-        crate::workers::negentropy_purge_drainer::Work::Drain { limit },
+        crate::protocol::workers::negentropy_purge_drainer::Work::Drain { limit },
     )
     .map_err(|err| format!("drain negentropy purges: {err}"))?;
     let summary = index.root_summary()?;

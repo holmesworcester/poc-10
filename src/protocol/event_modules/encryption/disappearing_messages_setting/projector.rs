@@ -138,7 +138,7 @@ mod tests {
     use crate::protocol::event_modules::identity::signed;
     use crate::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
     use crate::protocol::event_modules::worker::{DependencyContext, EventContext};
-    use crate::workers::pipeline_helpers::event_pipeline::EventWithContext;
+    use crate::protocol::workers::pipeline_helpers::event_pipeline::EventWithContext;
 
     use super::super::codec;
     use super::super::types::DisappearingMessagesSettingEvent;

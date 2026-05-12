@@ -44,7 +44,7 @@ use crate::core::daemon::{StepContext, Worker};
 use crate::core::store::Store;
 use crate::protocol::event_modules::sync::schema as negentropy_purges;
 use crate::protocol::event_modules::sync::SyncIndex;
-use crate::workers::DaemonWorkerContext;
+use crate::protocol::workers::DaemonWorkerContext;
 
 /// Default upper bound when a caller does not pass an explicit limit.
 /// Kept large enough that one tick's drain absorbs the bursty per-leaf

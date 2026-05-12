@@ -12,7 +12,7 @@
 //! only has to inspect events known to be waiting on that dependency.
 //! `TIMESTAMP_EVENTS` gives sync a timestamp-ordered feed of shared event ids
 //! without teaching core what an event is. Operational worker queues live under
-//! `src/workers/schema.rs`. Labels are generic, bounded context for projectors;
+//! `src/protocol/workers/schema.rs`. Labels are generic, bounded context for projectors;
 //! richer read models belong in scoped module schema files.
 
 use crate::core::store::{Schema, Store, TableName, TableRow};

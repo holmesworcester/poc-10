@@ -20,6 +20,7 @@
 pub mod cli;
 pub mod event_modules;
 pub mod wire;
+pub mod workers;
 
 use std::path::Path;
 
@@ -66,7 +67,7 @@ pub fn schemas() -> Vec<Schema> {
     // it only receives these declarations during open.
     let mut schemas = event_modules::schemas();
     schemas.extend_from_slice(crate::core::logical_clock::SCHEMAS);
-    schemas.extend_from_slice(crate::workers::schema::SCHEMAS);
+    schemas.extend_from_slice(crate::protocol::workers::schema::SCHEMAS);
     schemas.extend_from_slice(network_queues::SCHEMAS);
     schemas
 }
@@ -91,7 +92,7 @@ impl EventRegistry for Protocol {
         store: &Store,
         bytes: Vec<u8>,
         receive: Option<ReceiveMetadata>,
-        provenance: Option<crate::workers::schema::TransitProvenance>,
+        provenance: Option<crate::protocol::workers::schema::TransitProvenance>,
     ) -> Result<ReceivedRecord, String> {
         self.modules
             .record_from_canonical_in(store, bytes, receive, provenance)
@@ -128,7 +129,7 @@ impl DaemonProtocol for Protocol {
     }
 
     fn daemon_workers() -> Vec<Worker<Self::Context>> {
-        crate::workers::daemon_workers()
+        crate::protocol::workers::daemon_workers()
     }
 }
 

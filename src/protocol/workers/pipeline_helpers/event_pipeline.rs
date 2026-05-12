@@ -86,9 +86,9 @@ use crate::protocol::event_modules::types::{
 };
 
 use crate::protocol::event_modules::schema;
-use crate::workers::dependency_unblock;
-use crate::workers::pipeline_helpers::event_lifecycle;
-use crate::workers::schema as worker_schema;
+use crate::protocol::workers::dependency_unblock;
+use crate::protocol::workers::pipeline_helpers::event_lifecycle;
+use crate::protocol::workers::schema as worker_schema;
 
 /// Default upper bound for one ready-event drain.
 ///

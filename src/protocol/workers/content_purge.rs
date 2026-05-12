@@ -25,10 +25,10 @@ use crate::protocol::event_modules::content::{
 };
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventId;
-use crate::workers::encryption as encryption_worker;
-use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
-use crate::workers::pipeline_helpers::purging;
-use crate::workers::DaemonWorkerContext;
+use crate::protocol::workers::encryption as encryption_worker;
+use crate::protocol::workers::pipeline_helpers::event_pipeline::EventRegistry;
+use crate::protocol::workers::pipeline_helpers::purging;
+use crate::protocol::workers::DaemonWorkerContext;
 
 use message_deletion::schema as message_deletion_schema;
 
@@ -429,7 +429,7 @@ mod tests {
     use crate::protocol::event_modules::schema::EventLabel;
     use crate::protocol::event_modules::types::{event_id, EventStatus};
     use crate::protocol::Protocol;
-    use crate::workers::pipeline_helpers::event_lifecycle;
+    use crate::protocol::workers::pipeline_helpers::event_lifecycle;
 
     use super::*;
 

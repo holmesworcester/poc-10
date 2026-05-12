@@ -95,7 +95,7 @@ mod tests {
     use crate::protocol::event_modules::sync::schema as negentropy_purges;
     use crate::protocol::event_modules::types::{event_id, EventRecord, EventScope};
     use crate::protocol::Protocol;
-    use crate::workers::pipeline_helpers::event_lifecycle;
+    use crate::protocol::workers::pipeline_helpers::event_lifecycle;
 
     use super::*;
 

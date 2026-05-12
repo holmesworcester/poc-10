@@ -21,7 +21,7 @@ use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, user};
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker;
-use crate::workers::encryption as encryption_worker;
+use crate::protocol::workers::encryption as encryption_worker;
 
 use super::types::message_event_id_in_minute;
 
@@ -522,7 +522,7 @@ pub(crate) struct MessageLeafKey {
 /// siblings still cover authoring for every non-retired coordinate, so
 /// `derive_event_leaf` can keep working without forcing a
 /// `key-frontier` rotation. See `closest_retained_ancestor` in
-/// `src/workers/encryption.rs` for the matching primitive.
+/// `src/protocol/workers/encryption.rs` for the matching primitive.
 pub(crate) fn require_active_frontier_id(
     store: &Store,
     workspace_id: EventId,
@@ -574,7 +574,7 @@ pub(crate) fn derive_message_leaf<R>(
     event_id_in_minute: EventId,
 ) -> Result<MessageLeafKey, String>
 where
-    R: crate::workers::pipeline_helpers::event_pipeline::EventRegistry,
+    R: crate::protocol::workers::pipeline_helpers::event_pipeline::EventRegistry,
 {
     let output = encryption_worker::run(
         store,

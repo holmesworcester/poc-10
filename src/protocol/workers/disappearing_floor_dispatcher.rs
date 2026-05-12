@@ -35,7 +35,7 @@
 //! local clock state (local), so two peers that have observed the same
 //! setting chain and run their dispatchers under the same logical time
 //! converge to byte-identical chop tombstones (the `chop_is_deterministic`
-//! test in `src/workers/encryption.rs` covers the primitive's contract).
+//! test in `src/protocol/workers/encryption.rs` covers the primitive's contract).
 //!
 //! Fairness: the loop iterates every `(workspace_id, removal_frontier_id)`
 //! visible on the peer. `ctx.options.work_limit` caps the total number of
@@ -53,9 +53,9 @@ use crate::protocol::event_modules::encryption::disappearing_messages_setting::t
 use crate::protocol::event_modules::encryption::removal_frontier::schema as frontier_schema;
 use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
 use crate::protocol::event_modules::types::EventId;
-use crate::workers::encryption as encryption_worker;
-use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
-use crate::workers::DaemonWorkerContext;
+use crate::protocol::workers::encryption as encryption_worker;
+use crate::protocol::workers::pipeline_helpers::event_pipeline::EventRegistry;
+use crate::protocol::workers::DaemonWorkerContext;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DispatchReport {
@@ -228,7 +228,7 @@ mod tests {
     use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
     use crate::protocol::event_modules::types::{event_id, EventId, EventStatus};
     use crate::protocol::Protocol;
-    use crate::workers::pipeline_helpers::event_lifecycle;
+    use crate::protocol::workers::pipeline_helpers::event_lifecycle;
 
     use super::*;
 
@@ -236,7 +236,7 @@ mod tests {
     const KEY_SECRET: [u8; 32] = [7; 32];
     const ADMIN_ID: EventId = [9; 32];
 
-    /// Mirror of the helper in `src/workers/encryption.rs` tests: build a
+    /// Mirror of the helper in `src/protocol/workers/encryption.rs` tests: build a
     /// signed removal-frontier record so the encryption worker can find F's
     /// row, then seed the local key secret. Returns the deterministic
     /// frontier id.
