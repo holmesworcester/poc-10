@@ -9,30 +9,37 @@
 //!
 //! Inputs:
 //! - `event_modules.applied_shared_events` updates the warm negentropy index.
+//! - `encryption.negentropy_pending_purges` carries per-event purge notices
+//!   enqueued by the worker-owned local-retention purge helper; the tick
+//!   applies them to the in-memory `SyncIndex` before any response work.
 //! - `sync.in` holds projected inbound compare/have/need events by connection.
-//! - `Work::Tick` is the daemon input that catches up the index, drains
-//!   projected inbound sync work, and then starts current compares for routed
-//!   peers.
+//! - `Work::Tick` is the daemon input that drains the pending-purge queue,
+//!   catches up the index, drains projected inbound sync work, and then starts
+//!   current compares for routed peers.
 //! - `Work::Start` is an explicit local worker input for known connection
 //!   routes.
 //!
-//! State: process-local `SyncIndex` held by the protocol context.
-//! Step: drain pending index rows before any response-producing command, then
-//! call sync commands and write their queue/event outputs.
+//! State: process-local `SyncIndex` held by the protocol context. The pending
+//! purge queue mutates the index too, so the queue drain runs in this worker —
+//! one place owns every mutation of `SyncIndex`.
+//! Step: drain pending purges, drain pending index rows, then call sync
+//! commands and write their queue/event outputs.
 //! Outputs: connection-scoped sync events through event admission and durable
 //! send ids through `transit.out`.
-//! Consume: applied-shared and sync-in rows are deleted after the index update or
-//! inbound event handler completes.
+//! Consume: applied-shared, pending-purge, and sync-in rows are deleted after
+//! the index update or inbound event handler completes.
 //! Failure: response-producing work leaves unconsumed sync-in rows when it fails;
 //! index-drain failure leaves applied-shared rows queued.
-//! Fairness: `Tick`, `DrainIndex`, and `DrainIn` are limit-bounded where they
-//! claim queues; start fans out over the currently known routes.
+//! Fairness: `Tick`, `DrainIndex`, `DrainPendingPurges`, and `DrainIn` are
+//! limit-bounded where they claim queues; start fans out over the currently
+//! known routes.
 //!
-//! The worker has four input shapes:
+//! The worker has five input shapes:
 //!
 //! ```text
-//! daemon tick -> catch up index -> drain projected sync in -> start sync
+//! daemon tick -> drain pending purges -> catch up index -> drain projected sync in -> start sync
 //! applied shared events -> update warm index
+//! pending purge rows -> remove ids from warm index
 //! sync start input -> root compare command per route
 //! projected sync in rows -> compare/have/need handler for that connection
 //! ```
@@ -68,6 +75,7 @@ pub use crate::protocol::event_modules::sync::commands::{
 use crate::protocol::event_modules::sync::compare;
 use crate::protocol::event_modules::sync::compare::commands::ReadContext;
 use crate::protocol::event_modules::sync::compare::types::{RangeSummary, TimestampRange};
+use crate::protocol::event_modules::sync::schema as negentropy_purges;
 use crate::protocol::event_modules::types::{EventId, EventIndexEntry};
 use crate::workers::pipeline_helpers::event_pipeline::{CommandOutput, ProposedEvent};
 use crate::workers::schema as worker_schema;
@@ -75,6 +83,14 @@ use crate::workers::{pipeline_helpers::event_pipeline as event_worker, DaemonWor
 
 pub const DEFAULT_INBOUND_BATCH: usize = 1024;
 const DEFAULT_INDEX_BATCH: usize = 4096;
+
+/// Default upper bound for the per-tick pending-purge drain.
+///
+/// Kept large enough that one tick's drain absorbs the bursty per-leaf retire
+/// / chop output of a typical disappearing-minute expiry, but finite so a
+/// single tick cannot stall. The CLI's `negentropy-drain` command exposes
+/// this constant when callers do not pass an explicit limit.
+pub const DEFAULT_PURGE_DRAIN_LIMIT: usize = 4096;
 
 /// Process-local sync index shared by sync worker turns.
 ///
@@ -241,9 +257,10 @@ impl SyncIndex {
 
 /// Work accepted by the sync worker.
 ///
-/// `DrainIndex` processes the shared-event feed. `Start` creates initial
-/// compare events for route sync. `DrainIn` handles work already projected
-/// from transient inbound sync events.
+/// `DrainPendingPurges` removes purged event ids from the warm index before
+/// any response work. `DrainIndex` processes the shared-event feed. `Start`
+/// creates initial compare events for route sync. `DrainIn` handles work
+/// already projected from transient inbound sync events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
     Tick {
@@ -252,6 +269,9 @@ pub enum Work {
         selection: SyncSelection,
     },
     DrainIndex {
+        limit: usize,
+    },
+    DrainPendingPurges {
         limit: usize,
     },
     Start {
@@ -271,6 +291,7 @@ pub enum Work {
 pub enum Output {
     Ticked(CommandOutput<SyncTickReport>),
     Indexed(SyncIndexReport),
+    DrainedPurges(DrainPurgesReport),
     Started(CommandOutput<SyncStartReport>),
     DrainedIn(SyncWorkReport),
 }
@@ -280,10 +301,30 @@ pub struct SyncIndexReport {
     pub indexed_events: usize,
 }
 
+/// Summary of one pending-purge drain pass.
+///
+/// The pending-purge queue is fed by the worker-owned local-retention purge
+/// helper (`pipeline_helpers::purging`); each row records "negentropy still
+/// owes a purge of this event id." A drain reads up to `limit` rows in
+/// deterministic key order, removes the matching ids from the in-memory
+/// `SyncIndex`, then deletes the queue rows. The in-memory remove is
+/// idempotent so a daemon crash between "remove from index" and "delete
+/// row" simply replays the (false-returning) remove on the next tick.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DrainPurgesReport {
+    /// Total queued rows pulled from `negentropy_pending_purges` this pass.
+    pub drained_rows: usize,
+    /// Rows whose ids were still in the in-memory index when removed.
+    /// `drained_rows - removed_from_index` rows were already absent.
+    pub removed_from_index: usize,
+}
+
 /// Summary of one daemon sync tick.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SyncTickReport {
     pub indexed_events: usize,
+    pub drained_purges: usize,
+    pub applied_purges: usize,
     pub started_rounds: usize,
     pub processed_work: usize,
     pub sent_events: usize,
@@ -303,6 +344,9 @@ pub fn run(store: &Store, index: &SyncIndex, work: Work) -> Result<Output, Strin
         } => tick(store, index, index_limit, inbound_limit, selection).map(Output::Ticked),
         Work::DrainIndex { limit } => {
             drain_index_queue_once(store, index, limit).map(Output::Indexed)
+        }
+        Work::DrainPendingPurges { limit } => {
+            drain_pending_purges_in_tick(store, index, limit).map(Output::DrainedPurges)
         }
         Work::Start { selection } => {
             prepare_index_for_response(store, index, DEFAULT_INDEX_BATCH)?;
@@ -349,13 +393,20 @@ where
     .map_err(|err| format!("tick sync: {err}"))?
     {
         Output::Ticked(output) => output,
-        Output::Indexed(_) | Output::Started(_) | Output::DrainedIn(_) => {
+        Output::Indexed(_)
+        | Output::DrainedPurges(_)
+        | Output::Started(_)
+        | Output::DrainedIn(_) => {
             return Err("sync worker returned non-tick output".to_string())
         }
     };
     ctx.report.add("sync_rounds", output.value.started_rounds);
     ctx.report
         .add("sync_indexed_events", output.value.indexed_events);
+    ctx.report
+        .add("sync_drained_purges", output.value.drained_purges);
+    ctx.report
+        .add("sync_applied_purges", output.value.applied_purges);
     ctx.report
         .add("sync_processed_work", output.value.processed_work);
     ctx.report.add("sent_events", output.value.sent_events);
@@ -370,6 +421,11 @@ fn tick(
     inbound_limit: usize,
     selection: SyncSelection,
 ) -> Result<CommandOutput<SyncTickReport>, String> {
+    // Purged ids must be out of the in-memory index before any
+    // response-producing summary reads from it; otherwise two peers that
+    // purged the same set of shared events could compute mismatched root
+    // summaries and re-request canonical bytes they intentionally dropped.
+    let purges = drain_pending_purges_in_tick(store, index, DEFAULT_PURGE_DRAIN_LIMIT)?;
     let indexed = prepare_index_for_response(store, index, index_limit)?;
     let inbound = drain_in_events(store, index, inbound_limit)?;
     let started = start(store, index, selected_range(store, selection)?)?;
@@ -383,12 +439,55 @@ fn tick(
     Ok(CommandOutput::with_proposed_events(
         SyncTickReport {
             indexed_events: indexed.indexed_events,
+            drained_purges: purges.drained_rows,
+            applied_purges: purges.removed_from_index,
             started_rounds: started.value.sent_events,
             processed_work: inbound.processed_work,
             sent_events: started.value.sent_events + inbound.sent_events,
         },
         events,
     ))
+}
+
+/// Drain up to `limit` queued pending-purge rows and apply them to the
+/// in-memory `SyncIndex`.
+///
+/// This is the negentropy side of the purge contract: the worker-owned
+/// `purge_event_storage_in_tx` helper enqueues rows in
+/// `encryption.negentropy_pending_purges` whenever it drops the canonical
+/// bytes of a workspace-scoped shared event; the sync worker's tick picks
+/// up those rows here and calls `SyncIndex::remove_event` for each id
+/// before any response-producing compare. The in-memory index update and
+/// the row delete are not run in the same transaction because the index
+/// is process-local memory; a daemon crash between the two simply
+/// re-applies the (idempotent) `remove_event` on the next tick.
+fn drain_pending_purges_in_tick(
+    store: &Store,
+    index: &SyncIndex,
+    limit: usize,
+) -> Result<DrainPurgesReport, String> {
+    let limit = limit.max(1);
+    let pending = negentropy_purges::drain_pending_purges(store, limit)?;
+    if pending.is_empty() {
+        return Ok(DrainPurgesReport::default());
+    }
+
+    let mut report = DrainPurgesReport::default();
+    let mut keys_to_clear = Vec::with_capacity(pending.len());
+    for entry in &pending {
+        report.drained_rows += 1;
+        // Index removal runs first; if it fails we keep the queue row so
+        // the next tick retries. `SyncIndex::remove_event` is
+        // intentionally idempotent — a false return means the id was
+        // already absent (e.g. a daemon restart drained rows after a
+        // previous tick had already updated the in-memory index).
+        if index.remove_event(&entry.event_id)? {
+            report.removed_from_index += 1;
+        }
+        keys_to_clear.push(entry.key.clone());
+    }
+    let _ = negentropy_purges::clear_pending_purges(store, keys_to_clear)?;
+    Ok(report)
 }
 
 fn prepare_index_for_response(
@@ -1339,5 +1438,248 @@ mod tests {
                 device_name: format!("endpoint-{seed}"),
             },
         )
+    }
+
+    // -----------------------------------------------------------------
+    // Pending-purge drain tests.
+    //
+    // The drain step folded into the sync worker reads up to `limit`
+    // rows from `encryption.negentropy_pending_purges`, calls
+    // `SyncIndex::remove_event` for each id, then deletes the queue
+    // rows. The properties below were originally proven against the
+    // standalone drainer worker and continue to hold against the
+    // folded-in step.
+    // -----------------------------------------------------------------
+
+    fn enqueue_purge(store: &Store, workspace_id: EventId, event_id: EventId) {
+        store
+            .write_transaction(|store| {
+                negentropy_purges::enqueue_purge_in_tx(store, Some(workspace_id), &event_id)
+                    .map_err(|err| rusqlite::Error::InvalidParameterName(err.to_string()))
+            })
+            .expect("enqueue purge");
+    }
+
+    fn purge_test_entry(timestamp: u64, event_id: EventId, workspace_id: EventId) -> EventIndexEntry {
+        EventIndexEntry {
+            event_id,
+            timestamp,
+            workspace_id: Some(workspace_id),
+        }
+    }
+
+    #[test]
+    fn drain_pending_purges_removes_queued_ids_from_in_memory_index() {
+        let store = Protocol::open_memory_store().expect("open store");
+        let index = SyncIndex::default();
+        let workspace_id = [1u8; 32];
+        let id_a = [2u8; 32];
+        let id_b = [3u8; 32];
+        let id_c = [4u8; 32];
+
+        for (ts, id) in [(10, id_a), (20, id_b), (30, id_c)] {
+            index
+                .insert_entry(purge_test_entry(ts, id, workspace_id))
+                .expect("insert");
+        }
+        let pre_summary = index.root_summary().expect("pre summary");
+        let pre_count = index.indexed_event_count().expect("count");
+        assert_eq!(pre_count, 3);
+
+        enqueue_purge(&store, workspace_id, id_a);
+        enqueue_purge(&store, workspace_id, id_c);
+        let output = run(&store, &index, Work::DrainPendingPurges { limit: 16 })
+            .expect("drain pending purges");
+        let Output::DrainedPurges(report) = output else {
+            panic!("expected drain pending purges output");
+        };
+        assert_eq!(report.drained_rows, 2);
+        assert_eq!(report.removed_from_index, 2);
+
+        let post_summary = index.root_summary().expect("post summary");
+        assert_ne!(pre_summary, post_summary, "summary must change after purge");
+        assert_eq!(index.indexed_event_count().expect("count"), 1);
+        assert!(!index.contains_event(&id_a).expect("contains a"));
+        assert!(!index.contains_event(&id_c).expect("contains c"));
+        assert!(index.contains_event(&id_b).expect("contains b"));
+        assert_eq!(
+            negentropy_purges::pending_purge_count(&store).expect("count"),
+            0,
+            "queue must be empty after drain"
+        );
+    }
+
+    #[test]
+    fn drain_pending_purges_is_deterministic_under_two_drain_orderings() {
+        let workspace_id = [9u8; 32];
+        let ids: Vec<EventId> = (0..16u8).map(|i| [i; 32]).collect();
+
+        let build_indexed = || {
+            let index = SyncIndex::default();
+            for (idx, id) in ids.iter().enumerate() {
+                index
+                    .insert_entry(purge_test_entry(1000 + idx as u64, *id, workspace_id))
+                    .expect("insert");
+            }
+            index
+        };
+
+        let store_a = Protocol::open_memory_store().expect("open store a");
+        let index_a = build_indexed();
+        for id in ids.iter() {
+            enqueue_purge(&store_a, workspace_id, *id);
+        }
+        run(
+            &store_a,
+            &index_a,
+            Work::DrainPendingPurges { limit: 64 },
+        )
+        .expect("drain a");
+
+        let store_b = Protocol::open_memory_store().expect("open store b");
+        let index_b = build_indexed();
+        for id in ids.iter().rev() {
+            enqueue_purge(&store_b, workspace_id, *id);
+        }
+        run(
+            &store_b,
+            &index_b,
+            Work::DrainPendingPurges { limit: 64 },
+        )
+        .expect("drain b");
+
+        let summary_a = index_a.root_summary().expect("summary a");
+        let summary_b = index_b.root_summary().expect("summary b");
+        assert_eq!(summary_a, summary_b);
+        assert_eq!(summary_a.count, 0);
+        assert_eq!(summary_a.fingerprint, [0u8; 32]);
+    }
+
+    #[test]
+    fn drain_pending_purges_partial_subset_yields_same_summary_for_two_orderings() {
+        // Two peers that purge the same SUBSET (not all) of admitted ids
+        // reach byte-identical summaries regardless of the drain
+        // ordering.
+        let workspace_id = [11u8; 32];
+        let live_ids: Vec<EventId> = (0..6u8).map(|i| [i; 32]).collect();
+        let purged_ids: Vec<EventId> = (10..16u8).map(|i| [i; 32]).collect();
+
+        let build_indexed = || {
+            let index = SyncIndex::default();
+            for (idx, id) in live_ids.iter().chain(purged_ids.iter()).enumerate() {
+                index
+                    .insert_entry(purge_test_entry(1000 + idx as u64, *id, workspace_id))
+                    .expect("insert");
+            }
+            index
+        };
+
+        let store_a = Protocol::open_memory_store().expect("open store a");
+        let index_a = build_indexed();
+        for id in purged_ids.iter() {
+            enqueue_purge(&store_a, workspace_id, *id);
+        }
+        run(
+            &store_a,
+            &index_a,
+            Work::DrainPendingPurges { limit: 64 },
+        )
+        .expect("drain a");
+
+        let store_b = Protocol::open_memory_store().expect("open store b");
+        let index_b = build_indexed();
+        for id in purged_ids.iter().rev() {
+            enqueue_purge(&store_b, workspace_id, *id);
+        }
+        run(
+            &store_b,
+            &index_b,
+            Work::DrainPendingPurges { limit: 64 },
+        )
+        .expect("drain b");
+
+        let summary_a = index_a.root_summary().expect("summary a");
+        let summary_b = index_b.root_summary().expect("summary b");
+        assert_eq!(summary_a, summary_b);
+        assert_eq!(summary_a.count, live_ids.len() as u64);
+    }
+
+    #[test]
+    fn drain_pending_purges_on_empty_queue_is_noop() {
+        let store = Protocol::open_memory_store().expect("open store");
+        let index = SyncIndex::default();
+        let output = run(&store, &index, Work::DrainPendingPurges { limit: 16 })
+            .expect("drain");
+        let Output::DrainedPurges(report) = output else {
+            panic!("expected drain pending purges output");
+        };
+        assert_eq!(report.drained_rows, 0);
+        assert_eq!(report.removed_from_index, 0);
+    }
+
+    #[test]
+    fn drain_pending_purges_after_index_already_updated_clears_queue_row_idempotently() {
+        // Mimics the daemon-restart case: the in-memory index is empty
+        // (just rebuilt) and the queue still has rows for ids whose
+        // EVENTS rows were already gone. The drain should still wipe
+        // the queue so it does not grow without bound.
+        let store = Protocol::open_memory_store().expect("open store");
+        let index = SyncIndex::default();
+        let workspace_id = [3u8; 32];
+        let event_id = [7u8; 32];
+        enqueue_purge(&store, workspace_id, event_id);
+        let output = run(&store, &index, Work::DrainPendingPurges { limit: 16 })
+            .expect("drain");
+        let Output::DrainedPurges(report) = output else {
+            panic!("expected drain pending purges output");
+        };
+        assert_eq!(report.drained_rows, 1);
+        assert_eq!(report.removed_from_index, 0);
+        assert_eq!(
+            negentropy_purges::pending_purge_count(&store).expect("count"),
+            0
+        );
+    }
+
+    #[test]
+    fn tick_drains_pending_purges_before_response_work() {
+        // The tick must apply pending purges to the in-memory index
+        // BEFORE any response-producing summary is computed; the test
+        // checks that one tick call returns counters reflecting the
+        // drain and that the index no longer references the purged id.
+        let store = Protocol::open_memory_store().expect("open store");
+        let index = SyncIndex::default();
+        let workspace_id = [1u8; 32];
+        let id_keep = [2u8; 32];
+        let id_drop = [3u8; 32];
+        for (ts, id) in [(10, id_keep), (20, id_drop)] {
+            index
+                .insert_entry(purge_test_entry(ts, id, workspace_id))
+                .expect("insert");
+        }
+        enqueue_purge(&store, workspace_id, id_drop);
+
+        let output = run(
+            &store,
+            &index,
+            Work::Tick {
+                index_limit: DEFAULT_INDEX_BATCH,
+                inbound_limit: DEFAULT_INBOUND_BATCH,
+                selection: SyncSelection::All,
+            },
+        )
+        .expect("tick");
+        let Output::Ticked(output) = output else {
+            panic!("expected sync tick output");
+        };
+
+        assert_eq!(output.value.drained_purges, 1);
+        assert_eq!(output.value.applied_purges, 1);
+        assert!(!index.contains_event(&id_drop).expect("contains"));
+        assert!(index.contains_event(&id_keep).expect("contains"));
+        assert_eq!(
+            negentropy_purges::pending_purge_count(&store).expect("count"),
+            0
+        );
     }
 }

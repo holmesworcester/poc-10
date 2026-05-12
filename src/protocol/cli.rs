@@ -278,18 +278,18 @@ fn run_sync_status_command(
     let index = context.sync_index();
     // Catch the in-memory index up from durable rows so a fresh CLI
     // invocation (no running daemon) sees the same state the daemon
-    // would after one `sync_tick` step. Then run the negentropy purge
-    // drainer so pending purge rows are applied to the index — that
-    // way `root_fingerprint` reflects the post-purge state on a
-    // CLI-only inspection, not just the post-purge state on a
-    // running daemon.
+    // would after one `sync_tick` step. Then drain the negentropy
+    // pending-purge queue through the sync worker's `DrainPendingPurges`
+    // step so pending purge rows are applied to the index — that way
+    // `root_fingerprint` reflects the post-purge state on a CLI-only
+    // inspection, not just on a running daemon.
     index
         .catch_up(&context.store)
         .map_err(|err| format!("catch up sync index: {err}"))?;
-    let _ = crate::workers::negentropy_purge_drainer::run(
+    let _ = crate::workers::sync::run(
         &context.store,
         index,
-        crate::workers::negentropy_purge_drainer::Work::Drain {
+        crate::workers::sync::Work::DrainPendingPurges {
             limit: usize::MAX,
         },
     )
@@ -314,10 +314,10 @@ fn hex_bytes(bytes: &[u8]) -> String {
     out
 }
 
-/// Manually invoke one tick of the `negentropy_purge_drainer` worker.
+/// Manually invoke the sync worker's pending-purge drain step.
 ///
 /// Useful for tests and operators who want to force a drain without
-/// waiting for the daemon's sync_tick. Output mirrors `sync-status`'s
+/// waiting for the daemon's `sync_tick`. Output mirrors `sync-status`'s
 /// post-drain shape so test callers can assert on the same fields:
 ///
 ///   * `drained: <count>` — rows pulled from `negentropy_pending_purges`
@@ -328,7 +328,7 @@ fn negentropy_drain_command() -> CliCommand<Context> {
     CliCommand {
         name: "negentropy-drain",
         usage: NEGENTROPY_DRAIN_USAGE,
-        help: "Manually run one tick of the negentropy purge drainer; \
+        help: "Manually run the sync worker's pending-purge drain step; \
                useful for forcing a drain in tests or after operator \
                intervention without waiting for the daemon.",
         run: run_negentropy_drain_command,
@@ -346,7 +346,7 @@ fn run_negentropy_drain_command(
         Some(value) => value
             .parse::<usize>()
             .map_err(|_| NEGENTROPY_DRAIN_USAGE.to_string())?,
-        None => crate::workers::negentropy_purge_drainer::DEFAULT_DRAIN_LIMIT,
+        None => crate::workers::sync::DEFAULT_PURGE_DRAIN_LIMIT,
     };
     let index = context.sync_index();
     // Same sequencing as `sync-status`: catch the in-memory index up
@@ -355,12 +355,16 @@ fn run_negentropy_drain_command(
     index
         .catch_up(&context.store)
         .map_err(|err| format!("catch up sync index: {err}"))?;
-    let report = crate::workers::negentropy_purge_drainer::run(
+    let output = crate::workers::sync::run(
         &context.store,
         index,
-        crate::workers::negentropy_purge_drainer::Work::Drain { limit },
+        crate::workers::sync::Work::DrainPendingPurges { limit },
     )
     .map_err(|err| format!("drain negentropy purges: {err}"))?;
+    let report = match output {
+        crate::workers::sync::Output::DrainedPurges(report) => report,
+        _ => return Err("sync worker returned non-drain-pending-purges output".to_string()),
+    };
     let summary = index.root_summary()?;
     let remaining = event_modules::sync::schema::pending_purge_count(&context.store)
         .map_err(|err| format!("count pending purges: {err}"))?;
