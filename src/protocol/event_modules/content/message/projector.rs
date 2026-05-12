@@ -99,7 +99,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     // mismatch rejects the message: an admin-signed setting establishes a
     // bound that authors must honor, and the projector enforces it. The
     // trust gap (a peer can still pick an *older* setting with a longer
-    // TTL) is documented in `encryption.md`.
+    // TTL) is documented in `disappearing_messages_plan.md` §6.
     let permitted_ttl = resolve_permitted_ttl_minutes(
         event,
         message.workspace_id,
@@ -657,7 +657,7 @@ mod tests {
         // projector. Validates the slice-3 enforcement that closes
         // slice-2's trust gap. (The remaining gap, where the lying peer
         // points at an *older* admin setting with a longer TTL, is
-        // documented in `encryption.md`.)
+        // documented in `disappearing_messages_plan.md` §6.)
         let workspace_id = [7; 32];
         let signer_private_key = [9; 32];
         let signer_pubkey = signing_public_key_for(&signer_private_key);

@@ -67,7 +67,7 @@ use crate::core::daemon::{StepContext, Worker};
 use crate::core::store::Store;
 use crate::protocol::event_modules::connection;
 use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, invite_accepted};
-use crate::protocol::event_modules::schema as event_schema;
+use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::sync::commands;
 pub use crate::protocol::event_modules::sync::commands::{
     SyncSelection, SyncStartReport, SyncWorkReport,
@@ -177,7 +177,7 @@ impl SyncIndex {
     /// same path the daemon uses, so a CLI inspection that runs while
     /// no daemon is up reflects the durable state of the workspace.
     pub fn catch_up(&self, store: &Store) -> Result<(), String> {
-        let entries = event_schema::event_index_entries_in_timestamp_range(store, 0, u64::MAX)
+        let entries = event_queries::event_index_entries_in_timestamp_range(store, 0, u64::MAX)
             .map_err(|err| format!("load sync index feed: {err}"))?;
         for entry in entries {
             self.insert_entry(entry)?;
@@ -550,7 +550,7 @@ fn selected_range(store: &Store, selection: SyncSelection) -> Result<TimestampRa
     match selection {
         SyncSelection::All => Ok(TimestampRange::ROOT),
         SyncSelection::Today => {
-            let timestamp = event_schema::max_timestamp(store)
+            let timestamp = event_queries::max_timestamp(store)
                 .map_err(|err| format!("load max timestamp for sync today: {err}"))?;
             Ok(TimestampRange::containing_day(timestamp))
         }
@@ -770,7 +770,7 @@ impl compare::commands::ReadContext for StoreSyncContext<'_> {
     }
 
     fn can_send_event(&self, event_id: &EventId) -> Result<bool, String> {
-        event_schema::has_shared_event_in_workspaces(self.store, event_id, &self.workspace_ids)
+        event_queries::has_shared_event_in_workspaces(self.store, event_id, &self.workspace_ids)
             .map_err(|err| format!("check scoped event presence: {err}"))
     }
 }
@@ -961,7 +961,7 @@ impl IndexState {
         if !self.entries_by_id.contains_key(event_id) {
             return Ok(Vec::new());
         }
-        let bytes = event_schema::event_bytes(store, event_id)
+        let bytes = event_queries::event_bytes(store, event_id)
             .map_err(|err| format!("load sync dependency event bytes: {err}"))?
             .ok_or_else(|| "sync index referenced missing dependency event".to_string())?;
         let record = crate::protocol::event_modules::event_from_bytes(bytes)?;

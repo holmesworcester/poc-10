@@ -15,7 +15,7 @@ use crate::protocol::cli::Context;
 use crate::protocol::event_modules::content::message::queries as message_queries;
 use crate::protocol::event_modules::content::message::types::UNIX_MINUTE_MS;
 use crate::protocol::event_modules::identity::{admin, endpoint, endpoint_shared};
-use crate::protocol::event_modules::schema as event_schema;
+use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker as common_worker;
 
@@ -477,7 +477,7 @@ fn load_time_tree_parent(
             ));
         }
     }
-    let node_bytes = event_schema::event_bytes(store, &source_secret_id)
+    let node_bytes = event_queries::event_bytes(store, &source_secret_id)
         .map_err(|err| format!("load source event: {err}"))?
         .ok_or_else(|| "history node source event is missing".to_string())?;
     let node = local_history_node_secret::codec::decode(&node_bytes)
@@ -1175,7 +1175,7 @@ fn admin_for_user(
 
 fn next_timestamp(store: &Store) -> Result<u64, String> {
     let max_timestamp =
-        event_schema::max_timestamp(store).map_err(|err| format!("load max timestamp: {err}"))?;
+        event_queries::max_timestamp(store).map_err(|err| format!("load max timestamp: {err}"))?;
     logical_clock::next_timestamp(store, max_timestamp)
 }
 

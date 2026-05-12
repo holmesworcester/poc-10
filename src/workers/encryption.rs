@@ -68,6 +68,7 @@ use crate::core::crypto;
 use crate::core::logical_clock;
 use crate::core::store::Store;
 use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
+use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{self, EventRegistry};
@@ -2290,7 +2291,7 @@ fn drain_pending_message_leaves<R: EventRegistry>(
         let Ok((_missing_dep_id, blocked_event_id)) = event_schema::split_edge_key(&key) else {
             continue;
         };
-        let Some(bytes) = event_schema::event_bytes(store, &blocked_event_id)
+        let Some(bytes) = event_queries::event_bytes(store, &blocked_event_id)
             .map_err(|err| format!("load event bytes: {err}"))?
         else {
             continue;
@@ -2357,7 +2358,7 @@ fn drain_pending_message_leaves<R: EventRegistry>(
         if local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?.is_none() {
             continue;
         }
-        if event_schema::has_event(store, &leaf_id)
+        if event_queries::has_event(store, &leaf_id)
             .map_err(|err| format!("look up leaf event: {err}"))?
         {
             continue;
@@ -2531,7 +2532,7 @@ fn purge_retired_recipient_material(
 
 fn next_timestamp(store: &Store) -> Result<u64, String> {
     let max_timestamp =
-        event_schema::max_timestamp(store).map_err(|err| format!("load max timestamp: {err}"))?;
+        event_queries::max_timestamp(store).map_err(|err| format!("load max timestamp: {err}"))?;
     logical_clock::next_timestamp(store, max_timestamp)
 }
 

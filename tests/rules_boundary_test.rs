@@ -131,8 +131,12 @@ fn event_modules_are_directories() {
         .map(|entry| entry.expect("dir entry").path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
         .filter(|path| {
-            path.file_name()
-                .is_none_or(|name| name != "mod.rs" && name != "worker.rs" && name != "schema.rs")
+            path.file_name().is_none_or(|name| {
+                name != "mod.rs"
+                    && name != "worker.rs"
+                    && name != "schema.rs"
+                    && name != "queries.rs"
+            })
                 && path.file_name().is_none_or(|name| name != "types.rs")
                 && path
                     .file_name()

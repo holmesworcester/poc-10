@@ -17,7 +17,7 @@ use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::core::logical_clock;
 use crate::core::network_queues::InboundNetworkRow;
 use crate::core::store::Store;
-use crate::protocol::event_modules::schema as event_schema;
+use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::types::{EventRecord, ReceiveMetadata};
 use crate::protocol::event_modules::worker::{
     AdmitDecision, EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord,
@@ -173,15 +173,15 @@ fn count_command(name: &'static str, usage: &'static str) -> CliCommand<Context>
 fn run_count_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(0, COUNT_USAGE)?;
     let events =
-        event_schema::event_count(&context.store).map_err(|err| format!("count events: {err}"))?;
+        event_queries::event_count(&context.store).map_err(|err| format!("count events: {err}"))?;
     let payload_bytes =
-        event_schema::body_bytes(&context.store).map_err(|err| format!("count bytes: {err}"))?;
+        event_queries::body_bytes(&context.store).map_err(|err| format!("count bytes: {err}"))?;
     let connections = event_modules::connection::queries::connection_count(&context.store)?;
     let connection_events =
         event_modules::connection::queries::connection_event_count(&context.store)?;
     let invite_accepted =
         event_modules::identity::invite_accepted::queries::invite_accepted_count(&context.store)?;
-    let statuses = event_schema::status_counts(&context.store)
+    let statuses = event_queries::status_counts(&context.store)
         .map_err(|err| format!("count event statuses: {err}"))?;
     Ok(CliOutput::lines(
         CountSummary {
@@ -229,7 +229,7 @@ fn run_clock_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutp
 fn clock_output(store: &Store) -> Result<CliOutput, String> {
     let logical_time = logical_clock::logical_time(store)?;
     let max_event_timestamp =
-        event_schema::max_timestamp(store).map_err(|err| format!("load max timestamp: {err}"))?;
+        event_queries::max_timestamp(store).map_err(|err| format!("load max timestamp: {err}"))?;
     let next_timestamp = logical_clock::next_timestamp(store, max_event_timestamp)?;
     Ok(CliOutput::lines(vec![
         format!(

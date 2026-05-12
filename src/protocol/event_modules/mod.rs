@@ -13,6 +13,7 @@ pub mod connection;
 pub mod content;
 pub mod encryption;
 pub mod identity;
+pub mod queries;
 pub mod schema;
 pub mod sync;
 pub mod test_events;

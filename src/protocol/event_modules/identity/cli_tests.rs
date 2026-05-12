@@ -2,7 +2,7 @@ use crate::core::crypto;
 use crate::protocol::event_modules::identity::{
     admin, device_invite, endpoint, endpoint_shared, signed, user, user_invite, workspace,
 };
-use crate::protocol::event_modules::schema as event_schema;
+use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{self, CommandOutput};
 use crate::protocol::Protocol;
@@ -261,7 +261,7 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
     .expect("drain ready identity graph");
     assert_eq!(drained.applied_events, inserted - 1);
 
-    let statuses = event_schema::status_counts(&receiver).expect("status counts");
+    let statuses = event_queries::status_counts(&receiver).expect("status counts");
     assert_eq!(statuses.applied, inserted);
     assert_eq!(statuses.blocked, 0);
     assert_eq!(statuses.rejected, 0);
