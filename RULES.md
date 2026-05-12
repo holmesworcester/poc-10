@@ -987,6 +987,41 @@ Functional proof for this rewrite means black-box CLI tests that spawn the real
 `topo` binary, use real TCP sockets, start `sync`, wait through the CLI-observed
 event count, and report both events/s and MiB/s for perf cases.
 
+## Each Worker Owns The State It Mutates
+
+Workers in `src/workers/` are organized around the state they own. The boundary
+is:
+
+- A worker MAY mutate state it owns.
+- A worker MAY mutate state owned by another worker only through a persistent
+  queue table that the owning worker drains.
+- A worker MAY read state owned by another worker (read access is unrestricted).
+
+The test for whether a piece of work belongs in worker X versus is its own
+worker: does the work mutate state X owns? If yes, it's a step inside X.
+A "worker" whose entire purpose is draining a queue into another worker's
+state is not a worker — it's a step inside the owning worker.
+
+For example, `SyncIndex` is sync's state. The sync worker owns it. Any other
+worker that needs to remove ids from `SyncIndex` (because canonical bytes were
+purged, for instance) enqueues a row in a persistent queue table; the sync
+worker drains the queue as part of its own tick.
+
+This rule keeps each worker's state easy to reason about. A reader knows that
+the only mutations to `SyncIndex` happen inside `sync.rs` — not scattered
+across N workers that all touch the same data structure.
+
+Workers that legitimately deserve to be siblings:
+- Workers that own distinct durable state (e.g., a domain's read-model tables).
+- Workers that coordinate across multiple state owners by name (e.g., calling
+  several event modules' commands in sequence). The coordination IS the work.
+- Workers driven by external events on different cadences (e.g., logical-clock
+  ticks vs. admin-policy admits).
+
+Workers that should NOT be siblings:
+- Pure queue drainers — fold into the owning worker as a step.
+- Pre-pass filters that only mutate one downstream worker's input — fold.
+
 ## In-Line Documentation Describes Current Code, Not History
 
 Every doc comment, module-level comment, and inline comment must describe the
