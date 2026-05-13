@@ -2301,3 +2301,174 @@ fn core_storage_and_transport_do_not_own_connection_or_bootstrap_schema() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn file_inventory_for_event_modules() {
+    // Strengthens `child_event_module_directories_have_canonical_shape` (which
+    // checks the required minimum) by enforcing the upper bound: every file
+    // under `src/protocol/event_modules/<domain>/<event>/` must be one of the
+    // canonical filenames. New concerns must reuse a canonical role.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
+    let canonical = [
+        "mod.rs",
+        "types.rs",
+        "codec.rs",
+        "commands.rs",
+        "projector.rs",
+        "schema.rs",
+        "queries.rs",
+        "cli.rs",
+        "cli_tests.rs",
+    ];
+    let mut offenders = Vec::new();
+    for domain in std::fs::read_dir(&root).expect("read event modules") {
+        let domain = domain.expect("dir entry").path();
+        if !domain.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&domain).expect("read domain") {
+            let child = entry.expect("dir entry").path();
+            if !child.is_dir() {
+                continue;
+            }
+            for inner in std::fs::read_dir(&child).expect("read child event module") {
+                let inner = inner.expect("dir entry").path();
+                let name = inner
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                if inner.is_dir() {
+                    offenders.push(format!(
+                        "{} (subdirectory; child event modules are flat)",
+                        inner.strip_prefix(&root).unwrap().display()
+                    ));
+                    continue;
+                }
+                if !canonical.contains(&name) {
+                    offenders.push(format!(
+                        "{} (not one of {})",
+                        inner.strip_prefix(&root).unwrap().display(),
+                        canonical.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "child event-module directories may contain only canonical filenames (mod/types/codec/commands/projector/schema/queries/cli/cli_tests); split new concerns into one of these roles rather than adding new filenames:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn mod_rs_files_contain_no_logic() {
+    // Strengthens `leaf_mod_rs_files_are_declarations_only` and
+    // `event_module_mod_rs_files_do_not_orchestrate_commands_or_work` by
+    // forbidding type/impl/state declarations and limiting the function set
+    // in event-module mod.rs files. Leaf mod.rs (`<domain>/<event>/mod.rs`)
+    // must contain only declaration/use/comment lines; domain mod.rs
+    // (`event_modules/<domain>/mod.rs`) may host narrow tag-dispatch
+    // functions (event_from_bytes, project_record, signed_record_from_bytes,
+    // inbound_record_from_connection_bytes, plus is_*_tag/is_*_event/
+    // is_*_bytes/is_*_record predicates and the admit_check_received gate
+    // documented in mod.rs files), but never structs, enums, impl blocks,
+    // constants, or other free-standing logic.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let allowed_domain_fn_names = [
+        "event_from_bytes",
+        "project_record",
+        "project_signed_record",
+        "signed_record_from_bytes",
+        "inbound_record_from_connection_bytes",
+        "admit_check_received",
+        "ensure_record_connection",
+    ];
+
+    let mut offenders = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "mod.rs"))
+    {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let depth = path
+            .strip_prefix(&event_root)
+            .unwrap()
+            .components()
+            .count();
+        // depth == 1 is event_modules/mod.rs itself (registry root); leave it
+        // for `event_module_mod_rs_files_do_not_orchestrate_commands_or_work`.
+        // depth == 2 is `<domain>/mod.rs`; depth == 3 is leaf.
+        if depth < 2 {
+            continue;
+        }
+        let is_leaf = depth == 3;
+        for line in production.lines() {
+            let trimmed = line.trim_start();
+            // Forbid structural items everywhere.
+            let structural_starts = [
+                "pub struct ",
+                "struct ",
+                "pub enum ",
+                "enum ",
+                "pub const ",
+                "const ",
+                "pub static ",
+                "static ",
+                "impl ",
+                "pub impl ",
+                "pub trait ",
+                "trait ",
+            ];
+            if structural_starts
+                .iter()
+                .any(|prefix| trimmed.starts_with(prefix))
+            {
+                offenders.push(format!(
+                    "{relative} contains structural item: `{}`",
+                    trimmed.trim_end()
+                ));
+                continue;
+            }
+            // Forbid free-standing fn definitions, with a per-scope exception.
+            let fn_prefix = if trimmed.starts_with("pub fn ") {
+                Some("pub fn ")
+            } else if trimmed.starts_with("fn ") {
+                Some("fn ")
+            } else {
+                None
+            };
+            if let Some(prefix) = fn_prefix {
+                if is_leaf {
+                    offenders.push(format!(
+                        "{relative} contains forbidden fn in leaf mod.rs: `{}` (leaf mod.rs is declarations only)",
+                        trimmed.trim_end()
+                    ));
+                    continue;
+                }
+                let name = trimmed
+                    .trim_start_matches(prefix)
+                    .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .next()
+                    .unwrap_or_default();
+                let allowed_predicate = name.starts_with("is_");
+                if !allowed_predicate && !allowed_domain_fn_names.contains(&name) {
+                    offenders.push(format!(
+                        "{relative} contains unexpected fn: `{}` (domain mod.rs may only host narrow dispatch helpers like event_from_bytes / project_record / is_*_tag predicates)",
+                        trimmed.trim_end()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "mod.rs files are routing/declaration plumbing; types/impls/constants and ad-hoc logic belong in the canonical sibling roles:\n{}",
+        offenders.join("\n")
+    );
+}
