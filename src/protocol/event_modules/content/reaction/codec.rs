@@ -62,7 +62,7 @@ pub fn decode(bytes: &[u8]) -> Result<ReactionEvent, String> {
     let nonce = fixed_nonce(reader.bytes(XCHACHA20_POLY1305_NONCE_BYTES)?)?;
     let ciphertext = fixed_ciphertext(reader.bytes(REACTION_CIPHERTEXT_BYTES)?)?;
     reader.finish()?;
-    let event = ReactionEvent {
+    Ok(ReactionEvent {
         workspace_id,
         created_at_ms,
         target_message_id,
@@ -71,9 +71,7 @@ pub fn decode(bytes: &[u8]) -> Result<ReactionEvent, String> {
         local_history_node_secret_id,
         nonce,
         ciphertext,
-    };
-    validate_event(&event)?;
-    Ok(event)
+    })
 }
 
 pub fn sign(
@@ -169,26 +167,14 @@ fn metadata(bytes: &[u8]) -> Result<ReactionMetadata, String> {
     let _nonce = reader.bytes(XCHACHA20_POLY1305_NONCE_BYTES)?;
     let _ciphertext = reader.bytes(REACTION_CIPHERTEXT_BYTES)?;
     reader.finish()?;
-    let metadata = ReactionMetadata {
+    Ok(ReactionMetadata {
         workspace_id,
         created_at_ms,
         target_message_id,
         author_user_id,
         removal_frontier_id,
         local_history_node_secret_id,
-    };
-    validate_id("reaction workspace", &metadata.workspace_id)?;
-    validate_id("reaction target_message_id", &metadata.target_message_id)?;
-    validate_id("reaction author_user_id", &metadata.author_user_id)?;
-    validate_id(
-        "reaction removal_frontier_id",
-        &metadata.removal_frontier_id,
-    )?;
-    validate_id(
-        "reaction local_history_node_secret_id",
-        &metadata.local_history_node_secret_id,
-    )?;
-    Ok(metadata)
+    })
 }
 
 pub fn associated_data(event: &ReactionEvent, signer_endpoint_shared_id: EventId) -> Vec<u8> {
@@ -242,25 +228,6 @@ fn fixed_ciphertext(bytes: Vec<u8>) -> Result<ReactionCiphertext, String> {
     bytes
         .try_into()
         .map_err(|_| "reaction ciphertext length mismatch".to_string())
-}
-
-fn validate_event(event: &ReactionEvent) -> Result<(), String> {
-    validate_id("reaction workspace", &event.workspace_id)?;
-    validate_id("reaction target_message_id", &event.target_message_id)?;
-    validate_id("reaction author_user_id", &event.author_user_id)?;
-    validate_id("reaction removal_frontier_id", &event.removal_frontier_id)?;
-    validate_id(
-        "reaction local_history_node_secret_id",
-        &event.local_history_node_secret_id,
-    )?;
-    Ok(())
-}
-
-fn validate_id(name: &str, id: &EventId) -> Result<(), String> {
-    if id.iter().all(|byte| *byte == 0) {
-        return Err(format!("{name} cannot be empty"));
-    }
-    Ok(())
 }
 
 fn push_unique(out: &mut Vec<EventId>, id: EventId) {

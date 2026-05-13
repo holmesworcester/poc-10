@@ -20,7 +20,7 @@ use crate::protocol::wire::{Reader, Writer};
 use super::types::{
     FileDescriptorCiphertext, FileDescriptorPlaintext, FileEvent, SignedFileEnvelope,
     FILE_DESCRIPTOR_CIPHERTEXT_BYTES, FILE_DESCRIPTOR_PLAINTEXT_BYTES, FILE_MIME_BYTES,
-    FILE_NAME_BYTES, MAX_FILE_BYTES,
+    FILE_NAME_BYTES,
 };
 
 pub const TYPE_FILE: u8 = 13;
@@ -58,7 +58,6 @@ struct FileMetadata {
 }
 
 pub fn encode(event: &FileEvent) -> Result<Vec<u8>, String> {
-    validate(event)?;
     let mut out = Writer::with_capacity(FILE_WIRE_SIZE);
     out.u8(TYPE_FILE);
     out.id(&event.workspace_id);
@@ -97,7 +96,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileEvent, String> {
     let nonce = fixed_nonce(reader.bytes(XCHACHA20_POLY1305_NONCE_BYTES)?)?;
     let ciphertext = fixed_ciphertext(reader.bytes(FILE_DESCRIPTOR_CIPHERTEXT_BYTES)?)?;
     reader.finish()?;
-    let event = FileEvent {
+    Ok(FileEvent {
         workspace_id,
         created_at_ms,
         message_id,
@@ -111,9 +110,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileEvent, String> {
         local_history_node_secret_id,
         nonce,
         ciphertext,
-    };
-    validate(&event)?;
-    Ok(event)
+    })
 }
 
 pub fn sign(
@@ -209,49 +206,6 @@ fn metadata(bytes: &[u8]) -> Result<FileMetadata, String> {
     })
 }
 
-fn validate(event: &FileEvent) -> Result<(), String> {
-    if event.blob_bytes > MAX_FILE_BYTES {
-        return Err("file size exceeds the 10 GiB limit".to_string());
-    }
-    validate_id("file workspace", &event.workspace_id)?;
-    validate_id("file message_id", &event.message_id)?;
-    validate_id("file author_user_id", &event.author_user_id)?;
-    validate_id("file file_id", &event.file_id)?;
-    validate_id("file removal_frontier_id", &event.removal_frontier_id)?;
-    validate_id(
-        "file local_history_node_secret_id",
-        &event.local_history_node_secret_id,
-    )?;
-    if event.blob_bytes == 0 {
-        if event.total_slices != 0 {
-            return Err("zero-byte file must declare zero slices".to_string());
-        }
-        return Ok(());
-    }
-    if event.total_slices == 0 {
-        return Err("non-empty file must declare at least one slice".to_string());
-    }
-    if event.slice_bytes == 0 {
-        return Err("non-empty file must declare a slice budget".to_string());
-    }
-    let expected = expected_slice_count(event.blob_bytes, event.slice_bytes as u64)?;
-    if expected != event.total_slices {
-        return Err(format!(
-            "total_slices {} does not match blob_bytes / slice_bytes ceiling {}",
-            event.total_slices, expected
-        ));
-    }
-    Ok(())
-}
-
-fn expected_slice_count(blob_bytes: u64, slice_bytes: u64) -> Result<u32, String> {
-    if slice_bytes == 0 {
-        return Err("slice_bytes must be non-zero".to_string());
-    }
-    let count = blob_bytes.div_ceil(slice_bytes);
-    u32::try_from(count).map_err(|_| "slice count overflows u32".to_string())
-}
-
 fn validate_signed_payload(event: &SignedFileEnvelope) -> Result<(), String> {
     let Some(actual_type) = event.payload.first().copied() else {
         return Err("signed file payload is empty".to_string());
@@ -289,13 +243,6 @@ fn fixed_ciphertext(bytes: Vec<u8>) -> Result<FileDescriptorCiphertext, String> 
     bytes
         .try_into()
         .map_err(|_| "file descriptor ciphertext length mismatch".to_string())
-}
-
-fn validate_id(name: &str, id: &EventId) -> Result<(), String> {
-    if id.iter().all(|byte| *byte == 0) {
-        return Err(format!("{name} cannot be empty"));
-    }
-    Ok(())
 }
 
 fn push_unique(out: &mut Vec<EventId>, id: EventId) {
@@ -517,30 +464,6 @@ mod tests {
         let aad = descriptor_associated_data(&event, [8; 32]);
         event.ciphertext[0] ^= 1;
         assert!(open_descriptor_slot(&key, &nonce, &aad, &event.ciphertext).is_err());
-    }
-
-    #[test]
-    fn rejects_invalid_slice_arithmetic() {
-        let bad_count = FileEvent {
-            total_slices: 0,
-            ..event()
-        };
-        assert!(encode(&bad_count).is_err());
-
-        let bad_budget = FileEvent {
-            slice_bytes: 0,
-            total_slices: 1,
-            ..event()
-        };
-        assert!(encode(&bad_budget).is_err());
-
-        let bad_ceiling = FileEvent {
-            blob_bytes: 1024,
-            total_slices: 2,
-            slice_bytes: 1024,
-            ..event()
-        };
-        assert!(encode(&bad_ceiling).is_err());
     }
 
     #[test]

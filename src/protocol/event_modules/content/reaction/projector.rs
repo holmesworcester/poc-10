@@ -10,11 +10,12 @@ use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
 use crate::protocol::event_modules::leaf_history_node;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, schema};
+use super::{codec, commands, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
     let reaction = codec::decode(&envelope.payload)?;
+    commands::validate_event_ids(&reaction)?;
     if event.record.workspace_id != Some(reaction.workspace_id) {
         return Err("reaction workspace metadata does not match event body".to_string());
     }

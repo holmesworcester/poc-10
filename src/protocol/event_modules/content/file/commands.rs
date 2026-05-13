@@ -18,7 +18,62 @@ use crate::protocol::event_modules::worker::CommandOutput;
 use super::codec;
 use super::types::{
     FileDescriptorCiphertext, FileDescriptorPlaintext, FileEvent, FILE_DESCRIPTOR_CIPHERTEXT_BYTES,
+    MAX_FILE_BYTES,
 };
+
+/// Sanity guard: non-zero ids, size cap, and consistent slice arithmetic.
+/// The codec is intentionally lenient on decode; this helper is shared
+/// between the authoring path and the receive projector so a malformed
+/// peer event is rejected at projection time too.
+pub(super) fn validate_event_fields(event: &FileEvent) -> Result<(), String> {
+    if event.blob_bytes > MAX_FILE_BYTES {
+        return Err("file size exceeds the 10 GiB limit".to_string());
+    }
+    validate_id("file workspace", &event.workspace_id)?;
+    validate_id("file message_id", &event.message_id)?;
+    validate_id("file author_user_id", &event.author_user_id)?;
+    validate_id("file file_id", &event.file_id)?;
+    validate_id("file removal_frontier_id", &event.removal_frontier_id)?;
+    validate_id(
+        "file local_history_node_secret_id",
+        &event.local_history_node_secret_id,
+    )?;
+    if event.blob_bytes == 0 {
+        if event.total_slices != 0 {
+            return Err("zero-byte file must declare zero slices".to_string());
+        }
+        return Ok(());
+    }
+    if event.total_slices == 0 {
+        return Err("non-empty file must declare at least one slice".to_string());
+    }
+    if event.slice_bytes == 0 {
+        return Err("non-empty file must declare a slice budget".to_string());
+    }
+    let expected = expected_slice_count(event.blob_bytes, event.slice_bytes as u64)?;
+    if expected != event.total_slices {
+        return Err(format!(
+            "total_slices {} does not match blob_bytes / slice_bytes ceiling {}",
+            event.total_slices, expected
+        ));
+    }
+    Ok(())
+}
+
+fn expected_slice_count(blob_bytes: u64, slice_bytes: u64) -> Result<u32, String> {
+    if slice_bytes == 0 {
+        return Err("slice_bytes must be non-zero".to_string());
+    }
+    let count = blob_bytes.div_ceil(slice_bytes);
+    u32::try_from(count).map_err(|_| "slice count overflows u32".to_string())
+}
+
+fn validate_id(name: &str, id: &EventId) -> Result<(), String> {
+    if id.iter().all(|byte| *byte == 0) {
+        return Err(format!("{name} cannot be empty"));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateFile {
@@ -70,6 +125,7 @@ pub fn create(input: CreateFile) -> Result<CommandOutput<CreateFileOutput>, Stri
         nonce: crypto::random_xchacha20poly1305_nonce(),
         ciphertext: [0; FILE_DESCRIPTOR_CIPHERTEXT_BYTES],
     };
+    validate_event_fields(&event)?;
     let plaintext = FileDescriptorPlaintext {
         filename: input.filename.clone(),
         mime_type: input.mime_type.clone(),

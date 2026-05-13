@@ -12,6 +12,29 @@ use crate::protocol::event_modules::worker::CommandOutput;
 use super::codec;
 use super::types::ReactionEvent;
 
+/// Sanity guard: every named id in a reaction event is non-zero. The codec
+/// is intentionally lenient on decode; this helper is shared between the
+/// authoring path and the receive projector so a malformed peer event is
+/// rejected at projection time too.
+pub(super) fn validate_event_ids(event: &ReactionEvent) -> Result<(), String> {
+    validate_id("reaction workspace", &event.workspace_id)?;
+    validate_id("reaction target_message_id", &event.target_message_id)?;
+    validate_id("reaction author_user_id", &event.author_user_id)?;
+    validate_id("reaction removal_frontier_id", &event.removal_frontier_id)?;
+    validate_id(
+        "reaction local_history_node_secret_id",
+        &event.local_history_node_secret_id,
+    )?;
+    Ok(())
+}
+
+fn validate_id(name: &str, id: &EventId) -> Result<(), String> {
+    if id.iter().all(|byte| *byte == 0) {
+        return Err(format!("{name} cannot be empty"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostReaction {
     pub workspace_id: EventId,
@@ -48,6 +71,7 @@ pub fn post(input: PostReaction) -> Result<CommandOutput<PostReactionOutput>, St
         nonce: crypto::random_xchacha20poly1305_nonce(),
         ciphertext: [0; super::types::REACTION_CIPHERTEXT_BYTES],
     };
+    validate_event_ids(&event)?;
     let ciphertext = crypto::xchacha20poly1305_encrypt(
         &input.leaf_node_secret,
         &codec::associated_data(&event, input.signer_endpoint_shared_id),
