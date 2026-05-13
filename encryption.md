@@ -78,6 +78,14 @@ window and bounds steady-state storage.
 
 ## Per-event leaf retirement (FS mechanism)
 
+### What FS means here
+
+Forward secrecy in this protocol means: an attacker who compromises
+this peer's disk AFTER a leaf is retired cannot decrypt that leaf's
+content. It does NOT mean attackers who already had pre-retirement
+disk access lose their copy of any cached ciphertext or derived
+secret. The guarantee is purely about post-retirement disk state.
+
 `Work::RetireDeletedEventLeaf` in `src/workers/encryption.rs:1301`
 (`retire_deleted_event_leaf`) walks the F → leaf path. At each time-split
 and trie-split level it admits both the descend-side child (to keep the
@@ -89,14 +97,19 @@ canonical bytes, writes one `LOCAL_HISTORY_NODE_TOMBSTONES` row per wiped
 internal, and finally exact-deletes the leaf row, purges its bytes, and
 tombstones it.
 
-After F-wipe, `closest_retained_ancestor` falls back to the deepest
-covering sibling row admitted during the walk; future authoring in any
-minute except the wiped one is uninterrupted because the time-axis
-siblings collectively cover every minute. Coords whose subtree was
-inside the wiped descend chain wedge legitimately (the
-`closest_retained_ancestor` "no covering ancestor" error). No new key
-wraps to recipients are required — every peer's KDF is deterministic,
-so each peer derives the same sibling secrets locally.
+After per-leaf retire, the only leaf coord that cannot be re-derived is
+the one the walk retired. Every other coord — including coords in the
+same `unix_minute` — derives from the deepest materialized sibling
+whose range covers it. The minute_node row IS wiped (it's on the
+descend path), but trie-level siblings within the same minute preserve
+coverage for every other event in that minute.
+`closest_retained_ancestor` finds the deepest covering sibling and
+derivation proceeds normally. The wedged coord set after retire is
+exactly `{the retired leaf coord}`.
+
+Each peer's KDF is deterministic, so each peer derives the same
+sibling secrets locally during the walk; no new key wraps to recipients
+are required for the F-wipe itself.
 
 Per-retirement cost scales with tree-structural depth (~63 time-axis
 levels + log₂(messages_in_minute) trie levels): ~5 KB in active workspaces
@@ -104,6 +117,46 @@ where clustered authoring shares most of the path, up to ~22 KB worst-case
 under sparse retirements (see the `sparse_delete_materializes_log_n_internals_not_n_leaves`
 and `cover_summary_after_sparse_delete_is_logarithmic` tests in
 `src/workers/encryption.rs`).
+
+## Forward-secrecy scope and the pubkey reconstruction path
+
+The F-wipe + sibling-cover model provides forward secrecy of the retired
+leaf against an attacker who only retains the local history-node state.
+It does NOT block reconstruction paths that go through retained
+recipient-side key material.
+
+After per-leaf retire on this peer:
+
+  * `local_key_secret(F)` row: **wiped**
+  * Descend-path internal nodes: **wiped**
+  * Canonical bytes for the wiped chain: **purged**
+  * `key_wrap` events that delivered F to recipients: **retained**
+  * `local_recipient_key` private keys: **retained**
+  * Sender wrap public keys carried in past wraps: **retained**
+
+An attacker with disk access post-retire who also has:
+
+  * A `key_wrap` event for this F (any recipient), AND
+  * The corresponding `local_recipient_key` private key
+
+can unwrap the retained wrap to recover F, then re-derive the retired
+leaf's secret via the deterministic KDF chain. The retire walk alone
+does not close this path.
+
+Closing it requires one of:
+
+  * Purging the `key_wrap` events for the retired F at retire time
+    (closes the wrap-bytes path).
+  * Revoking + wiping the `local_recipient_key` rows for recipients
+    of those wraps (closes the recipient-private-key path).
+  * Rotating to a fresh recipient public key whose private half never
+    existed on this peer (the TreeKEM-style approach).
+
+The current implementation does none of these on retire. Forward
+secrecy is therefore scoped to "attacker who compromises this peer's
+disk after retire, AND lacks any recipient private key for a wrap
+of the retired F." Within that scope the F-wipe guarantees hold;
+outside it, they don't.
 
 ## Disappearing messages
 
