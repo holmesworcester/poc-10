@@ -15,7 +15,7 @@ use crate::core::crypto::XCHACHA20_POLY1305_KEY_BYTES;
 use crate::protocol::event_modules::types::{EventId, EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 
-use super::types::{mask_prefix_to_depth, LocalHistoryNodeSecret, TRIE_LEAF_BIT_DEPTH};
+use super::types::{mask_prefix_to_depth, LocalHistoryNodeSecret};
 
 pub const TYPE_LOCAL_HISTORY_NODE_SECRET: u8 = 145;
 pub const LOCAL_HISTORY_NODE_SECRET_WIRE_SIZE: usize =
@@ -70,7 +70,6 @@ pub fn decode(bytes: &[u8]) -> Result<LocalHistoryNodeSecret, String> {
         node_secret: reader.id()?,
     };
     reader.finish()?;
-    validate(&event)?;
     Ok(event)
 }
 
@@ -90,57 +89,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         workspace_id: Some(event.workspace_id),
         scope: EventScope::Local,
     })
-}
-
-pub fn validate_range(range_start: u64, range_width: u64) -> Result<(), String> {
-    if range_width == 0 {
-        return Err("local history node range width cannot be zero".to_string());
-    }
-    if !range_width.is_power_of_two() {
-        return Err("local history node range width must be a power of two".to_string());
-    }
-    if !range_start.is_multiple_of(range_width) {
-        return Err("local history node range start must align to width".to_string());
-    }
-    Ok(())
-}
-
-pub fn validate_bit_depth(bit_depth: u16, range_width: u64) -> Result<(), String> {
-    if bit_depth > TRIE_LEAF_BIT_DEPTH {
-        return Err("local history node bit_depth exceeds 256".to_string());
-    }
-    // Trie nodes (bit_depth > 0) only exist under a minute_node, which has
-    // range_width = 1. Time-tree internals have bit_depth = 0 and any
-    // power-of-two range_width.
-    if bit_depth > 0 && range_width != 1 {
-        return Err(
-            "local history node bit_depth>0 requires range_width=1 (trie lives under minute_node)"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn validate(event: &LocalHistoryNodeSecret) -> Result<(), String> {
-    if is_zero(&event.workspace_id) {
-        return Err("local history node workspace cannot be empty".to_string());
-    }
-    if is_zero(&event.removal_frontier_id) {
-        return Err("local history node removal_frontier_id cannot be empty".to_string());
-    }
-    if is_zero(&event.source_secret_id) {
-        return Err("local history node source_secret_id cannot be empty".to_string());
-    }
-    if is_zero(&event.node_secret) {
-        return Err("local history node material cannot be empty".to_string());
-    }
-    validate_range(event.range_start, event.range_width)?;
-    validate_bit_depth(event.bit_depth, event.range_width)?;
-    let masked = mask_prefix_to_depth(event.event_id_prefix, event.bit_depth);
-    if masked != event.event_id_prefix {
-        return Err("local history node event_id_prefix carries bits past bit_depth".to_string());
-    }
-    Ok(())
 }
 
 fn push_unique(out: &mut Vec<EventId>, id: EventId) {
@@ -234,12 +182,4 @@ mod tests {
         assert_eq!(record.dependencies, vec![[2; 32], [3; 32], [4; 32]]);
     }
 
-    #[test]
-    fn rejects_non_canonical_range() {
-        let err = validate_range(3, 8).expect_err("unaligned range must fail");
-        assert_eq!(err, "local history node range start must align to width");
-
-        let err = validate_range(0, 7).expect_err("non power of two must fail");
-        assert_eq!(err, "local history node range width must be a power of two");
-    }
 }

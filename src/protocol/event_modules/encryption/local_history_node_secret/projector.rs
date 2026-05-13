@@ -27,10 +27,11 @@ use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput,
 
 use super::super::local_key_secret;
 use super::types::{LocalHistoryNodeSecret, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH};
-use super::{codec, schema};
+use super::{codec, commands, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let node = codec::decode(&event.record.canonical_bytes)?;
+    commands::validate_event_fields(&node)?;
     if event.record.workspace_id != Some(node.workspace_id) {
         return Err("local history node workspace metadata does not match event body".to_string());
     }

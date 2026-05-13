@@ -96,7 +96,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     if slice_start.saturating_add(slice_len) > total_ciphertext_len {
         return Err("file slice extends past descriptor ciphertext bounds".to_string());
     }
-    let verified_ciphertext = codec::verify_slice_proof(
+    let verified_ciphertext = crate::core::crypto::bao_verify_slice(
         &descriptor_file.root_hash,
         &slice.proof,
         slice_start,

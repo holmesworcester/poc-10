@@ -41,7 +41,7 @@ pub fn decode(bytes: &[u8]) -> Result<SignedEnvelope, String> {
         payload,
         signature,
     };
-    validate_payload(&event)?;
+    validate_signed_payload(&event)?;
     if !crypto::ed25519_verify(
         &event.signer_public_key,
         &signing_bytes(&event),
@@ -180,7 +180,7 @@ fn fixed_signature(bytes: Vec<u8>) -> Result<[u8; ED25519_SIGNATURE_BYTES], Stri
         .map_err(|_| "signed envelope signature length mismatch".to_string())
 }
 
-fn validate_payload(event: &SignedEnvelope) -> Result<(), String> {
+fn validate_signed_payload(event: &SignedEnvelope) -> Result<(), String> {
     let Some(actual_type) = event.payload.first().copied() else {
         return Err("signed envelope payload is empty".to_string());
     };

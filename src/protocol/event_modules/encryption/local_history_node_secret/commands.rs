@@ -115,9 +115,9 @@ pub fn derive_time_split(
     if input.child_side > 1 {
         return Err("child_side must be 0 (left) or 1 (right)".to_string());
     }
-    codec::validate_range(input.child_range_start, input.child_range_width)?;
+    validate_range(input.child_range_start, input.child_range_width)?;
     if input.parent_range_width != u64::MAX {
-        codec::validate_range(input.parent_range_start, input.parent_range_width)?;
+        validate_range(input.parent_range_start, input.parent_range_width)?;
     }
 
     let info = time_split_info(&input);
@@ -276,7 +276,7 @@ pub fn derive_trie_split(
     if input.child_bit_depth > TRIE_LEAF_BIT_DEPTH {
         return Err("child_bit_depth must be at most 256".to_string());
     }
-    codec::validate_range(input.range_start, 1)?;
+    validate_range(input.range_start, 1)?;
 
     let info = trie_split_info(&input);
     let node_secret = crypto::blake3_keyed_hash(&input.parent_secret, TRIE_SPLIT_DOMAIN, &info);
@@ -329,11 +329,79 @@ fn validate_id(name: &str, id: &EventId) -> Result<(), String> {
     Ok(())
 }
 
+/// Sanity guard for the structural shape of a `(range_start, range_width)`
+/// pair: width is a non-zero power of two, and `range_start` aligns to
+/// width. Used by command authoring (via the wrapper below) and by the
+/// projector through `validate_event_fields`.
+pub(super) fn validate_range(range_start: u64, range_width: u64) -> Result<(), String> {
+    if range_width == 0 {
+        return Err("local history node range width cannot be zero".to_string());
+    }
+    if !range_width.is_power_of_two() {
+        return Err("local history node range width must be a power of two".to_string());
+    }
+    if !range_start.is_multiple_of(range_width) {
+        return Err("local history node range start must align to width".to_string());
+    }
+    Ok(())
+}
+
+/// Sanity guard for `(bit_depth, range_width)`. Trie nodes (bit_depth > 0)
+/// only exist under a minute_node, which has range_width=1; time-tree
+/// internals have bit_depth=0 and any power-of-two range_width.
+pub(super) fn validate_bit_depth(bit_depth: u16, range_width: u64) -> Result<(), String> {
+    if bit_depth > TRIE_LEAF_BIT_DEPTH {
+        return Err("local history node bit_depth exceeds 256".to_string());
+    }
+    if bit_depth > 0 && range_width != 1 {
+        return Err(
+            "local history node bit_depth>0 requires range_width=1 (trie lives under minute_node)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Sanity guard for a fully-built `LocalHistoryNodeSecret`. The codec is
+/// intentionally lenient on decode; this helper is shared between
+/// authoring (the codec's `encode`-time callers below) and the receive
+/// projector so a malformed peer event is rejected at projection time too.
+pub(super) fn validate_event_fields(event: &LocalHistoryNodeSecret) -> Result<(), String> {
+    if event.workspace_id.iter().all(|byte| *byte == 0) {
+        return Err("local history node workspace cannot be empty".to_string());
+    }
+    if event.removal_frontier_id.iter().all(|byte| *byte == 0) {
+        return Err("local history node removal_frontier_id cannot be empty".to_string());
+    }
+    if event.source_secret_id.iter().all(|byte| *byte == 0) {
+        return Err("local history node source_secret_id cannot be empty".to_string());
+    }
+    if event.node_secret.iter().all(|byte| *byte == 0) {
+        return Err("local history node material cannot be empty".to_string());
+    }
+    validate_range(event.range_start, event.range_width)?;
+    validate_bit_depth(event.bit_depth, event.range_width)?;
+    let masked = mask_prefix_to_depth(event.event_id_prefix, event.bit_depth);
+    if masked != event.event_id_prefix {
+        return Err("local history node event_id_prefix carries bits past bit_depth".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::protocol::event_modules::types::EventScope;
 
     use super::*;
+
+    #[test]
+    fn rejects_non_canonical_range() {
+        let err = validate_range(3, 8).expect_err("unaligned range must fail");
+        assert_eq!(err, "local history node range start must align to width");
+
+        let err = validate_range(0, 7).expect_err("non power of two must fail");
+        assert_eq!(err, "local history node range width must be a power of two");
+    }
 
     fn time_input(child_start: u64, child_width: u64, side: u8) -> DeriveTimeSplit {
         DeriveTimeSplit {
