@@ -363,7 +363,6 @@ pub fn resolve_selector(
 pub(crate) use commands::require_local_membership as require_membership;
 pub(crate) use commands::{
     derive_message_leaf, next_authoring_timestamp as next_timestamp, require_active_frontier_id,
-    workspace_expires_at_minute,
 };
 
 fn user_name(store: &Store, workspace_id: EventId, user_id: EventId) -> Result<String, String> {

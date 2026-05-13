@@ -162,6 +162,27 @@ pub fn create(input: CreateFile) -> Result<CommandOutput<CreateFileOutput>, Stri
     ))
 }
 
+/// Deterministic file id derived from the parent message id and the
+/// authoring endpoint. The hash captures `(signer_endpoint_shared_id,
+/// message_id, starting_timestamp)` under a domain-separated prefix so
+/// two clients independently authoring "the same logical file" reach
+/// the same id.
+pub fn derive_file_id(
+    signer_endpoint_shared_id: &EventId,
+    message_id: EventId,
+    starting_timestamp: u64,
+) -> EventId {
+    const DOMAIN: &[u8] = b"poc8-content-file-id\0";
+    let mut input = Vec::with_capacity(
+        DOMAIN.len() + signer_endpoint_shared_id.len() + message_id.len() + 8,
+    );
+    input.extend_from_slice(DOMAIN);
+    input.extend_from_slice(signer_endpoint_shared_id);
+    input.extend_from_slice(&message_id);
+    input.extend_from_slice(&starting_timestamp.to_be_bytes());
+    crypto::hash(&input)
+}
+
 /// Resolve the AEAD key bytes for a file descriptor by its named
 /// `local_history_node_secret_id`. Returns `Ok(None)` when the local
 /// leaf is not yet on disk; the caller treats that as "this row is not

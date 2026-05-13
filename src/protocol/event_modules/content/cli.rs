@@ -17,8 +17,6 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
-use crate::core::crypto;
-use crate::core::crypto::XCHACHA20_POLY1305_TAG_BYTES;
 use crate::core::store::Store;
 use crate::protocol::cli::Context;
 use crate::protocol::event_modules::content::{file, file_slice, message};
@@ -77,28 +75,14 @@ impl SendFileSummary {
 fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let parsed = SendFileArgs::parse(args)?;
 
-    let membership = message::cli::require_membership(&context.store, parsed.workspace_id)?;
+    let membership =
+        message::commands::require_local_membership(&context.store, parsed.workspace_id)?;
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
-    if membership.signing_public_key != local.signing_public_key {
-        return Err("local endpoint signing key does not match workspace membership".to_string());
-    }
 
     let plaintext = fs::read(&parsed.file_path)
         .map_err(|err| format!("read {}: {err}", parsed.file_path.display()))?;
     let blob_bytes = plaintext.len() as u64;
-    let slice_bytes = u32::try_from(file_slice::types::FILE_SLICE_DATA_BYTES)
-        .map_err(|_| "slice budget overflows u32".to_string())?;
-    let total_slices = if blob_bytes == 0 {
-        0
-    } else {
-        u32::try_from(
-            plaintext
-                .len()
-                .div_ceil(file_slice::types::FILE_SLICE_DATA_BYTES),
-        )
-        .map_err(|_| "slice count overflows u32".to_string())?
-    };
     let filename = parsed
         .file_path
         .file_name()
@@ -106,10 +90,11 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         .ok_or_else(|| "file path is not valid utf-8".to_string())?
         .to_string();
 
-    let starting_timestamp = message::cli::next_timestamp(&context.store, parsed.workspace_id)?;
+    let starting_timestamp =
+        message::commands::next_authoring_timestamp(&context.store, parsed.workspace_id)?;
     let mut timestamp = starting_timestamp;
     let removal_frontier_id =
-        message::cli::require_active_frontier_id(&context.store, parsed.workspace_id)?;
+        message::commands::require_active_frontier_id(&context.store, parsed.workspace_id)?;
     let signer_endpoint = membership.endpoint_shared_id;
     let author_user_id = membership.user_authority_event_id;
 
@@ -121,7 +106,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         &removal_frontier_id,
         timestamp,
     );
-    let message_leaf = message::cli::derive_message_leaf(
+    let message_leaf = message::commands::derive_message_leaf(
         &context.store,
         &context.protocol,
         parsed.workspace_id,
@@ -131,8 +116,11 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
     )?;
 
     // Send-message event under the message's own content key.
-    let (expires_at_minute, disappearing_setting_id) =
-        message::cli::workspace_expires_at_minute(&context.store, parsed.workspace_id, timestamp)?;
+    let (expires_at_minute, disappearing_setting_id) = message::commands::workspace_expires_at_minute(
+        &context.store,
+        parsed.workspace_id,
+        timestamp,
+    )?;
     let send = message::commands::send(message::commands::SendMessage {
         workspace_id: parsed.workspace_id,
         created_at_ms: timestamp,
@@ -149,7 +137,8 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
     let message_id = send.value.message_id;
     timestamp = timestamp.saturating_add(1);
 
-    let file_id = derive_file_id(&signer_endpoint, message_id, starting_timestamp);
+    let file_id =
+        file::commands::derive_file_id(&signer_endpoint, message_id, starting_timestamp);
 
     // Files now author their own leaf, distinct from the parent message's
     // leaf. Two clients independently authoring the same file (same
@@ -163,7 +152,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         &removal_frontier_id,
         timestamp,
     );
-    let file_leaf = message::cli::derive_message_leaf(
+    let file_leaf = message::commands::derive_message_leaf(
         &context.store,
         &context.protocol,
         parsed.workspace_id,
@@ -172,31 +161,15 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         file_event_coord,
     )?;
 
-    // Encrypt each plaintext slice with the file's own leaf node secret.
-    // Slice AAD is independent of file_event_id (see file_slice::codec
-    // docs), so a single seal pass + BAO outboard suffices.
-    let mut ciphertext_total = Vec::with_capacity(
-        plaintext.len() + (total_slices as usize) * XCHACHA20_POLY1305_TAG_BYTES,
-    );
-    for slice_number in 0..total_slices {
-        let start = (slice_number as usize) * slice_bytes as usize;
-        let end = ((slice_number + 1) as usize * slice_bytes as usize).min(plaintext.len());
-        let chunk = file_slice::codec::seal_slice(
-            &file_leaf.leaf_node_secret,
-            &parsed.workspace_id,
-            &file_id,
-            slice_number,
-            &signer_endpoint,
-            &plaintext[start..end],
-        )?;
-        ciphertext_total.extend_from_slice(&chunk);
-    }
-    let (root_hash, outboard) = if ciphertext_total.is_empty() {
-        ([0u8; 32], Vec::new())
-    } else {
-        crypto::bao_outboard(&ciphertext_total)?
-    };
-
+    // Encrypt each plaintext slice with the file's own leaf node secret
+    // and build the BAO outboard tree over the concatenated ciphertext.
+    let sealed = file_slice::commands::seal_file_blob(
+        &file_leaf.leaf_node_secret,
+        &parsed.workspace_id,
+        &file_id,
+        &signer_endpoint,
+        &plaintext,
+    )?;
     let create_file = file::commands::create(file::commands::CreateFile {
         workspace_id: parsed.workspace_id,
         created_at_ms: timestamp,
@@ -206,9 +179,9 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         signer_private_key: local.signing_secret,
         file_id,
         blob_bytes,
-        total_slices,
-        slice_bytes,
-        root_hash,
+        total_slices: sealed.total_slices,
+        slice_bytes: sealed.slice_bytes,
+        root_hash: sealed.root_hash,
         filename: filename.clone(),
         mime_type: parsed.mime_type.clone(),
         removal_frontier_id,
@@ -222,14 +195,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
     bundled.extend(send.events);
     bundled.extend(create_file.events);
 
-    for slice_number in 0..total_slices {
-        let plaintext_start = (slice_number as usize) * slice_bytes as usize;
-        let plaintext_end =
-            ((slice_number + 1) as usize * slice_bytes as usize).min(plaintext.len());
-        let plaintext_len = (plaintext_end - plaintext_start) as u32;
-        let chunk_size = u64::from(slice_bytes) + XCHACHA20_POLY1305_TAG_BYTES as u64;
-        let slice_start = u64::from(slice_number) * chunk_size;
-        let slice_len = u64::from(plaintext_len) + XCHACHA20_POLY1305_TAG_BYTES as u64;
+    for slice_number in 0..sealed.total_slices {
         let slice = file_slice::commands::slice_from_ciphertext(
             file_slice::commands::SliceFromCiphertext {
                 workspace_id: parsed.workspace_id,
@@ -240,11 +206,11 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
                 signer_endpoint_shared_id: signer_endpoint,
                 signer_private_key: local.signing_secret,
                 local_history_node_secret_id: file_leaf.local_history_node_secret_id,
-                plaintext_len,
-                ciphertext: &ciphertext_total,
-                outboard: &outboard,
-                slice_start,
-                slice_len,
+                plaintext_len: sealed.plaintext_lengths[slice_number as usize],
+                ciphertext: &sealed.ciphertext,
+                outboard: &sealed.outboard,
+                slice_start: sealed.slice_start(slice_number),
+                slice_len: sealed.slice_len(slice_number),
             },
         )?;
         bundled.extend(slice.events);
@@ -258,7 +224,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         filename,
         mime_type: parsed.mime_type,
         blob_bytes,
-        total_slices,
+        total_slices: sealed.total_slices,
     };
     let output = CommandOutput::with_proposed_events(summary, bundled);
     let report = worker::run(
@@ -323,23 +289,8 @@ impl SendFileArgs {
     }
 }
 
-fn derive_file_id(
-    signer_endpoint_shared_id: &EventId,
-    message_id: EventId,
-    starting_timestamp: u64,
-) -> EventId {
-    let mut input = Vec::with_capacity(
-        "poc8-content-file-id\0".len()
-            + signer_endpoint_shared_id.len()
-            + message_id.len()
-            + std::mem::size_of::<u64>(),
-    );
-    input.extend_from_slice(b"poc8-content-file-id\0");
-    input.extend_from_slice(signer_endpoint_shared_id);
-    input.extend_from_slice(&message_id);
-    input.extend_from_slice(&starting_timestamp.to_be_bytes());
-    crypto::hash(&input)
-}
+// `derive_file_id` moved to file::commands so the CLI does not import
+// core::crypto for content authoring.
 
 // --------------------------------------------------------------------------
 // `view` rendering
