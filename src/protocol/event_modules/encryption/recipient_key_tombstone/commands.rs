@@ -11,6 +11,33 @@ use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::{codec, types::RecipientKeyTombstoneEvent};
 
+/// Sanity guard: every named id is non-zero and the old and new recipient
+/// keys are distinct. The codec is intentionally lenient on decode; this
+/// helper is shared between the authoring path and the receive projector so
+/// a malformed peer event is rejected at projection time too.
+pub(super) fn validate_event_ids(event: &RecipientKeyTombstoneEvent) -> Result<(), String> {
+    if is_zero(&event.workspace_id) {
+        return Err("recipient key tombstone workspace cannot be empty".to_string());
+    }
+    if is_zero(&event.endpoint_shared_id) {
+        return Err("recipient key tombstone endpoint_shared_id cannot be empty".to_string());
+    }
+    if is_zero(&event.old_recipient_key_id) {
+        return Err("recipient key tombstone old key cannot be empty".to_string());
+    }
+    if is_zero(&event.new_recipient_key_id) {
+        return Err("recipient key tombstone new key cannot be empty".to_string());
+    }
+    if event.old_recipient_key_id == event.new_recipient_key_id {
+        return Err("recipient key tombstone must name different keys".to_string());
+    }
+    Ok(())
+}
+
+fn is_zero(bytes: &[u8; 32]) -> bool {
+    bytes.iter().all(|byte| *byte == 0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TombstoneRecipientKey {
     pub workspace_id: EventId,
@@ -31,14 +58,6 @@ pub struct RecipientKeyTombstoneOutput {
 pub fn tombstone(
     input: TombstoneRecipientKey,
 ) -> Result<CommandOutput<RecipientKeyTombstoneOutput>, String> {
-    validate_id("workspace_id", &input.workspace_id)?;
-    validate_id("endpoint_shared_id", &input.endpoint_shared_id)?;
-    validate_id("old_recipient_key_id", &input.old_recipient_key_id)?;
-    validate_id("new_recipient_key_id", &input.new_recipient_key_id)?;
-    if input.old_recipient_key_id == input.new_recipient_key_id {
-        return Err("recipient key tombstone must name different keys".to_string());
-    }
-
     let event = RecipientKeyTombstoneEvent {
         workspace_id: input.workspace_id,
         created_at_ms: input.created_at_ms,
@@ -46,6 +65,7 @@ pub fn tombstone(
         old_recipient_key_id: input.old_recipient_key_id,
         new_recipient_key_id: input.new_recipient_key_id,
     };
+    validate_event_ids(&event)?;
     let payload = codec::encode(&event);
     let envelope = codec::sign(input.endpoint_shared_id, &input.signer_private_key, payload);
     let bytes = codec::encode_signed(&envelope);
@@ -56,13 +76,6 @@ pub fn tombstone(
         new_recipient_key_id: event.new_recipient_key_id,
     };
     Ok(CommandOutput::with_events(value, vec![record]))
-}
-
-fn validate_id(name: &str, id: &EventId) -> Result<(), String> {
-    if id.iter().all(|byte| *byte == 0) {
-        return Err(format!("{name} cannot be empty"));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -113,7 +126,7 @@ mod tests {
         input.new_recipient_key_id = [0; 32];
         assert_eq!(
             tombstone(input).expect_err("empty key must fail"),
-            "new_recipient_key_id cannot be empty"
+            "recipient key tombstone new key cannot be empty"
         );
     }
 }

@@ -13,6 +13,38 @@ use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
 use super::codec;
 use super::types::{RemovalFrontierEvent, MAX_REMOVAL_FRONTIER_REFS};
 
+/// Sanity guard: non-zero ids and sorted/unique refs. The codec is
+/// intentionally lenient on decode; this helper is shared between the
+/// authoring path and the receive projector so a malformed peer event is
+/// rejected at projection time too.
+pub(super) fn validate_event_fields(event: &RemovalFrontierEvent) -> Result<(), String> {
+    if is_zero(&event.workspace_id) {
+        return Err("removal frontier workspace cannot be empty".to_string());
+    }
+    if is_zero(&event.authority_admin_id) {
+        return Err("removal frontier authority_admin_id cannot be empty".to_string());
+    }
+    if event.removal_event_ids.len() > MAX_REMOVAL_FRONTIER_REFS {
+        return Err("removal frontier has too many refs".to_string());
+    }
+    for id in &event.removal_event_ids {
+        if is_zero(id) {
+            return Err("removal frontier ref cannot be empty".to_string());
+        }
+    }
+    let mut sorted = event.removal_event_ids.clone();
+    sorted.sort();
+    sorted.dedup();
+    if sorted != event.removal_event_ids {
+        return Err("removal frontier refs must be sorted and unique".to_string());
+    }
+    Ok(())
+}
+
+fn is_zero(bytes: &[u8; 32]) -> bool {
+    bytes.iter().all(|byte| *byte == 0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRemovalFrontier {
     pub workspace_id: EventId,

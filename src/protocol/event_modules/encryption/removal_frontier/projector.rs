@@ -9,11 +9,12 @@
 use crate::protocol::event_modules::identity::{admin, endpoint_shared, signed};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, schema};
+use super::{codec, commands, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
     let frontier = codec::decode(&envelope.payload)?;
+    commands::validate_event_fields(&frontier)?;
     if event.record.workspace_id != Some(frontier.workspace_id) {
         return Err("removal frontier workspace metadata does not match event body".to_string());
     }

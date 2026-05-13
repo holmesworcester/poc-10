@@ -10,11 +10,12 @@ use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput,
 
 use super::super::recipient_key;
 use super::types::SignedRecipientKeyTombstoneEnvelope;
-use super::{codec, schema};
+use super::{codec, commands, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
     let tombstone = codec::decode(&envelope.payload)?;
+    commands::validate_event_ids(&tombstone)?;
     if event.record.workspace_id != Some(tombstone.workspace_id) {
         return Err(
             "recipient key tombstone workspace metadata does not match event body".to_string(),

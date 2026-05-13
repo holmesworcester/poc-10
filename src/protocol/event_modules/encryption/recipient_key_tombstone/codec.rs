@@ -49,7 +49,6 @@ pub fn decode(bytes: &[u8]) -> Result<RecipientKeyTombstoneEvent, String> {
         new_recipient_key_id: reader.id()?,
     };
     reader.finish()?;
-    validate_event(&event)?;
     Ok(event)
 }
 
@@ -157,25 +156,6 @@ fn validate_signed_payload(event: &SignedRecipientKeyTombstoneEnvelope) -> Resul
     metadata(&event.payload).map(|_| ())
 }
 
-fn validate_event(event: &RecipientKeyTombstoneEvent) -> Result<(), String> {
-    if is_zero(&event.workspace_id) {
-        return Err("recipient key tombstone workspace cannot be empty".to_string());
-    }
-    if is_zero(&event.endpoint_shared_id) {
-        return Err("recipient key tombstone endpoint_shared_id cannot be empty".to_string());
-    }
-    if is_zero(&event.old_recipient_key_id) {
-        return Err("recipient key tombstone old key cannot be empty".to_string());
-    }
-    if is_zero(&event.new_recipient_key_id) {
-        return Err("recipient key tombstone new key cannot be empty".to_string());
-    }
-    if event.old_recipient_key_id == event.new_recipient_key_id {
-        return Err("recipient key tombstone must name different keys".to_string());
-    }
-    Ok(())
-}
-
 fn write_signing_fields(out: &mut Writer, event: &SignedRecipientKeyTombstoneEnvelope) {
     out.u8(TYPE_SIGNED_RECIPIENT_KEY_TOMBSTONE);
     out.id(&event.signer_endpoint_shared_id);
@@ -197,10 +177,6 @@ fn push_unique(out: &mut Vec<EventId>, id: EventId) {
     if !out.iter().any(|candidate| candidate == &id) {
         out.push(id);
     }
-}
-
-fn is_zero(bytes: &[u8; 32]) -> bool {
-    bytes.iter().all(|byte| *byte == 0)
 }
 
 #[cfg(test)]

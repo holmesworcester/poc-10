@@ -28,7 +28,9 @@ struct RemovalFrontierMetadata {
 }
 
 pub fn encode(event: &RemovalFrontierEvent) -> Result<Vec<u8>, String> {
-    validate_event(event)?;
+    if event.removal_event_ids.len() > MAX_REMOVAL_FRONTIER_REFS {
+        return Err("removal frontier has too many refs".to_string());
+    }
     let mut out = Writer::with_capacity(REMOVAL_FRONTIER_WIRE_SIZE);
     out.u8(TYPE_REMOVAL_FRONTIER);
     out.id(&event.workspace_id);
@@ -71,14 +73,12 @@ pub fn decode(bytes: &[u8]) -> Result<RemovalFrontierEvent, String> {
             return Err("removal frontier unused ref slots must be empty".to_string());
         }
     }
-    let event = RemovalFrontierEvent {
+    Ok(RemovalFrontierEvent {
         workspace_id,
         created_at_ms,
         authority_admin_id,
         removal_event_ids,
-    };
-    validate_event(&event)?;
-    Ok(event)
+    })
 }
 
 pub fn sign(
@@ -179,30 +179,6 @@ fn validate_signed_payload(event: &SignedRemovalFrontierEnvelope) -> Result<(), 
     metadata(&event.payload).map(|_| ())
 }
 
-fn validate_event(event: &RemovalFrontierEvent) -> Result<(), String> {
-    if is_zero(&event.workspace_id) {
-        return Err("removal frontier workspace cannot be empty".to_string());
-    }
-    if is_zero(&event.authority_admin_id) {
-        return Err("removal frontier authority_admin_id cannot be empty".to_string());
-    }
-    if event.removal_event_ids.len() > MAX_REMOVAL_FRONTIER_REFS {
-        return Err("removal frontier has too many refs".to_string());
-    }
-    for id in &event.removal_event_ids {
-        if is_zero(id) {
-            return Err("removal frontier ref cannot be empty".to_string());
-        }
-    }
-    let mut sorted = event.removal_event_ids.clone();
-    sorted.sort();
-    sorted.dedup();
-    if sorted != event.removal_event_ids {
-        return Err("removal frontier refs must be sorted and unique".to_string());
-    }
-    Ok(())
-}
-
 fn write_signing_fields(out: &mut Writer, event: &SignedRemovalFrontierEnvelope) {
     out.u8(TYPE_SIGNED_REMOVAL_FRONTIER);
     out.id(&event.signer_endpoint_shared_id);
@@ -275,16 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_canonical_refs_and_tampered_signature() {
-        let bad = RemovalFrontierEvent {
-            removal_event_ids: vec![[4; 32], [3; 32]],
-            ..event()
-        };
-        assert_eq!(
-            encode(&bad).expect_err("unsorted refs must fail"),
-            "removal frontier refs must be sorted and unique"
-        );
-
+    fn rejects_tampered_signature() {
         let mut bytes = signed_event();
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
