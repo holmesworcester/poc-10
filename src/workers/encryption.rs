@@ -1292,13 +1292,16 @@ struct WipeTarget {
 /// Rotation via `key-frontier` can still happen for unrelated reasons
 /// (recipient turnover); it is not required by retirement.
 ///
-/// TODO(disappearing-messages): whole-minute retirement is a separate
-/// future flow. The time-tree shape supports it: walk the time tree, split
-/// as needed so the expired range is covered by a small set of internal
-/// nodes, then tombstone those internals (one tombstone per covering node,
-/// not one per minute). The current implementation only handles per-event
-/// leaf retirement; whole-minute (or whole-range) retirement will land
-/// later behind a separate `Work` variant.
+/// Retirement is strictly per-event-leaf. Whole-minute (or whole-range)
+/// retirement is not viable in this design: under mutable per-message
+/// TTL, messages within one `unix_minute` can carry different stamped
+/// expiries (mixed TTLs from setting changes mid-minute), and late-
+/// arriving messages can land in a minute whose other leaves have
+/// already expired. Wiping the minute_node row in a single coarse
+/// step would silently drop those still-live or yet-to-arrive leaves.
+/// Range retirement at the time-tree subtree level is available
+/// only via `Work::ChopTimeTreePrefix`, which is gated by the
+/// monotonic floor.
 fn retire_deleted_event_leaf<R: EventRegistry>(
     store: &Store,
     registry: &R,

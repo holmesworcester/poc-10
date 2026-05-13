@@ -1,12 +1,13 @@
 //! Types for the workspace-wide `disappearing_messages_setting` event.
 //!
-//! A setting event is a shared admin-signed fact that supersedes the
-//! workspace event's initial TTL. The active setting is the latest
-//! admitted setting event for a given `workspace_id` under the
-//! deterministic `(created_at_ms, event_id)` ordering. Late-arriving
-//! settings do not retroactively rewrite already-stamped messages -
-//! every authored message commits to its own `expires_at_minute` in
-//! canonical bytes (see slice 1).
+//! A setting event is a shared admin-signed fact carrying the workspace's
+//! current disappearing-messages TTL and monotonic floor. The active
+//! setting is the latest admitted setting event for a given
+//! `workspace_id` under the deterministic `(created_at_ms, event_id)`
+//! ordering. Late-arriving settings do not retroactively rewrite
+//! already-stamped messages: every authored message commits to its own
+//! `expires_at_minute` in canonical bytes, computed from the active
+//! setting at authoring time.
 
 use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
 use crate::protocol::event_modules::types::EventId;

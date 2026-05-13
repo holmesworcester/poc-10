@@ -9,11 +9,12 @@
 //! and purge canonical bytes. Outputs: per-leaf tombstones written by the
 //! encryption worker, plus row deletes.
 //!
-//! Slice 1 ships with per-leaf retirement: every expired message produces
-//! its own leaf tombstone. The plan's "one tombstone per minute"
-//! optimization is left for slice 3 (deletion summary monotonicity); the
-//! retention/cover-summary contract is identical either way because both
-//! peers retire the same set of leaves deterministically.
+//! Retirement is per-leaf: every expired message produces its own leaf
+//! tombstone. Coalescing into a "one tombstone per minute" form is not
+//! viable here because mutable per-message TTL allows messages in the
+//! same `unix_minute` to carry different stamped expiries — coalescing
+//! at minute granularity would silently drop leaves whose expiry has
+//! not yet been reached.
 //!
 //! Fairness: bounded by `ctx.options.work_limit`.
 

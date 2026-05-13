@@ -5,7 +5,7 @@
 //! latest admitted setting under deterministic `(created_at_ms,
 //! event_id)` ordering. Late-arriving settings do not retroactively
 //! rewrite already-stamped messages — every authored message commits to
-//! its own `expires_at_minute` in canonical bytes (slice 1).
+//! its own `expires_at_minute` in canonical bytes.
 //!
 //! Dependencies: workspace event and the authority admin event; both
 //! must be `Applied` before this event projects.

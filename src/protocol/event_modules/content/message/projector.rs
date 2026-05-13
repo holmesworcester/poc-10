@@ -98,8 +98,8 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     // referenced policy permits. A mismatch rejects the message: an
     // admin-signed setting establishes a bound that authors must honor,
     // and the projector enforces it. The trust gap (a peer can still pick
-    // an *older* setting with a longer TTL) is documented in
-    // `disappearing_messages_plan.md` §6.
+    // an *older* more-permissive setting) is the latest-setting trust
+    // gap described in `encryption.md`.
     let permitted_ttl = resolve_permitted_ttl_minutes(
         event,
         message.workspace_id,
@@ -639,10 +639,11 @@ mod tests {
     fn rejects_message_whose_expiry_disagrees_with_referenced_policy() {
         // A peer that lies — stamps `expires_at_minute = M + 99` while
         // referencing a setting whose `ttl_minutes` is 1 — must be
-        // rejected by the projector. Validates the slice-3 enforcement
-        // that closes slice-2's trust gap. (The remaining gap, where the
-        // lying peer points at an *older* admin setting with a longer
-        // TTL, is documented in `disappearing_messages_plan.md` §6.)
+        // rejected by the projector. The projector compares the message's
+        // stamped expiry against the referenced setting's policy and
+        // refuses to admit when they disagree. (Authors can still lie by
+        // referencing an *older* more-permissive setting; that latest-
+        // setting trust gap is described in `encryption.md`.)
         let workspace_id = [7; 32];
         let signer_private_key = [9; 32];
         let signer_pubkey = signing_public_key_for(&signer_private_key);
