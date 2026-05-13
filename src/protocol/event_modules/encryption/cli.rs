@@ -395,13 +395,13 @@ fn run_key_node_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
         .map(|value| parse_hex_id(value, KEY_NODE_USAGE))
         .transpose()?;
 
-    let (parent_secret, parent_range_start, parent_range_width) = load_time_tree_parent(
+    let parent = local_history_node_secret::commands::load_time_tree_parent(
         &context.store,
         workspace_id,
         removal_frontier_id,
         source_secret_id,
     )?;
-    let child_side = if range_start < parent_range_start + parent_range_width / 2 {
+    let child_side = if range_start < parent.parent_range_start + parent.parent_range_width / 2 {
         0u8
     } else {
         1u8
@@ -411,9 +411,9 @@ fn run_key_node_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
             workspace_id,
             removal_frontier_id,
             parent_secret_id: source_secret_id,
-            parent_secret,
-            parent_range_start,
-            parent_range_width,
+            parent_secret: parent.parent_secret,
+            parent_range_start: parent.parent_range_start,
+            parent_range_width: parent.parent_range_width,
             child_side,
             child_range_start: range_start,
             child_range_width: range_width,
@@ -432,17 +432,14 @@ fn run_key_node_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     .map_err(|err| format!("admit local history node secret: {err}"))?;
     let mut purged_event_bytes = 0usize;
     if let Some(retired_node_id) = tombstone_node_id {
-        // Mirror worker's tombstone purge: drop the retired event's
-        // canonical bytes so its plaintext node_secret cannot be recovered.
-        let purged = context
-            .store
-            .write_transaction(|store| {
-                crate::workers::pipeline_helpers::purging::purge_event_storage_in_tx(
-                    store,
-                    &retired_node_id,
-                )
-            })
-            .map_err(|err| format!("purge retired history node bytes: {err}"))?;
+        // `key-node` is a dev utility that bypasses the worker's full
+        // retire pipeline; the worker would normally purge the retired
+        // event's canonical bytes itself. Calling the same primitive here
+        // keeps forward-secrecy intact for diagnostic-issued retirements.
+        let purged = local_history_node_secret::commands::purge_retired_node_bytes(
+            &context.store,
+            retired_node_id,
+        )?;
         if purged {
             purged_event_bytes += 1;
         }
@@ -457,42 +454,6 @@ fn run_key_node_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
         format!("admitted_events: {}", admitted.admitted.inserted_events),
         format!("purged_event_bytes: {}", purged_event_bytes),
     ]))
-}
-
-/// Load `(parent_secret, parent_range_start, parent_range_width)` for a
-/// `source_secret_id` that names either a `local_key_secret` (frontier root)
-/// or an already-materialized `local_history_node_secret`.
-fn load_time_tree_parent(
-    store: &Store,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    source_secret_id: EventId,
-) -> Result<(crate::core::crypto::XChaCha20Poly1305Key, u64, u64), String> {
-    if let Some(row) = local_key_secret::queries::get(store, workspace_id, removal_frontier_id)? {
-        if row.local_key_secret_id == source_secret_id {
-            return Ok((
-                row.key_secret,
-                0,
-                crate::workers::encryption::TIME_TREE_ROOT_WIDTH,
-            ));
-        }
-    }
-    let node_bytes = event_queries::event_bytes(store, &source_secret_id)
-        .map_err(|err| format!("load source event: {err}"))?
-        .ok_or_else(|| "history node source event is missing".to_string())?;
-    let node = local_history_node_secret::codec::decode(&node_bytes)
-        .map_err(|_| "history node source event is not key material".to_string())?;
-    let row = local_history_node_secret::queries::get(
-        store,
-        workspace_id,
-        removal_frontier_id,
-        node.range_start,
-        node.range_width,
-        node.bit_depth,
-        node.event_id_prefix,
-    )?
-    .ok_or_else(|| "history node source has been tombstoned".to_string())?;
-    Ok((row.node_secret, row.range_start, row.range_width))
 }
 
 fn run_key_access_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {

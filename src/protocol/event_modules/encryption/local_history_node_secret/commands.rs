@@ -31,11 +31,14 @@
 //! to preserve forward secrecy.
 
 use crate::core::crypto;
+use crate::core::store::Store;
+use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::CommandOutput;
 use crate::protocol::wire::Writer;
 
 use super::codec;
+use super::queries;
 use super::types::{
     mask_prefix_to_depth, HistoryNodeSecret, LocalHistoryNodeSecret, TIME_TREE_BIT_DEPTH,
     TRIE_LEAF_BIT_DEPTH,
@@ -386,6 +389,79 @@ pub(super) fn validate_event_fields(event: &LocalHistoryNodeSecret) -> Result<()
         return Err("local history node event_id_prefix carries bits past bit_depth".to_string());
     }
     Ok(())
+}
+
+/// Parent secret material plus the time-axis range it covers. Used by
+/// callers that derive a time-tree split off a source secret identified
+/// by `source_secret_id` — either the workspace `local_key_secret`
+/// (frontier root) or a previously-materialized
+/// `local_history_node_secret`.
+#[derive(Debug, Clone)]
+pub struct TimeTreeParent {
+    pub parent_secret: crypto::XChaCha20Poly1305Key,
+    pub parent_range_start: u64,
+    pub parent_range_width: u64,
+}
+
+/// Purge the canonical bytes of a retired `local_history_node_secret`
+/// event so its plaintext `node_secret` cannot be recovered from disk.
+///
+/// Production retirement runs through the encryption worker which invokes
+/// the same primitive inside a transactional walk. This helper exists so
+/// the `key-node` diagnostic CLI (which authors a single split + optional
+/// retirement outside the worker) can perform the same final cleanup
+/// without spelling out the pipeline-helpers call site inline. Returns
+/// `Ok(true)` when at least one row's bytes were dropped.
+pub fn purge_retired_node_bytes(store: &Store, retired_node_id: EventId) -> Result<bool, String> {
+    store
+        .write_transaction(|store| {
+            crate::workers::pipeline_helpers::purging::purge_event_storage_in_tx(
+                store,
+                &retired_node_id,
+            )
+        })
+        .map_err(|err| format!("purge retired history node bytes: {err}"))
+}
+
+/// Resolve a parent secret for `derive_time_split`. The CLI's `key-node`
+/// utility uses this to feed `derive_time_split` without re-reading the
+/// time-tree state itself.
+pub fn load_time_tree_parent(
+    store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    source_secret_id: EventId,
+) -> Result<TimeTreeParent, String> {
+    use super::super::local_key_secret;
+    if let Some(row) = local_key_secret::queries::get(store, workspace_id, removal_frontier_id)? {
+        if row.local_key_secret_id == source_secret_id {
+            return Ok(TimeTreeParent {
+                parent_secret: row.key_secret,
+                parent_range_start: 0,
+                parent_range_width: crate::workers::encryption::TIME_TREE_ROOT_WIDTH,
+            });
+        }
+    }
+    let node_bytes = event_queries::event_bytes(store, &source_secret_id)
+        .map_err(|err| format!("load source event: {err}"))?
+        .ok_or_else(|| "history node source event is missing".to_string())?;
+    let node = codec::decode(&node_bytes)
+        .map_err(|_| "history node source event is not key material".to_string())?;
+    let row = queries::get(
+        store,
+        workspace_id,
+        removal_frontier_id,
+        node.range_start,
+        node.range_width,
+        node.bit_depth,
+        node.event_id_prefix,
+    )?
+    .ok_or_else(|| "history node source has been tombstoned".to_string())?;
+    Ok(TimeTreeParent {
+        parent_secret: row.node_secret,
+        parent_range_start: row.range_start,
+        parent_range_width: row.range_width,
+    })
 }
 
 #[cfg(test)]
