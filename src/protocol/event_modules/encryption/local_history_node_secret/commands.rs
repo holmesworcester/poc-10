@@ -403,26 +403,6 @@ pub struct TimeTreeParent {
     pub parent_range_width: u64,
 }
 
-/// Purge the canonical bytes of a retired `local_history_node_secret`
-/// event so its plaintext `node_secret` cannot be recovered from disk.
-///
-/// Production retirement runs through the encryption worker which invokes
-/// the same primitive inside a transactional walk. This helper exists so
-/// the `key-node` diagnostic CLI (which authors a single split + optional
-/// retirement outside the worker) can perform the same final cleanup
-/// without spelling out the pipeline-helpers call site inline. Returns
-/// `Ok(true)` when at least one row's bytes were dropped.
-pub fn purge_retired_node_bytes(store: &Store, retired_node_id: EventId) -> Result<bool, String> {
-    store
-        .write_transaction(|store| {
-            crate::workers::pipeline_helpers::purging::purge_event_storage_in_tx(
-                store,
-                &retired_node_id,
-            )
-        })
-        .map_err(|err| format!("purge retired history node bytes: {err}"))
-}
-
 /// Resolve a parent secret for `derive_time_split`. The CLI's `key-node`
 /// utility uses this to feed `derive_time_split` without re-reading the
 /// time-tree state itself.

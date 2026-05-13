@@ -443,13 +443,18 @@ fn run_key_node_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     if let Some(retired_node_id) = tombstone_node_id {
         // `key-node` is a dev utility that bypasses the worker's full
         // retire pipeline; the worker would normally purge the retired
-        // event's canonical bytes itself. Calling the same primitive here
-        // keeps forward-secrecy intact for diagnostic-issued retirements.
-        let purged = local_history_node_secret::commands::purge_retired_node_bytes(
+        // event's canonical bytes itself. Driving the same primitive
+        // through `Work::PurgeRetiredHistoryNodeBytes` keeps the storage
+        // mutation in the encryption worker where it belongs.
+        let output = worker::run(
             &context.store,
-            retired_node_id,
+            &context.protocol,
+            worker::Work::PurgeRetiredHistoryNodeBytes { retired_node_id },
         )?;
-        if purged {
+        let worker::Output::PurgedRetiredHistoryNodeBytes(report) = output else {
+            return Err("unexpected purge retired history node bytes output".to_string());
+        };
+        if report.purged {
             purged_event_bytes += 1;
         }
     }

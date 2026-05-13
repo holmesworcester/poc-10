@@ -143,6 +143,15 @@ pub enum Work {
         /// Minute boundary; everything `< floor_minute` is chopped.
         floor_minute: u64,
     },
+    /// Diagnostic primitive: purge the canonical bytes of one retired
+    /// `local_history_node_secret` event. Production retirement runs
+    /// through `RetireDeletedEventLeaf` which invokes this primitive
+    /// inside its transactional walk; the `key-node` dev CLI authors a
+    /// single split + optional retirement outside that walk and uses
+    /// this variant to drop plaintext for forward secrecy.
+    PurgeRetiredHistoryNodeBytes {
+        retired_node_id: EventId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +162,15 @@ pub enum Output {
     RetiredDeletedEventLeaf(RetireDeletedEventLeafReport),
     DrainedPendingMessageLeaves(DrainPendingLeavesReport),
     ChoppedTimeTreePrefix(ChopReport),
+    PurgedRetiredHistoryNodeBytes(PurgeRetiredHistoryNodeBytesReport),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PurgeRetiredHistoryNodeBytesReport {
+    /// `true` when the retired event's canonical bytes were on disk and
+    /// have been dropped from `event_modules.events`; `false` when the
+    /// event was already missing.
+    pub purged: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -291,7 +309,21 @@ pub fn run<R: EventRegistry>(store: &Store, registry: &R, work: Work) -> Result<
             floor_minute,
         )
         .map(Output::ChoppedTimeTreePrefix),
+        Work::PurgeRetiredHistoryNodeBytes { retired_node_id } => {
+            purge_retired_history_node_bytes(store, retired_node_id)
+                .map(Output::PurgedRetiredHistoryNodeBytes)
+        }
     }
+}
+
+fn purge_retired_history_node_bytes(
+    store: &Store,
+    retired_node_id: EventId,
+) -> Result<PurgeRetiredHistoryNodeBytesReport, String> {
+    let purged = store
+        .write_transaction(|store| purging::purge_event_storage_in_tx(store, &retired_node_id))
+        .map_err(|err| format!("purge retired history node bytes: {err}"))?;
+    Ok(PurgeRetiredHistoryNodeBytesReport { purged })
 }
 
 fn derive_key_secrets<R: EventRegistry>(
