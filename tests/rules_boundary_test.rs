@@ -1591,15 +1591,19 @@ fn event_module_commands_do_not_mutate_storage_directly() {
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "commands.rs"))
         .collect::<Vec<_>>();
+    // The 2026-05-13 mod.rs split + cli.rs thinning moved authoring-time
+    // reads (next-timestamp lookups, active-frontier resolution,
+    // membership lookups, sealed-row decryption) into commands.rs so each
+    // event module owns the read surface its commands need. That means
+    // commands legitimately take `&Store` and call `*::queries::*` for
+    // those reads. This rule still forbids mutations (write_transaction,
+    // *_in_tx helpers, projector output construction, drain primitives,
+    // and direct rusqlite use) — commands return CommandOutput, workers
+    // and projectors own the writes.
     let forbidden = [
-        "use crate::core::store::Store",
-        "&Store",
-        "Store,",
-        "Store)",
         "ProjectionOutput",
         "TableRow",
         "with_changes",
-        ".rows",
         "write_transaction",
         "insert_table_rows",
         "insert_event(",
