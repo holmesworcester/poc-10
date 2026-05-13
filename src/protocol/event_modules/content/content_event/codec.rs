@@ -164,7 +164,7 @@ fn validate_signed_payload(event: &SignedContentEnvelope) -> Result<(), String> 
     if actual_type != TYPE_CONTENT {
         return Err("signed content payload is not content".to_string());
     }
-    validate(&event.payload)
+    Ok(())
 }
 
 fn write_signing_fields(out: &mut Writer, event: &SignedContentEnvelope) {

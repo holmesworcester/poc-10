@@ -157,7 +157,7 @@ fn validate_signed_payload(event: &SignedMessageDeletionEnvelope) -> Result<(), 
     if actual_type != TYPE_MESSAGE_DELETION {
         return Err("signed message deletion payload is not a deletion event".to_string());
     }
-    metadata(&event.payload).map(|_| ())
+    Ok(())
 }
 
 fn write_signing_fields(out: &mut Writer, event: &SignedMessageDeletionEnvelope) {
