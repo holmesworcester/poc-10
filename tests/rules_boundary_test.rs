@@ -2303,6 +2303,134 @@ fn core_storage_and_transport_do_not_own_connection_or_bootstrap_schema() {
 }
 
 #[test]
+fn queries_rs_is_read_only() {
+    // queries.rs is the read-only surface used by CLI/reporting and
+    // sibling event-module admit-gates. Mutation primitives belong in
+    // workers (or projectors via row outputs). Complements the existing
+    // `event_module_queries_are_read_only` lint by also rejecting raw
+    // store mutator primitives (insert/delete/replace _in_tx) that are
+    // forbidden everywhere outside workers/projectors but are not yet
+    // covered by that lint's literal-substring set.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut offenders = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "queries.rs"))
+    {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        let relative = path.strip_prefix(root).unwrap().display();
+        for needle in [
+            "insert_table_rows_in_tx",
+            "delete_table_rows_in_tx",
+            "replace_table_rows_in_tx",
+            "write_transaction",
+        ] {
+            if production.contains(needle) {
+                offenders.push(format!(
+                    "{relative} contains mutator `{needle}` (queries.rs is read-only)"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "queries.rs is a read-only surface; mutations live in workers (or projectors via row outputs):\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn schema_rs_no_store_queries_or_mutations() {
+    // schema.rs files declare table names, row builders, and decode helpers
+    // for their own rows. Read queries against Store belong in queries.rs;
+    // mutations belong in workers/projectors. The whitelist below is the
+    // shared protocol-wide schema (which re-exports queries for callers
+    // inside event_modules) and the documented admit-gate helpers that
+    // cannot move to projector.rs without violating the projector
+    // store-query lint.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let admit_gate_whitelist = [
+        "src/protocol/event_modules/content/message/schema.rs",
+        "src/protocol/event_modules/content/reaction/schema.rs",
+        "src/protocol/event_modules/content/file/schema.rs",
+        "src/protocol/event_modules/content/file_slice/schema.rs",
+    ];
+    // The protocol-wide root schema deliberately re-exports query helpers
+    // so admit-gates inside event_modules can call them without crossing
+    // the queries:: boundary.
+    let store_helper_whitelist =
+        ["src/protocol/event_modules/schema.rs"];
+
+    let mut offenders = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "schema.rs"))
+    {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let admit_gate_allowed = admit_gate_whitelist.iter().any(|allowed| relative == *allowed);
+        let store_helper_allowed = store_helper_whitelist
+            .iter()
+            .any(|allowed| relative == *allowed);
+        for line in production.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub fn ") {
+                let name = trimmed
+                    .trim_start_matches("pub fn ")
+                    .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .next()
+                    .unwrap_or_default();
+                let takes_store = trimmed.contains("&Store") || trimmed.contains("store: &Store");
+                if takes_store && !store_helper_allowed {
+                    let admit_gate = name == "admit_check_received" && admit_gate_allowed;
+                    if !admit_gate {
+                        offenders.push(format!(
+                            "{relative}: `pub fn {name}` takes &Store (move read into queries.rs)"
+                        ));
+                    }
+                }
+                let validation_prefixes = ["admit_check_", "validate_", "verify_", "check_"];
+                if validation_prefixes
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+                {
+                    let admit_gate = name == "admit_check_received" && admit_gate_allowed;
+                    if !admit_gate {
+                        offenders.push(format!(
+                            "{relative}: `pub fn {name}` is a validation helper (move to projector.rs/commands.rs)"
+                        ));
+                    }
+                }
+            }
+        }
+        // Forbid mutating calls anywhere in production text.
+        for needle in [
+            "insert_table_rows_in_tx",
+            "delete_table_rows_in_tx",
+            "replace_table_rows_in_tx",
+            "write_transaction",
+        ] {
+            if production.contains(needle) {
+                offenders.push(format!(
+                    "{relative} contains mutator `{needle}` (writes belong in workers/projectors)"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "schema.rs files declare tables and row helpers; queries belong in queries.rs and mutations belong in workers:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn file_inventory_for_event_modules() {
     // Strengthens `child_event_module_directories_have_canonical_shape` (which
     // checks the required minimum) by enforcing the upper bound: every file
