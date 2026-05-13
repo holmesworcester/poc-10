@@ -2303,6 +2303,142 @@ fn core_storage_and_transport_do_not_own_connection_or_bootstrap_schema() {
 }
 
 #[test]
+fn cli_rs_no_business_logic() {
+    // event-module cli.rs files parse args, call into commands, and format
+    // reports. Crypto (signing/nonces), direct store mutations, and direct
+    // projector calls belong inside commands.rs/projector.rs/workers, with
+    // cli.rs as the thin user-facing adapter.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut offenders = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
+    {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        // Crypto belongs in commands.rs (signing) or codec.rs (envelope
+        // packing). cli.rs must not import core::crypto.
+        for needle in ["use crate::core::crypto", "crate::core::crypto::"] {
+            if production.contains(needle) {
+                offenders.push(format!(
+                    "{relative} imports core::crypto (signing belongs in commands.rs)"
+                ));
+            }
+        }
+        // Direct store mutations belong in workers (or in projector outputs
+        // applied by workers); cli.rs delegates to commands/workers.
+        for needle in [
+            "insert_table_rows_in_tx",
+            "delete_table_rows_in_tx",
+            "replace_table_rows_in_tx",
+            "write_transaction",
+        ] {
+            if production.contains(needle) {
+                offenders.push(format!(
+                    "{relative} contains store mutator `{needle}` (writes belong in workers)"
+                ));
+            }
+        }
+        // Projector logic is row-only; cli.rs surfaces results, not row
+        // construction. Imports of `*::projector` from cli.rs would let the
+        // CLI run projection out of band.
+        for line in production.lines() {
+            let trimmed = line.trim_start();
+            if !(trimmed.starts_with("use ") || trimmed.starts_with("pub use ")) {
+                continue;
+            }
+            if trimmed.contains("::projector::") || trimmed.contains("::projector;") {
+                offenders.push(format!(
+                    "{relative} imports `::projector` (cli.rs must not call projection directly): {}",
+                    trimmed.trim_end()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "event-module cli.rs files parse args and call commands/workers; crypto, store writes, and projector imports belong elsewhere:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn codec_rs_no_semantic_validation() {
+    // codec.rs files encode/decode wire bytes. The only validation allowed
+    // is `validate_signed_payload`, which checks the envelope's leading
+    // type tag and metadata structure - not semantic invariants. Semantic
+    // validation (checking parsed event content against rules) belongs in
+    // projector.rs or commands.rs.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let mut offenders = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "codec.rs"))
+    {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        for line in production.lines() {
+            let trimmed = line.trim_start();
+            let fn_prefix = if trimmed.starts_with("pub fn ") {
+                Some("pub fn ")
+            } else if trimmed.starts_with("fn ") {
+                Some("fn ")
+            } else {
+                None
+            };
+            let Some(prefix) = fn_prefix else { continue };
+            let after = trimmed.trim_start_matches(prefix);
+            let name = after
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .next()
+                .unwrap_or_default();
+            // Reject all `validate_*` except the whitelisted envelope tag check.
+            if name.starts_with("validate_") && name != "validate_signed_payload" {
+                offenders.push(format!(
+                    "{relative}: `fn {name}` is a validation helper (only validate_signed_payload allowed in codec.rs)"
+                ));
+            }
+            // Reject any fn that looks like semantic validation: takes a
+            // parsed event/envelope struct and returns Result<(), _>. The
+            // whitelisted `validate_signed_payload` is the only such fn.
+            if name == "validate_signed_payload" {
+                continue;
+            }
+            // Heuristic: rest-of-signature on this line plus the next few.
+            // We match (...: &<TypeWithEventOrEnvelopeSuffix>...) -> Result<(),
+            let mut signature = String::new();
+            for sig_line in production.lines().skip_while(|l| !std::ptr::eq(*l, line)) {
+                signature.push_str(sig_line);
+                if signature.contains('{') {
+                    break;
+                }
+            }
+            let has_event_or_envelope_param = signature.contains("Envelope)")
+                || signature.contains("Envelope,")
+                || signature.contains("Event)")
+                || signature.contains("Event,");
+            let returns_unit_result = signature.contains("-> Result<(),");
+            if has_event_or_envelope_param && returns_unit_result {
+                offenders.push(format!(
+                    "{relative}: `fn {name}` takes a parsed event/envelope and returns Result<(), _> (semantic validation belongs in projector.rs/commands.rs)"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "codec.rs is encode/decode only; semantic validation goes to projector.rs or commands.rs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn queries_rs_is_read_only() {
     // queries.rs is the read-only surface used by CLI/reporting and
     // sibling event-module admit-gates. Mutation primitives belong in
