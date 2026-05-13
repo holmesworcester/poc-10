@@ -262,6 +262,10 @@ pub fn workspace_expires_at_minute(
 
 /// Per-event leaf key material identifying which `local_history_node_secret`
 /// covers the authoring coord and the AEAD secret bytes for that leaf.
+///
+/// Constructed by the CLI-side `derive_message_leaf` helper (which drives the
+/// encryption worker); commands consume `MessageLeafKey` as an explicit
+/// authoring input rather than asking workers for it themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageLeafKey {
     pub removal_frontier_id: EventId,
@@ -350,49 +354,6 @@ pub fn open_sealed_message_row(
         signer_endpoint_shared_id: row.signer_endpoint_shared_id,
         text,
     }))
-}
-
-/// Derive (or look up) the per-event leaf for one
-/// `(workspace_id, removal_frontier_id, created_at_ms,
-/// event_id_in_minute)` quadruple. Drives the encryption worker's
-/// `DeriveEventLeaf` step; safe to call repeatedly for the same coord
-/// (idempotent on the second call).
-pub fn derive_message_leaf<R>(
-    store: &Store,
-    registry: &R,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    created_at_ms: u64,
-    event_id_in_minute: EventId,
-) -> Result<MessageLeafKey, String>
-where
-    R: crate::workers::pipeline_helpers::event_pipeline::EventRegistry,
-{
-    use crate::workers::encryption as encryption_worker;
-    let output = encryption_worker::run(
-        store,
-        registry,
-        encryption_worker::Work::DeriveEventLeaf {
-            workspace_id,
-            removal_frontier_id,
-            created_at_ms,
-            event_id_in_minute,
-        },
-    )?;
-    let encryption_worker::Output::DerivedEventLeaf(report) = output else {
-        return Err("unexpected encryption worker output".to_string());
-    };
-    let local_history_node_secret_id = report
-        .local_history_node_secret_id
-        .ok_or_else(|| "leaf history node secret id was not produced".to_string())?;
-    let leaf_node_secret = report
-        .leaf_node_secret
-        .ok_or_else(|| "leaf history node secret material was not produced".to_string())?;
-    Ok(MessageLeafKey {
-        removal_frontier_id,
-        local_history_node_secret_id,
-        leaf_node_secret,
-    })
 }
 
 #[cfg(test)]

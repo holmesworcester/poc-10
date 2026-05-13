@@ -102,7 +102,7 @@ fn run_send_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         &removal_frontier_id,
         timestamp,
     );
-    let leaf = commands::derive_message_leaf(
+    let leaf = derive_message_leaf(
         &context.store,
         &context.protocol,
         workspace_id,
@@ -355,15 +355,60 @@ pub fn resolve_selector(
     }
 }
 
-// CLI authoring helpers (membership lookup, active-frontier resolution,
-// next-timestamp, per-event leaf derivation, expires-at computation) live in
-// `commands.rs` so peer CLIs and tests can share them. The wrappers below
+// CLI authoring helpers that read store state (membership lookup,
+// active-frontier resolution, next-timestamp, expires-at computation) live
+// in `commands.rs` so peer CLIs and tests can share them. The wrappers below
 // keep `message::cli::*` callable as a compatibility surface for the rest of
-// the CLI tree.
+// the CLI tree. `derive_message_leaf` lives in this `cli.rs` because it
+// drives the encryption worker — commands.rs must not call worker::run.
 pub(crate) use commands::require_local_membership as require_membership;
 pub(crate) use commands::{
-    derive_message_leaf, next_authoring_timestamp as next_timestamp, require_active_frontier_id,
+    next_authoring_timestamp as next_timestamp, require_active_frontier_id,
 };
+
+/// Derive (or look up) the per-event leaf for one
+/// `(workspace_id, removal_frontier_id, created_at_ms,
+/// event_id_in_minute)` quadruple. Drives the encryption worker's
+/// `DeriveEventLeaf` step; safe to call repeatedly for the same coord
+/// (idempotent on the second call). Lives in `cli.rs` because driving a
+/// worker is not a command-time concern.
+pub(crate) fn derive_message_leaf<R>(
+    store: &Store,
+    registry: &R,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    created_at_ms: u64,
+    event_id_in_minute: EventId,
+) -> Result<commands::MessageLeafKey, String>
+where
+    R: crate::workers::pipeline_helpers::event_pipeline::EventRegistry,
+{
+    use crate::workers::encryption as encryption_worker;
+    let output = encryption_worker::run(
+        store,
+        registry,
+        encryption_worker::Work::DeriveEventLeaf {
+            workspace_id,
+            removal_frontier_id,
+            created_at_ms,
+            event_id_in_minute,
+        },
+    )?;
+    let encryption_worker::Output::DerivedEventLeaf(report) = output else {
+        return Err("unexpected encryption worker output".to_string());
+    };
+    let local_history_node_secret_id = report
+        .local_history_node_secret_id
+        .ok_or_else(|| "leaf history node secret id was not produced".to_string())?;
+    let leaf_node_secret = report
+        .leaf_node_secret
+        .ok_or_else(|| "leaf history node secret material was not produced".to_string())?;
+    Ok(commands::MessageLeafKey {
+        removal_frontier_id,
+        local_history_node_secret_id,
+        leaf_node_secret,
+    })
+}
 
 fn user_name(store: &Store, workspace_id: EventId, user_id: EventId) -> Result<String, String> {
     let key = user::schema::user_key(&workspace_id, &user_id);

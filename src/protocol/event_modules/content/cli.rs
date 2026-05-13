@@ -106,7 +106,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         &removal_frontier_id,
         timestamp,
     );
-    let message_leaf = message::commands::derive_message_leaf(
+    let message_leaf = message::cli::derive_message_leaf(
         &context.store,
         &context.protocol,
         parsed.workspace_id,
@@ -152,7 +152,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         &removal_frontier_id,
         timestamp,
     );
-    let file_leaf = message::commands::derive_message_leaf(
+    let file_leaf = message::cli::derive_message_leaf(
         &context.store,
         &context.protocol,
         parsed.workspace_id,
