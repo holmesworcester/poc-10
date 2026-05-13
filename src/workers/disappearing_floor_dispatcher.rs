@@ -325,7 +325,6 @@ mod tests {
             WORKSPACE,
             1,
             [4; 32],
-            0,
             "test",
         )
         .expect("workspace row");

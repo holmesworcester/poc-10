@@ -269,19 +269,24 @@ fn sync_worker_consumes_applied_shared_event_queue() {
     let store = Protocol::open_store(tmp.path().join("sync-index-queue.db")).unwrap();
     let modules = Modules::new();
 
+    let signer_private_key = [11; 32];
+    let signer_public_key = topo::core::crypto::ed25519_public_key(&signer_private_key);
     let output = workspace::commands::create(workspace::commands::CreateWorkspace {
         created_at_ms: 1,
-        public_key: [9; 32],
+        public_key: signer_public_key,
+        signer_private_key,
         disappearing_ttl_minutes: 0,
         name: "queue-index".to_string(),
     })
     .unwrap();
     worker::run(&store, &modules, output).expect("admit shared event");
+    // create-workspace emits two shared events: the workspace event and an
+    // initial disappearing_messages_setting event.
     assert_eq!(
         store
             .table_row_count(worker_schema::APPLIED_SHARED_EVENTS)
             .expect("count sync index queue"),
-        1
+        2
     );
 
     let index = topo::protocol::event_modules::sync::SyncIndex::default();
@@ -290,7 +295,7 @@ fn sync_worker_consumes_applied_shared_event_queue() {
     let sync::Output::Indexed(report) = output else {
         panic!("sync worker returned non-index output");
     };
-    assert_eq!(report.indexed_events, 1);
+    assert_eq!(report.indexed_events, 2);
     assert_eq!(
         store
             .table_row_count(worker_schema::APPLIED_SHARED_EVENTS)

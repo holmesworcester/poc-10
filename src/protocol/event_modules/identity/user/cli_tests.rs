@@ -19,6 +19,7 @@ fn admits_workspace_invite_user_join_flow_and_projects_rows() {
     let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
         created_at_ms: 1,
         public_key: workspace_public_key,
+        signer_private_key: workspace_private_key,
         disappearing_ttl_minutes: 0,
         name: "Workspace".to_string(),
     })
@@ -85,6 +86,7 @@ fn admission_rejects_user_signed_by_key_not_authorized_by_invite() {
     let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
         created_at_ms: 1,
         public_key: workspace_public_key,
+        signer_private_key: workspace_private_key,
         disappearing_ttl_minutes: 0,
         name: "Workspace".to_string(),
     })
@@ -136,6 +138,7 @@ fn join_store_receives_shared_workspace_and_invite_records_then_creates_user() {
     let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
         created_at_ms: 1,
         public_key: workspace_public_key,
+        signer_private_key: workspace_private_key,
         disappearing_ttl_minutes: 0,
         name: "Workspace".to_string(),
     })

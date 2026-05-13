@@ -1170,9 +1170,13 @@ mod tests {
         let inbound_connection_id = [1; 32];
         let response_connection_id = [2; 32];
 
+        let workspace_signer_private_key = [11; 32];
+        let workspace_signer_public_key =
+            crate::core::crypto::ed25519_public_key(&workspace_signer_private_key);
         let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
             created_at_ms: 1,
-            public_key: [9; 32],
+            public_key: workspace_signer_public_key,
+            signer_private_key: workspace_signer_private_key,
             disappearing_ttl_minutes: 0,
             name: "sync-in-route".to_string(),
         })
@@ -1260,9 +1264,13 @@ mod tests {
         let inbound_connection_id = [1; 32];
         let alternate_connection_id = [2; 32];
 
+        let workspace_signer_private_key = [11; 32];
+        let workspace_signer_public_key =
+            crate::core::crypto::ed25519_public_key(&workspace_signer_private_key);
         let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
             created_at_ms: 1,
-            public_key: [9; 32],
+            public_key: workspace_signer_public_key,
+            signer_private_key: workspace_signer_private_key,
             disappearing_ttl_minutes: 0,
             name: "sync-route-prefer-inbound".to_string(),
         })

@@ -144,7 +144,6 @@ mod tests {
         let workspace = WorkspaceEvent {
             created_at_ms: 1,
             public_key: signer_public_key(&WORKSPACE_PRIVATE),
-            disappearing_ttl_minutes: 0,
             name: "Workspace".to_string(),
         };
         let bytes = workspace::codec::encode(&workspace).expect("encode workspace");

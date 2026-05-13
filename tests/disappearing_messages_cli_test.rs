@@ -6,9 +6,10 @@
 //!
 //! The shipped surface tested here:
 //!   * `create-workspace ... --ttl-minutes <u32>` plumbs a workspace-wide
-//!     TTL into authored messages (slice 1 fallback).
+//!     TTL into the initial `disappearing_messages_setting` event emitted
+//!     alongside the workspace event, which messages then reference.
 //!   * `disappearing-set <ws> <ttl_minutes>` admin-signed setting event
-//!     supersedes the workspace-event TTL for new authoring (slice 2).
+//!     supersedes the initial setting for new authoring (slice 2).
 //!   * `MessageEvent` canonical bytes carry `expires_at_minute: u64`
 //!     (`u64::MAX` = no expiry) and `disappearing_setting_id: EventId`
 //!     referencing the policy under which the message was authored.
@@ -307,13 +308,14 @@ fn cli_disappearing_messages_two_peer_convergence() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3 (slice 2): admin-signed `disappearing_messages_setting` event
-// supersedes the workspace event's initial TTL. Authoring under one TTL
-// stamps that TTL into the message's canonical bytes; a later admin
-// `disappearing-set` does NOT retroactively rewrite already-stamped
-// messages, but DOES change the TTL stamped into subsequent messages.
+// Test 3: later admin-signed `disappearing_messages_setting` events
+// supersede earlier ones; messages stamped under an earlier setting
+// retain their stamped TTL. `workspace::commands::create` emits the
+// workspace's initial setting alongside the workspace event, so the
+// "first" setting and any later admin `disappearing-set` form a chain
+// of settings — there is no separate "workspace TTL fallback" anymore.
 //
-// This is the load-bearing slice-2 invariant from `encryption.md`:
+// This is the load-bearing invariant from `encryption.md`:
 // "Late arrivals do not retroactively change message expiry."
 // ---------------------------------------------------------------------------
 

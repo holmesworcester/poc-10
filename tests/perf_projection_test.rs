@@ -56,6 +56,7 @@ impl PerfFixture {
             workspace::commands::create(workspace::commands::CreateWorkspace {
                 created_at_ms: 1,
                 public_key: endpoint.signing_public_key,
+                signer_private_key: endpoint.signing_secret,
                 disappearing_ttl_minutes: 0,
                 name: "perf".to_string(),
             })

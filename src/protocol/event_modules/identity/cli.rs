@@ -111,10 +111,12 @@ fn run_create_workspace_command(
     let workspace = workspace::commands::create(workspace::commands::CreateWorkspace {
         created_at_ms: timestamp,
         public_key: local.signing_public_key,
+        signer_private_key: local.signing_secret,
         disappearing_ttl_minutes: options.disappearing_ttl_minutes,
         name: options.name,
     })?;
     let workspace_id = workspace.value.workspace_id;
+    let initial_setting_id = workspace.value.initial_setting_event_id;
     admit(context, workspace)?;
 
     let bootstrap = admin::commands::create_bootstrap(admin::commands::CreateBootstrapAdmin {
@@ -186,6 +188,8 @@ fn run_create_workspace_command(
             encode_hex(&endpoint_join.endpoint_shared_id)
         ),
         format!("admin_id: {}", encode_hex(&admin_id)),
+        format!("initial_setting_id: {}", encode_hex(&initial_setting_id)),
+        format!("disappearing_ttl_minutes: {}", options.disappearing_ttl_minutes),
     ]))
 }
 
