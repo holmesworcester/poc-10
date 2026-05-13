@@ -1749,21 +1749,27 @@ fn event_module_queries_are_read_only() {
 }
 
 #[test]
-fn worker_and_command_logic_do_not_call_query_modules() {
+fn worker_logic_and_projectors_do_not_call_query_modules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
+    // The 2026-05-13 mod.rs split + cli.rs thinning moved authoring-time
+    // reads into commands.rs and made `queries.rs` the read surface that
+    // both CLI and commands consume. Commands legitimately call
+    // `*::queries::*` to gather context for the events they propose.
+    // Projectors stay pure (row in / row out) and workers own active
+    // queue/cursor state; both must still go through schema reads, not
+    // queries.rs.
     let files = rust_files(&event_root)
         .into_iter()
         .filter(|path| {
-            path.file_name().is_some_and(|name| {
-                name == "worker.rs" || name == "commands.rs" || name == "projector.rs"
-            })
+            path.file_name()
+                .is_some_and(|name| name == "worker.rs" || name == "projector.rs")
         })
         .collect::<Vec<_>>();
     let violations = file_contains_violations(root, &files, &["queries::", "::queries::"]);
     assert!(
         violations.is_empty(),
-        "queries.rs is for read-only CLI/reporting surfaces; active worker/command reads stay with their owning work:\n{}",
+        "queries.rs is for read-only CLI/reporting and command-time context; active worker/projector reads stay with their owning work:\n{}",
         violations.join("\n")
     );
 }
