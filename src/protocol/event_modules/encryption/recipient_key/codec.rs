@@ -46,7 +46,6 @@ pub fn decode(bytes: &[u8]) -> Result<RecipientKeyEvent, String> {
         recipient_key: reader.id()?,
     };
     reader.finish()?;
-    validate_event(&event)?;
     Ok(event)
 }
 
@@ -146,19 +145,6 @@ fn validate_signed_payload(event: &SignedRecipientKeyEnvelope) -> Result<(), Str
     metadata(&event.payload).map(|_| ())
 }
 
-fn validate_event(event: &RecipientKeyEvent) -> Result<(), String> {
-    if is_zero(&event.workspace_id) {
-        return Err("recipient key workspace cannot be empty".to_string());
-    }
-    if is_zero(&event.endpoint_shared_id) {
-        return Err("recipient key endpoint_shared_id cannot be empty".to_string());
-    }
-    if is_zero(&event.recipient_key) {
-        return Err("recipient key public key cannot be empty".to_string());
-    }
-    Ok(())
-}
-
 fn write_signing_fields(out: &mut Writer, event: &SignedRecipientKeyEnvelope) {
     out.u8(TYPE_SIGNED_RECIPIENT_KEY);
     out.id(&event.signer_endpoint_shared_id);
@@ -180,10 +166,6 @@ fn push_unique(out: &mut Vec<EventId>, id: EventId) {
     if !out.iter().any(|candidate| candidate == &id) {
         out.push(id);
     }
-}
-
-fn is_zero(bytes: &[u8; 32]) -> bool {
-    bytes.iter().all(|byte| *byte == 0)
 }
 
 #[cfg(test)]
@@ -252,14 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_empty_required_ids_and_trailing_bytes() {
-        let mut sample = event();
-        sample.workspace_id = [0; 32];
-        assert_eq!(
-            decode(&encode(&sample)).expect_err("empty workspace must fail"),
-            "recipient key workspace cannot be empty"
-        );
-
+    fn decode_rejects_trailing_bytes() {
         let mut bytes = encode(&event());
         bytes.push(0);
         let err = decode(&bytes).expect_err("trailing byte must fail");

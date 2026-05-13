@@ -69,7 +69,6 @@ pub fn decode(bytes: &[u8]) -> Result<KeyWrapEvent, String> {
         ciphertext: fixed_ciphertext(reader.bytes(KEY_WRAP_CIPHERTEXT_BYTES)?)?,
     };
     reader.finish()?;
-    validate_event(&event)?;
     Ok(event)
 }
 
@@ -181,21 +180,6 @@ fn validate_signed_payload(event: &SignedKeyWrapEnvelope) -> Result<(), String> 
     metadata(&event.payload).map(|_| ())
 }
 
-fn validate_event(event: &KeyWrapEvent) -> Result<(), String> {
-    for (name, id) in [
-        ("key wrap workspace", &event.workspace_id),
-        ("key wrap removal_frontier_id", &event.removal_frontier_id),
-        ("key wrap local_key_secret_id", &event.local_key_secret_id),
-        ("key wrap recipient_key_id", &event.recipient_key_id),
-        ("key wrap sender public key", &event.sender_wrap_public_key),
-    ] {
-        if is_zero(id) {
-            return Err(format!("{name} cannot be empty"));
-        }
-    }
-    Ok(())
-}
-
 fn write_signing_fields(out: &mut Writer, event: &SignedKeyWrapEnvelope) {
     out.u8(TYPE_SIGNED_KEY_WRAP);
     out.id(&event.signer_endpoint_shared_id);
@@ -229,10 +213,6 @@ fn push_unique(out: &mut Vec<EventId>, id: EventId) {
     if !out.iter().any(|candidate| candidate == &id) {
         out.push(id);
     }
-}
-
-fn is_zero(bytes: &[u8; 32]) -> bool {
-    bytes.iter().all(|byte| *byte == 0)
 }
 
 #[cfg(test)]

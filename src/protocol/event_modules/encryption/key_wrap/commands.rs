@@ -13,6 +13,25 @@ use super::super::local_key_secret;
 use super::codec;
 use super::types::KeyWrapEvent;
 
+/// Sanity guard: every named id in a key-wrap event is non-zero. The codec
+/// is intentionally lenient on decode; this helper is shared between the
+/// authoring path (called via `validate_id` on each input) and the receive
+/// projector so a malformed peer event is rejected at projection time too.
+pub(super) fn validate_event_ids(event: &KeyWrapEvent) -> Result<(), String> {
+    for (name, id) in [
+        ("key wrap workspace", &event.workspace_id),
+        ("key wrap removal_frontier_id", &event.removal_frontier_id),
+        ("key wrap local_key_secret_id", &event.local_key_secret_id),
+        ("key wrap recipient_key_id", &event.recipient_key_id),
+        ("key wrap sender public key", &event.sender_wrap_public_key),
+    ] {
+        if id.iter().all(|byte| *byte == 0) {
+            return Err(format!("{name} cannot be empty"));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateKeyWrap {
     pub workspace_id: EventId,

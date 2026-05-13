@@ -8,11 +8,12 @@
 use crate::protocol::event_modules::identity::{endpoint_shared, signed};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, schema};
+use super::{codec, commands, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
     let recipient_key = codec::decode(&envelope.payload)?;
+    commands::validate_event_ids(&recipient_key)?;
     if event.record.workspace_id != Some(recipient_key.workspace_id) {
         return Err("recipient key workspace metadata does not match event body".to_string());
     }

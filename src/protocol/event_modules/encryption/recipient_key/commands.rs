@@ -11,6 +11,27 @@ use crate::protocol::event_modules::worker::CommandOutput;
 use super::codec;
 use super::types::RecipientKeyEvent;
 
+/// Sanity guard: every named id in a recipient key event is non-zero. The
+/// codec is intentionally lenient on decode; this helper is shared between
+/// the authoring path and the receive projector so a malformed peer event
+/// is rejected at projection time too.
+pub(super) fn validate_event_ids(event: &RecipientKeyEvent) -> Result<(), String> {
+    if is_zero(&event.workspace_id) {
+        return Err("recipient key workspace cannot be empty".to_string());
+    }
+    if is_zero(&event.endpoint_shared_id) {
+        return Err("recipient key endpoint_shared_id cannot be empty".to_string());
+    }
+    if is_zero(&event.recipient_key) {
+        return Err("recipient key public key cannot be empty".to_string());
+    }
+    Ok(())
+}
+
+fn is_zero(bytes: &[u8; 32]) -> bool {
+    bytes.iter().all(|byte| *byte == 0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishRecipientKey {
     pub workspace_id: EventId,
