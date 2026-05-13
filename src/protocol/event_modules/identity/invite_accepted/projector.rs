@@ -9,10 +9,11 @@
 use crate::protocol::event_modules::identity::invite;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, schema, types::InviteAcceptedEvent};
+use super::{codec, commands, schema, types::InviteAcceptedEvent};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let accepted = codec::decode(&event.record.canonical_bytes)?;
+    commands::validate_event_ids(&accepted)?;
     if event.record.workspace_id != Some(accepted.workspace_id) {
         return Err("invite_accepted workspace metadata does not match event body".to_string());
     }

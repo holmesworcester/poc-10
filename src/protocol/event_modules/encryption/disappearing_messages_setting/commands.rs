@@ -17,6 +17,21 @@ use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
 use super::codec;
 use super::types::DisappearingMessagesSettingEvent;
 
+/// Sanity guard: `effective_at_minute` must equal `created_at_ms / 60_000`.
+/// The codec is intentionally lenient on decode; this helper is shared
+/// between the authoring path and the receive projector so a malformed
+/// peer event is rejected at projection time too.
+pub(super) fn validate_event_fields(event: &DisappearingMessagesSettingEvent) -> Result<(), String> {
+    let expected = event.created_at_ms / 60_000;
+    if event.effective_at_minute != expected {
+        return Err(
+            "disappearing_messages_setting effective_at_minute disagrees with created_at_ms"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetDisappearingMessages {
     pub workspace_id: EventId,
@@ -52,6 +67,7 @@ pub fn set(
         expires_at_or_before_minute: input.expires_at_or_before_minute,
         previous_setting_id: input.previous_setting_id,
     };
+    validate_event_fields(&inner)?;
     let payload = codec::encode(&inner);
     let inner_setting_id = event_id(&payload);
     let envelope = codec::sign(

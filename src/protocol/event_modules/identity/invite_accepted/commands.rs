@@ -21,6 +21,25 @@ use std::net::SocketAddr;
 
 use super::{codec, types::InviteAcceptedEvent};
 
+/// Sanity guard: every named id is non-zero. The codec is intentionally
+/// lenient on decode; this helper is shared between the authoring path
+/// and the receive projector so a malformed peer event is rejected at
+/// projection time too.
+pub(super) fn validate_event_ids(event: &InviteAcceptedEvent) -> Result<(), String> {
+    validate_id("invite_accepted workspace_id", &event.workspace_id)?;
+    validate_id("invite_accepted invite_event_id", &event.invite_event_id)?;
+    validate_id(
+        "invite_accepted invite_secret_event_id",
+        &event.invite_secret_event_id,
+    )?;
+    validate_id("invite_accepted bootstrap_hash", &event.bootstrap_hash)?;
+    validate_id(
+        "invite_accepted accepted_endpoint_id",
+        &event.accepted_endpoint_id,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptInvite {
     pub accepted_endpoint_id: EndpointId,

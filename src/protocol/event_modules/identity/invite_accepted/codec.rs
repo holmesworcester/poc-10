@@ -40,7 +40,6 @@ pub fn decode(bytes: &[u8]) -> Result<InviteAcceptedEvent, String> {
         accepted_endpoint_id: reader.id()?,
     };
     reader.finish()?;
-    validate(&event)?;
     Ok(event)
 }
 
@@ -54,28 +53,6 @@ pub fn record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         workspace_id: Some(event.workspace_id),
         scope: EventScope::Local,
     })
-}
-
-fn validate(event: &InviteAcceptedEvent) -> Result<(), String> {
-    validate_id("invite_accepted workspace_id", &event.workspace_id)?;
-    validate_id("invite_accepted invite_event_id", &event.invite_event_id)?;
-    validate_id(
-        "invite_accepted invite_secret_event_id",
-        &event.invite_secret_event_id,
-    )?;
-    validate_id("invite_accepted bootstrap_hash", &event.bootstrap_hash)?;
-    validate_id(
-        "invite_accepted accepted_endpoint_id",
-        &event.accepted_endpoint_id,
-    )?;
-    Ok(())
-}
-
-fn validate_id(name: &str, id: &[u8; 32]) -> Result<(), String> {
-    if id.iter().all(|byte| *byte == 0) {
-        return Err(format!("{name} cannot be empty"));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -127,15 +104,14 @@ mod tests {
         assert_eq!(record.dependencies, vec![[3; 32]]);
     }
 
-    /// Invariant: local acceptance provenance cannot be projected for an empty
-    /// endpoint, workspace, invite, secret-event, or bootstrap-hash id.
+    /// The codec is lenient on decode; non-zero ID guards now live in
+    /// commands::validate_event_ids and the projector enforces them at
+    /// receive time.
     #[test]
-    fn decode_rejects_empty_ids() {
+    fn decode_is_lenient_for_empty_ids() {
         let mut candidate = event();
         candidate.workspace_id = [0; 32];
 
-        let err = decode(&encode(&candidate)).expect_err("empty id must fail");
-
-        assert_eq!(err, "invite_accepted workspace_id cannot be empty");
+        assert_eq!(decode(&encode(&candidate)).expect("decode lenient"), candidate);
     }
 }

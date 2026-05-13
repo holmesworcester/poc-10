@@ -30,11 +30,12 @@ use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
 use super::types::DisappearingMessagesSettingEvent;
-use super::{codec, schema};
+use super::{codec, commands, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
     let setting = codec::decode(&envelope.payload)?;
+    commands::validate_event_fields(&setting)?;
     if event.record.workspace_id != Some(setting.workspace_id) {
         return Err(
             "disappearing_messages_setting workspace metadata does not match event body"

@@ -64,7 +64,7 @@ pub fn decode(bytes: &[u8]) -> Result<DisappearingMessagesSettingEvent, String> 
     } else {
         Some(previous_raw)
     };
-    let event = DisappearingMessagesSettingEvent {
+    Ok(DisappearingMessagesSettingEvent {
         created_at_ms,
         workspace_id,
         ttl_minutes,
@@ -72,15 +72,7 @@ pub fn decode(bytes: &[u8]) -> Result<DisappearingMessagesSettingEvent, String> 
         effective_at_minute,
         expires_at_or_before_minute,
         previous_setting_id,
-    };
-    let expected = event.created_at_ms / 60_000;
-    if event.effective_at_minute != expected {
-        return Err(
-            "disappearing_messages_setting effective_at_minute disagrees with created_at_ms"
-                .to_string(),
-        );
-    }
-    Ok(event)
+    })
 }
 
 pub fn sign(
@@ -222,11 +214,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_inconsistent_effective_at_minute() {
+    fn decode_is_lenient_for_inconsistent_effective_at_minute() {
+        // The codec is lenient; semantic validation that
+        // `effective_at_minute == created_at_ms / 60_000` now lives in
+        // commands::validate_event_fields and the projector. Codec
+        // decode() must roundtrip the struct as parsed.
         let mut bad = event();
         bad.effective_at_minute = 999;
         let bytes = encode(&bad);
-        assert!(decode(&bytes).is_err());
+        assert_eq!(decode(&bytes).expect("decode lenient"), bad);
     }
 
     #[test]
