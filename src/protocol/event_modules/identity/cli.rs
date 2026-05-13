@@ -11,7 +11,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
-use crate::core::crypto;
 use crate::core::logical_clock;
 use crate::core::store::Store;
 use crate::protocol::cli::Context;
@@ -129,16 +128,17 @@ fn run_create_workspace_command(
     let bootstrap_admin_id = bootstrap.value.admin_id;
     admit(context, bootstrap)?;
 
-    let invite_private_key = crypto::random_ed25519_private_key();
-    let user_invite = user_invite::commands::create(user_invite::commands::CreateUserInvite {
-        created_at_ms: timestamp + 2,
-        public_key: crypto::ed25519_public_key(&invite_private_key),
-        workspace_id,
-        authority_event_id: workspace_id,
-        signer_event_id: workspace_id,
-        signer_private_key: local.signing_secret,
-    })?;
+    let user_invite = user_invite::commands::create_with_random_key(
+        user_invite::commands::CreateUserInviteRandom {
+            created_at_ms: timestamp + 2,
+            workspace_id,
+            authority_event_id: workspace_id,
+            signer_event_id: workspace_id,
+            signer_private_key: local.signing_secret,
+        },
+    )?;
     let user_invite_id = user_invite.value.user_invite_id;
+    let invite_private_key = user_invite.value.invite_private_key;
     admit(context, user_invite)?;
 
     let user = user::commands::create(user::commands::CreateUser {
@@ -277,16 +277,17 @@ fn run_invite_server_command(
         membership.user_authority_event_id,
     )?
     .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
-    let invite_private_key = crypto::random_ed25519_private_key();
-    let output = invite_server::commands::create(invite_server::commands::CreateInviteServer {
-        created_at_ms: next_timestamp(&context.store)?,
-        public_key: crypto::ed25519_public_key(&invite_private_key),
-        workspace_id: options.workspace_id,
-        authority_event_id: authority_admin_id,
-        signer_event_id: membership.endpoint_shared_id,
-        signer_private_key: local.signing_secret,
-    })?;
+    let output = invite_server::commands::create_with_random_key(
+        invite_server::commands::CreateInviteServerRandom {
+            created_at_ms: next_timestamp(&context.store)?,
+            workspace_id: options.workspace_id,
+            authority_event_id: authority_admin_id,
+            signer_event_id: membership.endpoint_shared_id,
+            signer_private_key: local.signing_secret,
+        },
+    )?;
     let invite_server_id = output.value.invite_server_id;
+    let invite_private_key = output.value.invite_private_key;
     admit(context, output)?;
     let scoped = invite::commands::create_scoped_with_role(
         local,
@@ -350,20 +351,17 @@ fn run_link_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
     let options = LinkOptions::parse(args)?;
     let local = ensure_local_endpoint(context)?;
     let membership = local_membership(&context.store, local.endpoint, options.workspace_id)?;
-    let device_invite_private_key = crypto::random_ed25519_private_key();
     let timestamp = next_timestamp(&context.store)?;
-    let device = device_invite::commands::create_with_private_key(
-        device_invite::commands::CreateDeviceInvite {
-            created_at_ms: timestamp,
-            workspace_id: options.workspace_id,
-            user_authority_event_id: membership.user_authority_event_id,
-            user_invite_event_id: None,
-            signer_event_id: membership.endpoint_shared_id,
-            signer_private_key: local.signing_secret,
-        },
-        device_invite_private_key,
-    )?;
+    let device = device_invite::commands::create(device_invite::commands::CreateDeviceInvite {
+        created_at_ms: timestamp,
+        workspace_id: options.workspace_id,
+        user_authority_event_id: membership.user_authority_event_id,
+        user_invite_event_id: None,
+        signer_event_id: membership.endpoint_shared_id,
+        signer_private_key: local.signing_secret,
+    })?;
     let device_invite_id = device.value.device_invite_id;
+    let device_invite_private_key = device.value.keypair.private_key;
     admit(context, device)?;
     let scoped = invite::commands::create_scoped_with_user_authority(
         local,
@@ -870,16 +868,17 @@ fn create_user_invite_link(
         membership.user_authority_event_id,
     )?
     .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
-    let invite_private_key = crypto::random_ed25519_private_key();
-    let output = user_invite::commands::create(user_invite::commands::CreateUserInvite {
-        created_at_ms: next_timestamp(&context.store)?,
-        public_key: crypto::ed25519_public_key(&invite_private_key),
-        workspace_id,
-        authority_event_id: authority_admin_id,
-        signer_event_id: membership.endpoint_shared_id,
-        signer_private_key: local.signing_secret,
-    })?;
+    let output = user_invite::commands::create_with_random_key(
+        user_invite::commands::CreateUserInviteRandom {
+            created_at_ms: next_timestamp(&context.store)?,
+            workspace_id,
+            authority_event_id: authority_admin_id,
+            signer_event_id: membership.endpoint_shared_id,
+            signer_private_key: local.signing_secret,
+        },
+    )?;
     let user_invite_id = output.value.user_invite_id;
+    let invite_private_key = output.value.invite_private_key;
     admit(context, output)?;
     let scoped = invite::commands::create_scoped(
         local,

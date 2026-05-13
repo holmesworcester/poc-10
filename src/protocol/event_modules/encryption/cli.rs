@@ -14,7 +14,7 @@ use crate::core::store::Store;
 use crate::protocol::cli::Context;
 use crate::protocol::event_modules::content::message::queries as message_queries;
 use crate::protocol::event_modules::content::message::types::UNIX_MINUTE_MS;
-use crate::protocol::event_modules::identity::{admin, endpoint, endpoint_shared};
+use crate::protocol::event_modules::identity::{admin, endpoint};
 use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker as common_worker;
@@ -145,7 +145,10 @@ fn run_key_recipient_command(
 ) -> Result<CliOutput, String> {
     args.require_len(1, KEY_RECIPIENT_USAGE)?;
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), KEY_RECIPIENT_USAGE)?;
-    let membership = require_membership(&context.store, workspace_id)?;
+    let membership = crate::protocol::event_modules::content::message::commands::require_local_membership(
+        &context.store,
+        workspace_id,
+    )?;
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
     if membership.signing_public_key != local.signing_public_key {
@@ -242,7 +245,10 @@ fn run_key_rotate_recipient_command(
 fn run_key_frontier_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(1, KEY_FRONTIER_USAGE)?;
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), KEY_FRONTIER_USAGE)?;
-    let membership = require_membership(&context.store, workspace_id)?;
+    let membership = crate::protocol::event_modules::content::message::commands::require_local_membership(
+        &context.store,
+        workspace_id,
+    )?;
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
     let authority_admin_id = admin_for_user(
@@ -302,7 +308,10 @@ fn run_key_wrap_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), KEY_WRAP_USAGE)?;
     let removal_frontier_id = parse_hex_id(args.get(1).expect("length checked"), KEY_WRAP_USAGE)?;
     let recipient_key_id = parse_hex_id(args.get(2).expect("length checked"), KEY_WRAP_USAGE)?;
-    let membership = require_membership(&context.store, workspace_id)?;
+    let membership = crate::protocol::event_modules::content::message::commands::require_local_membership(
+        &context.store,
+        workspace_id,
+    )?;
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
     let key_secret =
@@ -949,23 +958,6 @@ fn hex_bytes(bytes: &[u8]) -> String {
     out
 }
 
-fn require_membership(
-    store: &Store,
-    workspace_id: EventId,
-) -> Result<endpoint_shared::types::EndpointMembershipRow, String> {
-    let local = endpoint::commands::local_keypair(store)?
-        .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let key = endpoint_shared::schema::endpoint_membership_key(local.endpoint, workspace_id);
-    let value = store
-        .table_row(endpoint_shared::schema::ENDPOINT_MEMBERSHIPS, &key)
-        .map_err(|err| format!("load endpoint membership: {err}"))?
-        .ok_or_else(|| "local endpoint is not joined to workspace".to_string())?;
-    let row = endpoint_shared::schema::decode_endpoint_membership_row(&key, &value)?;
-    if row.signing_public_key != local.signing_public_key {
-        return Err("local endpoint signing key does not match workspace membership".to_string());
-    }
-    Ok(row)
-}
 
 fn load_recipient_key(
     store: &Store,
