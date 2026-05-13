@@ -269,6 +269,27 @@ pub struct MessageLeafKey {
     pub leaf_node_secret: XChaCha20Poly1305Key,
 }
 
+/// True iff the target message id has a deletion label authored by
+/// `author_user_id`. Read-side defensive filter: projectors purge message
+/// rows for both message-before-tombstone and tombstone-before-message
+/// orders, so most callers see message rows that already reflect
+/// deletion. This helper exists to filter rows written by older code or
+/// interrupted test fixtures.
+pub fn is_deleted_by_author(
+    store: &Store,
+    message_id: &EventId,
+    author_user_id: &EventId,
+) -> Result<bool, String> {
+    use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author;
+    let labels = crate::protocol::event_modules::schema::event_labels(store, message_id)
+        .map_err(|err| format!("load deletion labels: {err}"))?;
+    Ok(labels.iter().any(|label| {
+        deletion_label_author(label)
+            .map(|author| author == *author_user_id)
+            .unwrap_or(false)
+    }))
+}
+
 /// Open a sealed message row's ciphertext using the local leaf secret
 /// implied by the row, returning the message in plaintext form. Returns
 /// `Ok(None)` when the matching local leaf is not (yet) on disk;

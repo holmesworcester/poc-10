@@ -14,12 +14,10 @@ use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::core::store::Store;
 use crate::protocol::cli::Context;
 use crate::protocol::event_modules::content::{file_slice, message};
-use crate::protocol::event_modules::encryption::local_history_node_secret;
 use crate::protocol::event_modules::types::EventId;
 
-use super::codec;
+use super::commands;
 use super::queries;
-use super::types::{FileRow, SealedFileRow};
 
 const FILES_USAGE: &str = "files WORKSPACE_ID_HEX [LIMIT]";
 const SAVE_FILE_USAGE: &str = "save-file WORKSPACE_ID_HEX FILE_SELECTOR OUT_PATH";
@@ -170,7 +168,7 @@ fn run_save_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
     )? {
         return Err("file does not exist".to_string());
     }
-    let row = open_sealed_file_row(&context.store, &sealed)?
+    let row = commands::open_sealed_file_row(&context.store, &sealed)?
         .ok_or_else(|| "file local content key is missing; cannot decode".to_string())?;
     let slices = file_slice::queries::list_for_file(&context.store, workspace_id, row.file_id)?;
     if slices.len() < row.total_slices as usize {
@@ -181,10 +179,9 @@ fn run_save_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         ));
     }
 
-    let secret_bytes = lookup_content_key_secret(
+    let secret_bytes = commands::lookup_content_key_secret(
         &context.store,
         sealed.workspace_id,
-        sealed.removal_frontier_id,
         sealed.local_history_node_secret_id,
     )?
     .ok_or_else(|| "local content key is missing".to_string())?;
@@ -256,74 +253,10 @@ pub fn list_summaries(
     Ok(summaries)
 }
 
-pub(crate) fn visible_file_rows(
-    store: &Store,
-    workspace_id: EventId,
-) -> Result<Vec<FileRow>, String> {
-    let sealed_rows = queries::list_sealed_for_workspace(store, workspace_id)?;
-    let mut out = Vec::with_capacity(sealed_rows.len());
-    for sealed in sealed_rows {
-        if message::cli::is_deleted_by_author(store, &sealed.message_id, &sealed.author_user_id)? {
-            continue;
-        }
-        let Some(row) = open_sealed_file_row(store, &sealed)? else {
-            continue;
-        };
-        out.push(row);
-    }
-    Ok(out)
-}
-
-pub(crate) fn open_sealed_file_row(
-    store: &Store,
-    sealed: &SealedFileRow,
-) -> Result<Option<FileRow>, String> {
-    let Some(secret_bytes) = lookup_content_key_secret(
-        store,
-        sealed.workspace_id,
-        sealed.removal_frontier_id,
-        sealed.local_history_node_secret_id,
-    )?
-    else {
-        return Ok(None);
-    };
-    let event = super::types::FileEvent {
-        workspace_id: sealed.workspace_id,
-        created_at_ms: sealed.created_at_ms,
-        message_id: sealed.message_id,
-        author_user_id: sealed.author_user_id,
-        file_id: sealed.file_id,
-        blob_bytes: sealed.blob_bytes,
-        total_slices: sealed.total_slices,
-        slice_bytes: sealed.slice_bytes,
-        root_hash: sealed.root_hash,
-        removal_frontier_id: sealed.removal_frontier_id,
-        local_history_node_secret_id: sealed.local_history_node_secret_id,
-        nonce: sealed.nonce,
-        ciphertext: sealed.ciphertext,
-    };
-    let aad = codec::descriptor_associated_data(&event, sealed.signer_endpoint_shared_id);
-    let plaintext =
-        codec::open_descriptor_slot(&secret_bytes, &sealed.nonce, &aad, &sealed.ciphertext)
-            .map_err(|err| format!("decode file descriptor: {err}"))?;
-    Ok(Some(FileRow {
-        workspace_id: sealed.workspace_id,
-        file_event_id: sealed.file_event_id,
-        message_id: sealed.message_id,
-        file_id: sealed.file_id,
-        author_user_id: sealed.author_user_id,
-        signer_endpoint_shared_id: sealed.signer_endpoint_shared_id,
-        created_at_ms: sealed.created_at_ms,
-        blob_bytes: sealed.blob_bytes,
-        total_slices: sealed.total_slices,
-        slice_bytes: sealed.slice_bytes,
-        root_hash: sealed.root_hash,
-        removal_frontier_id: sealed.removal_frontier_id,
-        local_history_node_secret_id: sealed.local_history_node_secret_id,
-        filename: plaintext.filename,
-        mime_type: plaintext.mime_type,
-    }))
-}
+// Sealed file descriptor decryption + filtered listing live in
+// `commands.rs`. The cli re-exports `visible_file_rows` so peer CLIs
+// that already reference `file::cli::visible_file_rows` keep building.
+pub(crate) use commands::visible_file_rows;
 
 fn resolve_file_selector(
     store: &Store,
@@ -347,25 +280,7 @@ fn resolve_file_selector(
     }
 }
 
-/// Resolve the AEAD key bytes for a file by its `local_history_node_secret_id`.
-///
-/// Each file authors its own per-event leaf, so this is a single lookup
-/// against `encryption.local_history_node_secrets`. The
-/// `removal_frontier_id` arg is retained as a search-scope hint but is
-/// equivalent to filtering by frontier through the leaf row.
-fn lookup_content_key_secret(
-    store: &Store,
-    workspace_id: EventId,
-    _removal_frontier_id: EventId,
-    local_history_node_secret_id: EventId,
-) -> Result<Option<crate::core::crypto::XChaCha20Poly1305Key>, String> {
-    for row in local_history_node_secret::queries::list_for_workspace(store, workspace_id)? {
-        if row.local_history_node_secret_id == local_history_node_secret_id {
-            return Ok(Some(row.node_secret));
-        }
-    }
-    Ok(None)
-}
+// `lookup_content_key_secret` lives in `commands.rs` (AEAD key lookup).
 
 #[cfg(test)]
 mod tests {

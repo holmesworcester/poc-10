@@ -12,13 +12,14 @@
 //! a key.
 
 use crate::core::crypto::{self, Ed25519PrivateKey, Hash, XChaCha20Poly1305Key};
+use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
 use super::types::{
-    FileDescriptorCiphertext, FileDescriptorPlaintext, FileEvent, FILE_DESCRIPTOR_CIPHERTEXT_BYTES,
-    MAX_FILE_BYTES,
+    FileDescriptorCiphertext, FileDescriptorPlaintext, FileEvent, FileRow, SealedFileRow,
+    FILE_DESCRIPTOR_CIPHERTEXT_BYTES, MAX_FILE_BYTES,
 };
 
 /// Sanity guard: non-zero ids, size cap, and consistent slice arithmetic.
@@ -159,6 +160,94 @@ pub fn create(input: CreateFile) -> Result<CommandOutput<CreateFileOutput>, Stri
         },
         vec![record],
     ))
+}
+
+/// Resolve the AEAD key bytes for a file descriptor by its named
+/// `local_history_node_secret_id`. Returns `Ok(None)` when the local
+/// leaf is not yet on disk; the caller treats that as "this row is not
+/// yet displayable" rather than an error.
+pub fn lookup_content_key_secret(
+    store: &Store,
+    workspace_id: EventId,
+    local_history_node_secret_id: EventId,
+) -> Result<Option<XChaCha20Poly1305Key>, String> {
+    use crate::protocol::event_modules::encryption::local_history_node_secret;
+    for row in local_history_node_secret::queries::list_for_workspace(store, workspace_id)? {
+        if row.local_history_node_secret_id == local_history_node_secret_id {
+            return Ok(Some(row.node_secret));
+        }
+    }
+    Ok(None)
+}
+
+/// Open a sealed file descriptor row, returning the cleartext `FileRow`.
+/// `Ok(None)` when the local content key is missing.
+pub fn open_sealed_file_row(
+    store: &Store,
+    sealed: &SealedFileRow,
+) -> Result<Option<FileRow>, String> {
+    let Some(secret_bytes) =
+        lookup_content_key_secret(store, sealed.workspace_id, sealed.local_history_node_secret_id)?
+    else {
+        return Ok(None);
+    };
+    let event = FileEvent {
+        workspace_id: sealed.workspace_id,
+        created_at_ms: sealed.created_at_ms,
+        message_id: sealed.message_id,
+        author_user_id: sealed.author_user_id,
+        file_id: sealed.file_id,
+        blob_bytes: sealed.blob_bytes,
+        total_slices: sealed.total_slices,
+        slice_bytes: sealed.slice_bytes,
+        root_hash: sealed.root_hash,
+        removal_frontier_id: sealed.removal_frontier_id,
+        local_history_node_secret_id: sealed.local_history_node_secret_id,
+        nonce: sealed.nonce,
+        ciphertext: sealed.ciphertext,
+    };
+    let aad = codec::descriptor_associated_data(&event, sealed.signer_endpoint_shared_id);
+    let plaintext =
+        codec::open_descriptor_slot(&secret_bytes, &sealed.nonce, &aad, &sealed.ciphertext)
+            .map_err(|err| format!("decode file descriptor: {err}"))?;
+    Ok(Some(FileRow {
+        workspace_id: sealed.workspace_id,
+        file_event_id: sealed.file_event_id,
+        message_id: sealed.message_id,
+        file_id: sealed.file_id,
+        author_user_id: sealed.author_user_id,
+        signer_endpoint_shared_id: sealed.signer_endpoint_shared_id,
+        created_at_ms: sealed.created_at_ms,
+        blob_bytes: sealed.blob_bytes,
+        total_slices: sealed.total_slices,
+        slice_bytes: sealed.slice_bytes,
+        root_hash: sealed.root_hash,
+        removal_frontier_id: sealed.removal_frontier_id,
+        local_history_node_secret_id: sealed.local_history_node_secret_id,
+        filename: plaintext.filename,
+        mime_type: plaintext.mime_type,
+    }))
+}
+
+/// Iterate every file row visible to the local store for one
+/// workspace: sealed-row scan, sender-deletion filter, decrypt.
+pub fn visible_file_rows(store: &Store, workspace_id: EventId) -> Result<Vec<FileRow>, String> {
+    let sealed_rows = super::queries::list_sealed_for_workspace(store, workspace_id)?;
+    let mut out = Vec::with_capacity(sealed_rows.len());
+    for sealed in sealed_rows {
+        if crate::protocol::event_modules::content::message::commands::is_deleted_by_author(
+            store,
+            &sealed.message_id,
+            &sealed.author_user_id,
+        )? {
+            continue;
+        }
+        let Some(row) = open_sealed_file_row(store, &sealed)? else {
+            continue;
+        };
+        out.push(row);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

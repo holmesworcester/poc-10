@@ -10,10 +10,8 @@ use std::collections::BTreeMap;
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
 use crate::core::store::Store;
 use crate::protocol::cli::Context;
-use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author;
 use crate::protocol::event_modules::content::reaction;
 use crate::protocol::event_modules::identity::{endpoint, user};
-use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker;
 
@@ -209,25 +207,8 @@ pub fn list_for_display(
     Ok(display)
 }
 
-/// True iff the target message id has a deletion label authored by `author_user_id`.
-///
-/// Projectors now purge message rows for both message-before-tombstone and
-/// tombstone-before-message orders. The read-side check remains as a defensive
-/// compatibility filter for rows written by older code or interrupted test
-/// fixtures; it should not be the primary deletion mechanism.
-pub(crate) fn is_deleted_by_author(
-    store: &Store,
-    message_id: &EventId,
-    author_user_id: &EventId,
-) -> Result<bool, String> {
-    let labels = event_schema::event_labels(store, message_id)
-        .map_err(|err| format!("load deletion labels: {err}"))?;
-    Ok(labels.iter().any(|label| {
-        deletion_label_author(label)
-            .map(|author| author == *author_user_id)
-            .unwrap_or(false)
-    }))
-}
+// `is_deleted_by_author` lives in `commands.rs` (read-side defensive filter).
+pub(crate) use commands::is_deleted_by_author;
 
 fn visible_message_rows(
     store: &Store,
