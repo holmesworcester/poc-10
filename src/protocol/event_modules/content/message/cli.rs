@@ -8,20 +8,14 @@
 use std::collections::BTreeMap;
 
 use crate::core::cli::{CliArgs, CliCommand, CliOutput};
-use crate::core::crypto;
-use crate::core::logical_clock;
 use crate::core::store::Store;
 use crate::protocol::cli::Context;
 use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author;
 use crate::protocol::event_modules::content::reaction;
-use crate::protocol::event_modules::encryption::{
-    local_history_node_secret, local_key_secret, removal_frontier,
-};
-use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, user};
+use crate::protocol::event_modules::identity::{endpoint, user};
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker;
-use crate::workers::encryption as encryption_worker;
 
 use super::types::message_event_id_in_minute;
 
@@ -97,22 +91,20 @@ fn run_send_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), SEND_USAGE)?;
     let text = args.get(1).expect("length checked").to_string();
 
-    let membership = require_membership(&context.store, workspace_id)?;
+    let membership = commands::require_local_membership(&context.store, workspace_id)?;
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
-    if membership.signing_public_key != local.signing_public_key {
-        return Err("local endpoint signing key does not match workspace membership".to_string());
-    }
 
-    let timestamp = next_timestamp(&context.store, workspace_id)?;
-    let removal_frontier_id = require_active_frontier_id(&context.store, workspace_id)?;
+    let timestamp = commands::next_authoring_timestamp(&context.store, workspace_id)?;
+    let removal_frontier_id =
+        commands::require_active_frontier_id(&context.store, workspace_id)?;
     let event_id_in_minute = message_event_id_in_minute(
         &workspace_id,
         &membership.user_authority_event_id,
         &removal_frontier_id,
         timestamp,
     );
-    let leaf = derive_message_leaf(
+    let leaf = commands::derive_message_leaf(
         &context.store,
         &context.protocol,
         workspace_id,
@@ -121,7 +113,7 @@ fn run_send_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         event_id_in_minute,
     )?;
     let (expires_at_minute, disappearing_setting_id) =
-        workspace_expires_at_minute(&context.store, workspace_id, timestamp)?;
+        commands::workspace_expires_at_minute(&context.store, workspace_id, timestamp)?;
     let send = commands::send(commands::SendMessage {
         workspace_id,
         created_at_ms: timestamp,
@@ -246,7 +238,7 @@ fn visible_message_rows(
         by_id.insert(row.message_id, row);
     }
     for sealed in sealed_message_rows_for_workspace(store, workspace_id)? {
-        if let Some(row) = open_sealed_message_row(store, sealed)? {
+        if let Some(row) = commands::open_sealed_message_row(store, sealed)? {
             by_id.entry(row.message_id).or_insert(row);
         }
     }
@@ -279,60 +271,9 @@ fn sealed_message_rows_for_workspace(
         .collect()
 }
 
-fn open_sealed_message_row(
-    store: &Store,
-    row: schema::SealedMessageRow,
-) -> Result<Option<super::types::MessageRow>, String> {
-    let unix_minute = super::types::unix_minute_for(row.created_at_ms);
-    let event_id_in_minute = message_event_id_in_minute(
-        &row.workspace_id,
-        &row.author_user_id,
-        &row.removal_frontier_id,
-        row.created_at_ms,
-    );
-    let Some(leaf) = local_history_node_secret::queries::get_leaf(
-        store,
-        row.workspace_id,
-        row.removal_frontier_id,
-        unix_minute,
-        event_id_in_minute,
-    )?
-    else {
-        return Ok(None);
-    };
-    if leaf.local_history_node_secret_id != row.local_history_node_secret_id {
-        return Err(
-            "sealed message local_history_node_secret_id does not match local leaf".to_string(),
-        );
-    }
-    let event = super::types::MessageEvent {
-        workspace_id: row.workspace_id,
-        created_at_ms: row.created_at_ms,
-        author_user_id: row.author_user_id,
-        removal_frontier_id: row.removal_frontier_id,
-        local_history_node_secret_id: row.local_history_node_secret_id,
-        expires_at_minute: row.expires_at_minute,
-        disappearing_setting_id: row.disappearing_setting_id,
-        nonce: row.nonce,
-        ciphertext: row.ciphertext,
-    };
-    let plaintext = crypto::xchacha20poly1305_decrypt(
-        &leaf.node_secret,
-        &super::codec::associated_data(&event, row.signer_endpoint_shared_id),
-        &event.nonce,
-        &event.ciphertext,
-    )
-    .map_err(|err| format!("decrypt sealed message: {err}"))?;
-    let text = super::codec::decode_text_slot(&plaintext)?;
-    Ok(Some(super::types::MessageRow {
-        workspace_id: row.workspace_id,
-        message_id: row.message_id,
-        created_at_ms: row.created_at_ms,
-        author_user_id: row.author_user_id,
-        signer_endpoint_shared_id: row.signer_endpoint_shared_id,
-        text,
-    }))
-}
+// `open_sealed_message_row` lives in `commands.rs` — the crypto for
+// reopening a sealed message belongs alongside the seal-path commands so
+// the CLI does not need to import `core::crypto` for display.
 
 fn files_grouped_by_message_for_display(
     store: &Store,
@@ -377,7 +318,7 @@ pub fn visible_reaction_rows(
         by_id.insert(row.reaction_id, row);
     }
     for sealed in sealed_reaction_rows_for_workspace(store, workspace_id)? {
-        if let Some(row) = open_sealed_reaction_row(store, sealed)? {
+        if let Some(row) = reaction::commands::open_sealed_reaction_row(store, sealed)? {
             by_id.entry(row.reaction_id).or_insert(row);
         }
     }
@@ -407,61 +348,9 @@ fn sealed_reaction_rows_for_workspace(
         .collect()
 }
 
-fn open_sealed_reaction_row(
-    store: &Store,
-    row: reaction::schema::SealedReactionRow,
-) -> Result<Option<reaction::types::ReactionRow>, String> {
-    let unix_minute = super::types::unix_minute_for(row.created_at_ms);
-    let event_id_in_minute = reaction::types::reaction_event_id_in_minute(
-        &row.workspace_id,
-        &row.author_user_id,
-        &row.target_message_id,
-        &row.removal_frontier_id,
-        row.created_at_ms,
-    );
-    let Some(leaf) = local_history_node_secret::queries::get_leaf(
-        store,
-        row.workspace_id,
-        row.removal_frontier_id,
-        unix_minute,
-        event_id_in_minute,
-    )?
-    else {
-        return Ok(None);
-    };
-    if leaf.local_history_node_secret_id != row.local_history_node_secret_id {
-        return Err(
-            "sealed reaction local_history_node_secret_id does not match local leaf".to_string(),
-        );
-    }
-    let event = reaction::types::ReactionEvent {
-        workspace_id: row.workspace_id,
-        created_at_ms: row.created_at_ms,
-        target_message_id: row.target_message_id,
-        author_user_id: row.author_user_id,
-        removal_frontier_id: row.removal_frontier_id,
-        local_history_node_secret_id: row.local_history_node_secret_id,
-        nonce: row.nonce,
-        ciphertext: row.ciphertext,
-    };
-    let plaintext = crypto::xchacha20poly1305_decrypt(
-        &leaf.node_secret,
-        &reaction::codec::associated_data(&event, row.signer_endpoint_shared_id),
-        &event.nonce,
-        &event.ciphertext,
-    )
-    .map_err(|err| format!("decrypt sealed reaction: {err}"))?;
-    let emoji = reaction::codec::decode_emoji_slot(&plaintext)?;
-    Ok(Some(reaction::types::ReactionRow {
-        workspace_id: row.workspace_id,
-        reaction_id: row.reaction_id,
-        target_message_id: row.target_message_id,
-        author_user_id: row.author_user_id,
-        signer_endpoint_shared_id: row.signer_endpoint_shared_id,
-        created_at_ms: row.created_at_ms,
-        emoji,
-    }))
-}
+// `open_sealed_reaction_row` lives in `reaction::commands` so the cli is
+// not a crypto site; the visible_reaction_rows iterator below calls into
+// it for each sealed row.
 
 pub fn resolve_selector(
     store: &Store,
@@ -485,168 +374,16 @@ pub fn resolve_selector(
     }
 }
 
-pub(crate) fn require_membership(
-    store: &Store,
-    workspace_id: EventId,
-) -> Result<endpoint_shared::types::EndpointMembershipRow, String> {
-    let local = endpoint::commands::local_keypair(store)?
-        .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let key = endpoint_shared::schema::endpoint_membership_key(local.endpoint, workspace_id);
-    let value = store
-        .table_row(endpoint_shared::schema::ENDPOINT_MEMBERSHIPS, &key)
-        .map_err(|err| format!("load endpoint membership: {err}"))?
-        .ok_or_else(|| "local endpoint is not joined to workspace".to_string())?;
-    let row = endpoint_shared::schema::decode_endpoint_membership_row(&key, &value)?;
-    if row.signing_public_key != local.signing_public_key {
-        return Err("local endpoint signing key does not match workspace membership".to_string());
-    }
-    Ok(row)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MessageLeafKey {
-    pub removal_frontier_id: EventId,
-    pub local_history_node_secret_id: EventId,
-    pub leaf_node_secret: local_key_secret::types::KeySecret,
-}
-
-/// Find the most recent local frontier for which this store has key material.
-///
-/// Senders need a frontier id to author messages; receivers do not call this
-/// because they trust the message body to name the frontier id.
-///
-/// A frontier is considered active when EITHER its F root row
-/// (`local_key_secret`) is on disk, OR at least one history-node sibling
-/// row survives under it. The latter case arises after
-/// `retire_deleted_event_leaf` wipes F: the materialized time-tree
-/// siblings still cover authoring for every non-retired coordinate, so
-/// `derive_event_leaf` can keep working without forcing a
-/// `key-frontier` rotation. See `closest_retained_ancestor` in
-/// `src/workers/encryption.rs` for the matching primitive.
-pub(crate) fn require_active_frontier_id(
-    store: &Store,
-    workspace_id: EventId,
-) -> Result<EventId, String> {
-    let mut candidates = Vec::new();
-    for frontier in removal_frontier::queries::list_for_workspace(store, workspace_id)? {
-        let root_present =
-            local_key_secret::queries::get(store, workspace_id, frontier.removal_frontier_id)?
-                .is_some();
-        let has_siblings = !root_present
-            && !local_history_node_secret::queries::list_for_frontier(
-                store,
-                workspace_id,
-                frontier.removal_frontier_id,
-            )?
-            .is_empty();
-        if !root_present && !has_siblings {
-            continue;
-        }
-        candidates.push((frontier.created_at_ms, frontier.removal_frontier_id));
-    }
-    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-    let Some((_, removal_frontier_id)) = candidates.pop() else {
-        return Err(
-            "local content key is missing for workspace; run key-frontier or key-derive"
-                .to_string(),
-        );
-    };
-    Ok(removal_frontier_id)
-}
-
-/// Derive (or look up) the per-message minute_node and leaf for one
-/// `(workspace_id, removal_frontier_id, created_at_ms, event_id_in_minute)`
-/// quadruple.
-///
-/// The minute_node is shared across every message in the same `unix_minute`,
-/// so first call admits it and subsequent calls reuse the row. The leaf is
-/// per-message and never shared. The caller computes the deterministic
-/// `event_id_in_minute` from canonical event fields (see
-/// `message_event_id_in_minute`); two peers authoring the same logical
-/// message reach the same leaf id by BLAKE3-keyed-hash determinism. Returns
-/// the leaf id and the leaf's `node_secret` for AEAD use.
-pub(crate) fn derive_message_leaf<R>(
-    store: &Store,
-    registry: &R,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    created_at_ms: u64,
-    event_id_in_minute: EventId,
-) -> Result<MessageLeafKey, String>
-where
-    R: crate::workers::pipeline_helpers::event_pipeline::EventRegistry,
-{
-    let output = encryption_worker::run(
-        store,
-        registry,
-        encryption_worker::Work::DeriveEventLeaf {
-            workspace_id,
-            removal_frontier_id,
-            created_at_ms,
-            event_id_in_minute,
-        },
-    )?;
-    let encryption_worker::Output::DerivedEventLeaf(report) = output else {
-        return Err("unexpected encryption worker output".to_string());
-    };
-    let local_history_node_secret_id = report
-        .local_history_node_secret_id
-        .ok_or_else(|| "leaf history node secret id was not produced".to_string())?;
-    let leaf_node_secret = report
-        .leaf_node_secret
-        .ok_or_else(|| "leaf history node secret material was not produced".to_string())?;
-    Ok(MessageLeafKey {
-        removal_frontier_id,
-        local_history_node_secret_id,
-        leaf_node_secret,
-    })
-}
-
-pub(crate) fn next_timestamp(store: &Store, workspace_id: EventId) -> Result<u64, String> {
-    let from_messages = max_timestamp_for_messages(store, workspace_id)?;
-    let from_content =
-        super::super::content_event::queries::max_timestamp_for_workspace(store, workspace_id)?;
-    logical_clock::next_timestamp(store, from_messages.max(from_content))
-}
-
-fn max_timestamp_for_messages(store: &Store, workspace_id: EventId) -> Result<u64, String> {
-    let mut max = 0u64;
-    for row in visible_message_rows(store, workspace_id)? {
-        if row.created_at_ms > max {
-            max = row.created_at_ms;
-        }
-    }
-    Ok(max)
-}
-
-/// Compute the authoring-time `expires_at_minute` and the
-/// `disappearing_setting_id` reference that produced it. Reads from the
-/// active `disappearing_messages_setting` event for the workspace,
-/// which is guaranteed to exist because workspace creation emits an
-/// initial setting. Returns `(EXPIRES_NEVER, setting_event_id)` when
-/// the active TTL is zero.
-pub(crate) fn workspace_expires_at_minute(
-    store: &Store,
-    workspace_id: EventId,
-    created_at_ms: u64,
-) -> Result<(u64, EventId), String> {
-    use crate::protocol::event_modules::content::message::types::{EXPIRES_NEVER, UNIX_MINUTE_MS};
-    use crate::protocol::event_modules::encryption::disappearing_messages_setting::queries as setting_queries;
-
-    let active = setting_queries::active_for_workspace(store, workspace_id)?
-        .ok_or_else(|| "workspace has no active disappearing-messages setting".to_string())?;
-    let ttl_minutes = active.ttl_minutes;
-    let reference = active.setting_event_id;
-
-    if ttl_minutes == 0 {
-        return Ok((EXPIRES_NEVER, reference));
-    }
-    let authored_minute = created_at_ms / UNIX_MINUTE_MS;
-    Ok((
-        authored_minute.saturating_add(ttl_minutes as u64),
-        reference,
-    ))
-}
+// CLI authoring helpers (membership lookup, active-frontier resolution,
+// next-timestamp, per-event leaf derivation, expires-at computation) live in
+// `commands.rs` so peer CLIs and tests can share them. The wrappers below
+// keep `message::cli::*` callable as a compatibility surface for the rest of
+// the CLI tree.
+pub(crate) use commands::require_local_membership as require_membership;
+pub(crate) use commands::{
+    derive_message_leaf, next_authoring_timestamp as next_timestamp, require_active_frontier_id,
+    workspace_expires_at_minute,
+};
 
 fn user_name(store: &Store, workspace_id: EventId, user_id: EventId) -> Result<String, String> {
     let key = user::schema::user_key(&workspace_id, &user_id);

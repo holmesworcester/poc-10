@@ -6,6 +6,7 @@
 //! existence or write projection rows.
 
 use crate::core::crypto::{self, Ed25519PrivateKey, XChaCha20Poly1305Key};
+use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
@@ -54,6 +55,69 @@ pub struct PostReactionOutput {
     pub reaction_id: EventId,
     pub target_message_id: EventId,
     pub emoji: String,
+}
+
+/// Open a sealed reaction row, returning the cleartext `ReactionRow`.
+/// `Ok(None)` indicates the local leaf material is not yet on disk and
+/// the row is not yet displayable. Errors surface decryption failures
+/// or a mismatched leaf id.
+pub fn open_sealed_reaction_row(
+    store: &Store,
+    row: super::schema::SealedReactionRow,
+) -> Result<Option<super::types::ReactionRow>, String> {
+    use crate::protocol::event_modules::encryption::local_history_node_secret;
+    let unix_minute = crate::protocol::event_modules::content::message::types::unix_minute_for(
+        row.created_at_ms,
+    );
+    let event_id_in_minute = super::types::reaction_event_id_in_minute(
+        &row.workspace_id,
+        &row.author_user_id,
+        &row.target_message_id,
+        &row.removal_frontier_id,
+        row.created_at_ms,
+    );
+    let Some(leaf) = local_history_node_secret::queries::get_leaf(
+        store,
+        row.workspace_id,
+        row.removal_frontier_id,
+        unix_minute,
+        event_id_in_minute,
+    )?
+    else {
+        return Ok(None);
+    };
+    if leaf.local_history_node_secret_id != row.local_history_node_secret_id {
+        return Err(
+            "sealed reaction local_history_node_secret_id does not match local leaf".to_string(),
+        );
+    }
+    let event = super::types::ReactionEvent {
+        workspace_id: row.workspace_id,
+        created_at_ms: row.created_at_ms,
+        target_message_id: row.target_message_id,
+        author_user_id: row.author_user_id,
+        removal_frontier_id: row.removal_frontier_id,
+        local_history_node_secret_id: row.local_history_node_secret_id,
+        nonce: row.nonce,
+        ciphertext: row.ciphertext,
+    };
+    let plaintext = crypto::xchacha20poly1305_decrypt(
+        &leaf.node_secret,
+        &codec::associated_data(&event, row.signer_endpoint_shared_id),
+        &event.nonce,
+        &event.ciphertext,
+    )
+    .map_err(|err| format!("decrypt sealed reaction: {err}"))?;
+    let emoji = codec::decode_emoji_slot(&plaintext)?;
+    Ok(Some(super::types::ReactionRow {
+        workspace_id: row.workspace_id,
+        reaction_id: row.reaction_id,
+        target_message_id: row.target_message_id,
+        author_user_id: row.author_user_id,
+        signer_endpoint_shared_id: row.signer_endpoint_shared_id,
+        created_at_ms: row.created_at_ms,
+        emoji,
+    }))
 }
 
 pub fn post(input: PostReaction) -> Result<CommandOutput<PostReactionOutput>, String> {
