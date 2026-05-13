@@ -13,23 +13,22 @@ use super::types::{WorkspaceId, WorkspacePublicKey, WorkspaceRow, WORKSPACE_NAME
 pub const WORKSPACES: TableName = TableName::new("identity.workspaces");
 
 pub const SCHEMAS: &[Schema] = &[Schema::durable_row_table(
-    "identity.workspaces.v2",
+    "identity.workspaces.v3",
     WORKSPACES,
 )];
 
-const WORKSPACE_VALUE_BYTES: usize = 8 + 32 + 4 + WORKSPACE_NAME_BYTES;
+const WORKSPACE_VALUE_BYTES: usize = 8 + 32 + WORKSPACE_NAME_BYTES;
 
 pub fn workspace_row(
     workspace_id: WorkspaceId,
     created_at_ms: u64,
     public_key: WorkspacePublicKey,
-    disappearing_ttl_minutes: u32,
     name: &str,
 ) -> Result<TableRow, String> {
     Ok(TableRow {
         table: WORKSPACES,
         key: workspace_id.to_vec(),
-        value: encode_workspace_value(created_at_ms, public_key, disappearing_ttl_minutes, name)?,
+        value: encode_workspace_value(created_at_ms, public_key, name)?,
     })
 }
 
@@ -43,7 +42,6 @@ pub fn decode_workspace_row(key: &[u8], value: &[u8]) -> Result<WorkspaceRow, St
     let mut reader = Reader::new(value, "workspace row");
     let created_at_ms = reader.u64()?;
     let public_key = reader.id()?;
-    let disappearing_ttl_minutes = reader.u32()?;
     let name = workspace_value_name(reader.slice(WORKSPACE_NAME_BYTES)?)?;
     reader.finish()?;
 
@@ -51,7 +49,6 @@ pub fn decode_workspace_row(key: &[u8], value: &[u8]) -> Result<WorkspaceRow, St
         workspace_id,
         created_at_ms,
         public_key,
-        disappearing_ttl_minutes,
         name,
     })
 }
@@ -59,13 +56,11 @@ pub fn decode_workspace_row(key: &[u8], value: &[u8]) -> Result<WorkspaceRow, St
 fn encode_workspace_value(
     created_at_ms: u64,
     public_key: WorkspacePublicKey,
-    disappearing_ttl_minutes: u32,
     name: &str,
 ) -> Result<Vec<u8>, String> {
     let event = super::types::WorkspaceEvent {
         created_at_ms,
         public_key,
-        disappearing_ttl_minutes,
         name: name.to_string(),
     };
     let encoded = codec::encode(&event)?;
@@ -88,7 +83,6 @@ fn workspace_value_name(bytes: &[u8]) -> Result<String, String> {
         out.u8(codec::TYPE_WORKSPACE);
         out.u64(0);
         out.id(&[0; 32]);
-        out.u32(0);
         out.raw(bytes);
         out.finish()
     };
@@ -103,7 +97,7 @@ mod tests {
 
     #[test]
     fn workspace_rows_decode_to_projected_shape() {
-        let row = workspace_row([1; 32], 9, [2; 32], 3, "Ops").expect("workspace row");
+        let row = workspace_row([1; 32], 9, [2; 32], "Ops").expect("workspace row");
         assert_eq!(row.table, WORKSPACES);
         assert_eq!(row.key, [1; 32]);
 
@@ -114,7 +108,6 @@ mod tests {
                 workspace_id: [1; 32],
                 created_at_ms: 9,
                 public_key: [2; 32],
-                disappearing_ttl_minutes: 3,
                 name: "Ops".to_string(),
             }
         );
@@ -122,7 +115,7 @@ mod tests {
 
     #[test]
     fn duplicate_workspace_row_insert_is_idempotent() {
-        let row = workspace_row([3; 32], 10, [4; 32], 0, "Product").expect("workspace row");
+        let row = workspace_row([3; 32], 10, [4; 32], "Product").expect("workspace row");
         let store = Store::open_memory_with_schemas(SCHEMAS).expect("open store");
 
         assert_eq!(

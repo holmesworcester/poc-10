@@ -3,9 +3,15 @@
 //! Validation:
 //!   * Signed envelope decodes; envelope signer matches inner authority
 //!     admin.
-//!   * Authority admin dependency is a signed admin event; its workspace
-//!     matches the setting's workspace; the admin event's public key
-//!     matches the envelope signer key.
+//!   * Authority dependency is one of:
+//!       - The workspace event itself, for the bootstrap initial setting
+//!         emitted by `workspace::commands::create`. The signer's public
+//!         key must match the workspace event's `public_key`. This is
+//!         only legal when `previous_setting_id` is `None` (first
+//!         setting for the workspace).
+//!       - A signed admin event for the same workspace, for all ongoing
+//!         settings. The admin's `public_key` must match the envelope
+//!         signer key.
 //!   * `effective_at_minute == created_at_ms / 60_000` (codec already
 //!     enforces this on decode).
 //!   * Monotonic floor (`expires_at_or_before_minute`): if the event names
@@ -19,7 +25,7 @@
 //! setting is found by querying for the row with the highest
 //! `(created_at_ms, event_id)` per workspace.
 
-use crate::protocol::event_modules::identity::{admin, signed};
+use crate::protocol::event_modules::identity::{admin, signed, workspace};
 use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
@@ -39,6 +45,53 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("disappearing_messages_setting signer must be the authority admin".to_string());
     }
 
+    validate_authority(event, &envelope, &setting)?;
+    validate_monotonic_floor(event, &setting)?;
+
+    Ok(ProjectionOutput::rows(vec![schema::setting_row(
+        setting.workspace_id,
+        event.context.event_id,
+        setting.ttl_minutes,
+        setting.effective_at_minute,
+        setting.created_at_ms,
+        setting.expires_at_or_before_minute,
+    )]))
+}
+
+/// Validate the setting's authority. The bootstrap path uses the
+/// workspace event itself (signed by the workspace public key); the
+/// ongoing path uses a signed admin event for the same workspace.
+fn validate_authority(
+    event: &EventWithContext<'_>,
+    envelope: &super::types::SignedDisappearingMessagesSettingEnvelope,
+    setting: &DisappearingMessagesSettingEvent,
+) -> Result<(), String> {
+    if setting.authority_admin_event_id == setting.workspace_id {
+        if setting.previous_setting_id.is_some() {
+            return Err(
+                "disappearing_messages_setting may only use workspace as authority for the initial setting"
+                    .to_string(),
+            );
+        }
+        let workspace_record = event
+            .context
+            .dependency(&setting.workspace_id)
+            .ok_or_else(|| {
+                "disappearing_messages_setting workspace authority dependency is missing".to_string()
+            })?;
+        let workspace = workspace::codec::decode(&workspace_record.canonical_bytes).map_err(|_| {
+            "disappearing_messages_setting workspace authority dependency is not a workspace event"
+                .to_string()
+        })?;
+        if workspace.public_key != envelope.signer_public_key {
+            return Err(
+                "disappearing_messages_setting initial signer public key does not match workspace"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+
     let admin_event = decode_admin_dependency(event, setting.authority_admin_event_id)?;
     if admin_event.workspace_id != setting.workspace_id {
         return Err(
@@ -52,17 +105,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                 .to_string(),
         );
     }
-
-    validate_monotonic_floor(event, &setting)?;
-
-    Ok(ProjectionOutput::rows(vec![schema::setting_row(
-        setting.workspace_id,
-        event.context.event_id,
-        setting.ttl_minutes,
-        setting.effective_at_minute,
-        setting.created_at_ms,
-        setting.expires_at_or_before_minute,
-    )]))
+    Ok(())
 }
 
 fn validate_monotonic_floor(
