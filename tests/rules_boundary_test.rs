@@ -59,6 +59,31 @@ fn production_text_before_unit_tests(text: &str) -> &str {
         .unwrap_or(text)
 }
 
+/// Strip line comments (`// ...`) and outer-doc lines (`/// ...`,
+/// `//! ...`) from a slice of source text. Behavior lints look for
+/// real call sites, not narrative prose that happens to mention a
+/// forbidden verb in a comment.
+fn strip_line_comments(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                return "";
+            }
+            // Inline `// ...` after code: trim from the first `//` that
+            // isn't inside a string literal. The lints only care about
+            // identifier-shaped matches, so this naive split is enough
+            // — a stray `//` inside a `&str` literal here would be a
+            // pre-existing oddity, not a lint false positive.
+            match line.split_once("//") {
+                Some((code, _)) => code,
+                None => line,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn worker_implementation_files(root: &Path) -> Vec<std::path::PathBuf> {
     let common_root = root.join("src/workers/pipeline_helpers");
     rust_files(&root.join("src/workers"))
@@ -1796,10 +1821,17 @@ fn event_module_projectors_do_not_do_transit_or_crypto_work() {
     let mut violations = Vec::new();
     for path in files {
         let text = source_text(&path);
+        // Strip `#[cfg(test)]` content (test modules legitimately
+        // construct sealed/ciphertext fixtures by name) AND strip line
+        // comments — comments that reference `encryption.md` or use
+        // `// encrypt-` style narratives are documentation, not crypto
+        // work. The 2026-05-13 message-projector docs reference
+        // `encryption.md`, which is what surfaced this false positive.
         let production_text = production_text_before_unit_tests(&text);
+        let stripped = strip_line_comments(production_text);
         let relative = path.strip_prefix(root).unwrap_or(&path);
         for needle in forbidden {
-            if production_text.contains(needle) {
+            if stripped.contains(needle) {
                 violations.push(format!("{} contains {needle}", relative.display()));
             }
         }
