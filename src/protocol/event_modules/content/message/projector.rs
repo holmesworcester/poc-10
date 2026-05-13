@@ -9,7 +9,6 @@
 use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author;
 use crate::protocol::event_modules::disappearing_messages_setting;
 use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
-use crate::protocol::event_modules::identity::workspace;
 use crate::protocol::event_modules::leaf_history_node;
 use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
@@ -93,13 +92,13 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
 
     // Disappearing-messages policy validation: the message references a
     // disappearing-messages setting (a signed
-    // `disappearing_messages_setting` event id) or the workspace event id
-    // (slice-1 fallback) in canonical bytes. The projector verifies that
-    // `expires_at_minute` matches what the referenced policy permits. A
-    // mismatch rejects the message: an admin-signed setting establishes a
-    // bound that authors must honor, and the projector enforces it. The
-    // trust gap (a peer can still pick an *older* setting with a longer
-    // TTL) is documented in `disappearing_messages_plan.md` §6.
+    // `disappearing_messages_setting` event id) in canonical bytes. The
+    // projector verifies that `expires_at_minute` matches what the
+    // referenced policy permits. A mismatch rejects the message: an
+    // admin-signed setting establishes a bound that authors must honor,
+    // and the projector enforces it. The trust gap (a peer can still pick
+    // an *older* setting with a longer TTL) is documented in
+    // `disappearing_messages_plan.md` §6.
     let permitted_ttl = resolve_permitted_ttl_minutes(
         event,
         message.workspace_id,
@@ -164,14 +163,10 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
 }
 
 /// Look up the disappearing-messages policy referenced by a message and
-/// return the `ttl_minutes` it permits. The reference is one of:
-///   * The workspace event for this workspace — the slice-1 fallback
-///     when no setting has been admitted. Returns the workspace event's
-///     `disappearing_ttl_minutes`.
-///   * A signed `disappearing_messages_setting` for the same workspace —
-///     slice 2. Returns the setting's `ttl_minutes`.
-/// Mismatched workspaces and dependency-type mismatches are rejected.
-/// The setting module is reached through the
+/// return the `ttl_minutes` it permits. The reference is a signed
+/// `disappearing_messages_setting` for the same workspace; mismatched
+/// workspaces and dependency-type mismatches are rejected. The setting
+/// module is reached through the
 /// `protocol::event_modules::disappearing_messages_setting` alias to
 /// keep the projector lint clean.
 fn resolve_permitted_ttl_minutes(
@@ -183,27 +178,7 @@ fn resolve_permitted_ttl_minutes(
         .context
         .dependency(&disappearing_setting_id)
         .ok_or_else(|| "message disappearing_setting_id dependency is missing".to_string())?;
-    if disappearing_setting_id == message_workspace_id {
-        resolve_workspace_ttl(dependency, message_workspace_id)
-    } else {
-        resolve_setting_ttl(dependency, message_workspace_id, disappearing_setting_id)
-    }
-}
-
-fn resolve_workspace_ttl(
-    dependency: &EventRecord,
-    message_workspace_id: EventId,
-) -> Result<u32, String> {
-    let workspace_event = workspace::codec::decode(&dependency.canonical_bytes).map_err(|_| {
-        "message disappearing_setting_id references workspace_id but dependency is not a workspace event".to_string()
-    })?;
-    if dependency.workspace_id != Some(message_workspace_id) {
-        return Err(
-            "message disappearing_setting_id workspace event does not match message workspace"
-                .to_string(),
-        );
-    }
-    Ok(workspace_event.disappearing_ttl_minutes)
+    resolve_setting_ttl(dependency, message_workspace_id, disappearing_setting_id)
 }
 
 fn resolve_setting_ttl(
@@ -237,7 +212,7 @@ fn resolve_setting_ttl(
 #[cfg(test)]
 mod tests {
     use crate::protocol::event_modules::encryption::local_history_node_secret as leaf_module;
-    use crate::protocol::event_modules::identity::{endpoint_shared, signed, user, workspace};
+    use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
     use crate::protocol::event_modules::types::event_id;
     use crate::protocol::event_modules::worker::{
         DependencyContext, EventContext, EventWithContext,
@@ -254,6 +229,8 @@ mod tests {
         message_id: [u8; 32],
         leaf_id: [u8; 32],
         leaf_record: Record,
+        setting_id: [u8; 32],
+        setting_record: Record,
     }
 
     fn signing_public_key_for(private_key: &[u8; 32]) -> [u8; 32] {
@@ -295,11 +272,52 @@ mod tests {
         signed.events[0].record().clone()
     }
 
+    /// Build a signed `disappearing_messages_setting` record with the given
+    /// TTL. The setting is signed by an admin keypair separate from any
+    /// production admin event; the projector trusts the dependency record
+    /// itself rather than the admin chain when it's only checking the
+    /// referenced policy's permitted TTL on a message. The record's
+    /// `workspace_id` is set to match the message workspace.
+    fn setting_record_with_ttl(workspace_id: [u8; 32], ttl_minutes: u32) -> Record {
+        use crate::protocol::event_modules::encryption::disappearing_messages_setting as setting;
+        let admin_event_id = [42; 32];
+        let signer_private_key = [9; 32];
+        let inner = setting::types::DisappearingMessagesSettingEvent {
+            created_at_ms: 60_000,
+            workspace_id,
+            ttl_minutes,
+            authority_admin_event_id: admin_event_id,
+            effective_at_minute: 1,
+            expires_at_or_before_minute: 0,
+            previous_setting_id: None,
+        };
+        let payload = setting::codec::encode(&inner);
+        let envelope = setting::codec::sign(admin_event_id, &signer_private_key, payload);
+        let bytes = setting::codec::encode_signed(&envelope);
+        setting::codec::signed_record_from_bytes(bytes).expect("setting record")
+    }
+
     fn build(
         workspace_id: [u8; 32],
         author_user_id: [u8; 32],
         signer_private_key: &[u8; 32],
         signer_endpoint_shared_id: [u8; 32],
+    ) -> BuiltMessage {
+        build_with_setting_ttl(
+            workspace_id,
+            author_user_id,
+            signer_private_key,
+            signer_endpoint_shared_id,
+            0,
+        )
+    }
+
+    fn build_with_setting_ttl(
+        workspace_id: [u8; 32],
+        author_user_id: [u8; 32],
+        signer_private_key: &[u8; 32],
+        signer_endpoint_shared_id: [u8; 32],
+        setting_ttl_minutes: u32,
     ) -> BuiltMessage {
         let created_at_ms = 5u64;
         let removal_frontier_id = [30; 32];
@@ -332,6 +350,8 @@ mod tests {
             .expect("derive leaf for projector test");
         let leaf_record = leaf_output.events[0].record().clone();
         let leaf_id = leaf_output.value.local_history_node_secret_id;
+        let setting_record = setting_record_with_ttl(workspace_id, setting_ttl_minutes);
+        let setting_id = event_id(&setting_record.canonical_bytes);
         let output = super::super::commands::send(super::super::commands::SendMessage {
             workspace_id,
             created_at_ms,
@@ -342,7 +362,7 @@ mod tests {
             local_history_node_secret_id: leaf_id,
             leaf_node_secret: KEY_SECRET,
             expires_at_minute: u64::MAX,
-            disappearing_setting_id: workspace_id,
+            disappearing_setting_id: setting_id,
             text: "hello".to_string(),
         })
         .expect("send");
@@ -352,27 +372,9 @@ mod tests {
             message_id: output.value.message_id,
             leaf_id,
             leaf_record,
+            setting_id,
+            setting_record,
         }
-    }
-
-    /// Build a workspace event record for use as the slice-1 fallback
-    /// disappearing-policy dependency. The workspace event id IS the
-    /// `workspace_id` (workspaces are self-naming), so passing the same
-    /// 32-byte value as both `workspace_id` and the message's
-    /// `disappearing_setting_id` resolves the dep to this record.
-    fn workspace_record(workspace_id: [u8; 32], ttl_minutes: u32) -> Record
-    {
-        let event = workspace::types::WorkspaceEvent {
-            created_at_ms: 1,
-            public_key: [99; 32],
-            disappearing_ttl_minutes: ttl_minutes,
-            name: "test".to_string(),
-        };
-        let bytes = workspace::codec::encode(&event).expect("encode workspace");
-        let mut record = workspace::codec::record_from_bytes(bytes).expect("workspace record");
-        // Self-naming: force the workspace id to match the test fixture.
-        record.workspace_id = Some(workspace_id);
-        record
     }
 
     fn context_for<'a>(
@@ -382,27 +384,6 @@ mod tests {
         author_id: [u8; 32],
         author_record: Record,
     ) -> EventWithContext<'a> {
-        context_for_with_workspace_ttl(
-            built,
-            signer_id,
-            signer_record,
-            author_id,
-            author_record,
-            0,
-        )
-    }
-
-    fn context_for_with_workspace_ttl<'a>(
-        built: &'a BuiltMessage,
-        signer_id: [u8; 32],
-        signer_record: Record,
-        author_id: [u8; 32],
-        author_record: Record,
-        workspace_ttl_minutes: u32,
-    ) -> EventWithContext<'a> {
-        let envelope = codec::decode_signed(&built.record.canonical_bytes)
-            .expect("decode signed message");
-        let inner = codec::decode(&envelope.payload).expect("decode inner message");
         EventWithContext {
             record: &built.record,
             context: EventContext {
@@ -421,8 +402,8 @@ mod tests {
                         record: built.leaf_record.clone(),
                     },
                     DependencyContext {
-                        event_id: inner.disappearing_setting_id,
-                        record: workspace_record(inner.workspace_id, workspace_ttl_minutes),
+                        event_id: built.setting_id,
+                        record: built.setting_record.clone(),
                     },
                 ],
                 labels: Vec::new(),
@@ -570,6 +551,7 @@ mod tests {
         signer_private_key: &[u8; 32],
         signer_endpoint_shared_id: [u8; 32],
         expires_at_minute: u64,
+        setting_ttl_minutes: u32,
     ) -> BuiltMessage {
         let created_at_ms = 6_000_000u64;
         let removal_frontier_id = [30; 32];
@@ -596,6 +578,8 @@ mod tests {
             .expect("derive leaf for projector test");
         let leaf_record = leaf_output.events[0].record().clone();
         let leaf_id = leaf_output.value.local_history_node_secret_id;
+        let setting_record = setting_record_with_ttl(workspace_id, setting_ttl_minutes);
+        let setting_id = event_id(&setting_record.canonical_bytes);
         let output = super::super::commands::send(super::super::commands::SendMessage {
             workspace_id,
             created_at_ms,
@@ -606,7 +590,7 @@ mod tests {
             local_history_node_secret_id: leaf_id,
             leaf_node_secret: KEY_SECRET,
             expires_at_minute,
-            disappearing_setting_id: workspace_id,
+            disappearing_setting_id: setting_id,
             text: "ttl".to_string(),
         })
         .expect("send message");
@@ -616,6 +600,8 @@ mod tests {
             message_id: output.value.message_id,
             leaf_id,
             leaf_record,
+            setting_id,
+            setting_record,
         }
     }
 
@@ -630,16 +616,15 @@ mod tests {
         let signer_id = event_id(&signer_record.canonical_bytes);
 
         // expires_at_minute=105 = authored_minute(100) + ttl_minutes(5).
-        let built =
-            build_with_expiry(workspace_id, author_id, &signer_private_key, signer_id, 105);
-        let mut event = context_for_with_workspace_ttl(
-            &built,
-            signer_id,
-            signer_record,
+        let built = build_with_expiry(
+            workspace_id,
             author_id,
-            author_record,
+            &signer_private_key,
+            signer_id,
+            105,
             5,
         );
+        let mut event = context_for(&built, signer_id, signer_record, author_id, author_record);
         event.context.now_unix_minute = Some(102);
 
         let output = project(&event).expect("project before-expiry message");
@@ -652,12 +637,11 @@ mod tests {
     #[test]
     fn rejects_message_whose_expiry_disagrees_with_referenced_policy() {
         // A peer that lies — stamps `expires_at_minute = M + 99` while
-        // referencing the workspace event whose
-        // `disappearing_ttl_minutes` is 1 — must be rejected by the
-        // projector. Validates the slice-3 enforcement that closes
-        // slice-2's trust gap. (The remaining gap, where the lying peer
-        // points at an *older* admin setting with a longer TTL, is
-        // documented in `disappearing_messages_plan.md` §6.)
+        // referencing a setting whose `ttl_minutes` is 1 — must be
+        // rejected by the projector. Validates the slice-3 enforcement
+        // that closes slice-2's trust gap. (The remaining gap, where the
+        // lying peer points at an *older* admin setting with a longer
+        // TTL, is documented in `disappearing_messages_plan.md` §6.)
         let workspace_id = [7; 32];
         let signer_private_key = [9; 32];
         let signer_pubkey = signing_public_key_for(&signer_private_key);
@@ -667,18 +651,17 @@ mod tests {
         let signer_id = event_id(&signer_record.canonical_bytes);
 
         // Author stamps expires_at_minute = 199 (i.e., minute 100 + 99),
-        // but the workspace's `disappearing_ttl_minutes` will be 1 in
-        // the dependency context. The projector must reject.
-        let built =
-            build_with_expiry(workspace_id, author_id, &signer_private_key, signer_id, 199);
-        let event = context_for_with_workspace_ttl(
-            &built,
-            signer_id,
-            signer_record,
+        // but the referenced setting's `ttl_minutes` is 1 in the
+        // dependency context. The projector must reject.
+        let built = build_with_expiry(
+            workspace_id,
             author_id,
-            author_record,
+            &signer_private_key,
+            signer_id,
+            199,
             1,
         );
+        let event = context_for(&built, signer_id, signer_record, author_id, author_record);
         let err = project(&event).expect_err("inflated expiry must be rejected");
         assert!(
             err.contains("disagrees with referenced setting"),

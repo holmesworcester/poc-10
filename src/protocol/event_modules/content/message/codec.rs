@@ -30,10 +30,9 @@ pub const MESSAGE_ENCRYPTION_PURPOSE: &[u8] = b"topo message text v4";
 ///
 /// `expires_at_minute` is the authored-time expiry; `u64::MAX` means no
 /// expiry. `disappearing_setting_id` references the policy under which
-/// the message was authored — either a signed
-/// `disappearing_messages_setting` event id or the workspace event id
-/// when no setting has been authored. The projector validates that
-/// `expires_at_minute` is consistent with the referenced policy.
+/// the message was authored — a signed `disappearing_messages_setting`
+/// event id. The projector validates that `expires_at_minute` is
+/// consistent with the referenced policy.
 pub const MESSAGE_WIRE_SIZE: usize = 1
     + 32
     + 8

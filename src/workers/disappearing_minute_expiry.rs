@@ -28,6 +28,7 @@ use crate::protocol::event_modules::content::message::types::{
 use crate::protocol::event_modules::content::reaction::queries as reaction_queries;
 use crate::protocol::event_modules::content::reaction::types::reaction_event_id_in_minute;
 use crate::protocol::event_modules::identity::workspace::queries as workspace_queries;
+use crate::protocol::event_modules::encryption::disappearing_messages_setting::queries as setting_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::workers::encryption as encryption_worker;
 use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
@@ -110,7 +111,16 @@ where
     let mut expired_jobs: Vec<ExpireMessageJob> = Vec::new();
 
     for workspace in workspaces {
-        if workspace.disappearing_ttl_minutes == 0 {
+        // The workspace's active disappearing-messages setting is the
+        // sole source of truth for whether messages expire. No active
+        // setting (which only happens transiently while the initial
+        // setting is being admitted) or `ttl_minutes == 0` means
+        // disappearing messages are disabled.
+        let Some(active) = setting_queries::active_for_workspace(store, workspace.workspace_id)?
+        else {
+            continue;
+        };
+        if active.ttl_minutes == 0 {
             continue;
         }
         let sealed = sealed_messages_for_workspace(store, workspace.workspace_id)?;

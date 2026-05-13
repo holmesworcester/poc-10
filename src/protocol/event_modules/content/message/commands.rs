@@ -28,10 +28,11 @@ pub struct SendMessage {
     /// `super::types::EXPIRES_NEVER` (i.e. `u64::MAX`) means no expiry.
     pub expires_at_minute: u64,
     /// Reference to the disappearing-messages policy under which this
-    /// message is being authored. Either a signed
-    /// `disappearing_messages_setting` event id (when one has been
-    /// admitted) or the workspace event id (slice-1 fallback). Becomes a
-    /// dependency of the resulting message; the projector validates that
+    /// message is being authored — a signed
+    /// `disappearing_messages_setting` event id. Workspace creation
+    /// emits an initial setting alongside the workspace event so there
+    /// is always a setting to reference. Becomes a dependency of the
+    /// resulting message; the projector validates that
     /// `expires_at_minute` is consistent with the referenced policy.
     pub disappearing_setting_id: EventId,
     pub text: String,

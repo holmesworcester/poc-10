@@ -83,8 +83,8 @@ pub struct SealedMessageRow {
     /// projector can reject expired-at-receive messages.
     pub expires_at_minute: u64,
     /// Reference to the disappearing-messages policy this message was
-    /// authored under. Either a signed `disappearing_messages_setting`
-    /// event id or the workspace event id (slice-1 fallback).
+    /// authored under — a signed `disappearing_messages_setting` event
+    /// id.
     pub disappearing_setting_id: EventId,
     pub nonce: crate::core::crypto::XChaCha20Poly1305Nonce,
     pub ciphertext: MessageCiphertext,

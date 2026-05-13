@@ -92,14 +92,13 @@ pub struct MessageEvent {
     /// drive the disappearing-minute worker; admission stays generic.
     pub expires_at_minute: u64,
     /// Reference to the disappearing-messages policy under which this
-    /// message was authored — either a signed
-    /// `disappearing_messages_setting` event id or the `workspace_id`
-    /// itself when no setting has been admitted yet (the workspace event
-    /// carries the slice-1 fallback `disappearing_ttl_minutes`). Added to
-    /// the message's dependencies so the projector validates the stamped
-    /// `expires_at_minute` against the policy the author claims to have
-    /// honored. See `encryption.md` for the trust model and the
-    /// latest-setting gap.
+    /// message was authored — a signed `disappearing_messages_setting`
+    /// event id. Workspace creation emits an initial setting alongside
+    /// the workspace event, so there is always a setting to reference.
+    /// Added to the message's dependencies so the projector validates
+    /// the stamped `expires_at_minute` against the policy the author
+    /// claims to have honored. See `encryption.md` for the trust model
+    /// and the latest-setting gap.
     pub disappearing_setting_id: EventId,
     pub nonce: XChaCha20Poly1305Nonce,
     pub ciphertext: MessageCiphertext,

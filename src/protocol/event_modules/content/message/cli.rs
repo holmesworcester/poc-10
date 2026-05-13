@@ -620,15 +620,11 @@ fn max_timestamp_for_messages(store: &Store, workspace_id: EventId) -> Result<u6
 }
 
 /// Compute the authoring-time `expires_at_minute` and the
-/// `disappearing_setting_id` reference that produced it. Sources the TTL
-/// in this order:
-///   1. Active `disappearing_messages_setting` event for the workspace,
-///      if any has been admitted. The setting's event id is returned
-///      as the reference. Uses the latest setting under
-///      `(created_at_ms, event_id)` ordering — slice 2.
-///   2. The workspace event's `disappearing_ttl_minutes` field. The
-///      `workspace_id` is returned as the reference — slice 1 fallback.
-/// Returns `(EXPIRES_NEVER, reference)` when the resulting TTL is zero.
+/// `disappearing_setting_id` reference that produced it. Reads from the
+/// active `disappearing_messages_setting` event for the workspace,
+/// which is guaranteed to exist because workspace creation emits an
+/// initial setting. Returns `(EXPIRES_NEVER, setting_event_id)` when
+/// the active TTL is zero.
 pub(crate) fn workspace_expires_at_minute(
     store: &Store,
     workspace_id: EventId,
@@ -636,20 +632,11 @@ pub(crate) fn workspace_expires_at_minute(
 ) -> Result<(u64, EventId), String> {
     use crate::protocol::event_modules::content::message::types::{EXPIRES_NEVER, UNIX_MINUTE_MS};
     use crate::protocol::event_modules::encryption::disappearing_messages_setting::queries as setting_queries;
-    use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
 
-    let (ttl_minutes, reference) =
-        if let Some(active) = setting_queries::active_for_workspace(store, workspace_id)? {
-            (active.ttl_minutes, active.setting_event_id)
-        } else {
-            let key = workspace_id;
-            let value = store
-                .table_row(workspace_schema::WORKSPACES, &key)
-                .map_err(|err| format!("load workspace row: {err}"))?
-                .ok_or_else(|| "workspace row is missing".to_string())?;
-            let row = workspace_schema::decode_workspace_row(&key, &value)?;
-            (row.disappearing_ttl_minutes, workspace_id)
-        };
+    let active = setting_queries::active_for_workspace(store, workspace_id)?
+        .ok_or_else(|| "workspace has no active disappearing-messages setting".to_string())?;
+    let ttl_minutes = active.ttl_minutes;
+    let reference = active.setting_event_id;
 
     if ttl_minutes == 0 {
         return Ok((EXPIRES_NEVER, reference));
