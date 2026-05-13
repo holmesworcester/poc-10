@@ -623,66 +623,14 @@ fn run_disappearing_set_command(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let parsed = parse_disappearing_set_args(args)?;
-    let workspace_id = parsed.workspace_id;
-    let ttl_minutes = parsed.ttl_minutes;
-
-    let membership = require_membership(&context.store, workspace_id)?;
-    let local = endpoint::commands::local_keypair(&context.store)?
-        .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let authority_admin_id = admin_for_user(
-        &context.store,
-        workspace_id,
-        membership.user_authority_event_id,
-    )?
-    .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
-
-    let previous = disappearing_messages_setting::queries::active_for_workspace(
-        &context.store,
-        workspace_id,
-    )?;
-    let previous_setting_id = previous.as_ref().map(|row| row.setting_event_id);
-    let previous_floor = previous
-        .as_ref()
-        .map(|row| row.expires_at_or_before_minute)
-        .unwrap_or(0);
-
     let now_ms = next_timestamp(&context.store)?;
-    let now_minute = now_ms / UNIX_MINUTE_MS;
-    // Default behavior: every set is also a floor-advance opportunity
-    // (loosenings naturally GC subsumed debris). Pin the new floor to
-    // max(previous_floor, now_minute - new_ttl_minutes) so a setting
-    // with a longer TTL stays at or above the previous floor, and a
-    // setting with the same or shorter TTL monotonically advances it.
-    let auto_floor = std::cmp::max(
-        previous_floor,
-        now_minute.saturating_sub(u64::from(ttl_minutes)),
-    );
-    let new_floor = match parsed.explicit_floor {
-        Some(value) => {
-            if value < previous_floor {
-                // Mirror the projector's error so an operator who tries to
-                // regress the floor sees the same wording end-to-end. Bail
-                // out *before* admitting the event so the failed call has
-                // no on-disk side effect.
-                return Err(
-                    "disappearing setting floor must be monotonic non-decreasing".to_string(),
-                );
-            }
-            value
-        }
-        None => auto_floor,
-    };
-    let delta_from_previous = new_floor.saturating_sub(previous_floor);
-
-    let output = disappearing_messages_setting::commands::set(
-        disappearing_messages_setting::commands::SetDisappearingMessages {
-            workspace_id,
-            created_at_ms: now_ms,
-            ttl_minutes,
-            authority_admin_event_id: authority_admin_id,
-            signer_private_key: local.signing_secret,
-            expires_at_or_before_minute: new_floor,
-            previous_setting_id,
+    let output = disappearing_messages_setting::commands::author_set_with_auto_floor(
+        &context.store,
+        disappearing_messages_setting::commands::AuthorSetting {
+            workspace_id: parsed.workspace_id,
+            now_ms,
+            ttl_minutes: parsed.ttl_minutes,
+            explicit_floor: parsed.explicit_floor,
         },
     )?;
     let report = common_worker::run(
@@ -694,15 +642,22 @@ fn run_disappearing_set_command(
         },
     )
     .map_err(|err| format!("apply disappearing_messages_setting: {err}"))?;
+    let delta = report
+        .value
+        .new_floor_minute
+        .saturating_sub(report.value.previous_floor_minute);
     Ok(CliOutput::lines(vec![
         format!(
             "setting_event_id: {}",
             hex_id(report.value.setting_event_id)
         ),
-        format!("ttl_minutes: {ttl_minutes}"),
-        format!("previous_floor_minute: {previous_floor}"),
-        format!("new_floor_minute: {new_floor}"),
-        format!("floor_delta_minutes: {delta_from_previous}"),
+        format!("ttl_minutes: {}", parsed.ttl_minutes),
+        format!(
+            "previous_floor_minute: {}",
+            report.value.previous_floor_minute
+        ),
+        format!("new_floor_minute: {}", report.value.new_floor_minute),
+        format!("floor_delta_minutes: {delta}"),
     ]))
 }
 
@@ -848,63 +803,20 @@ fn run_disappearing_tighten_command(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let parsed = parse_disappearing_tighten_args(args)?;
-    let workspace_id = parsed.workspace_id;
-    let ttl_minutes = parsed.ttl_minutes;
-
-    let membership = require_membership(&context.store, workspace_id)?;
-    let local = endpoint::commands::local_keypair(&context.store)?
-        .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let authority_admin_id = admin_for_user(
-        &context.store,
-        workspace_id,
-        membership.user_authority_event_id,
-    )?
-    .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
-
-    let previous = disappearing_messages_setting::queries::active_for_workspace(
-        &context.store,
-        workspace_id,
-    )?;
-    let previous_setting_id = previous.as_ref().map(|row| row.setting_event_id);
-    let previous_floor = previous
-        .as_ref()
-        .map(|row| row.expires_at_or_before_minute)
-        .unwrap_or(0);
-
     let now_ms = next_timestamp(&context.store)?;
-    let now_minute = now_ms / UNIX_MINUTE_MS;
-    let target_floor = now_minute.saturating_sub(u64::from(ttl_minutes));
-    if target_floor < previous_floor {
-        return Err(
-            "disappearing setting floor must be monotonic non-decreasing (current floor \
-             already exceeds now_minute - new_ttl_minutes; use disappearing-set instead)"
-                .to_string(),
-        );
-    }
+    let input = disappearing_messages_setting::commands::AuthorTighten {
+        workspace_id: parsed.workspace_id,
+        now_ms,
+        ttl_minutes: parsed.ttl_minutes,
+    };
 
-    // Estimate live messages that will fall below the new floor. The
-    // count is a hint surfaced in the prompt — the actual deletes are
-    // performed by the dispatcher walking the time tree, not by this
-    // command directly. We sum opened + still-sealed rows because the
-    // sealed projection is what receivers see before key derivation.
-    let mut messages_below_floor: usize = 0;
-    for row in message_queries::list_for_workspace(&context.store, workspace_id)? {
-        let authored_minute = row.created_at_ms / UNIX_MINUTE_MS;
-        if authored_minute < target_floor {
-            messages_below_floor += 1;
-        }
-    }
-    for row in message_queries::list_sealed_for_workspace(&context.store, workspace_id)? {
-        let authored_minute = row.created_at_ms / UNIX_MINUTE_MS;
-        if authored_minute < target_floor {
-            messages_below_floor += 1;
-        }
-    }
-
+    // Plan first so the operator confirmation prompt knows how many live
+    // messages will fall below the target floor.
+    let plan = disappearing_messages_setting::commands::plan_tighten(&context.store, input)?;
     if !parsed.yes {
         eprintln!(
-            "WARNING: this will delete {messages_below_floor} messages older than \
-             {ttl_minutes} minutes (new floor = {target_floor})."
+            "WARNING: this will delete {} messages older than {} minutes (new floor = {}).",
+            plan.messages_below_floor, parsed.ttl_minutes, plan.target_floor_minute
         );
         eprint!("Continue? [y/N] ");
         let mut response = String::new();
@@ -918,17 +830,8 @@ fn run_disappearing_tighten_command(
         }
     }
 
-    let output = disappearing_messages_setting::commands::set(
-        disappearing_messages_setting::commands::SetDisappearingMessages {
-            workspace_id,
-            created_at_ms: now_ms,
-            ttl_minutes,
-            authority_admin_event_id: authority_admin_id,
-            signer_private_key: local.signing_secret,
-            expires_at_or_before_minute: target_floor,
-            previous_setting_id,
-        },
-    )?;
+    let output =
+        disappearing_messages_setting::commands::author_tighten(&context.store, input)?;
     let report = common_worker::run(
         &context.store,
         &context.protocol,
@@ -944,10 +847,13 @@ fn run_disappearing_tighten_command(
             "setting_event_id: {}",
             hex_id(report.value.setting_event_id)
         ),
-        format!("ttl_minutes: {ttl_minutes}"),
-        format!("previous_floor_minute: {previous_floor}"),
-        format!("new_floor_minute: {target_floor}"),
-        format!("messages_below_floor: {messages_below_floor}"),
+        format!("ttl_minutes: {}", parsed.ttl_minutes),
+        format!(
+            "previous_floor_minute: {}",
+            report.value.previous_floor_minute
+        ),
+        format!("new_floor_minute: {}", report.value.target_floor_minute),
+        format!("messages_below_floor: {}", plan.messages_below_floor),
     ]))
 }
 
@@ -989,49 +895,12 @@ fn run_disappearing_compact_command(
         args.get(0).expect("length checked"),
         DISAPPEARING_COMPACT_USAGE,
     )?;
-
-    let membership = require_membership(&context.store, workspace_id)?;
-    let local = endpoint::commands::local_keypair(&context.store)?
-        .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let authority_admin_id = admin_for_user(
-        &context.store,
-        workspace_id,
-        membership.user_authority_event_id,
-    )?
-    .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
-
-    let active = disappearing_messages_setting::queries::active_for_workspace(
-        &context.store,
-        workspace_id,
-    )?
-    .ok_or_else(|| {
-        "no active disappearing-messages setting; use disappearing-set first".to_string()
-    })?;
-    let previous_floor = active.expires_at_or_before_minute;
-    let ttl_minutes = active.ttl_minutes;
-
     let now_ms = next_timestamp(&context.store)?;
-    let now_minute = now_ms / UNIX_MINUTE_MS;
-    // Compact always picks the no-live-message-deletion floor: the same
-    // floor that an honest author would commit to right now under the
-    // current policy. By construction every live message stamped under
-    // this policy has `expires_at_minute >= new_floor`, so no live
-    // message is in `[0, new_floor)`. Only debris (already-expired
-    // messages, subsumed tombstones) gets GC'd.
-    let target_floor = std::cmp::max(
-        previous_floor,
-        now_minute.saturating_sub(u64::from(ttl_minutes)),
-    );
-
-    let output = disappearing_messages_setting::commands::set(
-        disappearing_messages_setting::commands::SetDisappearingMessages {
+    let output = disappearing_messages_setting::commands::author_compact(
+        &context.store,
+        disappearing_messages_setting::commands::AuthorCompact {
             workspace_id,
-            created_at_ms: now_ms,
-            ttl_minutes,
-            authority_admin_event_id: authority_admin_id,
-            signer_private_key: local.signing_secret,
-            expires_at_or_before_minute: target_floor,
-            previous_setting_id: Some(active.setting_event_id),
+            now_ms,
         },
     )?;
     let report = common_worker::run(
@@ -1043,16 +912,21 @@ fn run_disappearing_compact_command(
         },
     )
     .map_err(|err| format!("apply disappearing_messages_setting: {err}"))?;
-
-    let delta = target_floor.saturating_sub(previous_floor);
+    let delta = report
+        .value
+        .new_floor_minute
+        .saturating_sub(report.value.previous_floor_minute);
     Ok(CliOutput::lines(vec![
         format!(
             "setting_event_id: {}",
             hex_id(report.value.setting_event_id)
         ),
-        format!("ttl_minutes: {ttl_minutes}"),
-        format!("previous_floor_minute: {previous_floor}"),
-        format!("new_floor_minute: {target_floor}"),
+        format!("ttl_minutes: {}", report.value.ttl_minutes),
+        format!(
+            "previous_floor_minute: {}",
+            report.value.previous_floor_minute
+        ),
+        format!("new_floor_minute: {}", report.value.new_floor_minute),
         format!("floor_delta_minutes: {delta}"),
     ]))
 }
@@ -1062,22 +936,14 @@ fn run_chop_now_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), CHOP_NOW_USAGE)?;
     let floor_minute = parse_u64(args.get(1).expect("length checked"), CHOP_NOW_USAGE)?;
 
-    // Pick the most recently created frontier as the chop target. This
-    // mirrors what the dispatcher's per-frontier loop reaches today, but
-    // surfaces the choice explicitly so an operator can verify which
-    // frontier got chopped.
-    let frontiers = removal_frontier::queries::list_for_workspace(&context.store, workspace_id)?;
-    let target = frontiers
-        .into_iter()
-        .max_by_key(|row| (row.created_at_ms, row.removal_frontier_id))
-        .ok_or_else(|| "no removal frontier exists for workspace".to_string())?;
-
+    let removal_frontier_id =
+        removal_frontier::commands::latest_frontier_id(&context.store, workspace_id)?;
     let output = worker::run(
         &context.store,
         &context.protocol,
         worker::Work::ChopTimeTreePrefix {
             workspace_id,
-            removal_frontier_id: target.removal_frontier_id,
+            removal_frontier_id,
             floor_minute,
         },
     )?;
@@ -1086,10 +952,7 @@ fn run_chop_now_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     };
 
     Ok(CliOutput::lines(vec![
-        format!(
-            "removal_frontier_id: {}",
-            hex_id(target.removal_frontier_id)
-        ),
+        format!("removal_frontier_id: {}", hex_id(removal_frontier_id)),
         format!("floor_minute: {floor_minute}"),
         format!(
             "subtree_tombstones_written: {}",

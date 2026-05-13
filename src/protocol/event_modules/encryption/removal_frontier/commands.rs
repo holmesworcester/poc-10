@@ -7,10 +7,12 @@
 //! allowing the dependency closure to cover every referenced removal boundary.
 
 use crate::core::crypto::Ed25519PrivateKey;
+use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
 
 use super::codec;
+use super::queries;
 use super::types::{RemovalFrontierEvent, MAX_REMOVAL_FRONTIER_REFS};
 
 /// Sanity guard: non-zero ids and sorted/unique refs. The codec is
@@ -157,6 +159,20 @@ fn validate_refs(refs: &[EventId]) -> Result<(), String> {
 
 fn has_duplicate(ids: &[EventId]) -> bool {
     ids.windows(2).any(|pair| pair[0] == pair[1])
+}
+
+/// Pick the workspace's most-recently-authored removal frontier id, by
+/// `(created_at_ms, removal_frontier_id)`. This mirrors what the
+/// dispatcher's per-frontier loop reaches today and is used by
+/// diagnostic CLI commands (like `chop-now`) that need to name the
+/// active chop target deterministically.
+pub fn latest_frontier_id(store: &Store, workspace_id: EventId) -> Result<EventId, String> {
+    let frontiers = queries::list_for_workspace(store, workspace_id)?;
+    frontiers
+        .into_iter()
+        .max_by_key(|row| (row.created_at_ms, row.removal_frontier_id))
+        .map(|row| row.removal_frontier_id)
+        .ok_or_else(|| "no removal frontier exists for workspace".to_string())
 }
 
 #[cfg(test)]
