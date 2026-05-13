@@ -2310,68 +2310,40 @@ fn src_has_no_stale_doc_references() {
     // delivery vehicles, and now-abandoned plan filenames. These leak the
     // shape of last week's branch into next month's code review and rot
     // fast.
-    fn has_slice_or_task_number(text: &str, lead: &str) -> bool {
-        // Match `<lead><digit>` or `<lead>#<digit>`; `lead` is "slice " /
-        // "slice-" / "task #".
+    // Match every occurrence of `prefix` and call `accept_next` on the byte
+    // immediately after each occurrence. Returns true on the first match.
+    fn has_prefix_followed_by(text: &str, prefix: &str, accept_next: impl Fn(u8) -> bool) -> bool {
         let bytes = text.as_bytes();
-        let lead_bytes = lead.as_bytes();
-        if lead_bytes.is_empty() || bytes.len() < lead_bytes.len() + 1 {
+        let prefix_bytes = prefix.as_bytes();
+        if bytes.len() <= prefix_bytes.len() {
             return false;
         }
-        for window_start in 0..=bytes.len() - lead_bytes.len() - 1 {
-            if &bytes[window_start..window_start + lead_bytes.len()] == lead_bytes {
-                let next = bytes[window_start + lead_bytes.len()];
-                if next.is_ascii_digit() {
-                    return true;
-                }
-            }
-        }
-        false
+        bytes
+            .windows(prefix_bytes.len())
+            .enumerate()
+            .filter(|(_, window)| *window == prefix_bytes)
+            .any(|(start, _)| accept_next(bytes[start + prefix_bytes.len()]))
     }
 
     fn has_commit_hash(text: &str) -> bool {
         // Match `commit ` followed by >= 6 hex chars.
-        let needle = b"commit ";
         let bytes = text.as_bytes();
-        if bytes.len() < needle.len() + 6 {
+        let prefix = b"commit ";
+        if bytes.len() < prefix.len() + 6 {
             return false;
         }
-        for window_start in 0..=bytes.len() - needle.len() - 6 {
-            if &bytes[window_start..window_start + needle.len()] == needle {
-                let candidate = &bytes[window_start + needle.len()..];
-                let hex_run = candidate
+        bytes
+            .windows(prefix.len())
+            .enumerate()
+            .filter(|(_, window)| *window == prefix)
+            .any(|(start, _)| {
+                let after = &bytes[start + prefix.len()..];
+                after
                     .iter()
-                    .take_while(|byte| {
-                        byte.is_ascii_digit()
-                            || (b'a'..=b'f').contains(byte)
-                            || (b'A'..=b'F').contains(byte)
-                    })
-                    .count();
-                if hex_run >= 6 {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn has_todo_phase(text: &str) -> bool {
-        for tag in ["TODO(slice", "TODO(phase", "TODO(task", "TODO(sprint"] {
-            let bytes = text.as_bytes();
-            let tag_bytes = tag.as_bytes();
-            if bytes.len() < tag_bytes.len() + 1 {
-                continue;
-            }
-            for window_start in 0..=bytes.len() - tag_bytes.len() - 1 {
-                if &bytes[window_start..window_start + tag_bytes.len()] == tag_bytes {
-                    let next = bytes[window_start + tag_bytes.len()];
-                    if next == b' ' || next == b'-' {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+                    .take_while(|byte| byte.is_ascii_hexdigit())
+                    .count()
+                    >= 6
+            })
     }
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -2394,12 +2366,14 @@ fn src_has_no_stale_doc_references() {
             let log = |kind: &str, offenders: &mut Vec<String>| {
                 offenders.push(format!("{relative}:{}: {kind} -- {}", idx + 1, line.trim()));
             };
-            if has_slice_or_task_number(line, "slice ")
-                || has_slice_or_task_number(line, "slice-")
+            let digit = |b: u8| b.is_ascii_digit();
+            let space_or_dash = |b: u8| b == b' ' || b == b'-';
+            if has_prefix_followed_by(line, "slice ", digit)
+                || has_prefix_followed_by(line, "slice-", digit)
             {
                 log("slice number reference", &mut offenders);
             }
-            if has_slice_or_task_number(line, "task #") {
+            if has_prefix_followed_by(line, "task #", digit) {
                 log("task number reference", &mut offenders);
             }
             if has_commit_hash(line) {
@@ -2411,8 +2385,11 @@ fn src_has_no_stale_doc_references() {
                     break;
                 }
             }
-            if has_todo_phase(line) {
-                log("TODO tied to transient delivery vehicle", &mut offenders);
+            for todo_tag in ["TODO(slice", "TODO(phase", "TODO(task", "TODO(sprint"] {
+                if has_prefix_followed_by(line, todo_tag, space_or_dash) {
+                    log("TODO tied to transient delivery vehicle", &mut offenders);
+                    break;
+                }
             }
             for phrase in plan_phrases {
                 if line.contains(phrase) {
