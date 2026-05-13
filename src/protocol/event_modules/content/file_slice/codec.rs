@@ -19,8 +19,8 @@
 //! descriptor's `root_hash` hashes ciphertext, not plaintext.
 
 use crate::core::crypto::{
-    self, Ed25519PrivateKey, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce, ED25519_SIGNATURE_BYTES,
-    XCHACHA20_POLY1305_NONCE_BYTES,
+    self, Ed25519PrivateKey, Hash, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce,
+    ED25519_SIGNATURE_BYTES, XCHACHA20_POLY1305_NONCE_BYTES,
 };
 use crate::protocol::event_modules::types::{EventId, EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
@@ -155,6 +155,18 @@ pub fn build_slice(input: BuildSlice<'_>) -> Result<FileSliceEvent, String> {
         plaintext_len: input.plaintext_len,
         proof,
     })
+}
+
+/// Extract the original slice ciphertext from a BAO proof against the
+/// descriptor's root hash. Thin wrapper over `crypto::bao_verify_slice`
+/// so projectors can stay out of the `core::crypto` namespace.
+pub fn extract_verified_slice_bytes(
+    root_hash: &Hash,
+    proof: &[u8],
+    slice_start: u64,
+    slice_len: u64,
+) -> Result<Vec<u8>, String> {
+    crypto::bao_verify_slice(root_hash, proof, slice_start, slice_len)
 }
 
 pub fn encode(event: &FileSliceEvent, file_event_id: &EventId) -> Result<Vec<u8>, String> {
@@ -447,9 +459,13 @@ mod tests {
             assert!(event.proof.len() <= FILE_SLICE_PROOF_BYTES);
             encode(&event, &[9; 32]).expect("proof fits file slice slot");
 
-            let verified =
-                crypto::bao_verify_slice(&root_hash, &event.proof, slice_start, slice_len)
-                    .expect("verify slice proof");
+            let verified = extract_verified_slice_bytes(
+                &root_hash,
+                &event.proof,
+                slice_start,
+                slice_len,
+            )
+            .expect("verify slice proof");
             let expected_start = slice_start as usize;
             let expected_end = expected_start + slice_len as usize;
             assert_eq!(verified, ciphertext_total[expected_start..expected_end]);
