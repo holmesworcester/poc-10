@@ -13,6 +13,8 @@
 //! on the queries module, which the boundary rule forbids.
 
 use crate::core::store::{Schema, Store, TableName, TableRow};
+use crate::protocol::event_modules::encryption::local_history_node_secret::queries as
+    local_history_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::AdmitDecision;
 use crate::protocol::wire::{Reader, Writer};
@@ -20,8 +22,8 @@ use crate::protocol::wire::{Reader, Writer};
 use super::codec;
 use super::queries;
 use super::types::{
-    unix_minute_for, MessageCiphertext, MessageEvent, MessagePlaintext, MessageRow, EXPIRES_NEVER,
-    MESSAGE_CIPHERTEXT_BYTES, MESSAGE_TEXT_BYTES, UNIX_MINUTE_MS,
+    message_event_id_in_minute, unix_minute_for, MessageCiphertext, MessageEvent, MessagePlaintext,
+    MessageRow, EXPIRES_NEVER, MESSAGE_CIPHERTEXT_BYTES, MESSAGE_TEXT_BYTES, UNIX_MINUTE_MS,
 };
 
 pub const MESSAGES: TableName = TableName::new("content.messages");
@@ -44,6 +46,31 @@ pub const SCHEMAS: &[Schema] = &[
 /// and drops the bytes; this catches re-deliveries after a previous local
 /// expiry, and replaces the projector's old `is_expired_at_receive` branch
 /// (which fired too late, after the bytes were already stored).
+///
+/// A third drop condition catches messages whose leaf coordinate has no
+/// covering ancestor on this peer's retained tree. Three scenarios this
+/// closes:
+///
+///   1. **Cover-horizon sealing** (terminal): the peer was offline > 30
+///      days and the dispatcher chopped the message's range. A
+///      pre-horizon message arriving now is permanently undecryptable
+///      on this peer and must be dropped before storage.
+///   2. **Tightening** (terminal): an admin tightened the floor; a
+///      pre-floor message from a peer that hadn't yet seen the setting
+///      arrives at a peer whose retained tree already chopped past the
+///      message's authored minute. Same wedge as (1), different cause.
+///   3. **Transient bootstrap** (recoverable): the peer just joined and
+///      F has not yet been derived from an admitted key wrap. The
+///      message arrives early; we drop it. Sync's negentropy round
+///      will redeliver after F arrives, and the second admit
+///      succeeds with cover present.
+///
+/// Without this drop the canonical bytes would be admitted, the leaf
+/// projector would fail to derive AEAD material, and the message would
+/// linger as a sealed row that decryption-on-read keeps retrying.
+/// Dropping at admit keeps EVENTS, the in-memory SyncIndex, and the
+/// sealed-message projection consistent with what this peer can
+/// actually open.
 pub fn admit_check_received(store: &Store, bytes: &[u8]) -> Result<AdmitDecision, String> {
     let envelope = codec::decode_signed(bytes)?;
     let event = codec::decode(&envelope.payload)?;
@@ -51,22 +78,41 @@ pub fn admit_check_received(store: &Store, bytes: &[u8]) -> Result<AdmitDecision
     if queries::message_tombstone_exists(store, event.workspace_id, event_id)? {
         return Ok(AdmitDecision::Drop);
     }
-    if event.expires_at_minute == EXPIRES_NEVER {
-        return Ok(AdmitDecision::Admit);
+    if event.expires_at_minute != EXPIRES_NEVER {
+        if let Some(now_ms) = crate::core::logical_clock::logical_time(store)? {
+            if event.expires_at_minute < now_ms / UNIX_MINUTE_MS {
+                let row = message_tombstone_row(
+                    event.workspace_id,
+                    event_id,
+                    event.author_user_id,
+                    unix_minute_for(event.created_at_ms),
+                );
+                return Ok(AdmitDecision::WriteRowsAndDrop(vec![row]));
+            }
+        }
     }
-    let Some(now_ms) = crate::core::logical_clock::logical_time(store)? else {
-        return Ok(AdmitDecision::Admit);
-    };
-    if event.expires_at_minute >= now_ms / UNIX_MINUTE_MS {
-        return Ok(AdmitDecision::Admit);
-    }
-    let row = message_tombstone_row(
-        event.workspace_id,
-        event_id,
-        event.author_user_id,
-        unix_minute_for(event.created_at_ms),
+    // Cover check: drop messages whose leaf coord has no local covering
+    // ancestor. See doc-comment above for the three scenarios this
+    // catches. Coordinate is derived from the same canonical fields the
+    // author used (workspace, author, frontier, timestamp) — same hash
+    // as the encryption worker's `derive_event_leaf`.
+    let unix_minute = event.created_at_ms / UNIX_MINUTE_MS;
+    let leaf_coord = message_event_id_in_minute(
+        &event.workspace_id,
+        &event.author_user_id,
+        &event.removal_frontier_id,
+        event.created_at_ms,
     );
-    Ok(AdmitDecision::WriteRowsAndDrop(vec![row]))
+    if !local_history_queries::has_covering_ancestor(
+        store,
+        event.workspace_id,
+        event.removal_frontier_id,
+        unix_minute,
+        leaf_coord,
+    )? {
+        return Ok(AdmitDecision::Drop);
+    }
+    Ok(AdmitDecision::Admit)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,10 +333,14 @@ fn encode_sealed_value(signer_endpoint_shared_id: EventId, event: &MessageEvent)
 #[cfg(test)]
 mod tests {
     use crate::core::logical_clock;
+    use crate::protocol::event_modules::encryption::local_key_secret;
     use crate::protocol::event_modules::types::event_id;
     use crate::protocol::Protocol;
 
     use super::*;
+
+    const TEST_FRONTIER_ID: [u8; 32] = [30; 32];
+    const TEST_LOCAL_KEY_SECRET_ID: [u8; 32] = [40; 32];
 
     /// Build a signed message canonical record. The bytes are *not* admitted
     /// to EVENTS — the gate runs before storage, so the tests assert the
@@ -305,8 +355,8 @@ mod tests {
             workspace_id,
             created_at_ms,
             author_user_id,
-            removal_frontier_id: [30; 32],
-            local_history_node_secret_id: [40; 32],
+            removal_frontier_id: TEST_FRONTIER_ID,
+            local_history_node_secret_id: TEST_LOCAL_KEY_SECRET_ID,
             expires_at_minute,
             disappearing_setting_id: workspace_id,
             nonce: [0; 24],
@@ -317,10 +367,30 @@ mod tests {
         codec::encode_signed(&envelope)
     }
 
+    /// Seed `(workspace_id, TEST_FRONTIER_ID) -> LOCAL_KEY_SECRETS` so the
+    /// cover-ancestor check passes. The cover check is one of three drop
+    /// branches in `admit_check_received`; tests that exercise the other
+    /// branches (tombstone, past-TTL) need an F row to short-circuit it.
+    fn seed_frontier_root(store: &Store, workspace_id: EventId) {
+        let row = local_key_secret::schema::local_key_secret_row(
+            TEST_LOCAL_KEY_SECRET_ID,
+            &local_key_secret::types::LocalKeySecret {
+                workspace_id,
+                removal_frontier_id: TEST_FRONTIER_ID,
+                key_secret: [1; crate::core::crypto::XCHACHA20_POLY1305_KEY_BYTES],
+            },
+        );
+        store
+            .insert_table_rows(vec![row])
+            .expect("seed local_key_secret");
+    }
+
     #[test]
     fn admit_passes_message_with_no_tombstone_and_no_clock() {
         let store = Protocol::open_memory_store().expect("store");
-        let bytes = signed_message_bytes([1; 32], [2; 32], 0, EXPIRES_NEVER);
+        let workspace_id = [1; 32];
+        seed_frontier_root(&store, workspace_id);
+        let bytes = signed_message_bytes(workspace_id, [2; 32], 0, EXPIRES_NEVER);
         let decision = admit_check_received(&store, &bytes).expect("admit");
         assert_eq!(decision, AdmitDecision::Admit);
     }
@@ -330,6 +400,7 @@ mod tests {
         let store = Protocol::open_memory_store().expect("store");
         let workspace_id = [7; 32];
         let author_user_id = [3; 32];
+        seed_frontier_root(&store, workspace_id);
         let bytes = signed_message_bytes(workspace_id, author_user_id, 0, EXPIRES_NEVER);
         let id = event_id(&bytes);
 
@@ -361,6 +432,7 @@ mod tests {
         let store = Protocol::open_memory_store().expect("store");
         let workspace_id = [9; 32];
         let author_user_id = [4; 32];
+        seed_frontier_root(&store, workspace_id);
         let created_at_ms = 100 * UNIX_MINUTE_MS;
         let bytes = signed_message_bytes(workspace_id, author_user_id, created_at_ms, 101);
         let id = event_id(&bytes);
@@ -396,6 +468,7 @@ mod tests {
         let store = Protocol::open_memory_store().expect("store");
         let workspace_id = [11; 32];
         let author_user_id = [5; 32];
+        seed_frontier_root(&store, workspace_id);
         let created_at_ms = 100 * UNIX_MINUTE_MS;
         // Stamped expiry = 105; clock = 102 -> not expired yet.
         let bytes = signed_message_bytes(workspace_id, author_user_id, created_at_ms, 105);
@@ -409,9 +482,79 @@ mod tests {
         let store = Protocol::open_memory_store().expect("store");
         let workspace_id = [13; 32];
         let author_user_id = [6; 32];
+        seed_frontier_root(&store, workspace_id);
         let bytes = signed_message_bytes(workspace_id, author_user_id, 0, EXPIRES_NEVER);
         logical_clock::set_logical_time(&store, u64::MAX - 1).expect("set clock");
         let decision = admit_check_received(&store, &bytes).expect("admit");
         assert_eq!(decision, AdmitDecision::Admit);
+    }
+
+    /// Cover-horizon / tightening / bootstrap wedge: with no F row and no
+    /// sibling history-node row on this peer, an arriving message has no
+    /// covering ancestor and the gate must drop the bytes. The post-drop
+    /// state must be byte-equal to the pre-drop state — no tombstone is
+    /// written, EVENTS stays empty, and the cover check itself does not
+    /// mutate.
+    #[test]
+    fn admit_drops_message_with_no_covering_ancestor() {
+        let store = Protocol::open_memory_store().expect("store");
+        let workspace_id = [21; 32];
+        let author_user_id = [22; 32];
+        // No `seed_frontier_root`: this peer has no F row and no sibling.
+        let bytes = signed_message_bytes(
+            workspace_id,
+            author_user_id,
+            100 * UNIX_MINUTE_MS,
+            EXPIRES_NEVER,
+        );
+        let id = event_id(&bytes);
+
+        let decision = admit_check_received(&store, &bytes).expect("admit");
+        assert_eq!(decision, AdmitDecision::Drop);
+
+        // EVENTS row absent — the canonical bytes never reach storage.
+        assert!(
+            crate::protocol::event_modules::schema::event_bytes(&store, &id)
+                .expect("event bytes")
+                .is_none(),
+            "EVENTS must stay empty when the cover check drops"
+        );
+        // No tombstone written — this is not an expiry-driven drop. The
+        // tombstone surface stays empty so a later re-derivation of F can
+        // legitimately admit the message (transient bootstrap scenario).
+        let tombstones =
+            queries::list_message_tombstones_for_workspace(&store, workspace_id).expect("list");
+        assert!(
+            tombstones.is_empty(),
+            "no-cover drop must not write a tombstone (would block transient \
+             bootstrap recovery)"
+        );
+    }
+
+    /// Recoverable bootstrap: first admit drops because F has not yet been
+    /// derived; once F's row is seeded the same bytes admit cleanly. Mirrors
+    /// the case-3 sync redelivery cycle the gate is designed to support.
+    #[test]
+    fn admit_recovers_after_frontier_root_is_seeded() {
+        let store = Protocol::open_memory_store().expect("store");
+        let workspace_id = [23; 32];
+        let author_user_id = [24; 32];
+        let bytes = signed_message_bytes(
+            workspace_id,
+            author_user_id,
+            200 * UNIX_MINUTE_MS,
+            EXPIRES_NEVER,
+        );
+
+        // No F yet — gate drops.
+        let before = admit_check_received(&store, &bytes).expect("admit before");
+        assert_eq!(before, AdmitDecision::Drop);
+
+        // F arrives.
+        seed_frontier_root(&store, workspace_id);
+
+        // Same bytes admit cleanly now: F covers every leaf on this frontier.
+        let after = admit_check_received(&store, &bytes).expect("admit after");
+        assert_eq!(after, AdmitDecision::Admit);
     }
 }

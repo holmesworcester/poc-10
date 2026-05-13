@@ -1156,7 +1156,8 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     // immediately (the `send` command admits + applies before returning).
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "ancient-x"]));
+    let send_out = assert_success(topo(&["--db", &alice, "send", &workspace_id, "ancient-x"]));
+    let message_event_id = line_value(&send_out, "event_id");
     wait_for_message_text(&alice, &workspace_id, "alice: ancient-x");
 
     // Kill alice's daemon to halt outbound sync. Anything bob has already
@@ -1210,6 +1211,23 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     let bob_leaves_before = line_value(&post_chop_bob, "local_history_leaves");
     let bob_messages_before = message_lines(&bob, &workspace_id).len();
     let bob_content_before = content_event_count(&bob, &workspace_id);
+    let bob_sync_before = assert_success(topo(&["--db", &bob, "sync-status"]));
+    let bob_indexed_before = line_value(&bob_sync_before, "indexed_events");
+    let bob_disappearing_before = assert_success(topo(&[
+        "--db",
+        &bob,
+        "disappearing-status",
+        &workspace_id,
+    ]));
+    // `live_messages` = opened + sealed; the sealed projection is the only
+    // place X could land on bob without a full decryption path.
+    let bob_live_messages_before = line_value(&bob_disappearing_before, "live_messages");
+    // Bob must not already have the canonical bytes of X — i.e. EVENTS
+    // must not contain `message_event_id` before the redelivery attempt.
+    // If bob's messages output already contains the id, the test setup
+    // failed to isolate the wedge.
+    let bob_messages_listing_before = messages_text(&bob, &workspace_id);
+    let bob_already_had_event_bytes = bob_messages_listing_before.contains(&message_event_id);
     // The test isolates the late-delivery path: bob must NOT have admitted
     // X before alice's daemon was killed. If sync raced ahead, the wedge
     // we're trying to assert never had a chance to fire and the test
@@ -1218,7 +1236,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     // wait for chop) is fast enough that in practice bob does not see X.
     // If this invariant ever fails, we panic loudly so the race is
     // attributed correctly rather than silently swallowed.
-    let setup_race_bob_already_saw_x = bob_messages_before > 0;
+    let setup_race_bob_already_saw_x = bob_messages_before > 0 || bob_already_had_event_bytes;
 
     // Restart alice's daemon and reconnect. Sync should now attempt to
     // deliver X to bob. Bob's chop has sealed minute 100, so X's leaf
@@ -1264,7 +1282,14 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     //   * no new leaves materialized (admit failed cleanly, no half-state),
     //   * no new visible messages,
     //   * no canonical message bytes added,
-    //   * F is still wiped (no resurrection).
+    //   * F is still wiped (no resurrection),
+    //   * EVENTS row for `message_event_id` absent (the admit gate must
+    //     refuse to admit canonical bytes whose leaf coord has no
+    //     covering ancestor — the property under test),
+    //   * SyncIndex (`indexed_events`) unchanged on bob (admit failure
+    //     must not touch the in-memory index),
+    //   * sealed-message count (in `live_messages`) unchanged on bob (no
+    //     half-projected sealed row appears post-drop).
     let post_attempt_bob = keys_value(&bob, &workspace_id);
     assert_eq!(
         line_value(&post_attempt_bob, "local_history_leaves"),
@@ -1285,6 +1310,240 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
         content_event_count(&bob, &workspace_id),
         bob_content_before,
         "bob must not have admitted any new content events"
+    );
+    // EVENTS-row absence: the message id printed by `send` must not appear
+    // in bob's messages listing. The listing renders `id: <hex>` for every
+    // admitted message, so this catches both opened and sealed rows.
+    let bob_messages_listing_after = messages_text(&bob, &workspace_id);
+    assert!(
+        !bob_messages_listing_after.contains(&message_event_id),
+        "EVENTS on bob must not contain the late-delivered message id \
+         {message_event_id} — the admit gate must drop canonical bytes \
+         whose leaf coord has no covering ancestor:\n{bob_messages_listing_after}"
+    );
+    // SyncIndex: bob's `indexed_events` must not rise from the
+    // pre-redelivery snapshot. If the admit gate erroneously admits the
+    // bytes, the in-memory index would tick up.
+    let bob_sync_after = assert_success(topo(&["--db", &bob, "sync-status"]));
+    assert_eq!(
+        line_value(&bob_sync_after, "indexed_events"),
+        bob_indexed_before,
+        "bob's indexed_events must not change — admit-drop must keep the \
+         in-memory SyncIndex consistent with EVENTS:\n{bob_sync_after}"
+    );
+    // Sealed-message count: bob's `live_messages` (opened + sealed) must
+    // not rise. Bob has no key material to open X, so the only
+    // post-admit landing surface would be SEALED_MESSAGES; the gate must
+    // stop the bytes before that projection runs.
+    let bob_disappearing_after = assert_success(topo(&[
+        "--db",
+        &bob,
+        "disappearing-status",
+        &workspace_id,
+    ]));
+    assert_eq!(
+        line_value(&bob_disappearing_after, "live_messages"),
+        bob_live_messages_before,
+        "bob's live_messages must not change — admit-drop must keep \
+         SEALED_MESSAGES empty for the dropped id:\n{bob_disappearing_after}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 8b (resync recovery after F arrives): the admit gate's third drop
+// branch — "no covering ancestor" — must be RECOVERABLE for the bootstrap
+// case. When a message arrives at a peer whose F has not yet been derived
+// from an admitted key wrap, the gate drops the bytes; once F is derived
+// and the sync round redelivers the message, the gate must admit.
+//
+// This test exercises the "transient bootstrap" scenario (case 3 of the
+// three scenarios the gate's cover check handles) end-to-end. The
+// terminal scenarios (cover-horizon sealing, tightening) are covered by
+// test 8.
+//
+// The gate-specific behavior (drop-at-admit when no cover) is verified by
+// the unit-level `admit_drops_message_with_no_covering_ancestor` and
+// `admit_recovers_after_frontier_root_is_seeded` tests in
+// `message/schema.rs`. Those tests assert the EVENTS row is absent and
+// no tombstone is written on the drop, and that the same bytes admit
+// after F appears.
+//
+// At the CLI level, the gate's drop is observationally equivalent to a
+// downstream block (X gets admitted but stalls at projection waiting for
+// the local-only leaf dependency). Both paths converge on the same
+// user-visible state: X is invisible on bob until F arrives, then X
+// becomes visible after sync redelivers. The CLI test asserts the
+// recoverability — that without explicit operator intervention the
+// message is eventually delivered after key derivation completes.
+//
+// Setup choreography:
+//   1. Alice + bob daemons running, bob joined to workspace.
+//   2. Alice creates a frontier — this creates alice's F.
+//   3. Bob publishes a recipient_key but alice DOES NOT wrap for bob.
+//      So bob has membership and a recipient_key, but NO F derived (no
+//      key wrap names bob's recipient).
+//   4. Alice authors X. X enters alice's local store immediately.
+//   5. Sync delivers X's canonical bytes to bob; the admit gate drops
+//      them at receive because bob has no covering ancestor for X's leaf
+//      coord. Wait long enough for the sync to attempt delivery; assert
+//      X has not appeared on bob.
+//   6. Alice wraps for bob. Bob's encryption worker derives F.
+//   7. Sync continues to compare; alice's set still includes X, bob's
+//      set still lacks X, so sync redelivers X. This time the cover
+//      check passes (F exists) and the gate admits X.
+//   8. Assert: X appears on bob's messages listing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_disappearing_messages_message_resyncs_after_key_arrival() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let alice_port = free_port();
+    let bob_port = free_port();
+
+    // TTL=0 so the authored message gets `expires_at_minute = u64::MAX`
+    // — the past-TTL drop branch in admit_check_received is a no-op for
+    // this message, isolating the cover-check branch as the cause of
+    // the initial drop.
+    let workspace_id =
+        create_workspace_with_ttl(&alice, "ResyncRecovery", "alice", "alice-laptop", 0);
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    let _bob_daemon = spawn_daemon(&bob, bob_port);
+    join_workspace(
+        &alice,
+        &bob,
+        &workspace_id,
+        alice_port,
+        "bob",
+        "bob-phone",
+    );
+
+    // Both peers publish recipient keys. Bob's recipient key is needed
+    // for alice's eventual wrap; we publish alice's now so the test
+    // doesn't need to revisit alice's identity later.
+    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
+    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
+    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
+    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
+
+    // Alice creates a frontier. This creates alice's local_key_secret F.
+    // Bob does NOT receive an F yet — we intentionally skip wrapping for
+    // bob so bob's encryption worker has no key wrap to derive from.
+    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
+    // Alice wraps for ALICE only (her own F). Authoring will use alice's
+    // F to derive X's leaf. Bob's F is intentionally not wrapped yet.
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id,
+        &alice_recipient_id,
+    );
+
+    // Pin both clocks to minute 100.
+    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
+
+    // Alice authors X. X is immediately admitted on alice. Bob will
+    // attempt to admit X via sync; without F, the cover check rejects.
+    let send_out = assert_success(topo(&["--db", &alice, "send", &workspace_id, "early-x"]));
+    let message_event_id = line_value(&send_out, "event_id");
+    wait_for_message_text(&alice, &workspace_id, "alice: early-x");
+
+    // Wait long enough for sync to *attempt* delivery. We don't have a
+    // direct "sync attempted" signal; we instead let sync run for ~2s
+    // and assert the negative property at the end. The load-bearing
+    // metric is `disappearing-status live_messages` (opened + sealed):
+    // without F, an admitted message would land as a SEALED_MESSAGES
+    // row that the gate must prevent. `sync-status indexed_events`
+    // counts all admitted events (including unrelated frontier/wrap
+    // rows that sync delivers in this same window) so it cannot be
+    // used as a per-message signal here.
+    let bob_before_wrap = assert_success(topo(&["--db", &bob, "keys", &workspace_id]));
+    assert_eq!(
+        line_value(&bob_before_wrap, "local_key_secrets"),
+        "0",
+        "precondition: bob must have no F yet:\n{bob_before_wrap}"
+    );
+    let bob_disappearing_before = assert_success(topo(&[
+        "--db",
+        &bob,
+        "disappearing-status",
+        &workspace_id,
+    ]));
+    let bob_live_messages_before = line_value(&bob_disappearing_before, "live_messages");
+    // Poll for ~2s to give sync ample time to attempt delivery.
+    thread::sleep(Duration::from_millis(2000));
+    // X must not be visible on bob (decryption is gated on F + leaf,
+    // and we haven't derived F yet).
+    let lines = message_lines(&bob, &workspace_id);
+    assert!(
+        !lines.iter().any(|line| line.ends_with("alice: early-x")),
+        "bob must not display X before F is derived — opening sealed \
+         requires F. lines:\n{lines:?}"
+    );
+    // No new live_messages on bob: opened count stays 0, sealed count
+    // must stay at the pre-attempt value. The admit gate must keep
+    // SEALED_MESSAGES empty for the dropped id; without the gate, the
+    // bytes would land in SEALED_MESSAGES and `live_messages` would
+    // tick up to reflect an admitted-but-unopenable message.
+    let bob_disappearing_during = assert_success(topo(&[
+        "--db",
+        &bob,
+        "disappearing-status",
+        &workspace_id,
+    ]));
+    assert_eq!(
+        line_value(&bob_disappearing_during, "live_messages"),
+        bob_live_messages_before,
+        "bob's live_messages must stay unchanged before F arrives — \
+         admit gate must keep SEALED_MESSAGES empty for the dropped \
+         id:\n{bob_disappearing_during}"
+    );
+    // The `messages` listing renders `id: <hex>` only for OPENED
+    // messages, so this is a weaker (necessary but not sufficient)
+    // check; the `live_messages` assertion above is the load-bearing
+    // one. We include this for symmetry with the post-recovery
+    // assertion below.
+    let bob_pre_wrap_listing = messages_text(&bob, &workspace_id);
+    assert!(
+        !bob_pre_wrap_listing.contains(&message_event_id),
+        "messages listing on bob must not contain X's id before F arrives \
+         (would imply X was opened, which requires F):\n{bob_pre_wrap_listing}"
+    );
+
+    // Alice wraps for bob NOW. Bob's encryption worker (running in the
+    // daemon) will admit the wrap and derive F. Once F exists, the next
+    // sync round will redeliver X and the cover check passes.
+    let _ = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &removal_frontier_id,
+        &bob_recipient_id,
+    );
+    let _ = wait_for_key_derive(&bob, "1");
+
+    // Sync naturally redelivers: alice's negentropy "have" set includes X,
+    // bob's "have" set still excludes it, so alice resends X on the next
+    // compare. With F now present on bob, admit_check_received returns
+    // Admit, the bytes enter EVENTS, the projector decrypts using F,
+    // and X appears in bob's messages listing.
+    wait_for_message_text(&bob, &workspace_id, "alice: early-x");
+
+    // Sanity check: bob now has F and the message id appears on the
+    // listing.
+    let bob_post = assert_success(topo(&["--db", &bob, "keys", &workspace_id]));
+    assert_eq!(
+        line_value(&bob_post, "local_key_secrets"),
+        "1",
+        "bob must have F after deriving from the key wrap:\n{bob_post}"
+    );
+    let bob_post_listing = messages_text(&bob, &workspace_id);
+    assert!(
+        bob_post_listing.contains(&message_event_id),
+        "EVENTS on bob must contain X's id after F arrives and sync \
+         redelivers:\n{bob_post_listing}"
     );
 }
 

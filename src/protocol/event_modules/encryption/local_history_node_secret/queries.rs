@@ -16,6 +16,7 @@
 //!   tree and tombstones; used to assert peers converge after retire/chop.
 
 use crate::core::store::Store;
+use crate::protocol::event_modules::encryption::local_key_secret;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::wire::Writer;
 
@@ -25,7 +26,7 @@ use super::schema::{
 };
 use super::types::{
     is_leaf_row, is_minute_node_row, mask_prefix_to_depth, LocalHistoryNodeSecretRow,
-    LocalHistoryNodeTombstoneRow,
+    LocalHistoryNodeTombstoneRow, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH,
 };
 
 pub fn list_for_frontier(
@@ -226,4 +227,70 @@ pub fn cover_summary(store: &Store, workspace_id: EventId) -> Result<Vec<u8>, St
         out.id(&tomb.tombstone_node_id);
     }
     Ok(out.finish())
+}
+
+/// Read-only counterpart to the encryption worker's
+/// `closest_retained_ancestor` walk: returns true when some retained
+/// ancestor on this peer covers the leaf coordinate
+/// `(workspace_id, removal_frontier_id, unix_minute, event_id_in_minute)`.
+///
+/// The walk has two pieces:
+///
+/// 1. **F row** (`LOCAL_KEY_SECRETS`): if present for this
+///    `(workspace_id, removal_frontier_id)` it covers every coordinate
+///    on this frontier; returns true immediately.
+///
+/// 2. **Materialized history nodes** (`LOCAL_HISTORY_NODE_SECRETS`):
+///    scan the frontier's rows for any whose time-axis range contains
+///    `unix_minute` AND whose trie prefix (masked to `bit_depth`)
+///    matches `event_id_in_minute`. A single covering row is enough.
+///
+/// Returns false only when neither F is present nor any sibling row
+/// covers the target — i.e. the same wedge that would cause
+/// `closest_retained_ancestor` to error. The receive-side admit gate
+/// uses this to drop messages whose leaf is permanently undecryptable
+/// on this peer (cover horizon sealed the range, an admin tightening
+/// chopped the prefix, or — transiently — F has not yet been derived
+/// from a key wrap).
+pub fn has_covering_ancestor(
+    store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    unix_minute: u64,
+    event_id_in_minute: EventId,
+) -> Result<bool, String> {
+    if local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?.is_some() {
+        return Ok(true);
+    }
+    for row in list_for_frontier(store, workspace_id, removal_frontier_id)? {
+        if covers(&row, unix_minute, event_id_in_minute) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Does this retained-row coordinate cover the leaf at
+/// `(unix_minute, event_id_in_minute)`?
+///
+/// Mirrors the worker-side `covers` predicate in
+/// `workers/encryption.rs`. Both implementations must agree byte-for-byte
+/// — if they ever drift the admit gate could drop a message the worker
+/// would have decrypted (or vice versa).
+fn covers(
+    row: &LocalHistoryNodeSecretRow,
+    unix_minute: u64,
+    event_id_in_minute: EventId,
+) -> bool {
+    let row_end = row.range_start.saturating_add(row.range_width);
+    if unix_minute < row.range_start || unix_minute >= row_end {
+        return false;
+    }
+    if row.bit_depth == TIME_TREE_BIT_DEPTH {
+        return true;
+    }
+    if row.bit_depth >= TRIE_LEAF_BIT_DEPTH {
+        return row.event_id_prefix == event_id_in_minute;
+    }
+    mask_prefix_to_depth(event_id_in_minute, row.bit_depth) == row.event_id_prefix
 }
