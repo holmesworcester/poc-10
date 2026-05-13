@@ -2303,6 +2303,134 @@ fn core_storage_and_transport_do_not_own_connection_or_bootstrap_schema() {
 }
 
 #[test]
+fn src_has_no_stale_doc_references() {
+    // RULES.md "In-Line Documentation" forbids referencing transient
+    // workflow state in source comments: slice numbers, task ids, commit
+    // hashes, pre/post-merge phrasing, TODO labels tied to abandoned
+    // delivery vehicles, and now-abandoned plan filenames. These leak the
+    // shape of last week's branch into next month's code review and rot
+    // fast.
+    fn has_slice_or_task_number(text: &str, lead: &str) -> bool {
+        // Match `<lead><digit>` or `<lead>#<digit>`; `lead` is "slice " /
+        // "slice-" / "task #".
+        let bytes = text.as_bytes();
+        let lead_bytes = lead.as_bytes();
+        if lead_bytes.is_empty() || bytes.len() < lead_bytes.len() + 1 {
+            return false;
+        }
+        for window_start in 0..=bytes.len() - lead_bytes.len() - 1 {
+            if &bytes[window_start..window_start + lead_bytes.len()] == lead_bytes {
+                let next = bytes[window_start + lead_bytes.len()];
+                if next.is_ascii_digit() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn has_commit_hash(text: &str) -> bool {
+        // Match `commit ` followed by >= 6 hex chars.
+        let needle = b"commit ";
+        let bytes = text.as_bytes();
+        if bytes.len() < needle.len() + 6 {
+            return false;
+        }
+        for window_start in 0..=bytes.len() - needle.len() - 6 {
+            if &bytes[window_start..window_start + needle.len()] == needle {
+                let candidate = &bytes[window_start + needle.len()..];
+                let hex_run = candidate
+                    .iter()
+                    .take_while(|byte| {
+                        byte.is_ascii_digit()
+                            || (b'a'..=b'f').contains(byte)
+                            || (b'A'..=b'F').contains(byte)
+                    })
+                    .count();
+                if hex_run >= 6 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn has_todo_phase(text: &str) -> bool {
+        for tag in ["TODO(slice", "TODO(phase", "TODO(task", "TODO(sprint"] {
+            let bytes = text.as_bytes();
+            let tag_bytes = tag.as_bytes();
+            if bytes.len() < tag_bytes.len() + 1 {
+                continue;
+            }
+            for window_start in 0..=bytes.len() - tag_bytes.len() - 1 {
+                if &bytes[window_start..window_start + tag_bytes.len()] == tag_bytes {
+                    let next = bytes[window_start + tag_bytes.len()];
+                    if next == b' ' || next == b'-' {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = rust_files(&root.join("src"));
+
+    let merge_phrases = [
+        "post-merge",
+        "pre-merge",
+        "after the merge",
+        "before master",
+        "after master",
+    ];
+    let plan_phrases = ["disappearing_messages_plan", "encryption_plan.md"];
+
+    let mut offenders = Vec::new();
+    for path in files {
+        let text = source_text(&path);
+        for (idx, line) in text.lines().enumerate() {
+            let relative = path.strip_prefix(root).unwrap().display();
+            let log = |kind: &str, offenders: &mut Vec<String>| {
+                offenders.push(format!("{relative}:{}: {kind} -- {}", idx + 1, line.trim()));
+            };
+            if has_slice_or_task_number(line, "slice ")
+                || has_slice_or_task_number(line, "slice-")
+            {
+                log("slice number reference", &mut offenders);
+            }
+            if has_slice_or_task_number(line, "task #") {
+                log("task number reference", &mut offenders);
+            }
+            if has_commit_hash(line) {
+                log("commit hash reference", &mut offenders);
+            }
+            for phrase in merge_phrases {
+                if line.contains(phrase) {
+                    log("merge timeline reference", &mut offenders);
+                    break;
+                }
+            }
+            if has_todo_phase(line) {
+                log("TODO tied to transient delivery vehicle", &mut offenders);
+            }
+            for phrase in plan_phrases {
+                if line.contains(phrase) {
+                    log("abandoned plan-document reference", &mut offenders);
+                    break;
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "RULES.md forbids in-line doc references to transient delivery state (slice/task/commit/plan-name leakage):\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn cli_rs_no_business_logic() {
     // event-module cli.rs files parse args, call into commands, and format
     // reports. Crypto (signing/nonces), direct store mutations, and direct
@@ -2478,18 +2606,10 @@ fn queries_rs_is_read_only() {
     );
 }
 
-#[test]
-fn schema_rs_no_store_queries_or_mutations() {
-    // schema.rs files declare table names, row builders, and decode helpers
-    // for their own rows. Read queries against Store belong in queries.rs;
-    // mutations belong in workers/projectors. The whitelist below is the
-    // shared protocol-wide schema (which re-exports queries for callers
-    // inside event_modules) and the documented admit-gate helpers that
-    // cannot move to projector.rs without violating the projector
-    // store-query lint.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let event_root = root.join("src/protocol/event_modules");
-    let admit_gate_whitelist = [
+// Returns (admit_gate_whitelist, store_helper_whitelist) for schema.rs
+// boundary lints. Kept here so both lints share one source of truth.
+fn schema_rs_boundary_whitelists() -> (&'static [&'static str], &'static [&'static str]) {
+    const ADMIT_GATE: &[&str] = &[
         "src/protocol/event_modules/content/message/schema.rs",
         "src/protocol/event_modules/content/reaction/schema.rs",
         "src/protocol/event_modules/content/file/schema.rs",
@@ -2497,9 +2617,20 @@ fn schema_rs_no_store_queries_or_mutations() {
     ];
     // The protocol-wide root schema deliberately re-exports query helpers
     // so admit-gates inside event_modules can call them without crossing
-    // the queries:: boundary.
-    let store_helper_whitelist =
-        ["src/protocol/event_modules/schema.rs"];
+    // the `queries::` boundary.
+    const STORE_HELPER: &[&str] = &["src/protocol/event_modules/schema.rs"];
+    (ADMIT_GATE, STORE_HELPER)
+}
+
+#[test]
+fn schema_rs_no_store_queries_or_mutations() {
+    // schema.rs files declare table names, row builders, and decode helpers
+    // for their own rows. Read queries against Store belong in queries.rs;
+    // mutations belong in workers/projectors. See schema_rs_boundary_whitelists
+    // for the documented exceptions.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let (admit_gate_whitelist, store_helper_whitelist) = schema_rs_boundary_whitelists();
 
     let mut offenders = Vec::new();
     for path in rust_files(&event_root)
@@ -2515,32 +2646,21 @@ fn schema_rs_no_store_queries_or_mutations() {
             .any(|allowed| relative == *allowed);
         for line in production.lines() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("pub fn ") {
-                let name = trimmed
-                    .trim_start_matches("pub fn ")
-                    .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-                    .next()
-                    .unwrap_or_default();
-                let takes_store = trimmed.contains("&Store") || trimmed.contains("store: &Store");
-                if takes_store && !store_helper_allowed {
-                    let admit_gate = name == "admit_check_received" && admit_gate_allowed;
-                    if !admit_gate {
-                        offenders.push(format!(
-                            "{relative}: `pub fn {name}` takes &Store (move read into queries.rs)"
-                        ));
-                    }
-                }
-                let validation_prefixes = ["admit_check_", "validate_", "verify_", "check_"];
-                if validation_prefixes
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
-                {
-                    let admit_gate = name == "admit_check_received" && admit_gate_allowed;
-                    if !admit_gate {
-                        offenders.push(format!(
-                            "{relative}: `pub fn {name}` is a validation helper (move to projector.rs/commands.rs)"
-                        ));
-                    }
+            if !trimmed.starts_with("pub fn ") {
+                continue;
+            }
+            let name = trimmed
+                .trim_start_matches("pub fn ")
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .next()
+                .unwrap_or_default();
+            let takes_store = trimmed.contains("&Store") || trimmed.contains("store: &Store");
+            if takes_store && !store_helper_allowed {
+                let admit_gate = name == "admit_check_received" && admit_gate_allowed;
+                if !admit_gate {
+                    offenders.push(format!(
+                        "{relative}: `pub fn {name}` takes &Store (move read into queries.rs)"
+                    ));
                 }
             }
         }
@@ -2562,6 +2682,63 @@ fn schema_rs_no_store_queries_or_mutations() {
     assert!(
         offenders.is_empty(),
         "schema.rs files declare tables and row helpers; queries belong in queries.rs and mutations belong in workers:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn schema_rs_no_validation_functions() {
+    // Validation in event modules lives in projector.rs (admission-time
+    // checks against in-memory event + context) or commands.rs (construction
+    // pre-checks). The documented exception is `admit_check_received` in the
+    // four content schemas listed in schema_rs_boundary_whitelists: those
+    // gates couldn't be moved to projector.rs because the projector lint
+    // forbids `&Store` reads, but the admit gate must query the store for
+    // existing tombstones. Everything else - `pub fn validate_*`,
+    // `pub fn verify_*`, `pub fn check_*`, or any other `pub fn admit_check_*`
+    // shape - belongs in projector.rs/commands.rs.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/protocol/event_modules");
+    let (admit_gate_whitelist, _) = schema_rs_boundary_whitelists();
+
+    let mut offenders = Vec::new();
+    for path in rust_files(&event_root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "schema.rs"))
+    {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let admit_gate_allowed = admit_gate_whitelist.iter().any(|allowed| relative == *allowed);
+        for line in production.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub fn ") {
+                continue;
+            }
+            let name = trimmed
+                .trim_start_matches("pub fn ")
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .next()
+                .unwrap_or_default();
+            let validation_prefixes = ["admit_check_", "validate_", "verify_", "check_"];
+            if !validation_prefixes
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+            {
+                continue;
+            }
+            let admit_gate = name == "admit_check_received" && admit_gate_allowed;
+            if !admit_gate {
+                offenders.push(format!(
+                    "{relative}: `pub fn {name}` is a validation helper (move to projector.rs/commands.rs)"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "schema.rs holds row helpers, not validation logic; only the documented admit-gate exception (admit_check_received in content/{{message,reaction,file,file_slice}}) is allowed:\n{}",
         offenders.join("\n")
     );
 }
