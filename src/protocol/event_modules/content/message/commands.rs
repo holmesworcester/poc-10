@@ -12,7 +12,7 @@ use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
-use super::types::MessageEvent;
+use super::types::{MessageEvent, EXPIRES_NEVER, UNIX_MINUTE_MS};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendMessage {
@@ -51,6 +51,7 @@ pub fn send(input: SendMessage) -> Result<CommandOutput<SendMessageOutput>, Stri
     if input.text.trim().is_empty() {
         return Err("message text must not be empty".to_string());
     }
+    validate_expires_at_minute(input.created_at_ms, input.expires_at_minute)?;
     let plaintext = codec::encode_text_slot(&input.text)?;
     let mut event = MessageEvent {
         workspace_id: input.workspace_id,
@@ -89,6 +90,25 @@ pub fn send(input: SendMessage) -> Result<CommandOutput<SendMessageOutput>, Stri
         text: input.text,
     };
     Ok(CommandOutput::with_events(value, vec![record]))
+}
+
+/// Authoring sanity guard. The projector additionally rejects messages that
+/// are already past their expiry at receive time and validates against the
+/// referenced disappearing-messages setting; this check only enforces the
+/// canonical-bytes invariant that an authored message's stamped expiry
+/// cannot be earlier than its authored unix_minute.
+pub(super) fn validate_expires_at_minute(
+    created_at_ms: u64,
+    expires_at_minute: u64,
+) -> Result<(), String> {
+    if expires_at_minute == EXPIRES_NEVER {
+        return Ok(());
+    }
+    let authored_minute = created_at_ms / UNIX_MINUTE_MS;
+    if expires_at_minute < authored_minute {
+        return Err("message expires_at_minute is earlier than authored minute".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

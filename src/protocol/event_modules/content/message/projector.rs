@@ -14,7 +14,7 @@ use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
 use super::types::unix_minute_for;
-use super::{codec, schema};
+use super::{codec, commands, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
@@ -22,6 +22,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     if event.record.workspace_id != Some(message.workspace_id) {
         return Err("message workspace metadata does not match event body".to_string());
     }
+    commands::validate_expires_at_minute(message.created_at_ms, message.expires_at_minute)?;
 
     let signer = event
         .context

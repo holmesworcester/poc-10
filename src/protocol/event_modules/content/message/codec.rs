@@ -86,7 +86,7 @@ pub fn decode(bytes: &[u8]) -> Result<MessageEvent, String> {
     let nonce = fixed_nonce(reader.bytes(XCHACHA20_POLY1305_NONCE_BYTES)?)?;
     let ciphertext = fixed_ciphertext(reader.bytes(MESSAGE_CIPHERTEXT_BYTES)?)?;
     reader.finish()?;
-    let event = MessageEvent {
+    Ok(MessageEvent {
         workspace_id,
         created_at_ms,
         author_user_id,
@@ -96,9 +96,7 @@ pub fn decode(bytes: &[u8]) -> Result<MessageEvent, String> {
         disappearing_setting_id,
         nonce,
         ciphertext,
-    };
-    validate_event(&event)?;
-    Ok(event)
+    })
 }
 
 pub fn sign(
@@ -195,7 +193,7 @@ fn metadata(bytes: &[u8]) -> Result<MessageMetadata, String> {
     let _nonce = reader.bytes(XCHACHA20_POLY1305_NONCE_BYTES)?;
     let _ciphertext = reader.bytes(MESSAGE_CIPHERTEXT_BYTES)?;
     reader.finish()?;
-    let metadata = MessageMetadata {
+    Ok(MessageMetadata {
         workspace_id,
         created_at_ms,
         author_user_id,
@@ -203,36 +201,7 @@ fn metadata(bytes: &[u8]) -> Result<MessageMetadata, String> {
         local_history_node_secret_id,
         expires_at_minute,
         disappearing_setting_id,
-    };
-    validate_id("message workspace", &metadata.workspace_id)?;
-    validate_id("message author_user_id", &metadata.author_user_id)?;
-    validate_id("message removal_frontier_id", &metadata.removal_frontier_id)?;
-    validate_id(
-        "message local_history_node_secret_id",
-        &metadata.local_history_node_secret_id,
-    )?;
-    validate_id(
-        "message disappearing_setting_id",
-        &metadata.disappearing_setting_id,
-    )?;
-    validate_expires_at_minute(metadata.created_at_ms, metadata.expires_at_minute)?;
-    Ok(metadata)
-}
-
-/// Authoring sanity guard. The projector additionally rejects messages that
-/// are already past their expiry at receive time; this check only enforces
-/// the canonical-bytes invariant that an authored message's stamped expiry
-/// cannot be earlier than its authored unix_minute.
-fn validate_expires_at_minute(created_at_ms: u64, expires_at_minute: u64) -> Result<(), String> {
-    use crate::protocol::event_modules::content::message::types::EXPIRES_NEVER;
-    if expires_at_minute == EXPIRES_NEVER {
-        return Ok(());
-    }
-    let authored_minute = created_at_ms / super::types::UNIX_MINUTE_MS;
-    if expires_at_minute < authored_minute {
-        return Err("message expires_at_minute is earlier than authored minute".to_string());
-    }
-    Ok(())
+    })
 }
 
 /// Build the AEAD associated-data block for a message ciphertext.
@@ -293,28 +262,6 @@ fn fixed_ciphertext(bytes: Vec<u8>) -> Result<MessageCiphertext, String> {
     bytes
         .try_into()
         .map_err(|_| "message ciphertext length mismatch".to_string())
-}
-
-fn validate_event(event: &MessageEvent) -> Result<(), String> {
-    validate_id("message workspace", &event.workspace_id)?;
-    validate_id("message author_user_id", &event.author_user_id)?;
-    validate_id("message removal_frontier_id", &event.removal_frontier_id)?;
-    validate_id(
-        "message local_history_node_secret_id",
-        &event.local_history_node_secret_id,
-    )?;
-    validate_id(
-        "message disappearing_setting_id",
-        &event.disappearing_setting_id,
-    )?;
-    Ok(())
-}
-
-fn validate_id(name: &str, id: &EventId) -> Result<(), String> {
-    if id.iter().all(|byte| *byte == 0) {
-        return Err(format!("{name} cannot be empty"));
-    }
-    Ok(())
 }
 
 fn push_unique(out: &mut Vec<EventId>, id: EventId) {
