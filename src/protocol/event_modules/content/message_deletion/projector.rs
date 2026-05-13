@@ -13,7 +13,7 @@ use crate::protocol::event_modules::schema::EventLabel;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
 use super::codec;
-use super::schema::purge_pending_row;
+use super::schema::{purge_instruction_row, PurgeKind};
 use super::types::deletion_label;
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
@@ -61,12 +61,17 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("deletion author workspace does not match deletion".to_string());
     }
 
-    // Mark the deletion target so the post-admission hook can drain the
-    // content purge worker once before this admission call returns. The label
-    // and exact row delete still carry the convergent semantic; the queue row
-    // is a memory-local trigger that lets a synchronous admission path replace
-    // the daemon's tick-based content_purge for forward-secrecy purposes.
-    let mut output = ProjectionOutput::rows(vec![purge_pending_row(deletion.target_message_id)]);
+    // Enqueue a durable purge instruction so the content_purge worker can
+    // drain it once before this admission call returns and again on
+    // restart if anything between this admission and retire-walk
+    // completion crashes. The label and exact row delete still carry the
+    // convergent semantic; the queue row turns the trigger into a durable
+    // queue entry rather than a one-shot in-process signal.
+    let mut output = ProjectionOutput::rows(vec![purge_instruction_row(
+        deletion.workspace_id,
+        deletion.target_message_id,
+        PurgeKind::Message,
+    )]);
     output.append(ProjectionOutput::deletes_and_labels(
         vec![TableDelete {
             table: message::schema::MESSAGES,
@@ -194,10 +199,12 @@ mod tests {
         assert_eq!(output.rows.len(), 1);
         assert_eq!(
             output.rows[0].table,
-            super::super::schema::CONTENT_PURGE_PENDING
+            super::super::schema::PURGE_INSTRUCTIONS
         );
-        assert_eq!(output.rows[0].key, target_id.to_vec());
-        assert!(output.rows[0].value.is_empty());
+        let mut expected_key = workspace_id.to_vec();
+        expected_key.extend_from_slice(&target_id);
+        assert_eq!(output.rows[0].key, expected_key);
+        assert_eq!(output.rows[0].value, vec![PurgeKind::Message.as_byte()]);
         assert_eq!(output.deletes.len(), 1);
         assert_eq!(output.deletes[0].table, message::schema::MESSAGES);
         assert_eq!(

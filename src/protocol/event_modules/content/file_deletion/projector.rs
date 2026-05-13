@@ -17,7 +17,9 @@
 //! workspace + target id alone.
 
 use crate::protocol::event_modules::content::file;
-use crate::protocol::event_modules::content::message_deletion::schema as shared_schema;
+use crate::protocol::event_modules::content::message_deletion::schema::{
+    purge_instruction_row, PurgeKind,
+};
 use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
 use crate::protocol::event_modules::schema::EventLabel;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
@@ -75,8 +77,10 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("file deletion author workspace does not match deletion".to_string());
     }
 
-    let mut output = ProjectionOutput::rows(vec![shared_schema::purge_pending_row(
+    let mut output = ProjectionOutput::rows(vec![purge_instruction_row(
+        deletion.workspace_id,
         deletion.target_file_event_id,
+        PurgeKind::File,
     )]);
     output.append(ProjectionOutput::deletes_and_labels(
         vec![TableDelete {
@@ -205,9 +209,15 @@ mod tests {
         assert_eq!(output.rows.len(), 1);
         assert_eq!(
             output.rows[0].table,
-            crate::protocol::event_modules::content::message_deletion::schema::CONTENT_PURGE_PENDING
+            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
         );
-        assert_eq!(output.rows[0].key, target_id.to_vec());
+        let mut expected_key = workspace_id.to_vec();
+        expected_key.extend_from_slice(&target_id);
+        assert_eq!(output.rows[0].key, expected_key);
+        assert_eq!(
+            output.rows[0].value,
+            vec![PurgeKind::File.as_byte()]
+        );
         assert_eq!(output.deletes.len(), 1);
         assert_eq!(output.deletes[0].table, file::schema::FILES);
         assert_eq!(
