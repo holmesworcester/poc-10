@@ -17,8 +17,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
     let frontier_record = event
         .context
-        .dependency(&local.removal_frontier_id)
-        .ok_or_else(|| "local key secret removal frontier dependency is missing".to_string())?;
+        .require_dependency(&local.removal_frontier_id)?;
     let frontier_envelope =
         removal_frontier::codec::decode_signed(&frontier_record.canonical_bytes)
             .map_err(|_| "local key secret dependency is not a removal frontier".to_string())?;
@@ -78,6 +77,7 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: frontier_id,
                     record: frontier_record,
+                    labels: Vec::new(),
                 }],
                 labels: Vec::new(),
                 receive: None,

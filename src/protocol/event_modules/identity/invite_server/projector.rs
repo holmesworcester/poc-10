@@ -18,8 +18,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let invite_server = codec::decode(&envelope.payload)?;
     let signer = event
         .context
-        .dependency(&envelope.signer_event_id)
-        .ok_or_else(|| "missing signer dependency context for invite_server".to_string())?;
+        .require_dependency(&envelope.signer_event_id)?;
 
     match signer.canonical_bytes.first().copied() {
         Some(workspace::codec::TYPE_WORKSPACE) => {
@@ -83,8 +82,7 @@ fn validate_admin_signed_invite(
 
     let authority_record = event
         .context
-        .dependency(&invite_server.authority_event_id)
-        .ok_or_else(|| "missing admin authority dependency for invite_server".to_string())?;
+        .require_dependency(&invite_server.authority_event_id)?;
     let authority_admin = decode_admin_record(authority_record)
         .map_err(|_| "invite_server authority must be an admin event".to_string())?;
     if authority_admin.workspace_id != invite_server.workspace_id {
@@ -185,7 +183,11 @@ mod tests {
     }
 
     fn dependency(event_id: EventId, record: EventRecord) -> DependencyContext {
-        DependencyContext { event_id, record }
+        DependencyContext {
+            event_id,
+            record,
+            labels: Vec::new(),
+        }
     }
 
     #[test]

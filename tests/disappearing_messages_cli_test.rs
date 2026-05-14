@@ -173,7 +173,10 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     assert_success(topo(&["--db", &alice, "clock", "set", "6120001"]));
     thread::sleep(Duration::from_millis(300));
     let after_second_restart = keys_value(&alice, &workspace_id);
-    assert_eq!(line_value(&after_second_restart, "local_history_leaves"), "0");
+    assert_eq!(
+        line_value(&after_second_restart, "local_history_leaves"),
+        "0"
+    );
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
     assert_eq!(content_event_count(&alice, &workspace_id), "0");
     drop(alice_daemon_again);
@@ -192,18 +195,10 @@ fn cli_disappearing_messages_two_peer_convergence() {
     let alice_port = free_port();
     let bob_port = free_port();
 
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "Converge", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "Converge", "alice", "alice-laptop", 1);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
@@ -230,7 +225,13 @@ fn cli_disappearing_messages_two_peer_convergence() {
     // Pin both clocks to the same unix_minute and have each peer author.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "alice-secret"]));
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "send",
+        &workspace_id,
+        "alice-secret",
+    ]));
     assert_success(topo(&["--db", &bob, "send", &workspace_id, "bob-secret"]));
 
     wait_for_message_text(&alice, &workspace_id, "alice: alice-secret");
@@ -326,8 +327,7 @@ fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_
     let alice_port = free_port();
 
     // Workspace TTL = 1 minute at creation.
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "Setting", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "Setting", "alice", "alice-laptop", 1);
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
 
     // Pin the clock and author the first message at minute 100. This is
@@ -415,16 +415,13 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
     let alice = temp_db(&tmp, "alice.db");
     let alice_port = free_port();
 
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "Cascade", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "Cascade", "alice", "alice-laptop", 1);
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
 
     // Author a message and then react to it, both in unix_minute 100.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "secret"]));
-    assert_success(topo(&[
-        "--db", &alice, "react", &workspace_id, "#1", "🌶️",
-    ]));
+    assert_success(topo(&["--db", &alice, "react", &workspace_id, "#1", "🌶️"]));
 
     // Pre-expiry: one message visible, two leaves materialized (message +
     // reaction).
@@ -494,18 +491,10 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
     let alice_port = free_port();
     let bob_port = free_port();
 
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "NoRotate", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "NoRotate", "alice", "alice-laptop", 1);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     // Wrap the initial frontier for both recipients so bob can decrypt
     // alice's authored messages. Snapshot the frontier id NOW so we can
@@ -530,8 +519,7 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
         &alice_recipient_id,
     );
     let _ = wait_for_key_derive(&bob, "1");
-    let removal_frontiers_pre =
-        line_value(&keys_value(&alice, &workspace_id), "removal_frontiers");
+    let removal_frontiers_pre = line_value(&keys_value(&alice, &workspace_id), "removal_frontiers");
     assert_eq!(
         removal_frontiers_pre, "1",
         "precondition: exactly one removal_frontier exists at start"
@@ -707,18 +695,10 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
     // TTL=0 means messages have no per-message expiry. The dispatcher's
     // cover-horizon chop is the ONLY mechanism that can retire their
     // leaves, which is exactly what this test isolates.
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "Horizon", "alice", "alice-laptop", 0);
+    let workspace_id = create_workspace_with_ttl(&alice, "Horizon", "alice", "alice-laptop", 0);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
@@ -747,7 +727,13 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
     // forever — only the cover-horizon chop retires its leaf.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "ancient-secret"]));
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "send",
+        &workspace_id,
+        "ancient-secret",
+    ]));
     wait_for_message_text(&alice, &workspace_id, "alice: ancient-secret");
     wait_for_message_text(&bob, &workspace_id, "alice: ancient-secret");
 
@@ -905,18 +891,10 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
     // Initial workspace TTL = 10 minutes. Workspace TTL must be non-zero so
     // the `disappearing_minute_expiry` worker actually scans this workspace
     // (see `src/workers/disappearing_minute_expiry.rs:112`).
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "MixedTtl", "alice", "alice-laptop", 10);
+    let workspace_id = create_workspace_with_ttl(&alice, "MixedTtl", "alice", "alice-laptop", 10);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
@@ -1006,9 +984,11 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
         let alice_one_leaf = line_value(&alice_keys, "local_history_leaves") == "1";
         let bob_one_leaf = line_value(&bob_keys, "local_history_leaves") == "1";
         let alice_only_x = alice_lines.len() == 1
-            && alice_lines.iter().any(|line| line.ends_with("alice: x-long"));
-        let bob_only_x = bob_lines.len() == 1
-            && bob_lines.iter().any(|line| line.ends_with("alice: x-long"));
+            && alice_lines
+                .iter()
+                .any(|line| line.ends_with("alice: x-long"));
+        let bob_only_x =
+            bob_lines.len() == 1 && bob_lines.iter().any(|line| line.ends_with("alice: x-long"));
         if alice_only_x && bob_only_x && alice_one_leaf && bob_one_leaf {
             break;
         }
@@ -1020,11 +1000,15 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
         "alice must have exactly one visible message after Y expires:\n{alice_lines:?}"
     );
     assert!(
-        alice_lines.iter().any(|line| line.ends_with("alice: x-long")),
+        alice_lines
+            .iter()
+            .any(|line| line.ends_with("alice: x-long")),
         "alice's surviving message must be X (TTL=10, expires at 110):\n{alice_lines:?}"
     );
     assert!(
-        !alice_lines.iter().any(|line| line.ends_with("alice: y-short")),
+        !alice_lines
+            .iter()
+            .any(|line| line.ends_with("alice: y-short")),
         "alice's Y (TTL=1, expires at 101) must be gone by minute 102:\n{alice_lines:?}"
     );
     assert_eq!(
@@ -1037,7 +1021,9 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
         "bob's surviving message must be X:\n{bob_lines:?}"
     );
     assert!(
-        !bob_lines.iter().any(|line| line.ends_with("alice: y-short")),
+        !bob_lines
+            .iter()
+            .any(|line| line.ends_with("alice: y-short")),
         "bob's Y must also be gone by minute 102:\n{bob_lines:?}"
     );
     // Exactly one leaf survives on each peer (X's). Y's leaf was retired,
@@ -1120,14 +1106,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
         create_workspace_with_ttl(&alice, "LateDelivery", "alice", "alice-laptop", 0);
     let alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
@@ -1179,7 +1158,13 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     // and tombstones are written.
     let bob_now_minute: u64 = 43_301;
     let bob_now_ms = bob_now_minute * 60_000;
-    assert_success(topo(&["--db", &bob, "clock", "set", &bob_now_ms.to_string()]));
+    assert_success(topo(&[
+        "--db",
+        &bob,
+        "clock",
+        "set",
+        &bob_now_ms.to_string(),
+    ]));
 
     // Wait for the dispatcher to chop on bob AND for the forward-secrecy
     // rotation that fires atomically with the F-wipe (per
@@ -1231,12 +1216,8 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     let bob_content_before = content_event_count(&bob, &workspace_id);
     let bob_sync_before = assert_success(topo(&["--db", &bob, "sync-status"]));
     let bob_indexed_before = line_value(&bob_sync_before, "indexed_events");
-    let bob_disappearing_before = assert_success(topo(&[
-        "--db",
-        &bob,
-        "disappearing-status",
-        &workspace_id,
-    ]));
+    let bob_disappearing_before =
+        assert_success(topo(&["--db", &bob, "disappearing-status", &workspace_id]));
     // `live_messages` = opened + sealed; the sealed projection is the only
     // place X could land on bob without a full decryption path.
     let bob_live_messages_before = line_value(&bob_disappearing_before, "live_messages");
@@ -1364,12 +1345,8 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     // not rise. Bob has no key material to open X, so the only
     // post-admit landing surface would be SEALED_MESSAGES; the gate must
     // stop the bytes before that projection runs.
-    let bob_disappearing_after = assert_success(topo(&[
-        "--db",
-        &bob,
-        "disappearing-status",
-        &workspace_id,
-    ]));
+    let bob_disappearing_after =
+        assert_success(topo(&["--db", &bob, "disappearing-status", &workspace_id]));
     assert_eq!(
         line_value(&bob_disappearing_after, "live_messages"),
         bob_live_messages_before,
@@ -1379,11 +1356,11 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
 }
 
 // ---------------------------------------------------------------------------
-// Test 8b (resync recovery after F arrives): the admit gate's third drop
-// branch — "no covering ancestor" — must be RECOVERABLE for the bootstrap
-// case. When a message arrives at a peer whose F has not yet been derived
-// from an admitted key wrap, the gate drops the bytes; once F is derived
-// and the sync round redelivers the message, the gate must admit.
+// Test 8b (recipient-key-triggered proactive wrap): when a member publishes a
+// recipient key and a frontier exists, the frontier owner proactively
+// materializes the deterministic wrap. If a content event races ahead of the
+// key material, sync keeps comparing and the message becomes visible once the
+// wrap arrives and F is derived.
 //
 // This test exercises the "transient bootstrap" scenario (case 3 of the
 // three scenarios the gate's cover check handles) end-to-end. The
@@ -1397,34 +1374,24 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
 // no tombstone is written on the drop, and that the same bytes admit
 // after F appears.
 //
-// At the CLI level, the gate's drop is observationally equivalent to a
-// downstream block (X gets admitted but stalls at projection waiting for
-// the local-only leaf dependency). Both paths converge on the same
-// user-visible state: X is invisible on bob until F arrives, then X
-// becomes visible after sync redelivers. The CLI test asserts the
-// recoverability — that without explicit operator intervention the
-// message is eventually delivered after key derivation completes.
+// At the CLI level, the new event-native path removes the explicit
+// operator `key-wrap` step. The CLI test asserts the end-to-end behavior:
+// without manual wrapping, bob derives F from the proactive wrap and then
+// opens X.
 //
 // Setup choreography:
 //   1. Alice + bob daemons running, bob joined to workspace.
-//   2. Alice creates a frontier — this creates alice's F.
-//   3. Bob publishes a recipient_key but alice DOES NOT wrap for bob.
-//      So bob has membership and a recipient_key, but NO F derived (no
-//      key wrap names bob's recipient).
+//   2. Bob publishes a recipient_key.
+//   3. Alice creates a frontier. Projection enqueues proactive reconciliation
+//      for the known recipient keys.
 //   4. Alice authors X. X enters alice's local store immediately.
-//   5. Sync delivers X's canonical bytes to bob; the admit gate drops
-//      them at receive because bob has no covering ancestor for X's leaf
-//      coord. Wait long enough for the sync to attempt delivery; assert
-//      X has not appeared on bob.
-//   6. Alice wraps for bob. Bob's encryption worker derives F.
-//   7. Sync continues to compare; alice's set still includes X, bob's
-//      set still lacks X, so sync redelivers X. This time the cover
-//      check passes (F exists) and the gate admits X.
-//   8. Assert: X appears on bob's messages listing.
+//   5. Bob receives the deterministic key wrap, derives F, and sync
+//      redelivers/admitted X if an earlier receive raced ahead of the key.
+//   6. Assert: X appears on bob's messages listing and F exists on bob.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cli_disappearing_messages_message_resyncs_after_key_arrival() {
+fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
@@ -1439,30 +1406,23 @@ fn cli_disappearing_messages_message_resyncs_after_key_arrival() {
         create_workspace_with_ttl(&alice, "ResyncRecovery", "alice", "alice-laptop", 0);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     // Both peers publish recipient keys. Bob's recipient key is needed
-    // for alice's eventual wrap; we publish alice's now so the test
+    // for alice's proactive wrap; we publish alice's now so the test
     // doesn't need to revisit alice's identity later.
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
-    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
+    let _bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
 
-    // Alice creates a frontier. This creates alice's local_key_secret F.
-    // Bob does NOT receive an F yet — we intentionally skip wrapping for
-    // bob so bob's encryption worker has no key wrap to derive from.
+    // Alice creates a frontier. This creates alice's local_key_secret F and
+    // enqueues proactive wrapping for already-known recipient keys. We do not
+    // call the manual `key-wrap` command for bob in this test.
     let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
     // Alice wraps for ALICE only (her own F). Authoring will use alice's
-    // F to derive X's leaf. Bob's F is intentionally not wrapped yet.
+    // F to derive X's leaf. Bob's F must arrive through the proactive path.
     let _ = key_wrap_with_retry(
         &alice,
         &workspace_id,
@@ -1480,77 +1440,10 @@ fn cli_disappearing_messages_message_resyncs_after_key_arrival() {
     let message_event_id = line_value(&send_out, "event_id");
     wait_for_message_text(&alice, &workspace_id, "alice: early-x");
 
-    // Wait long enough for sync to *attempt* delivery. We don't have a
-    // direct "sync attempted" signal; we instead let sync run for ~2s
-    // and assert the negative property at the end. The load-bearing
-    // metric is `disappearing-status live_messages` (opened + sealed):
-    // without F, an admitted message would land as a SEALED_MESSAGES
-    // row that the gate must prevent. `sync-status indexed_events`
-    // counts all admitted events (including unrelated frontier/wrap
-    // rows that sync delivers in this same window) so it cannot be
-    // used as a per-message signal here.
-    let bob_before_wrap = assert_success(topo(&["--db", &bob, "keys", &workspace_id]));
-    assert_eq!(
-        line_value(&bob_before_wrap, "local_key_secrets"),
-        "0",
-        "precondition: bob must have no F yet:\n{bob_before_wrap}"
-    );
-    let bob_disappearing_before = assert_success(topo(&[
-        "--db",
-        &bob,
-        "disappearing-status",
-        &workspace_id,
-    ]));
-    let bob_live_messages_before = line_value(&bob_disappearing_before, "live_messages");
-    // Poll for ~2s to give sync ample time to attempt delivery.
-    thread::sleep(Duration::from_millis(2000));
-    // X must not be visible on bob (decryption is gated on F + leaf,
-    // and we haven't derived F yet).
-    let lines = message_lines(&bob, &workspace_id);
-    assert!(
-        !lines.iter().any(|line| line.ends_with("alice: early-x")),
-        "bob must not display X before F is derived — opening sealed \
-         requires F. lines:\n{lines:?}"
-    );
-    // No new live_messages on bob: opened count stays 0, sealed count
-    // must stay at the pre-attempt value. The admit gate must keep
-    // SEALED_MESSAGES empty for the dropped id; without the gate, the
-    // bytes would land in SEALED_MESSAGES and `live_messages` would
-    // tick up to reflect an admitted-but-unopenable message.
-    let bob_disappearing_during = assert_success(topo(&[
-        "--db",
-        &bob,
-        "disappearing-status",
-        &workspace_id,
-    ]));
-    assert_eq!(
-        line_value(&bob_disappearing_during, "live_messages"),
-        bob_live_messages_before,
-        "bob's live_messages must stay unchanged before F arrives — \
-         admit gate must keep SEALED_MESSAGES empty for the dropped \
-         id:\n{bob_disappearing_during}"
-    );
-    // The `messages` listing renders `id: <hex>` only for OPENED
-    // messages, so this is a weaker (necessary but not sufficient)
-    // check; the `live_messages` assertion above is the load-bearing
-    // one. We include this for symmetry with the post-recovery
-    // assertion below.
-    let bob_pre_wrap_listing = messages_text(&bob, &workspace_id);
-    assert!(
-        !bob_pre_wrap_listing.contains(&message_event_id),
-        "messages listing on bob must not contain X's id before F arrives \
-         (would imply X was opened, which requires F):\n{bob_pre_wrap_listing}"
-    );
-
-    // Alice wraps for bob NOW. Bob's encryption worker (running in the
-    // daemon) will admit the wrap and derive F. Once F exists, the next
-    // sync round will redeliver X and the cover check passes.
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &bob_recipient_id,
-    );
+    // Bob's encryption worker (running in the daemon) admits the proactive
+    // wrap and derives F. Once F exists, sync either opens X from an already
+    // admitted sealed row or redelivers X and admits it with the covering
+    // source now present.
     let _ = wait_for_key_derive(&bob, "1");
 
     // Sync naturally redelivers: alice's negentropy "have" set includes X,
@@ -1621,8 +1514,7 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
     // (per process_job in src/workers/disappearing_minute_expiry.rs:217)
     // AND per-leaf LOCAL_HISTORY_NODE_TOMBSTONES rows (per the retire
     // walk in src/workers/encryption.rs).
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "ChopGc", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "ChopGc", "alice", "alice-laptop", 1);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
@@ -1929,9 +1821,7 @@ fn wait_for_message_text(db: &str, workspace_id: &str, expected_suffix: &str) {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!(
-        "message text {expected_suffix:?} never appeared on db={db}:\n{last}"
-    );
+    panic!("message text {expected_suffix:?} never appeared on db={db}:\n{last}");
 }
 
 fn key_wrap_with_retry(

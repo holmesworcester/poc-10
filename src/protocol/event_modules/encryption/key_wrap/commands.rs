@@ -14,6 +14,8 @@ use super::super::{local_history_node_secret, local_key_secret};
 use super::codec;
 use super::types::{KeyWrapEvent, WrappedSecretKind};
 
+const DETERMINISTIC_CREATED_AT_MS: u64 = 0;
+
 /// Sanity guard: every named id in a key-wrap event is non-zero. The codec
 /// is intentionally lenient on decode; this helper is shared between the
 /// authoring path (called via `validate_id` on each input) and the receive
@@ -106,7 +108,7 @@ pub fn create(input: CreateKeyWrap) -> Result<CommandOutput<KeyWrapOutput>, Stri
     let nonce = deterministic_nonce(&input);
     let mut event = KeyWrapEvent {
         workspace_id: input.workspace_id,
-        created_at_ms: input.created_at_ms,
+        created_at_ms: DETERMINISTIC_CREATED_AT_MS,
         removal_frontier_id: input.removal_frontier_id,
         wrapped_secret_kind: input.wrapped_secret_kind,
         wrapped_secret_id: input.wrapped_secret_id,
@@ -213,9 +215,8 @@ fn deterministic_nonce(input: &CreateKeyWrap) -> crypto::XChaCha20Poly1305Nonce 
 }
 
 fn deterministic_wrap_info(input: &CreateKeyWrap) -> Vec<u8> {
-    let mut out = Writer::with_capacity(32 * 8 + 1 + 8 + 8 + 2 + 8);
+    let mut out = Writer::with_capacity(32 * 8 + 1 + 8 + 8 + 2);
     out.id(&input.workspace_id);
-    out.u64(input.created_at_ms);
     out.id(&input.signer_endpoint_shared_id);
     out.id(&input.removal_frontier_id);
     out.u8(input.wrapped_secret_kind.as_u8());
@@ -371,12 +372,18 @@ mod tests {
         };
 
         let first = create(input.clone()).expect("first");
-        let second = create(input).expect("second");
+        let mut second_input = input;
+        second_input.created_at_ms += 1;
+        let second = create(second_input).expect("second");
 
         assert_eq!(first.value.key_wrap_id, second.value.key_wrap_id);
         assert_eq!(
             first.events[0].record().canonical_bytes,
             second.events[0].record().canonical_bytes
+        );
+        assert_eq!(
+            first.events[0].record().timestamp,
+            DETERMINISTIC_CREATED_AT_MS
         );
     }
 }

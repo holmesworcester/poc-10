@@ -47,10 +47,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let connection_id = event.context.event_id;
     // Request bytes are dependency context supplied by the common worker. If
     // the request is absent or failed projection, this response cannot project.
-    let request = event
-        .context
-        .dependency(&response.request_id)
-        .ok_or_else(|| "connection response missing request dependency".to_string())?;
+    let request = event.context.require_dependency(&response.request_id)?;
     let request = connection_request::codec::decode(&request.canonical_bytes)
         .map_err(|_| "connection response references a non-request event".to_string())?;
     if request.from_endpoint != response.to_endpoint {
@@ -76,8 +73,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
     let invite_secret = event
         .context
-        .dependency(&response.invite_secret_event_id)
-        .ok_or_else(|| "connection response missing invite secret dependency".to_string())?;
+        .require_dependency(&response.invite_secret_event_id)?;
     let invite_secret = crate::protocol::event_modules::identity::invite::codec::decode(
         &invite_secret.canonical_bytes,
     )
@@ -108,10 +104,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         }
         let initiator = event
             .context
-            .dependency(&response.initiator_ephemeral_secret_event_id)
-            .ok_or_else(|| {
-                "connection response missing initiator ephemeral dependency".to_string()
-            })?;
+            .require_dependency(&response.initiator_ephemeral_secret_event_id)?;
         let initiator = connection_ephemeral_secret::codec::decode(&initiator.canonical_bytes)
             .map_err(|_| "connection response dependency is not an ephemeral secret".to_string())?;
         let material = commands::initiator_material(
@@ -149,10 +142,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     } else {
         let responder = event
             .context
-            .dependency(&response.responder_ephemeral_secret_event_id)
-            .ok_or_else(|| {
-                "connection response missing responder ephemeral dependency".to_string()
-            })?;
+            .require_dependency(&response.responder_ephemeral_secret_event_id)?;
         let responder = connection_ephemeral_secret::codec::decode(&responder.canonical_bytes)
             .map_err(|_| "connection response dependency is not an ephemeral secret".to_string())?;
         if responder.owner_endpoint != response.from_endpoint {
@@ -312,14 +302,17 @@ mod tests {
                     DependencyContext {
                         event_id: fixture.request_id,
                         record: fixture.request_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: fixture.invite_id,
                         record: fixture.invite_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: fixture.responder_ephemeral_id,
                         record: fixture.responder_ephemeral_record,
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),
@@ -352,14 +345,17 @@ mod tests {
                     DependencyContext {
                         event_id: fixture.request_id,
                         record: fixture.request_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: fixture.invite_id,
                         record: fixture.invite_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: fixture.initiator_ephemeral_id,
                         record: fixture.initiator_ephemeral_record,
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),
@@ -394,14 +390,17 @@ mod tests {
                         DependencyContext {
                             event_id: fixture.request_id,
                             record: fixture.request_record,
+                            labels: Vec::new(),
                         },
                         DependencyContext {
                             event_id: fixture.invite_id,
                             record: fixture.invite_record,
+                            labels: Vec::new(),
                         },
                         DependencyContext {
                             event_id: fixture.initiator_ephemeral_id,
                             record: fixture.initiator_ephemeral_record,
+                            labels: Vec::new(),
                         },
                     ],
                     labels: Vec::new(),
@@ -432,14 +431,17 @@ mod tests {
                         DependencyContext {
                             event_id: fixture.request_id,
                             record: fixture.request_record,
+                            labels: Vec::new(),
                         },
                         DependencyContext {
                             event_id: fixture.invite_id,
                             record: fixture.invite_record,
+                            labels: Vec::new(),
                         },
                         DependencyContext {
                             event_id: fixture.initiator_ephemeral_id,
                             record: fixture.initiator_ephemeral_record,
+                            labels: Vec::new(),
                         },
                     ],
                     labels: Vec::new(),

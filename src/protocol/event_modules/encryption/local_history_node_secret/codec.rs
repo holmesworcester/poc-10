@@ -181,5 +181,4 @@ mod tests {
         assert_eq!(record.workspace_id, Some([1; 32]));
         assert_eq!(record.dependencies, vec![[2; 32], [3; 32], [4; 32]]);
     }
-
 }

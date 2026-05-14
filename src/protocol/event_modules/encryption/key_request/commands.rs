@@ -1,4 +1,10 @@
 //! Commands for signed key-request events.
+//!
+//! The command creates one canonical shared request from a recipient endpoint
+//! to exactly one responder endpoint. Inputs are ids only: workspace,
+//! responder, removal frontier, and recipient key must be non-empty, while
+//! dependency ownership is validated later by the projector. The command does
+//! not inspect local key material or decide whether a wrap should be emitted.
 
 use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::protocol::event_modules::types::{event_id, EventId};

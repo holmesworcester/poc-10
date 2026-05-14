@@ -48,10 +48,7 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
 /// the right home for the gate because it already owns the storage helpers
 /// (tombstone existence checks, tombstone row construction) the gate
 /// consults.
-pub fn admit_check_received(
-    store: &Store,
-    record: &EventRecord,
-) -> Result<AdmitDecision, String> {
+pub fn admit_check_received(store: &Store, record: &EventRecord) -> Result<AdmitDecision, String> {
     let bytes = &record.canonical_bytes;
     match bytes.first().copied() {
         Some(message::codec::TYPE_SIGNED_MESSAGE) => {

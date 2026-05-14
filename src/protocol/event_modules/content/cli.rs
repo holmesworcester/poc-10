@@ -116,11 +116,12 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
     )?;
 
     // Send-message event under the message's own content key.
-    let (expires_at_minute, disappearing_setting_id) = message::commands::workspace_expires_at_minute(
-        &context.store,
-        parsed.workspace_id,
-        timestamp,
-    )?;
+    let (expires_at_minute, disappearing_setting_id) =
+        message::commands::workspace_expires_at_minute(
+            &context.store,
+            parsed.workspace_id,
+            timestamp,
+        )?;
     let send = message::commands::send(message::commands::SendMessage {
         workspace_id: parsed.workspace_id,
         created_at_ms: timestamp,
@@ -137,8 +138,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
     let message_id = send.value.message_id;
     timestamp = timestamp.saturating_add(1);
 
-    let file_id =
-        file::commands::derive_file_id(&signer_endpoint, message_id, starting_timestamp);
+    let file_id = file::commands::derive_file_id(&signer_endpoint, message_id, starting_timestamp);
 
     // Files now author their own leaf, distinct from the parent message's
     // leaf. Two clients independently authoring the same file (same

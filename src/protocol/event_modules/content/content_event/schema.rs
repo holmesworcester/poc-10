@@ -98,13 +98,17 @@ mod tests {
             .insert_table_rows(vec![row_a.clone(), row_b])
             .expect("insert content rows");
 
-        assert_eq!(super::super::queries::count_for_workspace(&store, [1; 32]).expect("count"), 1);
+        assert_eq!(
+            super::super::queries::count_for_workspace(&store, [1; 32]).expect("count"),
+            1
+        );
         assert_eq!(
             super::super::queries::payload_bytes_for_workspace(&store, [1; 32]).expect("bytes"),
             3
         );
         assert_eq!(
-            super::super::queries::max_timestamp_for_workspace(&store, [1; 32]).expect("max timestamp"),
+            super::super::queries::max_timestamp_for_workspace(&store, [1; 32])
+                .expect("max timestamp"),
             9
         );
         assert_eq!(

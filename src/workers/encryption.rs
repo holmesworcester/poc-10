@@ -618,9 +618,17 @@ fn drain_wrap_reconcile<R: EventRegistry>(
         };
         match row.kind {
             key_wrap::types::PendingWrapReconcileKind::RecipientKey => {
+                let Some(recipient) = recipient_key_row(store, row.workspace_id, row.target_id)?
+                else {
+                    consumed.push(row.key);
+                    continue;
+                };
                 for frontier in
                     removal_frontier::queries::list_for_workspace(store, row.workspace_id)?
                 {
+                    if !should_proactively_wrap_recipient_for_frontier(&recipient, &frontier) {
+                        continue;
+                    }
                     if !local_endpoint_owns_frontier(
                         store,
                         row.workspace_id,
@@ -634,7 +642,7 @@ fn drain_wrap_reconcile<R: EventRegistry>(
                         registry,
                         row.workspace_id,
                         frontier.removal_frontier_id,
-                        row.target_id,
+                        recipient.recipient_key_id,
                         frontier.created_at_ms,
                         membership.endpoint_shared_id,
                         local.signing_secret,
@@ -644,6 +652,12 @@ fn drain_wrap_reconcile<R: EventRegistry>(
                 }
             }
             key_wrap::types::PendingWrapReconcileKind::Frontier => {
+                let Some(frontier) =
+                    removal_frontier::queries::get(store, row.workspace_id, row.target_id)?
+                else {
+                    consumed.push(row.key);
+                    continue;
+                };
                 if local_endpoint_owns_frontier(
                     store,
                     row.workspace_id,
@@ -653,13 +667,16 @@ fn drain_wrap_reconcile<R: EventRegistry>(
                     for recipient in
                         recipient_key::queries::list_for_workspace(store, row.workspace_id)?
                     {
+                        if !should_proactively_wrap_recipient_for_frontier(&recipient, &frontier) {
+                            continue;
+                        }
                         let materialized = materialize_wraps_for_recipient(
                             store,
                             registry,
                             row.workspace_id,
-                            row.target_id,
+                            frontier.removal_frontier_id,
                             recipient.recipient_key_id,
-                            recipient.created_at_ms,
+                            frontier.created_at_ms,
                             membership.endpoint_shared_id,
                             local.signing_secret,
                         )?;
@@ -678,6 +695,14 @@ fn drain_wrap_reconcile<R: EventRegistry>(
         report.deleted_reconcile_rows = deleted;
     }
     Ok(report)
+}
+
+fn should_proactively_wrap_recipient_for_frontier(
+    recipient: &recipient_key::types::RecipientKeyRow,
+    frontier: &removal_frontier::types::RemovalFrontierRow,
+) -> bool {
+    recipient.previous_recipient_key_id == recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY
+        || frontier.created_at_ms >= recipient.created_at_ms
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

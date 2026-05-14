@@ -34,8 +34,7 @@ pub fn project_signed(
     }
     let signer = event
         .context
-        .dependency(&envelope.signer_event_id)
-        .ok_or_else(|| "endpoint_shared invite dependency is missing".to_string())?;
+        .require_dependency(&envelope.signer_event_id)?;
     let invite_envelope = signed::codec::decode(&signer.canonical_bytes)
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
     let expected_role = match invite_envelope.inner_type {
@@ -190,6 +189,7 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: device_invite_id,
                     record: device_invite_record,
+                    labels: Vec::new(),
                 }],
                 labels: Vec::new(),
                 receive: None,
@@ -237,9 +237,10 @@ mod tests {
             },
         };
 
-        assert_eq!(
-            project_signed(&envelope, &event).expect_err("missing dependency must fail"),
-            "endpoint_shared invite dependency is missing"
+        let err = project_signed(&envelope, &event).expect_err("missing dependency must wait");
+        assert!(
+            crate::workers::pipeline_helpers::event_pipeline::is_wait_for_dependency_error(&err),
+            "{err}"
         );
     }
 

@@ -1,13 +1,15 @@
 //! Event projection worker.
 //!
-//! Inputs: `event_modules.ready_events`.
+//! Inputs: `event_modules.ready_events`, `event_modules.pending_reprojections`.
 //! State: event status, projector-owned rows, and generic event labels.
-//! Step: claim ready events by moving Ready -> Applied, load dependency
-//! context, and run exactly one event-module projector per event.
+//! Step: load Applied direct-dependency context for ready events, run exactly
+//! one event-module projector per event, and commit either Apply or WaitForDeps.
 //! Outputs: projector rows and labels, `event_modules.recently_valid_events`,
-//! and `event_modules.applied_shared_events` for shared events.
-//! Consume: the Ready -> Applied status transition is the claim; failed projection
-//! rolls the status change back.
+//! `event_modules.pending_reprojections`, and
+//! `event_modules.applied_shared_events` for shared events; WaitForDeps moves
+//! the event back to Blocked and writes blocker edges.
+//! Consume: ready rows and pending reprojection rows are consumed only inside
+//! the same transaction that commits the projector decision.
 //! Failure: projection errors abort the current event and leave it ready for a
 //! later drain attempt.
 //! Fairness: `Work::Drain { limit }` bounds one call.
@@ -53,6 +55,7 @@ where
         |app, limit| run(app.store(), app, Work::Drain { limit }),
         |report, daemon_report| {
             daemon_report.add("ready_events", report.applied_events);
+            daemon_report.add("reprojected_events", report.reprojected_events);
             daemon_report.add("unblocked_events", report.unblocked_events);
         },
     )

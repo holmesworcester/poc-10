@@ -26,6 +26,7 @@ pub(crate) fn insert_event(
         return Ok(false);
     }
 
+    let dependencies = unique_dependencies(&event.dependencies);
     let mut rows = vec![schema::event_row(&id, event, status)?];
     if status == EventStatus::Ready {
         rows.push(schema::ready_row(event.timestamp, &id));
@@ -37,17 +38,41 @@ pub(crate) fn insert_event(
             &id,
         ));
     }
+    for dependency in &dependencies {
+        rows.push(schema::edge_row(schema::DEPENDENTS_BY_DEP, dependency, &id));
+        rows.push(schema::edge_row(schema::DEPS_BY_DEPENDENT, &id, dependency));
+    }
     store.insert_table_rows_in_tx(rows)?;
     Ok(true)
 }
 
+/// Return one event's current generic lifecycle status.
+pub(crate) fn event_status(
+    store: &Store,
+    event_id: &EventId,
+) -> rusqlite::Result<Option<EventStatus>> {
+    schema::read_event(store, event_id).map(|event| event.map(|event| event.status))
+}
+
 /// Return whether an event has reached the generic Applied lifecycle state.
 pub(crate) fn event_is_applied(store: &Store, event_id: &EventId) -> rusqlite::Result<bool> {
-    schema::read_event(store, event_id).map(|event| {
-        event
-            .map(|event| event.status == EventStatus::Applied)
-            .unwrap_or(false)
-    })
+    event_status(store, event_id).map(|status| status == Some(EventStatus::Applied))
+}
+
+/// List every retained direct dependent of an event id.
+pub(crate) fn direct_dependents(
+    store: &Store,
+    dependency_id: &EventId,
+) -> rusqlite::Result<Vec<EventId>> {
+    store
+        .table_rows_with_key_prefix(
+            schema::DEPENDENTS_BY_DEP,
+            dependency_id,
+            schema::MAX_DEPENDENCY_ROWS_PER_EVENT,
+        )?
+        .into_iter()
+        .map(|(key, _)| schema::split_edge_key(&key).map(|(_, dependent_id)| dependent_id))
+        .collect()
 }
 
 /// Record one missing dependency edge in both lookup directions.
@@ -131,6 +156,29 @@ pub(crate) fn delete_blocked_events_by_missing_dep(
     Ok(deleted)
 }
 
+/// Delete every blocker edge for one event that no longer waits.
+pub(crate) fn delete_missing_deps_by_blocked_event(
+    store: &Store,
+    blocked_event_id: &EventId,
+) -> rusqlite::Result<usize> {
+    let rows = store.table_rows_with_key_prefix(
+        schema::MISSING_DEPS_BY_BLOCKED_EVENT,
+        blocked_event_id,
+        schema::MAX_DEPENDENCY_ROWS_PER_EVENT,
+    )?;
+    let mut reverse_keys = Vec::with_capacity(rows.len());
+    let mut blocked_keys = Vec::with_capacity(rows.len());
+    for (key, _) in rows {
+        let (blocked_id, missing_dep) = schema::split_edge_key(&key)?;
+        reverse_keys.push(key);
+        blocked_keys.push(schema::edge_key(&missing_dep, &blocked_id));
+    }
+    let deleted =
+        store.delete_table_rows_in_tx(schema::MISSING_DEPS_BY_BLOCKED_EVENT, reverse_keys)?;
+    store.delete_table_rows_in_tx(schema::BLOCKED_EVENTS_BY_MISSING_DEP, blocked_keys)?;
+    Ok(deleted)
+}
+
 /// List events currently blocked on a specific missing dependency.
 pub(crate) fn blocked_events_by_missing_dep(
     store: &Store,
@@ -164,4 +212,11 @@ fn vec_to_id(bytes: Vec<u8>) -> rusqlite::Result<EventId> {
             bytes.len()
         ))
     })
+}
+
+fn unique_dependencies(dependencies: &[EventId]) -> Vec<EventId> {
+    let mut dependencies = dependencies.to_vec();
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
 }

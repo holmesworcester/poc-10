@@ -54,10 +54,7 @@ fn validate_frontier_refs(
     frontier: &super::types::RemovalFrontierEvent,
 ) -> Result<(), String> {
     for ref_id in &frontier.removal_event_ids {
-        let record = event
-            .context
-            .dependency(ref_id)
-            .ok_or_else(|| "removal frontier ref dependency is missing".to_string())?;
+        let record = event.context.require_dependency(ref_id)?;
         if record.workspace_id != Some(frontier.workspace_id) {
             return Err("removal frontier ref belongs to a different workspace".to_string());
         }
@@ -69,12 +66,7 @@ fn decode_signer_endpoint_shared(
     event: &EventWithContext<'_>,
     endpoint_shared_id: [u8; 32],
 ) -> Result<endpoint_shared::types::EndpointSharedEvent, String> {
-    let record = event
-        .context
-        .dependency(&endpoint_shared_id)
-        .ok_or_else(|| {
-            "removal frontier signer endpoint_shared dependency is missing".to_string()
-        })?;
+    let record = event.context.require_dependency(&endpoint_shared_id)?;
     let envelope = signed::codec::decode(&record.canonical_bytes).map_err(|_| {
         "removal frontier signer dependency is not a signed endpoint_shared".to_string()
     })?;
@@ -92,10 +84,7 @@ fn decode_authority_admin(
     event: &EventWithContext<'_>,
     authority_admin_id: [u8; 32],
 ) -> Result<admin::types::AdminEvent, String> {
-    let record = event
-        .context
-        .dependency(&authority_admin_id)
-        .ok_or_else(|| "removal frontier authority admin dependency is missing".to_string())?;
+    let record = event.context.require_dependency(&authority_admin_id)?;
     let envelope = signed::codec::decode(&record.canonical_bytes)
         .map_err(|_| "removal frontier authority dependency is not a signed admin".to_string())?;
     if envelope.inner_type != admin::codec::TYPE_ADMIN {
@@ -197,10 +186,12 @@ mod tests {
             DependencyContext {
                 event_id: signer_id,
                 record: signer_record,
+                labels: Vec::new(),
             },
             DependencyContext {
                 event_id: admin_id,
                 record: admin_record,
+                labels: Vec::new(),
             },
         ];
         dependencies.extend(extra_dependencies);
@@ -280,6 +271,7 @@ mod tests {
             vec![DependencyContext {
                 event_id: ref_id,
                 record: ref_record,
+                labels: Vec::new(),
             }],
         );
 

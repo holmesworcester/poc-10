@@ -1,4 +1,9 @@
 //! Read-only views for projected key requests.
+//!
+//! The encryption worker owns draining this queue and materializing any
+//! response wraps. Queries are read-only and scoped to projected rows; they do
+//! not inspect event dependencies, local key material, or responder authority.
+//! Limiting is caller supplied so worker batches stay bounded.
 
 use crate::core::store::Store;
 

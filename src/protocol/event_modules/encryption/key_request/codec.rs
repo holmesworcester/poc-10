@@ -1,4 +1,10 @@
 //! Codec for signed key-request events.
+//!
+//! The wire shape is fixed-width and shared-scope. Decoding verifies the
+//! signed envelope and exposes deterministic dependencies on requester,
+//! workspace, responder, removal frontier, and recipient key. The codec owns
+//! canonical bytes only; it does not validate endpoint authority or recipient
+//! ownership because those invariants belong to projection.
 
 use crate::core::crypto::{self, Ed25519PrivateKey, ED25519_SIGNATURE_BYTES};
 use crate::protocol::event_modules::types::{EventId, EventRecord, EventScope};

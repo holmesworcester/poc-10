@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{decode_reaction_row, decode_sealed_reaction_row, SealedReactionRow,
-    REACTIONS, SEALED_REACTIONS};
+use super::schema::{
+    decode_reaction_row, decode_sealed_reaction_row, SealedReactionRow, REACTIONS, SEALED_REACTIONS,
+};
 use super::types::ReactionRow;
 
 pub fn list_sealed(store: &Store, limit: usize) -> Result<Vec<SealedReactionRow>, String> {

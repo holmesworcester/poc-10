@@ -29,14 +29,8 @@ pub const SETTINGS: TableName = TableName::new("encryption.disappearing_messages
 pub const WORKSPACE_CHOP_FLOOR: TableName = TableName::new("encryption.workspace_chop_floor");
 
 pub const SCHEMAS: &[Schema] = &[
-    Schema::durable_row_table(
-        "encryption.disappearing_messages_settings.v1",
-        SETTINGS,
-    ),
-    Schema::durable_row_table(
-        "encryption.workspace_chop_floor.v1",
-        WORKSPACE_CHOP_FLOOR,
-    ),
+    Schema::durable_row_table("encryption.disappearing_messages_settings.v1", SETTINGS),
+    Schema::durable_row_table("encryption.workspace_chop_floor.v1", WORKSPACE_CHOP_FLOOR),
 ];
 
 const KEY_BYTES: usize = 32 + 8 + 32;

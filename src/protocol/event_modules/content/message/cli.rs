@@ -94,8 +94,7 @@ fn run_send_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         .ok_or_else(|| "local endpoint is missing".to_string())?;
 
     let timestamp = commands::next_authoring_timestamp(&context.store, workspace_id)?;
-    let removal_frontier_id =
-        commands::require_active_frontier_id(&context.store, workspace_id)?;
+    let removal_frontier_id = commands::require_active_frontier_id(&context.store, workspace_id)?;
     let event_id_in_minute = message_event_id_in_minute(
         &workspace_id,
         &membership.user_authority_event_id,
@@ -362,9 +361,7 @@ pub fn resolve_selector(
 // the CLI tree. `derive_message_leaf` lives in this `cli.rs` because it
 // drives the encryption worker — commands.rs must not call worker::run.
 pub(crate) use commands::require_local_membership as require_membership;
-pub(crate) use commands::{
-    next_authoring_timestamp as next_timestamp, require_active_frontier_id,
-};
+pub(crate) use commands::{next_authoring_timestamp as next_timestamp, require_active_frontier_id};
 
 /// Derive (or look up) the per-event leaf for one
 /// `(workspace_id, removal_frontier_id, created_at_ms,

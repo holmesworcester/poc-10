@@ -161,8 +161,7 @@ fn event_modules_are_directories() {
                     && name != "worker.rs"
                     && name != "schema.rs"
                     && name != "queries.rs"
-            })
-                && path.file_name().is_none_or(|name| name != "types.rs")
+            }) && path.file_name().is_none_or(|name| name != "types.rs")
                 && path
                     .file_name()
                     .is_none_or(|name| !registry_plumbing.iter().any(|allowed| *allowed == name))
@@ -1374,6 +1373,8 @@ fn protocol_event_schema_owns_common_fact_indexes() {
         "pub const TIMESTAMP_EVENTS",
         "pub const BLOCKED_EVENTS_BY_MISSING_DEP",
         "pub const MISSING_DEPS_BY_BLOCKED_EVENT",
+        "pub const DEPENDENTS_BY_DEP",
+        "pub const DEPS_BY_DEPENDENT",
         "pub const EVENT_LABELS",
         "pub(crate) fn event_row(",
         "pub fn event_labels(",
@@ -2659,7 +2660,9 @@ fn schema_rs_no_store_queries_or_mutations() {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         let relative = path.strip_prefix(root).unwrap().display().to_string();
-        let admit_gate_allowed = admit_gate_whitelist.iter().any(|allowed| relative == *allowed);
+        let admit_gate_allowed = admit_gate_whitelist
+            .iter()
+            .any(|allowed| relative == *allowed);
         let store_helper_allowed = store_helper_whitelist
             .iter()
             .any(|allowed| relative == *allowed);
@@ -2728,7 +2731,9 @@ fn schema_rs_no_validation_functions() {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         let relative = path.strip_prefix(root).unwrap().display().to_string();
-        let admit_gate_allowed = admit_gate_whitelist.iter().any(|allowed| relative == *allowed);
+        let admit_gate_allowed = admit_gate_whitelist
+            .iter()
+            .any(|allowed| relative == *allowed);
         for line in production.lines() {
             let trimmed = line.trim_start();
             if !trimmed.starts_with("pub fn ") {
@@ -2855,11 +2860,7 @@ fn mod_rs_files_contain_no_logic() {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         let relative = path.strip_prefix(root).unwrap().display().to_string();
-        let depth = path
-            .strip_prefix(&event_root)
-            .unwrap()
-            .components()
-            .count();
+        let depth = path.strip_prefix(&event_root).unwrap().components().count();
         // depth == 1 is event_modules/mod.rs itself (registry root); leave it
         // for `event_module_mod_rs_files_do_not_orchestrate_commands_or_work`.
         // depth == 2 is `<domain>/mod.rs`; depth == 3 is leaf.

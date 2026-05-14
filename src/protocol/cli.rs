@@ -20,7 +20,8 @@ use crate::core::store::Store;
 use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::types::{EventRecord, ReceiveMetadata};
 use crate::protocol::event_modules::worker::{
-    AdmitDecision, EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord,
+    AdmitDecision, EventRegistry, EventWithContext, ProjectionDecision, ProjectionOutput,
+    ReceivedRecord,
 };
 use crate::protocol::{event_modules, Protocol};
 use crate::workers::DaemonWorkerContext;
@@ -80,7 +81,7 @@ impl EventRegistry for Context {
         &self,
         store: &Store,
         event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String> {
+    ) -> Result<ProjectionDecision, String> {
         self.protocol.project_record(store, event)
     }
 
@@ -265,15 +266,13 @@ fn sync_status_command() -> CliCommand<Context> {
     CliCommand {
         name: "sync-status",
         usage: SYNC_STATUS_USAGE,
-        help: "Print the in-memory negentropy index size, root summary, and pending-purge queue size.",
+        help:
+            "Print the in-memory negentropy index size, root summary, and pending-purge queue size.",
         run: run_sync_status_command,
     }
 }
 
-fn run_sync_status_command(
-    context: &mut Context,
-    args: CliArgs<'_>,
-) -> Result<CliOutput, String> {
+fn run_sync_status_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(0, SYNC_STATUS_USAGE)?;
     let index = context.sync_index();
     // Catch the in-memory index up from durable rows so a fresh CLI
@@ -289,9 +288,7 @@ fn run_sync_status_command(
     let _ = crate::workers::sync::run(
         &context.store,
         index,
-        crate::workers::sync::Work::DrainPendingPurges {
-            limit: usize::MAX,
-        },
+        crate::workers::sync::Work::DrainPendingPurges { limit: usize::MAX },
     )
     .map_err(|err| format!("drain negentropy purges: {err}"))?;
     let summary = index.root_summary()?;
@@ -373,9 +370,6 @@ fn run_negentropy_drain_command(
         format!("removed_from_index: {}", report.removed_from_index),
         format!("remaining_pending: {remaining}"),
         format!("new_root_count: {}", summary.count),
-        format!(
-            "new_root_fingerprint: {}",
-            hex_bytes(&summary.fingerprint)
-        ),
+        format!("new_root_fingerprint: {}", hex_bytes(&summary.fingerprint)),
     ]))
 }

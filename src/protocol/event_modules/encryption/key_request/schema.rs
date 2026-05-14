@@ -1,4 +1,10 @@
 //! Projection schema for pending key requests.
+//!
+//! This table is a durable worker queue keyed by workspace, responder,
+//! removal frontier, recipient key, and request event id. The value records
+//! the requester endpoint and timestamp needed by the worker. Schema helpers
+//! own byte layout only; they do not decide whether a request is authorized or
+//! whether a wrap can be produced.
 
 use crate::core::store::{Schema, TableName, TableRow};
 use crate::protocol::event_modules::types::EventId;

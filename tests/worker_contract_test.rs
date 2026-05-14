@@ -6,7 +6,7 @@ use topo::protocol::event_modules::identity::{endpoint, endpoint_shared, workspa
 use topo::protocol::event_modules::schema::{self as event_schema, EventLabel};
 use topo::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
 use topo::protocol::event_modules::worker::{
-    self, CommandOutput, EventRegistry, EventWithContext, ProjectionOutput,
+    self, CommandOutput, EventRegistry, EventWithContext, ProjectionDecision, ProjectionOutput,
 };
 use topo::protocol::event_modules::Modules;
 use topo::protocol::Protocol;
@@ -147,10 +147,111 @@ fn worker_fetches_dependency_records_and_labels_before_projection() {
     let (_, dep_report) =
         worker::run(&store, &registry, CommandOutput::with_events((), vec![dep])).unwrap();
     assert_eq!(dep_report.applied_events, 1);
+    assert!(registry.child_saw_context.get());
 
     let drain = worker::run(&store, &registry, worker::DrainUntilIdle { batch_size: 10 }).unwrap();
-    assert_eq!(drain.applied_events, 1);
-    assert!(registry.child_saw_context.get());
+    assert_eq!(drain.applied_events, 0);
+}
+
+#[test]
+fn new_dependency_label_reprojects_already_applied_direct_dependents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("label-wake-applied.db")).unwrap();
+
+    let dep_bytes = b"wake-dep".to_vec();
+    let child_bytes = b"wake-child".to_vec();
+    let labeler_bytes = b"wake-labeler".to_vec();
+    let dep_id = event_id(&dep_bytes);
+    let child_id = event_id(&child_bytes);
+    let labeler_id = event_id(&labeler_bytes);
+    let registry = LabelWakeRegistry {
+        dep_id,
+        child_id,
+        labeler_id,
+        dep_bytes: dep_bytes.clone(),
+        child_bytes: child_bytes.clone(),
+        labeler_bytes: labeler_bytes.clone(),
+        child_projections: Cell::new(0),
+        child_saw_dependency_label: Cell::new(false),
+    };
+
+    let dep = registry.record_for(dep_bytes).unwrap();
+    let child = registry.record_for(child_bytes).unwrap();
+    let report = worker::run(
+        &store,
+        &registry,
+        worker::AdmitAndDrain {
+            output: CommandOutput::with_events((), vec![dep, child]),
+            batch_size: 10,
+        },
+    )
+    .expect("admit dep and child");
+    assert_eq!(report.admitted.applied_events, 2);
+    assert_eq!(report.drained.applied_events, 0);
+    assert_eq!(registry.child_projections.get(), 1);
+    assert!(!registry.child_saw_dependency_label.get());
+
+    let labeler = registry.record_for(labeler_bytes).unwrap();
+    let (_, label_report) = worker::run(
+        &store,
+        &registry,
+        CommandOutput::with_events((), vec![labeler]),
+    )
+    .expect("admit labeler");
+
+    assert_eq!(label_report.applied_events, 1);
+    assert_eq!(registry.child_projections.get(), 2);
+    assert!(registry.child_saw_dependency_label.get());
+    assert_eq!(
+        store
+            .table_row_count(worker_schema::PENDING_REPROJECTIONS)
+            .expect("count reprojections"),
+        0
+    );
+}
+
+#[test]
+fn label_on_blocked_event_gives_projector_a_purge_pass() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Protocol::open_store(tmp.path().join("label-wake-blocked.db")).unwrap();
+
+    let target_bytes = b"blocked-target".to_vec();
+    let labeler_bytes = b"blocked-labeler".to_vec();
+    let missing_dep_id = [77; 32];
+    let target_id = event_id(&target_bytes);
+    let labeler_id = event_id(&labeler_bytes);
+    let registry = BlockedLabelWakeRegistry {
+        target_id,
+        labeler_id,
+        missing_dep_id,
+        target_bytes: target_bytes.clone(),
+        labeler_bytes: labeler_bytes.clone(),
+        target_purge_projected: Cell::new(false),
+    };
+
+    let target = registry.record_for(target_bytes).unwrap();
+    let (_, target_report) = worker::run(
+        &store,
+        &registry,
+        CommandOutput::with_events((), vec![target]),
+    )
+    .expect("admit blocked target");
+    assert_eq!(target_report.blocked_events, 1);
+    assert_eq!(target_report.applied_events, 0);
+
+    let labeler = registry.record_for(labeler_bytes).unwrap();
+    let (_, label_report) = worker::run(
+        &store,
+        &registry,
+        CommandOutput::with_events((), vec![labeler]),
+    )
+    .expect("admit labeler");
+
+    assert_eq!(label_report.applied_events, 1);
+    assert!(registry.target_purge_projected.get());
+    assert!(event_schema::event_labels(&store, &target_id)
+        .expect("labels")
+        .contains(&b"purge-projected".to_vec()));
 }
 
 #[test]
@@ -579,9 +680,9 @@ impl EventRegistry for HookCountingRegistry {
         &self,
         _store: &Store,
         event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String> {
+    ) -> Result<ProjectionDecision, String> {
         if event.context.event_id == self.event_id {
-            return Ok(ProjectionOutput::default());
+            return Ok(ProjectionOutput::default().into());
         }
         Err("unknown hook-counting projection".to_string())
     }
@@ -621,13 +722,13 @@ impl EventRegistry for BatchHookRegistry {
         &self,
         _store: &Store,
         event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String> {
+    ) -> Result<ProjectionDecision, String> {
         if self
             .accepted_bytes
             .iter()
             .any(|bytes| event_id(bytes) == event.context.event_id)
         {
-            return Ok(ProjectionOutput::default());
+            return Ok(ProjectionOutput::default().into());
         }
         Err("unknown batch hook projection".to_string())
     }
@@ -644,6 +745,26 @@ struct ContextRegistry {
     dep_bytes: Vec<u8>,
     child_bytes: Vec<u8>,
     child_saw_context: Cell<bool>,
+}
+
+struct LabelWakeRegistry {
+    dep_id: EventId,
+    child_id: EventId,
+    labeler_id: EventId,
+    dep_bytes: Vec<u8>,
+    child_bytes: Vec<u8>,
+    labeler_bytes: Vec<u8>,
+    child_projections: Cell<usize>,
+    child_saw_dependency_label: Cell<bool>,
+}
+
+struct BlockedLabelWakeRegistry {
+    target_id: EventId,
+    labeler_id: EventId,
+    missing_dep_id: EventId,
+    target_bytes: Vec<u8>,
+    labeler_bytes: Vec<u8>,
+    target_purge_projected: Cell<bool>,
 }
 
 struct BatchRegistry {
@@ -741,6 +862,58 @@ impl ContextRegistry {
     }
 }
 
+impl LabelWakeRegistry {
+    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        if bytes == self.dep_bytes || bytes == self.labeler_bytes {
+            return Ok(EventRecord {
+                timestamp: 1,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: Vec::new(),
+                workspace_id: None,
+                scope: EventScope::Shared,
+            });
+        }
+        if bytes == self.child_bytes {
+            return Ok(EventRecord {
+                timestamp: 2,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: vec![self.dep_id],
+                workspace_id: None,
+                scope: EventScope::Shared,
+            });
+        }
+        Err("unknown label wake event".to_string())
+    }
+}
+
+impl BlockedLabelWakeRegistry {
+    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        if bytes == self.labeler_bytes {
+            return Ok(EventRecord {
+                timestamp: 1,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: Vec::new(),
+                workspace_id: None,
+                scope: EventScope::Shared,
+            });
+        }
+        if bytes == self.target_bytes {
+            return Ok(EventRecord {
+                timestamp: 2,
+                body_len: bytes.len(),
+                canonical_bytes: bytes,
+                dependencies: vec![self.missing_dep_id],
+                workspace_id: None,
+                scope: EventScope::Shared,
+            });
+        }
+        Err("unknown blocked label wake event".to_string())
+    }
+}
+
 impl ValidDependencyContextRegistry {
     fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
         if bytes == self.gate_bytes {
@@ -802,14 +975,24 @@ impl EventRegistry for ContextRegistry {
         &self,
         _store: &Store,
         event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String> {
+    ) -> Result<ProjectionDecision, String> {
         if event.context.event_id == self.dep_id {
-            return Ok(ProjectionOutput::labels(vec![EventLabel {
-                event_id: self.child_id,
-                label: b"dep-applied".to_vec(),
-            }]));
+            return Ok(ProjectionOutput::labels(vec![
+                EventLabel {
+                    event_id: self.child_id,
+                    label: b"dep-applied".to_vec(),
+                },
+                EventLabel {
+                    event_id: self.dep_id,
+                    label: b"dep-self".to_vec(),
+                },
+            ])
+            .into());
         }
         if event.context.event_id == self.child_id {
+            if let Some(wait) = wait_for_missing(event, &[self.dep_id]) {
+                return Ok(wait);
+            }
             assert_eq!(
                 event
                     .context
@@ -819,10 +1002,91 @@ impl EventRegistry for ContextRegistry {
                 self.dep_bytes
             );
             assert!(event.context.has_label(b"dep-applied"));
+            assert!(event
+                .context
+                .dependency_has_label(&self.dep_id, b"dep-self"));
             self.child_saw_context.set(true);
-            return Ok(ProjectionOutput::default());
+            return Ok(ProjectionOutput::default().into());
         }
         Err("unknown projection".to_string())
+    }
+}
+
+impl EventRegistry for LabelWakeRegistry {
+    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        self.record_for(bytes)
+    }
+
+    fn project_record(
+        &self,
+        _store: &Store,
+        event: &EventWithContext<'_>,
+    ) -> Result<ProjectionDecision, String> {
+        if event.context.event_id == self.dep_id {
+            return Ok(ProjectionOutput::default().into());
+        }
+        if event.context.event_id == self.child_id {
+            if let Some(wait) = wait_for_missing(event, &[self.dep_id]) {
+                return Ok(wait);
+            }
+            self.child_projections
+                .set(self.child_projections.get().saturating_add(1));
+            assert_eq!(
+                event
+                    .context
+                    .dependency(&self.dep_id)
+                    .expect("dependency context")
+                    .canonical_bytes,
+                self.dep_bytes
+            );
+            if event
+                .context
+                .dependency_has_label(&self.dep_id, b"dep-labeled")
+            {
+                self.child_saw_dependency_label.set(true);
+            }
+            return Ok(ProjectionOutput::default().into());
+        }
+        if event.context.event_id == self.labeler_id {
+            return Ok(ProjectionOutput::labels(vec![EventLabel {
+                event_id: self.dep_id,
+                label: b"dep-labeled".to_vec(),
+            }])
+            .into());
+        }
+        Err("unknown label wake projection".to_string())
+    }
+}
+
+impl EventRegistry for BlockedLabelWakeRegistry {
+    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
+        self.record_for(bytes)
+    }
+
+    fn project_record(
+        &self,
+        _store: &Store,
+        event: &EventWithContext<'_>,
+    ) -> Result<ProjectionDecision, String> {
+        if event.context.event_id == self.labeler_id {
+            return Ok(ProjectionOutput::labels(vec![EventLabel {
+                event_id: self.target_id,
+                label: b"delete".to_vec(),
+            }])
+            .into());
+        }
+        if event.context.event_id == self.target_id {
+            if event.context.has_label(b"delete") {
+                self.target_purge_projected.set(true);
+                return Ok(ProjectionOutput::labels(vec![EventLabel {
+                    event_id: self.target_id,
+                    label: b"purge-projected".to_vec(),
+                }])
+                .into());
+            }
+            return Ok(ProjectionDecision::wait_for(vec![self.missing_dep_id]));
+        }
+        Err("unknown blocked label wake projection".to_string())
     }
 }
 
@@ -835,14 +1099,17 @@ impl EventRegistry for BatchRegistry {
         &self,
         _store: &Store,
         event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String> {
+    ) -> Result<ProjectionDecision, String> {
         if event.context.event_id == self.dep_id {
-            return Ok(ProjectionOutput::default());
+            return Ok(ProjectionOutput::default().into());
         }
         if self.child_ids.contains(&event.context.event_id) {
+            if let Some(wait) = wait_for_missing(event, &[self.dep_id]) {
+                return Ok(wait);
+            }
             self.children_applied
                 .set(self.children_applied.get().saturating_add(1));
-            return Ok(ProjectionOutput::default());
+            return Ok(ProjectionOutput::default().into());
         }
         Err("unknown batch projection".to_string())
     }
@@ -857,12 +1124,15 @@ impl EventRegistry for ValidDependencyContextRegistry {
         &self,
         _store: &Store,
         event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String> {
+    ) -> Result<ProjectionDecision, String> {
         if event.context.event_id == self.gate_id {
             assert!(event.context.dependencies.is_empty());
-            return Ok(ProjectionOutput::default());
+            return Ok(ProjectionOutput::default().into());
         }
         if event.context.event_id == self.bad_dep_id {
+            if let Some(wait) = wait_for_missing(event, &[self.gate_id]) {
+                return Ok(wait);
+            }
             assert_eq!(
                 event
                     .context
@@ -874,6 +1144,9 @@ impl EventRegistry for ValidDependencyContextRegistry {
             return Err("bad dependency rejected by projector".to_string());
         }
         if event.context.event_id == self.child_id {
+            if let Some(wait) = wait_for_missing(event, &[self.bad_dep_id]) {
+                return Ok(wait);
+            }
             self.child_saw_context.set(true);
             panic!("child must remain blocked until bad dependency is applied");
         }
@@ -890,14 +1163,22 @@ impl EventRegistry for RejectThenAcceptRegistry {
         &self,
         _store: &Store,
         event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String> {
+    ) -> Result<ProjectionDecision, String> {
         if event.context.event_id == self.bad_id {
             return Err("intentional projection reject".to_string());
         }
         if event.context.event_id == self.good_id {
             self.good_applied.set(true);
-            return Ok(ProjectionOutput::default());
+            return Ok(ProjectionOutput::default().into());
         }
         Err("unknown reject projection".to_string())
     }
+}
+
+fn wait_for_missing(
+    event: &EventWithContext<'_>,
+    dependencies: &[EventId],
+) -> Option<ProjectionDecision> {
+    let missing = event.context.missing_dependencies_from(dependencies);
+    (!missing.is_empty()).then(|| ProjectionDecision::wait_for(missing))
 }

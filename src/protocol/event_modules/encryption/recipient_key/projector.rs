@@ -54,8 +54,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
 
     let signer = event
         .context
-        .dependency(&envelope.signer_endpoint_shared_id)
-        .ok_or_else(|| "recipient key signer endpoint_shared dependency is missing".to_string())?;
+        .require_dependency(&envelope.signer_endpoint_shared_id)?;
     let signer_envelope = signed::codec::decode(&signer.canonical_bytes).map_err(|_| {
         "recipient key signer dependency is not a signed endpoint_shared".to_string()
     })?;
@@ -144,10 +143,7 @@ fn validate_predecessor(
 ) -> Result<(), String> {
     let predecessor = event
         .context
-        .dependency(previous_recipient_key_id)
-        .ok_or_else(|| {
-            "recipient key supersession previous_recipient_key dependency is missing".to_string()
-        })?;
+        .require_dependency(previous_recipient_key_id)?;
     let predecessor_envelope =
         codec::decode_signed(&predecessor.canonical_bytes).map_err(|_| {
             "recipient key supersession previous dependency is not a signed recipient_key"
@@ -230,6 +226,7 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: signer_id,
                     record: signer_record,
+                    labels: Vec::new(),
                 }],
                 labels: Vec::new(),
                 receive: None,
@@ -298,9 +295,10 @@ mod tests {
             },
         };
 
-        assert_eq!(
-            project(&event).expect_err("missing signer must fail"),
-            "recipient key signer endpoint_shared dependency is missing"
+        let err = project(&event).expect_err("missing signer must wait");
+        assert!(
+            crate::workers::pipeline_helpers::event_pipeline::is_wait_for_dependency_error(&err),
+            "{err}"
         );
     }
 
@@ -367,10 +365,12 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: predecessor_id,
                         record: predecessor_record,
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),
@@ -437,6 +437,7 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: signer_id,
                     record: signer_record,
+                    labels: Vec::new(),
                 }],
                 // Pre-existing supersession label means the successor
                 // already projected and labeled this id earlier.
@@ -507,10 +508,12 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: other_predecessor_id,
                         record: other_predecessor,
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),

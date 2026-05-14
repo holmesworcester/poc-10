@@ -74,12 +74,7 @@ fn validate_authority(
                     .to_string(),
             );
         }
-        let workspace_record = event
-            .context
-            .dependency(&setting.workspace_id)
-            .ok_or_else(|| {
-                "disappearing_messages_setting workspace authority dependency is missing".to_string()
-            })?;
+        let workspace_record = event.context.require_dependency(&setting.workspace_id)?;
         let workspace = workspace::codec::decode(&workspace_record.canonical_bytes).map_err(|_| {
             "disappearing_messages_setting workspace authority dependency is not a workspace event"
                 .to_string()
@@ -116,14 +111,10 @@ fn validate_monotonic_floor(
     let Some(previous_setting_id) = setting.previous_setting_id else {
         return Ok(());
     };
-    let dependency = event.context.dependency(&previous_setting_id).ok_or_else(|| {
-        "disappearing_messages_setting previous_setting_id dependency is missing".to_string()
-    })?;
+    let dependency = event.context.require_dependency(&previous_setting_id)?;
     let previous = decode_previous_setting(dependency, setting.workspace_id)?;
     if setting.expires_at_or_before_minute < previous.expires_at_or_before_minute {
-        return Err(
-            "disappearing setting floor must be monotonic non-decreasing".to_string(),
-        );
+        return Err("disappearing setting floor must be monotonic non-decreasing".to_string());
     }
     Ok(())
 }
@@ -137,8 +128,7 @@ fn decode_previous_setting(
             .to_string()
     })?;
     let previous = codec::decode(&envelope.payload).map_err(|_| {
-        "disappearing_messages_setting previous_setting_id dependency is not a setting"
-            .to_string()
+        "disappearing_messages_setting previous_setting_id dependency is not a setting".to_string()
     })?;
     if previous.workspace_id != expected_workspace_id {
         return Err(
@@ -155,13 +145,9 @@ fn decode_admin_dependency(
 ) -> Result<admin::types::AdminEvent, String> {
     let dependency = event
         .context
-        .dependency(&authority_admin_event_id)
-        .ok_or_else(|| {
-            "disappearing_messages_setting authority admin dependency is missing".to_string()
-        })?;
+        .require_dependency(&authority_admin_event_id)?;
     let envelope = signed::codec::decode(&dependency.canonical_bytes).map_err(|_| {
-        "disappearing_messages_setting authority admin dependency is not a signed event"
-            .to_string()
+        "disappearing_messages_setting authority admin dependency is not a signed event".to_string()
     })?;
     if envelope.inner_type != admin::codec::TYPE_ADMIN {
         return Err(
@@ -188,11 +174,9 @@ mod tests {
     use super::super::types::DisappearingMessagesSettingEvent;
     use super::*;
 
-    fn admin_dependency_record(
-        workspace_id: EventId,
-        admin_public_key: [u8; 32],
-    ) -> EventRecord
-    {
+    type Record = EventRecord;
+
+    fn admin_dependency_record(workspace_id: EventId, admin_public_key: [u8; 32]) -> Record {
         let admin_event = admin::types::AdminEvent {
             created_at_ms: 1_000_000,
             workspace_id,
@@ -201,13 +185,10 @@ mod tests {
             user_event_id: workspace_id,
         };
         let payload = admin::codec::encode(&admin_event);
-        let signed_envelope = signed::commands::sign_payload(
-            workspace_id,
-            &[7; ED25519_PRIVATE_KEY_BYTES],
-            payload,
-        )
-        .expect("sign admin payload")
-        .value;
+        let signed_envelope =
+            signed::commands::sign_payload(workspace_id, &[7; ED25519_PRIVATE_KEY_BYTES], payload)
+                .expect("sign admin payload")
+                .value;
         let bytes = signed::codec::encode(&signed_envelope);
         signed::codec::record_from_bytes(bytes).expect("admin record")
     }
@@ -220,8 +201,7 @@ mod tests {
         created_at_ms: u64,
         expires_at_or_before_minute: u64,
         previous_setting_id: Option<EventId>,
-    ) -> EventRecord
-    {
+    ) -> Record {
         let inner = DisappearingMessagesSettingEvent {
             created_at_ms,
             workspace_id,
@@ -258,6 +238,7 @@ mod tests {
             dependencies: vec![DependencyContext {
                 event_id: admin_event_id,
                 record: admin_dependency_record(workspace_id, admin_public_key),
+                labels: Vec::new(),
             }],
             labels: Vec::new(),
             receive: None,
@@ -292,10 +273,12 @@ mod tests {
                 DependencyContext {
                     event_id: admin_event_id,
                     record: admin_dependency_record(workspace_id, admin_public_key),
+                    labels: Vec::new(),
                 },
                 DependencyContext {
                     event_id: previous_id,
                     record: previous_record.clone(),
+                    labels: Vec::new(),
                 },
             ],
             labels: Vec::new(),
@@ -309,8 +292,7 @@ mod tests {
     fn projects_one_active_setting_row_for_authorized_admin() {
         let private_key = [9; ED25519_PRIVATE_KEY_BYTES];
         let admin_public_key = crypto::ed25519_public_key(&private_key);
-        let (record, context) =
-            projector_input([1; 32], 5, [2; 32], admin_public_key, private_key);
+        let (record, context) = projector_input([1; 32], 5, [2; 32], admin_public_key, private_key);
         let event = EventWithContext {
             record: &record,
             context,
@@ -355,20 +337,13 @@ mod tests {
     fn rejects_admin_dependency_for_a_different_workspace() {
         let private_key = [9; ED25519_PRIVATE_KEY_BYTES];
         let admin_public_key = crypto::ed25519_public_key(&private_key);
-        let record = build_setting_record(
-            [1; 32],
-            5,
-            [2; 32],
-            private_key,
-            6_000_000,
-            0,
-            None,
-        );
+        let record = build_setting_record([1; 32], 5, [2; 32], private_key, 6_000_000, 0, None);
         let context = EventContext {
             event_id: event_id(&record.canonical_bytes),
             dependencies: vec![DependencyContext {
                 event_id: [2; 32],
                 record: admin_dependency_record([9; 32], admin_public_key),
+                labels: Vec::new(),
             }],
             labels: Vec::new(),
             receive: None,
@@ -415,15 +390,7 @@ mod tests {
     fn rejects_setting_whose_floor_is_below_previous_floor() {
         let private_key = [9; ED25519_PRIVATE_KEY_BYTES];
         let admin_public_key = crypto::ed25519_public_key(&private_key);
-        let previous = build_setting_record(
-            [1; 32],
-            5,
-            [2; 32],
-            private_key,
-            6_000_000,
-            50,
-            None,
-        );
+        let previous = build_setting_record([1; 32], 5, [2; 32], private_key, 6_000_000, 50, None);
         let (record, context) = projector_input_with_previous(
             [1; 32],
             5,
@@ -446,15 +413,7 @@ mod tests {
     fn admits_setting_whose_floor_equals_previous_floor() {
         let private_key = [9; ED25519_PRIVATE_KEY_BYTES];
         let admin_public_key = crypto::ed25519_public_key(&private_key);
-        let previous = build_setting_record(
-            [1; 32],
-            5,
-            [2; 32],
-            private_key,
-            6_000_000,
-            50,
-            None,
-        );
+        let previous = build_setting_record([1; 32], 5, [2; 32], private_key, 6_000_000, 50, None);
         let (record, context) = projector_input_with_previous(
             [1; 32],
             5,
@@ -483,15 +442,7 @@ mod tests {
     fn admits_setting_whose_floor_is_above_previous_floor() {
         let private_key = [9; ED25519_PRIVATE_KEY_BYTES];
         let admin_public_key = crypto::ed25519_public_key(&private_key);
-        let previous = build_setting_record(
-            [1; 32],
-            5,
-            [2; 32],
-            private_key,
-            6_000_000,
-            50,
-            None,
-        );
+        let previous = build_setting_record([1; 32], 5, [2; 32], private_key, 6_000_000, 50, None);
         let (record, context) = projector_input_with_previous(
             [1; 32],
             5,
