@@ -7,18 +7,31 @@
 //!
 //! Supersession: when the canonical event carries a non-zero
 //! `previous_recipient_key_id`, the projector also exact-deletes the old
-//! `RECIPIENT_KEYS` row in the same projection. The single event then acts
-//! as both the tombstone of the old pubkey and the introduction of the new
-//! one (per `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation
-//! On Wrap-Bound Deletion"). Validation requires the predecessor to be
-//! issued by the same endpoint and live in the same workspace; cross-
-//! endpoint or cross-workspace supersessions are rejected.
+//! `RECIPIENT_KEYS` row in the same projection AND emits a supersession
+//! label on the predecessor's event id. The single event then acts as both
+//! the tombstone of the old pubkey and the introduction of the new one
+//! (per `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+//! Wrap-Bound Deletion"). Validation requires the predecessor to be issued
+//! by the same endpoint and live in the same workspace; cross-endpoint or
+//! cross-workspace supersessions are rejected.
+//!
+//! Re-delivery defense: if this projection is for a non-supersession
+//! `recipient_key` event whose own id ALREADY carries a supersession
+//! label, the projector skips writing the row. The label is the
+//! persistent supersession marker — once a recipient_key has been
+//! retired (its successor was admitted first, label was written), a
+//! later re-delivery of the predecessor bytes via a peer that hasn't
+//! yet seen the successor projects through this branch and the row
+//! stays deleted. Both peers converge on identical EVENTS state because
+//! the predecessor is still admitted; only the projection row is
+//! suppressed.
 
 use crate::protocol::event_modules::identity::{endpoint_shared, signed};
+use crate::protocol::event_modules::schema::EventLabel;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
-use super::types::NO_PREVIOUS_RECIPIENT_KEY;
+use super::types::{is_superseded_label, superseded_label, NO_PREVIOUS_RECIPIENT_KEY};
 use super::{codec, commands, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
@@ -64,10 +77,26 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("recipient key signer endpoint role cannot receive key wraps".to_string());
     }
 
-    let mut output = ProjectionOutput::rows(vec![schema::recipient_key_row(
-        event.context.event_id,
-        &recipient_key,
-    )?]);
+    // Re-delivery suppression. If this event's own id already carries a
+    // supersession label (because a successor recipient_key was admitted
+    // and projected earlier on this peer), do not write the recipient_keys
+    // row. The supersession projector deleted it; a re-delivery must not
+    // resurrect it. The event itself stays admitted to EVENTS so both
+    // peers' negentropy state remains symmetric — only the projection
+    // row is suppressed.
+    let already_superseded = event
+        .context
+        .labels
+        .iter()
+        .any(|label| is_superseded_label(label));
+    let mut output = if already_superseded {
+        ProjectionOutput::rows(Vec::new())
+    } else {
+        ProjectionOutput::rows(vec![schema::recipient_key_row(
+            event.context.event_id,
+            &recipient_key,
+        )?])
+    };
 
     if recipient_key.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
         validate_predecessor(event, &recipient_key.previous_recipient_key_id, recipient_key.endpoint_shared_id, recipient_key.workspace_id)?;
@@ -77,6 +106,16 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                 recipient_key.workspace_id,
                 recipient_key.previous_recipient_key_id,
             ),
+        });
+        // Mark the predecessor's event id with a supersession label so a
+        // later re-projection of the predecessor's own bytes (e.g. on a
+        // fresh peer that admits the successor first) suppresses the
+        // resurrection of the predecessor's row. The label payload names
+        // the successor (this event's id) so a debugger / future query
+        // can follow the chain.
+        output.labels.push(EventLabel {
+            event_id: recipient_key.previous_recipient_key_id,
+            label: superseded_label(&event.context.event_id),
         });
     }
 
@@ -345,6 +384,71 @@ mod tests {
             output.deletes[0].key,
             schema::recipient_key_key([1; 32], predecessor_id),
             "the deleted row key must be the predecessor's"
+        );
+        assert_eq!(
+            output.labels.len(),
+            1,
+            "supersession must emit one EventLabel marking the predecessor"
+        );
+        assert_eq!(
+            output.labels[0].event_id, predecessor_id,
+            "the label must be attached to the predecessor's event id"
+        );
+        assert_eq!(
+            output.labels[0].label,
+            super::super::types::superseded_label(&event.context.event_id),
+            "the label payload must name the successor recipient_key event"
+        );
+    }
+
+    /// Re-delivery defense: a non-supersession recipient_key event whose
+    /// own id ALREADY carries a supersession label (because the successor
+    /// was admitted and projected first on this peer) must NOT write the
+    /// recipient_keys row. The label is the persistent supersession
+    /// marker; admitting the predecessor's bytes via sync from a peer
+    /// that hasn't yet seen the successor must not resurrect the row
+    /// the supersession projector deleted.
+    #[test]
+    fn fresh_recipient_key_with_existing_supersession_label_skips_row_write() {
+        let signer_private_key = [9; 32];
+        let signer_pubkey = signing_public_key_for(&signer_private_key);
+        let signer_record = endpoint_shared_record([1; 32], signer_pubkey);
+        let signer_id = event_id(&signer_record.canonical_bytes);
+        let record = recipient_key_record([1; 32], signer_id, signer_private_key);
+        let event_id_for_predecessor = event_id(&record.canonical_bytes);
+        let successor_id: [u8; 32] = [99; 32];
+
+        let event = EventWithContext {
+            record: &record,
+            context: EventContext {
+                event_id: event_id_for_predecessor,
+                dependencies: vec![DependencyContext {
+                    event_id: signer_id,
+                    record: signer_record,
+                }],
+                // Pre-existing supersession label means the successor
+                // already projected and labeled this id earlier.
+                labels: vec![super::super::types::superseded_label(&successor_id)],
+                receive: None,
+                now_unix_minute: None,
+            },
+        };
+
+        let output = project(&event).expect("project superseded predecessor");
+
+        assert!(
+            output.rows.is_empty(),
+            "predecessor with supersession label must not write the recipient_keys row \
+             (would resurrect the row the supersession projector deleted), got {} rows",
+            output.rows.len()
+        );
+        assert!(
+            output.deletes.is_empty(),
+            "fresh recipient_key (no previous_recipient_key_id) must not emit deletes"
+        );
+        assert!(
+            output.labels.is_empty(),
+            "fresh recipient_key must not emit a supersession label of its own"
         );
     }
 

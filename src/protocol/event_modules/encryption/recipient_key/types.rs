@@ -23,6 +23,30 @@ use crate::protocol::event_modules::types::EventId;
 /// supersession effect. Encoded on the wire as 32 zero bytes.
 pub const NO_PREVIOUS_RECIPIENT_KEY: EventId = [0; 32];
 
+/// Label prefix written under a superseded recipient_key event id by the
+/// supersession projector.
+///
+/// The full label is `SUPERSEDED_LABEL_PREFIX || successor_recipient_key_id`
+/// (16 + 32 = 48 bytes). The successor id is carried so a debugger or future
+/// query can follow the chain; projectors only need to know the prefix is
+/// present to suppress the predecessor's projection row on a re-delivery.
+pub const SUPERSEDED_LABEL_PREFIX: &[u8; 16] = b"encrypt.rk.supr:";
+
+/// Build the supersession label bytes for the given successor.
+pub fn superseded_label(successor_recipient_key_id: &EventId) -> Vec<u8> {
+    let mut label =
+        Vec::with_capacity(SUPERSEDED_LABEL_PREFIX.len() + successor_recipient_key_id.len());
+    label.extend_from_slice(SUPERSEDED_LABEL_PREFIX);
+    label.extend_from_slice(successor_recipient_key_id);
+    label
+}
+
+/// Detect whether a label is a recipient_key supersession label.
+pub fn is_superseded_label(label: &[u8]) -> bool {
+    label.len() == SUPERSEDED_LABEL_PREFIX.len() + 32
+        && &label[..SUPERSEDED_LABEL_PREFIX.len()] == SUPERSEDED_LABEL_PREFIX
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipientKeyEvent {
     pub workspace_id: EventId,
