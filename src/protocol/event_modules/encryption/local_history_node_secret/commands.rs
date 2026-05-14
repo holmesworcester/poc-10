@@ -40,8 +40,8 @@ use crate::protocol::wire::Writer;
 use super::codec;
 use super::queries;
 use super::types::{
-    bit_at, mask_prefix_to_depth, AncestorSource, HistoryNodeSecret, LocalHistoryNodeSecret,
-    TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH,
+    bit_at, first_diverging_bit, mask_prefix_to_depth, sibling_prefix_at_depth, AncestorSource,
+    HistoryNodeSecret, LocalHistoryNodeSecret, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH,
 };
 
 /// Domain-separated tag for time-axis range-tree splits under
@@ -535,6 +535,322 @@ fn trie_split_info(input: &DeriveTrieSplit) -> Vec<u8> {
     let child_prefix = mask_prefix_to_depth(input.child_event_id_prefix, input.child_bit_depth);
     out.id(&child_prefix);
     out.finish()
+}
+
+/// One row that the retire walk wipes after admission completes. Carries
+/// the event id (so canonical bytes can be purged) plus the full row
+/// coordinate (so the row can be exact-deleted by key and tombstoned
+/// against `range_start + range_width`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetireWipeEntry {
+    pub event_id: EventId,
+    pub range_start: u64,
+    pub range_width: u64,
+    pub bit_depth: u16,
+    pub event_id_prefix: EventId,
+}
+
+/// Retire one event's leaf by emitting all materialization records along
+/// the retirement path: time-tree descend + sibling pairs from the
+/// ancestor down to the minute_node, then trie descend + sibling pairs at
+/// every divergence depth between the leaf-being-retired and the surviving
+/// leaves in this minute.
+///
+/// At the FINAL time-tree split (`parent_width = 2`), only the descending
+/// child is emitted — the adjacent minute_node sibling stays implicit per
+/// the binary-tree FS spec.
+///
+/// Records use deterministic event ids, so duplicate emissions (rows that
+/// already exist in the store from prior retirements) are silently absorbed
+/// by admission. The command itself does not deduplicate.
+///
+/// The leaf row's exact-delete and canonical-byte purge are NOT part of the
+/// emitted records — they are cross-table store operations the worker
+/// performs after admission, along with wiping the descend-side rows
+/// returned in `wipe_path`. The frontier root (`local_key_secret`) wipe is
+/// also a worker responsibility because it lives in a different table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetireLeafFromAncestor {
+    pub workspace_id: EventId,
+    pub removal_frontier_id: EventId,
+    pub ancestor: AncestorSource,
+    pub unix_minute: u64,
+    /// Coordinate of the leaf being retired.
+    pub event_id_in_minute: EventId,
+    /// `event_id_in_minute` values of the OTHER materialized leaves in the
+    /// same minute. Their first-diverging-bit positions against
+    /// `event_id_in_minute` determine which sibling internal depths must be
+    /// materialized to keep the surviving leaves covered.
+    pub survivor_coords: Vec<EventId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RetireLeafFromAncestorOutput {
+    /// Subset of the emitted records that belong to the descend-side path
+    /// from the ancestor down toward the leaf. The worker exact-deletes
+    /// these rows and purges their canonical bytes after admission so the
+    /// deleted leaf's secret cannot be re-derived.
+    pub wipe_path: Vec<RetireWipeEntry>,
+}
+
+pub fn retire_leaf_from_ancestor(
+    input: RetireLeafFromAncestor,
+) -> Result<CommandOutput<RetireLeafFromAncestorOutput>, String> {
+    validate_id("workspace_id", &input.workspace_id)?;
+    validate_id("removal_frontier_id", &input.removal_frontier_id)?;
+    if input.event_id_in_minute.iter().all(|byte| *byte == 0) {
+        return Err("event_id_in_minute must be non-zero".to_string());
+    }
+
+    let mut records: Vec<crate::protocol::event_modules::types::EventRecord> = Vec::new();
+    let mut wipe_path: Vec<RetireWipeEntry> = Vec::new();
+    let (mut current_secret, mut current_id, mut current_bit_depth, mut current_event_id_prefix) =
+        emit_time_walk_for_retire(&input, &mut records, &mut wipe_path)?;
+
+    let mut divergence_depths: Vec<u16> = input
+        .survivor_coords
+        .iter()
+        .map(|coord| first_diverging_bit(&input.event_id_in_minute, coord))
+        .collect();
+    divergence_depths.sort_unstable();
+    divergence_depths.dedup();
+
+    for depth in divergence_depths {
+        if depth <= current_bit_depth {
+            continue;
+        }
+        let descend_side = bit_at(&input.event_id_in_minute, depth - 1);
+        let sibling_side = 1 - descend_side;
+        let descend_prefix = mask_prefix_to_depth(input.event_id_in_minute, depth);
+        let sibling_prefix = sibling_prefix_at_depth(input.event_id_in_minute, depth);
+
+        let descend_event = build_trie_split_event(
+            input.workspace_id,
+            input.removal_frontier_id,
+            input.unix_minute,
+            current_id,
+            current_secret,
+            current_bit_depth,
+            current_event_id_prefix,
+            descend_side,
+            depth,
+            descend_prefix,
+        );
+        let descend_record = codec::record_from_bytes(codec::encode(&descend_event))?;
+        let descend_id = event_id(&descend_record.canonical_bytes);
+        records.push(descend_record);
+        wipe_path.push(RetireWipeEntry {
+            event_id: descend_id,
+            range_start: input.unix_minute,
+            range_width: 1,
+            bit_depth: depth,
+            event_id_prefix: descend_prefix,
+        });
+
+        let sibling_event = build_trie_split_event(
+            input.workspace_id,
+            input.removal_frontier_id,
+            input.unix_minute,
+            current_id,
+            current_secret,
+            current_bit_depth,
+            current_event_id_prefix,
+            sibling_side,
+            depth,
+            sibling_prefix,
+        );
+        let sibling_record = codec::record_from_bytes(codec::encode(&sibling_event))?;
+        records.push(sibling_record);
+
+        current_secret = descend_event.node_secret;
+        current_id = descend_id;
+        current_bit_depth = depth;
+        current_event_id_prefix = descend_prefix;
+    }
+
+    Ok(CommandOutput::with_events(
+        RetireLeafFromAncestorOutput { wipe_path },
+        records,
+    ))
+}
+
+/// Walk the time tree from the ancestor down to the minute_node, emitting
+/// descend + sibling pairs at each level (sibling skipped at the final
+/// `width = 2 -> 1` split). Returns the trie position to start the trie
+/// walk from. For an `InMinute` ancestor the walk is a no-op; the trie
+/// position is the ancestor's coordinate.
+fn emit_time_walk_for_retire(
+    input: &RetireLeafFromAncestor,
+    records: &mut Vec<crate::protocol::event_modules::types::EventRecord>,
+    wipe_path: &mut Vec<RetireWipeEntry>,
+) -> Result<(HistoryNodeSecret, EventId, u16, EventId), String> {
+    let (mut current_secret, mut current_id, mut current_start, mut current_width) =
+        match input.ancestor {
+            AncestorSource::Root { secret_id, secret } => {
+                validate_id("ancestor.secret_id", &secret_id)?;
+                validate_id("ancestor.secret", &secret)?;
+                (secret, secret_id, 0u64, ROOT_TIME_TREE_WIDTH)
+            }
+            AncestorSource::TimeInternal {
+                secret_id,
+                secret,
+                range_start,
+                range_width,
+            } => {
+                validate_id("ancestor.secret_id", &secret_id)?;
+                validate_id("ancestor.secret", &secret)?;
+                validate_range(range_start, range_width)?;
+                if input.unix_minute < range_start
+                    || input.unix_minute >= range_start.saturating_add(range_width)
+                {
+                    return Err("ancestor does not cover unix_minute".to_string());
+                }
+                (secret, secret_id, range_start, range_width)
+            }
+            AncestorSource::InMinute {
+                secret_id,
+                secret,
+                range_start,
+                bit_depth,
+                event_id_prefix,
+            } => {
+                validate_id("ancestor.secret_id", &secret_id)?;
+                validate_id("ancestor.secret", &secret)?;
+                if range_start != input.unix_minute {
+                    return Err(
+                        "InMinute ancestor range_start does not match unix_minute".to_string(),
+                    );
+                }
+                if mask_prefix_to_depth(input.event_id_in_minute, bit_depth) != event_id_prefix {
+                    return Err("InMinute ancestor does not cover event_id_in_minute".to_string());
+                }
+                return Ok((secret, secret_id, bit_depth, event_id_prefix));
+            }
+        };
+
+    while current_width > 1 {
+        let half = current_width / 2;
+        let mid = current_start + half;
+        let (descend_side, descend_start, sibling_side, sibling_start) =
+            if input.unix_minute < mid {
+                (0u8, current_start, 1u8, mid)
+            } else {
+                (1u8, mid, 0u8, current_start)
+            };
+
+        let descend_event = build_time_split_event(
+            input.workspace_id,
+            input.removal_frontier_id,
+            current_id,
+            current_secret,
+            current_start,
+            current_width,
+            descend_side,
+            descend_start,
+            half,
+        );
+        let descend_record = codec::record_from_bytes(codec::encode(&descend_event))?;
+        let descend_id = event_id(&descend_record.canonical_bytes);
+        records.push(descend_record);
+        wipe_path.push(RetireWipeEntry {
+            event_id: descend_id,
+            range_start: descend_start,
+            range_width: half,
+            bit_depth: TIME_TREE_BIT_DEPTH,
+            event_id_prefix: [0; 32],
+        });
+
+        // Skip sibling at the final split: adjacent minute_nodes at
+        // width=1 stay implicit per the binary-tree FS spec.
+        if current_width > 2 {
+            let sibling_event = build_time_split_event(
+                input.workspace_id,
+                input.removal_frontier_id,
+                current_id,
+                current_secret,
+                current_start,
+                current_width,
+                sibling_side,
+                sibling_start,
+                half,
+            );
+            let sibling_record = codec::record_from_bytes(codec::encode(&sibling_event))?;
+            records.push(sibling_record);
+        }
+
+        current_secret = descend_event.node_secret;
+        current_id = descend_id;
+        current_start = descend_start;
+        current_width = half;
+    }
+    Ok((current_secret, current_id, TIME_TREE_BIT_DEPTH, [0; 32]))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_time_split_event(
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    parent_id: EventId,
+    parent_secret: HistoryNodeSecret,
+    parent_range_start: u64,
+    parent_range_width: u64,
+    child_side: u8,
+    child_range_start: u64,
+    child_range_width: u64,
+) -> LocalHistoryNodeSecret {
+    let info = time_split_info_bytes(
+        parent_range_start,
+        parent_range_width,
+        child_side,
+        child_range_start,
+        child_range_width,
+    );
+    let node_secret = crypto::blake3_keyed_hash(&parent_secret, TIME_SPLIT_DOMAIN, &info);
+    LocalHistoryNodeSecret {
+        workspace_id,
+        removal_frontier_id,
+        source_secret_id: parent_id,
+        range_start: child_range_start,
+        range_width: child_range_width,
+        bit_depth: TIME_TREE_BIT_DEPTH,
+        event_id_prefix: [0; 32],
+        tombstone_node_id: None,
+        node_secret,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_trie_split_event(
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    unix_minute: u64,
+    parent_id: EventId,
+    parent_secret: HistoryNodeSecret,
+    parent_bit_depth: u16,
+    parent_event_id_prefix: EventId,
+    child_side: u8,
+    child_bit_depth: u16,
+    child_event_id_prefix: EventId,
+) -> LocalHistoryNodeSecret {
+    let info = trie_split_info_bytes(
+        parent_bit_depth,
+        parent_event_id_prefix,
+        child_side,
+        child_bit_depth,
+        child_event_id_prefix,
+    );
+    let node_secret = crypto::blake3_keyed_hash(&parent_secret, TRIE_SPLIT_DOMAIN, &info);
+    LocalHistoryNodeSecret {
+        workspace_id,
+        removal_frontier_id,
+        source_secret_id: parent_id,
+        range_start: unix_minute,
+        range_width: 1,
+        bit_depth: child_bit_depth,
+        event_id_prefix: mask_prefix_to_depth(child_event_id_prefix, child_bit_depth),
+        tombstone_node_id: None,
+        node_secret,
+    }
 }
 
 fn validate_id(name: &str, id: &EventId) -> Result<(), String> {

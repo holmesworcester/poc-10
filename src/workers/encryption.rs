@@ -79,10 +79,9 @@ use crate::protocol::event_modules::encryption::{
     recipient_key_tombstone,
 };
 
-use local_history_node_secret::types::{
-    bit_at, first_diverging_bit, mask_prefix_to_depth, HistoryNodeSecret, TIME_TREE_BIT_DEPTH,
-    TRIE_LEAF_BIT_DEPTH,
-};
+use local_history_node_secret::types::{HistoryNodeSecret, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH};
+#[cfg(test)]
+use local_history_node_secret::types::{bit_at, mask_prefix_to_depth};
 
 /// The implicit time-tree root covers `(0, TIME_TREE_ROOT_WIDTH)`. Set to
 /// `2^63` so widths stay clean powers of two through `range_width=1`. This
@@ -510,19 +509,6 @@ fn rotate_recipient_key<R: EventRegistry>(
     Ok(report)
 }
 
-/// Trie-walk cursor used by the retire walk. Time-axis derivation lives in
-/// `commands::derive_leaf_from_ancestor` and the retire walk's own time
-/// loop; this cursor only tracks the current trie position
-/// `(bit_depth, event_id_prefix)` plus its secret material as we step from
-/// the minute_node down to the leaf.
-#[derive(Debug, Clone)]
-struct DerivationSource {
-    secret_id: EventId,
-    secret: HistoryNodeSecret,
-    bit_depth: u16,
-    event_id_prefix: EventId,
-}
-
 #[cfg(test)]
 fn time_split_info(
     parent_range_start: u64,
@@ -716,36 +702,62 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
         unix_minute,
         event_id_in_minute,
     )?;
-    let leaf_id = leaf_row
-        .as_ref()
-        .map(|row| row.local_history_node_secret_id);
+    let Some(leaf_row) = leaf_row else {
+        return Ok(RetireDeletedEventLeafReport::default());
+    };
+    let leaf_id = leaf_row.local_history_node_secret_id;
 
     let mut report = RetireDeletedEventLeafReport {
-        leaf_id,
+        leaf_id: Some(leaf_id),
         ..RetireDeletedEventLeafReport::default()
     };
-
-    if leaf_id.is_none() {
-        return Ok(report);
-    }
-    let leaf_id = leaf_id.expect("checked above");
 
     // Look up the F root row. If it's already wiped (a prior retire wiped
     // it), we still need to exact-delete this leaf row, purge its bytes,
     // and tombstone it — but there is no walk to perform.
     let frontier_root =
         local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?;
-    let mut path_rows_to_wipe: Vec<WipeTarget> = Vec::new();
-    if let Some(root_row) = frontier_root {
-        // Step 2: walk the time tree, materializing both descend and sibling
-        // children at each split. Track the descend-side rows so we can wipe
-        // them after the walk finishes.
-        let mut current_secret_id = root_row.local_key_secret_id;
-        let mut current_secret = root_row.key_secret;
-        let mut current_range_start: u64 = 0;
-        let mut current_range_width: u64 = TIME_TREE_ROOT_WIDTH;
-        // F root is on the descend path by definition.
-        path_rows_to_wipe.push(WipeTarget {
+    let mut wipe_path: Vec<WipeTarget> = Vec::new();
+    if let Some(root_row) = frontier_root.as_ref() {
+        // The retire walk runs from F root (current behavior preserves
+        // forward-secrecy: F gets wiped on first retire). The command
+        // emits descend + sibling KDF derivations from the ancestor down;
+        // here we always supply `AncestorSource::Root` so the descend
+        // chain is rooted at F.
+        let ancestor = local_history_node_secret::types::AncestorSource::Root {
+            secret_id: root_row.local_key_secret_id,
+            secret: root_row.key_secret,
+        };
+        let survivor_coords: Vec<EventId> =
+            local_history_node_secret::queries::list_leaves_in_minute(
+                store,
+                workspace_id,
+                removal_frontier_id,
+                unix_minute,
+            )?
+            .into_iter()
+            .filter(|row| row.event_id_prefix != event_id_in_minute)
+            .map(|row| row.event_id_prefix)
+            .collect();
+
+        let output = local_history_node_secret::commands::retire_leaf_from_ancestor(
+            local_history_node_secret::commands::RetireLeafFromAncestor {
+                workspace_id,
+                removal_frontier_id,
+                ancestor,
+                unix_minute,
+                event_id_in_minute,
+                survivor_coords,
+            },
+        )?;
+        // Count "new" materializations before admission. Admit-and-drain
+        // is idempotent; events whose ids already exist in the store are
+        // absorbed silently. We approximate `materialized_internal_rows`
+        // from inserted_events below.
+        let pre_admit_records = output.events.len();
+        // F root is on the descend path by definition; the wipe phase
+        // exact-deletes it alongside the descend-side internals.
+        wipe_path.push(WipeTarget {
             event_id: root_row.local_key_secret_id,
             range_start: 0,
             range_width: TIME_TREE_ROOT_WIDTH,
@@ -753,101 +765,36 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
             event_id_prefix: [0; 32],
             is_frontier_root: true,
         });
-        while current_range_width > 1 {
-            let half = current_range_width / 2;
-            let mid = current_range_start + half;
-            let (descend_side, descend_start, sibling_side, sibling_start) = if unix_minute < mid {
-                (0u8, current_range_start, 1u8, mid)
-            } else {
-                (1u8, mid, 0u8, current_range_start)
-            };
-
-            // Admit descending child (real event) so the projector's
-            // source-dependency chain holds for downstream siblings. We will
-            // wipe this row in the final step.
-            let descend = ensure_time_split(
-                store,
-                registry,
-                workspace_id,
-                removal_frontier_id,
-                current_secret_id,
-                current_secret,
-                current_range_start,
-                current_range_width,
-                descend_side,
-                descend_start,
-                half,
-            )?;
-            report.admitted_events += descend.admitted_events;
-            if descend.materialized_new_row {
-                report.materialized_internal_rows += 1;
-            }
-            path_rows_to_wipe.push(WipeTarget {
-                event_id: descend.row_event_id,
-                range_start: descend_start,
-                range_width: half,
-                bit_depth: TIME_TREE_BIT_DEPTH,
-                event_id_prefix: [0; 32],
+        for entry in &output.value.wipe_path {
+            wipe_path.push(WipeTarget {
+                event_id: entry.event_id,
+                range_start: entry.range_start,
+                range_width: entry.range_width,
+                bit_depth: entry.bit_depth,
+                event_id_prefix: entry.event_id_prefix,
                 is_frontier_root: false,
             });
-
-            // Admit sibling child. Skip the final sibling-at-width-1 (an
-            // adjacent minute_node) — adjacent minutes have no events to
-            // cover and their internal coverage is implicit under the
-            // (now-wiped) width-2 parent. Siblings at width >= 2 cover real
-            // surviving subtrees and must be materialized.
-            if half > 1 {
-                let sibling = ensure_time_split(
-                    store,
-                    registry,
-                    workspace_id,
-                    removal_frontier_id,
-                    current_secret_id,
-                    current_secret,
-                    current_range_start,
-                    current_range_width,
-                    sibling_side,
-                    sibling_start,
-                    half,
-                )?;
-                report.admitted_events += sibling.admitted_events;
-                if sibling.materialized_new_row {
-                    report.materialized_internal_rows += 1;
-                }
-            }
-            let _ = (sibling_side, sibling_start);
-
-            current_secret_id = descend.row_event_id;
-            current_secret = descend.row_secret;
-            current_range_start = descend_start;
-            current_range_width = half;
         }
-        if current_range_start != unix_minute || current_range_width != 1 {
-            return Err("retire walk did not reach the target minute_node".to_string());
-        }
-        // Step 3: walk the trie. The minute_node's id+secret are
-        // current_secret_id+current_secret.
-        walk_trie_for_retire(
+        let admitted = worker::run(
             store,
             registry,
-            workspace_id,
-            removal_frontier_id,
-            unix_minute,
-            event_id_in_minute,
-            current_secret_id,
-            current_secret,
-            &mut path_rows_to_wipe,
-            &mut report,
-        )?;
+            worker::AdmitAndDrain {
+                output,
+                batch_size: worker::DEFAULT_READY_BATCH,
+            },
+        )
+        .map_err(|err| format!("admit retire-path records: {err}"))?;
+        report.admitted_events += admitted.admitted.inserted_events;
+        report.materialized_internal_rows += admitted.admitted.inserted_events;
+        let _ = pre_admit_records;
     }
 
-    // Step 4 + 5: wipe phase. In one transaction, exact-delete every
-    // descend-path row (including F root), purge their canonical bytes,
-    // tombstone them, then exact-delete the leaf row, purge its bytes, and
-    // tombstone it. Doing this in one transaction guarantees the
-    // forward-secrecy invariant: at no point on disk do we have BOTH the
-    // descend-path rows AND a missing leaf row that an attacker could
-    // exploit.
+    // Wipe phase. In one transaction, exact-delete every descend-path row
+    // (including F root), purge their canonical bytes, tombstone them,
+    // then exact-delete the leaf row, purge its bytes, and tombstone it.
+    // Doing this in one transaction guarantees the forward-secrecy
+    // invariant: at no point on disk do we have BOTH the descend-path
+    // rows AND a missing leaf row that an attacker could exploit.
     let leaf_secret_key = local_history_node_secret::schema::local_history_node_secret_key(
         workspace_id,
         removal_frontier_id,
@@ -856,7 +803,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
         TRIE_LEAF_BIT_DEPTH,
         event_id_in_minute,
     );
-    let path_clone = path_rows_to_wipe.clone();
+    let path_clone = wipe_path.clone();
     let (wiped_path_rows, tombstones_written, purged_event_bytes) = store
         .write_transaction(move |store| {
             let mut wiped: usize = 0;
@@ -940,7 +887,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
     report.wiped_path_rows = wiped_path_rows;
     report.tombstones_written = tombstones_written;
     report.purged_event_bytes = purged_event_bytes;
-    let _ = path_rows_to_wipe;
+    let _ = wipe_path;
     Ok(report)
 }
 
@@ -1484,189 +1431,6 @@ fn ensure_time_split<R: EventRegistry>(
         admitted_events: admitted.admitted.inserted_events,
         materialized_new_row: true,
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn ensure_trie_split<R: EventRegistry>(
-    store: &Store,
-    registry: &R,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    range_start: u64,
-    parent_secret_id: EventId,
-    parent_secret: HistoryNodeSecret,
-    parent_bit_depth: u16,
-    parent_event_id_prefix: EventId,
-    child_side: u8,
-    child_bit_depth: u16,
-    child_event_id_prefix: EventId,
-) -> Result<EnsureSplitOutcome, String> {
-    if let Some(existing) = local_history_node_secret::queries::get(
-        store,
-        workspace_id,
-        removal_frontier_id,
-        range_start,
-        1,
-        child_bit_depth,
-        child_event_id_prefix,
-    )? {
-        return Ok(EnsureSplitOutcome {
-            row_event_id: existing.local_history_node_secret_id,
-            row_secret: existing.node_secret,
-            admitted_events: 0,
-            materialized_new_row: false,
-        });
-    }
-    let output = local_history_node_secret::commands::derive_trie_split(
-        local_history_node_secret::commands::DeriveTrieSplit {
-            workspace_id,
-            removal_frontier_id,
-            parent_secret_id,
-            parent_secret,
-            range_start,
-            parent_bit_depth,
-            parent_event_id_prefix,
-            child_side,
-            child_bit_depth,
-            child_event_id_prefix,
-            tombstone_node_id: None,
-        },
-    )?;
-    let event_id = output.value.local_history_node_secret_id;
-    let secret = output.value.event.node_secret;
-    let admitted = worker::run(
-        store,
-        registry,
-        worker::AdmitAndDrain {
-            output,
-            batch_size: worker::DEFAULT_READY_BATCH,
-        },
-    )
-    .map_err(|err| format!("admit retire-trie-split: {err}"))?;
-    Ok(EnsureSplitOutcome {
-        row_event_id: event_id,
-        row_secret: secret,
-        admitted_events: admitted.admitted.inserted_events,
-        materialized_new_row: true,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn walk_trie_for_retire<R: EventRegistry>(
-    store: &Store,
-    registry: &R,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    unix_minute: u64,
-    leaf_coord: EventId,
-    minute_node_secret_id: EventId,
-    minute_node_secret: HistoryNodeSecret,
-    path_rows: &mut Vec<WipeTarget>,
-    report: &mut RetireDeletedEventLeafReport,
-) -> Result<(), String> {
-    // Compute divergence depths between `leaf_coord` and every other
-    // materialized leaf in this minute. Each unique divergence depth
-    // requires a sibling internal at that depth (covering the surviving
-    // events on the opposite side of the leaf path).
-    let trie_rows: Vec<_> = local_history_node_secret::queries::list_leaves(store, workspace_id)?
-        .into_iter()
-        .filter(|row| {
-            row.removal_frontier_id == removal_frontier_id
-                && row.range_start == unix_minute
-                && row.event_id_prefix != leaf_coord
-        })
-        .collect();
-    let mut divergence_depths: Vec<u16> = trie_rows
-        .iter()
-        .map(|row| first_diverging_bit(&leaf_coord, &row.event_id_prefix))
-        .collect();
-    divergence_depths.sort_unstable();
-    divergence_depths.dedup();
-
-    let mut current = DerivationSource {
-        secret_id: minute_node_secret_id,
-        secret: minute_node_secret,
-        bit_depth: TIME_TREE_BIT_DEPTH,
-        event_id_prefix: [0; 32],
-    };
-
-    for depth in divergence_depths.iter().copied() {
-        if depth <= current.bit_depth {
-            continue;
-        }
-        // Materialize sibling internal at `depth`, on the side opposite
-        // `leaf_coord`'s bit at depth-1. Then materialize the descending
-        // internal at `depth` on `leaf_coord`'s side. Both share the same
-        // parent (`current`).
-        let descend_side = bit_at(&leaf_coord, depth - 1);
-        let sibling_side = 1 - descend_side;
-        let descend_prefix = mask_prefix_to_depth(leaf_coord, depth);
-        let sibling_prefix = sibling_prefix_at_depth(leaf_coord, depth);
-        let descend = ensure_trie_split(
-            store,
-            registry,
-            workspace_id,
-            removal_frontier_id,
-            unix_minute,
-            current.secret_id,
-            current.secret,
-            current.bit_depth,
-            current.event_id_prefix,
-            descend_side,
-            depth,
-            descend_prefix,
-        )?;
-        report.admitted_events += descend.admitted_events;
-        if descend.materialized_new_row {
-            report.materialized_internal_rows += 1;
-        }
-        path_rows.push(WipeTarget {
-            event_id: descend.row_event_id,
-            range_start: unix_minute,
-            range_width: 1,
-            bit_depth: depth,
-            event_id_prefix: descend_prefix,
-            is_frontier_root: false,
-        });
-        let sibling = ensure_trie_split(
-            store,
-            registry,
-            workspace_id,
-            removal_frontier_id,
-            unix_minute,
-            current.secret_id,
-            current.secret,
-            current.bit_depth,
-            current.event_id_prefix,
-            sibling_side,
-            depth,
-            sibling_prefix,
-        )?;
-        report.admitted_events += sibling.admitted_events;
-        if sibling.materialized_new_row {
-            report.materialized_internal_rows += 1;
-        }
-        current = DerivationSource {
-            secret_id: descend.row_event_id,
-            secret: descend.row_secret,
-            bit_depth: depth,
-            event_id_prefix: descend_prefix,
-        };
-    }
-    let _ = workspace_id;
-    let _ = registry;
-    Ok(())
-}
-
-fn sibling_prefix_at_depth(leaf_coord: EventId, depth: u16) -> EventId {
-    debug_assert!(depth > 0 && depth <= TRIE_LEAF_BIT_DEPTH);
-    let mut prefix = mask_prefix_to_depth(leaf_coord, depth);
-    let bit_index = depth - 1;
-    let byte = (bit_index / 8) as usize;
-    let shift = 7 - (bit_index % 8) as u8;
-    let mask = 1u8 << shift;
-    prefix[byte] ^= mask;
-    mask_prefix_to_depth(prefix, depth)
 }
 
 fn drain_pending_message_leaves<R: EventRegistry>(
