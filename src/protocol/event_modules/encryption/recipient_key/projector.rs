@@ -31,6 +31,7 @@ use crate::protocol::event_modules::schema::EventLabel;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
+use super::super::key_wrap;
 use super::types::{is_superseded_label, superseded_label, NO_PREVIOUS_RECIPIENT_KEY};
 use super::{codec, commands, schema};
 
@@ -92,14 +93,22 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let mut output = if already_superseded {
         ProjectionOutput::rows(Vec::new())
     } else {
-        ProjectionOutput::rows(vec![schema::recipient_key_row(
-            event.context.event_id,
-            &recipient_key,
-        )?])
+        ProjectionOutput::rows(vec![
+            schema::recipient_key_row(event.context.event_id, &recipient_key)?,
+            key_wrap::schema::pending_recipient_key_reconcile_row(
+                recipient_key.workspace_id,
+                event.context.event_id,
+            ),
+        ])
     };
 
     if recipient_key.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
-        validate_predecessor(event, &recipient_key.previous_recipient_key_id, recipient_key.endpoint_shared_id, recipient_key.workspace_id)?;
+        validate_predecessor(
+            event,
+            &recipient_key.previous_recipient_key_id,
+            recipient_key.endpoint_shared_id,
+            recipient_key.workspace_id,
+        )?;
         output.deletes.push(TableDelete {
             table: schema::RECIPIENT_KEYS,
             key: schema::recipient_key_key(
@@ -145,8 +154,7 @@ fn validate_predecessor(
                 .to_string()
         })?;
     let predecessor_event = codec::decode(&predecessor_envelope.payload).map_err(|_| {
-        "recipient key supersession previous dependency is not a signed recipient_key"
-            .to_string()
+        "recipient key supersession previous dependency is not a signed recipient_key".to_string()
     })?;
     if predecessor_event.workspace_id != expected_workspace_id {
         return Err(
@@ -263,7 +271,7 @@ mod tests {
 
         let output = project(&event).expect("project recipient key");
 
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows.len(), 2);
         assert_eq!(output.rows[0].table, schema::RECIPIENT_KEYS);
         let row = schema::decode_recipient_key_row(&output.rows[0].key, &output.rows[0].value)
             .expect("decode row");
@@ -373,7 +381,11 @@ mod tests {
 
         let output = project(&event).expect("project supersession");
 
-        assert_eq!(output.rows.len(), 1, "must write one new row");
+        assert_eq!(
+            output.rows.len(),
+            2,
+            "must write one new row and one reconcile hint"
+        );
         assert_eq!(
             output.deletes.len(),
             1,
@@ -458,21 +470,16 @@ mod tests {
         // a victim's pubkey must be rejected: the predecessor's
         // endpoint_shared_id must match the new event's signer.
         let signer_private_key = [9; 32];
-        let signer_record = endpoint_shared_record(
-            [1; 32],
-            signing_public_key_for(&signer_private_key),
-        );
+        let signer_record =
+            endpoint_shared_record([1; 32], signing_public_key_for(&signer_private_key));
         let signer_id = event_id(&signer_record.canonical_bytes);
         let other_private_key = [7; 32];
-        let other_record = endpoint_shared_record(
-            [1; 32],
-            signing_public_key_for(&other_private_key),
-        );
+        let other_record =
+            endpoint_shared_record([1; 32], signing_public_key_for(&other_private_key));
         let other_id = event_id(&other_record.canonical_bytes);
 
         // Predecessor authored by `other`.
-        let other_predecessor =
-            recipient_key_record([1; 32], other_id, other_private_key);
+        let other_predecessor = recipient_key_record([1; 32], other_id, other_private_key);
         let other_predecessor_id = event_id(&other_predecessor.canonical_bytes);
 
         // Attacker (signer) tries to supersede `other`'s pubkey.

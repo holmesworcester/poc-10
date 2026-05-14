@@ -112,9 +112,9 @@ pub fn canonical_in(
     provenance: Option<TransitProvenance>,
 ) -> Result<ReceivedRecord, String> {
     match provenance {
-        Some(provenance) => {
-            connection::transit::projector::record_from_transit_canonical_in(store, bytes, provenance)
-        }
+        Some(provenance) => connection::transit::projector::record_from_transit_canonical_in(
+            store, bytes, provenance,
+        ),
         None => {
             let record = event_from_bytes(bytes)?;
             Ok(match receive {
@@ -149,6 +149,7 @@ pub fn schemas() -> Vec<crate::core::store::Schema> {
     out.extend_from_slice(content::file::schema::SCHEMAS);
     out.extend_from_slice(content::file_slice::schema::SCHEMAS);
     out.extend_from_slice(encryption::disappearing_messages_setting::schema::SCHEMAS);
+    out.extend_from_slice(encryption::key_request::schema::SCHEMAS);
     out.extend_from_slice(encryption::key_wrap::schema::SCHEMAS);
     out.extend_from_slice(encryption::local_history_node_secret::schema::SCHEMAS);
     out.extend_from_slice(encryption::local_key_secret::schema::SCHEMAS);

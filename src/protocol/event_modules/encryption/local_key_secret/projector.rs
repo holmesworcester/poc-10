@@ -7,7 +7,7 @@
 
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::super::removal_frontier;
+use super::super::{key_wrap, removal_frontier};
 use super::{codec, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
@@ -28,10 +28,13 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("local key secret removal frontier workspace does not match event".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![schema::local_key_secret_row(
-        event.context.event_id,
-        &local,
-    )]))
+    Ok(ProjectionOutput::rows(vec![
+        schema::local_key_secret_row(event.context.event_id, &local),
+        key_wrap::schema::pending_frontier_reconcile_row(
+            local.workspace_id,
+            local.removal_frontier_id,
+        ),
+    ]))
 }
 
 #[cfg(test)]
@@ -95,7 +98,7 @@ mod tests {
 
         let output = project(&event).expect("project local secret");
 
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows.len(), 2);
         assert_eq!(output.rows[0].table, schema::LOCAL_KEY_SECRETS);
         let row = schema::decode_local_key_secret_row(&output.rows[0].key, &output.rows[0].value)
             .expect("decode row");

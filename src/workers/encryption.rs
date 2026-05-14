@@ -72,17 +72,19 @@ use crate::core::store::Store;
 use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
 use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::schema as event_schema;
-use crate::protocol::event_modules::types::EventId;
+use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::{self, EventRegistry};
-use crate::workers::pipeline_helpers::purging;
+use crate::workers::pipeline_helpers::{event_lifecycle, purging};
+use crate::workers::{dependency_unblock, schema as worker_schema};
 
 use crate::protocol::event_modules::encryption::{
-    key_wrap, local_history_node_secret, local_key_secret, local_recipient_key, recipient_key,
+    key_request, key_wrap, local_history_node_secret, local_key_secret, local_recipient_key,
+    recipient_key, removal_frontier,
 };
 
-use local_history_node_secret::types::{TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH};
 #[cfg(test)]
 use local_history_node_secret::types::{bit_at, mask_prefix_to_depth, HistoryNodeSecret};
+use local_history_node_secret::types::{TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH};
 
 /// The implicit time-tree root covers `(0, TIME_TREE_ROOT_WIDTH)`. Set to
 /// `2^63` so widths stay clean powers of two through `range_width=1`. This
@@ -93,6 +95,12 @@ pub const TIME_TREE_ROOT_WIDTH: u64 = 1u64 << 63;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Work {
     DeriveKeySecrets {
+        batch_size: usize,
+    },
+    DrainKeyRequests {
+        batch_size: usize,
+    },
+    DrainWrapReconcile {
         batch_size: usize,
     },
     RotateRecipientKey {
@@ -157,6 +165,8 @@ pub enum Work {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Output {
     DerivedKeySecrets(DeriveReport),
+    DrainedKeyRequests(DrainKeyRequestsReport),
+    DrainedWrapReconcile(DrainWrapReconcileReport),
     RotatedRecipientKey(RotateRecipientKeyReport),
     DerivedEventLeaf(DeriveEventLeafReport),
     RetiredDeletedEventLeaf(RetireDeletedEventLeafReport),
@@ -184,8 +194,25 @@ pub struct DrainPendingLeavesReport {
 pub struct DeriveReport {
     pub scanned_key_wraps: usize,
     pub derived_key_secrets: usize,
+    pub derived_history_node_secrets: usize,
     pub failed_key_wraps: usize,
     pub admitted_events: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DrainKeyRequestsReport {
+    pub scanned_requests: usize,
+    pub materialized_key_wraps: usize,
+    pub admitted_events: usize,
+    pub deleted_requests: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DrainWrapReconcileReport {
+    pub scanned_reconcile_rows: usize,
+    pub materialized_key_wraps: usize,
+    pub admitted_events: usize,
+    pub deleted_reconcile_rows: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -278,6 +305,12 @@ pub fn run<R: EventRegistry>(store: &Store, registry: &R, work: Work) -> Result<
         Work::DeriveKeySecrets { batch_size } => {
             derive_key_secrets(store, registry, batch_size).map(Output::DerivedKeySecrets)
         }
+        Work::DrainKeyRequests { batch_size } => {
+            drain_key_requests(store, registry, batch_size).map(Output::DrainedKeyRequests)
+        }
+        Work::DrainWrapReconcile { batch_size } => {
+            drain_wrap_reconcile(store, registry, batch_size).map(Output::DrainedWrapReconcile)
+        }
         Work::RotateRecipientKey { workspace_id } => {
             rotate_recipient_key(store, registry, workspace_id).map(Output::RotatedRecipientKey)
         }
@@ -362,9 +395,7 @@ fn derive_key_secrets<R: EventRegistry>(
             continue;
         }
         report.scanned_key_wraps += 1;
-        if local_key_secret::queries::get(store, row.workspace_id, row.removal_frontier_id)?
-            .is_some()
-        {
+        if wrap_target_already_present(store, &row)? {
             consumed_pending.push(pending.key);
             continue;
         }
@@ -402,29 +433,46 @@ fn derive_key_secrets<R: EventRegistry>(
                 continue;
             }
         };
-        let output = local_key_secret::commands::from_key_secret(
-            row.workspace_id,
-            row.removal_frontier_id,
-            key_secret,
-        )?;
-        if output.value.local_key_secret_id != row.local_key_secret_id {
-            report.failed_key_wraps += 1;
-            continue;
-        }
+        match row.wrapped_secret_kind {
+            key_wrap::types::WrappedSecretKind::FrontierRoot => {
+                let output = local_key_secret::commands::from_key_secret(
+                    row.workspace_id,
+                    row.removal_frontier_id,
+                    key_secret,
+                )?;
+                if output.value.local_key_secret_id != row.wrapped_secret_id {
+                    report.failed_key_wraps += 1;
+                    continue;
+                }
 
-        let admitted = worker::run(
-            store,
-            registry,
-            worker::AdmitAndDrain {
-                output,
-                batch_size: worker::DEFAULT_READY_BATCH,
-            },
-        )
-        .map_err(|err| format!("admit local key secret: {err}"))?;
-        if admitted.admitted.inserted_events > 0 {
-            report.derived_key_secrets += 1;
+                let admitted = worker::run(
+                    store,
+                    registry,
+                    worker::AdmitAndDrain {
+                        output,
+                        batch_size: worker::DEFAULT_READY_BATCH,
+                    },
+                )
+                .map_err(|err| format!("admit local key secret: {err}"))?;
+                if admitted.admitted.inserted_events > 0 {
+                    report.derived_key_secrets += 1;
+                }
+                report.admitted_events += admitted.admitted.inserted_events;
+            }
+            key_wrap::types::WrappedSecretKind::HistoryNode => {
+                let inserted = import_wrapped_history_node(store, &row, key_secret)?;
+                if inserted {
+                    report.derived_history_node_secrets += 1;
+                }
+                report.admitted_events += usize::from(inserted);
+                let _ = dependency_unblock::run(
+                    store,
+                    dependency_unblock::Work::Drain {
+                        limit: worker::DEFAULT_READY_BATCH,
+                    },
+                )?;
+            }
         }
-        report.admitted_events += admitted.admitted.inserted_events;
         consumed_pending.push(pending.key);
     }
     if !consumed_pending.is_empty() {
@@ -433,6 +481,376 @@ fn derive_key_secrets<R: EventRegistry>(
             .map_err(|err| format!("delete pending key unwraps: {err}"))?;
     }
     Ok(report)
+}
+
+fn wrap_target_already_present(
+    store: &Store,
+    row: &key_wrap::types::KeyWrapRow,
+) -> Result<bool, String> {
+    match row.wrapped_secret_kind {
+        key_wrap::types::WrappedSecretKind::FrontierRoot => {
+            Ok(
+                local_key_secret::queries::get(store, row.workspace_id, row.removal_frontier_id)?
+                    .is_some(),
+            )
+        }
+        key_wrap::types::WrappedSecretKind::HistoryNode => {
+            Ok(local_history_node_secret::queries::get(
+                store,
+                row.workspace_id,
+                row.removal_frontier_id,
+                row.range_start,
+                row.range_width,
+                row.bit_depth,
+                row.event_id_prefix,
+            )?
+            .is_some())
+        }
+    }
+}
+
+fn import_wrapped_history_node(
+    store: &Store,
+    row: &key_wrap::types::KeyWrapRow,
+    node_secret: local_history_node_secret::types::HistoryNodeSecret,
+) -> Result<bool, String> {
+    let node = local_history_node_secret::types::LocalHistoryNodeSecret {
+        workspace_id: row.workspace_id,
+        removal_frontier_id: row.removal_frontier_id,
+        source_secret_id: row.wrapped_source_secret_id,
+        range_start: row.range_start,
+        range_width: row.range_width,
+        bit_depth: row.bit_depth,
+        event_id_prefix: row.event_id_prefix,
+        tombstone_node_id: (!row.wrapped_tombstone_node_id.iter().all(|byte| *byte == 0))
+            .then_some(row.wrapped_tombstone_node_id),
+        node_secret,
+    };
+    let bytes = local_history_node_secret::codec::encode(&node);
+    let record = local_history_node_secret::codec::record_from_bytes(bytes)?;
+    if event_id(&record.canonical_bytes) != row.wrapped_secret_id {
+        return Err("history-node key wrap does not reconstruct wrapped secret id".to_string());
+    }
+    let table_row = local_history_node_secret::schema::local_history_node_secret_row(
+        row.wrapped_secret_id,
+        &node,
+    );
+    store
+        .write_transaction(|tx| {
+            let inserted_event = event_lifecycle::insert_event(
+                tx,
+                &record,
+                crate::protocol::event_modules::types::EventStatus::Applied,
+            )?;
+            tx.insert_table_rows_in_tx(vec![table_row.clone()])?;
+            if inserted_event {
+                tx.insert_table_rows_in_tx(vec![worker_schema::recently_valid_event_row(
+                    row.wrapped_secret_id,
+                )])?;
+            }
+            Ok(inserted_event)
+        })
+        .map_err(|err| format!("import wrapped history node: {err}"))
+}
+
+fn drain_key_requests<R: EventRegistry>(
+    store: &Store,
+    registry: &R,
+    batch_size: usize,
+) -> Result<DrainKeyRequestsReport, String> {
+    let mut report = DrainKeyRequestsReport::default();
+    let mut consumed = Vec::new();
+    for request in key_request::queries::list_pending(store, batch_size.max(1))? {
+        if report.scanned_requests >= batch_size {
+            break;
+        }
+        report.scanned_requests += 1;
+        let should_respond =
+            local_endpoint_membership(store, request.workspace_id)?.is_some_and(|membership| {
+                membership.endpoint_shared_id == request.responder_endpoint_shared_id
+            });
+        if should_respond {
+            let local = endpoint::commands::local_keypair(store)?
+                .ok_or_else(|| "local endpoint is missing".to_string())?;
+            let materialized = materialize_wraps_for_recipient(
+                store,
+                registry,
+                request.workspace_id,
+                request.removal_frontier_id,
+                request.recipient_key_id,
+                request.created_at_ms,
+                request.responder_endpoint_shared_id,
+                local.signing_secret,
+            )?;
+            report.materialized_key_wraps += materialized.materialized_key_wraps;
+            report.admitted_events += materialized.admitted_events;
+        }
+        consumed.push(request.key);
+    }
+    if !consumed.is_empty() {
+        let deleted = store
+            .delete_table_rows(key_request::schema::PENDING_KEY_REQUESTS, consumed)
+            .map_err(|err| format!("delete pending key requests: {err}"))?;
+        report.deleted_requests = deleted;
+    }
+    Ok(report)
+}
+
+fn drain_wrap_reconcile<R: EventRegistry>(
+    store: &Store,
+    registry: &R,
+    batch_size: usize,
+) -> Result<DrainWrapReconcileReport, String> {
+    let mut report = DrainWrapReconcileReport::default();
+    let mut consumed = Vec::new();
+    for row in key_wrap::queries::list_pending_wrap_reconcile(store, batch_size.max(1))? {
+        if report.scanned_reconcile_rows >= batch_size {
+            break;
+        }
+        report.scanned_reconcile_rows += 1;
+        let Some(local) = endpoint::commands::local_keypair(store)? else {
+            consumed.push(row.key);
+            continue;
+        };
+        let Some(membership) = local_endpoint_membership(store, row.workspace_id)? else {
+            consumed.push(row.key);
+            continue;
+        };
+        match row.kind {
+            key_wrap::types::PendingWrapReconcileKind::RecipientKey => {
+                for frontier in
+                    removal_frontier::queries::list_for_workspace(store, row.workspace_id)?
+                {
+                    if !local_endpoint_owns_frontier(
+                        store,
+                        row.workspace_id,
+                        frontier.removal_frontier_id,
+                        membership.endpoint_shared_id,
+                    )? {
+                        continue;
+                    }
+                    let materialized = materialize_wraps_for_recipient(
+                        store,
+                        registry,
+                        row.workspace_id,
+                        frontier.removal_frontier_id,
+                        row.target_id,
+                        frontier.created_at_ms,
+                        membership.endpoint_shared_id,
+                        local.signing_secret,
+                    )?;
+                    report.materialized_key_wraps += materialized.materialized_key_wraps;
+                    report.admitted_events += materialized.admitted_events;
+                }
+            }
+            key_wrap::types::PendingWrapReconcileKind::Frontier => {
+                if local_endpoint_owns_frontier(
+                    store,
+                    row.workspace_id,
+                    row.target_id,
+                    membership.endpoint_shared_id,
+                )? {
+                    for recipient in
+                        recipient_key::queries::list_for_workspace(store, row.workspace_id)?
+                    {
+                        let materialized = materialize_wraps_for_recipient(
+                            store,
+                            registry,
+                            row.workspace_id,
+                            row.target_id,
+                            recipient.recipient_key_id,
+                            recipient.created_at_ms,
+                            membership.endpoint_shared_id,
+                            local.signing_secret,
+                        )?;
+                        report.materialized_key_wraps += materialized.materialized_key_wraps;
+                        report.admitted_events += materialized.admitted_events;
+                    }
+                }
+            }
+        }
+        consumed.push(row.key);
+    }
+    if !consumed.is_empty() {
+        let deleted = store
+            .delete_table_rows(key_wrap::schema::PENDING_WRAP_RECONCILE, consumed)
+            .map_err(|err| format!("delete pending wrap reconcile rows: {err}"))?;
+        report.deleted_reconcile_rows = deleted;
+    }
+    Ok(report)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MaterializeWrapsReport {
+    materialized_key_wraps: usize,
+    admitted_events: usize,
+}
+
+fn materialize_wraps_for_recipient<R: EventRegistry>(
+    store: &Store,
+    registry: &R,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    recipient_key_id: EventId,
+    created_at_ms: u64,
+    signer_endpoint_shared_id: EventId,
+    signer_private_key: crypto::Ed25519PrivateKey,
+) -> Result<MaterializeWrapsReport, String> {
+    let Some(recipient) = recipient_key_row(store, workspace_id, recipient_key_id)? else {
+        return Ok(MaterializeWrapsReport::default());
+    };
+    let mut report = MaterializeWrapsReport::default();
+    if let Some(root) = local_key_secret::queries::get(store, workspace_id, removal_frontier_id)? {
+        let materialized = ensure_root_wrap(
+            store,
+            registry,
+            &recipient,
+            created_at_ms,
+            signer_endpoint_shared_id,
+            signer_private_key,
+            &root,
+        )?;
+        report.materialized_key_wraps += materialized.materialized_key_wraps;
+        report.admitted_events += materialized.admitted_events;
+        return Ok(report);
+    }
+    for node in local_history_node_secret::queries::list_for_frontier(
+        store,
+        workspace_id,
+        removal_frontier_id,
+    )? {
+        let materialized = ensure_history_node_wrap(
+            store,
+            registry,
+            &recipient,
+            created_at_ms,
+            signer_endpoint_shared_id,
+            signer_private_key,
+            &node,
+        )?;
+        report.materialized_key_wraps += materialized.materialized_key_wraps;
+        report.admitted_events += materialized.admitted_events;
+    }
+    Ok(report)
+}
+
+fn ensure_root_wrap<R: EventRegistry>(
+    store: &Store,
+    registry: &R,
+    recipient: &recipient_key::types::RecipientKeyRow,
+    created_at_ms: u64,
+    signer_endpoint_shared_id: EventId,
+    signer_private_key: crypto::Ed25519PrivateKey,
+    root: &local_key_secret::types::LocalKeySecretRow,
+) -> Result<MaterializeWrapsReport, String> {
+    let key = key_wrap::schema::frontier_root_key_wrap_key(
+        root.workspace_id,
+        root.removal_frontier_id,
+        recipient.recipient_key_id,
+    );
+    if key_wrap::queries::get(store, &key)?.is_some() {
+        return Ok(MaterializeWrapsReport::default());
+    }
+    let output = key_wrap::commands::create(key_wrap::commands::CreateKeyWrap {
+        workspace_id: root.workspace_id,
+        created_at_ms,
+        signer_endpoint_shared_id,
+        signer_private_key,
+        removal_frontier_id: root.removal_frontier_id,
+        wrapped_secret_kind: key_wrap::types::WrappedSecretKind::FrontierRoot,
+        wrapped_secret_id: root.local_key_secret_id,
+        wrapped_source_secret_id: [0; 32],
+        wrapped_tombstone_node_id: [0; 32],
+        range_start: 0,
+        range_width: 0,
+        bit_depth: 0,
+        event_id_prefix: [0; 32],
+        key_secret: root.key_secret,
+        recipient_key_id: recipient.recipient_key_id,
+        recipient_key: recipient.recipient_key,
+    })?;
+    admit_key_wrap_output(store, registry, output)
+}
+
+fn ensure_history_node_wrap<R: EventRegistry>(
+    store: &Store,
+    registry: &R,
+    recipient: &recipient_key::types::RecipientKeyRow,
+    created_at_ms: u64,
+    signer_endpoint_shared_id: EventId,
+    signer_private_key: crypto::Ed25519PrivateKey,
+    node: &local_history_node_secret::types::LocalHistoryNodeSecretRow,
+) -> Result<MaterializeWrapsReport, String> {
+    let key = key_wrap::schema::history_node_key_wrap_key(
+        node.workspace_id,
+        node.removal_frontier_id,
+        recipient.recipient_key_id,
+        node.range_start,
+        node.range_width,
+        node.bit_depth,
+        node.event_id_prefix,
+    );
+    if key_wrap::queries::get(store, &key)?.is_some() {
+        return Ok(MaterializeWrapsReport::default());
+    }
+    let output = key_wrap::commands::create(key_wrap::commands::CreateKeyWrap {
+        workspace_id: node.workspace_id,
+        created_at_ms,
+        signer_endpoint_shared_id,
+        signer_private_key,
+        removal_frontier_id: node.removal_frontier_id,
+        wrapped_secret_kind: key_wrap::types::WrappedSecretKind::HistoryNode,
+        wrapped_secret_id: node.local_history_node_secret_id,
+        wrapped_source_secret_id: node.source_secret_id,
+        wrapped_tombstone_node_id: node.tombstone_node_id.unwrap_or([0; 32]),
+        range_start: node.range_start,
+        range_width: node.range_width,
+        bit_depth: node.bit_depth,
+        event_id_prefix: node.event_id_prefix,
+        key_secret: node.node_secret,
+        recipient_key_id: recipient.recipient_key_id,
+        recipient_key: recipient.recipient_key,
+    })?;
+    admit_key_wrap_output(store, registry, output)
+}
+
+fn admit_key_wrap_output<R: EventRegistry>(
+    store: &Store,
+    registry: &R,
+    output: worker::CommandOutput<key_wrap::commands::KeyWrapOutput>,
+) -> Result<MaterializeWrapsReport, String> {
+    let admitted = worker::run(
+        store,
+        registry,
+        worker::AdmitAndDrain {
+            output,
+            batch_size: worker::DEFAULT_READY_BATCH,
+        },
+    )
+    .map_err(|err| format!("admit key wrap: {err}"))?;
+    Ok(MaterializeWrapsReport {
+        materialized_key_wraps: usize::from(admitted.admitted.inserted_events > 0),
+        admitted_events: admitted.admitted.inserted_events,
+    })
+}
+
+fn local_endpoint_owns_frontier(
+    store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    endpoint_shared_id: EventId,
+) -> Result<bool, String> {
+    let Some(bytes) = event_queries::event_bytes(store, &removal_frontier_id)
+        .map_err(|err| format!("load removal frontier event bytes: {err}"))?
+    else {
+        return Ok(false);
+    };
+    let envelope = removal_frontier::codec::decode_signed(&bytes)
+        .map_err(|_| "frontier owner event is not a signed removal frontier".to_string())?;
+    let frontier = removal_frontier::codec::decode(&envelope.payload)
+        .map_err(|_| "frontier owner event is not a removal frontier".to_string())?;
+    Ok(frontier.workspace_id == workspace_id
+        && envelope.signer_endpoint_shared_id == endpoint_shared_id)
 }
 
 /// Rotate the local endpoint's recipient keypair when a deletion that wiped
@@ -598,8 +1016,7 @@ fn rotate_recipient_key<R: EventRegistry>(
                 endpoint_shared_id: membership.endpoint_shared_id,
                 signer_private_key: local.signing_secret,
                 recipient_key: local_public_key,
-                previous_recipient_key_id:
-                    recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
+                previous_recipient_key_id: recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
             })?;
         let new_recipient_key_id = recipient_output.value.recipient_key_id;
         let admitted = worker::run(
@@ -855,8 +1272,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
     // Look up the F root row. If it's already wiped (a prior retire wiped
     // it), we still need to exact-delete this leaf row, purge its bytes,
     // and tombstone it — but there is no walk to perform.
-    let frontier_root =
-        local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?;
+    let frontier_root = local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?;
     let mut wipe_path: Vec<WipeTarget> = Vec::new();
     if let Some(root_row) = frontier_root.as_ref() {
         // The retire walk runs from F root (current behavior preserves
@@ -995,13 +1411,12 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
     // Wrap-Bound Deletion"). The rotation no-ops cleanly on peers that do
     // not hold a private key for any wrap of F.
     if f_was_wiped_this_call {
-        report.local_recipient_key_rotated =
-            rotate_local_recipient_keys_for_wiped_frontier(
-                store,
-                registry,
-                workspace_id,
-                removal_frontier_id,
-            )?;
+        report.local_recipient_key_rotated = rotate_local_recipient_keys_for_wiped_frontier(
+            store,
+            registry,
+            workspace_id,
+            removal_frontier_id,
+        )?;
     }
 
     Ok(report)
@@ -1055,8 +1470,7 @@ fn chop_time_tree_prefix<R: EventRegistry>(
     //   * If no row covers `floor_minute`, the boundary descend has no work
     //     (the chopped region either has no surviving cover at all or is
     //     already wiped). We still GC subsumed tombstones below.
-    let frontier_root =
-        local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?;
+    let frontier_root = local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?;
     let frontier_root_id = frontier_root.as_ref().map(|row| row.local_key_secret_id);
 
     // Track the descend-path rows we materialize (will be wiped at the end).
@@ -1155,13 +1569,12 @@ fn chop_time_tree_prefix<R: EventRegistry>(
     // Wrap-Bound Deletion"). The rotation no-ops cleanly on peers that do
     // not hold a private key for any wrap of F.
     if frontier_root_id.is_some() {
-        report.local_recipient_key_rotated =
-            rotate_local_recipient_keys_for_wiped_frontier(
-                store,
-                registry,
-                workspace_id,
-                removal_frontier_id,
-            )?;
+        report.local_recipient_key_rotated = rotate_local_recipient_keys_for_wiped_frontier(
+            store,
+            registry,
+            workspace_id,
+            removal_frontier_id,
+        )?;
     }
 
     // GC pre-existing per-message tombstones subsumed by this chop's range.
@@ -1186,12 +1599,7 @@ fn chop_time_tree_prefix<R: EventRegistry>(
     // `(workspace_id, message_id)` and not partitioned by frontier, so
     // any subsumed authored_minute is fair game once the chop covers
     // it on this workspace.
-    let subsumed = gc_subsumed_tombstones(
-        store,
-        workspace_id,
-        removal_frontier_id,
-        floor_minute,
-    )?;
+    let subsumed = gc_subsumed_tombstones(store, workspace_id, removal_frontier_id, floor_minute)?;
     report.subsumed_leaf_tombstones_gcd = subsumed.leaf_tombstones;
     report.subsumed_message_tombstones_gcd = subsumed.message_tombstones;
     Ok(report)
@@ -1224,21 +1632,19 @@ fn gc_subsumed_tombstones(
         return Ok(SubsumedTombstones::default());
     }
     // Collect leaf-tombstone keys that are subsumed.
-    let leaf_keys_to_delete: Vec<Vec<u8>> = local_history_node_secret::queries::list_tombstones_for_workspace(
-        store,
-        workspace_id,
-    )?
-    .into_iter()
-    .filter(|row| row.removal_frontier_id == removal_frontier_id)
-    .filter(|row| row.range_start.saturating_add(row.range_width) <= floor_minute)
-    .map(|row| {
-        local_history_node_secret::schema::local_history_node_tombstone_key(
-            row.workspace_id,
-            row.removal_frontier_id,
-            row.tombstone_node_id,
-        )
-    })
-    .collect();
+    let leaf_keys_to_delete: Vec<Vec<u8>> =
+        local_history_node_secret::queries::list_tombstones_for_workspace(store, workspace_id)?
+            .into_iter()
+            .filter(|row| row.removal_frontier_id == removal_frontier_id)
+            .filter(|row| row.range_start.saturating_add(row.range_width) <= floor_minute)
+            .map(|row| {
+                local_history_node_secret::schema::local_history_node_tombstone_key(
+                    row.workspace_id,
+                    row.removal_frontier_id,
+                    row.tombstone_node_id,
+                )
+            })
+            .collect();
     // Collect message-tombstone keys whose authored_minute is subsumed.
     let message_keys_to_delete: Vec<Vec<u8>> =
         crate::protocol::event_modules::content::message::queries::list_message_tombstones_for_workspace(
@@ -1264,13 +1670,13 @@ fn gc_subsumed_tombstones(
         .write_transaction(move |tx_store| {
             let mut leaf_deleted = 0usize;
             if !leaf_keys_to_delete.is_empty() {
-                leaf_deleted += tx_store
-                    .delete_table_rows_in_tx(leaf_table, leaf_keys_to_delete)?;
+                leaf_deleted +=
+                    tx_store.delete_table_rows_in_tx(leaf_table, leaf_keys_to_delete)?;
             }
             let mut message_deleted = 0usize;
             if !message_keys_to_delete.is_empty() {
-                message_deleted += tx_store
-                    .delete_table_rows_in_tx(message_table, message_keys_to_delete)?;
+                message_deleted +=
+                    tx_store.delete_table_rows_in_tx(message_table, message_keys_to_delete)?;
             }
             Ok((leaf_deleted, message_deleted))
         })
@@ -1308,10 +1714,8 @@ where
     let mut counts = WipeCounts::default();
     for target in targets {
         if target.is_frontier_root {
-            let key = local_key_secret::schema::local_key_secret_key(
-                workspace_id,
-                removal_frontier_id,
-            );
+            let key =
+                local_key_secret::schema::local_key_secret_key(workspace_id, removal_frontier_id);
             if tx_store
                 .delete_table_rows_in_tx(local_key_secret::schema::LOCAL_KEY_SECRETS, vec![key])?
                 > 0
@@ -1327,12 +1731,10 @@ where
                 target.bit_depth,
                 target.event_id_prefix,
             );
-            if tx_store
-                .delete_table_rows_in_tx(
-                    local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
-                    vec![key],
-                )?
-                > 0
+            if tx_store.delete_table_rows_in_tx(
+                local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
+                vec![key],
+            )? > 0
             {
                 counts.wiped += 1;
             }
@@ -1475,12 +1877,28 @@ where
     {
         let app = &*ctx.app;
         let store = app.store();
+        let request_report = drain_key_requests(store, app, ctx.options.work_limit)
+            .map_err(|err| format!("drain key requests: {err}"))?;
+        let reconcile_report = drain_wrap_reconcile(store, app, ctx.options.work_limit)
+            .map_err(|err| format!("drain wrap reconcile: {err}"))?;
         let key_report = derive_key_secrets(store, app, ctx.options.work_limit)
             .map_err(|err| format!("derive key secrets: {err}"))?;
         let leaf_report = drain_pending_message_leaves(store, app, ctx.options.work_limit)
             .map_err(|err| format!("drain pending message leaves: {err}"))?;
+        ctx.report.add(
+            "materialized_key_request_wraps",
+            request_report.materialized_key_wraps,
+        );
+        ctx.report.add(
+            "materialized_reconcile_wraps",
+            reconcile_report.materialized_key_wraps,
+        );
         ctx.report
             .add("derived_key_secrets", key_report.derived_key_secrets);
+        ctx.report.add(
+            "derived_history_node_secrets",
+            key_report.derived_history_node_secrets,
+        );
         ctx.report
             .add("derived_message_leaves", leaf_report.derived_leaves);
         Ok(())
@@ -1582,6 +2000,11 @@ fn purge_retired_recipient_material(
                 wrap.workspace_id,
                 wrap.removal_frontier_id,
                 wrap.recipient_key_id,
+                wrap.wrapped_secret_kind,
+                wrap.range_start,
+                wrap.range_width,
+                wrap.bit_depth,
+                wrap.event_id_prefix,
             )
         })
         .collect();
@@ -1622,7 +2045,14 @@ fn key_wrap_event_from_row(row: &key_wrap::types::KeyWrapRow) -> key_wrap::types
         workspace_id: row.workspace_id,
         created_at_ms: row.created_at_ms,
         removal_frontier_id: row.removal_frontier_id,
-        local_key_secret_id: row.local_key_secret_id,
+        wrapped_secret_kind: row.wrapped_secret_kind,
+        wrapped_secret_id: row.wrapped_secret_id,
+        wrapped_source_secret_id: row.wrapped_source_secret_id,
+        wrapped_tombstone_node_id: row.wrapped_tombstone_node_id,
+        range_start: row.range_start,
+        range_width: row.range_width,
+        bit_depth: row.bit_depth,
+        event_id_prefix: row.event_id_prefix,
         recipient_key_id: row.recipient_key_id,
         sender_wrap_public_key: row.sender_wrap_public_key,
         nonce: row.nonce,
@@ -1634,6 +2064,7 @@ fn key_wrap_event_from_row(row: &key_wrap::types::KeyWrapRow) -> key_wrap::types
 mod tests {
     use crate::core::crypto::{self as core_crypto, Ed25519PrivateKey};
     use crate::protocol::event_modules::encryption::removal_frontier;
+    use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, signed, workspace};
     use crate::protocol::event_modules::types::{event_id, EventStatus};
     use crate::protocol::Protocol;
     use crate::workers::pipeline_helpers::event_lifecycle;
@@ -1646,6 +2077,13 @@ mod tests {
     fn build_signed_frontier_record(
         signer_private_key: &Ed25519PrivateKey,
     ) -> crate::protocol::event_modules::types::EventRecord {
+        build_signed_frontier_record_for(signer_private_key, [8; 32])
+    }
+
+    fn build_signed_frontier_record_for(
+        signer_private_key: &Ed25519PrivateKey,
+        signer_endpoint_shared_id: EventId,
+    ) -> crate::protocol::event_modules::types::EventRecord {
         let payload =
             removal_frontier::codec::encode(&removal_frontier::types::RemovalFrontierEvent {
                 workspace_id: WORKSPACE,
@@ -1654,7 +2092,8 @@ mod tests {
                 removal_event_ids: Vec::new(),
             })
             .expect("encode frontier");
-        let envelope = removal_frontier::codec::sign([8; 32], signer_private_key, payload);
+        let envelope =
+            removal_frontier::codec::sign(signer_endpoint_shared_id, signer_private_key, payload);
         let bytes = removal_frontier::codec::encode_signed(&envelope);
         removal_frontier::codec::signed_record_from_bytes(bytes).expect("signed record")
     }
@@ -1670,7 +2109,16 @@ mod tests {
         store: &Store,
         signer_private_key: &Ed25519PrivateKey,
     ) -> (EventId, EventId) {
-        let frontier_record = build_signed_frontier_record(signer_private_key);
+        seed_local_key_secret_with_frontier_signer(store, signer_private_key, [8; 32])
+    }
+
+    fn seed_local_key_secret_with_frontier_signer(
+        store: &Store,
+        signer_private_key: &Ed25519PrivateKey,
+        signer_endpoint_shared_id: EventId,
+    ) -> (EventId, EventId) {
+        let frontier_record =
+            build_signed_frontier_record_for(signer_private_key, signer_endpoint_shared_id);
         let frontier_id = event_id(&frontier_record.canonical_bytes);
 
         let output =
@@ -1692,6 +2140,138 @@ mod tests {
             })
             .expect("seed local key secret");
         (frontier_id, local_key_secret_id)
+    }
+
+    fn endpoint_shared_record_for_local(
+        local: &endpoint::types::EndpointKeypair,
+        workspace_id: EventId,
+        device_name: &str,
+    ) -> (
+        EventId,
+        crate::protocol::event_modules::types::EventRecord,
+        endpoint_shared::types::EndpointSharedEvent,
+    ) {
+        let event = endpoint_shared::types::EndpointSharedEvent {
+            created_at_ms: 1,
+            workspace_id,
+            user_authority_event_id: [3; 32],
+            endpoint_id: local.endpoint,
+            signing_public_key: local.signing_public_key,
+            endpoint_role: endpoint::types::EndpointRole::Device,
+            device_name: device_name.to_string(),
+        };
+        let payload = endpoint_shared::codec::encode(&event).expect("endpoint shared payload");
+        let signed = signed::commands::sign_payload([6; 32], &[5; 32], payload)
+            .expect("sign endpoint shared");
+        let record = signed.events[0].record().clone();
+        let id = event_id(&record.canonical_bytes);
+        (id, record, event)
+    }
+
+    fn seed_local_identity(
+        store: &Store,
+        device_name: &str,
+    ) -> (endpoint::types::EndpointKeypair, EventId) {
+        seed_workspace_dependency(store);
+        let local_output = endpoint::commands::create_local_keypair();
+        let local = local_output.value;
+        let (endpoint_shared_id, endpoint_shared_record, endpoint_shared_event) =
+            endpoint_shared_record_for_local(&local, WORKSPACE, device_name);
+        let endpoint_rows = endpoint::projector::local_endpoint(local.clone());
+        let endpoint_shared_rows = endpoint_shared::schema::endpoint_shared_rows(
+            endpoint_shared_id,
+            [4; 32],
+            &endpoint_shared_event,
+        )
+        .expect("endpoint shared rows");
+        store
+            .write_transaction(|tx| {
+                tx.insert_table_rows_in_tx(endpoint_rows.clone())?;
+                event_lifecycle::insert_event(tx, &endpoint_shared_record, EventStatus::Applied)?;
+                tx.insert_table_rows_in_tx(endpoint_shared_rows.clone())?;
+                Ok(())
+            })
+            .expect("seed local identity");
+        (local, endpoint_shared_id)
+    }
+
+    fn seed_workspace_dependency(store: &Store) {
+        let workspace_secret = [0x33; 32];
+        let workspace_public = core_crypto::ed25519_public_key(&workspace_secret);
+        let output = workspace::commands::create(workspace::commands::CreateWorkspace {
+            created_at_ms: 0,
+            public_key: workspace_public,
+            signer_private_key: workspace_secret,
+            disappearing_ttl_minutes: 0,
+            name: "test".to_string(),
+        })
+        .expect("workspace command");
+        let record = output.events[0].record().clone();
+        store
+            .insert_table_rows(vec![crate::protocol::event_modules::schema::event_row(
+                &WORKSPACE,
+                &record,
+                EventStatus::Applied,
+            )
+            .expect("workspace event row")])
+            .expect("seed workspace dependency");
+    }
+
+    fn seed_recipient_key_row(
+        store: &Store,
+        endpoint_shared_id: EventId,
+        endpoint_signing_secret: Ed25519PrivateKey,
+        recipient_key: core_crypto::X25519PublicKey,
+    ) -> (EventId, crate::protocol::event_modules::types::EventRecord) {
+        let output =
+            recipient_key::commands::publish(recipient_key::commands::PublishRecipientKey {
+                workspace_id: WORKSPACE,
+                created_at_ms: 2,
+                endpoint_shared_id,
+                signer_private_key: endpoint_signing_secret,
+                recipient_key,
+                previous_recipient_key_id: recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
+            })
+            .expect("recipient key");
+        let record = output.events[0].record().clone();
+        let id = output.value.recipient_key_id;
+        let envelope =
+            recipient_key::codec::decode_signed(&record.canonical_bytes).expect("recipient env");
+        let event = recipient_key::codec::decode(&envelope.payload).expect("recipient event");
+        let row = recipient_key::schema::recipient_key_row(id, &event).expect("recipient row");
+        store
+            .write_transaction(|tx| {
+                event_lifecycle::insert_event(tx, &record, EventStatus::Applied)?;
+                tx.insert_table_rows_in_tx(vec![row.clone()])?;
+                Ok(())
+            })
+            .expect("seed recipient key");
+        (id, record)
+    }
+
+    fn insert_pending_key_request(
+        store: &Store,
+        request_id: EventId,
+        requester_endpoint_shared_id: EventId,
+        responder_endpoint_shared_id: EventId,
+        removal_frontier_id: EventId,
+        recipient_key_id: EventId,
+        created_at_ms: u64,
+    ) {
+        let event = key_request::types::KeyRequestEvent {
+            workspace_id: WORKSPACE,
+            created_at_ms,
+            responder_endpoint_shared_id,
+            removal_frontier_id,
+            recipient_key_id,
+        };
+        store
+            .insert_table_rows(vec![key_request::schema::pending_key_request_row(
+                request_id,
+                requester_endpoint_shared_id,
+                &event,
+            )])
+            .expect("insert pending key request");
     }
 
     #[test]
@@ -1716,8 +2296,7 @@ mod tests {
                 endpoint_shared_id: signer_endpoint_shared_id,
                 signer_private_key,
                 recipient_key: local_recipient_event.recipient_key,
-                previous_recipient_key_id:
-                    recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
+                previous_recipient_key_id: recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
             })
             .expect("recipient key");
         let recipient_record = recipient_output.events[0].record().clone();
@@ -1737,7 +2316,14 @@ mod tests {
             signer_endpoint_shared_id,
             signer_private_key,
             removal_frontier_id: frontier_id,
-            local_key_secret_id: sender_local_secret.local_key_secret_id,
+            wrapped_secret_kind: key_wrap::types::WrappedSecretKind::FrontierRoot,
+            wrapped_secret_id: sender_local_secret.local_key_secret_id,
+            wrapped_source_secret_id: [0; 32],
+            wrapped_tombstone_node_id: [0; 32],
+            range_start: 0,
+            range_width: 0,
+            bit_depth: 0,
+            event_id_prefix: [0; 32],
             key_secret: sender_local_secret.event.key_secret,
             recipient_key_id: recipient_output.value.recipient_key_id,
             recipient_key: local_recipient_event.recipient_key,
@@ -1821,6 +2407,379 @@ mod tests {
         };
         assert_eq!(second.scanned_key_wraps, 0);
         assert_eq!(second.derived_key_secrets, 0);
+    }
+
+    #[test]
+    fn targeted_key_requests_materialize_one_root_wrap_for_partitioned_joiner() {
+        let responder_store = Protocol::open_memory_store().expect("responder store");
+        let receiver_store = Protocol::open_memory_store().expect("receiver store");
+        let protocol = Protocol::new();
+
+        let (responder_local, responder_endpoint_shared_id) =
+            seed_local_identity(&responder_store, "responder");
+        let (frontier_id, _) = seed_local_key_secret_with_frontier_signer(
+            &responder_store,
+            &responder_local.signing_secret,
+            responder_endpoint_shared_id,
+        );
+
+        let requester_local = endpoint::commands::create_local_keypair().value;
+        let requester_recipient =
+            local_recipient_key::commands::create(WORKSPACE).expect("requester local recipient");
+        let requester_recipient_event = requester_recipient.value.clone();
+        let requester_recipient_record = requester_recipient.events[0].record().clone();
+        let (requester_endpoint_shared_id, requester_endpoint_record, requester_endpoint_event) =
+            endpoint_shared_record_for_local(&requester_local, WORKSPACE, "requester");
+        let requester_endpoint_rows = endpoint_shared::schema::endpoint_shared_rows(
+            requester_endpoint_shared_id,
+            [44; 32],
+            &requester_endpoint_event,
+        )
+        .expect("requester endpoint rows");
+        responder_store
+            .write_transaction(|tx| {
+                event_lifecycle::insert_event(
+                    tx,
+                    &requester_endpoint_record,
+                    EventStatus::Applied,
+                )?;
+                tx.insert_table_rows_in_tx(requester_endpoint_rows.clone())?;
+                Ok(())
+            })
+            .expect("seed requester endpoint on responder");
+        let (recipient_key_id, recipient_record) = seed_recipient_key_row(
+            &responder_store,
+            requester_endpoint_shared_id,
+            requester_local.signing_secret,
+            requester_recipient_event.recipient_key,
+        );
+
+        insert_pending_key_request(
+            &responder_store,
+            [0x51; 32],
+            requester_endpoint_shared_id,
+            responder_endpoint_shared_id,
+            frontier_id,
+            recipient_key_id,
+            50,
+        );
+        insert_pending_key_request(
+            &responder_store,
+            [0x52; 32],
+            requester_endpoint_shared_id,
+            responder_endpoint_shared_id,
+            frontier_id,
+            recipient_key_id,
+            51,
+        );
+
+        let output = run(
+            &responder_store,
+            &protocol,
+            Work::DrainKeyRequests { batch_size: 16 },
+        )
+        .expect("drain requests");
+        let Output::DrainedKeyRequests(report) = output else {
+            panic!("unexpected output");
+        };
+        assert_eq!(report.scanned_requests, 2);
+        assert_eq!(
+            report.materialized_key_wraps, 1,
+            "duplicate targeted requests for one desired edge must admit one wrap"
+        );
+        assert_eq!(report.deleted_requests, 2);
+        let wraps =
+            key_wrap::queries::list_for_workspace(&responder_store, WORKSPACE).expect("wraps");
+        assert_eq!(
+            wraps.len(),
+            1,
+            "no key amplification for duplicate requests"
+        );
+        assert_eq!(
+            wraps[0].wrapped_secret_kind,
+            key_wrap::types::WrappedSecretKind::FrontierRoot
+        );
+
+        let frontier_bytes = event_queries::event_bytes(&responder_store, &frontier_id)
+            .expect("frontier bytes")
+            .expect("frontier bytes");
+        let frontier_record =
+            removal_frontier::codec::signed_record_from_bytes(frontier_bytes).expect("frontier");
+        let wrap_bytes = event_queries::event_bytes(&responder_store, &wraps[0].key_wrap_id)
+            .expect("wrap bytes")
+            .expect("wrap bytes");
+        let wrap_record = key_wrap::codec::signed_record_from_bytes(wrap_bytes).expect("wrap rec");
+        let wrap_envelope =
+            key_wrap::codec::decode_signed(&wrap_record.canonical_bytes).expect("wrap env");
+        let wrap_event = key_wrap::codec::decode(&wrap_envelope.payload).expect("wrap event");
+        let recipient_envelope =
+            recipient_key::codec::decode_signed(&recipient_record.canonical_bytes)
+                .expect("recipient envelope");
+        let recipient_event =
+            recipient_key::codec::decode(&recipient_envelope.payload).expect("recipient event");
+        let recipient_row =
+            recipient_key::schema::recipient_key_row(recipient_key_id, &recipient_event)
+                .expect("recipient row");
+        let local_recipient_row = local_recipient_key::schema::local_recipient_key_row(
+            requester_recipient.events[0].event_id(),
+            &requester_recipient_event,
+        );
+        receiver_store
+            .write_transaction(|tx| {
+                event_lifecycle::insert_event(tx, &frontier_record, EventStatus::Applied)?;
+                event_lifecycle::insert_event(tx, &recipient_record, EventStatus::Applied)?;
+                event_lifecycle::insert_event(
+                    tx,
+                    &requester_recipient_record,
+                    EventStatus::Applied,
+                )?;
+                event_lifecycle::insert_event(tx, &wrap_record, EventStatus::Applied)?;
+                tx.insert_table_rows_in_tx(vec![
+                    recipient_row,
+                    local_recipient_row,
+                    key_wrap::schema::key_wrap_row(
+                        wraps[0].key_wrap_id,
+                        wrap_envelope.signer_endpoint_shared_id,
+                        wrap_envelope.signer_public_key,
+                        &wrap_event,
+                    ),
+                    key_wrap::schema::pending_key_unwrap_row(wraps[0].key_wrap_id, &wrap_event),
+                ])?;
+                Ok(())
+            })
+            .expect("seed receiver projected wrap");
+
+        let output = run(
+            &receiver_store,
+            &protocol,
+            Work::DeriveKeySecrets { batch_size: 16 },
+        )
+        .expect("receiver derives root");
+        let Output::DerivedKeySecrets(report) = output else {
+            panic!("unexpected output");
+        };
+        assert_eq!(report.derived_key_secrets, 1);
+        let local = local_key_secret::queries::get(&receiver_store, WORKSPACE, frontier_id)
+            .expect("local root")
+            .expect("local root");
+        assert_eq!(local.key_secret, KEY_SECRET);
+    }
+
+    #[test]
+    fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
+        let responder_store = Protocol::open_memory_store().expect("responder store");
+        let receiver_store = Protocol::open_memory_store().expect("receiver store");
+        let protocol = Protocol::new();
+        let (responder_local, responder_endpoint_shared_id) =
+            seed_local_identity(&responder_store, "responder");
+        let (frontier_id, _) = seed_local_key_secret_with_frontier_signer(
+            &responder_store,
+            &responder_local.signing_secret,
+            responder_endpoint_shared_id,
+        );
+
+        let coord_deleted = [0xaa; 32];
+        let coord_survivor = [0xbb; 32];
+        let created_at_ms = 60_000;
+        let survivor_leaf = run(
+            &responder_store,
+            &protocol,
+            Work::DeriveEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms,
+                event_id_in_minute: coord_survivor,
+            },
+        )
+        .expect("derive survivor");
+        let Output::DerivedEventLeaf(survivor_leaf) = survivor_leaf else {
+            panic!("unexpected");
+        };
+        let survivor_leaf_id = survivor_leaf
+            .local_history_node_secret_id
+            .expect("survivor id");
+        let _ = run(
+            &responder_store,
+            &protocol,
+            Work::DeriveEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms,
+                event_id_in_minute: coord_deleted,
+            },
+        )
+        .expect("derive deleted");
+        let _ = run(
+            &responder_store,
+            &protocol,
+            Work::RetireDeletedEventLeaf {
+                workspace_id: WORKSPACE,
+                removal_frontier_id: frontier_id,
+                created_at_ms,
+                event_id_in_minute: coord_deleted,
+            },
+        )
+        .expect("retire deleted");
+        assert!(
+            local_key_secret::queries::get(&responder_store, WORKSPACE, frontier_id)
+                .expect("responder root")
+                .is_none(),
+            "precondition: deletion wiped F, so request must wrap retained path/cover keys"
+        );
+
+        let requester_local = endpoint::commands::create_local_keypair().value;
+        let requester_recipient =
+            local_recipient_key::commands::create(WORKSPACE).expect("requester local recipient");
+        let requester_recipient_event = requester_recipient.value.clone();
+        let requester_recipient_record = requester_recipient.events[0].record().clone();
+        let (requester_endpoint_shared_id, requester_endpoint_record, requester_endpoint_event) =
+            endpoint_shared_record_for_local(&requester_local, WORKSPACE, "requester");
+        let requester_endpoint_rows = endpoint_shared::schema::endpoint_shared_rows(
+            requester_endpoint_shared_id,
+            [45; 32],
+            &requester_endpoint_event,
+        )
+        .expect("requester endpoint rows");
+        responder_store
+            .write_transaction(|tx| {
+                event_lifecycle::insert_event(
+                    tx,
+                    &requester_endpoint_record,
+                    EventStatus::Applied,
+                )?;
+                tx.insert_table_rows_in_tx(requester_endpoint_rows.clone())?;
+                Ok(())
+            })
+            .expect("seed requester endpoint on responder");
+        let (recipient_key_id, recipient_record) = seed_recipient_key_row(
+            &responder_store,
+            requester_endpoint_shared_id,
+            requester_local.signing_secret,
+            requester_recipient_event.recipient_key,
+        );
+        insert_pending_key_request(
+            &responder_store,
+            [0x61; 32],
+            requester_endpoint_shared_id,
+            responder_endpoint_shared_id,
+            frontier_id,
+            recipient_key_id,
+            60,
+        );
+
+        let output = run(
+            &responder_store,
+            &protocol,
+            Work::DrainKeyRequests { batch_size: 64 },
+        )
+        .expect("drain request");
+        let Output::DrainedKeyRequests(report) = output else {
+            panic!("unexpected output");
+        };
+        assert!(
+            report.materialized_key_wraps > 1,
+            "root is gone, so responder must wrap retained history nodes, not one F root"
+        );
+        let wraps =
+            key_wrap::queries::list_for_workspace(&responder_store, WORKSPACE).expect("wraps");
+        assert!(wraps.iter().all(|wrap| {
+            wrap.wrapped_secret_kind == key_wrap::types::WrappedSecretKind::HistoryNode
+        }));
+        assert!(
+            wraps
+                .iter()
+                .any(|wrap| wrap.wrapped_secret_id == survivor_leaf_id),
+            "surviving leaf's original event id must be wrapped for dependency healing"
+        );
+
+        let frontier_bytes = event_queries::event_bytes(&responder_store, &frontier_id)
+            .expect("frontier bytes")
+            .expect("frontier bytes");
+        let frontier_record =
+            removal_frontier::codec::signed_record_from_bytes(frontier_bytes).expect("frontier");
+        let recipient_envelope =
+            recipient_key::codec::decode_signed(&recipient_record.canonical_bytes)
+                .expect("recipient envelope");
+        let recipient_event =
+            recipient_key::codec::decode(&recipient_envelope.payload).expect("recipient event");
+        let recipient_row =
+            recipient_key::schema::recipient_key_row(recipient_key_id, &recipient_event)
+                .expect("recipient row");
+        let local_recipient_row = local_recipient_key::schema::local_recipient_key_row(
+            requester_recipient.events[0].event_id(),
+            &requester_recipient_event,
+        );
+        receiver_store
+            .write_transaction(|tx| {
+                event_lifecycle::insert_event(tx, &frontier_record, EventStatus::Applied)?;
+                event_lifecycle::insert_event(tx, &recipient_record, EventStatus::Applied)?;
+                event_lifecycle::insert_event(
+                    tx,
+                    &requester_recipient_record,
+                    EventStatus::Applied,
+                )?;
+                tx.insert_table_rows_in_tx(vec![recipient_row, local_recipient_row])?;
+                for wrap in &wraps {
+                    let wrap_bytes =
+                        event_queries::event_bytes(&responder_store, &wrap.key_wrap_id)?
+                            .expect("wrap bytes");
+                    let wrap_record =
+                        key_wrap::codec::signed_record_from_bytes(wrap_bytes).expect("wrap rec");
+                    let wrap_envelope =
+                        key_wrap::codec::decode_signed(&wrap_record.canonical_bytes)
+                            .expect("wrap env");
+                    let wrap_event =
+                        key_wrap::codec::decode(&wrap_envelope.payload).expect("wrap event");
+                    event_lifecycle::insert_event(tx, &wrap_record, EventStatus::Applied)?;
+                    tx.insert_table_rows_in_tx(vec![
+                        key_wrap::schema::key_wrap_row(
+                            wrap.key_wrap_id,
+                            wrap_envelope.signer_endpoint_shared_id,
+                            wrap_envelope.signer_public_key,
+                            &wrap_event,
+                        ),
+                        key_wrap::schema::pending_key_unwrap_row(wrap.key_wrap_id, &wrap_event),
+                    ])?;
+                }
+                Ok(())
+            })
+            .expect("seed receiver history wraps");
+
+        let output = run(
+            &receiver_store,
+            &protocol,
+            Work::DeriveKeySecrets { batch_size: 128 },
+        )
+        .expect("derive retained nodes");
+        let Output::DerivedKeySecrets(report) = output else {
+            panic!("unexpected output");
+        };
+        assert_eq!(report.derived_key_secrets, 0, "F root must not be restored");
+        assert!(
+            report.derived_history_node_secrets > 0,
+            "receiver must import retained cover/leaf keys"
+        );
+        assert!(
+            local_key_secret::queries::get(&receiver_store, WORKSPACE, frontier_id)
+                .expect("receiver root")
+                .is_none(),
+            "receiver should heal retained keys without resurrecting the purged root"
+        );
+        let survivor = local_history_node_secret::queries::get_leaf(
+            &receiver_store,
+            WORKSPACE,
+            frontier_id,
+            created_at_ms / 60_000,
+            coord_survivor,
+        )
+        .expect("survivor lookup")
+        .expect("survivor imported");
+        assert_eq!(survivor.local_history_node_secret_id, survivor_leaf_id);
+        assert!(
+            event_queries::has_event(&receiver_store, &survivor_leaf_id)
+                .expect("survivor event lookup"),
+            "import must reconstruct the original local history event id"
+        );
     }
 
     #[test]
@@ -2144,7 +3103,9 @@ mod tests {
         // log N + 1) (one tombstone per wiped descend-path row + leaf),
         // so cover_summary length stays bounded too.
         use local_history_node_secret::queries::cover_summary;
-        use local_history_node_secret::schema::{COVER_SUMMARY_ROW_LEN, COVER_SUMMARY_TOMBSTONE_LEN};
+        use local_history_node_secret::schema::{
+            COVER_SUMMARY_ROW_LEN, COVER_SUMMARY_TOMBSTONE_LEN,
+        };
         let store = Protocol::open_memory_store().expect("store");
         let protocol = Protocol::new();
         let (frontier_id, _) = seed_local_key_secret(&store);
@@ -2250,8 +3211,7 @@ mod tests {
                 panic!("unexpected output");
             };
             if idx == target_idx {
-                target_secret_snapshot =
-                    Some(report.leaf_node_secret.expect("target leaf secret"));
+                target_secret_snapshot = Some(report.leaf_node_secret.expect("target leaf secret"));
             }
         }
         let target_secret = target_secret_snapshot.expect("target snapshot");
@@ -2537,9 +3497,11 @@ mod tests {
         );
         // Sanity: tombstones are present (so summary actually exercises the
         // tombstone-encoding branch).
-        let tombstones =
-            local_history_node_secret::queries::list_tombstones_for_workspace(&alice_store, WORKSPACE)
-                .expect("list tombstones");
+        let tombstones = local_history_node_secret::queries::list_tombstones_for_workspace(
+            &alice_store,
+            WORKSPACE,
+        )
+        .expect("list tombstones");
         assert!(
             !tombstones.is_empty(),
             "retire must write tombstones so cover_summary's tombstone branch is non-empty",
@@ -2622,7 +3584,6 @@ mod tests {
             report.leaf_node_secret.is_some(),
             "sibling fallback must produce a fresh leaf secret"
         );
-
     }
 
     /// Same-minute authoring for a brand-new coord whose trie subtree is
@@ -2787,10 +3748,9 @@ mod tests {
             .expect("F row must remain after no-op chop");
         assert_eq!(root.local_key_secret_id, local_key_secret_id);
         // No tombstones should have been written.
-        let tombstones = local_history_node_secret::queries::list_tombstones_for_workspace(
-            &store, WORKSPACE,
-        )
-        .expect("list tombstones");
+        let tombstones =
+            local_history_node_secret::queries::list_tombstones_for_workspace(&store, WORKSPACE)
+                .expect("list tombstones");
         assert!(
             tombstones.is_empty(),
             "no tombstones must be written for floor=0"
@@ -2849,10 +3809,9 @@ mod tests {
         );
 
         // Tombstones are persisted in LOCAL_HISTORY_NODE_TOMBSTONES.
-        let tombstones = local_history_node_secret::queries::list_tombstones_for_workspace(
-            &store, WORKSPACE,
-        )
-        .expect("list tombstones");
+        let tombstones =
+            local_history_node_secret::queries::list_tombstones_for_workspace(&store, WORKSPACE)
+                .expect("list tombstones");
         // One tombstone per descend-path row + one per fully-left subtree.
         // Bound: depth + depth + 1 (F root).
         assert!(
@@ -2992,12 +3951,11 @@ mod tests {
              producing the same fingerprint)"
         );
         // Also sanity-check that tombstone rows are byte-equal directly.
-        let mut alice_tombs =
-            local_history_node_secret::queries::list_tombstones_for_workspace(
-                &alice_store,
-                WORKSPACE,
-            )
-            .expect("alice tombs");
+        let mut alice_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
+            &alice_store,
+            WORKSPACE,
+        )
+        .expect("alice tombs");
         let mut bob_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
             &bob_store, WORKSPACE,
         )
@@ -3125,10 +4083,9 @@ mod tests {
 
         // Snapshot the pre-chop tombstone set so we can assert the GC
         // strictly removes the subsumed ones.
-        let pre_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
-            &store, WORKSPACE,
-        )
-        .expect("pre-chop tombs");
+        let pre_tombs =
+            local_history_node_secret::queries::list_tombstones_for_workspace(&store, WORKSPACE)
+                .expect("pre-chop tombs");
         let subsumed_pre: Vec<_> = pre_tombs
             .iter()
             .filter(|t| t.removal_frontier_id == frontier_id)
@@ -3171,10 +4128,9 @@ mod tests {
 
         // Verify each pre-existing subsumed tombstone is truly gone from
         // the table.
-        let post_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
-            &store, WORKSPACE,
-        )
-        .expect("post-chop tombs");
+        let post_tombs =
+            local_history_node_secret::queries::list_tombstones_for_workspace(&store, WORKSPACE)
+                .expect("post-chop tombs");
         for old in &subsumed_pre {
             assert!(
                 !post_tombs.iter().any(|t| {
@@ -3254,10 +4210,9 @@ mod tests {
         // contains a minute >= 100. The minute-150 leaf tombstone has
         // range_start=150, range_width=1, so range_end=151 > 100 and it
         // must survive the chop.
-        let pre_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
-            &store, WORKSPACE,
-        )
-        .expect("pre-chop tombs");
+        let pre_tombs =
+            local_history_node_secret::queries::list_tombstones_for_workspace(&store, WORKSPACE)
+                .expect("pre-chop tombs");
         let above_floor: Vec<_> = pre_tombs
             .iter()
             .filter(|t| t.removal_frontier_id == frontier_id)
@@ -3282,10 +4237,9 @@ mod tests {
         .expect("chop");
 
         // Each above-floor tombstone must still be present after the chop.
-        let post_tombs = local_history_node_secret::queries::list_tombstones_for_workspace(
-            &store, WORKSPACE,
-        )
-        .expect("post-chop tombs");
+        let post_tombs =
+            local_history_node_secret::queries::list_tombstones_for_workspace(&store, WORKSPACE)
+                .expect("post-chop tombs");
         for survivor in &above_floor {
             assert!(
                 post_tombs.iter().any(|t| {
@@ -3296,7 +4250,10 @@ mod tests {
                  got post={:?}",
                 survivor.range_start,
                 survivor.range_start + survivor.range_width,
-                post_tombs.iter().map(|t| (t.range_start, t.range_width)).collect::<Vec<_>>(),
+                post_tombs
+                    .iter()
+                    .map(|t| (t.range_start, t.range_width))
+                    .collect::<Vec<_>>(),
             );
         }
     }

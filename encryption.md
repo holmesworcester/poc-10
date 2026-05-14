@@ -29,7 +29,8 @@ window and bounds steady-state storage.
 | `encryption::removal_frontier` | Shared admin-signed event naming F's derivation context. Its event id is the `removal_frontier_id` named by everything below. | `src/protocol/event_modules/encryption/removal_frontier/` |
 | `encryption::recipient_key` | Shared per-endpoint X25519 public encryption key for a workspace. Supersession is encoded in the replacement event's `previous_recipient_key_id` field; the projector exact-deletes the predecessor's row in the same projection. | `src/protocol/event_modules/encryption/recipient_key/` |
 | `encryption::local_recipient_key` | Local-only X25519 private key paired to a `recipient_key`. | `src/protocol/event_modules/encryption/local_recipient_key/` |
-| `encryption::key_wrap` | Shared event carrying F wrapped to one `recipient_key` under XChaCha20-Poly1305. | `src/protocol/event_modules/encryption/key_wrap/` |
+| `encryption::key_wrap` | Shared event carrying either F or one retained history-node secret wrapped to one `recipient_key` under XChaCha20-Poly1305. The desired edge is deterministic/idempotent: `(workspace, frontier, recipient_key, target)`. | `src/protocol/event_modules/encryption/key_wrap/` |
+| `encryption::key_request` | Shared event from a recipient endpoint to one responder endpoint asking it to materialize missing wraps for one frontier. | `src/protocol/event_modules/encryption/key_request/` |
 | `encryption::disappearing_messages_setting` | Shared admin-signed event setting `ttl_minutes` and the monotonic deletion floor `expires_at_or_before_minute`; chained via `previous_setting_id`. | `src/protocol/event_modules/encryption/disappearing_messages_setting/` |
 | `content::message` | Shared encrypted message event; stamps `expires_at_minute` and `disappearing_setting_id` in canonical bytes. | `src/protocol/event_modules/content/message/` |
 | `content::reaction` | Shared encrypted reaction event; inherits the parent message's expiry. | `src/protocol/event_modules/content/reaction/` |
@@ -402,6 +403,77 @@ same workload would grow into hundreds of MB to GBs.
 - Two peers admitting the same canonical bytes write byte-identical
   rows; running the same retire / chop on identical state produces
   byte-identical effects.
+- Key-wrap materialization is keyed by the desired edge, not by the
+  queue that caused it. Proactive reconcile and explicit key requests
+  both call the same materializer. Repeated requests for the same
+  `(workspace, frontier, recipient_key, target)` either produce the
+  same canonical `key_wrap` bytes or find the projected row already
+  present.
+
+## Event-native key healing
+
+There are two triggers for wrap materialization:
+
+1. **Proactive reconcile.** Projecting a live `recipient_key` enqueues a
+   recipient-key reconcile hint; projecting a local F root or retained
+   history-node row enqueues a frontier reconcile hint. The encryption
+   worker drains those hints and, only on the deterministic frontier
+   owner (the endpoint that signed the `removal_frontier`), materializes
+   missing wraps. This makes "initial share" and "request response" the
+   same operation: the trigger is different, the desired edge is not.
+2. **Targeted key request.** A recipient endpoint emits a signed
+   `key_request` naming exactly one responder endpoint, one
+   `removal_frontier`, and its current `recipient_key`. Only the named
+   responder drains that request. If F is still present it wraps F; if F
+   was already wiped by deletion/chop, it wraps the retained
+   `local_history_node_secret` rows for that frontier instead.
+
+The second path is the monotonic healing path for valid members who join
+concurrent with a removal or while partitioned from the remover. The
+remover may not know them when it rotates or deletes; the member can
+still request the frontier after it learns enough workspace history.
+When F is gone, the responder never resurrects it. It wraps only the
+retained cover/leaf rows, preserving the original local history-node
+event ids so blocked content dependencies can unblock on the requester.
+
+Key amplification is bounded by two rules:
+
+- Requests are targeted to one responder, so a broadcast request does
+  not cause every peer with a cover row to respond.
+- Projection rows are keyed by the desired wrap edge. Duplicate request
+  events and duplicate reconcile hints converge to one local wrap row.
+
+## Dep-aware negentropy key closure
+
+Range sync should treat keys as an out-of-range dependency closure of
+the content events in the range:
+
+1. Build the ordinary dep-aware range response for event ids in the
+   requested range.
+2. Decode the in-range content events that name
+   `local_history_node_secret_id` and collect their
+   `(workspace, removal_frontier_id, created_at_ms,
+   event_id_in_minute, local_history_node_secret_id)` needs.
+3. For each need, check whether a key event/wrap satisfying that
+   dependency is already inside the range response. If not, add the
+   minimal out-of-range key closure:
+   - a `key_wrap` to the requester for F when F is still retained;
+   - otherwise `key_wrap` events for retained history-node rows whose
+     coordinates cover or exactly match the needed leaves.
+4. Bound the closure by retained rows, not by historical deletes. If no
+   retained row covers a need because the range is below the monotonic
+   floor or outside the cover horizon, return the sealed content without
+   a key closure; that is the terminal no-cover case already described
+   below.
+5. Prefer already-materialized deterministic wraps; otherwise enqueue a
+   targeted `key_request` to the frontier owner/responder and let the
+   normal materializer produce the missing edge before the next range
+   exchange.
+
+This keeps negentropy set reconciliation about event ids while making
+decryption dependencies explicit: keys required for in-range events may
+live outside the range, but they are included because they are in the
+dependency closure of those in-range events.
 
 ## Three scenarios where a message arrives with no local covering ancestor
 
@@ -433,10 +505,10 @@ same workload would grow into hundreds of MB to GBs.
   reference an older more-permissive setting to extend their messages'
   effective TTL. Closing the gap requires committing to a specific
   epoch (time-based, logical-order, or counter-based); not implemented.
-- Newly-invited endpoints: no special grant for retained cover state. A
-  new endpoint receives the workspace `key_wrap`, derives F, and can
-  decrypt only what F still derives. Messages whose ancestor was wiped
-  before the join are not recoverable.
+- Newly-invited endpoints recover through `key_request`. If F is still
+  retained they get the root wrap. If F was wiped, a responder wraps the
+  retained cover/leaf keys instead. Events outside the retained cover
+  horizon remain terminally sealed.
 - Forward secrecy for retired leaves is enforced against on-disk
   attackers: after F-wipe + descend-chain wipe, no retained sibling row
   derives the wiped leaf's secret (the

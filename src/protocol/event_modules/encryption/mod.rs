@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod disappearing_messages_setting;
+pub mod key_request;
 pub mod key_wrap;
 pub mod local_history_node_secret;
 pub mod local_key_secret;
@@ -38,8 +39,13 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
         Some(key_wrap::codec::TYPE_SIGNED_KEY_WRAP) => {
             Ok(Some(key_wrap::projector::project(event)?))
         }
+        Some(key_request::codec::TYPE_SIGNED_KEY_REQUEST) => {
+            Ok(Some(key_request::projector::project(event)?))
+        }
         Some(disappearing_messages_setting::codec::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING) => {
-            Ok(Some(disappearing_messages_setting::projector::project(event)?))
+            Ok(Some(disappearing_messages_setting::projector::project(
+                event,
+            )?))
         }
         _ => Ok(None),
     }
@@ -59,6 +65,8 @@ pub fn is_encryption_tag(tag: u8) -> bool {
             | removal_frontier::codec::TYPE_SIGNED_REMOVAL_FRONTIER
             | key_wrap::codec::TYPE_KEY_WRAP
             | key_wrap::codec::TYPE_SIGNED_KEY_WRAP
+            | key_request::codec::TYPE_KEY_REQUEST
+            | key_request::codec::TYPE_SIGNED_KEY_REQUEST
             | disappearing_messages_setting::codec::TYPE_DISAPPEARING_MESSAGES_SETTING
             | disappearing_messages_setting::codec::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING
     )
@@ -93,6 +101,10 @@ pub fn event_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         }
         key_wrap::codec::TYPE_KEY_WRAP => Err("key_wrap must be signed".to_string()),
         key_wrap::codec::TYPE_SIGNED_KEY_WRAP => key_wrap::codec::signed_record_from_bytes(bytes),
+        key_request::codec::TYPE_KEY_REQUEST => Err("key_request must be signed".to_string()),
+        key_request::codec::TYPE_SIGNED_KEY_REQUEST => {
+            key_request::codec::signed_record_from_bytes(bytes)
+        }
         disappearing_messages_setting::codec::TYPE_DISAPPEARING_MESSAGES_SETTING => {
             Err("disappearing_messages_setting must be signed".to_string())
         }
