@@ -208,6 +208,25 @@ pub fn run<C>(
     run_after_bind(context, workers, options, |_| Ok(()))
 }
 
+/// Boilerplate-collapsing helper for daemon worker steps that always run a
+/// single bounded `Drain { limit }` job and then fan a typed report out into
+/// generic counters. The worker supplies the call (which usually just builds
+/// a `Work::Drain { limit }` from the context's `work_limit` and forwards to
+/// its module-level `run`) and a reporter that copies typed counters onto
+/// the shared `DaemonReport`. The returned closure shape matches the rest
+/// of `daemon_step` so callers stay 3-5 lines.
+pub fn run_step<C, R>(
+    ctx: &mut StepContext<'_, C>,
+    error_context: &'static str,
+    run: impl FnOnce(&C, usize) -> Result<R, String>,
+    report: impl FnOnce(R, &mut DaemonReport),
+) -> Result<(), String> {
+    let work_limit = ctx.options.work_limit;
+    let outcome = run(ctx.app, work_limit).map_err(|err| format!("{error_context}: {err}"))?;
+    report(outcome, ctx.report);
+    Ok(())
+}
+
 pub fn run_after_bind<C>(
     context: &mut C,
     workers: &[Worker<C>],

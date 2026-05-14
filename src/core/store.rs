@@ -674,6 +674,16 @@ fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
     Ok(format!("\"{name}\""))
 }
 
+/// Wrap a row-codec error in the `rusqlite::Error` variant the rest of the
+/// store API uses. Row helpers across the workers and protocol schema files
+/// share this shape: a `String` message produced while decoding a row's
+/// bytes is lifted to `rusqlite::Error::InvalidParameterName` so it can flow
+/// through `?` alongside genuine SQL errors. Centralizing the constructor
+/// here keeps the variant choice in one place.
+pub fn table_error(err: String) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
