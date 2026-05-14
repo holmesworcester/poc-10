@@ -147,6 +147,16 @@ this to emit purge/delete output for labeled messages, files, reactions, and
 file slices before asking for ordinary validation dependencies that no longer
 matter.
 
+This policy exists because labels sometimes need to affect events that are
+already Blocked. A deletion, supersession, expiry, or other terminal label can
+make an event obsolete before every ordinary dependency is available; if the
+context fetcher blocks first, the projector never gets a chance to observe the
+label and emit the purge/delete/suppress output. Projectors are the natural
+place for this branch because they already understand the event bytes, the row
+keys they own, and the authorization rule for whether a label is relevant.
+The common worker should therefore only record the projector's wait decision,
+not decide semantic blocking before projection.
+
 The current implementation is still transitional around physical cleanup.
 Content deletion projectors write target labels and purge intent rows, and
 message/reaction/file/file-slice projectors own the visible row suppression for
