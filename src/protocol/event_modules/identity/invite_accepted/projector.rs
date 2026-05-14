@@ -30,8 +30,7 @@ fn validate_invite_secret(
 ) -> Result<(), String> {
     let secret_record = event
         .context
-        .dependency(&accepted.invite_secret_event_id)
-        .ok_or_else(|| "invite_accepted invite_secret dependency is missing".to_string())?;
+        .require_dependency(&accepted.invite_secret_event_id)?;
     let secret = invite::codec::decode(&secret_record.canonical_bytes)
         .map_err(|_| "invite_accepted dependency is not an invite_secret event".to_string())?;
     if secret.bootstrap_hash != accepted.bootstrap_hash {
@@ -83,6 +82,7 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: dependency_id,
                     record: dependency,
+                    labels: Vec::new(),
                 }],
                 labels: Vec::new(),
                 receive: None,

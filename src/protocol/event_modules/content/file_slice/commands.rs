@@ -7,7 +7,9 @@
 //! whose projection verifies the slice's ciphertext bytes against the
 //! descriptor's `root_hash`.
 
-use crate::core::crypto::{self, Ed25519PrivateKey, XChaCha20Poly1305Key, XCHACHA20_POLY1305_TAG_BYTES};
+use crate::core::crypto::{
+    self, Ed25519PrivateKey, XChaCha20Poly1305Key, XCHACHA20_POLY1305_TAG_BYTES,
+};
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
@@ -161,8 +163,8 @@ pub fn seal_file_blob(
     plaintext: &[u8],
 ) -> Result<SealedFileBlob, String> {
     let blob_bytes = plaintext.len() as u64;
-    let slice_bytes =
-        u32::try_from(FILE_SLICE_DATA_BYTES).map_err(|_| "slice budget overflows u32".to_string())?;
+    let slice_bytes = u32::try_from(FILE_SLICE_DATA_BYTES)
+        .map_err(|_| "slice budget overflows u32".to_string())?;
     let total_slices = if blob_bytes == 0 {
         0u32
     } else {

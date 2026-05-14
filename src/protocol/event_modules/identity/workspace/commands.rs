@@ -163,10 +163,9 @@ mod tests {
 
         // The initial setting is the second emitted event.
         let setting_record = output.events[1].record();
-        let envelope = disappearing_messages_setting::codec::decode_signed(
-            &setting_record.canonical_bytes,
-        )
-        .expect("decode signed setting");
+        let envelope =
+            disappearing_messages_setting::codec::decode_signed(&setting_record.canonical_bytes)
+                .expect("decode signed setting");
         let setting = disappearing_messages_setting::codec::decode(&envelope.payload)
             .expect("decode setting");
         assert_eq!(setting.ttl_minutes, 5);

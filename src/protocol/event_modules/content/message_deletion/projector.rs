@@ -1,16 +1,14 @@
 //! Projector for signed message deletions.
 //!
 //! Deletion is projected as a generic event label attached to the target
-//! message id plus an exact delete for the message projection row. The label
-//! handles tombstone-before-message order; the delete handles
-//! message-before-tombstone order. The deletion event does not depend on the
-//! target message, so admission and projection are convergent under either
-//! arrival order.
+//! message id plus a purge intent for the physical cleanup worker. The
+//! deletion event does not depend on the target message, so it cannot inspect
+//! the target author here; target projectors and the purge worker authorize
+//! row cleanup against the retained label when the target bytes are available.
 
-use crate::protocol::event_modules::content::message;
 use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
 use crate::protocol::event_modules::schema::EventLabel;
-use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
+use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
 use super::codec;
 use super::schema::{purge_instruction_row, PurgeKind};
@@ -25,8 +23,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
 
     let signer = event
         .context
-        .dependency(&envelope.signer_endpoint_shared_id)
-        .ok_or_else(|| "deletion signer endpoint_shared dependency is missing".to_string())?;
+        .require_dependency(&envelope.signer_endpoint_shared_id)?;
     let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
         .map_err(|_| "deletion signer dependency is not a signed endpoint_shared".to_string())?;
     if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
@@ -46,10 +43,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("deletion signer endpoint is not authorized by the named author".to_string());
     }
 
-    let author = event
-        .context
-        .dependency(&deletion.author_user_id)
-        .ok_or_else(|| "deletion author user dependency is missing".to_string())?;
+    let author = event.context.require_dependency(&deletion.author_user_id)?;
     let author_envelope = signed::codec::decode(&author.canonical_bytes)
         .map_err(|_| "deletion author dependency is not a signed user".to_string())?;
     if author_envelope.inner_type != user::codec::TYPE_USER {
@@ -61,28 +55,17 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("deletion author workspace does not match deletion".to_string());
     }
 
-    // Enqueue a durable purge instruction so the content_purge worker can
-    // drain it once before this admission call returns and again on
-    // restart if anything between this admission and retire-walk
-    // completion crashes. The label and exact row delete still carry the
-    // convergent semantic; the queue row turns the trigger into a durable
-    // queue entry rather than a one-shot in-process signal.
-    let mut output = ProjectionOutput::rows(vec![purge_instruction_row(
-        deletion.workspace_id,
-        deletion.target_message_id,
-        PurgeKind::Message,
-    )]);
-    output.append(ProjectionOutput::deletes_and_labels(
-        vec![TableDelete {
-            table: message::schema::MESSAGES,
-            key: message::schema::message_key(deletion.workspace_id, deletion.target_message_id),
-        }],
+    Ok(ProjectionOutput::rows_and_labels(
+        vec![purge_instruction_row(
+            deletion.workspace_id,
+            deletion.target_message_id,
+            PurgeKind::Message,
+        )],
         vec![EventLabel {
             event_id: deletion.target_message_id,
             label: deletion_label(&deletion.author_user_id),
         }],
-    ));
-    Ok(output)
+    ))
 }
 
 #[cfg(test)]
@@ -183,10 +166,12 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: author_id,
                         record: author_record,
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),
@@ -205,12 +190,7 @@ mod tests {
         expected_key.extend_from_slice(&target_id);
         assert_eq!(output.rows[0].key, expected_key);
         assert_eq!(output.rows[0].value, vec![PurgeKind::Message.as_byte()]);
-        assert_eq!(output.deletes.len(), 1);
-        assert_eq!(output.deletes[0].table, message::schema::MESSAGES);
-        assert_eq!(
-            output.deletes[0].key,
-            message::schema::message_key(workspace_id, target_id)
-        );
+        assert!(output.deletes.is_empty());
         assert_eq!(output.labels.len(), 1);
         assert_eq!(output.labels[0].event_id, target_id);
         assert_eq!(output.labels[0].label, deletion_label(&author_id));
@@ -243,10 +223,12 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: author_id,
                         record: author_record,
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),

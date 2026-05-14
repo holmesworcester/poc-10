@@ -5,13 +5,14 @@
 //! itself stamped during a prior purge transaction.
 //! State: content read-model rows, durable message tombstone summaries, the
 //! protocol event store, and the two-table purge queue.
-//! Step: in one purge transaction, drain up to `limit` instructions in a
-//! worklist loop: for each, decode the target event bytes (if still
-//! present), stamp the retire coordinates, write a message tombstone if
-//! kind is `Message`, remove the read-model row, purge canonical bytes,
-//! cascade-enqueue dependent reactions/files/slices, then delete the
-//! instruction row in the same transaction. Looping reads the queue
-//! again so cascade-enqueued rows added inside this tx are also drained.
+//! Step: in one purge transaction, drain up to `limit` instructions: for
+//! each, decode the target event bytes if present, verify the retained
+//! deletion label or tombstone authorizes cleanup, stamp retire
+//! coordinates, perform idempotent read-model cleanup, purge canonical
+//! bytes, and enqueue any remaining transitional cascade work. If a
+//! message/file instruction arrives before target bytes and before retire
+//! coords exist, the instruction remains queued instead of being mistaken
+//! for crash recovery.
 //! After commit, run the retire-leaf step in its own transactions for
 //! every kind whose canonical bytes we actually purged in this call, then
 //! delete the `purge_retire_coords` row in a small follow-up transaction.
@@ -23,10 +24,9 @@
 //! bytes.
 //! Consume: purged event rows leave the durable deletion label/tombstone
 //! facts behind so semantic deletion survives without keeping ciphertext
-//! bytes. Cascaded reactions/files/slices ride on the same durable queue
-//! so a single inserter (the projector emitting one instruction for the
-//! deletion target) cascades to the full transitive purge set without any
-//! extra projector logic.
+//! bytes. Cascaded reactions/files/slices still ride on the same durable
+//! queue as transitional cleanup; the long-term direction is for their
+//! projectors to emit those purge intents from dependency labels.
 //! Failure: one malformed event aborts that worker transaction and will be
 //! retried; projectors remain the authority on validity before normal reads.
 //! Fairness: `Work::Drain { limit }` bounds one batch of queue instructions.
@@ -195,17 +195,20 @@ fn drain_in_tx(
     let instructions = message_deletion::queries::list_purge_instructions(store, limit)?;
     for instr in instructions {
         let outcome = process_instruction(store, &instr, &mut report)?;
-        drained.push(DrainedInstruction {
-            workspace_id: instr.workspace_id,
-            target_event_id: instr.target_event_id,
-            needs_retire: outcome.needs_retire,
-        });
+        if outcome.clear_instruction {
+            drained.push(DrainedInstruction {
+                workspace_id: instr.workspace_id,
+                target_event_id: instr.target_event_id,
+                needs_retire: outcome.needs_retire,
+            });
+        }
     }
     Ok((report, drained))
 }
 
 struct InstructionOutcome {
     needs_retire: bool,
+    clear_instruction: bool,
 }
 
 fn process_instruction(
@@ -214,9 +217,11 @@ fn process_instruction(
     report: &mut PurgeReport,
 ) -> Result<InstructionOutcome, String> {
     match instr.kind {
-        PurgeKind::Message => process_message(store, instr.target_event_id, report),
+        PurgeKind::Message => {
+            process_message(store, instr.workspace_id, instr.target_event_id, report)
+        }
         PurgeKind::Reaction => process_reaction(store, instr.target_event_id, report),
-        PurgeKind::File => process_file(store, instr.target_event_id, report),
+        PurgeKind::File => process_file(store, instr.workspace_id, instr.target_event_id, report),
         PurgeKind::FileSlice => process_file_slice(store, instr.target_event_id, report),
     }
 }
@@ -232,20 +237,38 @@ fn process_instruction(
 /// the coords stamped in the prior tx and run the retire walk.
 fn process_message(
     store: &Store,
+    workspace_id: EventId,
     message_id: EventId,
     report: &mut PurgeReport,
 ) -> Result<InstructionOutcome, String> {
     let Some(bytes) = event_queries::event_bytes(store, &message_id)
         .map_err(|err| format!("load message event bytes: {err}"))?
     else {
-        // Crash-recovery branch: bytes were purged in a prior tx.
-        // purge_retire_coords should already be stamped; post-commit retire
-        // reads them directly.
-        return Ok(InstructionOutcome { needs_retire: true });
+        // Crash recovery has durable retire coords. Deletion-before-target
+        // has neither bytes nor coords yet; keep the instruction queued.
+        let has_coords =
+            message_deletion::queries::purge_retire_coords_for(store, workspace_id, message_id)?
+                .is_some();
+        return Ok(InstructionOutcome {
+            needs_retire: has_coords,
+            clear_instruction: has_coords,
+        });
     };
     report.scanned_events += 1;
     let envelope = message::codec::decode_signed(&bytes)?;
     let event = message::codec::decode(&envelope.payload)?;
+    if event.workspace_id != workspace_id {
+        return Ok(InstructionOutcome {
+            needs_retire: false,
+            clear_instruction: true,
+        });
+    }
+    if !message_purge_is_authorized(store, message_id, &event)? {
+        return Ok(InstructionOutcome {
+            needs_retire: false,
+            clear_instruction: true,
+        });
+    }
 
     // Stamp retire coords inside this tx, before the bytes are purged.
     // Using `replace_table_rows_in_tx` keeps the call idempotent under
@@ -287,7 +310,10 @@ fn process_message(
 
     cascade_reactions_for_message(store, event.workspace_id, message_id)?;
     cascade_files_for_message(store, event.workspace_id, message_id)?;
-    Ok(InstructionOutcome { needs_retire: true })
+    Ok(InstructionOutcome {
+        needs_retire: true,
+        clear_instruction: true,
+    })
 }
 
 /// Process one Reaction cascade instruction (only authored as a cascade
@@ -303,7 +329,10 @@ fn process_reaction(
     else {
         // Crash recovery: reaction bytes already purged. Nothing to do
         // beyond letting the queue cleanup run after commit.
-        return Ok(InstructionOutcome { needs_retire: false });
+        return Ok(InstructionOutcome {
+            needs_retire: false,
+            clear_instruction: true,
+        });
     };
     report.scanned_events += 1;
     let envelope = reaction::codec::decode_signed(&bytes)?;
@@ -322,7 +351,10 @@ fn process_reaction(
     {
         report.event_bytes_purged += 1;
     }
-    Ok(InstructionOutcome { needs_retire: false })
+    Ok(InstructionOutcome {
+        needs_retire: false,
+        clear_instruction: true,
+    })
 }
 
 /// Process one File purge instruction.
@@ -337,19 +369,36 @@ fn process_reaction(
 /// can enqueue a `PurgeKind::File` instruction.
 fn process_file(
     store: &Store,
+    workspace_id: EventId,
     file_event_id: EventId,
     report: &mut PurgeReport,
 ) -> Result<InstructionOutcome, String> {
     let Some(bytes) = event_queries::event_bytes(store, &file_event_id)
         .map_err(|err| format!("load file event bytes: {err}"))?
     else {
-        // Crash recovery: file bytes already purged. Coords should be
-        // durable; post-commit retire reads them.
-        return Ok(InstructionOutcome { needs_retire: true });
+        let has_coords =
+            message_deletion::queries::purge_retire_coords_for(store, workspace_id, file_event_id)?
+                .is_some();
+        return Ok(InstructionOutcome {
+            needs_retire: has_coords,
+            clear_instruction: has_coords,
+        });
     };
     report.scanned_events += 1;
     let envelope = file::codec::decode_signed(&bytes)?;
     let event = file::codec::decode(&envelope.payload)?;
+    if event.workspace_id != workspace_id {
+        return Ok(InstructionOutcome {
+            needs_retire: false,
+            clear_instruction: true,
+        });
+    }
+    if !file_purge_is_authorized(store, file_event_id, &event)? {
+        return Ok(InstructionOutcome {
+            needs_retire: false,
+            clear_instruction: true,
+        });
+    }
 
     let coords = PurgeRetireCoords {
         workspace_id: event.workspace_id,
@@ -411,7 +460,10 @@ fn process_file(
     {
         report.event_bytes_purged += 1;
     }
-    Ok(InstructionOutcome { needs_retire: true })
+    Ok(InstructionOutcome {
+        needs_retire: true,
+        clear_instruction: true,
+    })
 }
 
 /// Process one FileSlice cascade instruction. Only authored as a cascade
@@ -425,7 +477,10 @@ fn process_file_slice(
     let Some(bytes) = event_queries::event_bytes(store, &slice_event_id)
         .map_err(|err| format!("load file slice event bytes: {err}"))?
     else {
-        return Ok(InstructionOutcome { needs_retire: false });
+        return Ok(InstructionOutcome {
+            needs_retire: false,
+            clear_instruction: true,
+        });
     };
     report.scanned_events += 1;
     let envelope = file_slice::codec::decode_signed(&bytes)?;
@@ -440,7 +495,42 @@ fn process_file_slice(
     {
         report.event_bytes_purged += 1;
     }
-    Ok(InstructionOutcome { needs_retire: false })
+    Ok(InstructionOutcome {
+        needs_retire: false,
+        clear_instruction: true,
+    })
+}
+
+fn message_purge_is_authorized(
+    store: &Store,
+    message_id: EventId,
+    event: &message::types::MessageEvent,
+) -> Result<bool, String> {
+    if message::queries::message_tombstone_exists(store, event.workspace_id, message_id)? {
+        return Ok(true);
+    }
+    let labels = event_queries::event_labels(store, &message_id)?;
+    Ok(labels.iter().any(|label| {
+        message_deletion::types::deletion_label_author(label)
+            .map(|author| author == event.author_user_id)
+            .unwrap_or(false)
+    }))
+}
+
+fn file_purge_is_authorized(
+    store: &Store,
+    file_event_id: EventId,
+    event: &file::types::FileEvent,
+) -> Result<bool, String> {
+    if message::queries::message_tombstone_exists(store, event.workspace_id, event.message_id)? {
+        return Ok(true);
+    }
+    let labels = event_queries::event_labels(store, &file_event_id)?;
+    Ok(labels.iter().any(|label| {
+        file_deletion::types::deletion_label_author(label)
+            .map(|author| author == event.author_user_id)
+            .unwrap_or(false)
+    }))
 }
 
 /// Cascade-enqueue every reaction in this workspace whose target is the
@@ -688,20 +778,21 @@ mod tests {
     }
 
     #[test]
-    fn ignores_purge_instruction_for_unrelated_message() {
-        // Even if a non-author tried to author a deletion, the projector
-        // rejects it before reaching here, so the queue only contains
-        // legitimate entries. This test seeds the queue directly (no
-        // projector), demonstrating that the queue alone authorizes the
-        // purge — the projector remains the policy enforcement point.
+    fn purge_instruction_with_non_author_label_does_not_purge_message() {
         let store = Protocol::open_memory_store().expect("store");
         let message_record = message_record("keep me");
         let message_id = event_id(&message_record.canonical_bytes);
         event_lifecycle::insert_event(&store, &message_record, EventStatus::Applied)
             .expect("insert message event");
+        store
+            .insert_table_rows(event_schema::event_label_rows(vec![EventLabel {
+                event_id: message_id,
+                label: message_deletion::types::deletion_label(&[9; 32]),
+            }]))
+            .expect("insert non-author deletion label");
+        enqueue_message_purge(&store, WORKSPACE, message_id);
 
         let protocol = Protocol::new();
-        // No queue entry => no purge.
         let report = run(&store, &protocol, Work::Drain { limit: 10 }).expect("purge");
         assert_eq!(report.event_bytes_purged, 0);
         assert!(event_queries::event_bytes(&store, &message_id)
@@ -710,6 +801,28 @@ mod tests {
         assert!(
             !message::queries::message_tombstone_exists(&store, WORKSPACE, message_id)
                 .expect("tombstone")
+        );
+        assert!(
+            !message_deletion::queries::has_purge_instructions(&store)
+                .expect("bogus queue row cleared"),
+            "unauthorized queue rows should be consumed rather than retried forever"
+        );
+    }
+
+    #[test]
+    fn delete_before_message_keeps_purge_instruction_until_target_arrives() {
+        let store = Protocol::open_memory_store().expect("store");
+        let missing_message_id = [99; 32];
+        enqueue_message_purge(&store, WORKSPACE, missing_message_id);
+
+        let protocol = Protocol::new();
+        let report = run(&store, &protocol, Work::Drain { limit: 10 }).expect("purge");
+
+        assert_eq!(report.event_bytes_purged, 0);
+        assert!(
+            message_deletion::queries::has_purge_instructions(&store)
+                .expect("instruction retained"),
+            "delete-before-target purge instructions must survive until target bytes arrive"
         );
     }
 
@@ -772,10 +885,8 @@ mod tests {
                 .expect("tombstone still exists")
         );
         // Queue rows cleared by the re-drain.
-        assert!(
-            !message_deletion::queries::has_purge_instructions(&store)
-                .expect("instructions cleared")
-        );
+        assert!(!message_deletion::queries::has_purge_instructions(&store)
+            .expect("instructions cleared"));
         assert!(
             message_deletion::queries::purge_retire_coords_for(&store, WORKSPACE, message_id)
                 .expect("coords lookup")

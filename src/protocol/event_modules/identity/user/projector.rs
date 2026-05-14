@@ -21,8 +21,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
 
     let signer = event
         .context
-        .dependency(&envelope.signer_event_id)
-        .ok_or_else(|| "missing signer dependency context for user".to_string())?;
+        .require_dependency(&envelope.signer_event_id)?;
     let invite_envelope = signed::codec::decode(&signer.canonical_bytes)
         .map_err(|_| "user signer must be user_invite".to_string())?;
     if invite_envelope.inner_type != user_invite::codec::TYPE_USER_INVITE {
@@ -129,7 +128,11 @@ mod tests {
                 event_id: event_id(&record.canonical_bytes),
                 dependencies: dependency
                     .into_iter()
-                    .map(|(event_id, record)| DependencyContext { event_id, record })
+                    .map(|(event_id, record)| DependencyContext {
+                        event_id,
+                        record,
+                        labels: Vec::new(),
+                    })
                     .collect(),
                 labels: Vec::new(),
                 receive: None,
@@ -161,9 +164,12 @@ mod tests {
         let (invite_id, _) = user_invite_record(&INVITE_PRIVATE);
         let user_record = signed_user_record(invite_id, &INVITE_PRIVATE, workspace_id(), "alice");
 
-        let err = project(&context(&user_record, None)).expect_err("missing context must fail");
+        let err = project(&context(&user_record, None)).expect_err("missing context must wait");
 
-        assert_eq!(err, "missing signer dependency context for user");
+        assert!(
+            crate::workers::pipeline_helpers::event_pipeline::is_wait_for_dependency_error(&err),
+            "{err}"
+        );
     }
 
     #[test]

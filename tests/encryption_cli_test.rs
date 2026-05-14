@@ -601,13 +601,7 @@ fn cli_chop_wiping_f_rotates_local_recipient_key_for_forward_secrecy() {
     // Chop with a non-zero floor. Because the frontier was just created
     // (no minute_node materializations exist yet), chop walks F → leaf
     // boundary and wipes F's row.
-    let chop = assert_success(topo(&[
-        "--db",
-        &alice,
-        "chop-now",
-        &workspace_id,
-        "100",
-    ]));
+    let chop = assert_success(topo(&["--db", &alice, "chop-now", &workspace_id, "100"]));
     assert_eq!(line_value(&chop, "floor_minute"), "100");
     let subtree: u64 = line_value(&chop, "subtree_tombstones_written")
         .parse()

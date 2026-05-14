@@ -71,6 +71,7 @@ where
     if IN_CONTENT_PURGE_DRAIN.with(|cell| cell.get()) {
         return Ok(());
     }
+    drain_pending_reprojections_until_idle(store, registry)?;
     if !message_deletion::queries::has_purge_instructions(store)? {
         return Ok(());
     }
@@ -84,6 +85,25 @@ where
     );
     IN_CONTENT_PURGE_DRAIN.with(|cell| cell.set(false));
     result?;
+    Ok(())
+}
+
+fn drain_pending_reprojections_until_idle<R>(store: &Store, registry: &R) -> Result<(), String>
+where
+    R: pipeline_helpers::event_pipeline::EventRegistry,
+{
+    let limit = pipeline_helpers::event_pipeline::DEFAULT_READY_BATCH;
+    while store
+        .table_row_count(schema::PENDING_REPROJECTIONS)
+        .map_err(|err| format!("count pending reprojections: {err}"))?
+        > 0
+    {
+        let report =
+            pipeline_helpers::event_pipeline::drain_pending_reprojections(store, registry, limit)?;
+        if report.reprojected_events == 0 {
+            break;
+        }
+    }
     Ok(())
 }
 
@@ -202,7 +222,7 @@ mod tests {
             &self,
             _store: &Store,
             _event: &crate::workers::pipeline_helpers::event_pipeline::EventWithContext<'_>,
-        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ProjectionOutput, String>
+        ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ProjectionDecision, String>
         {
             Err("not implemented".to_string())
         }

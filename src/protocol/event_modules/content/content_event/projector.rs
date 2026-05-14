@@ -19,8 +19,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
 
     let signer = event
         .context
-        .dependency(&envelope.signer_endpoint_shared_id)
-        .ok_or_else(|| "content signer endpoint_shared dependency is missing".to_string())?;
+        .require_dependency(&envelope.signer_endpoint_shared_id)?;
     let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
         .map_err(|_| "content signer dependency is not a signed endpoint_shared".to_string())?;
     if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
@@ -110,6 +109,7 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: signer_id,
                     record: signer,
+                    labels: Vec::new(),
                 }],
                 labels: Vec::new(),
                 receive: None,
@@ -161,9 +161,10 @@ mod tests {
             },
         };
 
-        assert_eq!(
-            project(&event).expect_err("missing signer must fail"),
-            "content signer endpoint_shared dependency is missing"
+        let err = project(&event).expect_err("missing signer must wait");
+        assert!(
+            crate::workers::pipeline_helpers::event_pipeline::is_wait_for_dependency_error(&err),
+            "{err}"
         );
     }
 

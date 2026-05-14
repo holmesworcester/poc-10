@@ -173,9 +173,8 @@ pub fn derive_file_id(
     starting_timestamp: u64,
 ) -> EventId {
     const DOMAIN: &[u8] = b"poc8-content-file-id\0";
-    let mut input = Vec::with_capacity(
-        DOMAIN.len() + signer_endpoint_shared_id.len() + message_id.len() + 8,
-    );
+    let mut input =
+        Vec::with_capacity(DOMAIN.len() + signer_endpoint_shared_id.len() + message_id.len() + 8);
     input.extend_from_slice(DOMAIN);
     input.extend_from_slice(signer_endpoint_shared_id);
     input.extend_from_slice(&message_id);
@@ -207,8 +206,11 @@ pub fn open_sealed_file_row(
     store: &Store,
     sealed: &SealedFileRow,
 ) -> Result<Option<FileRow>, String> {
-    let Some(secret_bytes) =
-        lookup_content_key_secret(store, sealed.workspace_id, sealed.local_history_node_secret_id)?
+    let Some(secret_bytes) = lookup_content_key_secret(
+        store,
+        sealed.workspace_id,
+        sealed.local_history_node_secret_id,
+    )?
     else {
         return Ok(None);
     };

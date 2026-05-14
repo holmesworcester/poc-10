@@ -149,9 +149,7 @@ impl SyncIndex {
             .state
             .lock()
             .map_err(|_| "sync index mutex poisoned".to_string())?;
-        Ok(summarize_entries(
-            &state.ids_in_range(TimestampRange::ROOT),
-        ))
+        Ok(summarize_entries(&state.ids_in_range(TimestampRange::ROOT)))
     }
 
     /// Number of admitted event ids currently in the in-memory index.
@@ -396,9 +394,7 @@ where
         Output::Indexed(_)
         | Output::DrainedPurges(_)
         | Output::Started(_)
-        | Output::DrainedIn(_) => {
-            return Err("sync worker returned non-tick output".to_string())
-        }
+        | Output::DrainedIn(_) => return Err("sync worker returned non-tick output".to_string()),
     };
     ctx.report.add("sync_rounds", output.value.started_rounds);
     ctx.report
@@ -476,8 +472,7 @@ fn drain_pending_purges_in_tick(
     let pending = rows
         .into_iter()
         .map(|(key, _)| {
-            let (_workspace_id, event_id) =
-                negentropy_purges::decode_pending_purge_key(&key)?;
+            let (_workspace_id, event_id) = negentropy_purges::decode_pending_purge_key(&key)?;
             Ok::<_, String>((key, event_id))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1486,7 +1481,11 @@ mod tests {
             .expect("enqueue purge");
     }
 
-    fn purge_test_entry(timestamp: u64, event_id: EventId, workspace_id: EventId) -> EventIndexEntry {
+    fn purge_test_entry(
+        timestamp: u64,
+        event_id: EventId,
+        workspace_id: EventId,
+    ) -> EventIndexEntry {
         EventIndexEntry {
             event_id,
             timestamp,
@@ -1555,24 +1554,14 @@ mod tests {
         for id in ids.iter() {
             enqueue_purge(&store_a, workspace_id, *id);
         }
-        run(
-            &store_a,
-            &index_a,
-            Work::DrainPendingPurges { limit: 64 },
-        )
-        .expect("drain a");
+        run(&store_a, &index_a, Work::DrainPendingPurges { limit: 64 }).expect("drain a");
 
         let store_b = Protocol::open_memory_store().expect("open store b");
         let index_b = build_indexed();
         for id in ids.iter().rev() {
             enqueue_purge(&store_b, workspace_id, *id);
         }
-        run(
-            &store_b,
-            &index_b,
-            Work::DrainPendingPurges { limit: 64 },
-        )
-        .expect("drain b");
+        run(&store_b, &index_b, Work::DrainPendingPurges { limit: 64 }).expect("drain b");
 
         let summary_a = index_a.root_summary().expect("summary a");
         let summary_b = index_b.root_summary().expect("summary b");
@@ -1605,24 +1594,14 @@ mod tests {
         for id in purged_ids.iter() {
             enqueue_purge(&store_a, workspace_id, *id);
         }
-        run(
-            &store_a,
-            &index_a,
-            Work::DrainPendingPurges { limit: 64 },
-        )
-        .expect("drain a");
+        run(&store_a, &index_a, Work::DrainPendingPurges { limit: 64 }).expect("drain a");
 
         let store_b = Protocol::open_memory_store().expect("open store b");
         let index_b = build_indexed();
         for id in purged_ids.iter().rev() {
             enqueue_purge(&store_b, workspace_id, *id);
         }
-        run(
-            &store_b,
-            &index_b,
-            Work::DrainPendingPurges { limit: 64 },
-        )
-        .expect("drain b");
+        run(&store_b, &index_b, Work::DrainPendingPurges { limit: 64 }).expect("drain b");
 
         let summary_a = index_a.root_summary().expect("summary a");
         let summary_b = index_b.root_summary().expect("summary b");
@@ -1634,8 +1613,7 @@ mod tests {
     fn drain_pending_purges_on_empty_queue_is_noop() {
         let store = Protocol::open_memory_store().expect("open store");
         let index = SyncIndex::default();
-        let output = run(&store, &index, Work::DrainPendingPurges { limit: 16 })
-            .expect("drain");
+        let output = run(&store, &index, Work::DrainPendingPurges { limit: 16 }).expect("drain");
         let Output::DrainedPurges(report) = output else {
             panic!("expected drain pending purges output");
         };
@@ -1654,8 +1632,7 @@ mod tests {
         let workspace_id = [3u8; 32];
         let event_id = [7u8; 32];
         enqueue_purge(&store, workspace_id, event_id);
-        let output = run(&store, &index, Work::DrainPendingPurges { limit: 16 })
-            .expect("drain");
+        let output = run(&store, &index, Work::DrainPendingPurges { limit: 16 }).expect("drain");
         let Output::DrainedPurges(report) = output else {
             panic!("expected drain pending purges output");
         };

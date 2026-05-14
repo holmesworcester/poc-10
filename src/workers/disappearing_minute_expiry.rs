@@ -28,8 +28,8 @@ use crate::protocol::event_modules::content::message::types::{
 };
 use crate::protocol::event_modules::content::reaction::queries as reaction_queries;
 use crate::protocol::event_modules::content::reaction::types::reaction_event_id_in_minute;
-use crate::protocol::event_modules::identity::workspace::queries as workspace_queries;
 use crate::protocol::event_modules::encryption::disappearing_messages_setting::queries as setting_queries;
+use crate::protocol::event_modules::identity::workspace::queries as workspace_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::workers::encryption as encryption_worker;
 use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
@@ -147,10 +147,7 @@ where
     }
 
     let job_count = expired_jobs.len().min(limit);
-    let processed_jobs: Vec<ExpireMessageJob> = expired_jobs
-        .into_iter()
-        .take(job_count)
-        .collect();
+    let processed_jobs: Vec<ExpireMessageJob> = expired_jobs.into_iter().take(job_count).collect();
     for job in processed_jobs.iter().copied() {
         process_job(store, registry, &mut report, job)?;
     }
@@ -218,8 +215,7 @@ fn process_job<R: EventRegistry>(
             deleted += tx_store
                 .delete_table_rows_in_tx(message_schema::MESSAGES, vec![key.clone()])?
                 as usize;
-            tx_store
-                .delete_table_rows_in_tx(message_schema::SEALED_MESSAGES, vec![key])?;
+            tx_store.delete_table_rows_in_tx(message_schema::SEALED_MESSAGES, vec![key])?;
             tx_store.insert_table_rows_in_tx(vec![message_schema::message_tombstone_row(
                 job.workspace_id,
                 job.message_id,

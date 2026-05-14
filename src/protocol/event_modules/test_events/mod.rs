@@ -7,14 +7,23 @@
 pub mod event_with_deps;
 
 use crate::protocol::event_modules::types::EventRecord;
-use crate::protocol::event_modules::worker::ProjectionOutput;
+use crate::protocol::event_modules::worker::{EventWithContext, ProjectionDecision};
 
-pub fn project_record(bytes: &[u8]) -> Result<Option<ProjectionOutput>, String> {
+pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionDecision>, String> {
+    let bytes = &event.record.canonical_bytes;
     match bytes.first().copied() {
-        Some(
-            event_with_deps::codec::TYPE_EVENT_WITH_DEPS
-            | event_with_deps::codec::TYPE_STAGED_EVENT_WITH_DEPS,
-        ) => Ok(Some(event_with_deps::projector::project(bytes)?)),
+        Some(event_with_deps::codec::TYPE_EVENT_WITH_DEPS) => {
+            let missing = event
+                .context
+                .missing_dependencies_from(&event.record.dependencies);
+            if !missing.is_empty() {
+                return Ok(Some(ProjectionDecision::wait_for(missing)));
+            }
+            Ok(Some(event_with_deps::projector::project(bytes)?.into()))
+        }
+        Some(event_with_deps::codec::TYPE_STAGED_EVENT_WITH_DEPS) => {
+            Ok(Some(event_with_deps::projector::project(bytes)?.into()))
+        }
         _ => Ok(None),
     }
 }

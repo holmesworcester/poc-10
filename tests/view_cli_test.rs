@@ -23,7 +23,13 @@ fn cli_view_renders_sidebar_messages_reactions_files() {
     assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
 
     assert_success(topo(&["--db", &db, "send", &workspace_id, "hey bob"]));
-    assert_success(topo(&["--db", &db, "send", &workspace_id, "second message"]));
+    assert_success(topo(&[
+        "--db",
+        &db,
+        "send",
+        &workspace_id,
+        "second message",
+    ]));
     assert_success(topo(&["--db", &db, "react", &workspace_id, "#1", "+1"]));
 
     let payload = b"hello world".to_vec();
@@ -67,7 +73,10 @@ fn cli_view_renders_sidebar_messages_reactions_files() {
     assert!(view.contains(&divider), "missing divider line:\n{view}");
 
     // Author block + numbered messages.
-    assert!(view.contains("    alice ["), "missing author header:\n{view}");
+    assert!(
+        view.contains("    alice ["),
+        "missing author header:\n{view}"
+    );
     assert!(
         view.contains("      1. hey bob"),
         "missing first message:\n{view}"
@@ -179,19 +188,24 @@ fn cli_view_collapses_consecutive_messages_from_same_author() {
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
 
     let bob_join_port = free_port();
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        bob_join_port,
-        "bob",
-        "phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, bob_join_port, "bob", "phone");
 
     // Alice sends two consecutive messages. Both should appear under one
     // author header on her local view.
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "first by alice"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "second by alice"]));
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "send",
+        &workspace_id,
+        "first by alice",
+    ]));
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "send",
+        &workspace_id,
+        "second by alice",
+    ]));
 
     let view = assert_success(topo(&["--db", &alice, "view", &workspace_id]));
     let alice_header_count = view.matches("    alice [").count();

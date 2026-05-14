@@ -171,16 +171,16 @@ fn max_timestamp_for_messages(store: &Store, workspace_id: EventId) -> Result<u6
         by_id.insert(row.message_id, row);
     }
     for row in message_queries::list_sealed_for_workspace(store, workspace_id)? {
-        by_id.entry(row.message_id).or_insert_with(|| {
-            super::types::MessageRow {
+        by_id
+            .entry(row.message_id)
+            .or_insert_with(|| super::types::MessageRow {
                 workspace_id: row.workspace_id,
                 message_id: row.message_id,
                 created_at_ms: row.created_at_ms,
                 author_user_id: row.author_user_id,
                 signer_endpoint_shared_id: row.signer_endpoint_shared_id,
                 text: String::new(),
-            }
-        });
+            });
     }
     for row in by_id.values() {
         if row.created_at_ms > max {
@@ -202,10 +202,7 @@ fn max_timestamp_for_messages(store: &Store, workspace_id: EventId) -> Result<u6
 /// siblings still cover authoring for every non-retired coordinate, so
 /// `derive_event_leaf` can keep working without forcing a
 /// `key-frontier` rotation.
-pub fn require_active_frontier_id(
-    store: &Store,
-    workspace_id: EventId,
-) -> Result<EventId, String> {
+pub fn require_active_frontier_id(store: &Store, workspace_id: EventId) -> Result<EventId, String> {
     use crate::protocol::event_modules::encryption::{
         local_history_node_secret, local_key_secret, removal_frontier,
     };
@@ -247,8 +244,7 @@ pub fn workspace_expires_at_minute(
     workspace_id: EventId,
     created_at_ms: u64,
 ) -> Result<(u64, EventId), String> {
-    use crate::protocol::event_modules::encryption::disappearing_messages_setting::queries
-        as setting_queries;
+    use crate::protocol::event_modules::encryption::disappearing_messages_setting::queries as setting_queries;
     let active = setting_queries::active_for_workspace(store, workspace_id)?
         .ok_or_else(|| "workspace has no active disappearing-messages setting".to_string())?;
     let ttl_minutes = active.ttl_minutes;
@@ -257,7 +253,10 @@ pub fn workspace_expires_at_minute(
         return Ok((EXPIRES_NEVER, reference));
     }
     let authored_minute = created_at_ms / UNIX_MINUTE_MS;
-    Ok((authored_minute.saturating_add(ttl_minutes as u64), reference))
+    Ok((
+        authored_minute.saturating_add(ttl_minutes as u64),
+        reference,
+    ))
 }
 
 /// Per-event leaf key material identifying which `local_history_node_secret`

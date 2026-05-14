@@ -173,7 +173,10 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     assert_success(topo(&["--db", &alice, "clock", "set", "6120001"]));
     thread::sleep(Duration::from_millis(300));
     let after_second_restart = keys_value(&alice, &workspace_id);
-    assert_eq!(line_value(&after_second_restart, "local_history_leaves"), "0");
+    assert_eq!(
+        line_value(&after_second_restart, "local_history_leaves"),
+        "0"
+    );
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
     assert_eq!(content_event_count(&alice, &workspace_id), "0");
     drop(alice_daemon_again);
@@ -192,18 +195,10 @@ fn cli_disappearing_messages_two_peer_convergence() {
     let alice_port = free_port();
     let bob_port = free_port();
 
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "Converge", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "Converge", "alice", "alice-laptop", 1);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
@@ -230,7 +225,13 @@ fn cli_disappearing_messages_two_peer_convergence() {
     // Pin both clocks to the same unix_minute and have each peer author.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "alice-secret"]));
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "send",
+        &workspace_id,
+        "alice-secret",
+    ]));
     assert_success(topo(&["--db", &bob, "send", &workspace_id, "bob-secret"]));
 
     wait_for_message_text(&alice, &workspace_id, "alice: alice-secret");
@@ -326,8 +327,7 @@ fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_
     let alice_port = free_port();
 
     // Workspace TTL = 1 minute at creation.
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "Setting", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "Setting", "alice", "alice-laptop", 1);
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
 
     // Pin the clock and author the first message at minute 100. This is
@@ -415,16 +415,13 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
     let alice = temp_db(&tmp, "alice.db");
     let alice_port = free_port();
 
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "Cascade", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "Cascade", "alice", "alice-laptop", 1);
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
 
     // Author a message and then react to it, both in unix_minute 100.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "secret"]));
-    assert_success(topo(&[
-        "--db", &alice, "react", &workspace_id, "#1", "🌶️",
-    ]));
+    assert_success(topo(&["--db", &alice, "react", &workspace_id, "#1", "🌶️"]));
 
     // Pre-expiry: one message visible, two leaves materialized (message +
     // reaction).
@@ -494,18 +491,10 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
     let alice_port = free_port();
     let bob_port = free_port();
 
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "NoRotate", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "NoRotate", "alice", "alice-laptop", 1);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     // Wrap the initial frontier for both recipients so bob can decrypt
     // alice's authored messages. Snapshot the frontier id NOW so we can
@@ -530,8 +519,7 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
         &alice_recipient_id,
     );
     let _ = wait_for_key_derive(&bob, "1");
-    let removal_frontiers_pre =
-        line_value(&keys_value(&alice, &workspace_id), "removal_frontiers");
+    let removal_frontiers_pre = line_value(&keys_value(&alice, &workspace_id), "removal_frontiers");
     assert_eq!(
         removal_frontiers_pre, "1",
         "precondition: exactly one removal_frontier exists at start"
@@ -707,18 +695,10 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
     // TTL=0 means messages have no per-message expiry. The dispatcher's
     // cover-horizon chop is the ONLY mechanism that can retire their
     // leaves, which is exactly what this test isolates.
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "Horizon", "alice", "alice-laptop", 0);
+    let workspace_id = create_workspace_with_ttl(&alice, "Horizon", "alice", "alice-laptop", 0);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
@@ -747,7 +727,13 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
     // forever — only the cover-horizon chop retires its leaf.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &alice, "send", &workspace_id, "ancient-secret"]));
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "send",
+        &workspace_id,
+        "ancient-secret",
+    ]));
     wait_for_message_text(&alice, &workspace_id, "alice: ancient-secret");
     wait_for_message_text(&bob, &workspace_id, "alice: ancient-secret");
 
@@ -905,18 +891,10 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
     // Initial workspace TTL = 10 minutes. Workspace TTL must be non-zero so
     // the `disappearing_minute_expiry` worker actually scans this workspace
     // (see `src/workers/disappearing_minute_expiry.rs:112`).
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "MixedTtl", "alice", "alice-laptop", 10);
+    let workspace_id = create_workspace_with_ttl(&alice, "MixedTtl", "alice", "alice-laptop", 10);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
@@ -1006,9 +984,11 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
         let alice_one_leaf = line_value(&alice_keys, "local_history_leaves") == "1";
         let bob_one_leaf = line_value(&bob_keys, "local_history_leaves") == "1";
         let alice_only_x = alice_lines.len() == 1
-            && alice_lines.iter().any(|line| line.ends_with("alice: x-long"));
-        let bob_only_x = bob_lines.len() == 1
-            && bob_lines.iter().any(|line| line.ends_with("alice: x-long"));
+            && alice_lines
+                .iter()
+                .any(|line| line.ends_with("alice: x-long"));
+        let bob_only_x =
+            bob_lines.len() == 1 && bob_lines.iter().any(|line| line.ends_with("alice: x-long"));
         if alice_only_x && bob_only_x && alice_one_leaf && bob_one_leaf {
             break;
         }
@@ -1020,11 +1000,15 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
         "alice must have exactly one visible message after Y expires:\n{alice_lines:?}"
     );
     assert!(
-        alice_lines.iter().any(|line| line.ends_with("alice: x-long")),
+        alice_lines
+            .iter()
+            .any(|line| line.ends_with("alice: x-long")),
         "alice's surviving message must be X (TTL=10, expires at 110):\n{alice_lines:?}"
     );
     assert!(
-        !alice_lines.iter().any(|line| line.ends_with("alice: y-short")),
+        !alice_lines
+            .iter()
+            .any(|line| line.ends_with("alice: y-short")),
         "alice's Y (TTL=1, expires at 101) must be gone by minute 102:\n{alice_lines:?}"
     );
     assert_eq!(
@@ -1037,7 +1021,9 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
         "bob's surviving message must be X:\n{bob_lines:?}"
     );
     assert!(
-        !bob_lines.iter().any(|line| line.ends_with("alice: y-short")),
+        !bob_lines
+            .iter()
+            .any(|line| line.ends_with("alice: y-short")),
         "bob's Y must also be gone by minute 102:\n{bob_lines:?}"
     );
     // Exactly one leaf survives on each peer (X's). Y's leaf was retired,
@@ -1120,14 +1106,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
         create_workspace_with_ttl(&alice, "LateDelivery", "alice", "alice-laptop", 0);
     let alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
@@ -1179,7 +1158,13 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     // and tombstones are written.
     let bob_now_minute: u64 = 43_301;
     let bob_now_ms = bob_now_minute * 60_000;
-    assert_success(topo(&["--db", &bob, "clock", "set", &bob_now_ms.to_string()]));
+    assert_success(topo(&[
+        "--db",
+        &bob,
+        "clock",
+        "set",
+        &bob_now_ms.to_string(),
+    ]));
 
     // Wait for the dispatcher to chop on bob AND for the forward-secrecy
     // rotation that fires atomically with the F-wipe (per
@@ -1231,12 +1216,8 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     let bob_content_before = content_event_count(&bob, &workspace_id);
     let bob_sync_before = assert_success(topo(&["--db", &bob, "sync-status"]));
     let bob_indexed_before = line_value(&bob_sync_before, "indexed_events");
-    let bob_disappearing_before = assert_success(topo(&[
-        "--db",
-        &bob,
-        "disappearing-status",
-        &workspace_id,
-    ]));
+    let bob_disappearing_before =
+        assert_success(topo(&["--db", &bob, "disappearing-status", &workspace_id]));
     // `live_messages` = opened + sealed; the sealed projection is the only
     // place X could land on bob without a full decryption path.
     let bob_live_messages_before = line_value(&bob_disappearing_before, "live_messages");
@@ -1364,12 +1345,8 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     // not rise. Bob has no key material to open X, so the only
     // post-admit landing surface would be SEALED_MESSAGES; the gate must
     // stop the bytes before that projection runs.
-    let bob_disappearing_after = assert_success(topo(&[
-        "--db",
-        &bob,
-        "disappearing-status",
-        &workspace_id,
-    ]));
+    let bob_disappearing_after =
+        assert_success(topo(&["--db", &bob, "disappearing-status", &workspace_id]));
     assert_eq!(
         line_value(&bob_disappearing_after, "live_messages"),
         bob_live_messages_before,
@@ -1439,14 +1416,7 @@ fn cli_disappearing_messages_message_resyncs_after_key_arrival() {
         create_workspace_with_ttl(&alice, "ResyncRecovery", "alice", "alice-laptop", 0);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(
-        &alice,
-        &bob,
-        &workspace_id,
-        alice_port,
-        "bob",
-        "bob-phone",
-    );
+    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
 
     // Both peers publish recipient keys. Bob's recipient key is needed
     // for alice's eventual wrap; we publish alice's now so the test
@@ -1495,12 +1465,8 @@ fn cli_disappearing_messages_message_resyncs_after_key_arrival() {
         "0",
         "precondition: bob must have no F yet:\n{bob_before_wrap}"
     );
-    let bob_disappearing_before = assert_success(topo(&[
-        "--db",
-        &bob,
-        "disappearing-status",
-        &workspace_id,
-    ]));
+    let bob_disappearing_before =
+        assert_success(topo(&["--db", &bob, "disappearing-status", &workspace_id]));
     let bob_live_messages_before = line_value(&bob_disappearing_before, "live_messages");
     // Poll for ~2s to give sync ample time to attempt delivery.
     thread::sleep(Duration::from_millis(2000));
@@ -1517,12 +1483,8 @@ fn cli_disappearing_messages_message_resyncs_after_key_arrival() {
     // SEALED_MESSAGES empty for the dropped id; without the gate, the
     // bytes would land in SEALED_MESSAGES and `live_messages` would
     // tick up to reflect an admitted-but-unopenable message.
-    let bob_disappearing_during = assert_success(topo(&[
-        "--db",
-        &bob,
-        "disappearing-status",
-        &workspace_id,
-    ]));
+    let bob_disappearing_during =
+        assert_success(topo(&["--db", &bob, "disappearing-status", &workspace_id]));
     assert_eq!(
         line_value(&bob_disappearing_during, "live_messages"),
         bob_live_messages_before,
@@ -1621,8 +1583,7 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
     // (per process_job in src/workers/disappearing_minute_expiry.rs:217)
     // AND per-leaf LOCAL_HISTORY_NODE_TOMBSTONES rows (per the retire
     // walk in src/workers/encryption.rs).
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "ChopGc", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "ChopGc", "alice", "alice-laptop", 1);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
@@ -1929,9 +1890,7 @@ fn wait_for_message_text(db: &str, workspace_id: &str, expected_suffix: &str) {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!(
-        "message text {expected_suffix:?} never appeared on db={db}:\n{last}"
-    );
+    panic!("message text {expected_suffix:?} never appeared on db={db}:\n{last}");
 }
 
 fn key_wrap_with_retry(

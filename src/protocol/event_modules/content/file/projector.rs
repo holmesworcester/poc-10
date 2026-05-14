@@ -10,10 +10,18 @@
 //! sealed slot using the local key-secret named by `local_key_secret_id` to
 //! display filename and mime.
 
+use crate::protocol::event_modules::content::file_deletion::types::{
+    deletion_label as file_deletion_label, deletion_label_author as file_deletion_label_author,
+};
 use crate::protocol::event_modules::content::message;
+use crate::protocol::event_modules::content::message_deletion::schema::{
+    purge_instruction_row, PurgeKind,
+};
+use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author as message_deletion_label_author;
 use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
 use crate::protocol::event_modules::leaf_history_node;
-use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
+use crate::protocol::event_modules::schema::EventLabel;
+use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
 use super::{codec, commands, schema};
 
@@ -25,10 +33,52 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("file workspace metadata does not match event body".to_string());
     }
 
+    let file_deleted_by_author = event.context.labels.iter().any(|label| {
+        file_deletion_label_author(label)
+            .map(|author| author == file.author_user_id)
+            .unwrap_or(false)
+    });
+    if file_deleted_by_author {
+        return Ok(file_purge_output(
+            file.workspace_id,
+            event.context.event_id,
+            file.message_id,
+            file.file_id,
+            file.author_user_id,
+        ));
+    }
+
+    let parent = event.context.require_dependency(&file.message_id)?;
+    let parent_envelope = message::codec::decode_signed(&parent.canonical_bytes)
+        .map_err(|_| "file parent dependency is not a signed message".to_string())?;
+    let parent_message = message::codec::decode(&parent_envelope.payload)
+        .map_err(|_| "file parent dependency is not a signed message".to_string())?;
+    if parent_message.workspace_id != file.workspace_id {
+        return Err("file parent message workspace does not match file".to_string());
+    }
+    let parent_deleted_by_author = event
+        .context
+        .dependency_labels(&file.message_id)
+        .unwrap_or(&[])
+        .iter()
+        .any(|label| {
+            message_deletion_label_author(label)
+                .map(|author| author == parent_message.author_user_id)
+                .unwrap_or(false)
+        });
+    if parent_deleted_by_author {
+        return Ok(file_purge_output(
+            file.workspace_id,
+            event.context.event_id,
+            file.message_id,
+            file.file_id,
+            file.author_user_id,
+        ));
+    }
+
     let signer = event
         .context
-        .dependency(&envelope.signer_endpoint_shared_id)
-        .ok_or_else(|| "file signer endpoint_shared dependency is missing".to_string())?;
+        .require_dependency(&envelope.signer_endpoint_shared_id)?;
     let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
         .map_err(|_| "file signer dependency is not a signed endpoint_shared".to_string())?;
     if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
@@ -46,10 +96,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("file signer endpoint is not authorized by the named author".to_string());
     }
 
-    let author = event
-        .context
-        .dependency(&file.author_user_id)
-        .ok_or_else(|| "file author user dependency is missing".to_string())?;
+    let author = event.context.require_dependency(&file.author_user_id)?;
     let author_envelope = signed::codec::decode(&author.canonical_bytes)
         .map_err(|_| "file author dependency is not a signed user".to_string())?;
     if author_envelope.inner_type != user::codec::TYPE_USER {
@@ -61,26 +108,13 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("file author workspace does not match file".to_string());
     }
 
-    let parent = event
-        .context
-        .dependency(&file.message_id)
-        .ok_or_else(|| "file parent message dependency is missing".to_string())?;
-    let parent_envelope = message::codec::decode_signed(&parent.canonical_bytes)
-        .map_err(|_| "file parent dependency is not a signed message".to_string())?;
-    let parent_message = message::codec::decode(&parent_envelope.payload)
-        .map_err(|_| "file parent dependency is not a signed message".to_string())?;
-    if parent_message.workspace_id != file.workspace_id {
-        return Err("file parent message workspace does not match file".to_string());
-    }
-
     // Each file authors its own leaf under the per-minute coarse cover,
     // independent of the parent message's leaf. The named leaf must live in
     // the file's `unix_minute` and carry the deterministic
     // `event_id_in_minute` recomputed from the file's canonical fields.
     let leaf_record = event
         .context
-        .dependency(&file.local_history_node_secret_id)
-        .ok_or_else(|| "file leaf history node dependency is missing".to_string())?;
+        .require_dependency(&file.local_history_node_secret_id)?;
     let leaf = leaf_history_node::codec::decode(&leaf_record.canonical_bytes)
         .map_err(|_| "file leaf dependency is not a local_history_node_secret".to_string())?;
     if leaf.workspace_id != file.workspace_id
@@ -105,6 +139,40 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         envelope.signer_endpoint_shared_id,
         &file,
     )?))
+}
+
+fn file_purge_output(
+    workspace_id: [u8; 32],
+    file_event_id: [u8; 32],
+    message_id: [u8; 32],
+    file_id: [u8; 32],
+    author_user_id: [u8; 32],
+) -> ProjectionOutput {
+    ProjectionOutput {
+        rows: vec![purge_instruction_row(
+            workspace_id,
+            file_event_id,
+            PurgeKind::File,
+        )],
+        deletes: vec![
+            TableDelete {
+                table: schema::FILES,
+                key: schema::file_key(workspace_id, file_event_id),
+            },
+            TableDelete {
+                table: schema::FILES_BY_MESSAGE,
+                key: schema::file_by_message_key(workspace_id, message_id, file_event_id),
+            },
+            TableDelete {
+                table: schema::FILES_BY_FILE_ID,
+                key: schema::file_by_file_id_key(workspace_id, file_id, file_event_id),
+            },
+        ],
+        labels: vec![EventLabel {
+            event_id: file_event_id,
+            label: file_deletion_label(&author_user_id),
+        }],
+    }
 }
 
 #[cfg(test)]
@@ -309,18 +377,22 @@ mod tests {
                     DependencyContext {
                         event_id: built.signer_id,
                         record: built.signer_record.clone(),
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.author_id,
                         record: built.author_record.clone(),
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.parent_id,
                         record: built.parent_record.clone(),
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.leaf_id,
                         record: built.leaf_record.clone(),
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),
@@ -377,6 +449,61 @@ mod tests {
                 .expect("open descriptor");
         assert_eq!(plaintext.filename, "photo.jpg");
         assert_eq!(plaintext.mime_type, "image/jpeg");
+    }
+
+    #[test]
+    fn self_deletion_label_suppresses_file_rows_and_emits_purge_intent() {
+        let built = build_descriptor("photo.jpg", "image/jpeg");
+        let mut event = context_for(&built);
+        event.context.labels.push(
+            crate::protocol::event_modules::content::file_deletion::types::deletion_label(
+                &built.author_id,
+            ),
+        );
+
+        let output = project(&event).expect("project deleted file");
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].table,
+            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+        );
+        assert_eq!(output.deletes.len(), 3);
+        let delete_tables: Vec<_> = output.deletes.iter().map(|delete| delete.table).collect();
+        assert!(delete_tables.contains(&schema::FILES));
+        assert!(delete_tables.contains(&schema::FILES_BY_MESSAGE));
+        assert!(delete_tables.contains(&schema::FILES_BY_FILE_ID));
+        assert_eq!(output.labels.len(), 1);
+        assert_eq!(output.labels[0].event_id, built.file_event_id);
+    }
+
+    #[test]
+    fn deleted_parent_message_label_suppresses_file_and_marks_descriptor_deleted() {
+        let built = build_descriptor("photo.jpg", "image/jpeg");
+        let mut event = context_for(&built);
+        event
+            .context
+            .dependencies
+            .iter_mut()
+            .find(|dependency| dependency.event_id == built.parent_id)
+            .expect("parent dependency")
+            .labels
+            .push(
+                crate::protocol::event_modules::content::message_deletion::types::deletion_label(
+                    &built.author_id,
+                ),
+            );
+
+        let output = project(&event).expect("project file under deleted message");
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].table,
+            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+        );
+        assert_eq!(output.deletes.len(), 3);
+        assert_eq!(output.labels.len(), 1);
+        assert_eq!(output.labels[0].event_id, built.file_event_id);
     }
 
     #[test]
@@ -448,18 +575,22 @@ mod tests {
                     DependencyContext {
                         event_id: tampered.signer_id,
                         record: tampered.signer_record.clone(),
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: tampered.author_id,
                         record: tampered.author_record.clone(),
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: tampered.parent_id,
                         record: tampered.parent_record.clone(),
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: other_leaf_id,
                         record: other_leaf_record,
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),

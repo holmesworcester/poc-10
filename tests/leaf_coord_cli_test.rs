@@ -168,13 +168,12 @@ fn cli_message_leaf_coord_is_deterministic_from_canonical_fields() {
         .expect("frontier hex token");
     let frontier_id = parse_hex(frontier_hex);
 
-    let recomputed = message_event_id_in_minute(
-        &workspace_bytes,
-        &author_id,
-        &frontier_id,
-        6_000_000,
+    let recomputed =
+        message_event_id_in_minute(&workspace_bytes, &author_id, &frontier_id, 6_000_000);
+    assert_eq!(
+        observed_coord, recomputed,
+        "leaf coord must be deterministic"
     );
-    assert_eq!(observed_coord, recomputed, "leaf coord must be deterministic");
 
     // Sanity-check the construction is BLAKE3-keyed-hash with the v1 domain.
     let mut info = Vec::with_capacity(32 + 32 + 32 + 8);
@@ -238,7 +237,8 @@ fn cli_delete_wipes_minute_node_along_descend_path() {
     );
     // Tombstones for the wiped path are present.
     assert!(
-        post.lines().any(|line| line.starts_with("local_history_node_tombstones:")),
+        post.lines()
+            .any(|line| line.starts_with("local_history_node_tombstones:")),
         "post-delete keys output must list tombstone count:\n{post}"
     );
     assert_ne!(
@@ -598,8 +598,14 @@ fn cli_concurrent_peer_send_survives_sibling_delete() {
     // and decrypted). If decryption of M_B had failed, this would have
     // panicked already.
     let pre = assert_success(topo(&["--db", &alice, "messages", &workspace_id]));
-    assert!(pre.contains(m_a_text), "alice missing M_A pre-delete:\n{pre}");
-    assert!(pre.contains(m_b_text), "alice missing M_B pre-delete:\n{pre}");
+    assert!(
+        pre.contains(m_a_text),
+        "alice missing M_A pre-delete:\n{pre}"
+    );
+    assert!(
+        pre.contains(m_b_text),
+        "alice missing M_B pre-delete:\n{pre}"
+    );
 
     // Alice deletes her own message M_A. The retire walk on her side
     // materializes the minute_node + trie internals between (M_A's
@@ -864,7 +870,6 @@ fn key_wrap_with_retry(
     }
     panic!("key-wrap never succeeded: {last}");
 }
-
 
 fn wait_for_messages_to_contain(db: &str, workspace_id: &str, expected: &str) {
     let mut last = String::new();

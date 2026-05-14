@@ -33,7 +33,8 @@ use crate::core::{
 };
 use event_modules::types::{EventRecord, ReceiveMetadata};
 use event_modules::worker::{
-    AdmitDecision, EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord,
+    AdmitDecision, EventRegistry, EventWithContext, ProjectionDecision, ProjectionOutput,
+    ReceivedRecord,
 };
 use event_modules::Modules;
 
@@ -108,7 +109,7 @@ impl EventRegistry for Protocol {
         &self,
         store: &Store,
         event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String> {
+    ) -> Result<ProjectionDecision, String> {
         self.modules.project_record(store, event)
     }
 

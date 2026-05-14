@@ -24,8 +24,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let user_invite = codec::decode(&envelope.payload)?;
     let signer = event
         .context
-        .dependency(&envelope.signer_event_id)
-        .ok_or_else(|| "missing signer dependency context for user_invite".to_string())?;
+        .require_dependency(&envelope.signer_event_id)?;
 
     match signer.canonical_bytes.first().copied() {
         Some(workspace::codec::TYPE_WORKSPACE) => {
@@ -86,8 +85,7 @@ fn validate_admin_signed_invite(
 
     let authority_record = event
         .context
-        .dependency(&user_invite.authority_event_id)
-        .ok_or_else(|| "missing admin authority dependency for user_invite".to_string())?;
+        .require_dependency(&user_invite.authority_event_id)?;
     let authority_admin = decode_admin_record(authority_record)
         .map_err(|_| "user_invite authority must be an admin event".to_string())?;
     if authority_admin.workspace_id != user_invite.workspace_id {
@@ -233,7 +231,11 @@ mod tests {
     }
 
     fn dependency(event_id: EventId, record: EventRecord) -> DependencyContext {
-        DependencyContext { event_id, record }
+        DependencyContext {
+            event_id,
+            record,
+            labels: Vec::new(),
+        }
     }
 
     #[test]
@@ -278,9 +280,12 @@ mod tests {
         };
         let record = signed_user_invite_record(workspace_id, &WORKSPACE_PRIVATE, invite);
 
-        let err = project(&context(&record, Vec::new())).expect_err("missing context must fail");
+        let err = project(&context(&record, Vec::new())).expect_err("missing context must wait");
 
-        assert_eq!(err, "missing signer dependency context for user_invite");
+        assert!(
+            crate::workers::pipeline_helpers::event_pipeline::is_wait_for_dependency_error(&err),
+            "{err}"
+        );
     }
 
     #[test]

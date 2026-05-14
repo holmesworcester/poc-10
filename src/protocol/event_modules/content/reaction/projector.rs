@@ -6,9 +6,13 @@
 //! preserves the poc-7 reaction summary rule without an extra index.
 
 use crate::protocol::event_modules::content::message;
+use crate::protocol::event_modules::content::message_deletion::schema::{
+    purge_instruction_row, PurgeKind,
+};
+use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author;
 use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
 use crate::protocol::event_modules::leaf_history_node;
-use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
+use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
 use super::{codec, commands, schema};
 
@@ -20,10 +24,51 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("reaction workspace metadata does not match event body".to_string());
     }
 
+    let target = event
+        .context
+        .require_dependency(&reaction.target_message_id)?;
+    let target_envelope = message::codec::decode_signed(&target.canonical_bytes)
+        .map_err(|_| "reaction target dependency is not a signed message".to_string())?;
+    let target_message = message::codec::decode(&target_envelope.payload)
+        .map_err(|_| "reaction target dependency is not a signed message".to_string())?;
+    if target_message.workspace_id != reaction.workspace_id {
+        return Err("reaction target message workspace does not match reaction".to_string());
+    }
+    let target_deleted_by_author = event
+        .context
+        .dependency_labels(&reaction.target_message_id)
+        .unwrap_or(&[])
+        .iter()
+        .any(|label| {
+            deletion_label_author(label)
+                .map(|author| author == target_message.author_user_id)
+                .unwrap_or(false)
+        });
+    if target_deleted_by_author {
+        let key = schema::reaction_key(reaction.workspace_id, event.context.event_id);
+        return Ok(ProjectionOutput {
+            rows: vec![purge_instruction_row(
+                reaction.workspace_id,
+                event.context.event_id,
+                PurgeKind::Reaction,
+            )],
+            deletes: vec![
+                TableDelete {
+                    table: schema::REACTIONS,
+                    key: key.clone(),
+                },
+                TableDelete {
+                    table: schema::SEALED_REACTIONS,
+                    key,
+                },
+            ],
+            labels: Vec::new(),
+        });
+    }
+
     let signer = event
         .context
-        .dependency(&envelope.signer_endpoint_shared_id)
-        .ok_or_else(|| "reaction signer endpoint_shared dependency is missing".to_string())?;
+        .require_dependency(&envelope.signer_endpoint_shared_id)?;
     let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
         .map_err(|_| "reaction signer dependency is not a signed endpoint_shared".to_string())?;
     if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
@@ -43,10 +88,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("reaction signer endpoint is not authorized by the named author".to_string());
     }
 
-    let author = event
-        .context
-        .dependency(&reaction.author_user_id)
-        .ok_or_else(|| "reaction author user dependency is missing".to_string())?;
+    let author = event.context.require_dependency(&reaction.author_user_id)?;
     let author_envelope = signed::codec::decode(&author.canonical_bytes)
         .map_err(|_| "reaction author dependency is not a signed user".to_string())?;
     if author_envelope.inner_type != user::codec::TYPE_USER {
@@ -58,18 +100,6 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("reaction author workspace does not match reaction".to_string());
     }
 
-    let target = event
-        .context
-        .dependency(&reaction.target_message_id)
-        .ok_or_else(|| "reaction target message dependency is missing".to_string())?;
-    let target_envelope = message::codec::decode_signed(&target.canonical_bytes)
-        .map_err(|_| "reaction target dependency is not a signed message".to_string())?;
-    let target_message = message::codec::decode(&target_envelope.payload)
-        .map_err(|_| "reaction target dependency is not a signed message".to_string())?;
-    if target_message.workspace_id != reaction.workspace_id {
-        return Err("reaction target message workspace does not match reaction".to_string());
-    }
-
     // Validate the binding to the per-reaction leaf event named in canonical
     // bytes. The leaf must live in the reaction's `unix_minute` and carry
     // `event_id_in_minute = Some(reaction.event_id_in_minute_derived())`. The
@@ -77,8 +107,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     // fields rather than trusting any wire-side nonce.
     let leaf_record = event
         .context
-        .dependency(&reaction.local_history_node_secret_id)
-        .ok_or_else(|| "reaction leaf history node dependency is missing".to_string())?;
+        .require_dependency(&reaction.local_history_node_secret_id)?;
     let leaf = leaf_history_node::codec::decode(&leaf_record.canonical_bytes)
         .map_err(|_| "reaction leaf dependency is not a local_history_node_secret".to_string())?;
     if leaf.workspace_id != reaction.workspace_id
@@ -275,22 +304,27 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: author_id,
                         record: author_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: target_id,
                         record: target_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.frontier_id,
                         record: built.frontier_record.clone(),
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.leaf_id,
                         record: built.leaf_record.clone(),
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),
@@ -341,6 +375,59 @@ mod tests {
         assert_eq!(row.signer_endpoint_shared_id, signer_id);
         assert_eq!(row.removal_frontier_id, built.frontier_id);
         assert_eq!(row.local_history_node_secret_id, built.leaf_id);
+    }
+
+    #[test]
+    fn deleted_target_message_label_suppresses_reaction_and_emits_purge_intent() {
+        let workspace_id = [7; 32];
+        let signer_private_key = [9; 32];
+        let signer_pubkey = signing_public_key_for(&signer_private_key);
+        let author_record = user_record(workspace_id);
+        let author_id = event_id(&author_record.canonical_bytes);
+        let signer_record = endpoint_shared_record(workspace_id, author_id, signer_pubkey);
+        let signer_id = event_id(&signer_record.canonical_bytes);
+        let target_record = target_message_record(workspace_id, author_id);
+        let target_id = event_id(&target_record.canonical_bytes);
+        let built = build_reaction(
+            workspace_id,
+            target_id,
+            author_id,
+            signer_id,
+            signer_private_key,
+        );
+        let mut event = event_with_context(
+            &built,
+            signer_id,
+            signer_record,
+            author_id,
+            author_record,
+            target_id,
+            target_record,
+        );
+        event
+            .context
+            .dependencies
+            .iter_mut()
+            .find(|dependency| dependency.event_id == target_id)
+            .expect("target dependency")
+            .labels
+            .push(
+                crate::protocol::event_modules::content::message_deletion::types::deletion_label(
+                    &author_id,
+                ),
+            );
+
+        let output = project(&event).expect("project reaction under deleted message");
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].table,
+            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+        );
+        assert_eq!(output.deletes.len(), 2);
+        let delete_tables: Vec<_> = output.deletes.iter().map(|delete| delete.table).collect();
+        assert!(delete_tables.contains(&schema::REACTIONS));
+        assert!(delete_tables.contains(&schema::SEALED_REACTIONS));
     }
 
     #[test]

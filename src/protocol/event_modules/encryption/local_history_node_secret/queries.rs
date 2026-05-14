@@ -419,11 +419,7 @@ pub fn has_covering_ancestor(
 /// `workers/encryption.rs`. Both implementations must agree byte-for-byte
 /// — if they ever drift the admit gate could drop a message the worker
 /// would have decrypted (or vice versa).
-fn covers(
-    row: &LocalHistoryNodeSecretRow,
-    unix_minute: u64,
-    event_id_in_minute: EventId,
-) -> bool {
+fn covers(row: &LocalHistoryNodeSecretRow, unix_minute: u64, event_id_in_minute: EventId) -> bool {
     let row_end = row.range_start.saturating_add(row.range_width);
     if unix_minute < row.range_start || unix_minute >= row_end {
         return false;

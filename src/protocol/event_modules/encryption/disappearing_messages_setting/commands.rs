@@ -25,7 +25,9 @@ use super::types::DisappearingMessagesSettingEvent;
 /// The codec is intentionally lenient on decode; this helper is shared
 /// between the authoring path and the receive projector so a malformed
 /// peer event is rejected at projection time too.
-pub(super) fn validate_event_fields(event: &DisappearingMessagesSettingEvent) -> Result<(), String> {
+pub(super) fn validate_event_fields(
+    event: &DisappearingMessagesSettingEvent,
+) -> Result<(), String> {
     let expected = event.created_at_ms / 60_000;
     if event.effective_at_minute != expected {
         return Err(
@@ -150,8 +152,10 @@ pub fn author_set_with_auto_floor(
     // max(previous_floor, now_minute - new_ttl_minutes) so a setting
     // with a longer TTL stays at or above the previous floor, and a
     // setting with the same or shorter TTL monotonically advances it.
-    let auto_floor =
-        std::cmp::max(previous_floor, now_minute.saturating_sub(u64::from(input.ttl_minutes)));
+    let auto_floor = std::cmp::max(
+        previous_floor,
+        now_minute.saturating_sub(u64::from(input.ttl_minutes)),
+    );
     let new_floor = match input.explicit_floor {
         Some(value) => {
             if value < previous_floor {
@@ -308,15 +312,17 @@ pub fn author_compact(
     input: AuthorCompact,
 ) -> Result<CommandOutput<AuthorCompactReport>, String> {
     let auth = resolve_workspace_authority(store, input.workspace_id)?;
-    let active = setting_queries::active_for_workspace(store, input.workspace_id)?
-        .ok_or_else(|| {
+    let active =
+        setting_queries::active_for_workspace(store, input.workspace_id)?.ok_or_else(|| {
             "no active disappearing-messages setting; use disappearing-set first".to_string()
         })?;
     let previous_floor = active.expires_at_or_before_minute;
     let ttl_minutes = active.ttl_minutes;
     let now_minute = input.now_ms / UNIX_MINUTE_MS;
-    let target_floor =
-        std::cmp::max(previous_floor, now_minute.saturating_sub(u64::from(ttl_minutes)));
+    let target_floor = std::cmp::max(
+        previous_floor,
+        now_minute.saturating_sub(u64::from(ttl_minutes)),
+    );
     let inner = set(SetDisappearingMessages {
         workspace_id: input.workspace_id,
         created_at_ms: input.now_ms,

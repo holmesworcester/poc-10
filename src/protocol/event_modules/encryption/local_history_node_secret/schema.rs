@@ -17,8 +17,10 @@ use crate::core::store::{Schema, TableName, TableRow};
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::wire::{Reader, Writer};
 
-use super::types::{mask_prefix_to_depth, LocalHistoryNodeSecret, LocalHistoryNodeSecretRow,
-    LocalHistoryNodeTombstoneRow};
+use super::types::{
+    mask_prefix_to_depth, LocalHistoryNodeSecret, LocalHistoryNodeSecretRow,
+    LocalHistoryNodeTombstoneRow,
+};
 
 pub const LOCAL_HISTORY_NODE_SECRETS: TableName =
     TableName::new("encryption.local_history_node_secrets");
@@ -102,11 +104,7 @@ pub fn local_history_node_tombstone_row_by_id(
 ) -> TableRow {
     TableRow {
         table: LOCAL_HISTORY_NODE_TOMBSTONES,
-        key: local_history_node_tombstone_key(
-            workspace_id,
-            removal_frontier_id,
-            tombstone_node_id,
-        ),
+        key: local_history_node_tombstone_key(workspace_id, removal_frontier_id, tombstone_node_id),
         value: encode_tombstone_value(replacement_node_id, range_start, range_width),
     }
 }

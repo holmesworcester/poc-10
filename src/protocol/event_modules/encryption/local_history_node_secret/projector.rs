@@ -91,10 +91,7 @@ fn validate_source(
     event: &EventWithContext<'_>,
     node: &LocalHistoryNodeSecret,
 ) -> Result<Option<LocalHistoryNodeSecret>, String> {
-    let source = event
-        .context
-        .dependency(&node.source_secret_id)
-        .ok_or_else(|| "local history node source dependency is missing".to_string())?;
+    let source = event.context.require_dependency(&node.source_secret_id)?;
     if let Ok(source_node) = codec::decode(&source.canonical_bytes) {
         if source_node.workspace_id != node.workspace_id
             || source_node.removal_frontier_id != node.removal_frontier_id
@@ -178,10 +175,7 @@ fn decode_history_node(
     event: &EventWithContext<'_>,
     node_id: [u8; 32],
 ) -> Result<LocalHistoryNodeSecret, String> {
-    let record = event
-        .context
-        .dependency(&node_id)
-        .ok_or_else(|| "local history node tombstone dependency is missing".to_string())?;
+    let record = event.context.require_dependency(&node_id)?;
     codec::decode(&record.canonical_bytes)
         .map_err(|_| "local history node tombstone dependency is not a history node".to_string())
 }
@@ -276,7 +270,11 @@ mod tests {
                 event_id: event_id(&record.canonical_bytes),
                 dependencies: deps
                     .into_iter()
-                    .map(|(event_id, record)| DependencyContext { event_id, record })
+                    .map(|(event_id, record)| DependencyContext {
+                        event_id,
+                        record,
+                        labels: Vec::new(),
+                    })
                     .collect(),
                 labels: Vec::new(),
                 receive: None,

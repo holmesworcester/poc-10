@@ -97,14 +97,18 @@ single route/frame boundary.
   for the `connection` worker. Ordinary sync responses are queued for
   `transit_out` and sent on routed connections in later worker turns.
 - `event_admission`: consumes `canonical.in` rows. It inserts/dedupes events,
-  performs the initial dependency check, keeps receive metadata beside blocked
-  received events, and writes `event_modules.ready_events` or blocker indexes.
-  Transit provenance is checked here before unwrapped bytes can become ordinary
-  pipeline events.
+  invokes the owning projector with Applied direct-dependency context plus
+  labels, and either applies projector output or records the dependencies the
+  projector chose to wait on. Receive metadata is kept beside blocked received
+  events. Transit provenance is checked here before unwrapped bytes can become
+  ordinary pipeline events.
 - `event_projection`: consumes `event_modules.ready_events`, loads dependency
-  context, runs projectors, writes read models/module queues, marks events
-  applied, and writes `event_modules.recently_valid_events` plus
-  `event_modules.applied_shared_events` for shared events.
+  context, runs projectors, writes read models/module queues for Apply
+  decisions, or moves events back to Blocked for WaitForDeps decisions. Applied
+  events write `event_modules.recently_valid_events` plus
+  `event_modules.applied_shared_events` for shared events. The worker also
+  drains label-triggered reprojections so already-applied or blocked direct
+  dependents can re-evaluate semantic labels.
 - `dependency_unblock`: consumes `event_modules.recently_valid_events`, clears
   missing-dependency edges, and writes newly unblocked events to
   `event_modules.ready_events`.

@@ -112,6 +112,9 @@ mod tests {
         let mut candidate = event();
         candidate.workspace_id = [0; 32];
 
-        assert_eq!(decode(&encode(&candidate)).expect("decode lenient"), candidate);
+        assert_eq!(
+            decode(&encode(&candidate)).expect("decode lenient"),
+            candidate
+        );
     }
 }
