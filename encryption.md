@@ -39,6 +39,14 @@ window and bounds steady-state storage.
 
 ## Key derivation
 
+- **F's secret value is shared across peers; F's local storage is
+  per-peer.** F is the workspace's content-derivation root for a given
+  `removal_frontier`. The admin-signed frontier event implies a single F
+  secret; that secret is wrapped to each recipient via a `key_wrap`
+  event encrypted to the recipient's public key. Each peer unwraps its
+  own wrap to recover the SAME F secret value, then stores it locally
+  in its own `local_key_secret(F)` row. So the secret is shared by
+  construction; only the row holding it is per-peer.
 - F (`local_key_secret`) is decoded from a `key_wrap` payload by
   `derive_key_secrets` in `src/workers/encryption.rs` (using
   `crypto::x25519_xchacha20poly1305_decrypt`), then admitted as a
@@ -119,6 +127,18 @@ and `cover_summary_after_sparse_delete_is_logarithmic` tests in
 `src/workers/encryption.rs`).
 
 ## Forward-secrecy scope and the recipient-key rotation requirement
+
+**Rule in one paragraph**: F's secret value is shared across peers; F's
+local storage is per-peer. The first deletion on a peer that wipes its
+local F triggers an atomic rotation of that peer's recipient keypair —
+wipe the `local_recipient_key` private half, generate a fresh keypair,
+emit a self-signed `recipient_key` event carrying
+`previous_recipient_key_id` pointing at the wiped pubkey. The single
+event acts as both the tombstone of the old pubkey and the
+introduction of the new one. Subsequent deletions under the same
+(now-wiped) F do nothing further — F's row and the privkey are already
+gone. Per peer, per F: at most ONE rotation. Network total: O(N peers)
+per F over F's lifetime, eventually consistent.
 
 F-wipe + sibling-cover gives forward secrecy of the retired leaf only if
 F is also unrecoverable from disk-state through any other path. The

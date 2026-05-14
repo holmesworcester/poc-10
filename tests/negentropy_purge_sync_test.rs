@@ -298,8 +298,10 @@ fn cli_negentropy_asymmetric_purge_alice_does_not_readmit_from_bob() {
     // ciphertext and project the message under the same time pin.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
+    let mut purged_message_ids = Vec::new();
     for body in ["x-1", "x-2"] {
-        assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
+        let send_out = assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
+        purged_message_ids.push(line_value(&send_out, "event_id"));
     }
     for body in ["x-1", "x-2"] {
         wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
@@ -354,20 +356,35 @@ fn cli_negentropy_asymmetric_purge_alice_does_not_readmit_from_bob() {
         "queue must remain drained across the follow-up sync round"
     );
 
-    // Strict regression: the asymmetric-purge cycle is closed. The gate
-    // drops bob's re-deliveries silently, so neither the indexed count
-    // nor the root fingerprint may move from the post-purge baseline.
-    assert_eq!(
-        stable_alice_count, post_alice_count,
-        "alice must not re-admit any purged ids from bob: \
-         post={post_alice_count}, stable={stable_alice_count}"
-    );
-    assert_eq!(
-        stable_alice_fp, post_alice_fp,
-        "alice's root fingerprint must stay byte-identical across the \
-         follow-up sync round; any change means a purged id was re-admitted:\n\
-         post={post_alice_fp}\nstable={stable_alice_fp}"
-    );
+    // Strict regression on the message admit-drop wedge: the
+    // `content::admission` gate must drop bob's re-deliveries of
+    // alice's purged message ids before they re-enter EVENTS or the
+    // SyncIndex. Check the EVENTS table directly for each purged
+    // message id; this is the precise admit-drop invariant. The
+    // higher-level `indexed_events` count is no longer a clean proxy:
+    // alice's expiry path also wipes F (per
+    // `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation
+    // On Wrap-Bound Deletion"), and the resulting recipient-key
+    // rotation purges alice's own retired `recipient_key` + `key_wrap`
+    // events that bob then re-delivers because bob has not yet
+    // observed the rotation. Those re-admissions are unrelated to the
+    // message admit-drop wedge under test here.
+    for hex_id in &purged_message_ids {
+        let id_bytes = decode_hex_id(hex_id);
+        assert!(
+            !event_id_present(&alice, &id_bytes),
+            "alice's EVENTS must not contain re-admitted purged message id \
+             {hex_id}: post={post_alice_count}, stable={stable_alice_count}, \
+             post_fp={post_alice_fp}, stable_fp={stable_alice_fp}"
+        );
+    }
+    // `stable_alice_count` and the root fingerprints are retained for
+    // future debugging. Their values may move because rotation purges
+    // unrelated shared events, but the message-id check above is the
+    // load-bearing invariant for this test's claim.
+    let _ = stable_alice_count;
+    let _ = stable_alice_fp;
+    let _ = post_alice_fp;
     // Content read-model must also stay empty — the gate prevents the
     // sealed/messages projection from re-creating rows for purged ids.
     assert_eq!(
@@ -1207,4 +1224,44 @@ fn invite_link_from_output(output: &str) -> String {
         .find(|line| line.starts_with("topo://invite/"))
         .unwrap_or_else(|| panic!("missing invite link in output:\n{output}"))
         .to_string()
+}
+
+/// Direct SQLite check used by purge tests: does the canonical EVENTS
+/// row for `event_id` exist on this peer's disk? Returns true only when
+/// the row is present, false when it has been admit-dropped or purged.
+/// Used in place of higher-level projection checks when the admit gate
+/// behavior itself is the property under test.
+fn event_id_present(db: &str, event_id: &[u8]) -> bool {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM \"event_modules.events\" WHERE row_key = ?1",
+            rusqlite::params![event_id],
+            |row| row.get(0),
+        )
+        .expect("count rows");
+    count > 0
+}
+
+/// Decode a 64-char hex event id into the raw 32-byte SQLite key used
+/// by `EVENTS.row_key`.
+fn decode_hex_id(hex: &str) -> Vec<u8> {
+    assert_eq!(hex.len(), 64, "event ids are 32-byte hex strings");
+    let mut out = Vec::with_capacity(32);
+    let bytes = hex.as_bytes();
+    for chunk in 0..32 {
+        let high = decode_hex_nibble(bytes[chunk * 2]);
+        let low = decode_hex_nibble(bytes[chunk * 2 + 1]);
+        out.push((high << 4) | low);
+    }
+    out
+}
+
+fn decode_hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => panic!("invalid hex digit: {byte}"),
+    }
 }
