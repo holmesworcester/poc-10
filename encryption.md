@@ -134,31 +134,39 @@ frontier rotation) MUST also force every recipient that received a
 Wrap-Bound Deletion."
 
 When a peer processes a deletion (per-leaf retire, chop, or frontier
-rotation) whose effect wipes its local F:
+rotation) whose effect wipes its local F, the same transaction:
 
   * `local_key_secret(F)` row: **wiped** (this peer)
   * Descend-path internal nodes: **wiped** (this peer)
   * Canonical bytes for the wiped chain: **purged** (this peer)
   * `local_recipient_key` private key that unwrapped F: **wiped**
     (this peer)
-  * `recipient_key_tombstone` for the local pubkey: **emitted**,
-    self-signed by this peer, propagates via sync
-  * Fresh recipient keypair: **generated** before the next wrap exchange
+  * Fresh recipient keypair: **generated** (this peer)
+  * `recipient_key` event for the new pubkey carrying
+    `previous_recipient_key_id` pointing at the wiped pubkey:
+    **emitted**, self-signed by this peer
 
-Each peer's deletion processing drives its own rotation. The peer
-self-authors the tombstone using its endpoint signing key (which signed
-the original `recipient_key` event). No admin involvement.
+That single `recipient_key` event acts as both the tombstone of the
+old pubkey AND the introduction of the new pubkey. Every other peer
+admits it, marks the old pubkey revoked, and uses the new pubkey for
+future wraps to this peer.
 
 After rotation, the surviving `key_wrap` for F is encrypted to a pubkey
 whose private half no longer exists on this peer's disk. An attacker
 with disk access post-deletion cannot unwrap to recover F.
 
 Cost: O(1) per deletion per peer — one keypair regeneration + one
-signed tombstone. Each peer has exactly ONE `local_recipient_key` per
-F (since each F is wrapped to this peer once), so rotation is a fixed
-constant regardless of how many recipients are in the workspace. Other
-peers do not rotate when this peer rotates; they each rotate on the
-deletions THEY process locally.
+signed event. Each peer has exactly ONE `local_recipient_key` per F
+(since each F is wrapped to this peer once), so rotation is a fixed
+constant regardless of how many recipients are in the workspace.
+Other peers do not rotate when this peer rotates; they each rotate on
+the deletions THEY process locally.
+
+A recipient_key may have received many wraps over its lifetime — one
+per F the peer was wrapped into. Rotation invalidates all retained
+wraps to the old pubkey on this peer. Live frontiers other than the
+deleted one will need to be re-wrapped to the new pubkey via the
+normal key-distribution flow.
 
 ## Disappearing messages
 

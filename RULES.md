@@ -1030,22 +1030,38 @@ wrap addressed to that peer's `recipient_key`. So there is exactly ONE
 `local_recipient_key` private half per peer per F.
 
 Any deletion on a peer that wipes that peer's local F (per-leaf retire,
-chop, or frontier rotation) MUST also force that peer to:
+chop, or frontier rotation) MUST also force that peer to, in a single
+atomic step:
 
 1. Wipe the `local_recipient_key` private key that received F's wrap.
-2. Emit a `recipient_key_tombstone` for the corresponding recipient
-   public key, **signed by the peer itself** with its endpoint signing
-   key. The recipient authored the original `recipient_key` event, so it
-   has authority to author its tombstone — no admin involvement needed.
-   The tombstone propagates via sync so every other peer marks the
-   pubkey as revoked in their active set.
-3. Generate a fresh recipient keypair before participating in the next
-   wrap exchange. Other peers will wrap future F's to the fresh pubkey.
+2. Generate a fresh recipient keypair.
+3. Emit a `recipient_key` event for the new pubkey carrying a
+   `previous_recipient_key_id` (or equivalent) field that names the
+   tombstoned pubkey. The event is **signed by the peer itself** with
+   its endpoint signing key. The recipient authored the original
+   `recipient_key` event so it has authority to replace it — no admin
+   involvement needed.
 
-Trigger: the peer self-tombstones only AFTER it receives and processes
-the deletion event locally — never speculatively or eagerly on someone
+The new `recipient_key` event serves as both:
+  * The tombstone for the old pubkey (projector marks the old key
+    revoked + active wraps to it as obsolete).
+  * The introduction of the new pubkey (peers wrap future F's to it).
+
+One signed event covers both transitions; this is cheaper than two
+separate events and removes the eager-vs-lazy regeneration question
+entirely.
+
+Trigger: the peer rotates only AFTER it receives and processes the
+deletion event locally — never speculatively or eagerly on someone
 else's deletion. Each peer's retire path is what fires its own
 rotation.
+
+A recipient_key may receive MANY wraps over its lifetime (one per F
+the peer is wrapped into). Rotation invalidates ALL retained wraps to
+the old pubkey on this peer — that's the cost of deletion-driven
+rotation. Live frontiers other than the deleted one will need to be
+re-wrapped to the new pubkey by their authors as part of normal
+key-distribution flow.
 
 Without this rotation, the deletion's local F-wipe + sibling-cover
 mechanism does not provide forward secrecy. An attacker with disk
