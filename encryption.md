@@ -118,45 +118,48 @@ under sparse retirements (see the `sparse_delete_materializes_log_n_internals_no
 and `cover_summary_after_sparse_delete_is_logarithmic` tests in
 `src/workers/encryption.rs`).
 
-## Forward-secrecy scope and the pubkey reconstruction path
+## Forward-secrecy scope and the recipient-key rotation requirement
 
-The F-wipe + sibling-cover model provides forward secrecy of the retired
-leaf against an attacker who only retains the local history-node state.
-It does NOT block reconstruction paths that go through retained
-recipient-side key material.
+F-wipe + sibling-cover gives forward secrecy of the retired leaf only if
+F is also unrecoverable from disk-state through any other path. The
+non-trivial path is: a `key_wrap` event encrypts F to a recipient
+public key; the recipient's `local_recipient_key` private half can
+unwrap it. If both survive a deletion, F is reconstructible and the
+retire walk's local F-wipe is moot.
 
-After per-leaf retire on this peer:
+Therefore: **any deletion that wipes F (per-leaf retire, chop, or
+frontier rotation) MUST also force every recipient that received a
+`key_wrap` for that F to rotate their recipient keypair**. See
+`RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+Wrap-Bound Deletion."
 
-  * `local_key_secret(F)` row: **wiped**
-  * Descend-path internal nodes: **wiped**
-  * Canonical bytes for the wiped chain: **purged**
-  * `key_wrap` events that delivered F to recipients: **retained**
-  * `local_recipient_key` private keys: **retained**
-  * Sender wrap public keys carried in past wraps: **retained**
+After a wrap-bound deletion, every peer:
 
-An attacker with disk access post-retire who also has:
+  * `local_key_secret(F)` row: **wiped** (locally)
+  * Descend-path internal nodes: **wiped** (locally)
+  * Canonical bytes for the wiped chain: **purged** (locally)
+  * `recipient_key` events for recipients of `key_wrap`s on this F:
+    **tombstoned** (`recipient_key_tombstone` propagates to every peer)
 
-  * A `key_wrap` event for this F (any recipient), AND
-  * The corresponding `local_recipient_key` private key
+And on each affected recipient's own peer:
 
-can unwrap the retained wrap to recover F, then re-derive the retired
-leaf's secret via the deterministic KDF chain. The retire walk alone
-does not close this path.
+  * `local_recipient_key` private key for the tombstoned pubkey:
+    **wiped**
+  * Fresh recipient keypair generated for future wraps
 
-Closing it requires one of:
+After this, the surviving `key_wrap` event is encrypted to a pubkey
+whose private half no longer exists anywhere. An attacker with disk
+access post-deletion cannot unwrap to recover F, regardless of which
+peer's disk they compromise.
 
-  * Purging the `key_wrap` events for the retired F at retire time
-    (closes the wrap-bytes path).
-  * Revoking + wiping the `local_recipient_key` rows for recipients
-    of those wraps (closes the recipient-private-key path).
-  * Rotating to a fresh recipient public key whose private half never
-    existed on this peer (the TreeKEM-style approach).
-
-The current implementation does none of these on retire. Forward
-secrecy is therefore scoped to "attacker who compromises this peer's
-disk after retire, AND lacks any recipient private key for a wrap
-of the retired F." Within that scope the F-wipe guarantees hold;
-outside it, they don't.
+Cost note: rotating recipient keys on every per-leaf retire is
+expensive at scale (`N_recipients` tombstones + N keypair generations
+per retired message). Implementations may batch by chop range — one
+rotation per chop, all messages in the chopped range covered by the
+same rotation. The FS guarantee is then bounded by the rotation
+cadence: leaves retired between rotations are FS only after the next
+rotation. The current implementation's rotation policy lives in the
+deletion-driving code; check that worker for the actual cadence.
 
 ## Disappearing messages
 

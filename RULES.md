@@ -1022,6 +1022,40 @@ Workers that should NOT be siblings:
 - Pure queue drainers — fold into the owning worker as a step.
 - Pre-pass filters that only mutate one downstream worker's input — fold.
 
+## Forward Secrecy Requires Recipient Key Rotation On Wrap-Bound Deletion
+
+Any deletion that wipes a key-wrapped frontier secret F (per-leaf retire,
+chop, or whole-frontier rotation) MUST also force every recipient that
+received a `key_wrap` for that F to:
+
+1. Tombstone the recipient public key that received the wrap (so it is no
+   longer present in the workspace's active recipient set).
+2. Wipe the corresponding `local_recipient_key` private key on the
+   recipient's own peer (so retained wraps cannot be unwrapped).
+3. Generate a fresh recipient keypair before participating in the next
+   wrap exchange.
+
+Without this rotation, the deletion's local F-wipe + sibling-cover
+mechanism does not provide forward secrecy. An attacker with disk access
+post-deletion who also retains a `key_wrap` for the wiped F + the
+corresponding recipient private key can unwrap to recover F and
+re-derive the deleted leaf's secret. The recipient pubkey rotation
+breaks the wrap-unwrap path: the old wrap is encrypted to a pubkey whose
+private half is gone, and future wraps go to the fresh keypair.
+
+This rule applies whether the deletion is per-leaf (single message
+expiry/deletion), range (chop on tightening or cover-horizon advance),
+or wholesale (frontier rotation). The trigger is "any disk wipe of F
+that does not also wipe every wrap and every recipient private key for
+that F."
+
+The rule has cost implications: a deletion rate that requires rotating
+recipient keys on every retire is expensive at large recipient counts.
+Implementations may batch rotations (e.g., one rotation per chop range,
+not per leaf), but the FS guarantee is bounded by the rotation cadence,
+not the deletion cadence. Document the actual cadence wherever the
+deletion mechanism lives.
+
 ## In-Line Documentation Describes Current Code, Not History
 
 Every doc comment, module-level comment, and inline comment must describe the
