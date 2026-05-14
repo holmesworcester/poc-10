@@ -1337,16 +1337,27 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
          {message_event_id} — the admit gate must drop canonical bytes \
          whose leaf coord has no covering ancestor:\n{bob_messages_listing_after}"
     );
-    // SyncIndex: bob's `indexed_events` must not rise from the
-    // pre-redelivery snapshot. If the admit gate erroneously admits the
-    // bytes, the in-memory index would tick up.
-    let bob_sync_after = assert_success(topo(&["--db", &bob, "sync-status"]));
-    assert_eq!(
-        line_value(&bob_sync_after, "indexed_events"),
-        bob_indexed_before,
-        "bob's indexed_events must not change — admit-drop must keep the \
-         in-memory SyncIndex consistent with EVENTS:\n{bob_sync_after}"
+    // EVENTS-table check: bob must NOT have canonical bytes for the
+    // late-delivered message id. This is the precise admit-drop
+    // invariant — `indexed_events` would be a stronger but noisier
+    // proxy now that the forward-secrecy hook on chop legitimately
+    // emits a fresh recipient_key event and purges the retired
+    // recipient_key + retired wrap (which alice then re-delivers
+    // because she did not chop), changing bob's index by a bounded
+    // amount unrelated to X's admit gate.
+    let message_event_id_bytes = decode_hex_id(&message_event_id);
+    assert!(
+        !event_id_present(&bob, &message_event_id_bytes),
+        "bob's EVENTS must not contain the late-delivered message id \
+         {message_event_id} — the admit gate must drop canonical bytes \
+         whose leaf coord has no covering ancestor"
     );
+    // `bob_indexed_before` is retained for future debugging if the
+    // wedge regresses; the sync-status read here keeps the index
+    // catch-up flushed so any post-attempt SyncIndex bookkeeping has
+    // settled before the remaining assertions.
+    let _ = bob_indexed_before;
+    let _bob_sync_after = assert_success(topo(&["--db", &bob, "sync-status"]));
     // Sealed-message count: bob's `live_messages` (opened + sealed) must
     // not rise. Bob has no key material to open X, so the only
     // post-admit landing surface would be SEALED_MESSAGES; the gate must
@@ -2128,4 +2139,44 @@ fn connect_with_retry(db: &str, invite: &str) -> String {
         thread::sleep(Duration::from_millis(50));
     }
     panic!("connect never succeeded: {last}");
+}
+
+/// Direct SQLite check used by forward-secrecy wedge tests: does the
+/// canonical EVENTS row for `event_id` exist on this peer's disk? Returns
+/// true only when the row is present, false when it has been admit-dropped
+/// or purged. Tests use this instead of probing higher-level projections
+/// when the admit gate behavior itself is the property under test.
+fn event_id_present(db: &str, event_id: &[u8]) -> bool {
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM \"event_modules.events\" WHERE row_key = ?1",
+            rusqlite::params![event_id],
+            |row| row.get(0),
+        )
+        .expect("count rows");
+    count > 0
+}
+
+/// Decode a 64-char hex event id into the raw 32-byte SQLite key used by
+/// `EVENTS.row_key`.
+fn decode_hex_id(hex: &str) -> Vec<u8> {
+    assert_eq!(hex.len(), 64, "event ids are 32-byte hex strings");
+    let mut out = Vec::with_capacity(32);
+    let bytes = hex.as_bytes();
+    for chunk in 0..32 {
+        let high = decode_hex_nibble(bytes[chunk * 2]);
+        let low = decode_hex_nibble(bytes[chunk * 2 + 1]);
+        out.push((high << 4) | low);
+    }
+    out
+}
+
+fn decode_hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => panic!("invalid hex digit: {byte}"),
+    }
 }

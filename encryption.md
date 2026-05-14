@@ -133,8 +133,16 @@ frontier rotation) MUST also force every recipient that received a
 `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
 Wrap-Bound Deletion."
 
-When a peer processes a deletion (per-leaf retire, chop, or frontier
-rotation) whose effect wipes its local F, the same transaction:
+The trigger is the F-wipe, not the deletion event itself. Per-leaf
+retire / chop / frontier rotation all eventually wipe F's row on this
+peer. Whichever deletion is the FIRST under F to wipe F is the
+deletion that triggers rotation. Subsequent deletions under the same
+(now-wiped) F do not re-rotate — they walk siblings without touching
+the privkey, because F's row is gone and the privkey is gone.
+
+So per peer, per F, there is at most ONE rotation in F's lifetime.
+
+When the F-wipe fires on this peer, the same atomic step:
 
   * `local_key_secret(F)` row: **wiped** (this peer)
   * Descend-path internal nodes: **wiped** (this peer)
@@ -151,22 +159,29 @@ old pubkey AND the introduction of the new pubkey. Every other peer
 admits it, marks the old pubkey revoked, and uses the new pubkey for
 future wraps to this peer.
 
-After rotation, the surviving `key_wrap` for F is encrypted to a pubkey
-whose private half no longer exists on this peer's disk. An attacker
-with disk access post-deletion cannot unwrap to recover F.
+After rotation, the surviving `key_wrap` for F is encrypted to a
+pubkey whose private half no longer exists on this peer's disk. An
+attacker with disk access post-deletion cannot unwrap to recover F.
 
-Cost: O(1) per deletion per peer — one keypair regeneration + one
-signed event. Each peer has exactly ONE `local_recipient_key` per F
-(since each F is wrapped to this peer once), so rotation is a fixed
-constant regardless of how many recipients are in the workspace.
-Other peers do not rotate when this peer rotates; they each rotate on
-the deletions THEY process locally.
+Cost per peer: O(1) per F over the F's lifetime — one keypair
+regeneration + one signed event, fired by whichever deletion happens
+to be the first to wipe F locally. Subsequent deletions under the
+already-wiped F are free of rotation work. So if hundreds of
+disappearing messages expire under one F, only the first one triggers
+rotation on this peer.
+
+Network cost: O(N peers) per F over the F's lifetime (each peer
+rotates once when its own deletion path first wipes F). The FS
+guarantee is eventually consistent — provided every peer eventually
+processes the deletion that wipes F, the workspace converges to a
+state where F is unrecoverable from any peer's disk via any retained
+wrap.
 
 A recipient_key may have received many wraps over its lifetime — one
-per F the peer was wrapped into. Rotation invalidates all retained
-wraps to the old pubkey on this peer. Live frontiers other than the
-deleted one will need to be re-wrapped to the new pubkey via the
-normal key-distribution flow.
+per F the peer was wrapped into. The rotation event invalidates all
+retained wraps to the old pubkey on this peer. Live frontiers other
+than the deleted one will need to be re-wrapped to the new pubkey via
+the normal key-distribution flow.
 
 ## Disappearing messages
 
