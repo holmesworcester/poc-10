@@ -25,7 +25,7 @@
 
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
-use super::super::local_key_secret;
+use super::super::{key_wrap, local_key_secret};
 use super::types::{LocalHistoryNodeSecret, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH};
 use super::{codec, commands, schema};
 
@@ -35,24 +35,34 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     if event.record.workspace_id != Some(node.workspace_id) {
         return Err("local history node workspace metadata does not match event body".to_string());
     }
-    let source_node = validate_source(event, &node)?;
-    if let Some(source_node) = &source_node {
-        validate_child_addressing(source_node, &node)?;
-        if let Some(tombstone_node_id) = node.tombstone_node_id {
-            if tombstone_node_id != node.source_secret_id {
+    let source = validate_source(event, &node)?;
+    match &source {
+        SourceKind::HistoryNode(source_node) => {
+            validate_child_addressing(source_node, &node)?;
+            if let Some(tombstone_node_id) = node.tombstone_node_id {
+                if tombstone_node_id != node.source_secret_id {
+                    return Err(
+                        "local history node tombstone must retire its source path node".to_string(),
+                    );
+                }
+            }
+        }
+        SourceKind::Root | SourceKind::WrappedImport => {
+            if node.tombstone_node_id.is_some() {
                 return Err(
-                    "local history node tombstone must retire its source path node".to_string(),
+                    "local history node cannot tombstone without a history source".to_string(),
                 );
             }
         }
-    } else if node.tombstone_node_id.is_some() {
-        return Err("local history node cannot tombstone without a history source".to_string());
     }
 
-    let mut output = ProjectionOutput::rows(vec![schema::local_history_node_secret_row(
-        event.context.event_id,
-        &node,
-    )]);
+    let mut output = ProjectionOutput::rows(vec![
+        schema::local_history_node_secret_row(event.context.event_id, &node),
+        key_wrap::schema::pending_frontier_reconcile_row(
+            node.workspace_id,
+            node.removal_frontier_id,
+        ),
+    ]);
     if let Some(tombstone_node_id) = node.tombstone_node_id {
         let retired = decode_history_node(event, tombstone_node_id)?;
         if retired.workspace_id != node.workspace_id
@@ -87,10 +97,16 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     Ok(output)
 }
 
+enum SourceKind {
+    Root,
+    HistoryNode(LocalHistoryNodeSecret),
+    WrappedImport,
+}
+
 fn validate_source(
     event: &EventWithContext<'_>,
     node: &LocalHistoryNodeSecret,
-) -> Result<Option<LocalHistoryNodeSecret>, String> {
+) -> Result<SourceKind, String> {
     let source = event.context.require_dependency(&node.source_secret_id)?;
     if let Ok(source_node) = codec::decode(&source.canonical_bytes) {
         if source_node.workspace_id != node.workspace_id
@@ -98,16 +114,34 @@ fn validate_source(
         {
             return Err("local history node source workspace or frontier mismatch".to_string());
         }
-        return Ok(Some(source_node));
+        return Ok(SourceKind::HistoryNode(source_node));
     }
-    let source_key = local_key_secret::codec::decode(&source.canonical_bytes)
+    if let Ok(source_key) = local_key_secret::codec::decode(&source.canonical_bytes) {
+        if source_key.workspace_id != node.workspace_id
+            || source_key.removal_frontier_id != node.removal_frontier_id
+        {
+            return Err("local history node source workspace or frontier mismatch".to_string());
+        }
+        return Ok(SourceKind::Root);
+    }
+    let (_envelope, wrap) = key_wrap::projector::decode_signed_key_wrap_event(source)
         .map_err(|_| "local history node source dependency is not key material".to_string())?;
-    if source_key.workspace_id != node.workspace_id
-        || source_key.removal_frontier_id != node.removal_frontier_id
+    if wrap.wrapped_secret_kind != key_wrap::types::WrappedSecretKind::HistoryNode {
+        return Err("local history node wrapped source is not a history-node key wrap".to_string());
+    }
+    if wrap.workspace_id != node.workspace_id
+        || wrap.removal_frontier_id != node.removal_frontier_id
     {
         return Err("local history node source workspace or frontier mismatch".to_string());
     }
-    Ok(None)
+    if wrap.range_start != node.range_start
+        || wrap.range_width != node.range_width
+        || wrap.bit_depth != node.bit_depth
+        || wrap.event_id_prefix != node.event_id_prefix
+    {
+        return Err("local history node wrapped source coordinate mismatch".to_string());
+    }
+    Ok(SourceKind::WrappedImport)
 }
 
 fn validate_child_addressing(
@@ -292,7 +326,7 @@ mod tests {
 
         let output = project(&event).expect("project minute_node");
 
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows.len(), 2);
         assert_eq!(output.rows[0].table, schema::LOCAL_HISTORY_NODE_SECRETS);
         let row = schema::decode_local_history_node_secret_row(
             &output.rows[0].key,
@@ -331,7 +365,7 @@ mod tests {
 
         let output = project(&event).expect("project leaf");
 
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows.len(), 2);
         let row = schema::decode_local_history_node_secret_row(
             &output.rows[0].key,
             &output.rows[0].value,

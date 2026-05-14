@@ -10,6 +10,7 @@ use crate::protocol::event_modules::identity::{endpoint_shared, signed};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
 use super::super::{recipient_key, removal_frontier};
+use super::types::WrappedSecretKind;
 use super::{codec, commands, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
@@ -39,16 +40,36 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("key wrap recipient key workspace does not match event".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![
-        schema::key_secret_commitment_row(&key_wrap),
-        schema::key_wrap_row(
-            event.context.event_id,
-            envelope.signer_endpoint_shared_id,
-            envelope.signer_public_key,
-            &key_wrap,
-        ),
-        schema::pending_key_unwrap_row(event.context.event_id, &key_wrap),
-    ]))
+    let mut rows = Vec::with_capacity(3);
+    if key_wrap.wrapped_secret_kind == WrappedSecretKind::FrontierRoot {
+        rows.push(schema::key_secret_commitment_row(&key_wrap));
+    }
+    rows.push(schema::key_wrap_row(
+        event.context.event_id,
+        envelope.signer_endpoint_shared_id,
+        envelope.signer_public_key,
+        &key_wrap,
+    ));
+    rows.push(schema::pending_key_unwrap_row(
+        event.context.event_id,
+        &key_wrap,
+    ));
+    Ok(ProjectionOutput::rows(rows))
+}
+
+pub(crate) fn decode_signed_key_wrap_event(
+    record: &crate::protocol::event_modules::types::EventRecord,
+) -> Result<
+    (
+        super::types::SignedKeyWrapEnvelope,
+        super::types::KeyWrapEvent,
+    ),
+    String,
+> {
+    let envelope = codec::decode_signed(&record.canonical_bytes)?;
+    let key_wrap = codec::decode(&envelope.payload)?;
+    commands::validate_event_ids(&key_wrap)?;
+    Ok((envelope, key_wrap))
 }
 
 fn decode_signer_endpoint_shared(
@@ -187,7 +208,14 @@ mod tests {
             signer_endpoint_shared_id: signer_id,
             signer_private_key: [9; 32],
             removal_frontier_id: frontier_id,
-            local_key_secret_id: local_secret.local_key_secret_id,
+            wrapped_secret_kind: WrappedSecretKind::FrontierRoot,
+            wrapped_secret_id: local_secret.local_key_secret_id,
+            wrapped_source_secret_id: [0; 32],
+            wrapped_tombstone_node_id: [0; 32],
+            range_start: 0,
+            range_width: 0,
+            bit_depth: 0,
+            event_id_prefix: [0; 32],
             key_secret: local_secret.event.key_secret,
             recipient_key_id: recipient_id,
             recipient_key: recipient.recipient_key,

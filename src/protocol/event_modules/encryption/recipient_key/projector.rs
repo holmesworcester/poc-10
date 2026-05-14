@@ -31,6 +31,7 @@ use crate::protocol::event_modules::schema::EventLabel;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
+use super::super::key_wrap;
 use super::types::{is_superseded_label, superseded_label, NO_PREVIOUS_RECIPIENT_KEY};
 use super::{codec, commands, schema};
 
@@ -91,10 +92,13 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let mut output = if already_superseded {
         ProjectionOutput::rows(Vec::new())
     } else {
-        ProjectionOutput::rows(vec![schema::recipient_key_row(
-            event.context.event_id,
-            &recipient_key,
-        )?])
+        ProjectionOutput::rows(vec![
+            schema::recipient_key_row(event.context.event_id, &recipient_key)?,
+            key_wrap::schema::pending_recipient_key_reconcile_row(
+                recipient_key.workspace_id,
+                event.context.event_id,
+            ),
+        ])
     };
 
     if recipient_key.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
@@ -264,7 +268,7 @@ mod tests {
 
         let output = project(&event).expect("project recipient key");
 
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows.len(), 2);
         assert_eq!(output.rows[0].table, schema::RECIPIENT_KEYS);
         let row = schema::decode_recipient_key_row(&output.rows[0].key, &output.rows[0].value)
             .expect("decode row");
@@ -377,7 +381,11 @@ mod tests {
 
         let output = project(&event).expect("project supersession");
 
-        assert_eq!(output.rows.len(), 1, "must write one new row");
+        assert_eq!(
+            output.rows.len(),
+            2,
+            "must write one new row and one reconcile hint"
+        );
         assert_eq!(
             output.deletes.len(),
             1,

@@ -11,9 +11,10 @@ use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
 use super::schema::{
-    decode_key_wrap_row, decode_pending_key_unwrap_row, KEY_WRAPS, PENDING_KEY_UNWRAPS,
+    decode_key_wrap_row, decode_pending_key_unwrap_row, decode_pending_wrap_reconcile_row,
+    KEY_WRAPS, PENDING_KEY_UNWRAPS, PENDING_WRAP_RECONCILE,
 };
-use super::types::{KeyWrapRow, PendingKeyUnwrapRow};
+use super::types::{KeyWrapRow, PendingKeyUnwrapRow, PendingWrapReconcileRow};
 
 pub fn list_all(store: &Store) -> Result<Vec<KeyWrapRow>, String> {
     store
@@ -33,6 +34,14 @@ pub fn list_for_workspace(store: &Store, workspace_id: EventId) -> Result<Vec<Ke
         .collect()
 }
 
+pub fn get(store: &Store, key: &[u8]) -> Result<Option<KeyWrapRow>, String> {
+    store
+        .table_row(KEY_WRAPS, key)
+        .map_err(|err| format!("load key wrap: {err}"))?
+        .map(|value| decode_key_wrap_row(key, &value))
+        .transpose()
+}
+
 pub fn list_pending_unwraps(
     store: &Store,
     limit: usize,
@@ -42,6 +51,18 @@ pub fn list_pending_unwraps(
         .map_err(|err| format!("load pending key unwraps: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_pending_key_unwrap_row(key, &value))
+        .collect()
+}
+
+pub fn list_pending_wrap_reconcile(
+    store: &Store,
+    limit: usize,
+) -> Result<Vec<PendingWrapReconcileRow>, String> {
+    store
+        .table_rows_with_key_prefix(PENDING_WRAP_RECONCILE, &[], limit)
+        .map_err(|err| format!("load pending wrap reconcile rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_pending_wrap_reconcile_row(key, &value))
         .collect()
 }
 

@@ -14,7 +14,8 @@ use crate::protocol::event_modules::types::{EventId, EventRecord, EventScope};
 use crate::protocol::wire::{Reader, Writer};
 
 use super::types::{
-    KeyWrapCiphertext, KeyWrapEvent, SignedKeyWrapEnvelope, KEY_WRAP_CIPHERTEXT_BYTES,
+    KeyWrapCiphertext, KeyWrapEvent, SignedKeyWrapEnvelope, WrappedSecretKind,
+    KEY_WRAP_CIPHERTEXT_BYTES,
 };
 
 pub const TYPE_KEY_WRAP: u8 = 22;
@@ -24,6 +25,13 @@ pub const KEY_WRAP_WIRE_SIZE: usize = 1
     + 32
     + 8
     + 32
+    + 1
+    + 32
+    + 32
+    + 32
+    + 8
+    + 8
+    + 2
     + 32
     + 32
     + X25519_PUBLIC_KEY_BYTES
@@ -44,7 +52,14 @@ pub fn encode(event: &KeyWrapEvent) -> Vec<u8> {
     out.id(&event.workspace_id);
     out.u64(event.created_at_ms);
     out.id(&event.removal_frontier_id);
-    out.id(&event.local_key_secret_id);
+    out.u8(event.wrapped_secret_kind.as_u8());
+    out.id(&event.wrapped_secret_id);
+    out.id(&event.wrapped_source_secret_id);
+    out.id(&event.wrapped_tombstone_node_id);
+    out.u64(event.range_start);
+    out.u64(event.range_width);
+    out.u16(event.bit_depth);
+    out.id(&event.event_id_prefix);
     out.id(&event.recipient_key_id);
     out.id(&event.sender_wrap_public_key);
     out.raw(&event.nonce);
@@ -62,7 +77,14 @@ pub fn decode(bytes: &[u8]) -> Result<KeyWrapEvent, String> {
         workspace_id: reader.id()?,
         created_at_ms: reader.u64()?,
         removal_frontier_id: reader.id()?,
-        local_key_secret_id: reader.id()?,
+        wrapped_secret_kind: WrappedSecretKind::from_u8(reader.u8()?)?,
+        wrapped_secret_id: reader.id()?,
+        wrapped_source_secret_id: reader.id()?,
+        wrapped_tombstone_node_id: reader.id()?,
+        range_start: reader.u64()?,
+        range_width: reader.u64()?,
+        bit_depth: reader.u16()?,
+        event_id_prefix: reader.id()?,
         recipient_key_id: reader.id()?,
         sender_wrap_public_key: reader.id()?,
         nonce: fixed_nonce(reader.bytes(XCHACHA20_POLY1305_NONCE_BYTES)?)?,
@@ -131,11 +153,18 @@ pub fn signing_bytes(event: &SignedKeyWrapEnvelope) -> Vec<u8> {
 }
 
 pub fn associated_data(event: &KeyWrapEvent, signer_endpoint_shared_id: EventId) -> Vec<u8> {
-    let mut out = Writer::with_capacity(1 + (32 * 6));
+    let mut out = Writer::with_capacity(1 + (32 * 9) + 1 + 8 + 8 + 2);
     out.u8(TYPE_KEY_WRAP);
     out.id(&event.workspace_id);
     out.id(&event.removal_frontier_id);
-    out.id(&event.local_key_secret_id);
+    out.u8(event.wrapped_secret_kind.as_u8());
+    out.id(&event.wrapped_secret_id);
+    out.id(&event.wrapped_source_secret_id);
+    out.id(&event.wrapped_tombstone_node_id);
+    out.u64(event.range_start);
+    out.u64(event.range_width);
+    out.u16(event.bit_depth);
+    out.id(&event.event_id_prefix);
     out.id(&event.recipient_key_id);
     out.id(&event.sender_wrap_public_key);
     out.id(&signer_endpoint_shared_id);
@@ -227,7 +256,14 @@ mod tests {
             workspace_id: [1; 32],
             created_at_ms: 1234,
             removal_frontier_id: [2; 32],
-            local_key_secret_id: [3; 32],
+            wrapped_secret_kind: WrappedSecretKind::FrontierRoot,
+            wrapped_secret_id: [3; 32],
+            wrapped_source_secret_id: [0; 32],
+            wrapped_tombstone_node_id: [0; 32],
+            range_start: 0,
+            range_width: 0,
+            bit_depth: 0,
+            event_id_prefix: [0; 32],
             recipient_key_id: [4; 32],
             sender_wrap_public_key: [5; 32],
             nonce: [6; XCHACHA20_POLY1305_NONCE_BYTES],

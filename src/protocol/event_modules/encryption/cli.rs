@@ -334,7 +334,14 @@ fn run_key_wrap_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
         signer_endpoint_shared_id: membership.endpoint_shared_id,
         signer_private_key: local.signing_secret,
         removal_frontier_id,
-        local_key_secret_id: key_secret.local_key_secret_id,
+        wrapped_secret_kind: key_wrap::types::WrappedSecretKind::FrontierRoot,
+        wrapped_secret_id: key_secret.local_key_secret_id,
+        wrapped_source_secret_id: [0; 32],
+        wrapped_tombstone_node_id: [0; 32],
+        range_start: 0,
+        range_width: 0,
+        bit_depth: 0,
+        event_id_prefix: [0; 32],
         key_secret: key_secret.key_secret,
         recipient_key_id,
         recipient_key: recipient_key.recipient_key,
@@ -360,8 +367,8 @@ fn run_key_wrap_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
             hex_id(report.value.recipient_key_id)
         ),
         format!(
-            "local_key_secret_id: {}",
-            hex_id(report.value.local_key_secret_id)
+            "wrapped_secret_id: {}",
+            hex_id(report.value.wrapped_secret_id)
         ),
     ]))
 }

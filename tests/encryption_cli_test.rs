@@ -16,7 +16,7 @@ use std::time::Duration;
 use cli_harness::*;
 
 #[test]
-fn cli_key_wrap_derives_access_only_for_wrapped_recipient() {
+fn cli_key_wrap_derives_access_for_proactive_recipients() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
@@ -39,8 +39,7 @@ fn cli_key_wrap_derives_access_only_for_wrapped_recipient() {
         "carol-tablet",
     );
 
-    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
-    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
+    assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     assert_success(topo(&["--db", &carol, "key-recipient", &workspace_id]));
 
     let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
@@ -59,58 +58,10 @@ fn cli_key_wrap_derives_access_only_for_wrapped_recipient() {
         "yes"
     );
 
-    thread::sleep(Duration::from_millis(1200));
-    assert_eq!(
-        line_value(
-            &assert_success(topo(&[
-                "--db",
-                &bob,
-                "key-access",
-                &workspace_id,
-                &removal_frontier_id,
-            ])),
-            "access",
-        ),
-        "no"
-    );
-    assert_eq!(
-        line_value(
-            &assert_success(topo(&[
-                "--db",
-                &carol,
-                "key-access",
-                &workspace_id,
-                &removal_frontier_id,
-            ])),
-            "access",
-        ),
-        "no"
-    );
-
-    let wrapped = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &bob_recipient_id,
-    );
-    assert_eq!(line_value(&wrapped, "recipient_key_id"), bob_recipient_id);
-
     let bob_access = wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
     assert_eq!(line_value(&bob_access, "access"), "yes");
-
-    assert_eq!(
-        line_value(
-            &assert_success(topo(&[
-                "--db",
-                &carol,
-                "key-access",
-                &workspace_id,
-                &removal_frontier_id,
-            ])),
-            "access",
-        ),
-        "no"
-    );
+    let carol_access = wait_for_key_access(&carol, &workspace_id, &removal_frontier_id, "yes");
+    assert_eq!(line_value(&carol_access, "access"), "yes");
 }
 
 #[test]
@@ -953,31 +904,6 @@ fn invite_link_from_output(output: &str) -> String {
         .find(|line| line.starts_with("topo://invite/"))
         .unwrap_or_else(|| panic!("missing invite link in output:\n{output}"))
         .to_string()
-}
-
-fn key_wrap_with_retry(
-    db: &str,
-    workspace_id: &str,
-    removal_frontier_id: &str,
-    recipient_key_id: &str,
-) -> String {
-    let mut last = String::new();
-    for _ in 0..300 {
-        let output = topo(&[
-            "--db",
-            db,
-            "key-wrap",
-            workspace_id,
-            removal_frontier_id,
-            recipient_key_id,
-        ]);
-        if output.status.success() {
-            return stdout(&output);
-        }
-        last = stderr(&output);
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("key-wrap never succeeded: {last}");
 }
 
 fn wait_for_key_access(

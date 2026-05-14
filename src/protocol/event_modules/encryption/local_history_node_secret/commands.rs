@@ -105,6 +105,46 @@ pub struct LocalHistoryNodeSecretOutput {
     pub event: LocalHistoryNodeSecret,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportWrappedNodeSecret {
+    pub workspace_id: EventId,
+    pub removal_frontier_id: EventId,
+    pub key_wrap_id: EventId,
+    pub range_start: u64,
+    pub range_width: u64,
+    pub bit_depth: u16,
+    pub event_id_prefix: EventId,
+    pub node_secret: HistoryNodeSecret,
+}
+
+pub fn import_wrapped_node_secret(
+    input: ImportWrappedNodeSecret,
+) -> Result<CommandOutput<LocalHistoryNodeSecretOutput>, String> {
+    validate_id("workspace_id", &input.workspace_id)?;
+    validate_id("removal_frontier_id", &input.removal_frontier_id)?;
+    validate_id("key_wrap_id", &input.key_wrap_id)?;
+    validate_id("node_secret", &input.node_secret)?;
+    let event = LocalHistoryNodeSecret {
+        workspace_id: input.workspace_id,
+        removal_frontier_id: input.removal_frontier_id,
+        source_secret_id: input.key_wrap_id,
+        range_start: input.range_start,
+        range_width: input.range_width,
+        bit_depth: input.bit_depth,
+        event_id_prefix: input.event_id_prefix,
+        tombstone_node_id: None,
+        node_secret: input.node_secret,
+    };
+    validate_event_fields(&event)?;
+    let bytes = codec::encode(&event);
+    let record = codec::record_from_bytes(bytes)?;
+    let value = LocalHistoryNodeSecretOutput {
+        local_history_node_secret_id: event_id(&record.canonical_bytes),
+        event,
+    };
+    Ok(CommandOutput::with_events(value, vec![record]))
+}
+
 pub fn derive_time_split(
     input: DeriveTimeSplit,
 ) -> Result<CommandOutput<LocalHistoryNodeSecretOutput>, String> {
