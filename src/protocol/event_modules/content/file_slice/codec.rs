@@ -459,13 +459,9 @@ mod tests {
             assert!(event.proof.len() <= FILE_SLICE_PROOF_BYTES);
             encode(&event, &[9; 32]).expect("proof fits file slice slot");
 
-            let verified = extract_verified_slice_bytes(
-                &root_hash,
-                &event.proof,
-                slice_start,
-                slice_len,
-            )
-            .expect("verify slice proof");
+            let verified =
+                extract_verified_slice_bytes(&root_hash, &event.proof, slice_start, slice_len)
+                    .expect("verify slice proof");
             let expected_start = slice_start as usize;
             let expected_end = expected_start + slice_len as usize;
             assert_eq!(verified, ciphertext_total[expected_start..expected_end]);

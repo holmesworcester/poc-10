@@ -46,8 +46,7 @@ fn validate_workspace(
 ) -> Result<(), String> {
     let workspace = event
         .context
-        .dependency(&device_invite.workspace_id)
-        .ok_or_else(|| "device_invite workspace dependency is missing".to_string())?;
+        .require_dependency(&device_invite.workspace_id)?;
     workspace::codec::decode(&workspace.canonical_bytes)
         .map_err(|_| "device_invite workspace dependency is not a workspace".to_string())?;
     Ok(())
@@ -146,10 +145,8 @@ fn require_dependency<'a>(
     event_id: &EventId,
     name: &'static str,
 ) -> Result<&'a EventRecord, String> {
-    event
-        .context
-        .dependency(event_id)
-        .ok_or_else(|| format!("device_invite {name} dependency is missing"))
+    let _ = name;
+    event.context.require_dependency(event_id)
 }
 
 #[cfg(test)]
@@ -296,7 +293,11 @@ mod tests {
                 event_id,
                 dependencies: dependencies
                     .into_iter()
-                    .map(|(event_id, record)| DependencyContext { event_id, record })
+                    .map(|(event_id, record)| DependencyContext {
+                        event_id,
+                        record,
+                        labels: Vec::new(),
+                    })
                     .collect(),
                 labels: Vec::new(),
                 receive: None,

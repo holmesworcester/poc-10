@@ -39,7 +39,9 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
             Ok(Some(key_wrap::projector::project(event)?))
         }
         Some(disappearing_messages_setting::codec::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING) => {
-            Ok(Some(disappearing_messages_setting::projector::project(event)?))
+            Ok(Some(disappearing_messages_setting::projector::project(
+                event,
+            )?))
         }
         _ => Ok(None),
     }

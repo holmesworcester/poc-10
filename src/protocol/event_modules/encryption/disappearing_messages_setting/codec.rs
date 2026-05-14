@@ -123,7 +123,9 @@ pub fn decode_signed(bytes: &[u8]) -> Result<SignedDisappearingMessagesSettingEn
         &signing_bytes(&event),
         &event.signature,
     ) {
-        return Err("signed disappearing_messages_setting signature verification failed".to_string());
+        return Err(
+            "signed disappearing_messages_setting signature verification failed".to_string(),
+        );
     }
     Ok(event)
 }

@@ -55,10 +55,7 @@ fn decode_signer_endpoint_shared(
     event: &EventWithContext<'_>,
     endpoint_shared_id: [u8; 32],
 ) -> Result<endpoint_shared::types::EndpointSharedEvent, String> {
-    let record = event
-        .context
-        .dependency(&endpoint_shared_id)
-        .ok_or_else(|| "key wrap signer endpoint_shared dependency is missing".to_string())?;
+    let record = event.context.require_dependency(&endpoint_shared_id)?;
     let envelope = signed::codec::decode(&record.canonical_bytes)
         .map_err(|_| "key wrap signer dependency is not a signed endpoint_shared".to_string())?;
     if envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
@@ -72,10 +69,7 @@ fn decode_removal_frontier(
     event: &EventWithContext<'_>,
     removal_frontier_id: [u8; 32],
 ) -> Result<removal_frontier::types::RemovalFrontierEvent, String> {
-    let record = event
-        .context
-        .dependency(&removal_frontier_id)
-        .ok_or_else(|| "key wrap removal frontier dependency is missing".to_string())?;
+    let record = event.context.require_dependency(&removal_frontier_id)?;
     let envelope = removal_frontier::codec::decode_signed(&record.canonical_bytes)
         .map_err(|_| "key wrap dependency is not a removal frontier".to_string())?;
     removal_frontier::codec::decode(&envelope.payload)
@@ -86,10 +80,7 @@ fn decode_recipient_key(
     event: &EventWithContext<'_>,
     recipient_key_id: [u8; 32],
 ) -> Result<recipient_key::types::RecipientKeyEvent, String> {
-    let record = event
-        .context
-        .dependency(&recipient_key_id)
-        .ok_or_else(|| "key wrap recipient key dependency is missing".to_string())?;
+    let record = event.context.require_dependency(&recipient_key_id)?;
     let envelope = recipient_key::codec::decode_signed(&record.canonical_bytes)
         .map_err(|_| "key wrap dependency is not a recipient key".to_string())?;
     recipient_key::codec::decode(&envelope.payload)
@@ -164,8 +155,7 @@ mod tests {
                 endpoint_shared_id: signer_id,
                 signer_private_key: [9; 32],
                 recipient_key: local.recipient_key,
-                previous_recipient_key_id:
-                    recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
+                previous_recipient_key_id: recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
             })
             .expect("publish")
             .events[0]
@@ -225,14 +215,17 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: frontier_id,
                         record: frontier_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: recipient_id,
                         record: recipient_record,
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),

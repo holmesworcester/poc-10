@@ -75,6 +75,29 @@ pub(crate) fn purge_event_storage_in_tx(
         store.delete_table_rows_in_tx(schema::MISSING_DEPS_BY_BLOCKED_EVENT, reverse_keys)? > 0;
     deleted_any |=
         store.delete_table_rows_in_tx(schema::BLOCKED_EVENTS_BY_MISSING_DEP, forward_keys)? > 0;
+
+    // The event being purged is no longer a dependent that can be woken or
+    // projected. Remove its outgoing retained dependency edges. Keep incoming
+    // `DEPENDENTS_BY_DEP[event_id -> dependent]` edges: labels on this event id
+    // may still need to wake retained direct dependents after the canonical
+    // bytes are gone.
+    let direct_edges = store.table_rows_with_key_prefix(
+        schema::DEPS_BY_DEPENDENT,
+        event_id,
+        schema::MAX_DEPENDENCY_ROWS_PER_EVENT,
+    )?;
+    let mut direct_reverse_keys = Vec::with_capacity(direct_edges.len());
+    let mut direct_forward_keys = Vec::with_capacity(direct_edges.len());
+    for (key, _) in direct_edges {
+        let (dependent_id, dependency_id) = schema::split_edge_key(&key)?;
+        direct_reverse_keys.push(key);
+        direct_forward_keys.push(schema::edge_key(&dependency_id, &dependent_id));
+    }
+    deleted_any |=
+        store.delete_table_rows_in_tx(schema::DEPS_BY_DEPENDENT, direct_reverse_keys)? > 0;
+    deleted_any |=
+        store.delete_table_rows_in_tx(schema::DEPENDENTS_BY_DEP, direct_forward_keys)? > 0;
+
     deleted_any |= store.delete_table_rows_in_tx(schema::EVENTS, vec![event_id.to_vec()])? > 0;
 
     // Negentropy bookkeeping: only shared events are admitted to the
@@ -193,8 +216,7 @@ mod tests {
         };
         let target_id = event_id(&record.canonical_bytes);
 
-        event_lifecycle::insert_event(&store, &record, EventStatus::Ready)
-            .expect("insert event");
+        event_lifecycle::insert_event(&store, &record, EventStatus::Ready).expect("insert event");
 
         let purged = store
             .write_transaction(|store| purge_event_storage_in_tx(store, &target_id))
@@ -227,8 +249,7 @@ mod tests {
         };
         let target_id = event_id(&record.canonical_bytes);
 
-        event_lifecycle::insert_event(&store, &record, EventStatus::Applied)
-            .expect("insert event");
+        event_lifecycle::insert_event(&store, &record, EventStatus::Applied).expect("insert event");
 
         store
             .write_transaction(|store| purge_event_storage_in_tx(store, &target_id))

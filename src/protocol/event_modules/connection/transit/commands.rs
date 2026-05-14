@@ -179,7 +179,10 @@ mod tests {
     #[test]
     fn exact_cap_fit_is_one_batch() {
         let batches = batch_inner_events(
-            vec![TRANSIT_TARGET_PLAINTEXT_BYTES / 2, TRANSIT_TARGET_PLAINTEXT_BYTES / 2],
+            vec![
+                TRANSIT_TARGET_PLAINTEXT_BYTES / 2,
+                TRANSIT_TARGET_PLAINTEXT_BYTES / 2,
+            ],
             identity_size,
         );
         assert_eq!(batches.len(), 1);

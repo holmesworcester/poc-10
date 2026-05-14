@@ -189,7 +189,10 @@ fn run_create_workspace_command(
         ),
         format!("admin_id: {}", encode_hex(&admin_id)),
         format!("initial_setting_id: {}", encode_hex(&initial_setting_id)),
-        format!("disappearing_ttl_minutes: {}", options.disappearing_ttl_minutes),
+        format!(
+            "disappearing_ttl_minutes: {}",
+            options.disappearing_ttl_minutes
+        ),
     ]))
 }
 

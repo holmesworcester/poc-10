@@ -62,8 +62,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
         // dependencies from context instead of doing side lookups.
         let invite_secret = envelope
             .context
-            .dependency(&event.invite_secret_event_id)
-            .ok_or_else(|| "connection request missing invite secret dependency".to_string())?;
+            .require_dependency(&event.invite_secret_event_id)?;
         let invite_secret = invite::codec::decode(&invite_secret.canonical_bytes)
             .map_err(|_| "connection request dependency is not an invite secret".to_string())?;
         commands::validate_invite_signature(&event, &invite_secret)?;
@@ -78,8 +77,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
         // validates the public key through the bootstrap receive proof instead.
         let ephemeral = envelope
             .context
-            .dependency(&event.initiator_ephemeral_secret_event_id)
-            .ok_or_else(|| "connection request missing ephemeral dependency".to_string())?;
+            .require_dependency(&event.initiator_ephemeral_secret_event_id)?;
         let ephemeral = connection_ephemeral_secret::codec::decode(&ephemeral.canonical_bytes)
             .map_err(|_| "connection request dependency is not an ephemeral secret".to_string())?;
         if ephemeral.owner_endpoint != event.from_endpoint {
@@ -92,8 +90,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
         }
         let invite_secret = envelope
             .context
-            .dependency(&event.invite_secret_event_id)
-            .ok_or_else(|| "connection request missing invite secret dependency".to_string())?;
+            .require_dependency(&event.invite_secret_event_id)?;
         let invite_secret = invite::codec::decode(&invite_secret.canonical_bytes)
             .map_err(|_| "connection request dependency is not an invite secret".to_string())?;
         commands::validate_invite_signature(&event, &invite_secret)?;
@@ -151,10 +148,12 @@ mod tests {
                     DependencyContext {
                         event_id: invite_secret_event_id,
                         record: invite_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: ephemeral_secret_event_id,
                         record: ephemeral_record,
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),
@@ -295,6 +294,7 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: invite_secret_event_id,
                     record: invite_record,
+                    labels: Vec::new(),
                 }],
                 labels: Vec::new(),
                 receive: Some(ReceiveMetadata::bootstrap_invite(
@@ -326,6 +326,7 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: invite_secret_event_id,
                     record: invite_record,
+                    labels: Vec::new(),
                 }],
                 labels: Vec::new(),
                 receive: Some(ReceiveMetadata::bootstrap_invite(
@@ -355,6 +356,7 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: invite_secret_event_id,
                     record: invite_record,
+                    labels: Vec::new(),
                 }],
                 labels: Vec::new(),
                 receive: Some(ReceiveMetadata::bootstrap_invite(
@@ -398,24 +400,25 @@ mod tests {
     fn rejects_received_request_when_invite_secret_dependency_is_missing() {
         let (record, _, _, _, _) = authorized_request_record();
 
-        assert_eq!(
-            project(&EventWithContext {
-                record: &record,
-                context: EventContext {
-                    event_id: types::event_id(&record.canonical_bytes),
-                    dependencies: Vec::new(),
-                    labels: Vec::new(),
-                    receive: Some(ReceiveMetadata::bootstrap_invite(
-                        "127.0.0.1:9000".parse::<SocketAddr>().expect("addr"),
-                        [9; 32],
-                        [1; 32],
-                        true,
-                    )),
-                    now_unix_minute: None,
-                },
-            })
-            .expect_err("missing invite dependency must fail"),
-            "connection request missing invite secret dependency"
+        let err = project(&EventWithContext {
+            record: &record,
+            context: EventContext {
+                event_id: types::event_id(&record.canonical_bytes),
+                dependencies: Vec::new(),
+                labels: Vec::new(),
+                receive: Some(ReceiveMetadata::bootstrap_invite(
+                    "127.0.0.1:9000".parse::<SocketAddr>().expect("addr"),
+                    [9; 32],
+                    [1; 32],
+                    true,
+                )),
+                now_unix_minute: None,
+            },
+        })
+        .expect_err("missing invite dependency must wait");
+        assert!(
+            crate::workers::pipeline_helpers::event_pipeline::is_wait_for_dependency_error(&err),
+            "{err}"
         );
     }
 
@@ -435,6 +438,7 @@ mod tests {
                     dependencies: vec![DependencyContext {
                         event_id: invite_secret_event_id,
                         record: wrong_invite_record,
+                        labels: Vec::new(),
                     }],
                     labels: Vec::new(),
                     receive: Some(ReceiveMetadata::bootstrap_invite(
@@ -467,6 +471,7 @@ mod tests {
                     dependencies: vec![DependencyContext {
                         event_id: invite_secret_event_id,
                         record: invite_record,
+                        labels: Vec::new(),
                     }],
                     labels: Vec::new(),
                     receive: Some(ReceiveMetadata::bootstrap_invite(
@@ -498,6 +503,7 @@ mod tests {
                     dependencies: vec![DependencyContext {
                         event_id: invite_secret_event_id,
                         record: invite_record,
+                        labels: Vec::new(),
                     }],
                     labels: Vec::new(),
                     receive: Some(ReceiveMetadata::bootstrap_invite(

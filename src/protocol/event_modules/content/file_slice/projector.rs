@@ -14,8 +14,12 @@
 //! unblocks the slice.
 
 use crate::protocol::event_modules::content::file;
+use crate::protocol::event_modules::content::file_deletion::types::deletion_label_author as file_deletion_label_author;
+use crate::protocol::event_modules::content::message_deletion::schema::{
+    purge_instruction_row, PurgeKind,
+};
 use crate::protocol::event_modules::identity::{endpoint_shared, signed};
-use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
+use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
 use super::{codec, schema};
 
@@ -28,28 +32,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("file slice workspace metadata does not match event body".to_string());
     }
 
-    let signer = event
-        .context
-        .dependency(&envelope.signer_endpoint_shared_id)
-        .ok_or_else(|| "file slice signer endpoint_shared dependency is missing".to_string())?;
-    let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
-        .map_err(|_| "file slice signer dependency is not a signed endpoint_shared".to_string())?;
-    if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
-        return Err("file slice signer dependency is not a signed endpoint_shared".to_string());
-    }
-    let signer_endpoint_shared = endpoint_shared::codec::decode(&signer_envelope.payload)
-        .map_err(|_| "file slice signer dependency is not a signed endpoint_shared".to_string())?;
-    if signer_endpoint_shared.workspace_id != slice.workspace_id {
-        return Err("file slice signer endpoint_shared workspace does not match slice".to_string());
-    }
-    if signer_endpoint_shared.signing_public_key != envelope.signer_public_key {
-        return Err("file slice signer public key does not match endpoint_shared".to_string());
-    }
-
-    let descriptor = event
-        .context
-        .dependency(&file_event_id)
-        .ok_or_else(|| "file slice file descriptor dependency is missing".to_string())?;
+    let descriptor = event.context.require_dependency(&file_event_id)?;
     let descriptor_envelope = file::codec::decode_signed(&descriptor.canonical_bytes)
         .map_err(|_| "file slice descriptor dependency is not a signed file".to_string())?;
     let descriptor_file = file::codec::decode(&descriptor_envelope.payload)
@@ -67,6 +50,47 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
     if slice.slice_number >= descriptor_file.total_slices {
         return Err("file slice number is out of range for descriptor".to_string());
+    }
+    let descriptor_deleted_by_author = event
+        .context
+        .dependency_labels(&file_event_id)
+        .unwrap_or(&[])
+        .iter()
+        .any(|label| {
+            file_deletion_label_author(label)
+                .map(|author| author == descriptor_file.author_user_id)
+                .unwrap_or(false)
+        });
+    if descriptor_deleted_by_author {
+        return Ok(ProjectionOutput {
+            rows: vec![purge_instruction_row(
+                slice.workspace_id,
+                event.context.event_id,
+                PurgeKind::FileSlice,
+            )],
+            deletes: vec![TableDelete {
+                table: schema::FILE_SLICES,
+                key: schema::file_slice_key(slice.workspace_id, slice.file_id, slice.slice_number),
+            }],
+            labels: Vec::new(),
+        });
+    }
+
+    let signer = event
+        .context
+        .require_dependency(&envelope.signer_endpoint_shared_id)?;
+    let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
+        .map_err(|_| "file slice signer dependency is not a signed endpoint_shared".to_string())?;
+    if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+        return Err("file slice signer dependency is not a signed endpoint_shared".to_string());
+    }
+    let signer_endpoint_shared = endpoint_shared::codec::decode(&signer_envelope.payload)
+        .map_err(|_| "file slice signer dependency is not a signed endpoint_shared".to_string())?;
+    if signer_endpoint_shared.workspace_id != slice.workspace_id {
+        return Err("file slice signer endpoint_shared workspace does not match slice".to_string());
+    }
+    if signer_endpoint_shared.signing_public_key != envelope.signer_public_key {
+        return Err("file slice signer public key does not match endpoint_shared".to_string());
     }
 
     // Compute expected ciphertext layout: every full plaintext slice
@@ -319,10 +343,12 @@ mod tests {
                     DependencyContext {
                         event_id: built.signer_id,
                         record: built.signer_record.clone(),
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.descriptor_id,
                         record: built.descriptor_record.clone(),
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),
@@ -354,6 +380,38 @@ mod tests {
         // (The plaintext here is sequential bytes 0..N which is unlikely to
         // appear in random ciphertext, but we still check.)
         assert!(row.ciphertext != built.plaintext);
+    }
+
+    #[test]
+    fn deleted_descriptor_label_suppresses_slice_and_emits_purge_intent() {
+        let built = build_slice(0, 1024, 2);
+        let mut event = context_for(&built);
+        let descriptor_envelope =
+            file::codec::decode_signed(&built.descriptor_record.canonical_bytes)
+                .expect("descriptor envelope");
+        let descriptor = file::codec::decode(&descriptor_envelope.payload).expect("descriptor");
+        event
+            .context
+            .dependencies
+            .iter_mut()
+            .find(|dependency| dependency.event_id == built.descriptor_id)
+            .expect("descriptor dependency")
+            .labels
+            .push(
+                crate::protocol::event_modules::content::file_deletion::types::deletion_label(
+                    &descriptor.author_user_id,
+                ),
+            );
+
+        let output = project(&event).expect("project slice under deleted descriptor");
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].table,
+            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+        );
+        assert_eq!(output.deletes.len(), 1);
+        assert_eq!(output.deletes[0].table, schema::FILE_SLICES);
     }
 
     #[test]

@@ -33,16 +33,8 @@ pub const MESSAGE_ENCRYPTION_PURPOSE: &[u8] = b"topo message text v4";
 /// the message was authored — a signed `disappearing_messages_setting`
 /// event id. The projector validates that `expires_at_minute` is
 /// consistent with the referenced policy.
-pub const MESSAGE_WIRE_SIZE: usize = 1
-    + 32
-    + 8
-    + 32
-    + 32
-    + 32
-    + 8
-    + 32
-    + XCHACHA20_POLY1305_NONCE_BYTES
-    + MESSAGE_CIPHERTEXT_BYTES;
+pub const MESSAGE_WIRE_SIZE: usize =
+    1 + 32 + 8 + 32 + 32 + 32 + 8 + 32 + XCHACHA20_POLY1305_NONCE_BYTES + MESSAGE_CIPHERTEXT_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MessageMetadata {

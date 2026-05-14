@@ -409,13 +409,7 @@ fn cli_chop_now_reports_non_zero_tombstones_for_non_zero_floor() {
     let workspace_id = create_workspace_with_ttl(&alice, "ChopNow", "alice", "alice-laptop", 5);
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
 
-    let chop = assert_success(topo(&[
-        "--db",
-        &alice,
-        "chop-now",
-        &workspace_id,
-        "100",
-    ]));
+    let chop = assert_success(topo(&["--db", &alice, "chop-now", &workspace_id, "100"]));
     assert_eq!(line_value(&chop, "floor_minute"), "100");
     let subtree: u64 = line_value(&chop, "subtree_tombstones_written")
         .parse()

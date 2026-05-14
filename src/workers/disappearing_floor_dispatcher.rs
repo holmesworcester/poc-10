@@ -316,13 +316,8 @@ mod tests {
     /// Insert a workspace projection row (without going through the codec /
     /// projector) so the dispatcher's `workspace_queries::list_all` finds it.
     fn seed_workspace_row(store: &Store) {
-        let row = workspace_schema::workspace_row(
-            WORKSPACE,
-            1,
-            [4; 32],
-            "test",
-        )
-        .expect("workspace row");
+        let row =
+            workspace_schema::workspace_row(WORKSPACE, 1, [4; 32], "test").expect("workspace row");
         store
             .insert_table_rows(vec![row])
             .expect("insert workspace row");
@@ -370,14 +365,7 @@ mod tests {
         let now_minute = COVER_HORIZON_MINUTES + 50;
         logical_clock::set_logical_time(&store, now_minute * UNIX_MINUTE_MS).expect("set clock");
 
-        let report = run(
-            &store,
-            &protocol,
-            Work::Drain {
-                limit: usize::MAX,
-            },
-        )
-        .expect("dispatch");
+        let report = run(&store, &protocol, Work::Drain { limit: usize::MAX }).expect("dispatch");
         assert_eq!(report.chops_issued, 1);
         assert_eq!(report.frontiers_visited, 1);
 
@@ -408,12 +396,7 @@ mod tests {
         // Clock pinned somewhere small so the horizon floor is 0.
         logical_clock::set_logical_time(&store, 12_000_000).expect("set clock");
 
-        let report = run(
-            &store,
-            &protocol,
-            Work::Drain { limit: usize::MAX },
-        )
-        .expect("dispatch");
+        let report = run(&store, &protocol, Work::Drain { limit: usize::MAX }).expect("dispatch");
         assert_eq!(report.chops_issued, 1);
         assert_eq!(
             setting_queries::get_last_chopped_floor(&store, WORKSPACE, frontier_id)
@@ -444,12 +427,7 @@ mod tests {
         let now_minute = COVER_HORIZON_MINUTES + 1000;
         logical_clock::set_logical_time(&store, now_minute * UNIX_MINUTE_MS).expect("set clock");
 
-        let report = run(
-            &store,
-            &protocol,
-            Work::Drain { limit: usize::MAX },
-        )
-        .expect("dispatch");
+        let report = run(&store, &protocol, Work::Drain { limit: usize::MAX }).expect("dispatch");
         assert_eq!(report.chops_issued, 1);
         let last = setting_queries::get_last_chopped_floor(&store, WORKSPACE, frontier_id)
             .expect("get last chopped");
@@ -471,12 +449,8 @@ mod tests {
         seed_setting(&store, [42; 32], 5, 12_000_000, 100);
         logical_clock::set_logical_time(&store, 12_000_000).expect("set clock");
 
-        let first = run(
-            &store,
-            &protocol,
-            Work::Drain { limit: usize::MAX },
-        )
-        .expect("first dispatch");
+        let first =
+            run(&store, &protocol, Work::Drain { limit: usize::MAX }).expect("first dispatch");
         assert_eq!(first.chops_issued, 1);
 
         let pre_tombstones =
@@ -484,12 +458,8 @@ mod tests {
                 .expect("pre tombstones")
                 .len();
 
-        let second = run(
-            &store,
-            &protocol,
-            Work::Drain { limit: usize::MAX },
-        )
-        .expect("second dispatch");
+        let second =
+            run(&store, &protocol, Work::Drain { limit: usize::MAX }).expect("second dispatch");
         assert_eq!(second.chops_issued, 0, "second tick must be a no-op");
         assert_eq!(second.frontiers_visited, 1);
 
@@ -524,12 +494,8 @@ mod tests {
             logical_clock::set_logical_time(&store, now_minute * UNIX_MINUTE_MS)
                 .expect("set clock");
 
-            let report = run(
-                &store,
-                &protocol,
-                Work::Drain { limit: usize::MAX },
-            )
-            .expect("dispatch");
+            let report =
+                run(&store, &protocol, Work::Drain { limit: usize::MAX }).expect("dispatch");
             assert_eq!(report.chops_issued, 1, "advancing clock must chop");
 
             let new_last = setting_queries::get_last_chopped_floor(&store, WORKSPACE, frontier_id)
@@ -558,12 +524,7 @@ mod tests {
         // semantics simple.)
         seed_setting(&store, [42; 32], 5, 12_000_000, 100);
 
-        let report = run(
-            &store,
-            &protocol,
-            Work::Drain { limit: usize::MAX },
-        )
-        .expect("dispatch");
+        let report = run(&store, &protocol, Work::Drain { limit: usize::MAX }).expect("dispatch");
         assert_eq!(report.chops_issued, 0);
         assert_eq!(report.frontiers_visited, 0);
         assert_eq!(

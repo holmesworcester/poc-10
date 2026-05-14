@@ -105,6 +105,64 @@ worker rules are authoritative.
   events plus durable purge of obsolete event bytes and local secrets after
   durable deletion/frontier facts preserve semantic state.
 
+# Deletion, Labels, and Purge Responsibility
+
+Semantic deletion is expressed as durable labels on event ids. A deletion
+event does not need the target event bytes to be present: it validates the
+authority it can see, writes a terminal label on the target id, and then
+returns ordinary row-shaped projector output. Labels are retained even when
+canonical event bytes are purged, so re-delivery cannot resurrect rows that
+the local store has already learned are terminal.
+
+Projectors own semantic SQLite row effects. When a projector sees a relevant
+label on its own event id or on a direct dependency, it decides whether to
+write normal read-model rows, delete/suppress rows it owns, write tombstones,
+attach follow-up labels, or emit a durable purge intent row. This keeps policy
+with the event schema that understands the row keys and authorization rule.
+Receive-side admit gates may still protect local capability boundaries, but
+they should not be the long-term home for semantic deletion policy.
+
+Workers own physical retention cleanup. A projector may request cleanup by
+emitting a typed purge intent, but the worker that drains that intent is
+responsible for deleting canonical bytes, lifecycle/index rows, sync-index
+purge bookkeeping, and any post-commit leaf-retirement work. The physical
+purge helper must preserve labels and must not decide new protocol meaning.
+
+Deletion propagation follows direct dependencies. If deleting event `A` must
+delete or suppress event `B`, then `B` must either directly depend on `A` or
+receive a terminal label from a projector that directly depends on `A`.
+Relying on transitive dependency chains is not enough once intermediate event
+bytes can be purged. The pipeline therefore retains all direct-dependency
+edges, not only unresolved missing-dependency edges. Writing a new label wakes
+the labeled event and its already-admitted direct dependents so their
+projectors can re-evaluate with current labels.
+
+Blocking is a projector decision at the semantic boundary. The common worker
+may keep retry indexes for events whose declared dependencies are not Applied,
+but label wake can still give a Blocked event an opportunistic projector pass.
+The context loader supplies only Applied dependency records; a missing record
+means "the projector must decide whether it still needs this fact", not "the
+common worker has made a semantic deletion decision." Content projectors use
+this to emit purge/delete output for labeled messages, files, reactions, and
+file slices before asking for ordinary validation dependencies that no longer
+matter.
+
+This policy exists because labels sometimes need to affect events that are
+already Blocked. A deletion, supersession, expiry, or other terminal label can
+make an event obsolete before every ordinary dependency is available; if the
+context fetcher blocks first, the projector never gets a chance to observe the
+label and emit the purge/delete/suppress output. Projectors are the natural
+place for this branch because they already understand the event bytes, the row
+keys they own, and the authorization rule for whether a label is relevant.
+The common worker should therefore only record the projector's wait decision,
+not decide semantic blocking before projection.
+
+The current implementation is still transitional around physical cleanup.
+Content deletion projectors write target labels and purge intent rows, and
+message/reaction/file/file-slice projectors own the visible row suppression for
+labels they can authorize. The remaining cleanup is to shrink `content_purge`
+into a mostly mechanical physical cleanup and retire-coordinates executor.
+
 ### Design note: file descriptor `root_hash` is plaintext
 
 In the encrypted file shape, `filename` and `mime` ride in an authenticated
@@ -1150,9 +1208,9 @@ boundedly.
 
 **labels** is a table whose rows are tuples of (event_id, label_type); adding a label can be a result of projection. Labels become part of context so there should be a bounded number of labels for a given event_id. "This event blocks others" can be a label. 
 
-**blocking** is protocol-worker-owned policy over core-maintained queues. A blocked event remains an `events` row with `status = blocked`; each missing dependency is a `blocked_by_event(blocked_by_event_id, event_id)` row.
+**blocking** is a projector decision recorded by the protocol worker. A blocked event remains an `events` row with `status = blocked`; each dependency the projector chose to wait on is a `blocked_by_event(blocked_by_event_id, event_id)` row. The context fetcher does not reject or block on missing dependency records by itself; it supplies the Applied records and labels it has, then lets the projector decide whether the missing fact still matters.
 
-**project** consumes an EventWithContext and returns either RejectedEvent (if known invalid), BlockedEvent, or StateUpdates.
+**project** consumes an EventWithContext and returns either RejectedEvent (if known invalid), WaitForDeps, or StateUpdates.
 
 **apply** consumes StateUpdates, applies them to State, and returns an AppliedEvent. There must be no writes (or at least no *context-relevant* writes) between the `get_context` and `apply` steps.
 

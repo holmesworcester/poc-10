@@ -9,11 +9,14 @@
 //! The common worker relies on small generic indexes. `EVENTS` stores canonical
 //! durable bytes and a compact header. `READY_EVENTS` and the two missing-dep
 //! edge tables make admission incremental: inserting a newly applied dependency
-//! only has to inspect events known to be waiting on that dependency.
-//! `TIMESTAMP_EVENTS` gives sync a timestamp-ordered feed of shared event ids
-//! without teaching core what an event is. Operational worker queues live under
-//! `src/workers/schema.rs`. Labels are generic, bounded context for projectors;
-//! richer read models belong in scoped module schema files.
+//! only has to inspect events known to be waiting on that dependency. The two
+//! retained direct-dependency edge tables keep every declared edge, including
+//! edges that are already satisfied, so a later label write can wake exactly the
+//! labeled event and its direct dependents. `TIMESTAMP_EVENTS` gives sync a
+//! timestamp-ordered feed of shared event ids without teaching core what an
+//! event is. Operational worker queues live under `src/workers/schema.rs`.
+//! Labels are generic, bounded context for projectors; richer read models belong
+//! in scoped module schema files.
 
 use crate::core::store::{table_error, Schema, Store, TableName, TableRow};
 use crate::protocol::event_modules::types::{
@@ -27,6 +30,8 @@ pub const BLOCKED_EVENTS_BY_MISSING_DEP: TableName =
     TableName::new("event_modules.blocked_events_by_missing_dep");
 pub const MISSING_DEPS_BY_BLOCKED_EVENT: TableName =
     TableName::new("event_modules.missing_deps_by_blocked_event");
+pub const DEPENDENTS_BY_DEP: TableName = TableName::new("event_modules.dependents_by_dep");
+pub const DEPS_BY_DEPENDENT: TableName = TableName::new("event_modules.deps_by_dependent");
 pub const EVENT_LABELS: TableName = TableName::new("event_modules.labels");
 
 pub const SCHEMAS: &[Schema] = &[
@@ -41,6 +46,8 @@ pub const SCHEMAS: &[Schema] = &[
         "event_modules.missing_deps_by_blocked_event.v1",
         MISSING_DEPS_BY_BLOCKED_EVENT,
     ),
+    Schema::durable_row_table("event_modules.dependents_by_dep.v1", DEPENDENTS_BY_DEP),
+    Schema::durable_row_table("event_modules.deps_by_dependent.v1", DEPS_BY_DEPENDENT),
     Schema::durable_row_table("event_modules.labels.v1", EVENT_LABELS),
 ];
 

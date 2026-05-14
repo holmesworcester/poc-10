@@ -420,9 +420,7 @@ fn descend_to_trie_position(
             validate_id("ancestor.secret_id", &secret_id)?;
             validate_id("ancestor.secret", &secret)?;
             if range_start != input.unix_minute {
-                return Err(
-                    "InMinute ancestor range_start does not match unix_minute".to_string(),
-                );
+                return Err("InMinute ancestor range_start does not match unix_minute".to_string());
             }
             if bit_depth > TRIE_LEAF_BIT_DEPTH {
                 return Err("InMinute ancestor bit_depth out of range".to_string());
@@ -684,59 +682,58 @@ fn emit_time_walk_for_retire(
     records: &mut Vec<crate::protocol::event_modules::types::EventRecord>,
     wipe_path: &mut Vec<RetireWipeEntry>,
 ) -> Result<(HistoryNodeSecret, EventId, u16, EventId), String> {
-    let (mut current_secret, mut current_id, mut current_start, mut current_width) =
-        match input.ancestor {
-            AncestorSource::Root { secret_id, secret } => {
-                validate_id("ancestor.secret_id", &secret_id)?;
-                validate_id("ancestor.secret", &secret)?;
-                (secret, secret_id, 0u64, ROOT_TIME_TREE_WIDTH)
+    let (mut current_secret, mut current_id, mut current_start, mut current_width) = match input
+        .ancestor
+    {
+        AncestorSource::Root { secret_id, secret } => {
+            validate_id("ancestor.secret_id", &secret_id)?;
+            validate_id("ancestor.secret", &secret)?;
+            (secret, secret_id, 0u64, ROOT_TIME_TREE_WIDTH)
+        }
+        AncestorSource::TimeInternal {
+            secret_id,
+            secret,
+            range_start,
+            range_width,
+        } => {
+            validate_id("ancestor.secret_id", &secret_id)?;
+            validate_id("ancestor.secret", &secret)?;
+            validate_range(range_start, range_width)?;
+            if input.unix_minute < range_start
+                || input.unix_minute >= range_start.saturating_add(range_width)
+            {
+                return Err("ancestor does not cover unix_minute".to_string());
             }
-            AncestorSource::TimeInternal {
-                secret_id,
-                secret,
-                range_start,
-                range_width,
-            } => {
-                validate_id("ancestor.secret_id", &secret_id)?;
-                validate_id("ancestor.secret", &secret)?;
-                validate_range(range_start, range_width)?;
-                if input.unix_minute < range_start
-                    || input.unix_minute >= range_start.saturating_add(range_width)
-                {
-                    return Err("ancestor does not cover unix_minute".to_string());
-                }
-                (secret, secret_id, range_start, range_width)
+            (secret, secret_id, range_start, range_width)
+        }
+        AncestorSource::InMinute {
+            secret_id,
+            secret,
+            range_start,
+            bit_depth,
+            event_id_prefix,
+        } => {
+            validate_id("ancestor.secret_id", &secret_id)?;
+            validate_id("ancestor.secret", &secret)?;
+            if range_start != input.unix_minute {
+                return Err("InMinute ancestor range_start does not match unix_minute".to_string());
             }
-            AncestorSource::InMinute {
-                secret_id,
-                secret,
-                range_start,
-                bit_depth,
-                event_id_prefix,
-            } => {
-                validate_id("ancestor.secret_id", &secret_id)?;
-                validate_id("ancestor.secret", &secret)?;
-                if range_start != input.unix_minute {
-                    return Err(
-                        "InMinute ancestor range_start does not match unix_minute".to_string(),
-                    );
-                }
-                if mask_prefix_to_depth(input.event_id_in_minute, bit_depth) != event_id_prefix {
-                    return Err("InMinute ancestor does not cover event_id_in_minute".to_string());
-                }
-                return Ok((secret, secret_id, bit_depth, event_id_prefix));
+            if mask_prefix_to_depth(input.event_id_in_minute, bit_depth) != event_id_prefix {
+                return Err("InMinute ancestor does not cover event_id_in_minute".to_string());
             }
-        };
+            return Ok((secret, secret_id, bit_depth, event_id_prefix));
+        }
+    };
 
     while current_width > 1 {
         let half = current_width / 2;
         let mid = current_start + half;
-        let (descend_side, descend_start, sibling_side, sibling_start) =
-            if input.unix_minute < mid {
-                (0u8, current_start, 1u8, mid)
-            } else {
-                (1u8, mid, 0u8, current_start)
-            };
+        let (descend_side, descend_start, sibling_side, sibling_start) = if input.unix_minute < mid
+        {
+            (0u8, current_start, 1u8, mid)
+        } else {
+            (1u8, mid, 0u8, current_start)
+        };
 
         let descend_event = build_time_split_event(
             input.workspace_id,

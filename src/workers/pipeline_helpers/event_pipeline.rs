@@ -13,8 +13,8 @@
 //! ```text
 //! command -> ProposedEvent
 //!          -> admit canonical bytes by deterministic event id
-//!          -> block until dependency event ids are applied
-//!          -> project ready events into rows and labels
+//!          -> project with Applied direct dependencies plus labels
+//!          -> either apply rows/labels or let the projector wait for deps
 //!          -> mark newly unblocked events ready
 //! ```
 //!
@@ -42,13 +42,15 @@
 //!     project_transient_event_tx
 //!   else:
 //!     store_durable_event_tx
-//!     if newly inserted and ready:
+//!     if newly inserted:
 //!       project_ready_event_tx
 //!         -> load_event_context_in_tx
-//!         -> write_projection_output_in_tx
-//!         -> write_applied_event_outputs_in_tx
-//! dependency_unblock later consumes recently-valid rows and marks dependents
-//! ready without recursively projecting inside the admission transaction.
+//!         -> project
+//!         -> Apply: write_projection_output_in_tx + write_applied_event_outputs_in_tx
+//!         -> WaitForDeps: record blocker edges and leave event Blocked
+//! dependency_unblock later consumes recently-valid rows and marks waiting
+//! dependents ready without recursively projecting inside the admission
+//! transaction.
 //! ```
 //!
 //! Every other helper exists to make one of those verbs precise. A good change
@@ -63,14 +65,14 @@
 //!
 //! Inputs: command outputs, decoded records, received records, transit input,
 //! and selected compatibility drain work supplied by CLI/test call sites.
-//! State: durable event rows, ready/blocker indexes, generic labels, and worker
-//! queue rows declared in `workers::schema`.
+//! State: durable event rows, ready/blocker indexes, retained direct dependency
+//! edges, generic labels, and worker queue rows declared in `workers::schema`.
 //! Step: admit local canonical records directly, drain queued canonical transit
 //! records, project ready durable events, or run bounded compatibility drains
 //! according to the supplied work item.
 //! Outputs: durable event rows, projector rows/labels, `canonical.in`,
-//! `event_modules.ready_events`, `event_modules.recently_valid_events`, and
-//! `event_modules.applied_shared_events`.
+//! `event_modules.ready_events`, `event_modules.recently_valid_events`,
+//! `event_modules.pending_reprojections`, and `event_modules.applied_shared_events`.
 //! Consume: queue rows are deleted only after the relevant event is accepted,
 //! rejected, projected, or dependency unblock is applied.
 //! Failure: rejected `canonical_in` rows are consumed; projection failures leave
@@ -225,6 +227,34 @@ impl ProjectionOutput {
     }
 }
 
+/// Scheduler-visible decision made by a projector.
+///
+/// `Apply` means the projector had enough context to write semantic rows.
+/// `WaitForDeps` means the event is valid so far but needs named direct
+/// dependencies before it can project. The common worker records the wait edges;
+/// it does not decide them before asking the projector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionDecision {
+    Apply(ProjectionOutput),
+    WaitForDeps(Vec<EventId>),
+}
+
+impl ProjectionDecision {
+    pub fn apply(output: ProjectionOutput) -> Self {
+        Self::Apply(output)
+    }
+
+    pub fn wait_for(dependencies: Vec<EventId>) -> Self {
+        Self::WaitForDeps(dependencies)
+    }
+}
+
+impl From<ProjectionOutput> for ProjectionDecision {
+    fn from(output: ProjectionOutput) -> Self {
+        Self::Apply(output)
+    }
+}
+
 /// One immediate dependency loaded as generic projector context.
 ///
 /// Dependency context contains the event id and the decoded record. It is
@@ -234,6 +264,7 @@ impl ProjectionOutput {
 pub struct DependencyContext {
     pub event_id: EventId,
     pub record: EventRecord,
+    pub labels: Vec<Vec<u8>>,
 }
 
 /// Generic context every projector receives.
@@ -264,6 +295,34 @@ impl EventContext {
             .iter()
             .find(|dependency| &dependency.event_id == event_id)
             .map(|dependency| &dependency.record)
+    }
+
+    pub fn require_dependency(&self, event_id: &EventId) -> Result<&EventRecord, String> {
+        self.dependency(event_id)
+            .ok_or_else(|| wait_for_dependency_error(event_id))
+    }
+
+    pub fn missing_dependencies_from(&self, dependencies: &[EventId]) -> Vec<EventId> {
+        let mut missing = Vec::new();
+        for dependency in unique_dependencies(dependencies) {
+            if self.dependency(&dependency).is_none() {
+                missing.push(dependency);
+            }
+        }
+        missing
+    }
+
+    pub fn dependency_labels(&self, event_id: &EventId) -> Option<&[Vec<u8>]> {
+        self.dependencies
+            .iter()
+            .find(|dependency| &dependency.event_id == event_id)
+            .map(|dependency| dependency.labels.as_slice())
+    }
+
+    pub fn dependency_has_label(&self, event_id: &EventId, label: &[u8]) -> bool {
+        self.dependency_labels(event_id)
+            .map(|labels| labels.iter().any(|candidate| candidate == label))
+            .unwrap_or(false)
     }
 
     pub fn has_label(&self, label: &[u8]) -> bool {
@@ -413,7 +472,7 @@ pub trait EventRegistry {
         &self,
         store: &Store,
         event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String>;
+    ) -> Result<ProjectionDecision, String>;
 
     /// Run any protocol-specific post-admission drains.
     ///
@@ -527,6 +586,9 @@ pub struct TransitInReport {
 pub struct ApplyReadyReport {
     pub applied_events: usize,
     pub unblocked_events: usize,
+    pub reprojected_events: usize,
+    pub blocked_events: usize,
+    pub blocked_edges: usize,
 }
 
 /// Summary of command admission followed by a ready-event drain.
@@ -596,15 +658,18 @@ where
                 .map_err(module_error)?;
             match decision {
                 AdmitDecision::Admit => {
-                    let proposed =
-                        ProposedEvent::contextual(received.record, received.receive);
+                    let proposed = ProposedEvent::contextual(received.record, received.receive);
                     process_proposed_event_tx(store, registry, &proposed, &mut report)?;
                 }
                 AdmitDecision::Drop => {
-                    report.event_ids.push(event_id(&received.record.canonical_bytes));
+                    report
+                        .event_ids
+                        .push(event_id(&received.record.canonical_bytes));
                 }
                 AdmitDecision::WriteRowsAndDrop(rows) => {
-                    report.event_ids.push(event_id(&received.record.canonical_bytes));
+                    report
+                        .event_ids
+                        .push(event_id(&received.record.canonical_bytes));
                     store.insert_table_rows_in_tx(rows)?;
                 }
             }
@@ -684,8 +749,14 @@ pub(crate) fn drain_ready_events<R>(
 where
     R: EventRegistry,
 {
-    let report = drain_ready(store, registry, limit)?;
-    if report.applied_events > 0 {
+    let mut report = drain_ready(store, registry, limit)?;
+    let reproject = drain_pending_reprojections(store, registry, limit)?;
+    report.applied_events += reproject.applied_events;
+    report.unblocked_events += reproject.unblocked_events;
+    report.reprojected_events += reproject.reprojected_events;
+    report.blocked_events += reproject.blocked_events;
+    report.blocked_edges += reproject.blocked_edges;
+    if report.applied_events > 0 || report.reprojected_events > 0 {
         registry.post_admission_hook(store)?;
     }
     Ok(report)
@@ -712,6 +783,36 @@ pub(crate) fn drain_recently_valid_events(
         .map_err(|err| format!("drain recently valid events: {err}"))
 }
 
+pub(crate) fn drain_pending_reprojections<R>(
+    store: &Store,
+    registry: &R,
+    limit: usize,
+) -> Result<ApplyReadyReport, String>
+where
+    R: EventRegistry,
+{
+    store
+        .write_transaction(|store| {
+            let pending = worker_schema::claim_pending_reprojections(store, limit)?;
+            let keys = pending
+                .iter()
+                .map(|event| event.key.clone())
+                .collect::<Vec<_>>();
+            let mut total = ApplyReadyReport::default();
+            for event in pending {
+                let report = reproject_label_woken_event_tx(store, registry, &event.event_id)?;
+                total.applied_events += report.applied_events;
+                total.unblocked_events += report.unblocked_events;
+                total.reprojected_events += report.reprojected_events;
+                total.blocked_events += report.blocked_events;
+                total.blocked_edges += report.blocked_edges;
+            }
+            store.delete_table_rows_in_tx(worker_schema::PENDING_REPROJECTIONS, keys)?;
+            Ok(total)
+        })
+        .map_err(|err| format!("drain pending reprojections: {err}"))
+}
+
 fn admit_proposed_events<R>(
     store: &Store,
     registry: &R,
@@ -729,10 +830,11 @@ where
             Ok(report)
         })
         .map_err(|err| format!("admit proposed events: {err}"))?;
-    if admitted.inserted_events > 0 || admitted.applied_events > 0 {
+    let drained = drain_followups_until_empty(store, registry, DEFAULT_READY_BATCH)?;
+    if admitted.inserted_events > 0 || admitted.applied_events > 0 || drained.reprojected_events > 0
+    {
         registry.post_admission_hook(store)?;
     }
-    let drained = drain_recently_valid_until_empty(store, DEFAULT_READY_BATCH)?;
     Ok(PipelineStepReport { admitted, drained })
 }
 
@@ -750,8 +852,35 @@ fn drain_recently_valid_until_empty(
         let report = dependency_unblock::run(store, dependency_unblock::Work::Drain { limit })?;
         total.applied_events += report.applied_events;
         total.unblocked_events += report.unblocked_events;
+        total.reprojected_events += report.reprojected_events;
+        total.blocked_events += report.blocked_events;
+        total.blocked_edges += report.blocked_edges;
     }
     Ok(total)
+}
+
+fn drain_followups_until_empty<R>(
+    store: &Store,
+    registry: &R,
+    batch_size: usize,
+) -> Result<ApplyReadyReport, String>
+where
+    R: EventRegistry,
+{
+    let mut total = ApplyReadyReport::default();
+    let limit = batch_size.max(1);
+    loop {
+        let reproject = drain_pending_reprojections(store, registry, limit)?;
+        let unblock = drain_recently_valid_until_empty(store, limit)?;
+        total.applied_events += reproject.applied_events + unblock.applied_events;
+        total.unblocked_events += reproject.unblocked_events + unblock.unblocked_events;
+        total.reprojected_events += reproject.reprojected_events + unblock.reprojected_events;
+        total.blocked_events += reproject.blocked_events + unblock.blocked_events;
+        total.blocked_edges += reproject.blocked_edges + unblock.blocked_edges;
+        if reproject.reprojected_events == 0 && unblock.unblocked_events == 0 {
+            return Ok(total);
+        }
+    }
 }
 
 fn merge_admit_report(total: &mut AdmitReport, next: AdmitReport) {
@@ -796,6 +925,9 @@ where
         let drained = ApplyReadyReport {
             applied_events: report.drained.applied_events + drained.applied_events,
             unblocked_events: report.drained.unblocked_events + drained.unblocked_events,
+            reprojected_events: report.drained.reprojected_events + drained.reprojected_events,
+            blocked_events: report.drained.blocked_events + drained.blocked_events,
+            blocked_edges: report.drained.blocked_edges + drained.blocked_edges,
         };
         Ok(AdmitAndDrainReport {
             value,
@@ -848,7 +980,7 @@ where
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
         let report = drain_until_idle(store, registry, self.batch_size)?;
-        if report.applied_events > 0 {
+        if report.applied_events > 0 || report.reprojected_events > 0 {
             registry.post_admission_hook(store)?;
         }
         Ok(report)
@@ -863,9 +995,11 @@ where
 
     fn execute(self, store: &Store, registry: &R) -> Result<Self::Output, String> {
         let mut report = drain_ready(store, registry, self.batch_size)?;
+        let reproject = drain_pending_reprojections(store, registry, self.batch_size)?;
         let unblock = drain_recently_valid_events(store, self.batch_size)?;
+        report.reprojected_events += reproject.reprojected_events;
         report.unblocked_events += unblock.unblocked_events;
-        if report.applied_events > 0 {
+        if report.applied_events > 0 || report.reprojected_events > 0 {
             registry.post_admission_hook(store)?;
         }
         Ok(report)
@@ -882,8 +1016,9 @@ where
 ///
 /// 1. Transient records are projected immediately and never inserted into the
 ///    durable event table.
-/// 2. Durable records are inserted by deterministic id, blocked if dependencies
-///    are missing, and projected only if this insertion made them ready.
+/// 2. Durable records are inserted by deterministic id, then projected with
+///    partial context. The projector decides whether to apply rows now or wait
+///    for direct dependencies.
 ///
 /// Duplicate durable events stop after insertion returns `inserted = false`.
 /// They do not re-project, rewrite blockers, or re-run module code.
@@ -902,7 +1037,7 @@ fn process_proposed_event_tx(
     }
 
     let stored = store_durable_event_tx(store, event, report)?;
-    if stored.inserted && stored.ready {
+    if stored.inserted {
         let apply = if event.receive().is_some() {
             project_ready_event_record_in_tx(
                 store,
@@ -914,7 +1049,10 @@ fn process_proposed_event_tx(
         } else {
             project_ready_event_tx(store, modules, &stored.event_id)?
         };
+        report.ready_events += apply.applied_events;
         report.applied_events += apply.applied_events;
+        report.blocked_events += apply.blocked_events;
+        report.blocked_edges += apply.blocked_edges;
     }
     Ok(())
 }
@@ -935,8 +1073,17 @@ fn project_transient_event_tx(
         ));
     }
     let event_id = event_id(&record.canonical_bytes);
-    let changes = project_event_with_context_in_tx(store, modules, &event_id, record, receive)?;
-    write_projection_output_in_tx(store, changes)?;
+    match project_event_with_context_in_tx(store, modules, &event_id, record, receive)? {
+        ProjectionDecision::Apply(changes) => {
+            write_projection_output_in_tx(store, changes)?;
+        }
+        ProjectionDecision::WaitForDeps(dependencies) => {
+            return Err(module_error(format!(
+                "transient event cannot wait for dependencies: {}",
+                dependencies.len()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -944,13 +1091,13 @@ fn project_transient_event_tx(
 struct StoredDurableEvent {
     event_id: EventId,
     inserted: bool,
-    ready: bool,
 }
 
-/// Insert a durable event row and, if blocked, the exact missing-dependency rows.
+/// Insert a durable event row as schedulable work.
 ///
-/// This helper does not project. It only records whether the event is new and
-/// whether it is ready, so the caller can decide if projection is allowed.
+/// This helper does not inspect dependencies. Missing context is a projector
+/// decision, so every new durable event starts Ready and the projection step can
+/// either apply rows or return `WaitForDeps`.
 fn store_durable_event_tx(
     store: &Store,
     event: &ProposedEvent,
@@ -958,68 +1105,39 @@ fn store_durable_event_tx(
 ) -> rusqlite::Result<StoredDurableEvent> {
     let record = event.record();
     let id = event.event_id();
-    let missing = missing_dependencies(store, &record.dependencies)?;
-    let status = if missing.is_empty() {
-        EventStatus::Ready
-    } else {
-        EventStatus::Blocked
-    };
 
-    let inserted = event_lifecycle::insert_event(store, record, status)?;
+    let inserted = event_lifecycle::insert_event(store, record, EventStatus::Ready)?;
     if inserted {
         report.inserted_events += 1;
-        if missing.is_empty() {
-            report.ready_events += 1;
-        } else {
-            report.blocked_events += 1;
-            report.blocked_edges += write_blockers(store, &id, &missing)?;
-            if let Some(receive) = event.receive() {
-                store.insert_table_rows_in_tx(vec![worker_schema::event_receive_context_row(
-                    id, receive,
-                )])?;
-            }
-        }
     }
     Ok(StoredDurableEvent {
         event_id: id,
         inserted,
-        ready: missing.is_empty(),
     })
 }
 
 /// Claim and project one ready durable event.
 ///
-/// Projection is coupled to the Ready -> Applied status change. That makes the
-/// operation idempotent under retry: if another caller already claimed the event,
-/// this helper reports no work instead of running the projector twice.
-///
-/// The status change, context load, projector call, row writes, and
-/// recently-valid queue write all happen in the caller's transaction. If
-/// projection fails, the Applied status rolls back, so failed events cannot
-/// become dependency context for later projectors.
+/// The projector sees Applied direct dependencies and labels, then returns a
+/// lifecycle decision. Apply moves Ready -> Applied and writes projector rows;
+/// WaitForDeps moves Ready -> Blocked and writes blocker edges. Context load,
+/// projector call, status change, and row writes all happen in the caller's
+/// transaction, so failed projection leaves the event Ready for retry.
 fn project_ready_event_tx(
     store: &Store,
     modules: &impl EventRegistry,
     event_id: &EventId,
 ) -> rusqlite::Result<ApplyReadyReport> {
     let mut report = ApplyReadyReport::default();
-    if event_lifecycle::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)?
-    {
-        // The status change is the claim. Projection runs only for the worker
-        // that successfully moved Ready -> Applied, which keeps duplicate drain
-        // attempts idempotent when callers retry.
-        let bytes =
-            schema::event_bytes(store, event_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        let record = modules.event_from_bytes(bytes).map_err(module_error)?;
-        let receive = worker_schema::event_receive_context(store, event_id)?;
-        let changes = project_event_with_context_in_tx(store, modules, event_id, &record, receive)?;
-        write_projection_output_in_tx(store, changes)?;
-        write_applied_event_outputs_in_tx(store, event_id, &record)?;
-        if receive.is_some() {
-            worker_schema::delete_event_receive_context_in_tx(store, event_id)?;
-        }
-        report.applied_events = 1;
+    if event_lifecycle::event_status(store, event_id)? != Some(EventStatus::Ready) {
+        return Ok(report);
     }
+    let bytes =
+        schema::event_bytes(store, event_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let record = modules.event_from_bytes(bytes).map_err(module_error)?;
+    let receive = worker_schema::event_receive_context(store, event_id)?;
+    let decision = project_event_with_context_in_tx(store, modules, event_id, &record, receive)?;
+    apply_projection_decision_in_tx(store, event_id, &record, receive, decision, &mut report)?;
     Ok(report)
 }
 
@@ -1031,14 +1149,122 @@ fn project_ready_event_record_in_tx(
     receive: Option<ReceiveMetadata>,
 ) -> rusqlite::Result<ApplyReadyReport> {
     let mut report = ApplyReadyReport::default();
-    if event_lifecycle::set_event_status(store, event_id, EventStatus::Ready, EventStatus::Applied)?
-    {
-        let changes = project_event_with_context_in_tx(store, modules, event_id, record, receive)?;
-        write_projection_output_in_tx(store, changes)?;
-        write_applied_event_outputs_in_tx(store, event_id, record)?;
-        report.applied_events = 1;
+    if event_lifecycle::event_status(store, event_id)? != Some(EventStatus::Ready) {
+        return Ok(report);
     }
+    let decision = project_event_with_context_in_tx(store, modules, event_id, record, receive)?;
+    apply_projection_decision_in_tx(store, event_id, record, receive, decision, &mut report)?;
     Ok(report)
+}
+
+fn apply_projection_decision_in_tx(
+    store: &Store,
+    event_id: &EventId,
+    record: &EventRecord,
+    receive: Option<ReceiveMetadata>,
+    decision: ProjectionDecision,
+    report: &mut ApplyReadyReport,
+) -> rusqlite::Result<()> {
+    match decision {
+        ProjectionDecision::Apply(changes) => {
+            if event_lifecycle::set_event_status(
+                store,
+                event_id,
+                EventStatus::Ready,
+                EventStatus::Applied,
+            )? {
+                write_projection_output_in_tx(store, changes)?;
+                write_applied_event_outputs_in_tx(store, event_id, record)?;
+                if receive.is_some() {
+                    worker_schema::delete_event_receive_context_in_tx(store, event_id)?;
+                }
+                report.applied_events += 1;
+            }
+        }
+        ProjectionDecision::WaitForDeps(dependencies) => {
+            let dependencies = wait_dependencies_for(store, record, dependencies)?;
+            if dependencies.is_empty() {
+                return Err(module_error(
+                    "projector waited without naming a declared dependency".to_string(),
+                ));
+            }
+            if event_lifecycle::set_event_status(
+                store,
+                event_id,
+                EventStatus::Ready,
+                EventStatus::Blocked,
+            )? {
+                if let Some(receive) = receive {
+                    store.insert_table_rows_in_tx(vec![
+                        worker_schema::event_receive_context_row(*event_id, receive),
+                    ])?;
+                }
+                report.blocked_events += 1;
+                report.blocked_edges += write_blockers(store, event_id, &dependencies)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reproject_label_woken_event_tx(
+    store: &Store,
+    modules: &impl EventRegistry,
+    event_id: &EventId,
+) -> rusqlite::Result<ApplyReadyReport> {
+    let mut report = ApplyReadyReport::default();
+    let Some(status) = event_lifecycle::event_status(store, event_id)? else {
+        return Ok(report);
+    };
+    if status == EventStatus::Ready {
+        // Ready events will see the new labels on their normal Ready -> Applied
+        // pass. Reprojecting here would race the lifecycle claim path.
+        return Ok(report);
+    }
+    let Some(bytes) = schema::event_bytes(store, event_id)? else {
+        return Ok(report);
+    };
+    let record = modules.event_from_bytes(bytes).map_err(module_error)?;
+    match status {
+        EventStatus::Applied => {
+            match project_event_with_context_in_tx(store, modules, event_id, &record, None)? {
+                ProjectionDecision::Apply(changes) => {
+                    write_projection_output_in_tx(store, changes)?;
+                    report.reprojected_events += 1;
+                    Ok(report)
+                }
+                ProjectionDecision::WaitForDeps(_) => Ok(report),
+            }
+        }
+        EventStatus::Blocked => {
+            // Label wake is opportunistic for blocked events. If the projector
+            // can make a semantic deletion decision from the event bytes plus
+            // available context, it writes purge/delete output now. If it still
+            // needs a missing dependency, the ordinary missing-dependency edge
+            // remains and the event will be tried again when that dependency
+            // applies.
+            match project_event_with_context_in_tx(store, modules, event_id, &record, None)? {
+                ProjectionDecision::Apply(changes) => {
+                    if event_lifecycle::set_event_status(
+                        store,
+                        event_id,
+                        EventStatus::Blocked,
+                        EventStatus::Applied,
+                    )? {
+                        event_lifecycle::delete_missing_deps_by_blocked_event(store, event_id)?;
+                        write_projection_output_in_tx(store, changes)?;
+                        write_applied_event_outputs_in_tx(store, event_id, &record)?;
+                        worker_schema::delete_event_receive_context_in_tx(store, event_id)?;
+                        report.applied_events += 1;
+                        report.reprojected_events += 1;
+                    }
+                    Ok(report)
+                }
+                ProjectionDecision::WaitForDeps(_) => Ok(report),
+            }
+        }
+        EventStatus::Ready | EventStatus::Rejected => Ok(report),
+    }
 }
 
 fn write_applied_event_outputs_in_tx(
@@ -1069,7 +1295,7 @@ fn project_event_with_context_in_tx(
     event_id: &EventId,
     record: &EventRecord,
     receive: Option<ReceiveMetadata>,
-) -> rusqlite::Result<ProjectionOutput> {
+) -> rusqlite::Result<ProjectionDecision> {
     let context = load_event_context_in_tx(store, modules, event_id, record, receive)?;
     let event = EventWithContext { record, context };
     modules.project_record(store, &event).map_err(module_error)
@@ -1077,11 +1303,12 @@ fn project_event_with_context_in_tx(
 
 /// Fetch the generic context shared by all projectors.
 ///
-/// The dependency list comes from the event itself and is safe to load here
-/// because blocked durable events do not reach projection. Admission only marks
-/// an event Ready after every dependency is Applied, so context never includes
-/// merely stored or failed events. Labels are generic, bounded facts attached to
-/// this event id by earlier projections.
+/// The dependency list comes from the event itself. Only Applied dependencies
+/// become dependency records; merely stored, blocked, failed, missing, or purged
+/// dependencies are absent from `context.dependencies`. Projectors use that
+/// absence to decide whether they still need to block or whether a label makes
+/// the event obsolete enough to delete/purge without the missing record. Labels
+/// are generic, bounded facts attached to this event id by earlier projections.
 fn load_event_context_in_tx(
     store: &Store,
     modules: &impl EventRegistry,
@@ -1091,13 +1318,17 @@ fn load_event_context_in_tx(
 ) -> rusqlite::Result<EventContext> {
     let mut dependencies = Vec::with_capacity(record.dependencies.len());
     for dependency in unique_dependencies(&record.dependencies) {
-        let bytes =
-            schema::event_bytes(store, &dependency)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        let record = modules.event_from_bytes(bytes).map_err(module_error)?;
-        dependencies.push(DependencyContext {
-            event_id: dependency,
-            record,
-        });
+        if event_lifecycle::event_is_applied(store, &dependency)? {
+            if let Some(bytes) = schema::event_bytes(store, &dependency)? {
+                let record = modules.event_from_bytes(bytes).map_err(module_error)?;
+                let labels = schema::event_labels(store, &dependency).map_err(module_error)?;
+                dependencies.push(DependencyContext {
+                    event_id: dependency,
+                    record,
+                    labels,
+                });
+            }
+        }
     }
     let now_unix_minute = crate::core::logical_clock::logical_time(store)
         .map_err(module_error)?
@@ -1116,12 +1347,28 @@ fn write_projection_output_in_tx(
     changes: ProjectionOutput,
 ) -> rusqlite::Result<usize> {
     let rows = store.insert_table_rows_in_tx(changes.rows)?;
-    let labels = store.insert_table_rows_in_tx(schema::event_label_rows(changes.labels))?;
+    let mut labels = 0;
+    for label in changes.labels {
+        let inserted =
+            store.insert_table_rows_in_tx(schema::event_label_rows(vec![label.clone()]))?;
+        if inserted > 0 {
+            labels += inserted;
+            enqueue_label_reprojections_in_tx(store, &label.event_id)?;
+        }
+    }
     let mut deletes = 0;
     for delete in changes.deletes {
         deletes += store.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
     }
     Ok(rows + labels + deletes)
+}
+
+fn enqueue_label_reprojections_in_tx(store: &Store, event_id: &EventId) -> rusqlite::Result<usize> {
+    let mut rows = vec![worker_schema::pending_reprojection_row(*event_id)];
+    for dependent in event_lifecycle::direct_dependents(store, event_id)? {
+        rows.push(worker_schema::pending_reprojection_row(dependent));
+    }
+    store.insert_table_rows_in_tx(rows)
 }
 
 fn drain_ready(
@@ -1132,13 +1379,20 @@ fn drain_ready(
     store
         .write_transaction(|store| {
             let mut total = ApplyReadyReport::default();
-            while total.applied_events < limit {
+            let mut processed = 0usize;
+            while processed < limit {
                 let Some(event_id) = event_lifecycle::next_ready_event(store)? else {
                     break;
                 };
                 let report = project_ready_event_tx(store, modules, &event_id)?;
+                processed += report.applied_events + report.blocked_events;
                 total.applied_events += report.applied_events;
                 total.unblocked_events += report.unblocked_events;
+                total.blocked_events += report.blocked_events;
+                total.blocked_edges += report.blocked_edges;
+                if report.applied_events == 0 && report.blocked_events == 0 {
+                    break;
+                }
             }
             Ok(total)
         })
@@ -1153,10 +1407,20 @@ fn drain_until_idle(
     let mut total = ApplyReadyReport::default();
     loop {
         let report = drain_ready(store, modules, batch_size)?;
+        let reproject = drain_pending_reprojections(store, modules, batch_size)?;
         let unblock = drain_recently_valid_events(store, batch_size)?;
-        total.applied_events += report.applied_events;
+        total.applied_events += report.applied_events + reproject.applied_events;
         total.unblocked_events += report.unblocked_events + unblock.unblocked_events;
-        if report.applied_events == 0 && unblock.unblocked_events == 0 {
+        total.reprojected_events +=
+            report.reprojected_events + reproject.reprojected_events + unblock.reprojected_events;
+        total.blocked_events +=
+            report.blocked_events + reproject.blocked_events + unblock.blocked_events;
+        total.blocked_edges +=
+            report.blocked_edges + reproject.blocked_edges + unblock.blocked_edges;
+        if report.applied_events == 0
+            && reproject.reprojected_events == 0
+            && unblock.unblocked_events == 0
+        {
             return Ok(total);
         }
     }
@@ -1166,14 +1430,24 @@ fn module_error(err: String) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(err)
 }
 
-fn missing_dependencies(store: &Store, dependencies: &[EventId]) -> rusqlite::Result<Vec<EventId>> {
-    let mut missing = Vec::new();
-    for dependency in unique_dependencies(dependencies) {
-        if !event_lifecycle::event_is_applied(store, &dependency)? {
-            missing.push(dependency);
-        }
+const WAIT_FOR_DEPENDENCY_PREFIX: &str = "__wait_for_dependency__:";
+
+fn wait_for_dependency_error(event_id: &EventId) -> String {
+    format!("{WAIT_FOR_DEPENDENCY_PREFIX}{}", hex_event_id(event_id))
+}
+
+pub(crate) fn is_wait_for_dependency_error(err: &str) -> bool {
+    err.starts_with(WAIT_FOR_DEPENDENCY_PREFIX)
+}
+
+fn hex_event_id(event_id: &EventId) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in event_id {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
     }
-    Ok(missing)
+    out
 }
 
 fn unique_dependencies(dependencies: &[EventId]) -> Vec<EventId> {
@@ -1181,6 +1455,24 @@ fn unique_dependencies(dependencies: &[EventId]) -> Vec<EventId> {
     dependencies.sort();
     dependencies.dedup();
     dependencies
+}
+
+fn wait_dependencies_for(
+    store: &Store,
+    record: &EventRecord,
+    dependencies: Vec<EventId>,
+) -> rusqlite::Result<Vec<EventId>> {
+    let declared = unique_dependencies(&record.dependencies);
+    let mut waiting = Vec::new();
+    for dependency in unique_dependencies(&dependencies) {
+        if !declared.contains(&dependency) {
+            continue;
+        }
+        if !event_lifecycle::event_is_applied(store, &dependency)? {
+            waiting.push(dependency);
+        }
+    }
+    Ok(waiting)
 }
 
 fn write_blockers(

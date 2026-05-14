@@ -3,9 +3,11 @@
 //! Inputs: `canonical.in`.
 //! State: durable event rows plus missing-dependency edge indexes.
 //! Step: claim up to `limit` canonical records, insert or dedupe each durable
-//! event, and decide whether it is ready or blocked.
-//! Outputs: `event_modules.ready_events` for ready events and blocker rows for
-//! missing dependencies.
+//! event, and invoke its projector with Applied direct dependencies plus
+//! labels. Projectors either apply rows or name dependencies to wait on.
+//! Outputs: projector rows/labels for Apply decisions, blocker rows for
+//! WaitForDeps decisions, and ready/recently-valid/applied-shared queue rows as
+//! status changes require.
 //! Consume: accepted and rejected input rows are removed from their input queues;
 //! rejected rows are not retried by those queues.
 //! Failure: a semantic admission/projection error is returned to the caller
@@ -65,7 +67,7 @@ mod tests {
     use crate::protocol::event_modules::connection::{self, types};
     use crate::protocol::event_modules::content::content_event;
     use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
-use crate::protocol::event_modules::queries as event_queries;
+    use crate::protocol::event_modules::queries as event_queries;
     use crate::protocol::event_modules::types::event_id;
     use crate::protocol::Protocol;
     use crate::workers::schema as worker_schema;

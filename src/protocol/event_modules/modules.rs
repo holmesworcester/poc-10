@@ -16,8 +16,9 @@ use crate::protocol::event_modules::sync;
 use crate::protocol::event_modules::test_events;
 use crate::protocol::event_modules::types::{EventRecord, ReceiveMetadata};
 use crate::protocol::event_modules::worker::{
-    AdmitDecision, EventRegistry, EventWithContext, ProjectionOutput, ReceivedRecord,
+    AdmitDecision, EventRegistry, EventWithContext, ProjectionDecision, ReceivedRecord,
 };
+use crate::workers::pipeline_helpers::event_pipeline::is_wait_for_dependency_error;
 use crate::workers::schema::TransitProvenance;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -48,7 +49,7 @@ impl EventRegistry for Modules {
         &self,
         store: &Store,
         event: &EventWithContext<'_>,
-    ) -> Result<ProjectionOutput, String> {
+    ) -> Result<ProjectionDecision, String> {
         project_record(store, event)
     }
 
@@ -78,28 +79,54 @@ impl EventRegistry for Modules {
 pub fn project_record(
     _store: &Store,
     event: &EventWithContext<'_>,
-) -> Result<ProjectionOutput, String> {
+) -> Result<ProjectionDecision, String> {
     let bytes = &event.record.canonical_bytes;
-    if let Some(output) = identity::project_record(event)? {
-        return Ok(output);
+    match identity::project_record(event) {
+        Ok(Some(output)) => return Ok(output.into()),
+        Ok(None) => {}
+        Err(err) => return dependency_wait_or_error(event, err),
     }
     if connection::is_projection_record(bytes) {
-        return connection::project_record(event);
+        return connection::project_record(event)
+            .map(Into::into)
+            .or_else(|err| dependency_wait_or_error(event, err));
     }
-    if let Some(output) = sync::project_record(event)? {
-        return Ok(output);
+    match sync::project_record(event) {
+        Ok(Some(output)) => return Ok(output.into()),
+        Ok(None) => {}
+        Err(err) => return dependency_wait_or_error(event, err),
     }
-    if let Some(output) = content::project_record(event)? {
-        return Ok(output);
+    match content::project_record(event) {
+        Ok(Some(output)) => return Ok(output.into()),
+        Ok(None) => {}
+        Err(err) => return dependency_wait_or_error(event, err),
     }
-    if let Some(output) = encryption::project_record(event)? {
-        return Ok(output);
+    match encryption::project_record(event) {
+        Ok(Some(output)) => return Ok(output.into()),
+        Ok(None) => {}
+        Err(err) => return dependency_wait_or_error(event, err),
     }
-    if let Some(output) = test_events::project_record(bytes)? {
+    if let Some(output) = test_events::project_record(event)? {
         return Ok(output);
     }
     let tag = bytes.first().copied().unwrap_or_default();
     Err(format!("unknown event type {tag}"))
+}
+
+fn dependency_wait_or_error(
+    event: &EventWithContext<'_>,
+    err: String,
+) -> Result<ProjectionDecision, String> {
+    if !is_wait_for_dependency_error(&err) {
+        return Err(err);
+    }
+    let missing = event
+        .context
+        .missing_dependencies_from(&event.record.dependencies);
+    if missing.is_empty() {
+        return Err("projector waited but every declared dependency is present".to_string());
+    }
+    Ok(ProjectionDecision::wait_for(missing))
 }
 
 /// Decode an admitted record from canonical bytes plus optional receive
@@ -112,9 +139,9 @@ pub fn canonical_in(
     provenance: Option<TransitProvenance>,
 ) -> Result<ReceivedRecord, String> {
     match provenance {
-        Some(provenance) => {
-            connection::transit::projector::record_from_transit_canonical_in(store, bytes, provenance)
-        }
+        Some(provenance) => connection::transit::projector::record_from_transit_canonical_in(
+            store, bytes, provenance,
+        ),
         None => {
             let record = event_from_bytes(bytes)?;
             Ok(match receive {

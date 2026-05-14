@@ -13,8 +13,7 @@
 //! on the queries module, which the boundary rule forbids.
 
 use crate::core::store::{Schema, Store, TableName, TableRow};
-use crate::protocol::event_modules::encryption::local_history_node_secret::queries as
-    local_history_queries;
+use crate::protocol::event_modules::encryption::local_history_node_secret::queries as local_history_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::AdmitDecision;
 use crate::protocol::wire::{Reader, Writer};
@@ -407,7 +406,12 @@ mod tests {
         // Pre-write the tombstone exactly as the disappearing-minute worker
         // or content_purge worker would.
         store
-            .insert_table_rows(vec![message_tombstone_row(workspace_id, id, author_user_id, 0)])
+            .insert_table_rows(vec![message_tombstone_row(
+                workspace_id,
+                id,
+                author_user_id,
+                0,
+            )])
             .expect("insert tombstone");
 
         let decision = admit_check_received(&store, &bytes).expect("admit");

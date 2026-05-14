@@ -5,9 +5,12 @@
 //! semantic facts; this file keeps operational worker queues visible in one
 //! place.
 //!
-//! All tables here are memory tables. They are restart-local work queues, not
+//! Most tables here are memory tables. They are restart-local work queues, not
 //! durable semantic history. A worker either recreates needed work from durable
 //! facts or accepts eventual-consistency retry through the peer protocol.
+//! Queues derived from durable labels are durable too, because losing a wake
+//! row after committing a label would strand already-projected dependents until
+//! another label happens to touch the same edge.
 //!
 //! Naming is caller-facing: `in` is work entering a worker, `out` is work a
 //! worker prepared for another boundary, and event-module names are used only
@@ -29,6 +32,7 @@ use crate::protocol::wire::{Reader, Writer};
 pub const CANONICAL_IN: TableName = TableName::new("canonical.in");
 pub const EVENT_RECEIVE_CONTEXT: TableName = TableName::new("event_modules.event_receive_context");
 pub const RECENTLY_VALID_EVENTS: TableName = TableName::new("event_modules.recently_valid_events");
+pub const PENDING_REPROJECTIONS: TableName = TableName::new("event_modules.pending_reprojections");
 pub const APPLIED_SHARED_EVENTS: TableName = TableName::new("event_modules.applied_shared_events");
 pub const SYNC_IN_EVENTS: TableName = TableName::new("sync.in");
 pub const TRANSIT_OUT: TableName = TableName::new("transit.out");
@@ -42,6 +46,10 @@ pub const SCHEMAS: &[Schema] = &[
     Schema::memory_row_table(
         "event_modules.recently_valid_events.v1",
         RECENTLY_VALID_EVENTS,
+    ),
+    Schema::durable_row_table(
+        "event_modules.pending_reprojections.v1",
+        PENDING_REPROJECTIONS,
     ),
     Schema::memory_row_table(
         "event_modules.applied_shared_events.v1",
@@ -71,6 +79,12 @@ pub(crate) type DecodedCanonicalIn = (Vec<u8>, Option<ReceiveMetadata>, Option<T
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentlyValidEvent {
+    pub key: Vec<u8>,
+    pub event_id: EventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingReprojection {
     pub key: Vec<u8>,
     pub event_id: EventId,
 }
@@ -195,6 +209,28 @@ pub fn claim_recently_valid_events(
         .map(|(key, value)| {
             let event_id = vec_to_id(value)?;
             Ok(RecentlyValidEvent { key, event_id })
+        })
+        .collect()
+}
+
+pub fn pending_reprojection_row(event_id: EventId) -> TableRow {
+    TableRow {
+        table: PENDING_REPROJECTIONS,
+        key: event_id.to_vec(),
+        value: event_id.to_vec(),
+    }
+}
+
+pub fn claim_pending_reprojections(
+    store: &Store,
+    limit: usize,
+) -> rusqlite::Result<Vec<PendingReprojection>> {
+    store
+        .table_rows_with_key_prefix(PENDING_REPROJECTIONS, &[], limit)?
+        .into_iter()
+        .map(|(key, value)| {
+            let event_id = vec_to_id(value)?;
+            Ok(PendingReprojection { key, event_id })
         })
         .collect()
 }

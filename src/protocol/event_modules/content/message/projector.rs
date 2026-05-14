@@ -6,6 +6,9 @@
 //! the named author user is also a workspace member who signed off the
 //! endpoint chain. The text itself is opaque; storage is keyed by workspace.
 
+use crate::protocol::event_modules::content::message_deletion::schema::{
+    purge_instruction_row, PurgeKind,
+};
 use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author;
 use crate::protocol::event_modules::disappearing_messages_setting;
 use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
@@ -24,10 +27,52 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
     commands::validate_expires_at_minute(message.created_at_ms, message.expires_at_minute)?;
 
+    // Purge-on-project runs before ordinary dependency validation. A deletion
+    // label is written by the signed deletion projector; once its author bytes
+    // match this message's author, the message can erase its read-model rows
+    // and schedule local retention cleanup even if some ordinary projection
+    // dependency is still missing.
+    let authored_minute = unix_minute_for(message.created_at_ms);
+    let is_deleted_by_author = event.context.labels.iter().any(|label| {
+        deletion_label_author(label)
+            .map(|author| author == message.author_user_id)
+            .unwrap_or(false)
+    });
+    if is_deleted_by_author {
+        let key = schema::message_key(message.workspace_id, event.context.event_id);
+        let sealed_key = schema::message_key(message.workspace_id, event.context.event_id);
+        let output = ProjectionOutput {
+            rows: vec![
+                schema::message_tombstone_row(
+                    message.workspace_id,
+                    event.context.event_id,
+                    message.author_user_id,
+                    authored_minute,
+                ),
+                purge_instruction_row(
+                    message.workspace_id,
+                    event.context.event_id,
+                    PurgeKind::Message,
+                ),
+            ],
+            deletes: vec![
+                TableDelete {
+                    table: schema::MESSAGES,
+                    key,
+                },
+                TableDelete {
+                    table: schema::SEALED_MESSAGES,
+                    key: sealed_key,
+                },
+            ],
+            labels: Vec::new(),
+        };
+        return Ok(output);
+    }
+
     let signer = event
         .context
-        .dependency(&envelope.signer_endpoint_shared_id)
-        .ok_or_else(|| "message signer endpoint_shared dependency is missing".to_string())?;
+        .require_dependency(&envelope.signer_endpoint_shared_id)?;
     let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
         .map_err(|_| "message signer dependency is not a signed endpoint_shared".to_string())?;
     if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
@@ -42,10 +87,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("message signer public key does not match endpoint_shared".to_string());
     }
 
-    let author = event
-        .context
-        .dependency(&message.author_user_id)
-        .ok_or_else(|| "message author user dependency is missing".to_string())?;
+    let author = event.context.require_dependency(&message.author_user_id)?;
     let author_envelope = signed::codec::decode(&author.canonical_bytes)
         .map_err(|_| "message author dependency is not a signed user".to_string())?;
     if author_envelope.inner_type != user::codec::TYPE_USER {
@@ -69,8 +111,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     // fields rather than trusting any wire-side nonce.
     let leaf_record = event
         .context
-        .dependency(&message.local_history_node_secret_id)
-        .ok_or_else(|| "message leaf history node dependency is missing".to_string())?;
+        .require_dependency(&message.local_history_node_secret_id)?;
     let leaf = leaf_history_node::codec::decode(&leaf_record.canonical_bytes)
         .map_err(|_| "message leaf dependency is not a local_history_node_secret".to_string())?;
     if leaf.workspace_id != message.workspace_id
@@ -105,7 +146,6 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         message.workspace_id,
         message.disappearing_setting_id,
     )?;
-    let authored_minute = unix_minute_for(message.created_at_ms);
     let expected_expires = if permitted_ttl == 0 {
         super::types::EXPIRES_NEVER
     } else {
@@ -116,44 +156,6 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
             "message expires_at_minute {} disagrees with referenced setting (permits ttl_minutes={}, expected {})",
             message.expires_at_minute, permitted_ttl, expected_expires
         ));
-    }
-
-    // Purge-on-project: drop the message's read-model and sealed rows when
-    // the author has tombstoned the message (deletion label set on the
-    // event by the deletion projector).
-    //
-    // Past-TTL re-deliveries are caught earlier, by the receive-side
-    // admission gate (`schema::admit_check_received`), so by the time
-    // projection runs the only remaining tombstone trigger is the
-    // author-driven deletion label.
-    let is_deleted_by_author = event.context.labels.iter().any(|label| {
-        deletion_label_author(label)
-            .map(|author| author == message.author_user_id)
-            .unwrap_or(false)
-    });
-    if is_deleted_by_author {
-        let key = schema::message_key(message.workspace_id, event.context.event_id);
-        let sealed_key = schema::message_key(message.workspace_id, event.context.event_id);
-        let output = ProjectionOutput {
-            rows: vec![schema::message_tombstone_row(
-                message.workspace_id,
-                event.context.event_id,
-                message.author_user_id,
-                authored_minute,
-            )],
-            deletes: vec![
-                TableDelete {
-                    table: schema::MESSAGES,
-                    key,
-                },
-                TableDelete {
-                    table: schema::SEALED_MESSAGES,
-                    key: sealed_key,
-                },
-            ],
-            labels: Vec::new(),
-        };
-        return Ok(output);
     }
 
     Ok(ProjectionOutput::rows(vec![schema::sealed_message_row(
@@ -175,10 +177,7 @@ fn resolve_permitted_ttl_minutes(
     message_workspace_id: EventId,
     disappearing_setting_id: EventId,
 ) -> Result<u32, String> {
-    let dependency = event
-        .context
-        .dependency(&disappearing_setting_id)
-        .ok_or_else(|| "message disappearing_setting_id dependency is missing".to_string())?;
+    let dependency = event.context.require_dependency(&disappearing_setting_id)?;
     resolve_setting_ttl(dependency, message_workspace_id, disappearing_setting_id)
 }
 
@@ -191,9 +190,11 @@ fn resolve_setting_ttl(
         .map_err(|_| {
             "message disappearing_setting_id dependency is not a signed disappearing_messages_setting event".to_string()
         })?;
-    let setting = disappearing_messages_setting::codec::decode(&envelope.payload).map_err(|_| {
-        "message disappearing_setting_id dependency is not a disappearing_messages_setting".to_string()
-    })?;
+    let setting =
+        disappearing_messages_setting::codec::decode(&envelope.payload).map_err(|_| {
+            "message disappearing_setting_id dependency is not a disappearing_messages_setting"
+                .to_string()
+        })?;
     if setting.workspace_id != message_workspace_id {
         return Err(
             "message disappearing_setting_id setting workspace does not match message workspace"
@@ -393,18 +394,22 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: author_id,
                         record: author_record,
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.leaf_id,
                         record: built.leaf_record.clone(),
+                        labels: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.setting_id,
                         record: built.setting_record.clone(),
+                        labels: Vec::new(),
                     },
                 ],
                 labels: Vec::new(),
@@ -534,8 +539,12 @@ mod tests {
         event.context.labels.push(deletion_label(&author_id));
 
         let output = project(&event).expect("project deleted message");
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows.len(), 2);
         assert_eq!(output.rows[0].table, schema::MESSAGE_TOMBSTONES);
+        assert_eq!(
+            output.rows[1].table,
+            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+        );
         // For self-deletes the label is already on the event (set by the
         // deletion projector); we don't double-write it.
         assert!(output.labels.is_empty());
@@ -544,6 +553,36 @@ mod tests {
         let tables: Vec<_> = output.deletes.iter().map(|d| d.table).collect();
         assert!(tables.contains(&schema::MESSAGES));
         assert!(tables.contains(&schema::SEALED_MESSAGES));
+    }
+
+    #[test]
+    fn deletion_label_purges_message_before_missing_dependencies_block() {
+        use crate::protocol::event_modules::content::message_deletion::types::deletion_label;
+
+        let workspace_id = [7; 32];
+        let signer_private_key = [9; 32];
+        let signer_pubkey = signing_public_key_for(&signer_private_key);
+        let author_record = user_record(workspace_id);
+        let author_id = event_id(&author_record.canonical_bytes);
+        let signer_record = endpoint_shared_record(workspace_id, author_id, signer_pubkey);
+        let signer_id = event_id(&signer_record.canonical_bytes);
+        let built = build(workspace_id, author_id, &signer_private_key, signer_id);
+        let event = EventWithContext {
+            record: &built.record,
+            context: EventContext {
+                event_id: built.message_id,
+                dependencies: Vec::new(),
+                labels: vec![deletion_label(&author_id)],
+                receive: None,
+                now_unix_minute: None,
+            },
+        };
+
+        let output = project(&event).expect("deleted message can project without deps");
+
+        assert_eq!(output.rows.len(), 2);
+        assert_eq!(output.rows[0].table, schema::MESSAGE_TOMBSTONES);
+        assert_eq!(output.deletes.len(), 2);
     }
 
     fn build_with_expiry(
@@ -665,10 +704,7 @@ mod tests {
         );
         let event = context_for(&built, signer_id, signer_record, author_id, author_record);
         let err = project(&event).expect_err("inflated expiry must be rejected");
-        assert!(
-            err.contains("disagrees with referenced setting"),
-            "{err}"
-        );
+        assert!(err.contains("disagrees with referenced setting"), "{err}");
     }
 
     #[test]
@@ -735,5 +771,4 @@ mod tests {
             "message must be signed"
         );
     }
-
 }

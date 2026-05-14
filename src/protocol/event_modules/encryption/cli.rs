@@ -145,10 +145,11 @@ fn run_key_recipient_command(
 ) -> Result<CliOutput, String> {
     args.require_len(1, KEY_RECIPIENT_USAGE)?;
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), KEY_RECIPIENT_USAGE)?;
-    let membership = crate::protocol::event_modules::content::message::commands::require_local_membership(
-        &context.store,
-        workspace_id,
-    )?;
+    let membership =
+        crate::protocol::event_modules::content::message::commands::require_local_membership(
+            &context.store,
+            workspace_id,
+        )?;
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
     if membership.signing_public_key != local.signing_public_key {
@@ -180,8 +181,7 @@ fn run_key_recipient_command(
             // forward-secrecy rotation path in the encryption worker
             // sets this to the wiped pubkey when re-publishing under
             // an F-wipe.
-            previous_recipient_key_id:
-                super::recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
+            previous_recipient_key_id: super::recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
         })?;
     let recipient_report = common_worker::run(
         &context.store,
@@ -251,10 +251,11 @@ fn run_key_rotate_recipient_command(
 fn run_key_frontier_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(1, KEY_FRONTIER_USAGE)?;
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), KEY_FRONTIER_USAGE)?;
-    let membership = crate::protocol::event_modules::content::message::commands::require_local_membership(
-        &context.store,
-        workspace_id,
-    )?;
+    let membership =
+        crate::protocol::event_modules::content::message::commands::require_local_membership(
+            &context.store,
+            workspace_id,
+        )?;
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
     let authority_admin_id = admin_for_user(
@@ -314,10 +315,11 @@ fn run_key_wrap_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliO
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), KEY_WRAP_USAGE)?;
     let removal_frontier_id = parse_hex_id(args.get(1).expect("length checked"), KEY_WRAP_USAGE)?;
     let recipient_key_id = parse_hex_id(args.get(2).expect("length checked"), KEY_WRAP_USAGE)?;
-    let membership = crate::protocol::event_modules::content::message::commands::require_local_membership(
-        &context.store,
-        workspace_id,
-    )?;
+    let membership =
+        crate::protocol::event_modules::content::message::commands::require_local_membership(
+            &context.store,
+            workspace_id,
+        )?;
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
     let key_secret =
@@ -499,7 +501,8 @@ fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
     args.require_len(1, KEYS_USAGE)?;
     let workspace_id = parse_hex_id(args.get(0).expect("length checked"), KEYS_USAGE)?;
     let frontiers = removal_frontier::queries::list_for_workspace(&context.store, workspace_id)?;
-    let local_secrets = local_key_secret::queries::list_for_workspace(&context.store, workspace_id)?;
+    let local_secrets =
+        local_key_secret::queries::list_for_workspace(&context.store, workspace_id)?;
     let recipient_keys = recipient_key::queries::list_for_workspace(&context.store, workspace_id)?;
     let local_recipient_keys =
         local_recipient_key::queries::list_for_workspace(&context.store, workspace_id)?;
@@ -684,13 +687,13 @@ fn run_disappearing_status_command(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     args.require_len(1, DISAPPEARING_STATUS_USAGE)?;
-    let workspace_id =
-        parse_hex_id(args.get(0).expect("length checked"), DISAPPEARING_STATUS_USAGE)?;
-
-    let active = disappearing_messages_setting::queries::active_for_workspace(
-        &context.store,
-        workspace_id,
+    let workspace_id = parse_hex_id(
+        args.get(0).expect("length checked"),
+        DISAPPEARING_STATUS_USAGE,
     )?;
+
+    let active =
+        disappearing_messages_setting::queries::active_for_workspace(&context.store, workspace_id)?;
     let ttl_minutes = active
         .as_ref()
         .map(|row| row.ttl_minutes.to_string())
@@ -746,8 +749,7 @@ fn run_disappearing_status_command(
     let live_messages = message_queries::count_for_workspace(&context.store, workspace_id)?
         + message_queries::count_sealed_for_workspace(&context.store, workspace_id)?;
     let message_tombstones =
-        message_queries::list_message_tombstones_for_workspace(&context.store, workspace_id)?
-            .len();
+        message_queries::list_message_tombstones_for_workspace(&context.store, workspace_id)?.len();
     let leaf_tombstones = local_history_node_secret::queries::list_tombstones_for_workspace(
         &context.store,
         workspace_id,
@@ -805,8 +807,7 @@ fn run_disappearing_tighten_command(
         }
     }
 
-    let output =
-        disappearing_messages_setting::commands::author_tighten(&context.store, input)?;
+    let output = disappearing_messages_setting::commands::author_tighten(&context.store, input)?;
     let report = common_worker::run(
         &context.store,
         &context.protocol,
@@ -962,7 +963,6 @@ fn hex_bytes(bytes: &[u8]) -> String {
     }
     out
 }
-
 
 fn load_recipient_key(
     store: &Store,

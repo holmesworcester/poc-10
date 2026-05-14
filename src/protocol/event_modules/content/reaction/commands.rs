@@ -66,9 +66,8 @@ pub fn open_sealed_reaction_row(
     row: super::schema::SealedReactionRow,
 ) -> Result<Option<super::types::ReactionRow>, String> {
     use crate::protocol::event_modules::encryption::local_history_node_secret;
-    let unix_minute = crate::protocol::event_modules::content::message::types::unix_minute_for(
-        row.created_at_ms,
-    );
+    let unix_minute =
+        crate::protocol::event_modules::content::message::types::unix_minute_for(row.created_at_ms);
     let event_id_in_minute = super::types::reaction_event_id_in_minute(
         &row.workspace_id,
         &row.author_user_id,

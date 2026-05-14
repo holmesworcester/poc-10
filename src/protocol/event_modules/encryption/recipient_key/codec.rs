@@ -14,8 +14,7 @@ use super::types::{RecipientKeyEvent, SignedRecipientKeyEnvelope};
 
 pub const TYPE_RECIPIENT_KEY: u8 = 18;
 pub const TYPE_SIGNED_RECIPIENT_KEY: u8 = 19;
-pub const RECIPIENT_KEY_WIRE_SIZE: usize =
-    1 + 32 + 8 + 32 + X25519_PUBLIC_KEY_BYTES + 32;
+pub const RECIPIENT_KEY_WIRE_SIZE: usize = 1 + 32 + 8 + 32 + X25519_PUBLIC_KEY_BYTES + 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecipientKeyMetadata {
