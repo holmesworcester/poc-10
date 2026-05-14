@@ -151,3 +151,53 @@ pub fn first_diverging_bit(a: &EventId, b: &EventId) -> u16 {
     }
     TRIE_LEAF_BIT_DEPTH
 }
+
+/// Compute the sibling's masked prefix at `depth` along the trie path of
+/// `leaf_coord` — flips bit `(depth - 1)` of the masked prefix. Used by the
+/// retire trie walk to derive the surviving sibling's coordinate at each
+/// divergence depth.
+pub fn sibling_prefix_at_depth(leaf_coord: EventId, depth: u16) -> EventId {
+    debug_assert!(depth > 0 && depth <= TRIE_LEAF_BIT_DEPTH);
+    let mut prefix = mask_prefix_to_depth(leaf_coord, depth);
+    let bit_index = depth - 1;
+    let byte = (bit_index / 8) as usize;
+    let shift = 7 - (bit_index % 8) as u8;
+    let mask = 1u8 << shift;
+    prefix[byte] ^= mask;
+    mask_prefix_to_depth(prefix, depth)
+}
+
+/// Source-of-derivation for a per-event leaf, returned by
+/// `queries::closest_ancestor`. The three variants correspond to the three
+/// places a derivation chain can resume from when descending toward a leaf:
+///
+/// * `Root` — the frontier root (`local_key_secret`). Implicitly covers the
+///   entire time axis at `bit_depth = 0`. Walking to the leaf requires
+///   `log2(TIME_TREE_ROOT_WIDTH)` time-tree splits plus one trie split.
+/// * `TimeInternal` — a materialized time-tree internal whose
+///   `range_width > 1` (so `bit_depth = 0`, `event_id_prefix = 0`). Walking
+///   to the leaf requires `log2(range_width)` time-tree splits plus one
+///   trie split.
+/// * `InMinute` — a materialized minute_node (`range_width = 1,
+///   bit_depth = 0`) or trie internal (`range_width = 1, 0 < bit_depth <
+///   256`). Walking to the leaf requires one trie split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AncestorSource {
+    Root {
+        secret_id: EventId,
+        secret: HistoryNodeSecret,
+    },
+    TimeInternal {
+        secret_id: EventId,
+        secret: HistoryNodeSecret,
+        range_start: u64,
+        range_width: u64,
+    },
+    InMinute {
+        secret_id: EventId,
+        secret: HistoryNodeSecret,
+        range_start: u64,
+        bit_depth: u16,
+        event_id_prefix: EventId,
+    },
+}

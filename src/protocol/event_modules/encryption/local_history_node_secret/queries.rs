@@ -25,8 +25,9 @@ use super::schema::{
     local_history_node_secret_key, LOCAL_HISTORY_NODE_SECRETS, LOCAL_HISTORY_NODE_TOMBSTONES,
 };
 use super::types::{
-    is_leaf_row, is_minute_node_row, mask_prefix_to_depth, LocalHistoryNodeSecretRow,
-    LocalHistoryNodeTombstoneRow, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH,
+    is_leaf_row, is_minute_node_row, mask_prefix_to_depth, AncestorSource,
+    LocalHistoryNodeSecretRow, LocalHistoryNodeTombstoneRow, TIME_TREE_BIT_DEPTH,
+    TRIE_LEAF_BIT_DEPTH,
 };
 
 pub fn list_for_frontier(
@@ -152,6 +153,100 @@ pub fn list_leaves(
         .into_iter()
         .filter(is_leaf_row)
         .collect())
+}
+
+/// Return all materialized trie leaves in a single minute under one frontier.
+/// Used by the retire walk to compute trie divergence depths against the
+/// surviving leaves in the same minute as the leaf being retired.
+pub fn list_leaves_in_minute(
+    store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    unix_minute: u64,
+) -> Result<Vec<LocalHistoryNodeSecretRow>, String> {
+    Ok(list_for_frontier(store, workspace_id, removal_frontier_id)?
+        .into_iter()
+        .filter(|row| {
+            row.range_start == unix_minute
+                && row.range_width == 1
+                && row.bit_depth == TRIE_LEAF_BIT_DEPTH
+        })
+        .collect())
+}
+
+/// Find the closest source-of-derivation for the leaf at
+/// `(unix_minute, event_id_in_minute)` under this frontier. Returns the
+/// frontier root (`local_key_secret`) when no materialized internal covers
+/// the position. When `exclude_leaf` is true, skip the leaf-being-retired
+/// itself (it cannot be its own ancestor).
+///
+/// Specificity ranks first by smaller `range_width`, then by larger
+/// `bit_depth`. The returned `AncestorSource` carries the secret material
+/// and identity needed to resume derivation toward the leaf.
+///
+/// Errors when neither the frontier root nor any covering sibling row
+/// exists — the genuine "wedge" case where the target leaf has no covering
+/// ancestor at all (F has been wiped by a prior retire AND no sibling row
+/// covers this coordinate).
+pub fn closest_ancestor(
+    store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    unix_minute: u64,
+    event_id_in_minute: EventId,
+    exclude_leaf: bool,
+) -> Result<AncestorSource, String> {
+    let root = local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?;
+    let mut best: Option<AncestorSource> = root.map(|row| AncestorSource::Root {
+        secret_id: row.local_key_secret_id,
+        secret: row.key_secret,
+    });
+    let mut best_range_width: u64 = u64::MAX;
+    let mut best_bit_depth: u16 = TIME_TREE_BIT_DEPTH;
+    let mut best_is_root = matches!(best, Some(AncestorSource::Root { .. }));
+
+    for row in list_for_frontier(store, workspace_id, removal_frontier_id)? {
+        if !covers(&row, unix_minute, event_id_in_minute) {
+            continue;
+        }
+        if exclude_leaf
+            && row.bit_depth == TRIE_LEAF_BIT_DEPTH
+            && row.event_id_prefix == event_id_in_minute
+        {
+            continue;
+        }
+        let better = best.is_none()
+            || best_is_root
+            || row.range_width < best_range_width
+            || (row.range_width == best_range_width && row.bit_depth > best_bit_depth);
+        if !better {
+            continue;
+        }
+        best_range_width = row.range_width;
+        best_bit_depth = row.bit_depth;
+        best_is_root = false;
+        best = Some(if row.range_width > 1 {
+            AncestorSource::TimeInternal {
+                secret_id: row.local_history_node_secret_id,
+                secret: row.node_secret,
+                range_start: row.range_start,
+                range_width: row.range_width,
+            }
+        } else {
+            AncestorSource::InMinute {
+                secret_id: row.local_history_node_secret_id,
+                secret: row.node_secret,
+                range_start: row.range_start,
+                bit_depth: row.bit_depth,
+                event_id_prefix: row.event_id_prefix,
+            }
+        });
+    }
+    best.ok_or_else(|| {
+        "no retained ancestor covers the target leaf: F is wiped and no \
+         sibling row covers this coordinate"
+            .to_string()
+    })
 }
 
 /// Canonical, workspace-independent encoding of every retained node-secret
