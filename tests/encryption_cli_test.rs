@@ -204,10 +204,9 @@ fn cli_rotates_recipient_keys_and_tombstones_history_path_nodes() {
 
     let keys = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
     assert_eq!(line_value(&keys, "recipient_keys"), "1");
-    // No separate `recipient_key_tombstone` event is emitted under the
-    // refined FS rule; supersession lives in the new `recipient_key`'s
-    // `previous_recipient_key_id` field.
-    assert_eq!(line_value(&keys, "recipient_key_tombstones"), "0");
+    // Supersession lives in the new `recipient_key`'s
+    // `previous_recipient_key_id` field; the old standalone
+    // `recipient_key_tombstone` mechanism has been removed.
     // Rotation wipes the retired private key alongside the supersession.
     assert_eq!(line_value(&keys, "local_recipient_keys"), "1");
 
@@ -463,7 +462,6 @@ fn cli_rotate_recipient_purges_old_local_private_key_and_wraps() {
     // the test below is checking the wrong baseline.
     let pre = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
     assert_eq!(line_value(&pre, "recipient_keys"), "1");
-    assert_eq!(line_value(&pre, "recipient_key_tombstones"), "0");
     assert_eq!(line_value(&pre, "local_recipient_keys"), "1");
     assert_eq!(line_value(&pre, "key_wraps"), "1");
 
@@ -498,12 +496,11 @@ fn cli_rotate_recipient_purges_old_local_private_key_and_wraps() {
     // event replaced the retired pubkey row, and the retired wrap row
     // was deleted alongside the supersession. Under the refined FS rule
     // (`RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
-    // Wrap-Bound Deletion") no separate `recipient_key_tombstone` event
-    // is emitted; supersession lives in the new `recipient_key`'s
-    // `previous_recipient_key_id` field.
+    // Wrap-Bound Deletion") supersession lives in the new
+    // `recipient_key`'s `previous_recipient_key_id` field; the old
+    // standalone `recipient_key_tombstone` mechanism has been removed.
     let post = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
     assert_eq!(line_value(&post, "recipient_keys"), "1");
-    assert_eq!(line_value(&post, "recipient_key_tombstones"), "0");
     assert_eq!(line_value(&post, "local_recipient_keys"), "1");
     assert_eq!(line_value(&post, "key_wraps"), "0");
 
@@ -546,15 +543,19 @@ fn cli_chop_wiping_f_rotates_local_recipient_key_for_forward_secrecy() {
     // RULES.md § "Forward Secrecy Requires Recipient Key Rotation On
     // Wrap-Bound Deletion" demands that any deletion that wipes a
     // key-wrapped F also force every recipient of a `key_wrap` for that
-    // F to rotate: tombstone the recipient pubkey, wipe the matching
-    // `local_recipient_key` private key, and generate a fresh keypair.
+    // F to rotate: supersede the recipient pubkey (via the new
+    // `recipient_key`'s `previous_recipient_key_id` field), wipe the
+    // matching `local_recipient_key` private key, and generate a fresh
+    // keypair.
     //
     // This test proves the chop path. Alice publishes a recipient key,
     // creates a frontier, wraps F to her own recipient key, then runs
     // `chop-now` with a non-zero floor. Chop wipes F's row, and the
     // forward-secrecy hook in the encryption worker must:
-    //   * Sign and admit a `recipient_key_tombstone` for the old key.
-    //   * Publish a new `recipient_key` event (fresh pubkey).
+    //   * Sign and admit a fresh `recipient_key` event whose
+    //     `previous_recipient_key_id` supersedes the retired pubkey
+    //     (the supersession projector exact-deletes the predecessor's
+    //     row and labels it).
     //   * Exact-delete the old `LOCAL_RECIPIENT_KEYS` row + purge bytes.
     //   * Exact-delete the old `KEY_WRAPS` row for the wiped F.
     let tmp = tempfile::tempdir().unwrap();
@@ -582,11 +583,10 @@ fn cli_chop_wiping_f_rotates_local_recipient_key_for_forward_secrecy() {
     ]));
     let retired_key_wrap_id = line_value(&wrapped, "key_wrap_id");
 
-    // Sanity: pre-chop, alice has F's row, one recipient key, no
-    // tombstones, one local private key, and one key wrap.
+    // Sanity: pre-chop, alice has F's row, one recipient key, one
+    // local private key, and one key wrap.
     let pre = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
     assert_eq!(line_value(&pre, "recipient_keys"), "1");
-    assert_eq!(line_value(&pre, "recipient_key_tombstones"), "0");
     assert_eq!(line_value(&pre, "local_recipient_keys"), "1");
     assert_eq!(line_value(&pre, "key_wraps"), "1");
     let access_pre = assert_success(topo(&[
@@ -634,25 +634,19 @@ fn cli_chop_wiping_f_rotates_local_recipient_key_for_forward_secrecy() {
         "chop must wipe F's row"
     );
 
-    // The forward-secrecy rotation hook must have tombstoned the
+    // The forward-secrecy rotation hook must have superseded the
     // retired recipient key, published a fresh recipient key, and wiped
-    // the retired private rows + the wrap.
+    // the retired private rows + the wrap. Under the refined FS rule
+    // (`RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+    // Wrap-Bound Deletion") supersession lives in the new
+    // `recipient_key`'s `previous_recipient_key_id` field; the old
+    // standalone `recipient_key_tombstone` mechanism has been removed.
     let post = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
     assert_eq!(
         line_value(&post, "recipient_keys"),
         "1",
         "old recipient key row is exact-deleted by the supersession \
          projector; a fresh recipient key replaces it"
-    );
-    // Under the refined FS rule (`RULES.md` § "Forward Secrecy Requires
-    // Recipient Key Rotation On Wrap-Bound Deletion") no separate
-    // `recipient_key_tombstone` event is emitted; supersession lives in
-    // the new `recipient_key`'s `previous_recipient_key_id` field.
-    assert_eq!(
-        line_value(&post, "recipient_key_tombstones"),
-        "0",
-        "supersession is encoded in the replacement recipient_key event \
-         itself; no separate tombstone is authored"
     );
     assert_eq!(
         line_value(&post, "local_recipient_keys"),

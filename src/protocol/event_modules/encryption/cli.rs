@@ -22,7 +22,7 @@ use crate::protocol::event_modules::worker as common_worker;
 use super::disappearing_messages_setting::types::COVER_HORIZON_MINUTES;
 use super::{
     disappearing_messages_setting, key_wrap, local_history_node_secret, local_key_secret,
-    local_recipient_key, recipient_key, recipient_key_tombstone, removal_frontier, worker,
+    local_recipient_key, recipient_key, removal_frontier, worker,
 };
 
 const KEY_RECIPIENT_USAGE: &str = "key-recipient WORKSPACE_ID_HEX";
@@ -501,8 +501,6 @@ fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
     let frontiers = removal_frontier::queries::list_for_workspace(&context.store, workspace_id)?;
     let local_secrets = local_key_secret::queries::list_for_workspace(&context.store, workspace_id)?;
     let recipient_keys = recipient_key::queries::list_for_workspace(&context.store, workspace_id)?;
-    let recipient_key_tombstones =
-        recipient_key_tombstone::queries::list_for_workspace(&context.store, workspace_id)?;
     let local_recipient_keys =
         local_recipient_key::queries::list_for_workspace(&context.store, workspace_id)?;
     let key_wraps = key_wrap::queries::list_for_workspace(&context.store, workspace_id)?;
@@ -541,10 +539,6 @@ fn run_keys_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
 
     let mut lines = vec![
         format!("recipient_keys: {}", recipient_keys.len()),
-        format!(
-            "recipient_key_tombstones: {}",
-            recipient_key_tombstones.len()
-        ),
         format!("local_recipient_keys: {}", local_recipient_keys.len()),
         format!("removal_frontiers: {}", frontiers.len()),
         format!("key_wraps: {}", key_wraps.len()),

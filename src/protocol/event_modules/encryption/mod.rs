@@ -11,7 +11,6 @@ pub mod local_history_node_secret;
 pub mod local_key_secret;
 pub mod local_recipient_key;
 pub mod recipient_key;
-pub mod recipient_key_tombstone;
 pub mod removal_frontier;
 pub use crate::workers::encryption as worker;
 
@@ -32,9 +31,6 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
         }
         Some(recipient_key::codec::TYPE_SIGNED_RECIPIENT_KEY) => {
             Ok(Some(recipient_key::projector::project(event)?))
-        }
-        Some(recipient_key_tombstone::codec::TYPE_SIGNED_RECIPIENT_KEY_TOMBSTONE) => {
-            Ok(Some(recipient_key_tombstone::projector::project(event)?))
         }
         Some(removal_frontier::codec::TYPE_SIGNED_REMOVAL_FRONTIER) => {
             Ok(Some(removal_frontier::projector::project(event)?))
@@ -59,8 +55,6 @@ pub fn is_encryption_tag(tag: u8) -> bool {
             | local_history_node_secret::codec::TYPE_LOCAL_HISTORY_NODE_SECRET
             | recipient_key::codec::TYPE_RECIPIENT_KEY
             | recipient_key::codec::TYPE_SIGNED_RECIPIENT_KEY
-            | recipient_key_tombstone::codec::TYPE_RECIPIENT_KEY_TOMBSTONE
-            | recipient_key_tombstone::codec::TYPE_SIGNED_RECIPIENT_KEY_TOMBSTONE
             | removal_frontier::codec::TYPE_REMOVAL_FRONTIER
             | removal_frontier::codec::TYPE_SIGNED_REMOVAL_FRONTIER
             | key_wrap::codec::TYPE_KEY_WRAP
@@ -90,12 +84,6 @@ pub fn event_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         recipient_key::codec::TYPE_RECIPIENT_KEY => Err("recipient_key must be signed".to_string()),
         recipient_key::codec::TYPE_SIGNED_RECIPIENT_KEY => {
             recipient_key::codec::signed_record_from_bytes(bytes)
-        }
-        recipient_key_tombstone::codec::TYPE_RECIPIENT_KEY_TOMBSTONE => {
-            Err("recipient_key_tombstone must be signed".to_string())
-        }
-        recipient_key_tombstone::codec::TYPE_SIGNED_RECIPIENT_KEY_TOMBSTONE => {
-            recipient_key_tombstone::codec::signed_record_from_bytes(bytes)
         }
         removal_frontier::codec::TYPE_REMOVAL_FRONTIER => {
             Err("removal_frontier must be signed".to_string())

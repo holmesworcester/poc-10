@@ -78,7 +78,6 @@ use crate::workers::pipeline_helpers::purging;
 
 use crate::protocol::event_modules::encryption::{
     key_wrap, local_history_node_secret, local_key_secret, local_recipient_key, recipient_key,
-    recipient_key_tombstone,
 };
 
 use local_history_node_secret::types::{TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH};
@@ -445,12 +444,12 @@ fn derive_key_secrets<R: EventRegistry>(
 /// none of its active recipient keys have wraps for F).
 ///
 /// Rotation produces a fresh recipient keypair, publishes the new public
-/// `recipient_key` event, signs a `recipient_key_tombstone` for every active
-/// recipient key on this endpoint, and wipes the matching
-/// `local_recipient_key` private rows + retired `key_wrap` rows. Together
-/// these satisfy `RULES.md` § "Forward Secrecy Requires Recipient Key
-/// Rotation On Wrap-Bound Deletion": after the wipe, the surviving
-/// `key_wrap` for the wiped F is encrypted to a tombstoned pubkey whose
+/// `recipient_key` event whose `previous_recipient_key_id` field
+/// supersedes every active recipient key on this endpoint, and wipes the
+/// matching `local_recipient_key` private rows + retired `key_wrap` rows.
+/// Together these satisfy `RULES.md` § "Forward Secrecy Requires Recipient
+/// Key Rotation On Wrap-Bound Deletion": after the wipe, the surviving
+/// `key_wrap` for the wiped F is encrypted to a superseded pubkey whose
 /// private half no longer exists on this peer.
 ///
 /// The caller must invoke this AFTER the F-wipe transaction has committed.
@@ -1536,11 +1535,10 @@ fn active_local_recipient_keys(
         else {
             continue;
         };
-        if recipient_key_tombstone::queries::get(store, workspace_id, row.recipient_key_id)?
-            .is_some()
-        {
-            continue;
-        }
+        // Superseded recipient keys are filtered structurally: the
+        // supersession projector exact-deletes the predecessor's
+        // RECIPIENT_KEYS row in the same projection, so
+        // `list_for_workspace` already only returns live keys.
         active.push(RetiredRecipientKey {
             recipient_key_id: row.recipient_key_id,
             local_recipient_key_id: local.local_recipient_key_id,

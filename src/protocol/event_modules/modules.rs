@@ -154,7 +154,6 @@ pub fn schemas() -> Vec<crate::core::store::Schema> {
     out.extend_from_slice(encryption::local_key_secret::schema::SCHEMAS);
     out.extend_from_slice(encryption::local_recipient_key::schema::SCHEMAS);
     out.extend_from_slice(encryption::recipient_key::schema::SCHEMAS);
-    out.extend_from_slice(encryption::recipient_key_tombstone::schema::SCHEMAS);
     out.extend_from_slice(encryption::removal_frontier::schema::SCHEMAS);
     out.extend_from_slice(connection::schema::SCHEMAS);
     out.extend_from_slice(sync::schema::SCHEMAS);
