@@ -44,7 +44,7 @@
 
 use std::cmp::max;
 
-use crate::core::daemon::{StepContext, Worker};
+use crate::core::daemon::{self, StepContext, Worker};
 use crate::core::logical_clock;
 use crate::core::store::Store;
 use crate::protocol::event_modules::content::message::types::UNIX_MINUTE_MS;
@@ -94,27 +94,22 @@ fn daemon_step<C>(ctx: &mut StepContext<'_, C>) -> Result<(), String>
 where
     C: DaemonWorkerContext,
 {
-    let app = &*ctx.app;
-    let store = app.store();
-    let report = run(
-        store,
-        app,
-        Work::Drain {
-            limit: ctx.options.work_limit,
+    daemon::run_step(
+        ctx,
+        "disappearing floor dispatcher",
+        |app, limit| run(app.store(), app, Work::Drain { limit }),
+        |report, daemon_report| {
+            daemon_report.add("disappearing_floor_chops_issued", report.chops_issued);
+            daemon_report.add(
+                "disappearing_floor_subtree_tombstones",
+                report.subtree_tombstones_written,
+            );
+            daemon_report.add(
+                "disappearing_floor_boundary_tombstones",
+                report.boundary_descend_tombstones_written,
+            );
         },
     )
-    .map_err(|err| format!("disappearing floor dispatcher: {err}"))?;
-    ctx.report
-        .add("disappearing_floor_chops_issued", report.chops_issued);
-    ctx.report.add(
-        "disappearing_floor_subtree_tombstones",
-        report.subtree_tombstones_written,
-    );
-    ctx.report.add(
-        "disappearing_floor_boundary_tombstones",
-        report.boundary_descend_tombstones_written,
-    );
-    Ok(())
 }
 
 /// Single public worker entrypoint. The daemon-step shim above and any

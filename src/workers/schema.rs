@@ -16,7 +16,7 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-use crate::core::store::{Schema, Store, TableName, TableRow};
+use crate::core::store::{table_error, Schema, Store, TableName, TableRow};
 pub use crate::protocol::event_modules::connection::transit::projector::{
     TransitEventType, TransitProvenance,
 };
@@ -546,10 +546,6 @@ fn vec_to_id(bytes: Vec<u8>) -> rusqlite::Result<EventId> {
     bytes.try_into().map_err(|bytes: Vec<u8>| {
         table_error(format!("expected 32-byte event id, got {}", bytes.len()))
     })
-}
-
-fn table_error(err: String) -> rusqlite::Error {
-    rusqlite::Error::InvalidParameterName(err)
 }
 
 #[cfg(test)]

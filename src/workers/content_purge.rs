@@ -38,8 +38,8 @@
 //! row in a tiny tx, so two processes cannot run retire for the same
 //! orphan coord simultaneously.
 
-use crate::core::daemon::{StepContext, Worker};
-use crate::core::store::Store;
+use crate::core::daemon::{self, StepContext, Worker};
+use crate::core::store::{table_error, Store};
 use crate::protocol::event_modules::content::{
     file, file_deletion, file_slice, message, message_deletion, reaction,
 };
@@ -96,21 +96,15 @@ fn daemon_step<C>(ctx: &mut StepContext<'_, C>) -> Result<(), String>
 where
     C: DaemonWorkerContext,
 {
-    let app = &*ctx.app;
-    let store = app.store();
-    let report = run(
-        store,
-        app,
-        Work::Drain {
-            limit: ctx.options.work_limit,
+    daemon::run_step(
+        ctx,
+        "purge content",
+        |app, limit| run(app.store(), app, Work::Drain { limit }),
+        |report, daemon_report| {
+            daemon_report.add("purged_content_events", report.event_bytes_purged);
+            daemon_report.add("retired_message_leaves", report.retired_message_leaves);
         },
     )
-    .map_err(|err| format!("purge content: {err}"))?;
-    ctx.report
-        .add("purged_content_events", report.event_bytes_purged);
-    ctx.report
-        .add("retired_message_leaves", report.retired_message_leaves);
-    Ok(())
 }
 
 /// Per-instruction record carried from the purge transaction into the
@@ -518,10 +512,6 @@ fn cascade_files_for_message(
         .insert_table_rows_in_tx(cascade_rows)
         .map_err(|err| format!("enqueue cascade file instructions: {err}"))?;
     Ok(())
-}
-
-fn table_error(err: String) -> rusqlite::Error {
-    rusqlite::Error::InvalidParameterName(err)
 }
 
 // Unused import guards for crate items referenced only by tests.

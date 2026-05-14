@@ -15,7 +15,7 @@
 //! `src/workers/schema.rs`. Labels are generic, bounded context for projectors;
 //! richer read models belong in scoped module schema files.
 
-use crate::core::store::{Schema, Store, TableName, TableRow};
+use crate::core::store::{table_error, Schema, Store, TableName, TableRow};
 use crate::protocol::event_modules::types::{
     EventId, EventIndexEntry, EventRecord, EventScope, EventStatus, EventStatusCounts,
 };
@@ -450,8 +450,4 @@ fn vec_to_id(bytes: Vec<u8>) -> rusqlite::Result<EventId> {
     bytes.try_into().map_err(|bytes: Vec<u8>| {
         table_error(format!("expected 32-byte event id, got {}", bytes.len()))
     })
-}
-
-fn table_error(err: String) -> rusqlite::Error {
-    rusqlite::Error::InvalidParameterName(err)
 }

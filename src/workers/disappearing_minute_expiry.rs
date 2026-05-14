@@ -18,7 +18,7 @@
 //!
 //! Fairness: bounded by `ctx.options.work_limit`.
 
-use crate::core::daemon::{StepContext, Worker};
+use crate::core::daemon::{self, StepContext, Worker};
 use crate::core::logical_clock;
 use crate::core::store::Store;
 use crate::protocol::event_modules::content::message::queries as message_queries;
@@ -62,21 +62,15 @@ fn daemon_step<C>(ctx: &mut StepContext<'_, C>) -> Result<(), String>
 where
     C: DaemonWorkerContext,
 {
-    let app = &*ctx.app;
-    let store = app.store();
-    let report = run(
-        store,
-        app,
-        Work::Drain {
-            limit: ctx.options.work_limit,
+    daemon::run_step(
+        ctx,
+        "disappearing minute expiry",
+        |app, limit| run(app.store(), app, Work::Drain { limit }),
+        |report, daemon_report| {
+            daemon_report.add("disappearing_retired_leaves", report.retired_message_leaves);
+            daemon_report.add("disappearing_purged_event_bytes", report.purged_event_bytes);
         },
     )
-    .map_err(|err| format!("disappearing minute expiry: {err}"))?;
-    ctx.report
-        .add("disappearing_retired_leaves", report.retired_message_leaves);
-    ctx.report
-        .add("disappearing_purged_event_bytes", report.purged_event_bytes);
-    Ok(())
 }
 
 /// Single public worker entrypoint. The daemon-step shim above and any
