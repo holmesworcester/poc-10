@@ -14,6 +14,7 @@ context needs
 context offers
 context matchers
 pending projection
+projectors
 intents
 intent handlers
 ```
