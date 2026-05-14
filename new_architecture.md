@@ -24,6 +24,45 @@ pending reprojection queues, worker-specific drain queues, or receive metadata
 side channels. Existing code can migrate incrementally, but the end state
 should not keep duplicate vocabulary.
 
+## Poc-10 Success Criteria
+
+`poc-10` is the new-architecture repository. It should start from the merged
+`poc-8` behavior, but the implementation target is this architecture, not a
+compatibility layer around the old one.
+
+The migration succeeds when:
+
+- Every non-ignored `poc-8` test passes in `poc-10`, with the same user-facing
+  behavior.
+- The old mechanisms are gone, not wrapped: labels, blocked tables, ready
+  queues, pending reprojection queues, worker-specific domain queues, and
+  receive metadata side channels.
+- Core owns facts, context, projection scheduling, intents, handler dispatch,
+  storage mechanics, wire field primitives, and crypto helpers.
+- Protocol code owns projectors, context matchers, wire layouts, user-facing
+  commands, and protocol validation rules.
+- Intent handlers own bounded stateful work and handler checkpoint state.
+- Projectors return only needs, offers, and intents.
+- Intent handlers return only facts and intents.
+- No event module, handler, command, schema, or wire codec reaches around core
+  to call another stage directly.
+- There is no `mod.rs` anywhere in the repository.
+- There is no per-module `schema.rs`, `codec.rs`, or `cli.rs` where logic can
+  hide.
+- Schema declarations exist in exactly three visible places:
+  `core/schema.p8sql`, `event_modules/schema.p8sql`, and
+  `handlers/schema.p8sql`.
+- Wire layouts are declarative and fixed length unless the fact explicitly
+  stores opaque chunk bytes with a fixed outer slot.
+- Transit frames use the same fixed-layout wire machinery and support only the
+  two configured frame sizes.
+- Boundary tests fail if new dumping-ground files, ad hoc SQL, ad hoc codecs,
+  broad projector reads, direct handler calls, or direct network/store side
+  effects appear.
+
+The first `poc-10` milestone is not feature expansion. It is a clean structural
+switch-over with the `poc-8` test suite still green.
+
 ## Design Principles
 
 Core owns mechanics, not protocol meaning.
@@ -44,6 +83,407 @@ Projectors may use `core::crypto` for encryption and decryption when the
 operation is pure over the fact and provided context. Projectors still may not
 do IO, broad scans, clock reads, process-local mutation, or nested event
 admission.
+
+File names are part of the architecture. A file with a broad name tends to
+become a broad responsibility. `poc-10` should use narrow role names and
+boundary tests so logic has nowhere ambiguous to accumulate.
+
+## Project Layout
+
+The target source tree should make ownership visible from the top level:
+
+```text
+src/
+  lib.rs
+  core.rs
+  event_modules.rs
+  handlers.rs
+  commands.rs
+
+  core/
+    schema.p8sql
+    crypto.rs
+    facts.rs
+    context.rs
+    matchers.rs
+    projection.rs
+    intents.rs
+    handler_dispatch.rs
+    store.rs
+    wire.rs
+
+  event_modules/
+    schema.p8sql
+    message/
+      fact.rs
+      layout.rs
+      create.rs
+      project.rs
+      rules.rs
+      read.rs
+    key_wrap/
+      fact.rs
+      layout.rs
+      create.rs
+      project.rs
+      rules.rs
+      read.rs
+
+  handlers/
+    schema.p8sql
+    purge_event.rs
+    discover_cascade.rs
+    retire_secret.rs
+    materialize_key_wraps.rs
+    receive_transit.rs
+    send_on_connection.rs
+    network_send.rs
+
+  commands/
+    send_message.rs
+    delete_message.rs
+    accept_invite.rs
+    view.rs
+```
+
+The exact event module names can change, but the ownership pattern should not.
+
+### No `mod.rs`
+
+`mod.rs` should disappear entirely.
+
+Rust still needs module declarations, but they should live in a small number of
+manifest files:
+
+```text
+src/core.rs
+src/event_modules.rs
+src/handlers.rs
+src/commands.rs
+```
+
+Those files are declarations only:
+
+```rust
+pub mod facts;
+pub mod context;
+pub mod projection;
+```
+
+They should contain no functions, no tests, no constants other than module
+exports, no `use` trees other than re-exports, and no conditional behavior.
+A boundary test should reject `mod.rs` and should line-count the manifest files
+so they cannot become the new dumping grounds.
+
+### File Role Rules
+
+Use narrow role names:
+
+```text
+fact.rs
+  protocol data types and semantic field names
+
+layout.rs
+  declarative fixed-length wire layout for that fact type
+
+create.rs
+  user/local command constructors that produce proposed facts
+
+project.rs
+  one projector entrypoint plus tiny local glue
+
+rules.rs
+  named, reusable validation predicates for that module
+
+read.rs
+  read models and presentation-facing queries
+```
+
+Avoid broad names:
+
+```text
+mod.rs
+schema.rs
+codec.rs
+cli.rs
+utils.rs
+helpers.rs
+common.rs
+misc.rs
+manager.rs
+service.rs
+```
+
+If a helper is real, its file should say what invariant it checks or what
+object it builds. For example, prefer `workspace_auth.rs` or
+`retention_cover.rs` over `helpers.rs`.
+
+### Schema Ownership
+
+Schema should be declarative and globally visible by ownership class.
+
+There should be exactly three schema files:
+
+```text
+src/core/schema.p8sql
+src/event_modules/schema.p8sql
+src/handlers/schema.p8sql
+```
+
+`core/schema.p8sql` contains only core tables:
+
+```text
+facts
+inbox
+needs
+offers
+pending_projection
+intents
+clock
+network_in
+network_out
+```
+
+`event_modules/schema.p8sql` contains only projection state:
+
+```text
+message_rows
+file_rows
+workspace_rows
+recipient_key_rows
+key_wrap_rows
+opened_content_rows
+```
+
+`handlers/schema.p8sql` contains only handler checkpoint or operational state:
+
+```text
+purge_retire_coords
+sync_index_snapshots
+connection_attempt_checkpoints
+network_send_cursors
+```
+
+The schema DSL should allow tables, indexes, uniqueness, byte lengths, and row
+key declarations. It should not allow Rust expressions, projection callbacks,
+or validation logic. Generated Rust table constants and row codecs are fine,
+but handwritten SQL should not appear outside the schema compiler and tests.
+
+The point is searchability: every durable table is visible in one of three
+files, so no event module or handler can hide a private schema.
+
+### Projector Style
+
+A projector should read like a validation test followed by a small output
+statement. It should be mostly one-liners composed from common helpers:
+
+```rust
+pub fn project(fact: &Fact, ctx: &ProjectionContext) -> ProjectionOutput {
+    let msg = fact.decode::<Message>()?;
+    let workspace = ctx.require(event::<Workspace>(msg.workspace_id))?;
+    let signer = ctx.require(event::<SignerPubkey>(msg.signer_key_id))?;
+    let deletion = ctx.optional(update::<MessageDeletion>(fact.id));
+
+    require(signature_valid(&msg, &signer))?;
+    require(signer_is_member_of_workspace(&signer, &workspace))?;
+    require(message_names_workspace(&msg, &workspace))?;
+
+    output()
+        .need(update::<MessageDeletion>(fact.id))
+        .offer(event::<Message>(fact.id))
+        .intent(put_row(message_row(&msg, deletion)))
+}
+```
+
+Common helpers should be small and named by invariant:
+
+```text
+signature_valid
+signer_is_member_of_workspace
+message_names_workspace
+recipient_key_supersedes_previous
+wrap_matches_recipient_and_frontier
+secret_covers_leaf_coord
+```
+
+Helpers may compose other helpers, but they must not query storage, emit
+intents, mutate rows, call handlers, or inspect process state. A projector can
+then stay declarative without hiding protocol meaning in generic utility code.
+
+For missing context, the helper should make the need obvious:
+
+```rust
+let signer = ctx.require(event::<SignerPubkey>(msg.signer_key_id))?;
+let key = ctx.require(secret_covering(msg.leaf_coord))?;
+ctx.watch(update::<MessageDeletion>(fact.id));
+```
+
+`require` means "without this, do not apply rows." `watch` means "apply now,
+but wake me if this arrives later." Core stores both as context needs; the
+projector gives them meaning.
+
+### Intent Handler Style
+
+An intent handler should read like a bounded state-machine step:
+
+```rust
+pub fn handle(intent: &Intent, ctx: &HandlerContext) -> HandlerOutput {
+    let purge = intent.decode::<PurgeEvent>()?;
+    let target = ctx.load_fact(purge.target_id)?;
+    let plan = retention_plan_for_exact_target(&target, ctx.retention())?;
+
+    ctx.atomic(plan.storage_deletes())?;
+
+    output()
+        .intent(retire_secret(plan.retire_coord()))
+        .intent(discover_cascade(plan.target_id()))
+        .intent(sync_index_purge(plan.shared_event_id()))
+}
+```
+
+Handlers may read local state, use clocks, use network IO, and commit bounded
+atomic steps. They should still be boring: decode intent, load exact inputs,
+compute plan, commit one bounded step, emit follow-on facts or intents.
+
+No handler should call another handler. Chaining happens through the intent
+queue so crash recovery and idempotence stay visible.
+
+### Wire And Codec Style
+
+`poc-10` should avoid per-module handwritten `codec.rs` files.
+
+Use one shared fixed-layout wire system in `core/wire.rs` with field
+primitives:
+
+```text
+U8
+U16be
+U32be
+U64be
+Bool8
+Tag<N>
+FixedBytes<N>
+Id32
+Hash32
+PublicKey32
+Signature64
+Nonce24
+Ciphertext<N>
+Padding<N>
+```
+
+Event modules declare layouts, not readers and writers:
+
+```rust
+wire_layout! {
+    MessageV1: fixed {
+        tag: Tag<4> = b"MSG1",
+        workspace_id: Id32,
+        author_id: Id32,
+        signer_key_id: Id32,
+        leaf_coord: U64be,
+        nonce: Nonce24,
+        ciphertext: Ciphertext<1024>,
+    }
+}
+```
+
+The macro or DSL should generate:
+
+```text
+encoded length constant
+encode
+decode
+field slicing
+wrong-length rejection
+trailing-byte rejection
+golden vector tests
+```
+
+Fixed length remains the default. If a logical value is variable length, use
+one of these patterns:
+
+```text
+fixed encrypted slot with encrypted inner length
+fixed chunk fact
+hash pointer to separately chunked bytes
+fixed enum variant with its own total length
+```
+
+Do not reintroduce ad hoc varints, maps, arbitrary `Vec<u8>` fields, or
+per-event parsing loops.
+
+### Transit Frame Style
+
+Transit should use the same fixed-layout system as facts.
+
+Flatten transit wrapping into two outer frame layouts:
+
+```text
+TransitSmallV1
+TransitLargeV1
+```
+
+Each frame has a fixed public header and a fixed encrypted payload slot:
+
+```text
+tag
+version
+frame_size_class
+sender_endpoint_id
+receiver_endpoint_id
+connection_id
+nonce
+ciphertext_and_tag<SMALL_PAYLOAD>
+```
+
+and:
+
+```text
+tag
+version
+frame_size_class
+sender_endpoint_id
+receiver_endpoint_id
+connection_id
+nonce
+ciphertext_and_tag<LARGE_PAYLOAD>
+```
+
+The encrypted payload can contain the packed canonical fact bytes, their
+actual used length, and padding. The outer frame length should reveal only
+"small" or "large", not a bespoke per-message size.
+
+This removes nested transit wrappers and keeps transit compatible with the
+fixed-field discipline. The batcher chooses small or large; the wire layer
+only encodes one fixed layout or the other.
+
+### Simplicity Guardrails
+
+The repo should make the easy path the correct path:
+
+- Add boundary tests before the large rewrite, not after.
+- Reject broad filenames and `mod.rs` in source inventory tests.
+- Keep manifests, projectors, handlers, and rule files under explicit line
+  limits unless a local exception is justified in the test.
+- Register fact types, context roles, intent kinds, handlers, and wire layouts
+  in visible manifests.
+- Generate row and wire boilerplate from declarative schema/layouts.
+- Keep every compatibility bridge in a directory named `migration/`, and delete
+  that directory before declaring `poc-10` complete.
+- Prefer one exact helper per invariant over one flexible helper with flags.
+- Give every intent kind an idempotence key in its type definition.
+- Give every context matcher deterministic tests for `new need -> old offers`
+  and `new offer -> old needs`.
+- Keep CLI parsing thin: parse arguments, call one command constructor or read
+  model, print output.
+- Keep read models separate from projection and handler checkpoint state.
+- Keep fixture/golden tests close to layout declarations so wire changes are
+  obvious and reviewable.
+
+Pleasant code here means boring code: the file name predicts the allowed side
+effects, the function name states the invariant, and the test name states the
+behavior.
 
 ## Facts
 
@@ -984,6 +1424,25 @@ steps remain atomic, but the full workflow is intentionally multi-step.
 The migration should temporarily bridge old code only inside short-lived
 compatibility modules. The final state must remove every old queue, label, and
 blocked-event table listed above.
+
+### Phase 0: Start `poc-10`
+
+Create `poc-10` from the pushed `poc-8` `master` that includes recipient key
+rotation and this document.
+
+The first `poc-10` commits should:
+
+```text
+copy the full poc-8 test suite
+add source inventory boundary tests for forbidden files
+add schema-location boundary tests
+add projector and handler boundary tests
+add fixed-wire-layout golden test harness
+keep cargo test green
+```
+
+Do not begin by rewriting behavior. Begin by installing the guardrails that
+will keep the rewrite from recreating the old dumping grounds.
 
 ### Phase 1: Introduce Core Types
 
