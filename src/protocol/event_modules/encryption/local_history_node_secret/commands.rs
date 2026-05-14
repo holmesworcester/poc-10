@@ -853,6 +853,219 @@ fn build_trie_split_event(
     }
 }
 
+/// Boundary descent for a time-tree range-deletion. Tombstones every minute
+/// in `[0, floor_minute)` by walking from the ancestor down along the
+/// boundary at `floor_minute`. At each level (range_width >= 2):
+///
+/// * If `floor_minute >= mid` (floor lives in the right half): the entire
+///   LEFT half is fully `< mid <= floor_minute` and is fully chopped.
+///   Emit the left child (full-subtree wipe) and the right child (boundary
+///   descend continuation). Descend RIGHT.
+/// * If `floor_minute < mid` (floor lives in the left half): the right
+///   half is fully `>= mid > floor_minute` and survives. Emit the right
+///   child (surviving sibling cover) and the left child (boundary descend
+///   continuation). Descend LEFT.
+///
+/// At each step the descend-side child is also part of the wipe path; the
+/// worker exact-deletes those rows + the F root row after admission. The
+/// surviving right-side siblings stay on disk and provide cover for future
+/// authoring above the floor.
+///
+/// Cost: at most `log2(ancestor.range_width)` levels (~63 for F root). One
+/// or two records per level, all using the deterministic
+/// `TIME_SPLIT_DOMAIN` KDF, so two peers running the same chop produce
+/// byte-identical events.
+///
+/// The ancestor MUST cover `floor_minute` (Root always does; a Sibling
+/// ancestor must have `range_start <= floor_minute <
+/// range_start + range_width`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChopTimeTreeFromAncestor {
+    pub workspace_id: EventId,
+    pub removal_frontier_id: EventId,
+    /// Must be `Root` or `TimeInternal`. `InMinute` is rejected (chop
+    /// operates on time-tree subtrees only).
+    pub ancestor: AncestorSource,
+    /// Minute boundary; everything `< floor_minute` is chopped.
+    pub floor_minute: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChopTimeTreeFromAncestorOutput {
+    /// Subset of the emitted records that belong to the descend-side path
+    /// AND the full-subtree-wipe path. The worker exact-deletes these
+    /// rows + purges canonical bytes + writes tombstones after admission.
+    pub wipe_path: Vec<RetireWipeEntry>,
+    /// Number of fully-left subtree tombstones emitted (one per level
+    /// whose floor-minute bit is 1). Bounded by `log2(range_width)`.
+    pub subtree_tombstones_emitted: usize,
+    /// Number of boundary descend-path tombstones emitted (one per level
+    /// where the boundary descends, regardless of floor-bit direction).
+    pub boundary_descend_tombstones_emitted: usize,
+    /// Number of right-side sibling cover rows emitted (one per level
+    /// whose floor-minute bit is 0, materializing the surviving right
+    /// half).
+    pub right_side_siblings_emitted: usize,
+}
+
+pub fn chop_time_tree_from_ancestor(
+    input: ChopTimeTreeFromAncestor,
+) -> Result<CommandOutput<ChopTimeTreeFromAncestorOutput>, String> {
+    validate_id("workspace_id", &input.workspace_id)?;
+    validate_id("removal_frontier_id", &input.removal_frontier_id)?;
+    if input.floor_minute == 0 {
+        return Err("chop floor_minute must be > 0 (caller short-circuits)".to_string());
+    }
+
+    let (mut current_secret, mut current_id, mut current_start, mut current_width) =
+        match input.ancestor {
+            AncestorSource::Root { secret_id, secret } => {
+                validate_id("ancestor.secret_id", &secret_id)?;
+                validate_id("ancestor.secret", &secret)?;
+                (secret, secret_id, 0u64, ROOT_TIME_TREE_WIDTH)
+            }
+            AncestorSource::TimeInternal {
+                secret_id,
+                secret,
+                range_start,
+                range_width,
+            } => {
+                validate_id("ancestor.secret_id", &secret_id)?;
+                validate_id("ancestor.secret", &secret)?;
+                validate_range(range_start, range_width)?;
+                if input.floor_minute < range_start
+                    || input.floor_minute >= range_start.saturating_add(range_width)
+                {
+                    return Err("ancestor does not cover floor_minute".to_string());
+                }
+                (secret, secret_id, range_start, range_width)
+            }
+            AncestorSource::InMinute { .. } => {
+                return Err(
+                    "chop_time_tree_from_ancestor requires a time-axis ancestor (Root \
+                     or TimeInternal)"
+                        .to_string(),
+                );
+            }
+        };
+
+    let mut output = ChopTimeTreeFromAncestorOutput::default();
+    let mut records: Vec<crate::protocol::event_modules::types::EventRecord> = Vec::new();
+
+    while current_width > 1 {
+        if current_start >= input.floor_minute {
+            break;
+        }
+        let current_end = current_start.saturating_add(current_width);
+        if current_end <= input.floor_minute {
+            break;
+        }
+        let half = current_width / 2;
+        let mid = current_start + half;
+        if input.floor_minute >= mid {
+            // Left half fully chopped; right half is the boundary continuation.
+            let left_event = build_time_split_event(
+                input.workspace_id,
+                input.removal_frontier_id,
+                current_id,
+                current_secret,
+                current_start,
+                current_width,
+                0u8,
+                current_start,
+                half,
+            );
+            let left_record = codec::record_from_bytes(codec::encode(&left_event))?;
+            let left_id = event_id(&left_record.canonical_bytes);
+            records.push(left_record);
+            output.wipe_path.push(RetireWipeEntry {
+                event_id: left_id,
+                range_start: current_start,
+                range_width: half,
+                bit_depth: TIME_TREE_BIT_DEPTH,
+                event_id_prefix: [0; 32],
+            });
+            output.subtree_tombstones_emitted += 1;
+
+            let right_event = build_time_split_event(
+                input.workspace_id,
+                input.removal_frontier_id,
+                current_id,
+                current_secret,
+                current_start,
+                current_width,
+                1u8,
+                mid,
+                half,
+            );
+            let right_record = codec::record_from_bytes(codec::encode(&right_event))?;
+            let right_id = event_id(&right_record.canonical_bytes);
+            records.push(right_record);
+            output.wipe_path.push(RetireWipeEntry {
+                event_id: right_id,
+                range_start: mid,
+                range_width: half,
+                bit_depth: TIME_TREE_BIT_DEPTH,
+                event_id_prefix: [0; 32],
+            });
+            output.boundary_descend_tombstones_emitted += 1;
+
+            current_secret = right_event.node_secret;
+            current_id = right_id;
+            current_start = mid;
+            current_width = half;
+        } else {
+            // Right half fully survives; left half is the boundary continuation.
+            let right_event = build_time_split_event(
+                input.workspace_id,
+                input.removal_frontier_id,
+                current_id,
+                current_secret,
+                current_start,
+                current_width,
+                1u8,
+                mid,
+                half,
+            );
+            let right_record = codec::record_from_bytes(codec::encode(&right_event))?;
+            records.push(right_record);
+            output.right_side_siblings_emitted += 1;
+
+            let left_event = build_time_split_event(
+                input.workspace_id,
+                input.removal_frontier_id,
+                current_id,
+                current_secret,
+                current_start,
+                current_width,
+                0u8,
+                current_start,
+                half,
+            );
+            let left_record = codec::record_from_bytes(codec::encode(&left_event))?;
+            let left_id = event_id(&left_record.canonical_bytes);
+            records.push(left_record);
+            output.wipe_path.push(RetireWipeEntry {
+                event_id: left_id,
+                range_start: current_start,
+                range_width: half,
+                bit_depth: TIME_TREE_BIT_DEPTH,
+                event_id_prefix: [0; 32],
+            });
+            output.boundary_descend_tombstones_emitted += 1;
+
+            current_secret = left_event.node_secret;
+            current_id = left_id;
+            // current_start unchanged (left child starts at parent's start).
+            current_width = half;
+        }
+    }
+    let _ = current_secret;
+    let _ = current_id;
+
+    Ok(CommandOutput::with_events(output, records))
+}
+
 fn validate_id(name: &str, id: &EventId) -> Result<(), String> {
     if id.iter().all(|byte| *byte == 0) {
         return Err(format!("{name} cannot be empty"));

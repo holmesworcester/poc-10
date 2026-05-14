@@ -79,9 +79,9 @@ use crate::protocol::event_modules::encryption::{
     recipient_key_tombstone,
 };
 
-use local_history_node_secret::types::{HistoryNodeSecret, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH};
+use local_history_node_secret::types::{TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH};
 #[cfg(test)]
-use local_history_node_secret::types::{bit_at, mask_prefix_to_depth};
+use local_history_node_secret::types::{bit_at, mask_prefix_to_depth, HistoryNodeSecret};
 
 /// The implicit time-tree root covers `(0, TIME_TREE_ROOT_WIDTH)`. Set to
 /// `2^63` so widths stay clean powers of two through `range_width=1`. This
@@ -932,77 +932,18 @@ fn chop_time_tree_prefix<R: EventRegistry>(
         return Ok(report);
     }
 
-    // Pick the starting source covering `floor_minute`.
+    // Pick the starting source covering `floor_minute`:
     //   * F root (when alive): covers the whole time axis.
-    //   * Otherwise: deepest sibling row whose range contains `floor_minute`.
-    //     If no row covers floor_minute, the boundary descend has no work
+    //   * Otherwise: deepest time-axis sibling whose range contains
+    //     `floor_minute`.
+    //   * If no row covers `floor_minute`, the boundary descend has no work
     //     (the chopped region either has no surviving cover at all or is
-    //     already wiped). We still scan all surviving rows below for any
-    //     fully inside `[0, floor_minute)`.
+    //     already wiped). We still GC subsumed tombstones below.
     let frontier_root =
         local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?;
     let frontier_root_id = frontier_root.as_ref().map(|row| row.local_key_secret_id);
 
-    enum StartSource {
-        FrontierRoot {
-            secret_id: EventId,
-            secret: HistoryNodeSecret,
-        },
-        Sibling {
-            secret_id: EventId,
-            secret: HistoryNodeSecret,
-            range_start: u64,
-            range_width: u64,
-        },
-        None,
-    }
-
-    let start = if let Some(root_row) = frontier_root.as_ref() {
-        StartSource::FrontierRoot {
-            secret_id: root_row.local_key_secret_id,
-            secret: root_row.key_secret,
-        }
-    } else {
-        let mut best: Option<(EventId, HistoryNodeSecret, u64, u64)> = None;
-        for row in local_history_node_secret::queries::list_for_frontier(
-            store,
-            workspace_id,
-            removal_frontier_id,
-        )? {
-            // Time-tree internals only (range_width >= 1, bit_depth = 0).
-            if row.bit_depth != TIME_TREE_BIT_DEPTH {
-                continue;
-            }
-            let row_end = row.range_start.saturating_add(row.range_width);
-            if floor_minute < row.range_start || floor_minute >= row_end {
-                continue;
-            }
-            let take = match best {
-                None => true,
-                Some((_, _, _, current_width)) => row.range_width < current_width,
-            };
-            if take {
-                best = Some((
-                    row.local_history_node_secret_id,
-                    row.node_secret,
-                    row.range_start,
-                    row.range_width,
-                ));
-            }
-        }
-        match best {
-            Some((id, secret, range_start, range_width)) => StartSource::Sibling {
-                secret_id: id,
-                secret,
-                range_start,
-                range_width,
-            },
-            None => StartSource::None,
-        }
-    };
-
     // Track the descend-path rows we materialize (will be wiped at the end).
-    // `WipeTarget` already exists in this module for the retire walk; reuse it.
     let mut descend_path: Vec<WipeTarget> = Vec::new();
     if let Some(root_row) = frontier_root.as_ref() {
         // F root is on the descend boundary by definition.
@@ -1016,159 +957,50 @@ fn chop_time_tree_prefix<R: EventRegistry>(
         });
     }
 
-    // Boundary descent.
-    if let StartSource::None = start {
-        // Nothing to descend; skip the walk.
-    } else {
-        let (mut current_secret_id, mut current_secret, mut current_range_start, mut current_range_width) =
-            match start {
-                StartSource::FrontierRoot { secret_id, secret } => {
-                    (secret_id, secret, 0u64, TIME_TREE_ROOT_WIDTH)
-                }
-                StartSource::Sibling {
-                    secret_id,
-                    secret,
-                    range_start,
-                    range_width,
-                } => (secret_id, secret, range_start, range_width),
-                StartSource::None => unreachable!(),
-            };
-
-        while current_range_width > 1 {
-            // Once we have descended past the floor on the left, stop:
-            // current_range_start == floor_minute means the subtree is fully
-            // surviving (no chopping inside it).
-            if current_range_start >= floor_minute {
-                break;
-            }
-            // Once we are entirely within the chopped range, stop: this
-            // subtree should have been tombstoned at a higher level. Defensive.
-            let current_end = current_range_start.saturating_add(current_range_width);
-            if current_end <= floor_minute {
-                break;
-            }
-            let half = current_range_width / 2;
-            let mid = current_range_start + half;
-            if floor_minute >= mid {
-                // Left half [start, mid) is fully chopped. Materialize the
-                // left child to get its event id, then track for wiping +
-                // tombstoning. Descend right (boundary).
-                let left = ensure_time_split(
-                    store,
-                    registry,
-                    workspace_id,
-                    removal_frontier_id,
-                    current_secret_id,
-                    current_secret,
-                    current_range_start,
-                    current_range_width,
-                    0u8,
-                    current_range_start,
-                    half,
-                )?;
-                report.purged_event_bytes += 0; // accumulated in wipe phase
-                let _ = left.admitted_events; // accounting noise
-                let left_target = WipeTarget {
-                    event_id: left.row_event_id,
-                    range_start: current_range_start,
-                    range_width: half,
-                    bit_depth: TIME_TREE_BIT_DEPTH,
-                    event_id_prefix: [0; 32],
-                    is_frontier_root: false,
-                };
-                // Subtree tombstone for fully-chopped left subtree (counted
-                // separately from boundary descend tombstones).
-                descend_path.push(left_target);
-                report.subtree_tombstones_written += 1;
-
-                // Materialize right child as the boundary descend continuation.
-                let right = ensure_time_split(
-                    store,
-                    registry,
-                    workspace_id,
-                    removal_frontier_id,
-                    current_secret_id,
-                    current_secret,
-                    current_range_start,
-                    current_range_width,
-                    1u8,
-                    mid,
-                    half,
-                )?;
-                let _ = right.admitted_events;
-                descend_path.push(WipeTarget {
-                    event_id: right.row_event_id,
-                    range_start: mid,
-                    range_width: half,
-                    bit_depth: TIME_TREE_BIT_DEPTH,
-                    event_id_prefix: [0; 32],
-                    is_frontier_root: false,
-                });
-                report.boundary_descend_tombstones_written += 1;
-
-                current_secret_id = right.row_event_id;
-                current_secret = right.row_secret;
-                current_range_start = mid;
-                current_range_width = half;
-            } else {
-                // Left half [start, mid) straddles the floor. Right half
-                // [mid, end) is fully surviving — materialize as sibling
-                // cover. Descend left (boundary).
-                let right = ensure_time_split(
-                    store,
-                    registry,
-                    workspace_id,
-                    removal_frontier_id,
-                    current_secret_id,
-                    current_secret,
-                    current_range_start,
-                    current_range_width,
-                    1u8,
-                    mid,
-                    half,
-                )?;
-                let _ = right.admitted_events;
-                if right.materialized_new_row {
-                    report.right_side_siblings_materialized += 1;
-                }
-
-                let left = ensure_time_split(
-                    store,
-                    registry,
-                    workspace_id,
-                    removal_frontier_id,
-                    current_secret_id,
-                    current_secret,
-                    current_range_start,
-                    current_range_width,
-                    0u8,
-                    current_range_start,
-                    half,
-                )?;
-                let _ = left.admitted_events;
-                descend_path.push(WipeTarget {
-                    event_id: left.row_event_id,
-                    range_start: current_range_start,
-                    range_width: half,
-                    bit_depth: TIME_TREE_BIT_DEPTH,
-                    event_id_prefix: [0; 32],
-                    is_frontier_root: false,
-                });
-                report.boundary_descend_tombstones_written += 1;
-
-                current_secret_id = left.row_event_id;
-                current_secret = left.row_secret;
-                // current_range_start unchanged (left child starts at parent's start)
-                current_range_width = half;
-            }
+    // Boundary descent — pure KDF emission lives in the command. We hand it
+    // an `AncestorSource` and admit the records it returns.
+    if let Some(ancestor) = local_history_node_secret::queries::closest_time_axis_ancestor(
+        store,
+        workspace_id,
+        removal_frontier_id,
+        floor_minute,
+    )? {
+        let output = local_history_node_secret::commands::chop_time_tree_from_ancestor(
+            local_history_node_secret::commands::ChopTimeTreeFromAncestor {
+                workspace_id,
+                removal_frontier_id,
+                ancestor,
+                floor_minute,
+            },
+        )?;
+        report.subtree_tombstones_written += output.value.subtree_tombstones_emitted;
+        report.boundary_descend_tombstones_written +=
+            output.value.boundary_descend_tombstones_emitted;
+        report.right_side_siblings_materialized += output.value.right_side_siblings_emitted;
+        for entry in &output.value.wipe_path {
+            descend_path.push(WipeTarget {
+                event_id: entry.event_id,
+                range_start: entry.range_start,
+                range_width: entry.range_width,
+                bit_depth: entry.bit_depth,
+                event_id_prefix: entry.event_id_prefix,
+                is_frontier_root: false,
+            });
         }
-        // At width = 1 the boundary minute_node is `floor_minute` itself.
-        // floor_minute is NOT in [0, floor_minute) — it survives. Nothing
-        // to do here: the minute_node was either materialized as a descend
-        // step at the previous level (it sits at width=2 → width=1), or it
-        // was implicit. Either way it is the surviving boundary minute.
-        let _ = (current_secret_id, current_secret, current_range_start, current_range_width);
+        let _ = worker::run(
+            store,
+            registry,
+            worker::AdmitAndDrain {
+                output,
+                batch_size: worker::DEFAULT_READY_BATCH,
+            },
+        )
+        .map_err(|err| format!("admit chop-path records: {err}"))?;
     }
+    // At width = 1 the boundary minute_node is `floor_minute` itself.
+    // floor_minute is NOT in [0, floor_minute) — it survives. The
+    // surviving boundary minute stays implicit under whatever cover it
+    // sits under after the chop's wipe transaction.
 
     // Wipe phase. Exact-delete every descend-path row (including F root if
     // alive), purge canonical bytes, write tombstones. The replacement node
@@ -1360,76 +1192,6 @@ fn gc_subsumed_tombstones(
     Ok(SubsumedTombstones {
         leaf_tombstones: leaf_deleted,
         message_tombstones: message_deleted,
-    })
-}
-
-struct EnsureSplitOutcome {
-    row_event_id: EventId,
-    row_secret: HistoryNodeSecret,
-    admitted_events: usize,
-    materialized_new_row: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn ensure_time_split<R: EventRegistry>(
-    store: &Store,
-    registry: &R,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    parent_secret_id: EventId,
-    parent_secret: HistoryNodeSecret,
-    parent_range_start: u64,
-    parent_range_width: u64,
-    child_side: u8,
-    child_range_start: u64,
-    child_range_width: u64,
-) -> Result<EnsureSplitOutcome, String> {
-    if let Some(existing) = local_history_node_secret::queries::get(
-        store,
-        workspace_id,
-        removal_frontier_id,
-        child_range_start,
-        child_range_width,
-        TIME_TREE_BIT_DEPTH,
-        [0; 32],
-    )? {
-        return Ok(EnsureSplitOutcome {
-            row_event_id: existing.local_history_node_secret_id,
-            row_secret: existing.node_secret,
-            admitted_events: 0,
-            materialized_new_row: false,
-        });
-    }
-    let output = local_history_node_secret::commands::derive_time_split(
-        local_history_node_secret::commands::DeriveTimeSplit {
-            workspace_id,
-            removal_frontier_id,
-            parent_secret_id,
-            parent_secret,
-            parent_range_start,
-            parent_range_width,
-            child_side,
-            child_range_start,
-            child_range_width,
-            tombstone_node_id: None,
-        },
-    )?;
-    let event_id = output.value.local_history_node_secret_id;
-    let secret = output.value.event.node_secret;
-    let admitted = worker::run(
-        store,
-        registry,
-        worker::AdmitAndDrain {
-            output,
-            batch_size: worker::DEFAULT_READY_BATCH,
-        },
-    )
-    .map_err(|err| format!("admit retire-time-split: {err}"))?;
-    Ok(EnsureSplitOutcome {
-        row_event_id: event_id,
-        row_secret: secret,
-        admitted_events: admitted.admitted.inserted_events,
-        materialized_new_row: true,
     })
 }
 

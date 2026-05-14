@@ -174,6 +174,53 @@ pub fn list_leaves_in_minute(
         .collect())
 }
 
+/// Find the closest time-axis ancestor that covers `unix_minute`. Returns
+/// `Root` when F is alive (it implicitly covers the whole time axis), else
+/// the smallest-width covering time-tree internal (`bit_depth = 0,
+/// range_width >= 1`). Returns `Ok(None)` when neither covers — i.e. F has
+/// been wiped AND no time-internal covers this minute (e.g. the minute
+/// lies inside a chopped/wiped region with no surviving sibling).
+///
+/// Used by the chop walk to pick its starting point: chop operates on
+/// time-tree subtrees so it cannot resume from a trie internal even if
+/// one happens to cover the leaf coordinate at this minute.
+pub fn closest_time_axis_ancestor(
+    store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    unix_minute: u64,
+) -> Result<Option<AncestorSource>, String> {
+    if let Some(row) = local_key_secret::queries::get(store, workspace_id, removal_frontier_id)? {
+        return Ok(Some(AncestorSource::Root {
+            secret_id: row.local_key_secret_id,
+            secret: row.key_secret,
+        }));
+    }
+    let mut best: Option<LocalHistoryNodeSecretRow> = None;
+    for row in list_for_frontier(store, workspace_id, removal_frontier_id)? {
+        if row.bit_depth != TIME_TREE_BIT_DEPTH {
+            continue;
+        }
+        let row_end = row.range_start.saturating_add(row.range_width);
+        if unix_minute < row.range_start || unix_minute >= row_end {
+            continue;
+        }
+        let take = match &best {
+            None => true,
+            Some(current) => row.range_width < current.range_width,
+        };
+        if take {
+            best = Some(row);
+        }
+    }
+    Ok(best.map(|row| AncestorSource::TimeInternal {
+        secret_id: row.local_history_node_secret_id,
+        secret: row.node_secret,
+        range_start: row.range_start,
+        range_width: row.range_width,
+    }))
+}
+
 /// Find the closest source-of-derivation for the leaf at
 /// `(unix_minute, event_id_in_minute)` under this frontier. Returns the
 /// frontier root (`local_key_secret`) when no materialized internal covers
