@@ -133,33 +133,32 @@ frontier rotation) MUST also force every recipient that received a
 `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
 Wrap-Bound Deletion."
 
-After a wrap-bound deletion, every peer:
+When a peer processes a deletion (per-leaf retire, chop, or frontier
+rotation) whose effect wipes its local F:
 
-  * `local_key_secret(F)` row: **wiped** (locally)
-  * Descend-path internal nodes: **wiped** (locally)
-  * Canonical bytes for the wiped chain: **purged** (locally)
-  * `recipient_key` events for recipients of `key_wrap`s on this F:
-    **tombstoned** (`recipient_key_tombstone` propagates to every peer)
+  * `local_key_secret(F)` row: **wiped** (this peer)
+  * Descend-path internal nodes: **wiped** (this peer)
+  * Canonical bytes for the wiped chain: **purged** (this peer)
+  * `local_recipient_key` private key that unwrapped F: **wiped**
+    (this peer)
+  * `recipient_key_tombstone` for the local pubkey: **emitted**,
+    self-signed by this peer, propagates via sync
+  * Fresh recipient keypair: **generated** before the next wrap exchange
 
-And on each affected recipient's own peer:
+Each peer's deletion processing drives its own rotation. The peer
+self-authors the tombstone using its endpoint signing key (which signed
+the original `recipient_key` event). No admin involvement.
 
-  * `local_recipient_key` private key for the tombstoned pubkey:
-    **wiped**
-  * Fresh recipient keypair generated for future wraps
+After rotation, the surviving `key_wrap` for F is encrypted to a pubkey
+whose private half no longer exists on this peer's disk. An attacker
+with disk access post-deletion cannot unwrap to recover F.
 
-After this, the surviving `key_wrap` event is encrypted to a pubkey
-whose private half no longer exists anywhere. An attacker with disk
-access post-deletion cannot unwrap to recover F, regardless of which
-peer's disk they compromise.
-
-Cost note: rotating recipient keys on every per-leaf retire is
-expensive at scale (`N_recipients` tombstones + N keypair generations
-per retired message). Implementations may batch by chop range — one
-rotation per chop, all messages in the chopped range covered by the
-same rotation. The FS guarantee is then bounded by the rotation
-cadence: leaves retired between rotations are FS only after the next
-rotation. The current implementation's rotation policy lives in the
-deletion-driving code; check that worker for the actual cadence.
+Cost: O(1) per deletion per peer — one keypair regeneration + one
+signed tombstone. Each peer has exactly ONE `local_recipient_key` per
+F (since each F is wrapped to this peer once), so rotation is a fixed
+constant regardless of how many recipients are in the workspace. Other
+peers do not rotate when this peer rotates; they each rotate on the
+deletions THEY process locally.
 
 ## Disappearing messages
 

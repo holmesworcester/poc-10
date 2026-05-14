@@ -524,6 +524,142 @@ fn cli_rotate_recipient_purges_old_local_private_key_and_wraps() {
     );
 }
 
+#[test]
+fn cli_chop_wiping_f_rotates_local_recipient_key_for_forward_secrecy() {
+    // RULES.md § "Forward Secrecy Requires Recipient Key Rotation On
+    // Wrap-Bound Deletion" demands that any deletion that wipes a
+    // key-wrapped F also force every recipient of a `key_wrap` for that
+    // F to rotate: tombstone the recipient pubkey, wipe the matching
+    // `local_recipient_key` private key, and generate a fresh keypair.
+    //
+    // This test proves the chop path. Alice publishes a recipient key,
+    // creates a frontier, wraps F to her own recipient key, then runs
+    // `chop-now` with a non-zero floor. Chop wipes F's row, and the
+    // forward-secrecy hook in the encryption worker must:
+    //   * Sign and admit a `recipient_key_tombstone` for the old key.
+    //   * Publish a new `recipient_key` event (fresh pubkey).
+    //   * Exact-delete the old `LOCAL_RECIPIENT_KEYS` row + purge bytes.
+    //   * Exact-delete the old `KEY_WRAPS` row for the wiped F.
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&alice, "FS Chop Rotate", "alice", "alice-laptop");
+
+    // Build the full pre-rotation setup. The wrap is addressed to
+    // alice's own retired recipient key — the same arrangement
+    // cli_rotate_recipient_purges_old_local_private_key_and_wraps
+    // exercises for manual rotation.
+    let recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
+    let retired_recipient_key_id = line_value(&recipient, "recipient_key_id");
+    let retired_local_recipient_key_id = line_value(&recipient, "local_recipient_key_id");
+
+    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
+
+    let wrapped = assert_success(topo(&[
+        "--db",
+        &alice,
+        "key-wrap",
+        &workspace_id,
+        &removal_frontier_id,
+        &retired_recipient_key_id,
+    ]));
+    let retired_key_wrap_id = line_value(&wrapped, "key_wrap_id");
+
+    // Sanity: pre-chop, alice has F's row, one recipient key, no
+    // tombstones, one local private key, and one key wrap.
+    let pre = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
+    assert_eq!(line_value(&pre, "recipient_keys"), "1");
+    assert_eq!(line_value(&pre, "recipient_key_tombstones"), "0");
+    assert_eq!(line_value(&pre, "local_recipient_keys"), "1");
+    assert_eq!(line_value(&pre, "key_wraps"), "1");
+    let access_pre = assert_success(topo(&[
+        "--db",
+        &alice,
+        "key-access",
+        &workspace_id,
+        &removal_frontier_id,
+    ]));
+    assert_eq!(line_value(&access_pre, "access"), "yes");
+
+    // Chop with a non-zero floor. Because the frontier was just created
+    // (no minute_node materializations exist yet), chop walks F → leaf
+    // boundary and wipes F's row.
+    let chop = assert_success(topo(&[
+        "--db",
+        &alice,
+        "chop-now",
+        &workspace_id,
+        "100",
+    ]));
+    assert_eq!(line_value(&chop, "floor_minute"), "100");
+    let subtree: u64 = line_value(&chop, "subtree_tombstones_written")
+        .parse()
+        .expect("parse subtree");
+    let boundary: u64 = line_value(&chop, "boundary_descend_tombstones_written")
+        .parse()
+        .expect("parse boundary");
+    assert!(
+        subtree + boundary > 0,
+        "chop with non-zero floor must produce at least one tombstone:\n{chop}"
+    );
+
+    // F is wiped on disk: key-access reports `no` for this frontier.
+    let access_post = assert_success(topo(&[
+        "--db",
+        &alice,
+        "key-access",
+        &workspace_id,
+        &removal_frontier_id,
+    ]));
+    assert_eq!(
+        line_value(&access_post, "access"),
+        "no",
+        "chop must wipe F's row"
+    );
+
+    // The forward-secrecy rotation hook must have tombstoned the
+    // retired recipient key, published a fresh recipient key, and wiped
+    // the retired private rows + the wrap.
+    let post = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
+    assert_eq!(
+        line_value(&post, "recipient_keys"),
+        "1",
+        "old recipient key row is exact-deleted by the tombstone projector; \
+         a fresh recipient key replaces it"
+    );
+    assert_eq!(
+        line_value(&post, "recipient_key_tombstones"),
+        "1",
+        "chop must trigger a recipient key tombstone for the wrap-bound key"
+    );
+    assert_eq!(
+        line_value(&post, "local_recipient_keys"),
+        "1",
+        "old local private row is wiped; a fresh keypair takes its place"
+    );
+    assert_eq!(
+        line_value(&post, "key_wraps"),
+        "0",
+        "the retired wrap row must be exact-deleted alongside the retired pubkey"
+    );
+
+    // The canonical bytes for the retired recipient key, retired local
+    // private key, and retired wrap must be unrecoverable from disk —
+    // otherwise an on-disk attacker could still unwrap to F.
+    assert!(
+        !event_row_exists(&alice, &retired_recipient_key_id),
+        "retired recipient_key bytes must be purged for forward secrecy"
+    );
+    assert!(
+        !event_row_exists(&alice, &retired_local_recipient_key_id),
+        "retired local_recipient_key bytes must be purged for forward secrecy"
+    );
+    assert!(
+        !event_row_exists(&alice, &retired_key_wrap_id),
+        "retired key_wrap bytes must be purged for forward secrecy"
+    );
+}
+
 fn event_row_exists(db_path: &str, event_id_hex: &str) -> bool {
     event_id_present(db_path, &decode_hex_id(event_id_hex))
 }

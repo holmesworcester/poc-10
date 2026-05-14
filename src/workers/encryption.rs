@@ -220,6 +220,14 @@ pub struct RetireDeletedEventLeafReport {
     /// Number of tombstone rows the retire walk inserted into
     /// `local_history_node_tombstones`.
     pub tombstones_written: usize,
+    /// `true` when this retire wiped F and the local endpoint had at least
+    /// one active recipient key bound to a `key_wrap` for the wiped F, so the
+    /// follow-up rotation tombstoned that key, generated a fresh keypair, and
+    /// wiped the local private bytes. The rule
+    /// `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+    /// Wrap-Bound Deletion" requires this rotation whenever F is wiped on a
+    /// peer that holds a wrap-bound private key for it.
+    pub local_recipient_key_rotated: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -250,6 +258,14 @@ pub struct ChopReport {
     /// chop's wipe. Subsumed by the coarse subtree tombstones the chop
     /// just wrote.
     pub subsumed_message_tombstones_gcd: usize,
+    /// `true` when this chop wiped F and the local endpoint had at least
+    /// one active recipient key bound to a `key_wrap` for the wiped F, so
+    /// the follow-up rotation tombstoned that key, generated a fresh
+    /// keypair, and wiped the local private bytes. The rule
+    /// `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+    /// Wrap-Bound Deletion" requires this rotation whenever F is wiped on
+    /// a peer that holds a wrap-bound private key for it.
+    pub local_recipient_key_rotated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,6 +434,87 @@ fn derive_key_secrets<R: EventRegistry>(
             .map_err(|err| format!("delete pending key unwraps: {err}"))?;
     }
     Ok(report)
+}
+
+/// Rotate the local endpoint's recipient keypair when a deletion that wiped
+/// `removal_frontier_id`'s F also leaves a local `local_recipient_key`
+/// private row whose paired `recipient_key` received a `key_wrap` for that F.
+/// Returns `true` when rotation actually fired, `false` when the local peer
+/// is not a recipient of any wrap for F (either because it isn't a member,
+/// its role can't receive key wraps, it has no active recipient keys, or
+/// none of its active recipient keys have wraps for F).
+///
+/// Rotation produces a fresh recipient keypair, publishes the new public
+/// `recipient_key` event, signs a `recipient_key_tombstone` for every active
+/// recipient key on this endpoint, and wipes the matching
+/// `local_recipient_key` private rows + retired `key_wrap` rows. Together
+/// these satisfy `RULES.md` § "Forward Secrecy Requires Recipient Key
+/// Rotation On Wrap-Bound Deletion": after the wipe, the surviving
+/// `key_wrap` for the wiped F is encrypted to a tombstoned pubkey whose
+/// private half no longer exists on this peer.
+///
+/// The caller must invoke this AFTER the F-wipe transaction has committed.
+/// Each peer drives its own rotation when its own deterministic deletion
+/// path wipes F locally; cross-peer rotation is bounded by each peer's
+/// rotation cadence (see the cost note in `encryption.md`).
+fn rotate_local_recipient_keys_for_wiped_frontier<R: EventRegistry>(
+    store: &Store,
+    registry: &R,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+) -> Result<bool, String> {
+    let membership = match local_endpoint_membership(store, workspace_id)? {
+        Some(membership) => membership,
+        None => return Ok(false),
+    };
+    if !membership.endpoint_role.can_receive_key_wraps() {
+        return Ok(false);
+    }
+    let active = active_local_recipient_keys(store, workspace_id, membership.endpoint_shared_id)?;
+    if active.is_empty() {
+        return Ok(false);
+    }
+    let frontier_wraps: Vec<key_wrap::types::KeyWrapRow> =
+        key_wrap::queries::list_for_workspace(store, workspace_id)?
+            .into_iter()
+            .filter(|wrap| wrap.removal_frontier_id == removal_frontier_id)
+            .collect();
+    let any_wrap_for_local = active.iter().any(|key| {
+        frontier_wraps
+            .iter()
+            .any(|wrap| wrap.recipient_key_id == key.recipient_key_id)
+    });
+    if !any_wrap_for_local {
+        return Ok(false);
+    }
+    let report = rotate_recipient_key(store, registry, workspace_id)?;
+    Ok(report.tombstoned_recipient_keys > 0)
+}
+
+/// Look up the local endpoint's membership row for a workspace, returning
+/// `None` when no local endpoint exists or the local endpoint is not joined
+/// to the workspace. Used by paths that opportunistically act on the local
+/// membership when present (e.g. forward-secrecy rotation triggered by a
+/// shared deletion event).
+fn local_endpoint_membership(
+    store: &Store,
+    workspace_id: EventId,
+) -> Result<Option<endpoint_shared::types::EndpointMembershipRow>, String> {
+    let Some(local) = endpoint::commands::local_keypair(store)? else {
+        return Ok(None);
+    };
+    let key = endpoint_shared::schema::endpoint_membership_key(local.endpoint, workspace_id);
+    let Some(value) = store
+        .table_row(endpoint_shared::schema::ENDPOINT_MEMBERSHIPS, &key)
+        .map_err(|err| format!("load endpoint membership: {err}"))?
+    else {
+        return Ok(None);
+    };
+    let membership = endpoint_shared::schema::decode_endpoint_membership_row(&key, &value)?;
+    if membership.signing_public_key != local.signing_public_key {
+        return Ok(None);
+    }
+    Ok(Some(membership))
 }
 
 fn rotate_recipient_key<R: EventRegistry>(
@@ -806,6 +903,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
         event_id_in_minute,
     );
     let path_clone = wipe_path.clone();
+    let f_was_wiped_this_call = frontier_root.is_some();
     let counts = store
         .write_transaction(move |store| {
             let mut counts = wipe_targets_in_tx(
@@ -845,6 +943,26 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
     report.tombstones_written = counts.tombstones;
     report.purged_event_bytes = counts.purged;
     let _ = wipe_path;
+
+    // Forward-secrecy rotation hook. When this retire wiped F (the first
+    // retire on a frontier walks from F root and exact-deletes F; subsequent
+    // retires on the same frontier find F already wiped and skip the walk),
+    // any surviving `key_wrap` for F still encrypts F to a recipient pubkey
+    // whose private half is stored in `LOCAL_RECIPIENT_KEYS` on this peer.
+    // Rotate so the wrap can no longer decrypt to F on this peer's disk
+    // (`RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+    // Wrap-Bound Deletion"). The rotation no-ops cleanly on peers that do
+    // not hold a private key for any wrap of F.
+    if f_was_wiped_this_call {
+        report.local_recipient_key_rotated =
+            rotate_local_recipient_keys_for_wiped_frontier(
+                store,
+                registry,
+                workspace_id,
+                removal_frontier_id,
+            )?;
+    }
+
     Ok(report)
 }
 
@@ -986,6 +1104,24 @@ fn chop_time_tree_prefix<R: EventRegistry>(
     report.purged_event_bytes = counts.purged;
     let _ = (counts.wiped, counts.tombstones);
     let _ = descend_path;
+
+    // Forward-secrecy rotation hook. When this chop wiped F (the
+    // `frontier_root_id` slot was populated and now its row is gone), any
+    // surviving `key_wrap` for F still encrypts F to a recipient pubkey
+    // whose private half is stored in `LOCAL_RECIPIENT_KEYS` on this peer.
+    // Rotate so the wrap can no longer decrypt to F on this peer's disk
+    // (`RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+    // Wrap-Bound Deletion"). The rotation no-ops cleanly on peers that do
+    // not hold a private key for any wrap of F.
+    if frontier_root_id.is_some() {
+        report.local_recipient_key_rotated =
+            rotate_local_recipient_keys_for_wiped_frontier(
+                store,
+                registry,
+                workspace_id,
+                removal_frontier_id,
+            )?;
+    }
 
     // GC pre-existing per-message tombstones subsumed by this chop's range.
     // The coarse subtree tombstones written above already convey

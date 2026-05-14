@@ -1180,12 +1180,20 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     let bob_now_ms = bob_now_minute * 60_000;
     assert_success(topo(&["--db", &bob, "clock", "set", &bob_now_ms.to_string()]));
 
-    // Wait for the dispatcher to chop on bob: F is wiped and at least one
-    // tombstone exists. (Same convergence signal as test 6.)
+    // Wait for the dispatcher to chop on bob AND for the forward-secrecy
+    // rotation that fires when chop wipes F: F is wiped, at least one
+    // history-node tombstone exists, AND at least one recipient-key
+    // tombstone exists. Without waiting for the recipient-key tombstone,
+    // the test can race in between chop's wipe transaction and the
+    // rotation hook (`RULES.md` § "Forward Secrecy Requires Recipient
+    // Key Rotation On Wrap-Bound Deletion"), capturing an `indexed_events`
+    // snapshot that does not yet count the rotation's new
+    // `recipient_key` + `recipient_key_tombstone` events.
     for _ in 0..300 {
         let bob_keys = keys_value(&bob, &workspace_id);
         if line_value(&bob_keys, "local_key_secrets") == "0"
             && line_value(&bob_keys, "local_history_node_tombstones") != "0"
+            && line_value(&bob_keys, "recipient_key_tombstones") != "0"
         {
             break;
         }
@@ -1203,6 +1211,14 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     assert!(
         bob_tombstones > 0,
         "precondition: bob must have at least one chop tombstone:\n{post_chop_bob}"
+    );
+    let bob_recipient_key_tombstones: u64 = line_value(&post_chop_bob, "recipient_key_tombstones")
+        .parse()
+        .expect("parse bob recipient key tombstones");
+    assert!(
+        bob_recipient_key_tombstones > 0,
+        "precondition: bob's forward-secrecy rotation must publish at least \
+         one recipient-key tombstone when chop wipes F:\n{post_chop_bob}"
     );
 
     // Snapshot bob's pre-redelivery state — we will assert it is

@@ -1024,37 +1024,48 @@ Workers that should NOT be siblings:
 
 ## Forward Secrecy Requires Recipient Key Rotation On Wrap-Bound Deletion
 
-Any deletion that wipes a key-wrapped frontier secret F (per-leaf retire,
-chop, or whole-frontier rotation) MUST also force every recipient that
-received a `key_wrap` for that F to:
+F (a workspace's content-derivation root) is wrapped to each recipient
+via a `key_wrap` event. Each peer derives F locally by unwrapping the
+wrap addressed to that peer's `recipient_key`. So there is exactly ONE
+`local_recipient_key` private half per peer per F.
 
-1. Tombstone the recipient public key that received the wrap (so it is no
-   longer present in the workspace's active recipient set).
-2. Wipe the corresponding `local_recipient_key` private key on the
-   recipient's own peer (so retained wraps cannot be unwrapped).
+Any deletion on a peer that wipes that peer's local F (per-leaf retire,
+chop, or frontier rotation) MUST also force that peer to:
+
+1. Wipe the `local_recipient_key` private key that received F's wrap.
+2. Emit a `recipient_key_tombstone` for the corresponding recipient
+   public key, **signed by the peer itself** with its endpoint signing
+   key. The recipient authored the original `recipient_key` event, so it
+   has authority to author its tombstone — no admin involvement needed.
+   The tombstone propagates via sync so every other peer marks the
+   pubkey as revoked in their active set.
 3. Generate a fresh recipient keypair before participating in the next
-   wrap exchange.
+   wrap exchange. Other peers will wrap future F's to the fresh pubkey.
+
+Trigger: the peer self-tombstones only AFTER it receives and processes
+the deletion event locally — never speculatively or eagerly on someone
+else's deletion. Each peer's retire path is what fires its own
+rotation.
 
 Without this rotation, the deletion's local F-wipe + sibling-cover
-mechanism does not provide forward secrecy. An attacker with disk access
-post-deletion who also retains a `key_wrap` for the wiped F + the
-corresponding recipient private key can unwrap to recover F and
-re-derive the deleted leaf's secret. The recipient pubkey rotation
-breaks the wrap-unwrap path: the old wrap is encrypted to a pubkey whose
-private half is gone, and future wraps go to the fresh keypair.
+mechanism does not provide forward secrecy. An attacker with disk
+access post-deletion who also retains the peer's `key_wrap` for the
+wiped F + the corresponding `local_recipient_key` private key can
+unwrap to recover F and re-derive the deleted leaf's secret. Rotating
+the recipient keypair breaks the wrap-unwrap path: the old wrap is
+encrypted to a pubkey whose private half is gone, and the next wrap
+goes to the fresh keypair.
 
-This rule applies whether the deletion is per-leaf (single message
-expiry/deletion), range (chop on tightening or cover-horizon advance),
-or wholesale (frontier rotation). The trigger is "any disk wipe of F
-that does not also wipe every wrap and every recipient private key for
-that F."
+This rule applies whether the deletion is per-leaf, range (chop), or
+wholesale (frontier rotation). The trigger is "any disk wipe of F that
+does not also wipe the local wrap and the local recipient private key
+for that F."
 
-The rule has cost implications: a deletion rate that requires rotating
-recipient keys on every retire is expensive at large recipient counts.
-Implementations may batch rotations (e.g., one rotation per chop range,
-not per leaf), but the FS guarantee is bounded by the rotation cadence,
-not the deletion cadence. Document the actual cadence wherever the
-deletion mechanism lives.
+Cost: O(1) per deletion per peer (one keypair regeneration + one
+signed tombstone), since each peer has only ONE recipient privkey per
+F. Each peer manages its own rotation independently when its own F
+gets wiped; "everyone rotates on every deletion" is wrong — each
+peer rotates on the deletion events ITS retire path processes.
 
 ## In-Line Documentation Describes Current Code, Not History
 
