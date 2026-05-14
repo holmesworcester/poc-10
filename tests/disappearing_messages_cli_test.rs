@@ -1133,6 +1133,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
+    let bob_local_recipient_id_pre = line_value(&bob_recipient, "local_recipient_key_id");
     let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
@@ -1181,19 +1182,18 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
     assert_success(topo(&["--db", &bob, "clock", "set", &bob_now_ms.to_string()]));
 
     // Wait for the dispatcher to chop on bob AND for the forward-secrecy
-    // rotation that fires when chop wipes F: F is wiped, at least one
-    // history-node tombstone exists, AND at least one recipient-key
-    // tombstone exists. Without waiting for the recipient-key tombstone,
-    // the test can race in between chop's wipe transaction and the
-    // rotation hook (`RULES.md` § "Forward Secrecy Requires Recipient
-    // Key Rotation On Wrap-Bound Deletion"), capturing an `indexed_events`
-    // snapshot that does not yet count the rotation's new
-    // `recipient_key` + `recipient_key_tombstone` events.
+    // rotation that fires atomically with the F-wipe (per
+    // `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+    // Wrap-Bound Deletion"). The rotation wipes the old
+    // `local_recipient_key` private row and creates a fresh one with
+    // a new event id; we detect rotation completion by the
+    // `local_recipient_key_id` flipping to a value different from the
+    // pre-rotation snapshot.
     for _ in 0..300 {
         let bob_keys = keys_value(&bob, &workspace_id);
         if line_value(&bob_keys, "local_key_secrets") == "0"
             && line_value(&bob_keys, "local_history_node_tombstones") != "0"
-            && line_value(&bob_keys, "recipient_key_tombstones") != "0"
+            && bob_local_recipient_id_changed(&bob, &workspace_id, &bob_local_recipient_id_pre)
         {
             break;
         }
@@ -1212,13 +1212,15 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
         bob_tombstones > 0,
         "precondition: bob must have at least one chop tombstone:\n{post_chop_bob}"
     );
-    let bob_recipient_key_tombstones: u64 = line_value(&post_chop_bob, "recipient_key_tombstones")
-        .parse()
-        .expect("parse bob recipient key tombstones");
     assert!(
-        bob_recipient_key_tombstones > 0,
-        "precondition: bob's forward-secrecy rotation must publish at least \
-         one recipient-key tombstone when chop wipes F:\n{post_chop_bob}"
+        bob_local_recipient_id_changed(&bob, &workspace_id, &bob_local_recipient_id_pre),
+        "precondition: bob's forward-secrecy rotation must wipe the original \
+         local_recipient_key and publish a fresh one when chop wipes F. \
+         The single replacement `recipient_key` event with \
+         `previous_recipient_key_id` carries both supersession and \
+         introduction; the projector exact-deletes the old pubkey row \
+         (`RULES.md` § \"Forward Secrecy Requires Recipient Key Rotation \
+         On Wrap-Bound Deletion\")."
     );
 
     // Snapshot bob's pre-redelivery state — we will assert it is
@@ -2156,6 +2158,41 @@ fn event_id_present(db: &str, event_id: &[u8]) -> bool {
         )
         .expect("count rows");
     count > 0
+}
+
+/// Read the latest `local_recipient_key` event id from this peer's disk
+/// for a workspace. Returns `None` when no row is present (e.g. rotation
+/// in flight). Tests use this to detect that the forward-secrecy
+/// rotation hook has flipped over the local privkey to a fresh keypair.
+fn read_local_recipient_key_id_hex(db: &str, workspace_id_hex: &str) -> Option<String> {
+    let workspace_id = decode_hex_id(workspace_id_hex);
+    let conn = rusqlite::Connection::open(db).expect("open db");
+    let id: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT row_key FROM \"encryption.local_recipient_keys\" \
+             WHERE substr(row_key, 1, 32) = ?1 LIMIT 1",
+            rusqlite::params![workspace_id],
+            |row| row.get(0),
+        )
+        .ok();
+    id.map(|raw| {
+        let mut out = String::with_capacity(64);
+        for byte in &raw[32..64] {
+            out.push_str(&format!("{:02x}", byte));
+        }
+        out
+    })
+}
+
+/// Returns true when the persisted `local_recipient_key` event id for
+/// the workspace differs from `previous_id_hex`. Used by the
+/// forward-secrecy rotation wedge to wait for the rotation to flip the
+/// local privkey row.
+fn bob_local_recipient_id_changed(db: &str, workspace_id: &str, previous_id_hex: &str) -> bool {
+    match read_local_recipient_key_id_hex(db, workspace_id) {
+        Some(current) => current != previous_id_hex,
+        None => false,
+    }
 }
 
 /// Decode a 64-char hex event id into the raw 32-byte SQLite key used by

@@ -176,6 +176,12 @@ fn run_key_recipient_command(
             endpoint_shared_id: membership.endpoint_shared_id,
             signer_private_key: local.signing_secret,
             recipient_key: local_report.value.recipient_key,
+            // Fresh first-time publication, not a rotation. The
+            // forward-secrecy rotation path in the encryption worker
+            // sets this to the wiped pubkey when re-publishing under
+            // an F-wipe.
+            previous_recipient_key_id:
+                super::recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
         })?;
     let recipient_report = common_worker::run(
         &context.store,

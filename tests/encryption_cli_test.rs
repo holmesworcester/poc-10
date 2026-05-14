@@ -188,15 +188,27 @@ fn cli_rotates_recipient_keys_and_tombstones_history_path_nodes() {
         &workspace_id,
     ]));
     assert_eq!(line_value(&rotated, "old_active_recipient_keys"), "1");
+    // The refined FS rule (`RULES.md` § "Forward Secrecy Requires
+    // Recipient Key Rotation On Wrap-Bound Deletion") emits one signed
+    // `recipient_key` event with `previous_recipient_key_id` instead of
+    // a separate `recipient_key_tombstone`. The single event acts as
+    // both supersession and introduction; the projector exact-deletes
+    // the retired pubkey row in the same projection.
     assert_eq!(line_value(&rotated, "tombstoned_recipient_keys"), "1");
     let clock = assert_success(topo(&["--db", &alice, "clock"]));
     assert_eq!(line_value(&clock, "logical_time"), "70000");
-    assert_eq!(line_value(&clock, "max_event_timestamp"), "70001");
+    // Only one shared event is authored by the rotation (the
+    // replacement `recipient_key`), so the maximum event timestamp
+    // matches the pinned logical time.
+    assert_eq!(line_value(&clock, "max_event_timestamp"), "70000");
 
     let keys = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
     assert_eq!(line_value(&keys, "recipient_keys"), "1");
-    assert_eq!(line_value(&keys, "recipient_key_tombstones"), "1");
-    // Rotation purges the retired private key alongside the public tombstone.
+    // No separate `recipient_key_tombstone` event is emitted under the
+    // refined FS rule; supersession lives in the new `recipient_key`'s
+    // `previous_recipient_key_id` field.
+    assert_eq!(line_value(&keys, "recipient_key_tombstones"), "0");
+    // Rotation wipes the retired private key alongside the supersession.
     assert_eq!(line_value(&keys, "local_recipient_keys"), "1");
 
     let advanced = assert_success(topo(&["--db", &alice, "clock", "advance", "1000"]));
@@ -482,11 +494,16 @@ fn cli_rotate_recipient_purges_old_local_private_key_and_wraps() {
     assert_ne!(new_recipient_key_id, retired_recipient_key_id);
     assert_ne!(new_local_recipient_key_id, retired_local_recipient_key_id);
 
-    // CLI surface: the retired private key is gone, the tombstone semantic
-    // record remains, and the retired wrap row was deleted along with it.
+    // CLI surface: the retired private key is gone, the supersession
+    // event replaced the retired pubkey row, and the retired wrap row
+    // was deleted alongside the supersession. Under the refined FS rule
+    // (`RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+    // Wrap-Bound Deletion") no separate `recipient_key_tombstone` event
+    // is emitted; supersession lives in the new `recipient_key`'s
+    // `previous_recipient_key_id` field.
     let post = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
     assert_eq!(line_value(&post, "recipient_keys"), "1");
-    assert_eq!(line_value(&post, "recipient_key_tombstones"), "1");
+    assert_eq!(line_value(&post, "recipient_key_tombstones"), "0");
     assert_eq!(line_value(&post, "local_recipient_keys"), "1");
     assert_eq!(line_value(&post, "key_wraps"), "0");
 
@@ -624,13 +641,18 @@ fn cli_chop_wiping_f_rotates_local_recipient_key_for_forward_secrecy() {
     assert_eq!(
         line_value(&post, "recipient_keys"),
         "1",
-        "old recipient key row is exact-deleted by the tombstone projector; \
-         a fresh recipient key replaces it"
+        "old recipient key row is exact-deleted by the supersession \
+         projector; a fresh recipient key replaces it"
     );
+    // Under the refined FS rule (`RULES.md` § "Forward Secrecy Requires
+    // Recipient Key Rotation On Wrap-Bound Deletion") no separate
+    // `recipient_key_tombstone` event is emitted; supersession lives in
+    // the new `recipient_key`'s `previous_recipient_key_id` field.
     assert_eq!(
         line_value(&post, "recipient_key_tombstones"),
-        "1",
-        "chop must trigger a recipient key tombstone for the wrap-bound key"
+        "0",
+        "supersession is encoded in the replacement recipient_key event \
+         itself; no separate tombstone is authored"
     );
     assert_eq!(
         line_value(&post, "local_recipient_keys"),

@@ -4,10 +4,21 @@
 //! same workspace and owns the signing public key named by the envelope. It
 //! writes the public recipient-key row only; local private material and wrap
 //! scheduling belong to sibling local event leaves and workers.
+//!
+//! Supersession: when the canonical event carries a non-zero
+//! `previous_recipient_key_id`, the projector also exact-deletes the old
+//! `RECIPIENT_KEYS` row in the same projection. The single event then acts
+//! as both the tombstone of the old pubkey and the introduction of the new
+//! one (per `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation
+//! On Wrap-Bound Deletion"). Validation requires the predecessor to be
+//! issued by the same endpoint and live in the same workspace; cross-
+//! endpoint or cross-workspace supersessions are rejected.
 
 use crate::protocol::event_modules::identity::{endpoint_shared, signed};
-use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
+use crate::protocol::event_modules::types::EventId;
+use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
+use super::types::NO_PREVIOUS_RECIPIENT_KEY;
 use super::{codec, commands, schema};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
@@ -19,6 +30,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
     if envelope.signer_endpoint_shared_id != recipient_key.endpoint_shared_id {
         return Err("recipient key signer does not match payload endpoint".to_string());
+    }
+    if recipient_key.previous_recipient_key_id == event.context.event_id {
+        return Err(
+            "recipient key cannot supersede itself (previous_recipient_key_id == event_id)"
+                .to_string(),
+        );
     }
 
     let signer = event
@@ -47,10 +64,65 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("recipient key signer endpoint role cannot receive key wraps".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![schema::recipient_key_row(
+    let mut output = ProjectionOutput::rows(vec![schema::recipient_key_row(
         event.context.event_id,
         &recipient_key,
-    )?]))
+    )?]);
+
+    if recipient_key.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
+        validate_predecessor(event, &recipient_key.previous_recipient_key_id, recipient_key.endpoint_shared_id, recipient_key.workspace_id)?;
+        output.deletes.push(TableDelete {
+            table: schema::RECIPIENT_KEYS,
+            key: schema::recipient_key_key(
+                recipient_key.workspace_id,
+                recipient_key.previous_recipient_key_id,
+            ),
+        });
+    }
+
+    Ok(output)
+}
+
+/// The predecessor recipient_key event must live in the same workspace and
+/// be signed by the same endpoint membership as this replacement. Without
+/// these checks an attacker could publish a `recipient_key` claiming to
+/// supersede an unrelated peer's pubkey and trick projection into deleting
+/// it.
+fn validate_predecessor(
+    event: &EventWithContext<'_>,
+    previous_recipient_key_id: &EventId,
+    expected_endpoint_shared_id: EventId,
+    expected_workspace_id: EventId,
+) -> Result<(), String> {
+    let predecessor = event
+        .context
+        .dependency(previous_recipient_key_id)
+        .ok_or_else(|| {
+            "recipient key supersession previous_recipient_key dependency is missing".to_string()
+        })?;
+    let predecessor_envelope =
+        codec::decode_signed(&predecessor.canonical_bytes).map_err(|_| {
+            "recipient key supersession previous dependency is not a signed recipient_key"
+                .to_string()
+        })?;
+    let predecessor_event = codec::decode(&predecessor_envelope.payload).map_err(|_| {
+        "recipient key supersession previous dependency is not a signed recipient_key"
+            .to_string()
+    })?;
+    if predecessor_event.workspace_id != expected_workspace_id {
+        return Err(
+            "recipient key supersession previous_recipient_key workspace does not match"
+                .to_string(),
+        );
+    }
+    if predecessor_event.endpoint_shared_id != expected_endpoint_shared_id {
+        return Err(
+            "recipient key supersession previous_recipient_key endpoint does not match \
+             (cross-endpoint supersession is rejected)"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -133,6 +205,7 @@ mod tests {
             endpoint_shared_id: signer_id,
             signer_private_key,
             recipient_key: local.recipient_key,
+            previous_recipient_key_id: NO_PREVIOUS_RECIPIENT_KEY,
         })
         .expect("publish")
         .events[0]
@@ -204,6 +277,141 @@ mod tests {
         assert_eq!(
             project(&event).expect_err("wrong workspace must fail"),
             "recipient key signer endpoint_shared workspace does not match event"
+        );
+    }
+
+    #[test]
+    fn supersession_event_emits_table_delete_for_previous_key_row() {
+        // The forward-secrecy rotation path uses a new `recipient_key`
+        // event whose `previous_recipient_key_id` names a wiped pubkey.
+        // The projector must emit a TableDelete for the predecessor's
+        // RECIPIENT_KEYS row so the workspace's active recipient set
+        // flips over in the same projection.
+        let signer_private_key = [9; 32];
+        let signer_pubkey = signing_public_key_for(&signer_private_key);
+        let signer_record = endpoint_shared_record([1; 32], signer_pubkey);
+        let signer_id = event_id(&signer_record.canonical_bytes);
+
+        let predecessor_record = recipient_key_record([1; 32], signer_id, signer_private_key);
+        let predecessor_id = event_id(&predecessor_record.canonical_bytes);
+
+        // Author the replacement that supersedes the predecessor.
+        let local = super::super::super::local_recipient_key::commands::create([1; 32])
+            .expect("create local key")
+            .value;
+        let replacement_record = commands::publish(commands::PublishRecipientKey {
+            workspace_id: [1; 32],
+            created_at_ms: 12,
+            endpoint_shared_id: signer_id,
+            signer_private_key,
+            recipient_key: local.recipient_key,
+            previous_recipient_key_id: predecessor_id,
+        })
+        .expect("publish supersession")
+        .events[0]
+            .record()
+            .clone();
+
+        let event = EventWithContext {
+            record: &replacement_record,
+            context: EventContext {
+                event_id: event_id(&replacement_record.canonical_bytes),
+                dependencies: vec![
+                    DependencyContext {
+                        event_id: signer_id,
+                        record: signer_record,
+                    },
+                    DependencyContext {
+                        event_id: predecessor_id,
+                        record: predecessor_record,
+                    },
+                ],
+                labels: Vec::new(),
+                receive: None,
+                now_unix_minute: None,
+            },
+        };
+
+        let output = project(&event).expect("project supersession");
+
+        assert_eq!(output.rows.len(), 1, "must write one new row");
+        assert_eq!(
+            output.deletes.len(),
+            1,
+            "supersession must emit one TableDelete for the predecessor row"
+        );
+        assert_eq!(output.deletes[0].table, schema::RECIPIENT_KEYS);
+        assert_eq!(
+            output.deletes[0].key,
+            schema::recipient_key_key([1; 32], predecessor_id),
+            "the deleted row key must be the predecessor's"
+        );
+    }
+
+    #[test]
+    fn supersession_event_rejects_predecessor_from_different_endpoint() {
+        // An attacker authoring a recipient_key that claims to supersede
+        // a victim's pubkey must be rejected: the predecessor's
+        // endpoint_shared_id must match the new event's signer.
+        let signer_private_key = [9; 32];
+        let signer_record = endpoint_shared_record(
+            [1; 32],
+            signing_public_key_for(&signer_private_key),
+        );
+        let signer_id = event_id(&signer_record.canonical_bytes);
+        let other_private_key = [7; 32];
+        let other_record = endpoint_shared_record(
+            [1; 32],
+            signing_public_key_for(&other_private_key),
+        );
+        let other_id = event_id(&other_record.canonical_bytes);
+
+        // Predecessor authored by `other`.
+        let other_predecessor =
+            recipient_key_record([1; 32], other_id, other_private_key);
+        let other_predecessor_id = event_id(&other_predecessor.canonical_bytes);
+
+        // Attacker (signer) tries to supersede `other`'s pubkey.
+        let local = super::super::super::local_recipient_key::commands::create([1; 32])
+            .expect("create local key")
+            .value;
+        let attacker_record = commands::publish(commands::PublishRecipientKey {
+            workspace_id: [1; 32],
+            created_at_ms: 12,
+            endpoint_shared_id: signer_id,
+            signer_private_key,
+            recipient_key: local.recipient_key,
+            previous_recipient_key_id: other_predecessor_id,
+        })
+        .expect("publish")
+        .events[0]
+            .record()
+            .clone();
+
+        let event = EventWithContext {
+            record: &attacker_record,
+            context: EventContext {
+                event_id: event_id(&attacker_record.canonical_bytes),
+                dependencies: vec![
+                    DependencyContext {
+                        event_id: signer_id,
+                        record: signer_record,
+                    },
+                    DependencyContext {
+                        event_id: other_predecessor_id,
+                        record: other_predecessor,
+                    },
+                ],
+                labels: Vec::new(),
+                receive: None,
+                now_unix_minute: None,
+            },
+        };
+
+        let err = project(&event).expect_err("cross-endpoint supersession must fail");
+        assert!(
+            err.contains("cross-endpoint supersession is rejected"),
+            "expected cross-endpoint rejection, got: {err}"
         );
     }
 

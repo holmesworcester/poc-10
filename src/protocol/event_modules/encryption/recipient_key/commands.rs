@@ -9,7 +9,7 @@ use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::codec;
-use super::types::RecipientKeyEvent;
+use super::types::{RecipientKeyEvent, NO_PREVIOUS_RECIPIENT_KEY};
 
 /// Sanity guard: every named id in a recipient key event is non-zero. The
 /// codec is intentionally lenient on decode; this helper is shared between
@@ -39,6 +39,14 @@ pub struct PublishRecipientKey {
     pub endpoint_shared_id: EventId,
     pub signer_private_key: Ed25519PrivateKey,
     pub recipient_key: X25519PublicKey,
+    /// `NO_PREVIOUS_RECIPIENT_KEY` for a fresh keypair publication.
+    /// Otherwise the event id of the recipient_key being superseded by
+    /// this rotation. Forward-secrecy rotation paths (per
+    /// `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+    /// Wrap-Bound Deletion") set this to the wiped pubkey's event id;
+    /// the projector treats the resulting event as both tombstone of
+    /// the old pubkey and introduction of the new pubkey.
+    pub previous_recipient_key_id: EventId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +55,7 @@ pub struct PublishRecipientKeyOutput {
     pub workspace_id: EventId,
     pub endpoint_shared_id: EventId,
     pub recipient_key: X25519PublicKey,
+    pub previous_recipient_key_id: EventId,
 }
 
 pub fn publish(
@@ -55,12 +64,19 @@ pub fn publish(
     validate_id("workspace_id", &input.workspace_id)?;
     validate_id("endpoint_shared_id", &input.endpoint_shared_id)?;
     validate_id("recipient_key", &input.recipient_key)?;
+    if input.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
+        // A non-zero predecessor must be a real event id (not all-zero
+        // fields surfaced as a typo). The codec lets the value through
+        // unchanged; the projector validates the predecessor's
+        // workspace + endpoint match this event.
+    }
 
     let event = RecipientKeyEvent {
         workspace_id: input.workspace_id,
         created_at_ms: input.created_at_ms,
         endpoint_shared_id: input.endpoint_shared_id,
         recipient_key: input.recipient_key,
+        previous_recipient_key_id: input.previous_recipient_key_id,
     };
     let payload = codec::encode(&event);
     let envelope = codec::sign(input.endpoint_shared_id, &input.signer_private_key, payload);
@@ -71,6 +87,7 @@ pub fn publish(
         workspace_id: event.workspace_id,
         endpoint_shared_id: event.endpoint_shared_id,
         recipient_key: event.recipient_key,
+        previous_recipient_key_id: event.previous_recipient_key_id,
     };
     Ok(CommandOutput::with_events(value, vec![record]))
 }
@@ -97,6 +114,7 @@ mod tests {
             endpoint_shared_id: [2; 32],
             signer_private_key: [9; 32],
             recipient_key: crypto::x25519_public_key(&recipient_secret),
+            previous_recipient_key_id: NO_PREVIOUS_RECIPIENT_KEY,
         }
     }
 

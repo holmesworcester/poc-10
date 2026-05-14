@@ -517,6 +517,33 @@ fn local_endpoint_membership(
     Ok(Some(membership))
 }
 
+/// Rotate the local endpoint's recipient keypair under
+/// `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
+/// Wrap-Bound Deletion". Per peer, per F, this fires at most ONCE in F's
+/// lifetime — driven by the F-wipe trigger in
+/// `rotate_local_recipient_keys_for_wiped_frontier` — but the
+/// CLI-driven `key-rotate-recipient` flow also goes through here for
+/// manual rotation.
+///
+/// Steps, all on this peer:
+///
+///   1. Generate a fresh keypair (new `local_recipient_key` event).
+///   2. For each currently-active recipient pubkey for this endpoint,
+///      publish a new `recipient_key` event whose
+///      `previous_recipient_key_id` names the old pubkey. The single
+///      event acts as both the tombstone of the old pubkey and the
+///      introduction of the new one — the projector exact-deletes the
+///      old `RECIPIENT_KEYS` row in the same projection that writes the
+///      new one.
+///   3. Wipe the old `local_recipient_key` private rows + retired
+///      `KEY_WRAPS` rows + retired event-store entries. The supersession
+///      dependency in (2) guarantees every peer admits the new
+///      recipient_key only after admitting the old one, so the
+///      projector can complete the row-delete without the predecessor
+///      being missing.
+///
+/// `tombstoned_recipient_keys` counts how many old keys were superseded
+/// (one supersession event per old key).
 fn rotate_recipient_key<R: EventRegistry>(
     store: &Store,
     registry: &R,
@@ -553,56 +580,71 @@ fn rotate_recipient_key<R: EventRegistry>(
     report.admitted_events += admitted.admitted.inserted_events;
     report.local_recipient_key_id = Some(local_recipient_key_id);
 
-    let recipient_output =
-        recipient_key::commands::publish(recipient_key::commands::PublishRecipientKey {
-            workspace_id,
-            created_at_ms: next_timestamp(store)?,
-            endpoint_shared_id: membership.endpoint_shared_id,
-            signer_private_key: local.signing_secret,
-            recipient_key: local_public_key,
-        })?;
-    let new_recipient_key_id = recipient_output.value.recipient_key_id;
-    let admitted = worker::run(
-        store,
-        registry,
-        worker::AdmitAndDrain {
-            output: recipient_output,
-            batch_size: worker::DEFAULT_READY_BATCH,
-        },
-    )
-    .map_err(|err| format!("admit rotated recipient key: {err}"))?;
-    report.admitted_events += admitted.admitted.inserted_events;
-    report.recipient_key_id = Some(new_recipient_key_id);
-
-    let mut retired = Vec::with_capacity(old_active.len());
-    for old_key in &old_active {
-        let tombstone = recipient_key_tombstone::commands::tombstone(
-            recipient_key_tombstone::commands::TombstoneRecipientKey {
+    // Author one replacement `recipient_key` event per active old key.
+    // The first one carries `previous_recipient_key_id` so the projector
+    // tombstones the old pubkey; if the local endpoint somehow has
+    // multiple active old keys (legacy state), we author one
+    // supersession per old key. The LAST new event id becomes the
+    // workspace-visible "current" key for this endpoint.
+    let mut last_new_recipient_key_id: Option<EventId> = None;
+    let retired_input = old_active.clone();
+    if old_active.is_empty() {
+        // No predecessor: a fresh keypair publication. Used by the
+        // first-time `key-recipient` path when no prior recipient_key
+        // exists for this endpoint.
+        let recipient_output =
+            recipient_key::commands::publish(recipient_key::commands::PublishRecipientKey {
                 workspace_id,
                 created_at_ms: next_timestamp(store)?,
                 endpoint_shared_id: membership.endpoint_shared_id,
                 signer_private_key: local.signing_secret,
-                old_recipient_key_id: old_key.recipient_key_id,
-                new_recipient_key_id,
-            },
-        )?;
+                recipient_key: local_public_key,
+                previous_recipient_key_id:
+                    recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
+            })?;
+        let new_recipient_key_id = recipient_output.value.recipient_key_id;
         let admitted = worker::run(
             store,
             registry,
             worker::AdmitAndDrain {
-                output: tombstone,
+                output: recipient_output,
                 batch_size: worker::DEFAULT_READY_BATCH,
             },
         )
-        .map_err(|err| format!("admit recipient key tombstone: {err}"))?;
-        if admitted.admitted.inserted_events > 0 {
-            report.tombstoned_recipient_keys += 1;
-        }
+        .map_err(|err| format!("admit rotated recipient key: {err}"))?;
         report.admitted_events += admitted.admitted.inserted_events;
-        retired.push(*old_key);
+        last_new_recipient_key_id = Some(new_recipient_key_id);
+    } else {
+        for old_key in &old_active {
+            let recipient_output =
+                recipient_key::commands::publish(recipient_key::commands::PublishRecipientKey {
+                    workspace_id,
+                    created_at_ms: next_timestamp(store)?,
+                    endpoint_shared_id: membership.endpoint_shared_id,
+                    signer_private_key: local.signing_secret,
+                    recipient_key: local_public_key,
+                    previous_recipient_key_id: old_key.recipient_key_id,
+                })?;
+            let new_recipient_key_id = recipient_output.value.recipient_key_id;
+            let admitted = worker::run(
+                store,
+                registry,
+                worker::AdmitAndDrain {
+                    output: recipient_output,
+                    batch_size: worker::DEFAULT_READY_BATCH,
+                },
+            )
+            .map_err(|err| format!("admit rotated recipient key: {err}"))?;
+            if admitted.admitted.inserted_events > 0 {
+                report.tombstoned_recipient_keys += 1;
+            }
+            report.admitted_events += admitted.admitted.inserted_events;
+            last_new_recipient_key_id = Some(new_recipient_key_id);
+        }
     }
+    report.recipient_key_id = last_new_recipient_key_id;
 
-    purge_retired_recipient_material(store, workspace_id, &retired)
+    purge_retired_recipient_material(store, workspace_id, &retired_input)
         .map_err(|err| format!("purge retired recipient material: {err}"))?;
 
     Ok(report)
@@ -1676,6 +1718,8 @@ mod tests {
                 endpoint_shared_id: signer_endpoint_shared_id,
                 signer_private_key,
                 recipient_key: local_recipient_event.recipient_key,
+                previous_recipient_key_id:
+                    recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
             })
             .expect("recipient key");
         let recipient_record = recipient_output.events[0].record().clone();

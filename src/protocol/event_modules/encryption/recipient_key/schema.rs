@@ -15,7 +15,7 @@ use super::types::{RecipientKeyEvent, RecipientKeyRow};
 pub const RECIPIENT_KEYS: TableName = TableName::new("encryption.recipient_keys");
 
 pub const SCHEMAS: &[Schema] = &[Schema::durable_row_table(
-    "encryption.recipient_keys.v1",
+    "encryption.recipient_keys.v2",
     RECIPIENT_KEYS,
 )];
 
@@ -50,6 +50,7 @@ pub fn decode_recipient_key_row(key: &[u8], value: &[u8]) -> Result<RecipientKey
     let created_at_ms = reader.u64()?;
     let endpoint_shared_id = reader.id()?;
     let recipient_key = reader.id()?;
+    let previous_recipient_key_id = reader.id()?;
     reader.finish()?;
     validate_public_key(&recipient_key)?;
     Ok(RecipientKeyRow {
@@ -58,15 +59,17 @@ pub fn decode_recipient_key_row(key: &[u8], value: &[u8]) -> Result<RecipientKey
         created_at_ms,
         endpoint_shared_id,
         recipient_key,
+        previous_recipient_key_id,
     })
 }
 
 fn encode_value(event: &RecipientKeyEvent) -> Result<Vec<u8>, String> {
     validate_public_key(&event.recipient_key)?;
-    let mut out = Writer::with_capacity(8 + 32 + 32);
+    let mut out = Writer::with_capacity(8 + 32 + 32 + 32);
     out.u64(event.created_at_ms);
     out.id(&event.endpoint_shared_id);
     out.id(&event.recipient_key);
+    out.id(&event.previous_recipient_key_id);
     Ok(out.finish())
 }
 

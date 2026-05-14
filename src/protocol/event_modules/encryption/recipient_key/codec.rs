@@ -14,13 +14,15 @@ use super::types::{RecipientKeyEvent, SignedRecipientKeyEnvelope};
 
 pub const TYPE_RECIPIENT_KEY: u8 = 18;
 pub const TYPE_SIGNED_RECIPIENT_KEY: u8 = 19;
-pub const RECIPIENT_KEY_WIRE_SIZE: usize = 1 + 32 + 8 + 32 + X25519_PUBLIC_KEY_BYTES;
+pub const RECIPIENT_KEY_WIRE_SIZE: usize =
+    1 + 32 + 8 + 32 + X25519_PUBLIC_KEY_BYTES + 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecipientKeyMetadata {
     workspace_id: EventId,
     created_at_ms: u64,
     endpoint_shared_id: EventId,
+    previous_recipient_key_id: EventId,
 }
 
 pub fn encode(event: &RecipientKeyEvent) -> Vec<u8> {
@@ -30,6 +32,7 @@ pub fn encode(event: &RecipientKeyEvent) -> Vec<u8> {
     out.u64(event.created_at_ms);
     out.id(&event.endpoint_shared_id);
     out.id(&event.recipient_key);
+    out.id(&event.previous_recipient_key_id);
     out.finish()
 }
 
@@ -44,6 +47,7 @@ pub fn decode(bytes: &[u8]) -> Result<RecipientKeyEvent, String> {
         created_at_ms: reader.u64()?,
         endpoint_shared_id: reader.id()?,
         recipient_key: reader.id()?,
+        previous_recipient_key_id: reader.id()?,
     };
     reader.finish()?;
     Ok(event)
@@ -113,9 +117,17 @@ pub fn signed_record_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
     if envelope.signer_endpoint_shared_id != metadata.endpoint_shared_id {
         return Err("signed recipient key signer does not match payload endpoint".to_string());
     }
-    let mut dependencies = Vec::with_capacity(2);
+    let mut dependencies = Vec::with_capacity(3);
     push_unique(&mut dependencies, metadata.endpoint_shared_id);
     push_unique(&mut dependencies, metadata.workspace_id);
+    if metadata.previous_recipient_key_id != [0; 32] {
+        // Forward-secrecy supersession path: the predecessor recipient_key
+        // event must be admitted before this one so the projector can
+        // confirm same-workspace + same-endpoint and exact-delete the
+        // retired pubkey row in the same projection. A fresh keypair
+        // publication uses `[0; 32]` and skips the dependency edge.
+        push_unique(&mut dependencies, metadata.previous_recipient_key_id);
+    }
     Ok(EventRecord {
         timestamp: metadata.created_at_ms,
         body_len: RECIPIENT_KEY_WIRE_SIZE - 1,
@@ -132,6 +144,7 @@ fn metadata(bytes: &[u8]) -> Result<RecipientKeyMetadata, String> {
         workspace_id: event.workspace_id,
         created_at_ms: event.created_at_ms,
         endpoint_shared_id: event.endpoint_shared_id,
+        previous_recipient_key_id: event.previous_recipient_key_id,
     })
 }
 
@@ -182,6 +195,18 @@ mod tests {
             created_at_ms: 1234,
             endpoint_shared_id: [2; 32],
             recipient_key: crypto::x25519_public_key(&secret),
+            previous_recipient_key_id: super::super::types::NO_PREVIOUS_RECIPIENT_KEY,
+        }
+    }
+
+    fn supersedes_event(previous: EventId) -> RecipientKeyEvent {
+        let secret = crypto::random_x25519_private_key();
+        RecipientKeyEvent {
+            workspace_id: [1; 32],
+            created_at_ms: 1234,
+            endpoint_shared_id: [2; 32],
+            recipient_key: crypto::x25519_public_key(&secret),
+            previous_recipient_key_id: previous,
         }
     }
 
@@ -207,6 +232,21 @@ mod tests {
         assert_eq!(record.workspace_id, Some([1; 32]));
         assert_eq!(record.timestamp, 1234);
         assert_eq!(record.dependencies, vec![[2; 32], [1; 32]]);
+    }
+
+    #[test]
+    fn signed_record_with_predecessor_carries_previous_recipient_key_dependency() {
+        let predecessor: EventId = [42; 32];
+        let payload = encode(&supersedes_event(predecessor));
+        let envelope = sign([2; 32], &[9; ED25519_PRIVATE_KEY_BYTES], payload);
+        let record = signed_record_from_bytes(encode_signed(&envelope)).expect("record");
+
+        assert_eq!(record.scope, EventScope::Shared);
+        assert_eq!(
+            record.dependencies,
+            vec![[2; 32], [1; 32], predecessor],
+            "supersession path must add the previous recipient_key as a dependency"
+        );
     }
 
     #[test]

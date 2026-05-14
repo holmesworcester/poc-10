@@ -160,6 +160,8 @@ mod tests {
             endpoint_shared_id: signer_id,
             signer_private_key,
             recipient_key: local.recipient_key,
+            previous_recipient_key_id:
+                recipient_key::types::NO_PREVIOUS_RECIPIENT_KEY,
         })
         .expect("publish")
         .events[0]
