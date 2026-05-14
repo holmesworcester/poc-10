@@ -5,8 +5,10 @@
 //! matching local recipient private material is present, then admits the
 //! resulting local key-secret event through the common event worker.
 //!
-//! History-node derivation is the worker's other responsibility. The retained
-//! tree is a real binary tree on both axes:
+//! History-node derivation is the worker's other responsibility, but the
+//! algorithmic work — KDF descent, ancestor lookup, sibling-cover
+//! materialization — lives in `local_history_node_secret::{queries,commands}`.
+//! The retained tree is a real binary tree on both axes:
 //!
 //!   * Time axis. Internal nodes cover `(range_start, range_width)` where
 //!     `range_width` is a power of two minutes. The frontier root
@@ -20,18 +22,18 @@
 //! only when delete or expiry punches a hole that splits a covering range, or
 //! when an AEAD operation wants the leaf to be a single-row read.
 //!
-//! `derive_event_leaf` walks from any retained ancestor down through the time
-//! tree to the event's minute_node, then down the trie to its leaf, returning
-//! the leaf's `node_secret` for AEAD use. For a fresh encryption with no deletes
-//! in the region the walk descends straight from the workspace root and only
-//! the leaf row is materialized.
+//! Each work variant is a thin lookup -> command -> admit/wipe coordinator:
 //!
-//! `RetireDeletedEventLeaf` walks the same path, materializing BOTH children
-//! at every split so the projector's source-dependency invariant holds while
-//! we admit the chain. After the walk, the descend-side rows AND the F root
-//! row are exact-deleted, their canonical bytes are purged, and tombstone
-//! rows are written into `local_history_node_tombstones`. Only sibling rows
-//! survive, plus other event leaves.
+//!   * `DeriveEventLeaf` looks up `closest_ancestor`, hands it to
+//!     `commands::derive_leaf_from_ancestor`, admits the emitted records.
+//!   * `RetireDeletedEventLeaf` looks up F root + same-minute survivors,
+//!     hands them to `commands::retire_leaf_from_ancestor`, admits the
+//!     emitted records, then runs the wipe transaction (exact-delete F +
+//!     descend path + leaf row, purge canonical bytes, write tombstones).
+//!   * `ChopTimeTreePrefix` looks up F root + the time-axis ancestor
+//!     covering `floor_minute`, hands it to
+//!     `commands::chop_time_tree_from_ancestor`, admits the emitted
+//!     records, then runs the wipe transaction.
 //!
 //! After retire, an adversary on the device has access to:
 //!
@@ -58,7 +60,7 @@
 //! coord's prefix lies under a surviving trie sibling; coords whose
 //! subtree was inside the wiped descend chain legitimately wedge —
 //! that's the "no covering ancestor" branch in
-//! `closest_retained_ancestor`.) Each peer derives the sibling
+//! `queries::closest_ancestor`.) Each peer derives the sibling
 //! secrets locally because the KDF is deterministic, so no new wraps
 //! to recipients are required. Rotation can still happen for
 //! unrelated reasons (e.g. recipient turnover via `key-frontier`);
@@ -804,67 +806,22 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
         event_id_in_minute,
     );
     let path_clone = wipe_path.clone();
-    let (wiped_path_rows, tombstones_written, purged_event_bytes) = store
+    let counts = store
         .write_transaction(move |store| {
-            let mut wiped: usize = 0;
-            let mut tombstones: usize = 0;
-            let mut purged: usize = 0;
-            for target in &path_clone {
-                if target.is_frontier_root {
-                    let key = local_key_secret::schema::local_key_secret_key(
-                        workspace_id,
-                        removal_frontier_id,
-                    );
-                    if store
-                        .delete_table_rows_in_tx(
-                            local_key_secret::schema::LOCAL_KEY_SECRETS,
-                            vec![key],
-                        )?
-                        > 0
-                    {
-                        wiped += 1;
-                    }
-                } else {
-                    let key = local_history_node_secret::schema::local_history_node_secret_key(
-                        workspace_id,
-                        removal_frontier_id,
-                        target.range_start,
-                        target.range_width,
-                        target.bit_depth,
-                        target.event_id_prefix,
-                    );
-                    if store
-                        .delete_table_rows_in_tx(
-                            local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
-                            vec![key],
-                        )?
-                        > 0
-                    {
-                        wiped += 1;
-                    }
-                }
-                if purging::purge_event_storage_in_tx(store, &target.event_id)? {
-                    purged += 1;
-                }
-                let inserted = store.insert_table_rows_in_tx(vec![
-                    local_history_node_secret::schema::local_history_node_tombstone_row_by_id(
-                        workspace_id,
-                        removal_frontier_id,
-                        target.event_id,
-                        leaf_id,
-                        target.range_start,
-                        target.range_width,
-                    ),
-                ])?;
-                tombstones += inserted;
-            }
+            let mut counts = wipe_targets_in_tx(
+                store,
+                workspace_id,
+                removal_frontier_id,
+                &path_clone,
+                |_| leaf_id,
+            )?;
             // Leaf row.
             let _ = store.delete_table_rows_in_tx(
                 local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
                 vec![leaf_secret_key.clone()],
             )?;
             if purging::purge_event_storage_in_tx(store, &leaf_id)? {
-                purged += 1;
+                counts.purged += 1;
             }
             // The leaf is its own replacement; it's gone, so the replacement
             // is leaf_id which itself is wiped. This still uniquely names
@@ -880,13 +837,13 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
                     1,
                 ),
             ])?;
-            tombstones += inserted;
-            Ok((wiped, tombstones, purged))
+            counts.tombstones += inserted;
+            Ok(counts)
         })
         .map_err(|err| format!("retire deleted event leaf wipe transaction: {err}"))?;
-    report.wiped_path_rows = wiped_path_rows;
-    report.tombstones_written = tombstones_written;
-    report.purged_event_bytes = purged_event_bytes;
+    report.wiped_path_rows = counts.wiped;
+    report.tombstones_written = counts.tombstones;
+    report.purged_event_bytes = counts.purged;
     let _ = wipe_path;
     Ok(report)
 }
@@ -1009,73 +966,25 @@ fn chop_time_tree_prefix<R: EventRegistry>(
     // the wiped row "is its own replacement" when no global replacement exists).
     let replacement_node_id = frontier_root_id.unwrap_or([0; 32]);
     let descend_path_clone = descend_path.clone();
-    let (wiped, tombstones, purged) = store
+    let counts = store
         .write_transaction(move |store| {
-            let mut wiped: usize = 0;
-            let mut tombstones: usize = 0;
-            let mut purged: usize = 0;
-            for target in &descend_path_clone {
-                if target.is_frontier_root {
-                    let key = local_key_secret::schema::local_key_secret_key(
-                        workspace_id,
-                        removal_frontier_id,
-                    );
-                    if store
-                        .delete_table_rows_in_tx(
-                            local_key_secret::schema::LOCAL_KEY_SECRETS,
-                            vec![key],
-                        )?
-                        > 0
-                    {
-                        wiped += 1;
+            wipe_targets_in_tx(
+                store,
+                workspace_id,
+                removal_frontier_id,
+                &descend_path_clone,
+                |target| {
+                    if replacement_node_id == [0; 32] {
+                        target.event_id
+                    } else {
+                        replacement_node_id
                     }
-                } else {
-                    let key = local_history_node_secret::schema::local_history_node_secret_key(
-                        workspace_id,
-                        removal_frontier_id,
-                        target.range_start,
-                        target.range_width,
-                        target.bit_depth,
-                        target.event_id_prefix,
-                    );
-                    if store
-                        .delete_table_rows_in_tx(
-                            local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
-                            vec![key],
-                        )?
-                        > 0
-                    {
-                        wiped += 1;
-                    }
-                }
-                if purging::purge_event_storage_in_tx(store, &target.event_id)? {
-                    purged += 1;
-                }
-                let inserted = store.insert_table_rows_in_tx(vec![
-                    local_history_node_secret::schema::local_history_node_tombstone_row_by_id(
-                        workspace_id,
-                        removal_frontier_id,
-                        target.event_id,
-                        // Replacement: the chop has no single replacement
-                        // node, so we use F's id (when known) or the wiped
-                        // row's own id as a stable, deterministic marker.
-                        if replacement_node_id == [0; 32] {
-                            target.event_id
-                        } else {
-                            replacement_node_id
-                        },
-                        target.range_start,
-                        target.range_width,
-                    ),
-                ])?;
-                tombstones += inserted;
-            }
-            Ok((wiped, tombstones, purged))
+                },
+            )
         })
         .map_err(|err| format!("chop time tree prefix wipe transaction: {err}"))?;
-    let _ = wiped;
-    let _ = tombstones;
-    report.purged_event_bytes = purged;
+    report.purged_event_bytes = counts.purged;
+    let _ = (counts.wiped, counts.tombstones);
     let _ = descend_path;
 
     // GC pre-existing per-message tombstones subsumed by this chop's range.
@@ -1193,6 +1102,80 @@ fn gc_subsumed_tombstones(
         leaf_tombstones: leaf_deleted,
         message_tombstones: message_deleted,
     })
+}
+
+/// Counts accumulated by `wipe_targets_in_tx` inside a single
+/// `write_transaction`.
+#[derive(Debug, Default, Clone, Copy)]
+struct WipeCounts {
+    wiped: usize,
+    purged: usize,
+    tombstones: usize,
+}
+
+/// Inside a write transaction, exact-delete each target row, purge its
+/// canonical bytes, and write a tombstone naming `replacement_for(target)`
+/// as the replacement node id. Targets marked `is_frontier_root` are
+/// deleted from `LOCAL_KEY_SECRETS`; everything else is deleted from
+/// `LOCAL_HISTORY_NODE_SECRETS` by full-coordinate key.
+fn wipe_targets_in_tx<F>(
+    tx_store: &Store,
+    workspace_id: EventId,
+    removal_frontier_id: EventId,
+    targets: &[WipeTarget],
+    replacement_for: F,
+) -> Result<WipeCounts, rusqlite::Error>
+where
+    F: Fn(&WipeTarget) -> EventId,
+{
+    let mut counts = WipeCounts::default();
+    for target in targets {
+        if target.is_frontier_root {
+            let key = local_key_secret::schema::local_key_secret_key(
+                workspace_id,
+                removal_frontier_id,
+            );
+            if tx_store
+                .delete_table_rows_in_tx(local_key_secret::schema::LOCAL_KEY_SECRETS, vec![key])?
+                > 0
+            {
+                counts.wiped += 1;
+            }
+        } else {
+            let key = local_history_node_secret::schema::local_history_node_secret_key(
+                workspace_id,
+                removal_frontier_id,
+                target.range_start,
+                target.range_width,
+                target.bit_depth,
+                target.event_id_prefix,
+            );
+            if tx_store
+                .delete_table_rows_in_tx(
+                    local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
+                    vec![key],
+                )?
+                > 0
+            {
+                counts.wiped += 1;
+            }
+        }
+        if purging::purge_event_storage_in_tx(tx_store, &target.event_id)? {
+            counts.purged += 1;
+        }
+        let inserted = tx_store.insert_table_rows_in_tx(vec![
+            local_history_node_secret::schema::local_history_node_tombstone_row_by_id(
+                workspace_id,
+                removal_frontier_id,
+                target.event_id,
+                replacement_for(target),
+                target.range_start,
+                target.range_width,
+            ),
+        ])?;
+        counts.tombstones += inserted;
+    }
+    Ok(counts)
 }
 
 fn drain_pending_message_leaves<R: EventRegistry>(
