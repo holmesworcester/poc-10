@@ -40,8 +40,8 @@ use crate::protocol::wire::Writer;
 use super::codec;
 use super::queries;
 use super::types::{
-    mask_prefix_to_depth, HistoryNodeSecret, LocalHistoryNodeSecret, TIME_TREE_BIT_DEPTH,
-    TRIE_LEAF_BIT_DEPTH,
+    bit_at, mask_prefix_to_depth, AncestorSource, HistoryNodeSecret, LocalHistoryNodeSecret,
+    TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH,
 };
 
 /// Domain-separated tag for time-axis range-tree splits under
@@ -221,6 +221,218 @@ pub fn derive_event_leaf_from_root(
         event,
     };
     Ok(CommandOutput::with_events(value, vec![record]))
+}
+
+/// Derive a per-event leaf from the closest ancestor that already covers
+/// the target position. Three input shapes correspond to the three places
+/// the derivation chain can resume from:
+///
+/// * `Root` — the frontier root (`local_key_secret`). Walks the entire time
+///   tree as KDF chains in memory and emits a single leaf event whose
+///   `source_secret_id` is the root. (Equivalent to the legacy
+///   `derive_event_leaf_from_root`.)
+/// * `TimeInternal` — a materialized time-tree internal at `range_width >
+///   1`. Emits one record per time-tree level on the descending path
+///   (`log2(range_width)` records) plus one leaf trie split.
+/// * `InMinute` — a materialized minute_node (`bit_depth = 0, range_width =
+///   1`) or trie internal (`0 < bit_depth < 256`). Emits a single trie
+///   split straight to the leaf (Patricia-compressed from `bit_depth` to
+///   256).
+///
+/// All arms produce records using the same domain tags and KDF info layout
+/// as `derive_time_split` / `derive_trie_split`, so leaves admitted via any
+/// arm are byte-equal to leaves admitted via materialized intermediates.
+/// Admission of the returned records is the caller's responsibility (the
+/// encryption worker dispatches the admit-and-drain pipeline).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeriveLeafFromAncestor {
+    pub workspace_id: EventId,
+    pub removal_frontier_id: EventId,
+    pub ancestor: AncestorSource,
+    pub unix_minute: u64,
+    pub event_id_in_minute: EventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeriveLeafFromAncestorOutput {
+    pub leaf_id: EventId,
+    pub leaf_secret: HistoryNodeSecret,
+}
+
+pub fn derive_leaf_from_ancestor(
+    input: DeriveLeafFromAncestor,
+) -> Result<CommandOutput<DeriveLeafFromAncestorOutput>, String> {
+    validate_id("workspace_id", &input.workspace_id)?;
+    validate_id("removal_frontier_id", &input.removal_frontier_id)?;
+    if input.event_id_in_minute.iter().all(|byte| *byte == 0) {
+        return Err("event_id_in_minute must be non-zero".to_string());
+    }
+
+    let mut records: Vec<crate::protocol::event_modules::types::EventRecord> = Vec::new();
+    let (parent_secret, parent_id, parent_bit_depth, parent_event_id_prefix) =
+        descend_to_trie_position(&input, &mut records)?;
+
+    if parent_bit_depth >= TRIE_LEAF_BIT_DEPTH {
+        return Err("ancestor is already at the leaf depth".to_string());
+    }
+
+    let child_side = bit_at(&input.event_id_in_minute, parent_bit_depth);
+    let leaf_info = trie_split_info_bytes(
+        parent_bit_depth,
+        parent_event_id_prefix,
+        child_side,
+        TRIE_LEAF_BIT_DEPTH,
+        input.event_id_in_minute,
+    );
+    let leaf_secret = crypto::blake3_keyed_hash(&parent_secret, TRIE_SPLIT_DOMAIN, &leaf_info);
+
+    let leaf_event = LocalHistoryNodeSecret {
+        workspace_id: input.workspace_id,
+        removal_frontier_id: input.removal_frontier_id,
+        source_secret_id: parent_id,
+        range_start: input.unix_minute,
+        range_width: 1,
+        bit_depth: TRIE_LEAF_BIT_DEPTH,
+        event_id_prefix: input.event_id_in_minute,
+        tombstone_node_id: None,
+        node_secret: leaf_secret,
+    };
+    let leaf_bytes = codec::encode(&leaf_event);
+    let leaf_record = codec::record_from_bytes(leaf_bytes)?;
+    let leaf_id = event_id(&leaf_record.canonical_bytes);
+    records.push(leaf_record);
+
+    Ok(CommandOutput::with_events(
+        DeriveLeafFromAncestorOutput {
+            leaf_id,
+            leaf_secret,
+        },
+        records,
+    ))
+}
+
+/// Walk down the time tree to the trie position from which to take the
+/// leaf split. For `Root`, walks the entire time axis as in-memory KDF
+/// chains (no intermediate events emitted; the leaf event sources directly
+/// from the root). For `TimeInternal`, emits one event per descending
+/// time-tree level. For `InMinute`, returns the ancestor's trie coordinate
+/// directly. Returns `(parent_secret, parent_secret_id, parent_bit_depth,
+/// parent_event_id_prefix)` — the immediate parent of the trie leaf.
+fn descend_to_trie_position(
+    input: &DeriveLeafFromAncestor,
+    records: &mut Vec<crate::protocol::event_modules::types::EventRecord>,
+) -> Result<(HistoryNodeSecret, EventId, u16, EventId), String> {
+    match input.ancestor {
+        AncestorSource::Root { secret_id, secret } => {
+            validate_id("ancestor.secret_id", &secret_id)?;
+            validate_id("ancestor.secret", &secret)?;
+            let mut current_secret = secret;
+            let mut current_start = 0u64;
+            let mut current_width = ROOT_TIME_TREE_WIDTH;
+            while current_width > 1 {
+                let half = current_width / 2;
+                let mid = current_start + half;
+                let (child_side, child_start) = if input.unix_minute < mid {
+                    (0u8, current_start)
+                } else {
+                    (1u8, mid)
+                };
+                let info = time_split_info_bytes(
+                    current_start,
+                    current_width,
+                    child_side,
+                    child_start,
+                    half,
+                );
+                current_secret =
+                    crypto::blake3_keyed_hash(&current_secret, TIME_SPLIT_DOMAIN, &info);
+                current_start = child_start;
+                current_width = half;
+            }
+            // The leaf event sources directly from the root id; no
+            // intermediate records are emitted.
+            Ok((current_secret, secret_id, TIME_TREE_BIT_DEPTH, [0; 32]))
+        }
+        AncestorSource::TimeInternal {
+            secret_id,
+            secret,
+            range_start,
+            range_width,
+        } => {
+            validate_id("ancestor.secret_id", &secret_id)?;
+            validate_id("ancestor.secret", &secret)?;
+            validate_range(range_start, range_width)?;
+            if input.unix_minute < range_start
+                || input.unix_minute >= range_start.saturating_add(range_width)
+            {
+                return Err("ancestor does not cover unix_minute".to_string());
+            }
+            let mut current_secret = secret;
+            let mut current_id = secret_id;
+            let mut current_start = range_start;
+            let mut current_width = range_width;
+            while current_width > 1 {
+                let half = current_width / 2;
+                let mid = current_start + half;
+                let (child_side, child_start) = if input.unix_minute < mid {
+                    (0u8, current_start)
+                } else {
+                    (1u8, mid)
+                };
+                let info = time_split_info_bytes(
+                    current_start,
+                    current_width,
+                    child_side,
+                    child_start,
+                    half,
+                );
+                let child_secret =
+                    crypto::blake3_keyed_hash(&current_secret, TIME_SPLIT_DOMAIN, &info);
+                let event = LocalHistoryNodeSecret {
+                    workspace_id: input.workspace_id,
+                    removal_frontier_id: input.removal_frontier_id,
+                    source_secret_id: current_id,
+                    range_start: child_start,
+                    range_width: half,
+                    bit_depth: TIME_TREE_BIT_DEPTH,
+                    event_id_prefix: [0; 32],
+                    tombstone_node_id: None,
+                    node_secret: child_secret,
+                };
+                let bytes = codec::encode(&event);
+                let record = codec::record_from_bytes(bytes)?;
+                let child_id = event_id(&record.canonical_bytes);
+                records.push(record);
+                current_id = child_id;
+                current_secret = child_secret;
+                current_start = child_start;
+                current_width = half;
+            }
+            Ok((current_secret, current_id, TIME_TREE_BIT_DEPTH, [0; 32]))
+        }
+        AncestorSource::InMinute {
+            secret_id,
+            secret,
+            range_start,
+            bit_depth,
+            event_id_prefix,
+        } => {
+            validate_id("ancestor.secret_id", &secret_id)?;
+            validate_id("ancestor.secret", &secret)?;
+            if range_start != input.unix_minute {
+                return Err(
+                    "InMinute ancestor range_start does not match unix_minute".to_string(),
+                );
+            }
+            if bit_depth > TRIE_LEAF_BIT_DEPTH {
+                return Err("InMinute ancestor bit_depth out of range".to_string());
+            }
+            if mask_prefix_to_depth(input.event_id_in_minute, bit_depth) != event_id_prefix {
+                return Err("InMinute ancestor does not cover event_id_in_minute".to_string());
+            }
+            Ok((secret, secret_id, bit_depth, event_id_prefix))
+        }
+    }
 }
 
 fn time_split_info_bytes(

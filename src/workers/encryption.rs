@@ -510,76 +510,20 @@ fn rotate_recipient_key<R: EventRegistry>(
     Ok(report)
 }
 
-/// Source-of-derivation node — either the workspace frontier root (which
-/// implicitly covers the whole time axis at `range_width = TIME_TREE_ROOT_WIDTH`)
-/// or a materialized history node row.
+/// Trie-walk cursor used by the retire walk. Time-axis derivation lives in
+/// `commands::derive_leaf_from_ancestor` and the retire walk's own time
+/// loop; this cursor only tracks the current trie position
+/// `(bit_depth, event_id_prefix)` plus its secret material as we step from
+/// the minute_node down to the leaf.
 #[derive(Debug, Clone)]
 struct DerivationSource {
     secret_id: EventId,
     secret: HistoryNodeSecret,
-    range_start: u64,
-    range_width: u64,
     bit_depth: u16,
     event_id_prefix: EventId,
 }
 
-/// Look up the workspace's `local_key_secret(F)` row and present it as a
-/// `DerivationSource`. Returns `None` when the row has been wiped (e.g. by
-/// a prior `retire_deleted_event_leaf`); callers must then fall back to
-/// the deepest covering sibling row.
-fn try_root_source(
-    store: &Store,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-) -> Result<Option<DerivationSource>, String> {
-    let Some(root) = local_key_secret::queries::get(store, workspace_id, removal_frontier_id)?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(DerivationSource {
-        secret_id: root.local_key_secret_id,
-        secret: root.key_secret,
-        range_start: 0,
-        range_width: TIME_TREE_ROOT_WIDTH,
-        bit_depth: TIME_TREE_BIT_DEPTH,
-        event_id_prefix: [0; 32],
-    }))
-}
-
-/// Compute (in memory, not stored) the next time-split secret along the path
-/// to `target_minute`, given a parent that covers `target_minute`.
-fn time_split_step(
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    parent: &DerivationSource,
-    target_minute: u64,
-) -> Result<(u64, u64, u8, HistoryNodeSecret), String> {
-    let half = parent.range_width / 2;
-    if half == 0 {
-        return Err("time tree cannot split below range_width=1".to_string());
-    }
-    let mid = parent.range_start + half;
-    let (child_side, child_start, child_width) = if target_minute < mid {
-        (0u8, parent.range_start, half)
-    } else {
-        (1u8, mid, half)
-    };
-    let info = time_split_info(
-        parent.range_start,
-        parent.range_width,
-        child_side,
-        child_start,
-        child_width,
-    );
-    let secret = crypto::blake3_keyed_hash(
-        &parent.secret,
-        local_history_node_secret::commands::TIME_SPLIT_DOMAIN,
-        &info,
-    );
-    let _ = (workspace_id, removal_frontier_id);
-    Ok((child_start, child_width, child_side, secret))
-}
-
+#[cfg(test)]
 fn time_split_info(
     parent_range_start: u64,
     parent_range_width: u64,
@@ -596,6 +540,7 @@ fn time_split_info(
     out
 }
 
+#[cfg(test)]
 fn trie_split_info(
     parent_bit_depth: u16,
     parent_event_id_prefix: EventId,
@@ -618,127 +563,11 @@ fn trie_split_info(
     out
 }
 
-/// Walk in-memory from `root` (the closest retained ancestor) down to the
-/// minute_node at `target_minute`. Returns the in-memory `DerivationSource`
-/// for the minute_node — its secret is the parent of the trie.
-fn descend_time_axis_in_memory(
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    root: &DerivationSource,
-    target_minute: u64,
-) -> Result<DerivationSource, String> {
-    let mut current = root.clone();
-    while current.range_width > 1 {
-        let (child_start, child_width, child_side, secret) =
-            time_split_step(workspace_id, removal_frontier_id, &current, target_minute)?;
-        current = DerivationSource {
-            secret_id: current.secret_id, // virtual parent id chain; unused for in-memory walk
-            secret,
-            range_start: child_start,
-            range_width: child_width,
-            bit_depth: TIME_TREE_BIT_DEPTH,
-            event_id_prefix: [0; 32],
-        };
-        let _ = child_side;
-    }
-    Ok(current)
-}
-
-/// Find the closest retained ancestor that covers
-/// `(unix_minute, 1, TRIE_LEAF_BIT_DEPTH, event_id_in_minute)`. The starting
-/// candidate is the frontier root's `DerivationSource` when its row is
-/// present; if F's row has been wiped (post-retire), the scan starts with
-/// no candidate and picks the deepest covering sibling row admitted by
-/// an earlier retire walk. The retire walk's time-tree siblings
-/// collectively cover every minute except the wiped one, so any coord
-/// in a different minute has a covering ancestor; for a coord in the
-/// same minute as a prior retirement, coverage depends on whether a
-/// surviving trie sibling shares the coord's prefix.
-///
-/// Errors only when no covering ancestor exists at all (a genuine
-/// wedge — either F has never been seeded, or the target lies inside
-/// a wiped subtree that no sibling covers).
-fn closest_retained_ancestor(
-    store: &Store,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    unix_minute: u64,
-    event_id_in_minute: EventId,
-) -> Result<DerivationSource, String> {
-    let mut best: Option<DerivationSource> =
-        try_root_source(store, workspace_id, removal_frontier_id)?;
-    for row in local_history_node_secret::queries::list_for_frontier(
-        store,
-        workspace_id,
-        removal_frontier_id,
-    )? {
-        if !covers(&row, unix_minute, event_id_in_minute) {
-            continue;
-        }
-        let take = match best.as_ref() {
-            None => true,
-            Some(current) => more_specific_than(&row, current),
-        };
-        if take {
-            best = Some(DerivationSource {
-                secret_id: row.local_history_node_secret_id,
-                secret: row.node_secret,
-                range_start: row.range_start,
-                range_width: row.range_width,
-                bit_depth: row.bit_depth,
-                event_id_prefix: row.event_id_prefix,
-            });
-        }
-    }
-    best.ok_or_else(|| {
-        "no retained ancestor covers the target leaf: F is wiped and no \
-         sibling row covers this coordinate"
-            .to_string()
-    })
-}
-
-fn covers(
-    row: &local_history_node_secret::types::LocalHistoryNodeSecretRow,
-    unix_minute: u64,
-    event_id_in_minute: EventId,
-) -> bool {
-    // Time-axis containment.
-    let row_end = row.range_start.saturating_add(row.range_width);
-    if unix_minute < row.range_start || unix_minute >= row_end {
-        return false;
-    }
-    // Trie containment.
-    if row.bit_depth == TIME_TREE_BIT_DEPTH {
-        return true;
-    }
-    if row.bit_depth >= TRIE_LEAF_BIT_DEPTH {
-        return row.event_id_prefix == event_id_in_minute;
-    }
-    let masked = mask_prefix_to_depth(event_id_in_minute, row.bit_depth);
-    masked == row.event_id_prefix
-}
-
-/// Returns true when `row` is more specific (strictly closer to the leaf)
-/// than `current`. Specificity ranks first by smaller `range_width`, then
-/// by larger `bit_depth`.
-fn more_specific_than(
-    row: &local_history_node_secret::types::LocalHistoryNodeSecretRow,
-    current: &DerivationSource,
-) -> bool {
-    if row.range_width < current.range_width {
-        return true;
-    }
-    if row.range_width > current.range_width {
-        return false;
-    }
-    row.bit_depth > current.bit_depth
-}
-
-/// Walk from the closest retained ancestor down to the leaf row for
-/// `(unix_minute, event_id_in_minute)`. If the leaf row already exists,
-/// return it; otherwise materialize ONLY the leaf row (the path stays
-/// implicit) and return it. AEAD operations call this so the AEAD path is a
-/// single row read.
+/// Find the closest ancestor for `(unix_minute, event_id_in_minute)` and
+/// hand it to `commands::derive_leaf_from_ancestor`. The command emits one
+/// or many records depending on the ancestor shape; admission inserts them
+/// in dependency order. The returned leaf id and secret come from the
+/// command output.
 fn derive_event_leaf<R: EventRegistry>(
     store: &Store,
     registry: &R,
@@ -767,239 +596,25 @@ fn derive_event_leaf<R: EventRegistry>(
         });
     }
 
-    let ancestor = closest_retained_ancestor(
+    let ancestor = local_history_node_secret::queries::closest_ancestor(
         store,
         workspace_id,
         removal_frontier_id,
         unix_minute,
         event_id_in_minute,
+        false,
     )?;
-    let minute_node = if ancestor.range_width == 1 {
-        ancestor
-    } else {
-        descend_time_axis_in_memory(workspace_id, removal_frontier_id, &ancestor, unix_minute)?
-    };
-    if minute_node.range_start != unix_minute || minute_node.range_width != 1 {
-        return Err("time-axis descent did not reach the target minute_node".to_string());
-    }
-    // From minute_node (bit_depth = 0) to leaf (bit_depth = 256) in one trie
-    // split. The minute_node may itself be implicit; for implicit cases we
-    // need a stable `source_secret_id` for the leaf row. Use the closest
-    // materialized ancestor row id as the source for the leaf event so the
-    // leaf's dependency chain is real.
-    //
-    // NOTE: we MUST descend fully through the trie when an intermediate
-    // trie internal exists (e.g. after a delete materialized siblings). The
-    // closest_retained_ancestor walk already accounts for this by returning
-    // a deeper ancestor; the descent below from `minute_node` to the leaf
-    // simply follows the bits past whatever depth the ancestor sits at.
-    let mut current = minute_node.clone();
-    if current.bit_depth < TRIE_LEAF_BIT_DEPTH {
-        // Walk in-memory through any further materialized trie internals.
-        // Each step looks up a row at the next-deeper materialized depth on
-        // the side dictated by `event_id_in_minute`. If no more rows lie on
-        // the path, the loop terminates and we fall through to the final
-        // single-shot derivation to depth 256.
-        loop {
-            let Some(next_row) = next_materialized_trie_step(
-                store,
-                workspace_id,
-                removal_frontier_id,
-                unix_minute,
-                &current,
-                event_id_in_minute,
-            )?
-            else {
-                break;
-            };
-            current = DerivationSource {
-                secret_id: next_row.local_history_node_secret_id,
-                secret: next_row.node_secret,
-                range_start: next_row.range_start,
-                range_width: next_row.range_width,
-                bit_depth: next_row.bit_depth,
-                event_id_prefix: next_row.event_id_prefix,
-            };
-            if current.bit_depth >= TRIE_LEAF_BIT_DEPTH {
-                break;
-            }
-        }
-    }
-
-    let leaf_secret = if current.bit_depth >= TRIE_LEAF_BIT_DEPTH {
-        // Already at the leaf (only possible if the closest ancestor was the
-        // leaf itself, but we returned early above for that case).
-        current.secret
-    } else {
-        let child_side = bit_at(&event_id_in_minute, current.bit_depth);
-        let info = trie_split_info(
-            current.bit_depth,
-            current.event_id_prefix,
-            child_side,
-            TRIE_LEAF_BIT_DEPTH,
-            event_id_in_minute,
-        );
-        crypto::blake3_keyed_hash(
-            &current.secret,
-            local_history_node_secret::commands::TRIE_SPLIT_DOMAIN,
-            &info,
-        )
-    };
-    // Materialize the leaf row through the projector, sourced from the
-    // closest *materialized* ancestor (so the dependency edge is real). The
-    // leaf row carries its own `node_secret` so subsequent encryptions are
-    // single-row reads.
-    let materialization_source = closest_materialized_source(
-        store,
-        workspace_id,
-        removal_frontier_id,
-        unix_minute,
-        event_id_in_minute,
-    )?;
-    let admitted = admit_leaf_with_source(
-        store,
-        registry,
-        workspace_id,
-        removal_frontier_id,
-        unix_minute,
-        event_id_in_minute,
-        leaf_secret,
-        materialization_source,
-    )?;
-    Ok(DeriveEventLeafReport {
-        local_history_node_secret_id: Some(admitted.event_id),
-        leaf_node_secret: Some(leaf_secret),
-        admitted_events: admitted.admitted_events,
-    })
-}
-
-struct AdmittedLeaf {
-    event_id: EventId,
-    admitted_events: usize,
-}
-
-/// Admit a `local_history_node_secret` event for the leaf with a fixed
-/// `node_secret` (so the leaf row carries the AEAD key already derived from
-/// in-memory trie descent). The admission produces a normal local event
-/// whose `source_secret_id` references the closest materialized ancestor.
-///
-/// To stay schema-clean we synthesize the leaf event by replaying the
-/// minimum trie split chain from the materialized ancestor: we go from
-/// `(ancestor_bit_depth, ancestor_prefix)` straight to
-/// `(TRIE_LEAF_BIT_DEPTH, event_id_in_minute)`. Patricia compression makes
-/// this a single split. The KDF info encodes the depth jump explicitly.
-fn admit_leaf_with_source<R: EventRegistry>(
-    store: &Store,
-    registry: &R,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    unix_minute: u64,
-    event_id_in_minute: EventId,
-    expected_secret: HistoryNodeSecret,
-    source: MaterializedSource,
-) -> Result<AdmittedLeaf, String> {
-    let split = if source.is_root {
-        // Fresh encryption with no deletes in the region: short-circuit
-        // straight from the workspace `local_key_secret` to the leaf with
-        // a single bundled derivation that walks time + trie internally.
-        // No intermediate rows are materialized; the leaf row is the only
-        // new row admitted. AEAD decoding is then a single row read.
-        let output = local_history_node_secret::commands::derive_event_leaf_from_root(
-            local_history_node_secret::commands::DeriveEventLeafFromRoot {
-                workspace_id,
-                removal_frontier_id,
-                root_secret_id: source.secret_id,
-                root_secret: source.secret,
-                unix_minute,
-                event_id_in_minute,
-            },
-        )?;
-        if output.value.event.node_secret != expected_secret {
-            return Err(
-                "leaf secret mismatch between in-memory walk and admitted root-fast-path event"
-                    .to_string(),
-            );
-        }
-        let event_id = output.value.local_history_node_secret_id;
-        let admitted = worker::run(
-            store,
-            registry,
-            worker::AdmitAndDrain {
-                output,
-                batch_size: worker::DEFAULT_READY_BATCH,
-            },
-        )
-        .map_err(|err| format!("admit local history node secret leaf (root fast path): {err}"))?;
-        AdmittedLeaf {
-            event_id,
-            admitted_events: admitted.admitted.inserted_events,
-        }
-    } else if source.range_width == 1 && source.bit_depth < TRIE_LEAF_BIT_DEPTH {
-        // Trie split from materialized internal directly to leaf.
-        admit_single_trie_leaf_split(
-            store,
-            registry,
+    let output = local_history_node_secret::commands::derive_leaf_from_ancestor(
+        local_history_node_secret::commands::DeriveLeafFromAncestor {
             workspace_id,
             removal_frontier_id,
+            ancestor,
             unix_minute,
             event_id_in_minute,
-            &source,
-            expected_secret,
-        )?
-    } else if source.range_width == 1 && source.bit_depth >= TRIE_LEAF_BIT_DEPTH {
-        return Err(
-            "closest materialized ancestor is already the leaf; expected lookup short-circuit"
-                .to_string(),
-        );
-    } else {
-        // Materialized time-tree internal (range_width > 1, bit_depth = 0).
-        // Walk the rest of the time tree (publishing each split) then take
-        // the trie leaf split. This is the post-delete path where some
-        // time-internal has been materialized as a sibling cover.
-        admit_time_path_then_leaf(
-            store,
-            registry,
-            workspace_id,
-            removal_frontier_id,
-            event_id_in_minute,
-            unix_minute,
-            &source,
-            expected_secret,
-        )?
-    };
-    Ok(split)
-}
-
-fn admit_single_trie_leaf_split<R: EventRegistry>(
-    store: &Store,
-    registry: &R,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    unix_minute: u64,
-    event_id_in_minute: EventId,
-    source: &MaterializedSource,
-    expected_secret: HistoryNodeSecret,
-) -> Result<AdmittedLeaf, String> {
-    let child_side = bit_at(&event_id_in_minute, source.bit_depth);
-    let output = local_history_node_secret::commands::derive_trie_split(
-        local_history_node_secret::commands::DeriveTrieSplit {
-            workspace_id,
-            removal_frontier_id,
-            parent_secret_id: source.secret_id,
-            parent_secret: source.secret,
-            range_start: unix_minute,
-            parent_bit_depth: source.bit_depth,
-            parent_event_id_prefix: source.event_id_prefix,
-            child_side,
-            child_bit_depth: TRIE_LEAF_BIT_DEPTH,
-            child_event_id_prefix: event_id_in_minute,
-            tombstone_node_id: None,
         },
     )?;
-    if output.value.event.node_secret != expected_secret {
-        return Err("leaf secret mismatch between in-memory walk and admitted event".to_string());
-    }
-    let event_id = output.value.local_history_node_secret_id;
+    let leaf_id = output.value.leaf_id;
+    let leaf_secret = output.value.leaf_secret;
     let admitted = worker::run(
         store,
         registry,
@@ -1009,261 +624,11 @@ fn admit_single_trie_leaf_split<R: EventRegistry>(
         },
     )
     .map_err(|err| format!("admit local history node secret leaf: {err}"))?;
-    Ok(AdmittedLeaf {
-        event_id,
+    Ok(DeriveEventLeafReport {
+        local_history_node_secret_id: Some(leaf_id),
+        leaf_node_secret: Some(leaf_secret),
         admitted_events: admitted.admitted.inserted_events,
     })
-}
-
-/// Walk down the time tree from `source` to the minute_node at
-/// `unix_minute` AND admit each split as a real event so subsequent calls
-/// can short-circuit to a closer ancestor. Then take a single trie split
-/// from the minute_node directly to the leaf.
-///
-/// This admits one row per time-tree level on the descending path PLUS the
-/// minute_node row PLUS the leaf row. Subsequent calls in the same minute
-/// short-circuit at the minute_node lookup and only admit one new leaf.
-fn admit_time_path_then_leaf<R: EventRegistry>(
-    store: &Store,
-    registry: &R,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    event_id_in_minute: EventId,
-    unix_minute: u64,
-    source: &MaterializedSource,
-    expected_secret: HistoryNodeSecret,
-) -> Result<AdmittedLeaf, String> {
-    let mut current = DerivationSource {
-        secret_id: source.secret_id,
-        secret: source.secret,
-        range_start: source.range_start,
-        range_width: source.range_width,
-        bit_depth: source.bit_depth,
-        event_id_prefix: source.event_id_prefix,
-    };
-    // Use the implicit root width when source is the frontier root.
-    if source.is_root {
-        current.range_start = 0;
-        current.range_width = TIME_TREE_ROOT_WIDTH;
-        current.bit_depth = TIME_TREE_BIT_DEPTH;
-        current.event_id_prefix = [0; 32];
-    }
-    let mut admitted_events = 0usize;
-    while current.range_width > 1 {
-        // Skip if the next minute_node row for this minute already exists
-        // (some other concurrent path built it). Look up by full coordinate.
-        if let Some(existing) = local_history_node_secret::queries::get_minute_node(
-            store,
-            workspace_id,
-            removal_frontier_id,
-            unix_minute,
-        )? {
-            current = DerivationSource {
-                secret_id: existing.local_history_node_secret_id,
-                secret: existing.node_secret,
-                range_start: existing.range_start,
-                range_width: existing.range_width,
-                bit_depth: existing.bit_depth,
-                event_id_prefix: existing.event_id_prefix,
-            };
-            break;
-        }
-        let half = current.range_width / 2;
-        let mid = current.range_start + half;
-        let (child_side, child_start) = if unix_minute < mid {
-            (0u8, current.range_start)
-        } else {
-            (1u8, mid)
-        };
-        let parent_range_start = current.range_start;
-        let parent_range_width = current.range_width;
-        let output = local_history_node_secret::commands::derive_time_split(
-            local_history_node_secret::commands::DeriveTimeSplit {
-                workspace_id,
-                removal_frontier_id,
-                parent_secret_id: current.secret_id,
-                parent_secret: current.secret,
-                parent_range_start,
-                parent_range_width,
-                child_side,
-                child_range_start: child_start,
-                child_range_width: half,
-                tombstone_node_id: None,
-            },
-        )?;
-        let admitted = worker::run(
-            store,
-            registry,
-            worker::AdmitAndDrain {
-                output: output.clone(),
-                batch_size: worker::DEFAULT_READY_BATCH,
-            },
-        )
-        .map_err(|err| format!("admit local history node time-split: {err}"))?;
-        admitted_events += admitted.admitted.inserted_events;
-        current = DerivationSource {
-            secret_id: output.value.local_history_node_secret_id,
-            secret: output.value.event.node_secret,
-            range_start: child_start,
-            range_width: half,
-            bit_depth: TIME_TREE_BIT_DEPTH,
-            event_id_prefix: [0; 32],
-        };
-    }
-    if current.range_start != unix_minute || current.range_width != 1 {
-        return Err("time descent did not reach target minute_node".to_string());
-    }
-    // current is now the minute_node. Admit the leaf via a single trie split.
-    let leaf_source = MaterializedSource {
-        secret_id: current.secret_id,
-        secret: current.secret,
-        range_start: current.range_start,
-        range_width: 1,
-        bit_depth: TIME_TREE_BIT_DEPTH,
-        event_id_prefix: [0; 32],
-        is_root: false,
-    };
-    let leaf = admit_single_trie_leaf_split(
-        store,
-        registry,
-        workspace_id,
-        removal_frontier_id,
-        unix_minute,
-        event_id_in_minute,
-        &leaf_source,
-        expected_secret,
-    )?;
-    Ok(AdmittedLeaf {
-        event_id: leaf.event_id,
-        admitted_events: admitted_events + leaf.admitted_events,
-    })
-}
-
-#[derive(Debug, Clone)]
-struct MaterializedSource {
-    secret_id: EventId,
-    secret: HistoryNodeSecret,
-    range_start: u64,
-    range_width: u64,
-    bit_depth: u16,
-    event_id_prefix: EventId,
-    /// True iff this source is the frontier root (`local_key_secret`),
-    /// implicitly covering `(0, TIME_TREE_ROOT_WIDTH)`.
-    is_root: bool,
-}
-
-fn closest_materialized_source(
-    store: &Store,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    unix_minute: u64,
-    event_id_in_minute: EventId,
-) -> Result<MaterializedSource, String> {
-    // Start with the F root row when present. If F has been wiped, start
-    // with no candidate and let the sibling scan below pick the deepest
-    // covering sibling — the same fallback as `closest_retained_ancestor`.
-    let mut best: Option<MaterializedSource> = local_key_secret::queries::get(
-        store,
-        workspace_id,
-        removal_frontier_id,
-    )?
-    .map(|root| MaterializedSource {
-        secret_id: root.local_key_secret_id,
-        secret: root.key_secret,
-        range_start: 0,
-        range_width: TIME_TREE_ROOT_WIDTH,
-        bit_depth: TIME_TREE_BIT_DEPTH,
-        event_id_prefix: [0; 32],
-        is_root: true,
-    });
-    for row in local_history_node_secret::queries::list_for_frontier(
-        store,
-        workspace_id,
-        removal_frontier_id,
-    )? {
-        if !covers(&row, unix_minute, event_id_in_minute) {
-            continue;
-        }
-        let candidate = MaterializedSource {
-            secret_id: row.local_history_node_secret_id,
-            secret: row.node_secret,
-            range_start: row.range_start,
-            range_width: row.range_width,
-            bit_depth: row.bit_depth,
-            event_id_prefix: row.event_id_prefix,
-            is_root: false,
-        };
-        let better = match best.as_ref() {
-            None => true,
-            Some(current) if current.is_root => true,
-            Some(current) if candidate.range_width < current.range_width => true,
-            Some(current) if candidate.range_width > current.range_width => false,
-            Some(current) => candidate.bit_depth > current.bit_depth,
-        };
-        if better {
-            best = Some(candidate);
-        }
-    }
-    best.ok_or_else(|| {
-        "no materialized source covers the target leaf: F is wiped and no \
-         sibling row covers this coordinate"
-            .to_string()
-    })
-}
-
-fn next_materialized_trie_step(
-    store: &Store,
-    workspace_id: EventId,
-    removal_frontier_id: EventId,
-    unix_minute: u64,
-    current: &DerivationSource,
-    event_id_in_minute: EventId,
-) -> Result<Option<local_history_node_secret::types::LocalHistoryNodeSecretRow>, String> {
-    // Look at all trie rows in this minute and pick the closest descendant
-    // of `current` along the path of `event_id_in_minute`.
-    let rows = local_history_node_secret::queries::list_for_frontier(
-        store,
-        workspace_id,
-        removal_frontier_id,
-    )?;
-    let mut best: Option<local_history_node_secret::types::LocalHistoryNodeSecretRow> = None;
-    for row in rows {
-        if row.range_start != unix_minute || row.range_width != 1 {
-            continue;
-        }
-        if row.bit_depth <= current.bit_depth {
-            continue;
-        }
-        if row.bit_depth > TRIE_LEAF_BIT_DEPTH {
-            continue;
-        }
-        if !trie_extends(current, &row, event_id_in_minute) {
-            continue;
-        }
-        match &best {
-            Some(existing) if existing.bit_depth >= row.bit_depth => {}
-            _ => best = Some(row),
-        }
-    }
-    Ok(best)
-}
-
-fn trie_extends(
-    parent: &DerivationSource,
-    row: &local_history_node_secret::types::LocalHistoryNodeSecretRow,
-    event_id_in_minute: EventId,
-) -> bool {
-    // The row must continue the trie path of `event_id_in_minute` past the
-    // parent's depth. Concretely: the row's prefix must agree with
-    // `event_id_in_minute` up to `row.bit_depth`, and with `parent.event_id_prefix`
-    // up to `parent.bit_depth`.
-    if mask_prefix_to_depth(event_id_in_minute, row.bit_depth) != row.event_id_prefix {
-        return false;
-    }
-    if mask_prefix_to_depth(row.event_id_prefix, parent.bit_depth) != parent.event_id_prefix {
-        return false;
-    }
-    true
 }
 
 /// Coordinates of one node-secret row that the retire walk wipes after the
@@ -2221,8 +1586,6 @@ fn walk_trie_for_retire<R: EventRegistry>(
     let mut current = DerivationSource {
         secret_id: minute_node_secret_id,
         secret: minute_node_secret,
-        range_start: unix_minute,
-        range_width: 1,
         bit_depth: TIME_TREE_BIT_DEPTH,
         event_id_prefix: [0; 32],
     };
@@ -2286,8 +1649,6 @@ fn walk_trie_for_retire<R: EventRegistry>(
         current = DerivationSource {
             secret_id: descend.row_event_id,
             secret: descend.row_secret,
-            range_start: unix_minute,
-            range_width: 1,
             bit_depth: depth,
             event_id_prefix: descend_prefix,
         };
