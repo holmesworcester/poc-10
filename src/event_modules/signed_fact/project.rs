@@ -1,6 +1,6 @@
 //! Projector for local signing capability facts.
 
-use crate::core::facts::Fact;
+use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use super::{context, layout};
@@ -29,11 +29,28 @@ impl Projector for SignedFactProjector {
 
 fn project_local_signer_secret(fact: &Fact) -> Result<ProjectionOutput, String> {
     let secret = layout::decode_local_signer_secret(&fact.bytes)?;
+    require_local_scope(fact)?;
+    let scope = workspace_scope(secret.workspace_id);
     Ok(
         ProjectionOutput::new().offer(context::local_signer_secret_offer(
             fact.id,
-            fact.scope.clone(),
+            scope,
             secret.signer_id,
         )),
     )
+}
+
+fn workspace_scope(workspace_id: crate::core::facts::FactId) -> FactScope {
+    FactScope::Scoped {
+        kind: ScopeKind::new("workspace").expect("valid workspace scope"),
+        id: workspace_id,
+    }
+}
+
+fn require_local_scope(fact: &Fact) -> Result<(), String> {
+    if fact.scope == FactScope::Local {
+        Ok(())
+    } else {
+        Err("local signer secret fact must have local scope".to_string())
+    }
 }

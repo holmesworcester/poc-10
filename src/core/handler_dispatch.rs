@@ -1,6 +1,6 @@
 //! Intent handler contract.
 
-use crate::core::facts::{Fact, FactId};
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{AtomicIntent, Intent};
 use crate::core::store::{Store, TableName};
 use std::collections::BTreeMap;
@@ -31,6 +31,14 @@ impl HandlerContext {
     pub fn require_fact(&self, id: &FactId) -> Result<&Fact, String> {
         self.fact(id)
             .ok_or_else(|| format!("handler context missing fact {id:?}"))
+    }
+
+    pub fn require_non_local_fact_bytes(&self, id: &FactId) -> Result<&[u8], String> {
+        let fact = self.require_fact(id)?;
+        if fact.scope == FactScope::Local {
+            return Err(format!("handler context refused local fact {id:?}"));
+        }
+        Ok(&fact.bytes)
     }
 }
 

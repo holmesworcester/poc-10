@@ -1,8 +1,7 @@
 //! Poc-10 encryption projector for key healing and wrap requests.
 
 use crate::core::context::ContextOffer;
-use crate::core::facts::Fact;
-use crate::core::facts::FactId;
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
@@ -125,7 +124,7 @@ fn project_removal_frontier(fact: &Fact) -> Result<ProjectionOutput, String> {
 fn project_local_key_secret(fact: &Fact) -> Result<ProjectionOutput, String> {
     let secret = layout::decode_local_key_secret(&fact.bytes)?;
     let scope = sealed_message::context::workspace_scope(secret.workspace_id);
-    require_fact_scope(fact, &scope)?;
+    require_local_scope(fact)?;
     Ok(ProjectionOutput::new()
         .offer(context::frontier_root_wrap_source_offer(
             fact.id,
@@ -150,7 +149,7 @@ fn project_local_key_secret(fact: &Fact) -> Result<ProjectionOutput, String> {
 fn project_local_history_node_secret(fact: &Fact) -> Result<ProjectionOutput, String> {
     let node = layout::decode_local_history_node_secret(&fact.bytes)?;
     let scope = sealed_message::context::workspace_scope(node.workspace_id);
-    require_fact_scope(fact, &scope)?;
+    require_local_scope(fact)?;
     let end_minute = node
         .range_start
         .checked_add(node.range_width - 1)
@@ -191,7 +190,7 @@ fn project_local_recipient_key(
 ) -> Result<ProjectionOutput, String> {
     let local = layout::decode_local_recipient_key(&fact.bytes)?;
     let scope = sealed_message::context::workspace_scope(local.workspace_id);
-    require_fact_scope(fact, &scope)?;
+    require_local_scope(fact)?;
 
     let recipient_need =
         context::recipient_key_need(fact.id, scope.clone(), local.recipient_key_id);
@@ -436,6 +435,14 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
         Ok(())
     } else {
         Err("encryption fact scope does not match body workspace".to_string())
+    }
+}
+
+fn require_local_scope(fact: &Fact) -> Result<(), String> {
+    if fact.scope == FactScope::Local {
+        Ok(())
+    } else {
+        Err("local encryption fact must have local scope".to_string())
     }
 }
 

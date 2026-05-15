@@ -262,7 +262,7 @@ fn root_secret_fact(
     key_secret: crypto::XChaCha20Poly1305Key,
 ) -> Result<Fact, String> {
     Ok(Fact::new(
-        context::workspace_scope(wrap.workspace_id),
+        crate::core::facts::FactScope::Local,
         wrap.created_at_ms,
         layout::encode_local_key_secret(&LocalKeySecretFact {
             workspace_id: wrap.workspace_id,
@@ -279,7 +279,7 @@ fn history_secret_fact(
     node_secret: crypto::XChaCha20Poly1305Key,
 ) -> Result<Fact, String> {
     Ok(Fact::new(
-        context::workspace_scope(wrap.workspace_id),
+        crate::core::facts::FactScope::Local,
         wrap.created_at_ms,
         layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
             workspace_id: wrap.workspace_id,

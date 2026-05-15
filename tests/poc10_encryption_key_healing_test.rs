@@ -1,6 +1,6 @@
 use topo::core::crypto;
 use topo::core::event_bus::EventBus;
-use topo::core::facts::Fact;
+use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
@@ -922,7 +922,7 @@ fn local_key_secret_fact(
     created_at_ms: u64,
 ) -> Fact {
     Fact::new(
-        workspace_scope(workspace_id),
+        FactScope::Local,
         created_at_ms,
         encryption_layout::encode_local_key_secret(&LocalKeySecretFact {
             workspace_id,
@@ -944,7 +944,7 @@ fn history_node_fact(
     event_id_prefix: [u8; 32],
 ) -> Fact {
     Fact::new(
-        workspace_scope(workspace_id),
+        FactScope::Local,
         0,
         encryption_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
             workspace_id,
@@ -972,9 +972,10 @@ fn local_signer_secret_fact_with_private(
     private_key: [u8; 32],
 ) -> Fact {
     Fact::new(
-        workspace_scope(workspace_id),
+        FactScope::Local,
         0,
         signed_fact::layout::encode_local_signer_secret(&LocalSignerSecretFact {
+            workspace_id,
             signer_id,
             public_key: topo::core::crypto::ed25519_public_key(&private_key),
             private_key,
@@ -990,7 +991,7 @@ fn local_recipient_key_fact(
     recipient_secret: [u8; 32],
 ) -> Fact {
     Fact::new(
-        workspace_scope(workspace_id),
+        FactScope::Local,
         0,
         encryption_layout::encode_local_recipient_key(&LocalRecipientKeyFact {
             workspace_id,

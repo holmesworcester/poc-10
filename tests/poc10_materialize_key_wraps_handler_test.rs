@@ -1,5 +1,5 @@
 use topo::core::event_bus::EventBus;
-use topo::core::facts::Fact;
+use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
 use topo::event_modules::encryption::context::{
     workspace_scope, WrapSourceKind, WrapSourceSelector,
@@ -152,7 +152,7 @@ fn local_root_fact(
     key_secret: [u8; 32],
 ) -> Fact {
     Fact::new(
-        workspace_scope(workspace_id),
+        FactScope::Local,
         20,
         layout::encode_local_key_secret(&LocalKeySecretFact {
             workspace_id,
@@ -168,9 +168,10 @@ fn local_root_fact(
 fn local_signer_secret_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
     let private_key = [9; 32];
     Fact::new(
-        workspace_scope(workspace_id),
+        FactScope::Local,
         10,
         signed_fact::layout::encode_local_signer_secret(&LocalSignerSecretFact {
+            workspace_id,
             signer_id,
             public_key: topo::core::crypto::ed25519_public_key(&private_key),
             private_key,

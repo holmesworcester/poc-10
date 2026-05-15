@@ -9,6 +9,7 @@ pub const SIGNED_FACT_PAYLOAD_BYTES: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalSignerSecretFact {
+    pub workspace_id: FactId,
     pub signer_id: SignerId,
     pub public_key: Ed25519PublicKey,
     pub private_key: Ed25519PrivateKey,

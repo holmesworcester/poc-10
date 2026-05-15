@@ -1,8 +1,11 @@
 use topo::core::crypto;
-use topo::core::facts::Fact;
+use topo::core::facts::{Fact, FactScope};
 use topo::core::projection::{ProjectionContext, Projector};
 use topo::event_modules::encryption::context::workspace_scope;
-use topo::event_modules::encryption::fact::{KeyWrapFact, WrappedSecretKind};
+use topo::event_modules::encryption::fact::{
+    KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, LocalRecipientKeyFact,
+    WrappedSecretKind,
+};
 use topo::event_modules::encryption::layout as key_wrap_layout;
 use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
 use topo::event_modules::signed_fact::project::SignedFactProjector;
@@ -90,14 +93,16 @@ fn local_signer_secret_round_trips_and_offers_signing_context() {
     let private_key = [9; 32];
     let public_key = crypto::ed25519_public_key(&private_key);
     let bytes = layout::encode_local_signer_secret(&LocalSignerSecretFact {
+        workspace_id: workspace,
         signer_id,
         public_key,
         private_key,
     })
     .expect("encode signer secret");
-    let fact = Fact::new(workspace_scope(workspace), 10, bytes);
+    let fact = Fact::new(FactScope::Local, 10, bytes);
     let decoded = layout::decode_local_signer_secret(&fact.bytes).expect("decode signer secret");
 
+    assert_eq!(decoded.workspace_id, workspace);
     assert_eq!(decoded.signer_id, signer_id);
     assert_eq!(decoded.public_key, public_key);
     let output = SignedFactProjector::new()
@@ -106,6 +111,82 @@ fn local_signer_secret_round_trips_and_offers_signing_context() {
     assert_eq!(output.offers.len(), 1);
     assert_eq!(output.offers[0].owner, fact.id);
     assert_eq!(output.offers[0].payload_ref, fact.id);
+    assert_eq!(output.offers[0].scope, workspace_scope(workspace));
+}
+
+#[test]
+fn local_signer_secret_must_be_local_scope() {
+    let workspace = [1; 32];
+    let signer_id = [2; 32];
+    let private_key = [9; 32];
+    let bytes = layout::encode_local_signer_secret(&LocalSignerSecretFact {
+        workspace_id: workspace,
+        signer_id,
+        public_key: crypto::ed25519_public_key(&private_key),
+        private_key,
+    })
+    .expect("encode signer secret");
+    let fact = Fact::new(workspace_scope(workspace), 10, bytes);
+
+    let err = SignedFactProjector::new()
+        .project(&fact, &ProjectionContext::new(Vec::new()))
+        .expect_err("workspace-scoped local signer is rejected");
+    assert!(err.contains("local scope"), "{err}");
+}
+
+#[test]
+fn signed_fact_rejects_private_payload_tags() {
+    let signer_id = [2; 32];
+    let private_key = [9; 32];
+    let local_signer_payload = layout::encode_local_signer_secret(&LocalSignerSecretFact {
+        workspace_id: [1; 32],
+        signer_id,
+        public_key: crypto::ed25519_public_key(&private_key),
+        private_key,
+    })
+    .expect("encode local signer secret");
+    let local_root_payload = key_wrap_layout::encode_local_key_secret(&LocalKeySecretFact {
+        workspace_id: [1; 32],
+        frontier_id: [3; 32],
+        owner_endpoint_id: signer_id,
+        created_at_ms: 10,
+        key_secret: [4; 32],
+    })
+    .expect("encode local root");
+    let local_history_payload =
+        key_wrap_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
+            workspace_id: [1; 32],
+            frontier_id: [3; 32],
+            owner_endpoint_id: signer_id,
+            source_secret_id: [5; 32],
+            range_start: 8,
+            range_width: 8,
+            bit_depth: 0,
+            event_id_prefix: [0; 32],
+            tombstone_node_id: [7; 32],
+            node_secret: [8; 32],
+        })
+        .expect("encode local history");
+    let local_recipient_payload =
+        key_wrap_layout::encode_local_recipient_key(&LocalRecipientKeyFact {
+            workspace_id: [1; 32],
+            recipient_key_id: [3; 32],
+            recipient_key: crypto::x25519_public_key(&[4; 32]),
+            recipient_secret: [4; 32],
+        })
+        .expect("encode local recipient");
+
+    for payload in [
+        local_signer_payload,
+        local_root_payload,
+        local_history_payload,
+        local_recipient_payload,
+    ] {
+        assert!(
+            create::sign_payload(signer_id, &private_key, payload).is_err(),
+            "private local payload must not be signable"
+        );
+    }
 }
 
 fn key_wrap() -> KeyWrapFact {

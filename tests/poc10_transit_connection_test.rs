@@ -1,5 +1,7 @@
-use topo::core::handler_dispatch::HandlerOutput;
+use topo::core::facts::{Fact, FactScope};
+use topo::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
 use topo::core::intents::IntentKind;
+use topo::event_modules::{encryption, signed_fact, sync};
 use topo::handlers::{connection, transit};
 
 fn connection_drain_output() -> HandlerOutput {
@@ -50,6 +52,98 @@ fn sync_send_on_connection_names_ordered_fact_bundle() {
     let decoded = transit::decode_send_on_connection(&intent).unwrap();
     assert_eq!(decoded.connection_id, [9; 32]);
     assert_eq!(decoded.fact_ids, vec![[1; 32], [2; 32], [3; 32]]);
+}
+
+#[test]
+fn transit_send_guard_refuses_forged_local_fact_reference() {
+    let fact = Fact::new(
+        FactScope::Local,
+        1,
+        sync::layout::encode_shared_event(&sync::fact::SharedEventFact {
+            workspace_id: [7; 32],
+            event_id: [8; 32],
+        })
+        .expect("encode shared event"),
+    );
+    let intent = transit::send_on_connection_intent(transit::TransitSendOnConnection {
+        connection_id: [9; 32],
+        fact_ids: vec![fact.id],
+    });
+    let context = HandlerContext::with_facts([fact]);
+
+    let err = transit::TransitSendOnConnectionHandler::new()
+        .handle(&intent, &context)
+        .expect_err("local facts must never be packaged for transit send");
+
+    assert!(
+        err.contains("local fact"),
+        "error should identify the sendability failure: {err}"
+    );
+}
+
+#[test]
+fn transit_send_guard_refuses_forged_private_tag_reference() {
+    for private_tag in [
+        signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET,
+        encryption::layout::TYPE_LOCAL_KEY_SECRET,
+        encryption::layout::TYPE_LOCAL_HISTORY_NODE_SECRET,
+        encryption::layout::TYPE_LOCAL_RECIPIENT_KEY,
+    ] {
+        let fact = Fact::new(
+            sync::context::workspace_scope([7; 32]),
+            1,
+            vec![private_tag, 1, 2, 3],
+        );
+        let intent = transit::send_on_connection_intent(transit::TransitSendOnConnection {
+            connection_id: [9; 32],
+            fact_ids: vec![fact.id],
+        });
+        let context = HandlerContext::with_facts([fact]);
+
+        let err = transit::TransitSendOnConnectionHandler::new()
+            .handle(&intent, &context)
+            .expect_err("private/local fact tags must never be packaged for transit send");
+
+        assert!(
+            err.contains("private/local fact tag"),
+            "tag {private_tag} should be rejected before packaging: {err}"
+        );
+    }
+}
+
+#[test]
+fn transit_send_guard_accepts_normal_shared_facts() {
+    let first = Fact::new(
+        sync::context::workspace_scope([7; 32]),
+        1,
+        sync::layout::encode_shared_event(&sync::fact::SharedEventFact {
+            workspace_id: [7; 32],
+            event_id: [8; 32],
+        })
+        .expect("encode shared event"),
+    );
+    let second = Fact::new(
+        sync::context::workspace_scope([7; 32]),
+        2,
+        sync::layout::encode_key_wrap_available(&sync::fact::KeyWrapAvailableFact {
+            workspace_id: [7; 32],
+            key_wrap_id: [10; 32],
+        })
+        .expect("encode key wrap available"),
+    );
+    let intent = transit::send_on_connection_intent(transit::TransitSendOnConnection {
+        connection_id: [9; 32],
+        fact_ids: vec![first.id, second.id],
+    });
+    let context = HandlerContext::with_facts([first.clone(), second.clone()]);
+    let input = transit::decode_send_on_connection(&intent).expect("decode send intent");
+
+    let bytes = transit::sendable_fact_bytes(&input, &context).expect("shared facts are sendable");
+
+    assert_eq!(bytes, vec![first.bytes, second.bytes]);
+    transit::TransitSendOnConnectionHandler::new()
+        .handle(&intent, &context)
+        .expect("handler should accept normal shared facts");
 }
 
 #[test]
