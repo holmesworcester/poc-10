@@ -5,6 +5,9 @@ use crate::core::crypto::{
     XCHACHA20_POLY1305_NONCE_BYTES,
 };
 use crate::core::wire;
+use crate::core::wire::FixedLayout;
+use crate::core::wire::U16be;
+use crate::core::wire::U64be;
 
 use super::fact::{
     KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact,
@@ -167,7 +170,7 @@ pub fn encode_local_history_node_secret(
     out[97..129].copy_from_slice(&fact.source_secret_id);
     wire::put_u64be(fact.range_start, &mut out[129..137]).map_err(wire_err)?;
     wire::put_u64be(fact.range_width, &mut out[137..145]).map_err(wire_err)?;
-    out[145..147].copy_from_slice(&fact.bit_depth.to_be_bytes());
+    wire::put_u16be(fact.bit_depth, &mut out[145..147]).map_err(wire_err)?;
     out[147..179].copy_from_slice(&fact.event_id_prefix);
     out[179..211].copy_from_slice(&fact.tombstone_node_id);
     out[211..243].copy_from_slice(&fact.node_secret);
@@ -190,7 +193,7 @@ pub fn decode_local_history_node_secret(
         source_secret_id: bytes[97..129].try_into().unwrap(),
         range_start: wire::take_u64be(&bytes[129..137]).map_err(wire_err)?,
         range_width: wire::take_u64be(&bytes[137..145]).map_err(wire_err)?,
-        bit_depth: u16::from_be_bytes(bytes[145..147].try_into().unwrap()),
+        bit_depth: wire::take_u16be(&bytes[145..147]).map_err(wire_err)?,
         event_id_prefix: bytes[147..179].try_into().unwrap(),
         tombstone_node_id: bytes[179..211].try_into().unwrap(),
         node_secret: bytes[211..243].try_into().unwrap(),
@@ -238,7 +241,7 @@ pub fn encode_key_wrap(fact: &KeyWrapFact) -> Result<Vec<u8>, String> {
     out[170..202].copy_from_slice(&fact.wrapped_tombstone_node_id);
     wire::put_u64be(fact.range_start, &mut out[202..210]).map_err(wire_err)?;
     wire::put_u64be(fact.range_width, &mut out[210..218]).map_err(wire_err)?;
-    out[218..220].copy_from_slice(&fact.bit_depth.to_be_bytes());
+    wire::put_u16be(fact.bit_depth, &mut out[218..220]).map_err(wire_err)?;
     out[220..252].copy_from_slice(&fact.event_id_prefix);
     out[252..284].copy_from_slice(&fact.recipient_key_id);
     out[284..316].copy_from_slice(&fact.sender_wrap_public_key);
@@ -261,7 +264,7 @@ pub fn decode_key_wrap(bytes: &[u8]) -> Result<KeyWrapFact, String> {
         wrapped_tombstone_node_id: bytes[170..202].try_into().unwrap(),
         range_start: wire::take_u64be(&bytes[202..210]).map_err(wire_err)?,
         range_width: wire::take_u64be(&bytes[210..218]).map_err(wire_err)?,
-        bit_depth: u16::from_be_bytes(bytes[218..220].try_into().unwrap()),
+        bit_depth: wire::take_u16be(&bytes[218..220]).map_err(wire_err)?,
         event_id_prefix: bytes[220..252].try_into().unwrap(),
         recipient_key_id: bytes[252..284].try_into().unwrap(),
         sender_wrap_public_key: bytes[284..316].try_into().unwrap(),
@@ -301,9 +304,9 @@ pub fn key_wrap_coordinate_key_parts(
     key.extend_from_slice(&frontier_id);
     key.extend_from_slice(&recipient_key_id);
     key.push(wrapped_secret_kind.as_u8());
-    key.extend_from_slice(&range_start.to_be_bytes());
-    key.extend_from_slice(&range_width.to_be_bytes());
-    key.extend_from_slice(&bit_depth.to_be_bytes());
+    key.extend_from_slice(&encode_u64(range_start));
+    key.extend_from_slice(&encode_u64(range_width));
+    key.extend_from_slice(&encode_u16(bit_depth));
     key.extend_from_slice(&event_id_prefix);
     key
 }
@@ -456,6 +459,18 @@ fn validate_history_node_coordinate(
         return Err("history-node key wrap time ranges must have empty trie prefix".to_string());
     }
     Ok(())
+}
+
+fn encode_u64(value: u64) -> [u8; 8] {
+    let mut buf = [0; 8];
+    U64be(value).encode(&mut buf).expect("u64 fixed layout");
+    buf
+}
+
+fn encode_u16(value: u16) -> [u8; 2] {
+    let mut buf = [0; 2];
+    U16be(value).encode(&mut buf).expect("u16 fixed layout");
+    buf
 }
 
 fn mask_prefix_to_depth(mut prefix: [u8; 32], bit_depth: u16) -> [u8; 32] {
