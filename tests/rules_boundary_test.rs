@@ -183,6 +183,7 @@ fn core_file_set_stays_small_and_named() {
         "crypto.rs",
         "crux_runner.rs",
         "daemon.rs",
+        "event_bus.rs",
         "facts.rs",
         "handler_dispatch.rs",
         "intents.rs",

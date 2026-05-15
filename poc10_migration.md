@@ -36,11 +36,15 @@ active:
   poc10_core_contract_files_are_present
   poc10_projector_output_contract_emits_only_needs_offers_and_intents
   poc10_handler_output_contract_emits_only_facts_and_intents
+  poc10_core_event_bus_exposes_protocol_neutral_vocabulary
   poc10_target_has_exactly_three_schema_dsl_files
 
 ignored until migration reaches the target:
   no mod.rs files
   no per-module schema.rs/codec.rs/cli.rs files
+  no old event status/blocker/label/receive queue names
+  no old worker queue names
+  projectors emit only needs/offers/intents
   no dumping-ground filenames
   root manifests are declarations only
 ```
@@ -259,13 +263,24 @@ Wave 3 matrix:
 
 ### Wave 2: Schema And Wire
 
-Disjoint owner from core behavior.
+Status: complete. The target schema and wire foundation is in place for the
+next event-bus integration slice:
 
 ```text
-introduce schema.p8sql parser/generator stub
-create the three schema.p8sql files
-introduce core/wire.rs fixed-layout primitives
-add golden layout tests
+the schema.p8sql parser/generator stub exists
+the three target schema.p8sql files exist
+core/wire.rs fixed-layout primitives exist
+golden layout tests cover fixed-width and trailing-byte behavior
+store/schema loading can create declared target tables
+```
+
+Completed scope, disjoint from core behavior:
+
+```text
+introduced schema.p8sql parser/generator stub
+created the three schema.p8sql files
+introduced core/wire.rs fixed-layout primitives
+added golden layout tests
 ```
 
 Do not migrate every fact immediately. First make the target path attractive
@@ -284,7 +299,52 @@ update/about offers replace deletion and supersession labels
 ```
 
 Port `worker_contract_test.rs` behavior while removing old queue names from the
-assertions.
+assertions. The first bridge should prove the event-bus path with the smallest
+fact/projector/handler surface that can exercise the new contracts end to end.
+
+Bridge success criteria:
+
+```text
+submit fact:
+  admitting a command or received event writes one fact row with a deterministic
+  id from canonical bytes and returns that id before projection side effects run
+
+project once:
+  each newly admitted fact creates at most one pending projection for the same
+  fact/projector pair, and duplicate admission does not create another pending
+  projection
+
+replace standing context:
+  when a projector emits a new offer for the same subject and offer kind, the
+  bridge makes the new offer the standing context observed by later projections
+  without requiring old blocker, label, or recently-valid tables
+
+match need/offer:
+  a pending projection with an unmet need stays pending until a compatible
+  offer exists, then resumes with a ProjectionContext containing exactly the
+  matched offer data needed by that projector
+
+wake owner:
+  inserting a compatible offer wakes only pending projections that own a
+  matching need, and does not scan or enqueue unrelated facts
+
+emit intent:
+  a successful projection records ProjectionOutput intents as pending handler
+  work without executing handler side effects during projection
+
+no stable-need self-loop:
+  if a projector re-emits the same unmet stable need for the same fact, the
+  bridge records the need once and does not repeatedly wake or re-project that
+  fact without a new matching offer
+
+no duplicate wake amplification:
+  duplicate facts, duplicate offers, and repeated compatible wake checks do not
+  multiply pending projections or handler intents for work that has already been
+  queued
+```
+
+The bridge is complete when these criteria are asserted without referencing old
+ready, blocked, dependency, label, reprojection, or recently-valid queue names.
 
 ### Wave 4: Encryption Slice
 

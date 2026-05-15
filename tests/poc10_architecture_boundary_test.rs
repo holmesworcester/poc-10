@@ -156,6 +156,94 @@ fn poc10_handler_output_contract_emits_only_facts_and_intents() {
 }
 
 #[test]
+fn poc10_core_event_bus_exposes_protocol_neutral_vocabulary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_bus_path = root.join("src/core/event_bus.rs");
+    assert!(
+        event_bus_path.is_file(),
+        "missing src/core/event_bus.rs; when introduced, it must expose protocol-neutral terms for pending projection, context delta matching, and intent output"
+    );
+
+    let text = source_text(&event_bus_path);
+    let required_terms = [
+        (
+            "pending projection",
+            &[
+                "PendingProjection",
+                "pending_projection",
+                "pending projection",
+            ][..],
+        ),
+        (
+            "context delta matching",
+            &[
+                "ContextDeltaMatching",
+                "ContextDeltaMatcher",
+                "context_delta_matching",
+                "context_delta_match",
+                "context delta matching",
+            ][..],
+        ),
+        (
+            "intent output",
+            &["IntentOutput", "intent_output", "intent output"][..],
+        ),
+    ];
+    let missing = required_terms
+        .into_iter()
+        .filter_map(|(term, spellings)| {
+            (!spellings.iter().any(|spelling| text.contains(spelling))).then_some(term)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "src/core/event_bus.rs must expose protocol-neutral event bus vocabulary:\n{}",
+        missing.join("\n")
+    );
+
+    let forbidden = [
+        "EventStatus",
+        "EventStatusCounts",
+        "ready_events",
+        "blocked_events_by_missing_dep",
+        "missing_deps_by_blocked_event",
+        "dependents_by_dep",
+        "deps_by_dependent",
+        "pending_reprojections",
+        "recently_valid_events",
+        "event_receive_context",
+        "applied_shared_events",
+        "dependency_labels",
+        "event_labels",
+        "canonical.in",
+        "sync.in",
+        "transit.out",
+        "content.purge_instructions",
+        "encryption.pending_key_requests",
+        "encryption.pending_key_unwraps",
+        "encryption.pending_wrap_reconcile",
+        "encryption.negentropy_pending_purges",
+        "connection.pending_connection_attempts",
+        "connection.pending_connection_responses",
+        "canonical_in",
+        "transit_out",
+        "purge_instructions",
+        "pending_key_requests",
+        "pending_key_unwraps",
+        "pending_wrap_reconcile",
+        "negentropy_pending_purges",
+        "pending_connection_attempts",
+        "pending_connection_responses",
+    ];
+    let offenders = source_matches_in_paths(root, vec![event_bus_path], &forbidden);
+    assert!(
+        offenders.is_empty(),
+        "src/core/event_bus.rs must not expose old worker queue or event status vocabulary:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 #[ignore = "poc-10 target guardrail: enable after the module tree is converted to root manifests"]
 fn poc10_target_has_no_mod_rs_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));

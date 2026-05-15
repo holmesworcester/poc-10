@@ -12,6 +12,7 @@ pub mod context;
 pub mod crux_runner;
 pub mod crypto;
 pub mod daemon;
+pub mod event_bus;
 pub mod facts;
 pub mod handler_dispatch;
 pub mod intents;
