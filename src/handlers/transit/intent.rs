@@ -49,7 +49,7 @@ pub fn wrap_connection_batch_intent(input: TransitWrapConnectionBatch) -> Intent
         IntentKind::new(TRANSIT_WRAP_CONNECTION_BATCH)
             .expect("valid transit wrap connection batch intent kind"),
         IntentExecution::Deferred,
-        input.connection_id,
+        wrap_connection_batch_key(&input),
         payload,
     )
 }
@@ -71,18 +71,19 @@ pub fn decode_wrap_connection_batch(intent: &Intent) -> Result<TransitWrapConnec
     let canonical_events = reader.vecs()?;
     reader.finish()?;
 
-    if intent.key != connection_id {
-        return Err("transit wrap idempotence key must be the connection id".to_string());
-    }
-
-    Ok(TransitWrapConnectionBatch {
+    let input = TransitWrapConnectionBatch {
         connection_id,
         sender_endpoint,
         recipient_endpoint,
         connection_secret_id,
         send_item_keys,
         canonical_events,
-    })
+    };
+    if intent.key != wrap_connection_batch_key(&input) {
+        return Err("transit wrap idempotence key does not match payload".to_string());
+    }
+
+    Ok(input)
 }
 
 pub fn send_on_connection_intent(input: TransitSendOnConnection) -> Intent {
@@ -133,6 +134,26 @@ fn connection_fact_ids_key(connection_id: HandlerId, fact_ids: &[HandlerId]) -> 
         hash.update(fact_id);
     }
     hash.finalize().as_bytes().to_vec()
+}
+
+fn wrap_connection_batch_key(input: &TransitWrapConnectionBatch) -> Vec<u8> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"topo:transit-wrap-connection-batch:v1:");
+    hash.update(&input.connection_id);
+    hash.update(&input.sender_endpoint);
+    hash.update(&input.recipient_endpoint);
+    hash.update(&input.connection_secret_id);
+    hash_vecs(&mut hash, &input.send_item_keys);
+    hash_vecs(&mut hash, &input.canonical_events);
+    hash.finalize().as_bytes().to_vec()
+}
+
+fn hash_vecs(hash: &mut blake3::Hasher, values: &[Vec<u8>]) {
+    hash.update(&(values.len() as u32).to_be_bytes());
+    for value in values {
+        hash.update(&(value.len() as u32).to_be_bytes());
+        hash.update(value);
+    }
 }
 
 fn push_id(out: &mut Vec<u8>, id: &HandlerId) {

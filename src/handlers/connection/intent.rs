@@ -44,7 +44,7 @@ pub fn send_frame_intent(input: ConnectionSendFrame) -> Intent {
     Intent::new(
         IntentKind::new(CONNECTION_SEND_FRAME).expect("valid connection send frame intent kind"),
         IntentExecution::Deferred,
-        input.target_addr.into_bytes(),
+        send_frame_key(&input),
         payload,
     )
 }
@@ -64,15 +64,16 @@ pub fn decode_send_frame(intent: &Intent) -> Result<ConnectionSendFrame, String>
     let frame = reader.bytes()?.to_vec();
     reader.finish()?;
 
-    if intent.key != target_addr.as_bytes() {
-        return Err("connection send idempotence key must be the target address".to_string());
-    }
-
-    Ok(ConnectionSendFrame {
+    let input = ConnectionSendFrame {
         target_addr,
         send_item_keys,
         frame,
-    })
+    };
+    if intent.key != send_frame_key(&input) {
+        return Err("connection send idempotence key does not match payload".to_string());
+    }
+
+    Ok(input)
 }
 
 pub fn mark_sent_intent(input: ConnectionMarkSent) -> Intent {
@@ -82,7 +83,7 @@ pub fn mark_sent_intent(input: ConnectionMarkSent) -> Intent {
     Intent::new(
         IntentKind::new(CONNECTION_MARK_SENT).expect("valid connection mark sent intent kind"),
         IntentExecution::Deferred,
-        b"connection_send_items".to_vec(),
+        mark_sent_key(&input),
         payload,
     )
 }
@@ -99,7 +100,12 @@ pub fn decode_mark_sent(intent: &Intent) -> Result<ConnectionMarkSent, String> {
     let send_item_keys = reader.vecs()?;
     reader.finish()?;
 
-    Ok(ConnectionMarkSent { send_item_keys })
+    let input = ConnectionMarkSent { send_item_keys };
+    if intent.key != mark_sent_key(&input) {
+        return Err("connection mark-sent idempotence key does not match payload".to_string());
+    }
+
+    Ok(input)
 }
 
 pub fn send_request_intent(input: ConnectionSendRequest) -> Intent {
@@ -151,6 +157,31 @@ fn decode_single_id(intent: &Intent, expected_kind: &str) -> Result<HandlerId, S
         ));
     }
     Ok(id)
+}
+
+fn send_frame_key(input: &ConnectionSendFrame) -> Vec<u8> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"topo:connection-send-frame:v1:");
+    hash.update(input.target_addr.as_bytes());
+    hash_vecs(&mut hash, &input.send_item_keys);
+    hash.update(&(input.frame.len() as u32).to_be_bytes());
+    hash.update(&input.frame);
+    hash.finalize().as_bytes().to_vec()
+}
+
+fn mark_sent_key(input: &ConnectionMarkSent) -> Vec<u8> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"topo:connection-mark-sent:v1:");
+    hash_vecs(&mut hash, &input.send_item_keys);
+    hash.finalize().as_bytes().to_vec()
+}
+
+fn hash_vecs(hash: &mut blake3::Hasher, values: &[Vec<u8>]) {
+    hash.update(&(values.len() as u32).to_be_bytes());
+    for value in values {
+        hash.update(&(value.len() as u32).to_be_bytes());
+        hash.update(value);
+    }
 }
 
 fn push_vecs(out: &mut Vec<u8>, values: &[Vec<u8>]) {

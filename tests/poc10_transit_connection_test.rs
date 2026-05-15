@@ -150,3 +150,58 @@ fn intent_kind_names_keep_crypto_and_transport_boundaries_separate() {
         "network send/drain belongs to connection handlers"
     );
 }
+
+#[test]
+fn idempotence_keys_distinguish_parallel_batches_on_same_route() {
+    let first_wrap = transit::wrap_connection_batch_intent(transit::TransitWrapConnectionBatch {
+        connection_id: [1; 32],
+        sender_endpoint: [2; 32],
+        recipient_endpoint: [3; 32],
+        connection_secret_id: [4; 32],
+        send_item_keys: vec![b"out-key-1".to_vec()],
+        canonical_events: vec![b"event:a".to_vec()],
+    });
+    let first_wrap_duplicate = transit::wrap_connection_batch_intent(
+        transit::decode_wrap_connection_batch(&first_wrap).unwrap(),
+    );
+    let second_wrap = transit::wrap_connection_batch_intent(transit::TransitWrapConnectionBatch {
+        connection_id: [1; 32],
+        sender_endpoint: [2; 32],
+        recipient_endpoint: [3; 32],
+        connection_secret_id: [4; 32],
+        send_item_keys: vec![b"out-key-2".to_vec()],
+        canonical_events: vec![b"event:b".to_vec()],
+    });
+
+    assert_eq!(first_wrap.key, first_wrap_duplicate.key);
+    assert_ne!(
+        first_wrap.key, second_wrap.key,
+        "same connection may have multiple pending transit batches"
+    );
+
+    let first_send = connection::send_frame_intent(connection::ConnectionSendFrame {
+        target_addr: "127.0.0.1:44000".to_string(),
+        send_item_keys: vec![b"out-key-1".to_vec()],
+        frame: b"frame:a".to_vec(),
+    });
+    let second_send = connection::send_frame_intent(connection::ConnectionSendFrame {
+        target_addr: "127.0.0.1:44000".to_string(),
+        send_item_keys: vec![b"out-key-2".to_vec()],
+        frame: b"frame:b".to_vec(),
+    });
+    assert_ne!(
+        first_send.key, second_send.key,
+        "same address may have multiple pending frames"
+    );
+
+    let first_mark = connection::mark_sent_intent(connection::ConnectionMarkSent {
+        send_item_keys: vec![b"out-key-1".to_vec()],
+    });
+    let second_mark = connection::mark_sent_intent(connection::ConnectionMarkSent {
+        send_item_keys: vec![b"out-key-2".to_vec()],
+    });
+    assert_ne!(
+        first_mark.key, second_mark.key,
+        "send acknowledgements are keyed by represented items"
+    );
+}
