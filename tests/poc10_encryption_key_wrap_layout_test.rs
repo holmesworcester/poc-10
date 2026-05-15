@@ -1,11 +1,11 @@
-use topo::core::crypto::XCHACHA20_POLY1305_NONCE_BYTES;
+use topo::core::crypto::{self, XCHACHA20_POLY1305_NONCE_BYTES};
 use topo::event_modules::encryption::fact::{
-    KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
+    KeyWrapFact, LocalRecipientKeyFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
 use topo::event_modules::encryption::layout::{
-    decode_key_wrap, encode_key_wrap, frontier_root_key_wrap_coordinate_key,
-    history_node_key_wrap_coordinate_key, key_wrap_coordinate_key, KEY_WRAP_BYTES,
-    KEY_WRAP_COORDINATE_KEY_BYTES,
+    decode_key_wrap, decode_local_recipient_key, encode_key_wrap, encode_local_recipient_key,
+    frontier_root_key_wrap_coordinate_key, history_node_key_wrap_coordinate_key,
+    key_wrap_coordinate_key, KEY_WRAP_BYTES, KEY_WRAP_COORDINATE_KEY_BYTES,
 };
 
 fn id(byte: u8) -> [u8; 32] {
@@ -155,4 +155,31 @@ fn sender_wrap_public_key_and_nonce_are_required_and_round_trip() {
     let decoded = decode_key_wrap(&encode_key_wrap(&fact).expect("encode")).expect("decode");
     assert_eq!(decoded.sender_wrap_public_key, fact.sender_wrap_public_key);
     assert_eq!(decoded.nonce, fact.nonce);
+}
+
+#[test]
+fn local_recipient_key_requires_matching_secret_and_public_key() {
+    let secret = [21; 32];
+    let fact = LocalRecipientKeyFact {
+        workspace_id: id(22),
+        recipient_key_id: id(23),
+        recipient_key: crypto::x25519_public_key(&secret),
+        recipient_secret: secret,
+    };
+
+    let encoded = encode_local_recipient_key(&fact).expect("encode local recipient");
+    assert_eq!(
+        decode_local_recipient_key(&encoded).expect("decode local recipient"),
+        fact
+    );
+
+    let mut wrong_public = fact.clone();
+    wrong_public.recipient_key = id(24);
+    let err = encode_local_recipient_key(&wrong_public).expect_err("public must match secret");
+    assert!(err.contains("secret does not match public key"));
+
+    let mut empty_secret = fact;
+    empty_secret.recipient_secret = [0; 32];
+    let err = encode_local_recipient_key(&empty_secret).expect_err("secret is required");
+    assert!(err.contains("recipient_secret"));
 }

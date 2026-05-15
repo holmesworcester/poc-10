@@ -11,11 +11,13 @@ use topo::event_modules::encryption::context::{
     WrapSourceKind, WrapSourceMatcher,
 };
 use topo::event_modules::encryption::fact::{
-    KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, RecipientKeyFact,
-    RemovalFrontierFact, WrappedSecretKind, NO_PREVIOUS_RECIPIENT_KEY,
+    KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact,
+    LocalRecipientKeyFact, RecipientKeyFact, RemovalFrontierFact, WrappedSecretKind,
+    NO_PREVIOUS_RECIPIENT_KEY,
 };
 use topo::event_modules::encryption::intent::{
     decode_materialize_key_wraps_intent, decode_purge_retired_recipient_material_intent,
+    decode_unwrap_key_wrap_intent,
 };
 use topo::event_modules::encryption::{
     create as encryption_create, layout as encryption_layout, project as encryption_project,
@@ -32,6 +34,7 @@ use topo::event_modules::sealed_message::{layout as message_layout, project as m
 use topo::event_modules::signed_fact::{self, fact::LocalSignerSecretFact};
 use topo::event_modules::sync::context as sync_context;
 use topo::handlers::materialize_key_wraps::MaterializeKeyWrapsHandler;
+use topo::handlers::unwrap_key_wrap::UnwrapKeyWrapHandler;
 
 #[test]
 fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appears() {
@@ -282,7 +285,6 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     let signed_context = restarted
         .context(&expected_signed_wrap.id)
         .expect("signed wrap projected context");
-    assert!(signed_context.needs.is_empty());
     assert!(signed_context.offers.iter().any(|offer| {
         offer.role == sync_context::key_wrap_role()
             && offer.selector.as_bytes() == expected_signed_wrap.id
@@ -293,6 +295,14 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
             && offer.selector.as_bytes() == expected_signed_wrap.id
             && offer.payload_ref == expected_signed_wrap.id
     }));
+    assert!(signed_context.needs.iter().any(|need| {
+        need.role == encryption_context::local_recipient_key_role()
+            && need.selector.as_bytes() == recipient.id
+    }));
+    assert!(!signed_context
+        .offers
+        .iter()
+        .any(|offer| offer.role == message_context::secret_role()));
 
     let envelope =
         signed_fact::layout::decode_signed_fact(&expected_signed_wrap.bytes).expect("signed wrap");
@@ -535,7 +545,6 @@ fn signed_key_wrap_waits_for_context_then_offers_sync_key_and_row() {
     let ready = bus
         .context(&signed_wrap.id)
         .expect("ready key-wrap context");
-    assert!(ready.needs.is_empty());
     assert!(ready.offers.iter().any(|offer| {
         offer.role == sync_context::key_wrap_role()
             && offer.selector.as_bytes() == signed_wrap.id
@@ -565,6 +574,143 @@ fn signed_key_wrap_waits_for_context_then_offers_sync_key_and_row() {
     assert_eq!(decoded.key_wrap_id, signed_wrap.id);
     assert_eq!(decoded.wrap.frontier_id, frontier.id);
     assert_eq!(decoded.wrap.recipient_key_id, recipient.id);
+    assert!(
+        !ready
+            .offers
+            .iter()
+            .any(|offer| offer.role == message_context::secret_role()),
+        "an accepted signed key wrap is not message-secret coverage by itself"
+    );
+    assert!(
+        ready.needs.iter().any(|need| {
+            need.role == encryption_context::local_recipient_key_role()
+                && need.selector.as_bytes() == recipient.id
+        }),
+        "accepted key wraps should wait for local recipient material before unwrapping"
+    );
+}
+
+#[test]
+fn local_recipient_key_wakes_signed_wrap_unwrap_and_opens_sealed_message() {
+    let workspace = [70; 32];
+    let signer_id = [71; 32];
+    let signer_private_key = [72; 32];
+    let frontier = removal_frontier_fact(workspace, signer_id, 10);
+    let root = local_key_secret_fact(workspace, frontier.id, signer_id, 10);
+    let recipient_secret = [73; 32];
+    let recipient_public = crypto::x25519_public_key(&recipient_secret);
+    let recipient =
+        recipient_key_fact_with_public(workspace, signer_id, recipient_public, [0; 32], 11);
+    let local_recipient =
+        local_recipient_key_fact(workspace, recipient.id, recipient_public, recipient_secret);
+    let signer = local_signer_secret_fact_with_private(workspace, signer_id, signer_private_key);
+    let signer_pubkey = signer_pubkey_fact(
+        workspace,
+        signer_id,
+        crypto::ed25519_public_key(&signer_private_key),
+    );
+    let materialize = decode_materialize_key_wraps_intent(
+        &topo::event_modules::encryption::intent::materialize_key_wraps_intent(
+            recipient.id,
+            root.id,
+            signer.id,
+            encryption_context::WrapSourceSelector {
+                workspace_id: workspace,
+                frontier_id: frontier.id,
+                owner_endpoint_id: signer_id,
+                frontier_created_at_ms: 10,
+                kind: WrapSourceKind::FrontierRoot,
+            },
+        ),
+    )
+    .expect("decode materialize intent");
+    let signed_wrap = encryption_create::materialize_signed_key_wrap_fact(
+        &materialize,
+        &recipient,
+        &root,
+        &signer,
+    )
+    .expect("materialize signed key wrap");
+    let message = sealed_message_fact(workspace, signer_id, frontier.id, 15, [74; 32]);
+    let projector = CombinedProjector;
+    let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
+    let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
+    let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
+    let local_recipient_matcher =
+        ExactSelectorMatcher::new(encryption_context::local_recipient_key_role());
+    let deletion_matcher = ExactSelectorMatcher::new(message_context::deletion_role());
+    let secret_matcher = SecretCoverageMatcher::new();
+    let matchers = [
+        &signer_matcher as &dyn ContextMatcher,
+        &recipient_matcher as &dyn ContextMatcher,
+        &frontier_matcher as &dyn ContextMatcher,
+        &local_recipient_matcher as &dyn ContextMatcher,
+        &deletion_matcher as &dyn ContextMatcher,
+        &secret_matcher as &dyn ContextMatcher,
+    ];
+    let mut bus = EventBus::new();
+
+    for fact in [
+        signed_wrap.clone(),
+        signer_pubkey,
+        frontier.clone(),
+        recipient.clone(),
+        message.clone(),
+    ] {
+        bus.submit_fact(fact);
+    }
+    bus.drain(&projector, &matchers, 100)
+        .expect("accepted wrap and sealed message project without local recipient");
+    let wrap_context = bus.context(&signed_wrap.id).expect("signed wrap context");
+    assert!(wrap_context.offers.iter().any(|offer| {
+        offer.role == sync_context::key_wrap_role()
+            && offer.selector.as_bytes() == signed_wrap.id
+            && offer.payload_ref == signed_wrap.id
+    }));
+    assert!(
+        !wrap_context
+            .offers
+            .iter()
+            .any(|offer| offer.role == message_context::secret_role()),
+        "accepted key wrap must not masquerade as local secret coverage"
+    );
+    let message_context_before = bus.context(&message.id).expect("message waits for secret");
+    assert!(message_context_before
+        .needs
+        .iter()
+        .any(|need| need.role == message_context::secret_role()));
+    assert!(
+        !message_rows(&bus).iter().any(|row| row.key == message.id),
+        "sealed message must stay closed before local unwrap"
+    );
+
+    bus.submit_fact(local_recipient.clone());
+    bus.drain(&projector, &matchers, 100)
+        .expect("local recipient wakes signed key wrap");
+    let unwrap = bus
+        .intents()
+        .iter()
+        .find_map(|intent| decode_unwrap_key_wrap_intent(intent).ok())
+        .expect("local recipient context emits unwrap_key_wrap intent");
+    assert_eq!(unwrap.workspace_id, workspace);
+    assert_eq!(unwrap.frontier_id, frontier.id);
+    assert_eq!(unwrap.recipient_key_id, recipient.id);
+    assert_eq!(unwrap.key_wrap_id, signed_wrap.id);
+    assert_eq!(unwrap.local_recipient_key_id, local_recipient.id);
+
+    let dispatch = bus
+        .dispatch_deferred_intents_with_fact_context(&UnwrapKeyWrapHandler::new(), 10)
+        .expect("dispatch unwrap handler");
+    assert_eq!(dispatch.handled, 1);
+    assert_eq!(dispatch.facts, 1);
+    assert!(bus.has_fact(&root.id));
+    bus.drain(&projector, &matchers, 100)
+        .expect("unwrapped root offers normal secret coverage");
+
+    assert!(
+        message_rows(&bus).iter().any(|row| row.key == message.id),
+        "normal secret coverage from the unwrapped local root should open the message"
+    );
 }
 
 #[test]
@@ -682,6 +828,7 @@ impl Projector for CombinedProjector {
             | Some(encryption_layout::TYPE_REMOVAL_FRONTIER)
             | Some(encryption_layout::TYPE_LOCAL_KEY_SECRET)
             | Some(encryption_layout::TYPE_LOCAL_HISTORY_NODE_SECRET)
+            | Some(encryption_layout::TYPE_LOCAL_RECIPIENT_KEY)
             | Some(encryption_layout::TYPE_KEY_REQUEST)
             | Some(signed_fact::layout::TYPE_SIGNED_FACT) => {
                 encryption_project::EncryptionProjector::new().project(fact, context)
@@ -700,13 +847,29 @@ fn recipient_key_fact(
     previous_recipient_key_id: [u8; 32],
     created_at_ms: u64,
 ) -> Fact {
+    recipient_key_fact_with_public(
+        workspace_id,
+        endpoint_id,
+        [0x55; 32],
+        previous_recipient_key_id,
+        created_at_ms,
+    )
+}
+
+fn recipient_key_fact_with_public(
+    workspace_id: [u8; 32],
+    endpoint_id: [u8; 32],
+    recipient_key: [u8; 32],
+    previous_recipient_key_id: [u8; 32],
+    created_at_ms: u64,
+) -> Fact {
     Fact::new(
         workspace_scope(workspace_id),
         created_at_ms,
         encryption_layout::encode_recipient_key(&RecipientKeyFact {
             workspace_id,
             endpoint_id,
-            recipient_key: [0x55; 32],
+            recipient_key,
             previous_recipient_key_id,
             created_at_ms,
         })
@@ -779,7 +942,14 @@ fn history_node_fact(
 }
 
 fn local_signer_secret_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
-    let private_key = [0x42; 32];
+    local_signer_secret_fact_with_private(workspace_id, signer_id, [0x42; 32])
+}
+
+fn local_signer_secret_fact_with_private(
+    workspace_id: [u8; 32],
+    signer_id: [u8; 32],
+    private_key: [u8; 32],
+) -> Fact {
     Fact::new(
         workspace_scope(workspace_id),
         0,
@@ -790,6 +960,36 @@ fn local_signer_secret_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact
         })
         .expect("encode local signer secret"),
     )
+}
+
+fn local_recipient_key_fact(
+    workspace_id: [u8; 32],
+    recipient_key_id: [u8; 32],
+    recipient_key: [u8; 32],
+    recipient_secret: [u8; 32],
+) -> Fact {
+    Fact::new(
+        workspace_scope(workspace_id),
+        0,
+        encryption_layout::encode_local_recipient_key(&LocalRecipientKeyFact {
+            workspace_id,
+            recipient_key_id,
+            recipient_key,
+            recipient_secret,
+        })
+        .expect("encode local recipient key"),
+    )
+}
+
+fn message_rows(bus: &EventBus) -> Vec<topo::core::store::TableRow> {
+    bus.intents()
+        .iter()
+        .filter_map(|intent| AtomicIntent::from_intent(intent, &[MESSAGE_ROWS]).ok())
+        .filter_map(|intent| match intent {
+            AtomicIntent::PutRow(row) if row.table == MESSAGE_ROWS => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 fn key_request_fact(

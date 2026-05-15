@@ -25,6 +25,10 @@ pub fn recipient_superseded_role() -> Role {
     Role::new("recipient_superseded").expect("valid recipient superseded role")
 }
 
+pub fn local_recipient_key_role() -> Role {
+    Role::new("local_recipient_key").expect("valid local recipient key role")
+}
+
 pub fn wrap_source_role() -> Role {
     Role::new("wrap_source").expect("valid wrap source role")
 }
@@ -50,6 +54,33 @@ pub fn recipient_key_offer(
     ContextOffer {
         owner,
         role: recipient_key_role(),
+        scope,
+        selector: Selector::from_bytes(recipient_key_id),
+        payload_ref: owner,
+    }
+}
+
+pub fn local_recipient_key_need(
+    owner: FactId,
+    scope: FactScope,
+    recipient_key_id: RecipientKeyId,
+) -> ContextNeed {
+    ContextNeed {
+        owner,
+        role: local_recipient_key_role(),
+        scope,
+        selector: Selector::from_bytes(recipient_key_id),
+    }
+}
+
+pub fn local_recipient_key_offer(
+    owner: FactId,
+    scope: FactScope,
+    recipient_key_id: RecipientKeyId,
+) -> ContextOffer {
+    ContextOffer {
+        owner,
+        role: local_recipient_key_role(),
         scope,
         selector: Selector::from_bytes(recipient_key_id),
         payload_ref: owner,

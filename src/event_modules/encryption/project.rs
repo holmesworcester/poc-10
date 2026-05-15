@@ -12,8 +12,8 @@ use super::fact::{
     RemovalFrontierFact, NO_PREVIOUS_RECIPIENT_KEY,
 };
 use super::intent::{
-    materialize_key_wraps_intent, purge_retired_recipient_material_intent,
-    PurgeRetiredRecipientMaterialIntent,
+    materialize_key_wraps_intent, purge_retired_recipient_material_intent, unwrap_key_wrap_intent,
+    PurgeRetiredRecipientMaterialIntent, UnwrapKeyWrapIntent,
 };
 use super::layout;
 use super::rows::{key_wrap_row, KeyWrapRow};
@@ -41,6 +41,7 @@ impl Projector for EncryptionProjector {
             Some(layout::TYPE_REMOVAL_FRONTIER) => project_removal_frontier(fact),
             Some(layout::TYPE_LOCAL_KEY_SECRET) => project_local_key_secret(fact),
             Some(layout::TYPE_LOCAL_HISTORY_NODE_SECRET) => project_local_history_node_secret(fact),
+            Some(layout::TYPE_LOCAL_RECIPIENT_KEY) => project_local_recipient_key(fact, context),
             Some(layout::TYPE_KEY_REQUEST) => project_key_request(fact, context),
             Some(signed_fact::layout::TYPE_SIGNED_FACT) => project_signed_key_wrap(fact, context),
             _ => Err("unknown encryption fact type".to_string()),
@@ -184,6 +185,36 @@ fn project_local_history_node_secret(fact: &Fact) -> Result<ProjectionOutput, St
         )))
 }
 
+fn project_local_recipient_key(
+    fact: &Fact,
+    projection_context: &ProjectionContext,
+) -> Result<ProjectionOutput, String> {
+    let local = layout::decode_local_recipient_key(&fact.bytes)?;
+    let scope = sealed_message::context::workspace_scope(local.workspace_id);
+    require_fact_scope(fact, &scope)?;
+
+    let recipient_need =
+        context::recipient_key_need(fact.id, scope.clone(), local.recipient_key_id);
+    let Some(recipient_fact) = matched_payload_fact(projection_context, &recipient_need) else {
+        return Ok(ProjectionOutput::new().need(recipient_need));
+    };
+    let recipient = layout::decode_recipient_key(&recipient_fact.bytes)?;
+    if recipient.workspace_id != local.workspace_id {
+        return Err("local recipient key workspace does not match recipient".to_string());
+    }
+    if recipient.recipient_key != local.recipient_key {
+        return Err("local recipient key public key does not match recipient".to_string());
+    }
+
+    Ok(
+        ProjectionOutput::new().offer(context::local_recipient_key_offer(
+            fact.id,
+            scope,
+            local.recipient_key_id,
+        )),
+    )
+}
+
 fn project_key_request(
     fact: &Fact,
     projection_context: &ProjectionContext,
@@ -248,6 +279,8 @@ fn project_signed_key_wrap(
         sealed_message::context::signer_need(fact.id, scope.clone(), envelope.signer_id);
     let recipient_need = context::recipient_key_need(fact.id, scope.clone(), wrap.recipient_key_id);
     let frontier_need = context::frontier_need(fact.id, scope.clone(), wrap.frontier_id);
+    let local_recipient_need =
+        context::local_recipient_key_need(fact.id, scope.clone(), wrap.recipient_key_id);
 
     let signer_ready = has_matching_signer_public_key(
         projection_context,
@@ -256,6 +289,7 @@ fn project_signed_key_wrap(
     );
     let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
     let frontier_fact = matched_payload_fact(projection_context, &frontier_need);
+    let local_recipient_fact = matched_payload_fact(projection_context, &local_recipient_need);
 
     if !signer_ready || recipient_fact.is_none() || frontier_fact.is_none() {
         return Ok(ProjectionOutput::new()
@@ -273,12 +307,12 @@ fn project_signed_key_wrap(
         return Err("key wrap removal frontier workspace does not match event".to_string());
     }
 
-    Ok(ProjectionOutput::new()
+    let mut output = ProjectionOutput::new()
         .intent(
             AtomicIntent::PutRow(key_wrap_row(KeyWrapRow {
                 key_wrap_id: fact.id,
                 signer_public_key: envelope.signer_public_key,
-                wrap,
+                wrap: wrap.clone(),
             })?)
             .into_intent(),
         )
@@ -288,7 +322,25 @@ fn project_signed_key_wrap(
             fact.id,
             fact.id,
         ))
-        .offer(sync::context::key_wrap_offer(fact.id, scope, fact.id)))
+        .offer(sync::context::key_wrap_offer(fact.id, scope, fact.id));
+
+    if let Some(local_recipient_fact) = local_recipient_fact {
+        output = output.intent(unwrap_key_wrap_intent(UnwrapKeyWrapIntent {
+            workspace_id: wrap.workspace_id,
+            frontier_id: wrap.frontier_id,
+            recipient_key_id: wrap.recipient_key_id,
+            key_wrap_id: fact.id,
+            local_recipient_key_id: local_recipient_fact.id,
+        }));
+    } else {
+        output = output
+            .need(signer_need)
+            .need(recipient_need)
+            .need(frontier_need)
+            .need(local_recipient_need);
+    }
+
+    Ok(output)
 }
 
 fn matching_wrap_sources_with_signer(

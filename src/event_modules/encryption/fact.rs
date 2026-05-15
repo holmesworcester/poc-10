@@ -1,6 +1,8 @@
 //! Poc-10 encryption fact shapes for key healing and wrap materialization.
 
-use crate::core::crypto::{X25519PublicKey, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce};
+use crate::core::crypto::{
+    X25519PrivateKey, X25519PublicKey, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce,
+};
 use crate::core::facts::FactId;
 
 pub type WorkspaceId = FactId;
@@ -43,6 +45,14 @@ pub struct RecipientKeyFact {
     pub recipient_key: FactId,
     pub previous_recipient_key_id: FactId,
     pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalRecipientKeyFact {
+    pub workspace_id: WorkspaceId,
+    pub recipient_key_id: RecipientKeyId,
+    pub recipient_key: X25519PublicKey,
+    pub recipient_secret: X25519PrivateKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

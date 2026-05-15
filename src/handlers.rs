@@ -6,3 +6,4 @@
 pub mod connection;
 pub mod materialize_key_wraps;
 pub mod transit;
+pub mod unwrap_key_wrap;

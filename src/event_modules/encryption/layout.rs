@@ -1,13 +1,15 @@
 //! Fixed-width layouts for poc-10 encryption facts.
 
 use crate::core::crypto::{
-    X25519_PUBLIC_KEY_BYTES, XCHACHA20_POLY1305_KEY_BYTES, XCHACHA20_POLY1305_NONCE_BYTES,
+    self, X25519_PRIVATE_KEY_BYTES, X25519_PUBLIC_KEY_BYTES, XCHACHA20_POLY1305_KEY_BYTES,
+    XCHACHA20_POLY1305_NONCE_BYTES,
 };
 use crate::core::wire;
 
 use super::fact::{
-    KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, RecipientKeyFact,
-    RemovalFrontierFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
+    KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact,
+    LocalRecipientKeyFact, RecipientKeyFact, RemovalFrontierFact, WrappedSecretKind,
+    KEY_WRAP_CIPHERTEXT_BYTES,
 };
 
 pub const TYPE_RECIPIENT_KEY: u8 = 150;
@@ -16,6 +18,7 @@ pub const TYPE_LOCAL_KEY_SECRET: u8 = 152;
 pub const TYPE_LOCAL_HISTORY_NODE_SECRET: u8 = 153;
 pub const TYPE_KEY_REQUEST: u8 = 154;
 pub const TYPE_KEY_WRAP: u8 = 155;
+pub const TYPE_LOCAL_RECIPIENT_KEY: u8 = 156;
 
 pub const RECIPIENT_KEY_BYTES: usize = 1 + 32 + 32 + 32 + 32 + 8;
 pub const REMOVAL_FRONTIER_BYTES: usize = 1 + 32 + 32 + 8;
@@ -23,6 +26,8 @@ pub const LOCAL_KEY_SECRET_BYTES: usize = 1 + 32 + 32 + 32 + 8 + 32;
 pub const LOCAL_HISTORY_NODE_SECRET_BYTES: usize =
     1 + 32 + 32 + 32 + 32 + 8 + 8 + 2 + 32 + 32 + XCHACHA20_POLY1305_KEY_BYTES;
 pub const KEY_REQUEST_BYTES: usize = 1 + 32 + 32 + 32 + 32 + 32 + 8;
+pub const LOCAL_RECIPIENT_KEY_BYTES: usize =
+    1 + 32 + 32 + X25519_PUBLIC_KEY_BYTES + X25519_PRIVATE_KEY_BYTES;
 pub const KEY_WRAP_BYTES: usize = 1
     + 32
     + 8
@@ -63,6 +68,30 @@ pub fn decode_recipient_key(bytes: &[u8]) -> Result<RecipientKeyFact, String> {
         previous_recipient_key_id: bytes[97..129].try_into().unwrap(),
         created_at_ms: wire::take_u64be(&bytes[129..137]).map_err(wire_err)?,
     })
+}
+
+pub fn encode_local_recipient_key(fact: &LocalRecipientKeyFact) -> Result<Vec<u8>, String> {
+    validate_local_recipient_key(fact)?;
+    let mut out = vec![0; LOCAL_RECIPIENT_KEY_BYTES];
+    wire::put_u8(TYPE_LOCAL_RECIPIENT_KEY, &mut out[0..1]).map_err(wire_err)?;
+    out[1..33].copy_from_slice(&fact.workspace_id);
+    out[33..65].copy_from_slice(&fact.recipient_key_id);
+    out[65..97].copy_from_slice(&fact.recipient_key);
+    out[97..129].copy_from_slice(&fact.recipient_secret);
+    Ok(out)
+}
+
+pub fn decode_local_recipient_key(bytes: &[u8]) -> Result<LocalRecipientKeyFact, String> {
+    wire::expect_len(bytes, LOCAL_RECIPIENT_KEY_BYTES).map_err(wire_err)?;
+    expect_tag(bytes, TYPE_LOCAL_RECIPIENT_KEY, "local recipient key")?;
+    let fact = LocalRecipientKeyFact {
+        workspace_id: bytes[1..33].try_into().unwrap(),
+        recipient_key_id: bytes[33..65].try_into().unwrap(),
+        recipient_key: bytes[65..97].try_into().unwrap(),
+        recipient_secret: bytes[97..129].try_into().unwrap(),
+    };
+    validate_local_recipient_key(&fact)?;
+    Ok(fact)
 }
 
 pub fn encode_removal_frontier(fact: &RemovalFrontierFact) -> Result<Vec<u8>, String> {
@@ -361,6 +390,29 @@ pub fn validate_key_wrap(fact: &KeyWrapFact) -> Result<(), String> {
                 fact.event_id_prefix,
             )?;
         }
+    }
+    Ok(())
+}
+
+fn validate_local_recipient_key(fact: &LocalRecipientKeyFact) -> Result<(), String> {
+    for (name, id) in [
+        ("local recipient key workspace_id", &fact.workspace_id),
+        (
+            "local recipient key recipient_key_id",
+            &fact.recipient_key_id,
+        ),
+        ("local recipient key recipient_key", &fact.recipient_key),
+        (
+            "local recipient key recipient_secret",
+            &fact.recipient_secret,
+        ),
+    ] {
+        if id.iter().all(|byte| *byte == 0) {
+            return Err(format!("{name} cannot be empty"));
+        }
+    }
+    if crypto::x25519_public_key(&fact.recipient_secret) != fact.recipient_key {
+        return Err("local recipient key secret does not match public key".to_string());
     }
     Ok(())
 }
