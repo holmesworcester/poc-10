@@ -1,24 +1,17 @@
-//! Poc-10 encryption projector for key healing and wrap requests.
+//! Poc-10 encryption projector dispatcher and shared projection helpers.
 
-use crate::core::context::ContextOffer;
+use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
-use super::context::{self, WrapSourceSelector};
-use super::fact::{
-    KeyRequestFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, RecipientKeyFact,
-    RemovalFrontierFact, NO_PREVIOUS_RECIPIENT_KEY,
-};
-use super::intent::{
-    materialize_key_wraps_intent, purge_retired_recipient_material_intent, unwrap_key_wrap_intent,
-    PurgeRetiredRecipientMaterialIntent, UnwrapKeyWrapIntent,
-};
-use super::layout;
-use super::rows::{key_wrap_row, KeyWrapRow};
+use super::key_request::project::project_key_request;
+use super::key_wrap::project::project_signed_key_wrap;
+use super::local_secret::project::{project_local_history_node_secret, project_local_key_secret};
+use super::recipient_key::project::{project_local_recipient_key, project_recipient_key};
+use super::wrap_source::context::{self as wrap_source_context, WrapSourceSelector};
+use super::wrap_source::project::project_removal_frontier;
 use crate::event_modules::sealed_message;
 use crate::event_modules::signed_fact;
-use crate::event_modules::sync;
 
 #[derive(Debug, Clone, Default)]
 pub struct EncryptionProjector;
@@ -36,350 +29,40 @@ impl Projector for EncryptionProjector {
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         match fact.bytes.first().copied() {
-            Some(layout::TYPE_RECIPIENT_KEY) => project_recipient_key(fact, context),
-            Some(layout::TYPE_REMOVAL_FRONTIER) => project_removal_frontier(fact),
-            Some(layout::TYPE_LOCAL_KEY_SECRET) => project_local_key_secret(fact),
-            Some(layout::TYPE_LOCAL_HISTORY_NODE_SECRET) => project_local_history_node_secret(fact),
-            Some(layout::TYPE_LOCAL_RECIPIENT_KEY) => project_local_recipient_key(fact, context),
-            Some(layout::TYPE_KEY_REQUEST) => project_key_request(fact, context),
-            Some(signed_fact::layout::TYPE_SIGNED_FACT) => project_signed_key_wrap(fact, context),
+            Some(tag) if tag == super::recipient_key::layout::TYPE_RECIPIENT_KEY => {
+                project_recipient_key(fact, context)
+            }
+            Some(tag) if tag == super::wrap_source::layout::TYPE_REMOVAL_FRONTIER => {
+                project_removal_frontier(fact)
+            }
+            Some(tag) if tag == super::local_secret::layout::TYPE_LOCAL_KEY_SECRET => {
+                project_local_key_secret(fact)
+            }
+            Some(tag) if tag == super::local_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET => {
+                project_local_history_node_secret(fact)
+            }
+            Some(tag) if tag == super::recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY => {
+                project_local_recipient_key(fact, context)
+            }
+            Some(tag) if tag == super::key_request::layout::TYPE_KEY_REQUEST => {
+                project_key_request(fact, context)
+            }
+            Some(tag) if tag == signed_fact::layout::TYPE_SIGNED_FACT => {
+                project_signed_key_wrap(fact, context)
+            }
             _ => Err("unknown encryption fact type".to_string()),
         }
     }
 }
 
-fn project_recipient_key(
-    fact: &Fact,
-    projection_context: &ProjectionContext,
-) -> Result<ProjectionOutput, String> {
-    let recipient = layout::decode_recipient_key(&fact.bytes)?;
-    let scope = sealed_message::context::workspace_scope(recipient.workspace_id);
-    require_fact_scope(fact, &scope)?;
-
-    let superseded_need = context::recipient_superseded_need(fact.id, scope.clone(), fact.id);
-    let is_superseded = projection_context.offers().iter().any(|offer| {
-        offer.role == superseded_need.role && offer.selector == superseded_need.selector
-    });
-    let mut output = ProjectionOutput::new()
-        .offer(context::recipient_key_offer(
-            fact.id,
-            scope.clone(),
-            fact.id,
-        ))
-        .need(superseded_need);
-
-    if recipient.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
-        output = output.offer(context::recipient_superseded_offer(
-            fact.id,
-            scope.clone(),
-            recipient.previous_recipient_key_id,
-        ));
-    }
-
-    if is_superseded {
-        return Ok(output);
-    }
-
-    let min_frontier_created_at_ms =
-        if recipient.previous_recipient_key_id == NO_PREVIOUS_RECIPIENT_KEY {
-            0
-        } else {
-            recipient.created_at_ms
-        };
-    let wrap_need = context::proactive_wrap_source_need(
-        fact.id,
-        scope.clone(),
-        recipient.workspace_id,
-        min_frontier_created_at_ms,
-    );
-    output = output.need(wrap_need.clone());
-
-    output = add_signer_needs_for_matching_sources(output, projection_context.offers(), &wrap_need);
-    for (source_fact_id, signer_secret_fact_id, source) in
-        matching_wrap_sources_with_signer(projection_context.offers(), &wrap_need)
-    {
-        output = output.intent(materialize_key_wraps_intent(
-            fact.id,
-            source_fact_id,
-            signer_secret_fact_id,
-            source,
-        ));
-    }
-    Ok(output)
-}
-
-fn project_removal_frontier(fact: &Fact) -> Result<ProjectionOutput, String> {
-    let frontier = layout::decode_removal_frontier(&fact.bytes)?;
-    let scope = sealed_message::context::workspace_scope(frontier.workspace_id);
-    require_fact_scope(fact, &scope)?;
-    Ok(ProjectionOutput::new().offer(context::frontier_offer(fact.id, scope, fact.id)))
-}
-
-fn project_local_key_secret(fact: &Fact) -> Result<ProjectionOutput, String> {
-    let secret = layout::decode_local_key_secret(&fact.bytes)?;
-    let scope = sealed_message::context::workspace_scope(secret.workspace_id);
-    require_local_scope(fact)?;
-    Ok(ProjectionOutput::new()
-        .offer(context::frontier_root_wrap_source_offer(
-            fact.id,
-            scope.clone(),
-            secret.workspace_id,
-            secret.frontier_id,
-            secret.owner_endpoint_id,
-            secret.created_at_ms,
-        ))
-        .offer(sealed_message::context::secret_offer(
-            fact.id,
-            scope,
-            secret.workspace_id,
-            secret.frontier_id,
-            0,
-            u64::MAX,
-            0,
-            [0; 32],
-        )))
-}
-
-fn project_local_history_node_secret(fact: &Fact) -> Result<ProjectionOutput, String> {
-    let node = layout::decode_local_history_node_secret(&fact.bytes)?;
-    let scope = sealed_message::context::workspace_scope(node.workspace_id);
-    require_local_scope(fact)?;
-    let end_minute = node
-        .range_start
-        .checked_add(node.range_width - 1)
-        .ok_or_else(|| "history node range end overflow".to_string())?;
-    if node.bit_depth % 8 != 0 {
-        return Err("sealed-message bridge only accepts byte-aligned history prefixes".to_string());
-    }
-    let prefix_bytes = (node.bit_depth / 8)
-        .try_into()
-        .map_err(|_| "history node prefix byte width overflow".to_string())?;
-    Ok(ProjectionOutput::new()
-        .offer(context::history_node_wrap_source_offer(
-            fact.id,
-            scope.clone(),
-            node.workspace_id,
-            node.frontier_id,
-            node.owner_endpoint_id,
-            node.range_start,
-            node.range_width,
-            node.bit_depth,
-            node.event_id_prefix,
-        ))
-        .offer(sealed_message::context::secret_offer(
-            fact.id,
-            scope,
-            node.workspace_id,
-            node.frontier_id,
-            node.range_start,
-            end_minute,
-            prefix_bytes,
-            node.event_id_prefix,
-        )))
-}
-
-fn project_local_recipient_key(
-    fact: &Fact,
-    projection_context: &ProjectionContext,
-) -> Result<ProjectionOutput, String> {
-    let local = layout::decode_local_recipient_key(&fact.bytes)?;
-    let scope = sealed_message::context::workspace_scope(local.workspace_id);
-    require_local_scope(fact)?;
-
-    let recipient_need =
-        context::recipient_key_need(fact.id, scope.clone(), local.recipient_key_id);
-    let Some(recipient_fact) = matched_payload_fact(projection_context, &recipient_need) else {
-        return Ok(ProjectionOutput::new().need(recipient_need));
-    };
-    let recipient = layout::decode_recipient_key(&recipient_fact.bytes)?;
-    if recipient.workspace_id != local.workspace_id {
-        return Err("local recipient key workspace does not match recipient".to_string());
-    }
-    if recipient.recipient_key != local.recipient_key {
-        return Err("local recipient key public key does not match recipient".to_string());
-    }
-
-    let superseded_need =
-        context::recipient_superseded_need(fact.id, scope.clone(), local.recipient_key_id);
-    let is_superseded = projection_context.offers().iter().any(|offer| {
-        offer.role == superseded_need.role && offer.selector == superseded_need.selector
-    });
-    let output = ProjectionOutput::new()
-        .need(recipient_need)
-        .need(superseded_need);
-    if is_superseded {
-        return Ok(output.intent(purge_retired_recipient_material_intent(
-            PurgeRetiredRecipientMaterialIntent {
-                workspace_id: local.workspace_id,
-                recipient_key_id: local.recipient_key_id,
-                local_recipient_key_id: fact.id,
-            },
-        )));
-    }
-
-    Ok(output.offer(context::local_recipient_key_offer(
-        fact.id,
-        scope,
-        local.recipient_key_id,
-    )))
-}
-
-fn project_key_request(
-    fact: &Fact,
-    projection_context: &ProjectionContext,
-) -> Result<ProjectionOutput, String> {
-    let request = layout::decode_key_request(&fact.bytes)?;
-    let scope = sealed_message::context::workspace_scope(request.workspace_id);
-    require_fact_scope(fact, &scope)?;
-
-    let recipient_need =
-        context::recipient_key_need(fact.id, scope.clone(), request.recipient_key_id);
-    let frontier_need = context::frontier_need(fact.id, scope.clone(), request.frontier_id);
-    let source_need = context::requested_wrap_source_need(
-        fact.id,
-        scope,
-        request.workspace_id,
-        request.frontier_id,
-    );
-
-    let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
-    let frontier_fact = matched_payload_fact(projection_context, &frontier_need);
-    let mut output = ProjectionOutput::new()
-        .need(recipient_need)
-        .need(frontier_need)
-        .need(source_need.clone());
-
-    if let (Some(recipient_fact), Some(frontier_fact)) = (recipient_fact, frontier_fact) {
-        let recipient = layout::decode_recipient_key(&recipient_fact.bytes)?;
-        if recipient.workspace_id != request.workspace_id {
-            return Err("key request recipient workspace mismatch".to_string());
-        }
-        if recipient.endpoint_id != request.requester_endpoint_id {
-            return Err("key request recipient is not requester endpoint".to_string());
-        }
-        let frontier = layout::decode_removal_frontier(&frontier_fact.bytes)?;
-        if frontier.workspace_id != request.workspace_id {
-            return Err("key request frontier workspace mismatch".to_string());
-        }
-        if frontier.owner_endpoint_id != request.responder_endpoint_id {
-            return Err("key request frontier is not owned by responder".to_string());
-        }
-        output = add_signer_needs_for_matching_sources(
-            output,
-            projection_context.offers(),
-            &source_need,
-        );
-        for (source_fact_id, signer_secret_fact_id, source) in
-            matching_wrap_sources_with_signer(projection_context.offers(), &source_need)
-        {
-            if source.owner_endpoint_id != request.responder_endpoint_id {
-                continue;
-            }
-            output = output.intent(materialize_key_wraps_intent(
-                request.recipient_key_id,
-                source_fact_id,
-                signer_secret_fact_id,
-                source,
-            ));
-        }
-    }
-    Ok(output)
-}
-
-fn project_signed_key_wrap(
-    fact: &Fact,
-    projection_context: &ProjectionContext,
-) -> Result<ProjectionOutput, String> {
-    let envelope = signed_fact::layout::decode_signed_fact(&fact.bytes)?;
-    if envelope.inner_type != layout::TYPE_KEY_WRAP {
-        return Err("signed fact does not contain an encryption key wrap".to_string());
-    }
-    let wrap = layout::decode_key_wrap(&envelope.payload)?;
-    let scope = sealed_message::context::workspace_scope(wrap.workspace_id);
-    require_fact_scope(fact, &scope)?;
-    if envelope.signer_id != wrap.signer_endpoint_id {
-        return Err("key wrap signer does not match signed envelope signer".to_string());
-    }
-
-    let signer_need =
-        sealed_message::context::signer_need(fact.id, scope.clone(), envelope.signer_id);
-    let recipient_need = context::recipient_key_need(fact.id, scope.clone(), wrap.recipient_key_id);
-    let frontier_need = context::frontier_need(fact.id, scope.clone(), wrap.frontier_id);
-    let local_recipient_need =
-        context::local_recipient_key_need(fact.id, scope.clone(), wrap.recipient_key_id);
-
-    let signer_ready = has_matching_signer_public_key(
-        projection_context,
-        &signer_need,
-        &envelope.signer_public_key,
-    );
-    let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
-    let frontier_fact = matched_payload_fact(projection_context, &frontier_need);
-    let local_recipient_fact = matched_payload_fact(projection_context, &local_recipient_need);
-
-    if !signer_ready || recipient_fact.is_none() || frontier_fact.is_none() {
-        return Ok(ProjectionOutput::new()
-            .need(signer_need)
-            .need(recipient_need)
-            .need(frontier_need));
-    }
-
-    let recipient = layout::decode_recipient_key(&recipient_fact.expect("checked").bytes)?;
-    if recipient.workspace_id != wrap.workspace_id {
-        return Err("key wrap recipient key workspace does not match event".to_string());
-    }
-    let frontier = layout::decode_removal_frontier(&frontier_fact.expect("checked").bytes)?;
-    if frontier.workspace_id != wrap.workspace_id {
-        return Err("key wrap removal frontier workspace does not match event".to_string());
-    }
-    if frontier.owner_endpoint_id != wrap.signer_endpoint_id {
-        return Err("key wrap signer does not own removal frontier".to_string());
-    }
-
-    let mut output = ProjectionOutput::new()
-        .intent(
-            AtomicIntent::PutRow(key_wrap_row(KeyWrapRow {
-                key_wrap_id: fact.id,
-                signer_public_key: envelope.signer_public_key,
-                wrap: wrap.clone(),
-            })?)
-            .into_intent(),
-        )
-        .offer(sync::context::exact_event_offer(
-            fact.id,
-            scope.clone(),
-            fact.id,
-            fact.id,
-        ))
-        .offer(sync::context::key_wrap_offer(fact.id, scope, fact.id));
-
-    if let Some(local_recipient_fact) = local_recipient_fact {
-        output = output.intent(unwrap_key_wrap_intent(UnwrapKeyWrapIntent {
-            workspace_id: wrap.workspace_id,
-            frontier_id: wrap.frontier_id,
-            recipient_key_id: wrap.recipient_key_id,
-            key_wrap_id: fact.id,
-            local_recipient_key_id: local_recipient_fact.id,
-        }));
-    } else {
-        output = output
-            .need(signer_need)
-            .need(recipient_need)
-            .need(frontier_need)
-            .need(local_recipient_need);
-    }
-
-    Ok(output)
-}
-
-fn matching_wrap_sources_with_signer(
+pub(super) fn matching_wrap_sources_with_signer(
     offers: &[ContextOffer],
-    need: &crate::core::context::ContextNeed,
+    need: &ContextNeed,
 ) -> Vec<(FactId, FactId, WrapSourceSelector)> {
     offers
         .iter()
         .filter_map(|offer| {
-            context::wrap_source_offer_matches_need(need, offer).and_then(|source| {
+            wrap_source_context::wrap_source_offer_matches_need(need, offer).and_then(|source| {
                 local_signer_secret_payload_ref(
                     offers,
                     need.owner,
@@ -392,13 +75,13 @@ fn matching_wrap_sources_with_signer(
         .collect()
 }
 
-fn add_signer_needs_for_matching_sources(
+pub(super) fn add_signer_needs_for_matching_sources(
     mut output: ProjectionOutput,
     offers: &[ContextOffer],
-    need: &crate::core::context::ContextNeed,
+    need: &ContextNeed,
 ) -> ProjectionOutput {
     for offer in offers {
-        let Some(source) = context::wrap_source_offer_matches_need(need, offer) else {
+        let Some(source) = wrap_source_context::wrap_source_offer_matches_need(need, offer) else {
             continue;
         };
         output = output.need(signed_fact::context::local_signer_secret_need(
@@ -413,7 +96,7 @@ fn add_signer_needs_for_matching_sources(
 fn local_signer_secret_payload_ref(
     offers: &[ContextOffer],
     owner: FactId,
-    scope: &crate::core::facts::FactScope,
+    scope: &FactScope,
     signer_id: FactId,
 ) -> Option<FactId> {
     let need = signed_fact::context::local_signer_secret_need(owner, scope.clone(), signer_id);
@@ -424,9 +107,9 @@ fn local_signer_secret_payload_ref(
         .min()
 }
 
-fn matched_payload_fact<'a>(
+pub(super) fn matched_payload_fact<'a>(
     projection_context: &'a ProjectionContext,
-    need: &crate::core::context::ContextNeed,
+    need: &ContextNeed,
 ) -> Option<&'a Fact> {
     projection_context
         .matched_context()
@@ -435,9 +118,9 @@ fn matched_payload_fact<'a>(
         .map(|matched| &matched.payload)
 }
 
-fn has_matching_signer_public_key(
+pub(super) fn has_matching_signer_public_key(
     projection_context: &ProjectionContext,
-    need: &crate::core::context::ContextNeed,
+    need: &ContextNeed,
     signer_public_key: &[u8; 32],
 ) -> bool {
     projection_context
@@ -454,7 +137,7 @@ fn has_matching_signer_public_key(
         })
 }
 
-fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {
+pub(super) fn require_fact_scope(fact: &Fact, expected: &FactScope) -> Result<(), String> {
     if &fact.scope == expected {
         Ok(())
     } else {
@@ -462,20 +145,10 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
     }
 }
 
-fn require_local_scope(fact: &Fact) -> Result<(), String> {
+pub(super) fn require_local_scope(fact: &Fact) -> Result<(), String> {
     if fact.scope == FactScope::Local {
         Ok(())
     } else {
         Err("local encryption fact must have local scope".to_string())
     }
-}
-
-#[allow(dead_code)]
-fn _keep_fact_types_visible(
-    _: RecipientKeyFact,
-    _: RemovalFrontierFact,
-    _: LocalKeySecretFact,
-    _: LocalHistoryNodeSecretFact,
-    _: KeyRequestFact,
-) {
 }
