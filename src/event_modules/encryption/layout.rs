@@ -1,6 +1,8 @@
 //! Fixed-width layouts for poc-10 encryption facts.
 
-use crate::core::crypto::{X25519_PUBLIC_KEY_BYTES, XCHACHA20_POLY1305_NONCE_BYTES};
+use crate::core::crypto::{
+    X25519_PUBLIC_KEY_BYTES, XCHACHA20_POLY1305_KEY_BYTES, XCHACHA20_POLY1305_NONCE_BYTES,
+};
 use crate::core::wire;
 
 use super::fact::{
@@ -18,7 +20,8 @@ pub const TYPE_KEY_WRAP: u8 = 155;
 pub const RECIPIENT_KEY_BYTES: usize = 1 + 32 + 32 + 32 + 32 + 8;
 pub const REMOVAL_FRONTIER_BYTES: usize = 1 + 32 + 32 + 8;
 pub const LOCAL_KEY_SECRET_BYTES: usize = 1 + 32 + 32 + 32 + 8 + 32;
-pub const LOCAL_HISTORY_NODE_SECRET_BYTES: usize = 1 + 32 + 32 + 32 + 8 + 8 + 1 + 32;
+pub const LOCAL_HISTORY_NODE_SECRET_BYTES: usize =
+    1 + 32 + 32 + 32 + 8 + 8 + 2 + 32 + 32 + XCHACHA20_POLY1305_KEY_BYTES;
 pub const KEY_REQUEST_BYTES: usize = 1 + 32 + 32 + 32 + 32 + 32 + 8;
 pub const KEY_WRAP_BYTES: usize = 1
     + 32
@@ -81,46 +84,59 @@ pub fn decode_removal_frontier(bytes: &[u8]) -> Result<RemovalFrontierFact, Stri
 }
 
 pub fn encode_local_key_secret(fact: &LocalKeySecretFact) -> Result<Vec<u8>, String> {
+    if fact.key_secret.iter().all(|byte| *byte == 0) {
+        return Err("local key secret material cannot be empty".to_string());
+    }
     let mut out = vec![0; LOCAL_KEY_SECRET_BYTES];
     wire::put_u8(TYPE_LOCAL_KEY_SECRET, &mut out[0..1]).map_err(wire_err)?;
     out[1..33].copy_from_slice(&fact.workspace_id);
     out[33..65].copy_from_slice(&fact.frontier_id);
     out[65..97].copy_from_slice(&fact.owner_endpoint_id);
     wire::put_u64be(fact.created_at_ms, &mut out[97..105]).map_err(wire_err)?;
-    out[105..137].copy_from_slice(&fact.secret_commitment);
+    out[105..137].copy_from_slice(&fact.key_secret);
     Ok(out)
 }
 
 pub fn decode_local_key_secret(bytes: &[u8]) -> Result<LocalKeySecretFact, String> {
     wire::expect_len(bytes, LOCAL_KEY_SECRET_BYTES).map_err(wire_err)?;
     expect_tag(bytes, TYPE_LOCAL_KEY_SECRET, "local key secret")?;
-    Ok(LocalKeySecretFact {
+    let fact = LocalKeySecretFact {
         workspace_id: bytes[1..33].try_into().unwrap(),
         frontier_id: bytes[33..65].try_into().unwrap(),
         owner_endpoint_id: bytes[65..97].try_into().unwrap(),
         created_at_ms: wire::take_u64be(&bytes[97..105]).map_err(wire_err)?,
-        secret_commitment: bytes[105..137].try_into().unwrap(),
-    })
+        key_secret: bytes[105..137].try_into().unwrap(),
+    };
+    encode_local_key_secret(&fact)?;
+    Ok(fact)
 }
 
 pub fn encode_local_history_node_secret(
     fact: &LocalHistoryNodeSecretFact,
 ) -> Result<Vec<u8>, String> {
-    if fact.start_minute > fact.end_minute {
-        return Err("history node range is inverted".to_string());
+    validate_history_node_coordinate(
+        fact.range_start,
+        fact.range_width,
+        fact.bit_depth,
+        fact.event_id_prefix,
+    )?;
+    if fact.source_secret_id.iter().all(|byte| *byte == 0) {
+        return Err("local history node source_secret_id cannot be empty".to_string());
     }
-    if fact.prefix_bytes > 32 {
-        return Err("history node prefix is too long".to_string());
+    if fact.node_secret.iter().all(|byte| *byte == 0) {
+        return Err("local history node secret material cannot be empty".to_string());
     }
     let mut out = vec![0; LOCAL_HISTORY_NODE_SECRET_BYTES];
     wire::put_u8(TYPE_LOCAL_HISTORY_NODE_SECRET, &mut out[0..1]).map_err(wire_err)?;
     out[1..33].copy_from_slice(&fact.workspace_id);
     out[33..65].copy_from_slice(&fact.frontier_id);
     out[65..97].copy_from_slice(&fact.source_secret_id);
-    wire::put_u64be(fact.start_minute, &mut out[97..105]).map_err(wire_err)?;
-    wire::put_u64be(fact.end_minute, &mut out[105..113]).map_err(wire_err)?;
-    out[113] = fact.prefix_bytes;
-    out[114..146].copy_from_slice(&fact.leaf_prefix);
+    wire::put_u64be(fact.range_start, &mut out[97..105]).map_err(wire_err)?;
+    wire::put_u64be(fact.range_width, &mut out[105..113]).map_err(wire_err)?;
+    out[113..115].copy_from_slice(&fact.bit_depth.to_be_bytes());
+    out[115..147].copy_from_slice(&fact.event_id_prefix);
+    out[147..179].copy_from_slice(&fact.tombstone_node_id);
+    out[179..211].copy_from_slice(&fact.node_secret);
     Ok(out)
 }
 
@@ -137,10 +153,12 @@ pub fn decode_local_history_node_secret(
         workspace_id: bytes[1..33].try_into().unwrap(),
         frontier_id: bytes[33..65].try_into().unwrap(),
         source_secret_id: bytes[65..97].try_into().unwrap(),
-        start_minute: wire::take_u64be(&bytes[97..105]).map_err(wire_err)?,
-        end_minute: wire::take_u64be(&bytes[105..113]).map_err(wire_err)?,
-        prefix_bytes: bytes[113],
-        leaf_prefix: bytes[114..146].try_into().unwrap(),
+        range_start: wire::take_u64be(&bytes[97..105]).map_err(wire_err)?,
+        range_width: wire::take_u64be(&bytes[105..113]).map_err(wire_err)?,
+        bit_depth: u16::from_be_bytes(bytes[113..115].try_into().unwrap()),
+        event_id_prefix: bytes[115..147].try_into().unwrap(),
+        tombstone_node_id: bytes[147..179].try_into().unwrap(),
+        node_secret: bytes[179..211].try_into().unwrap(),
     };
     encode_local_history_node_secret(&fact)?;
     Ok(fact)

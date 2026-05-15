@@ -2,6 +2,7 @@
 
 use crate::core::context::ContextOffer;
 use crate::core::facts::Fact;
+use crate::core::facts::FactId;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use super::context::{self, WrapSourceSelector};
@@ -94,8 +95,12 @@ fn project_recipient_key(
         ));
     }
 
-    for source in matching_wrap_sources(projection_context.offers(), &wrap_need) {
-        output = output.intent(materialize_key_wraps_intent(fact.id, source));
+    for (source_fact_id, source) in matching_wrap_sources(projection_context.offers(), &wrap_need) {
+        output = output.intent(materialize_key_wraps_intent(
+            fact.id,
+            source_fact_id,
+            source,
+        ));
     }
     Ok(output)
 }
@@ -135,26 +140,36 @@ fn project_local_history_node_secret(fact: &Fact) -> Result<ProjectionOutput, St
     let node = layout::decode_local_history_node_secret(&fact.bytes)?;
     let scope = sealed_message::context::workspace_scope(node.workspace_id);
     require_fact_scope(fact, &scope)?;
+    let end_minute = node
+        .range_start
+        .checked_add(node.range_width - 1)
+        .ok_or_else(|| "history node range end overflow".to_string())?;
+    if node.bit_depth % 8 != 0 {
+        return Err("sealed-message bridge only accepts byte-aligned history prefixes".to_string());
+    }
+    let prefix_bytes = (node.bit_depth / 8)
+        .try_into()
+        .map_err(|_| "history node prefix byte width overflow".to_string())?;
     Ok(ProjectionOutput::new()
         .offer(context::history_node_wrap_source_offer(
             fact.id,
             scope.clone(),
             node.workspace_id,
             node.frontier_id,
-            node.start_minute,
-            node.end_minute,
-            node.prefix_bytes,
-            node.leaf_prefix,
+            node.range_start,
+            node.range_width,
+            node.bit_depth,
+            node.event_id_prefix,
         ))
         .offer(sealed_message::context::secret_offer(
             fact.id,
             scope,
             node.workspace_id,
             node.frontier_id,
-            node.start_minute,
-            node.end_minute,
-            node.prefix_bytes,
-            node.leaf_prefix,
+            node.range_start,
+            end_minute,
+            prefix_bytes,
+            node.event_id_prefix,
         )))
 }
 
@@ -184,9 +199,12 @@ fn project_key_request(
         .need(source_need.clone());
 
     if has_recipient && has_frontier {
-        for source in matching_wrap_sources(projection_context.offers(), &source_need) {
+        for (source_fact_id, source) in
+            matching_wrap_sources(projection_context.offers(), &source_need)
+        {
             output = output.intent(materialize_key_wraps_intent(
                 request.recipient_key_id,
+                source_fact_id,
                 source,
             ));
         }
@@ -197,10 +215,13 @@ fn project_key_request(
 fn matching_wrap_sources(
     offers: &[ContextOffer],
     need: &crate::core::context::ContextNeed,
-) -> Vec<WrapSourceSelector> {
+) -> Vec<(FactId, WrapSourceSelector)> {
     offers
         .iter()
-        .filter_map(|offer| context::wrap_source_offer_matches_need(need, offer))
+        .filter_map(|offer| {
+            context::wrap_source_offer_matches_need(need, offer)
+                .map(|source| (offer.payload_ref, source))
+        })
         .collect()
 }
 

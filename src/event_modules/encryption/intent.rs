@@ -14,6 +14,7 @@ pub struct MaterializeKeyWrapsIntent {
     pub workspace_id: WorkspaceId,
     pub frontier_id: FactId,
     pub recipient_key_id: RecipientKeyId,
+    pub source_fact_id: FactId,
     pub source: WrapSourceKind,
 }
 
@@ -25,12 +26,14 @@ pub struct PurgeRetiredRecipientMaterialIntent {
 
 pub fn materialize_key_wraps_intent(
     recipient_key_id: RecipientKeyId,
+    source_fact_id: FactId,
     source: WrapSourceSelector,
 ) -> Intent {
     let input = MaterializeKeyWrapsIntent {
         workspace_id: source.workspace_id,
         frontier_id: source.frontier_id,
         recipient_key_id,
+        source_fact_id,
         source: source.kind,
     };
     Intent::new(
@@ -88,7 +91,7 @@ pub fn decode_purge_retired_recipient_material_intent(
 }
 
 fn materialize_key(input: &MaterializeKeyWrapsIntent) -> Vec<u8> {
-    let mut key = Vec::with_capacity(32 + 32 + 32 + 1 + 8 + 8 + 1 + 32);
+    let mut key = Vec::with_capacity(32 + 32 + 32 + 1 + 8 + 8 + 2 + 32);
     key.extend_from_slice(&input.workspace_id);
     key.extend_from_slice(&input.frontier_id);
     key.extend_from_slice(&input.recipient_key_id);
@@ -98,74 +101,76 @@ fn materialize_key(input: &MaterializeKeyWrapsIntent) -> Vec<u8> {
             key.extend_from_slice(&[0; 49]);
         }
         WrapSourceKind::HistoryNode {
-            start_minute,
-            end_minute,
-            prefix_bytes,
-            leaf_prefix,
+            range_start,
+            range_width,
+            bit_depth,
+            event_id_prefix,
         } => {
             key.push(2);
-            key.extend_from_slice(&start_minute.to_be_bytes());
-            key.extend_from_slice(&end_minute.to_be_bytes());
-            key.push(prefix_bytes);
-            key.extend_from_slice(&leaf_prefix);
+            key.extend_from_slice(&range_start.to_be_bytes());
+            key.extend_from_slice(&range_width.to_be_bytes());
+            key.extend_from_slice(&bit_depth.to_be_bytes());
+            key.extend_from_slice(&event_id_prefix);
         }
     }
     key
 }
 
 fn encode_materialize_payload(input: &MaterializeKeyWrapsIntent) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 32 + 32 + 32 + 1 + 8 + 8 + 1 + 32);
+    let mut out = Vec::with_capacity(1 + 32 + 32 + 32 + 32 + 1 + 8 + 8 + 2 + 32);
     out.push(1);
     out.extend_from_slice(&input.workspace_id);
     out.extend_from_slice(&input.frontier_id);
     out.extend_from_slice(&input.recipient_key_id);
+    out.extend_from_slice(&input.source_fact_id);
     match input.source {
         WrapSourceKind::FrontierRoot => {
             out.push(1);
-            out.extend_from_slice(&[0; 49]);
+            out.extend_from_slice(&[0; 50]);
         }
         WrapSourceKind::HistoryNode {
-            start_minute,
-            end_minute,
-            prefix_bytes,
-            leaf_prefix,
+            range_start,
+            range_width,
+            bit_depth,
+            event_id_prefix,
         } => {
             out.push(2);
-            out.extend_from_slice(&start_minute.to_be_bytes());
-            out.extend_from_slice(&end_minute.to_be_bytes());
-            out.push(prefix_bytes);
-            out.extend_from_slice(&leaf_prefix);
+            out.extend_from_slice(&range_start.to_be_bytes());
+            out.extend_from_slice(&range_width.to_be_bytes());
+            out.extend_from_slice(&bit_depth.to_be_bytes());
+            out.extend_from_slice(&event_id_prefix);
         }
     }
     out
 }
 
 fn decode_materialize_payload(payload: &[u8]) -> Result<MaterializeKeyWrapsIntent, String> {
-    if payload.len() != 147 || payload[0] != 1 {
+    if payload.len() != 180 || payload[0] != 1 {
         return Err("invalid materialize_key_wraps payload".to_string());
     }
     let workspace_id = payload[1..33].try_into().unwrap();
     let frontier_id = payload[33..65].try_into().unwrap();
     let recipient_key_id = payload[65..97].try_into().unwrap();
-    let source = match payload[97] {
+    let source_fact_id = payload[97..129].try_into().unwrap();
+    let source = match payload[129] {
         1 => {
-            if payload[98..147].iter().any(|byte| *byte != 0) {
+            if payload[130..180].iter().any(|byte| *byte != 0) {
                 return Err("invalid materialize_key_wraps root padding".to_string());
             }
             WrapSourceKind::FrontierRoot
         }
         2 => {
-            let start_minute = u64::from_be_bytes(payload[98..106].try_into().unwrap());
-            let end_minute = u64::from_be_bytes(payload[106..114].try_into().unwrap());
-            let prefix_bytes = payload[114];
-            if prefix_bytes > 32 || start_minute > end_minute {
+            let range_start = u64::from_be_bytes(payload[130..138].try_into().unwrap());
+            let range_width = u64::from_be_bytes(payload[138..146].try_into().unwrap());
+            let bit_depth = u16::from_be_bytes(payload[146..148].try_into().unwrap());
+            if bit_depth > 256 || range_width == 0 || !range_width.is_power_of_two() {
                 return Err("invalid materialize_key_wraps history range".to_string());
             }
             WrapSourceKind::HistoryNode {
-                start_minute,
-                end_minute,
-                prefix_bytes,
-                leaf_prefix: payload[115..147].try_into().unwrap(),
+                range_start,
+                range_width,
+                bit_depth,
+                event_id_prefix: payload[148..180].try_into().unwrap(),
             }
         }
         _ => return Err("invalid materialize_key_wraps source kind".to_string()),
@@ -174,6 +179,7 @@ fn decode_materialize_payload(payload: &[u8]) -> Result<MaterializeKeyWrapsInten
         workspace_id,
         frontier_id,
         recipient_key_id,
+        source_fact_id,
         source,
     })
 }

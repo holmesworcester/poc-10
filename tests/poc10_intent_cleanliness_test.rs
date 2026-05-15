@@ -368,6 +368,7 @@ fn target_manifests_are_declarations_only() {
         root.join("src/handlers.rs"),
     ];
     manifests.extend(immediate_rust_children(&root.join("src/event_modules")));
+    manifests.extend(immediate_rust_children(&root.join("src/handlers")));
 
     let mut offenders = Vec::new();
     for path in manifests {
@@ -388,6 +389,119 @@ fn target_manifests_are_declarations_only() {
     assert!(
         offenders.is_empty(),
         "target root/module manifests must not accumulate behavior:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_handler_intent_files_do_not_define_fact_or_crypto_outputs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let handler_root = root.join("src/handlers");
+    if !handler_root.exists() {
+        return;
+    }
+
+    let mut offenders = Vec::new();
+    for path in rust_files_named(&handler_root, "intent.rs") {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        for forbidden in [
+            "Fact::new",
+            "FactScope",
+            "ScopeKind",
+            "TYPE_",
+            "KEY_WRAP_BYTES",
+            "encode_key_wrap",
+            "decode_key_wrap",
+            "sender_wrap_public_key",
+            "ciphertext",
+            "nonce",
+            "encrypt",
+            "decrypt",
+            "placeholder",
+            "fake",
+            "crate::core::wire",
+            "wire::",
+        ] {
+            if production.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "handler intent files should encode/decode handler payloads, not facts or crypto outputs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn connection_intents_treat_transit_frames_as_opaque() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("src/handlers/connection/intent.rs");
+    if !path.exists() {
+        return;
+    }
+
+    let text = source_text(&path);
+    let production = production_text_before_unit_tests(&text);
+    let mut offenders = Vec::new();
+    for forbidden in [
+        "canonical_events",
+        "event_modules::encryption",
+        "XChaCha",
+        "X25519",
+        "ciphertext",
+        "nonce",
+        "encrypt",
+        "decrypt",
+    ] {
+        if production.contains(forbidden) {
+            offenders.push(format!(
+                "{} contains {forbidden:?}",
+                path.strip_prefix(root).unwrap().display()
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "connection intents must treat transit frames as opaque transport bytes:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn core_handler_dispatch_stays_protocol_neutral() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("src/core/handler_dispatch.rs");
+    let text = source_text(&path);
+    let production = production_text_before_unit_tests(&text);
+    let mut offenders = Vec::new();
+
+    for forbidden in [
+        "event_modules::",
+        "handlers::connection",
+        "handlers::transit",
+        "KeyWrap",
+        "Transit",
+        "Connection",
+    ] {
+        if production.contains(forbidden) {
+            offenders.push(format!(
+                "{} contains {forbidden:?}",
+                path.strip_prefix(root).unwrap().display()
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "core handler dispatch must stay generic and protocol-neutral:\n{}",
         offenders.join("\n")
     );
 }

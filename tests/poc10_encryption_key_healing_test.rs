@@ -52,6 +52,7 @@ fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appe
     assert_eq!(intent.workspace_id, workspace);
     assert_eq!(intent.frontier_id, [3; 32]);
     assert_eq!(intent.recipient_key_id, recipient.id);
+    assert_eq!(intent.source_fact_id, root.id);
     assert_eq!(intent.source, WrapSourceKind::FrontierRoot);
 }
 
@@ -76,6 +77,7 @@ fn rotated_recipient_key_does_not_receive_old_frontier_sources() {
     assert_eq!(old_seen.wakes, 0);
     assert!(bus.intents().is_empty());
 
+    let new_root_id = new_root.id;
     bus.submit_fact(new_root);
     let new_seen = bus
         .drain(&projector, &[&wrap_matcher as &dyn ContextMatcher], 10)
@@ -84,6 +86,7 @@ fn rotated_recipient_key_does_not_receive_old_frontier_sources() {
     assert_eq!(bus.intents().len(), 1);
     let intent = decode_materialize_key_wraps_intent(&bus.intents()[0]).expect("wrap intent");
     assert_eq!(intent.frontier_id, new_frontier);
+    assert_eq!(intent.source_fact_id, new_root_id);
 }
 
 #[test]
@@ -157,8 +160,8 @@ fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
         recipient.id,
         90,
     );
-    let retained_a = history_node_fact(workspace, frontier.id, 40, 50, 0, [0; 32]);
-    let retained_b = history_node_fact(workspace, frontier.id, 51, 60, 1, [0xaa; 32]);
+    let retained_a = history_node_fact(workspace, frontier.id, 40, 8, 0, [0; 32]);
+    let retained_b = history_node_fact(workspace, frontier.id, 51, 1, 8, byte_prefix(0xaa));
     let projector = encryption_project::EncryptionProjector::new();
     let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
@@ -235,7 +238,7 @@ fn encryption_history_node_offer_wakes_and_opens_sealed_message() {
     let leaf = [0xab; 32];
     let message = sealed_message_fact(workspace, signer, frontier, 55, leaf);
     let signer = signer_fact(workspace, signer);
-    let history_node = history_node_fact(workspace, frontier, 50, 60, 1, leaf);
+    let history_node = history_node_fact(workspace, frontier, 55, 1, 8, byte_prefix(0xab));
     let projector = CombinedProjector;
     let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let deletion_matcher = ExactSelectorMatcher::new(message_context::deletion_role());
@@ -371,7 +374,7 @@ fn local_key_secret_fact(
             frontier_id,
             owner_endpoint_id,
             created_at_ms,
-            secret_commitment: [0x66; 32],
+            key_secret: [0x66; 32],
         })
         .expect("encode local root"),
     )
@@ -380,10 +383,10 @@ fn local_key_secret_fact(
 fn history_node_fact(
     workspace_id: [u8; 32],
     frontier_id: [u8; 32],
-    start_minute: u64,
-    end_minute: u64,
-    prefix_bytes: u8,
-    leaf_prefix: [u8; 32],
+    range_start: u64,
+    range_width: u64,
+    bit_depth: u16,
+    event_id_prefix: [u8; 32],
 ) -> Fact {
     Fact::new(
         workspace_scope(workspace_id),
@@ -392,10 +395,12 @@ fn history_node_fact(
             workspace_id,
             frontier_id,
             source_secret_id: [0x77; 32],
-            start_minute,
-            end_minute,
-            prefix_bytes,
-            leaf_prefix,
+            range_start,
+            range_width,
+            bit_depth,
+            event_id_prefix,
+            tombstone_node_id: [0x78; 32],
+            node_secret: [0x79; 32],
         })
         .expect("encode history node"),
     )
@@ -456,4 +461,10 @@ fn signer_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
         })
         .expect("encode signer"),
     )
+}
+
+fn byte_prefix(value: u8) -> [u8; 32] {
+    let mut prefix = [0; 32];
+    prefix[0] = value;
+    prefix
 }

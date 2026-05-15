@@ -395,6 +395,12 @@ done: target sync intent payload construction is isolated in intent.rs so projec
 done: target transit and connection intent payload layouts live under src/handlers and expose the handler boundary without owning event facts
 done: guardrails reject fake crypto/fact wire layouts inside handlers so wrap facts must be authored by event-module semantics
 done: full cargo test passes after the target key-wrap, sync, transit/connection, and handler-context integration
+done: materialize_key_wraps intents retain the exact wrap source payload fact id so handlers do not need scans
+done: target local root and history-node secret facts now carry actual secret bytes, not just coverage descriptors
+done: target history-node wrap sources use production-shaped range_start/range_width/bit_depth/event_id_prefix coordinates
+done: connection/transit handler intent payload layouts are split under handler submodules instead of accumulating in broad handler files
+done: active guardrails now check handler intent files, opaque connection frame boundaries, and protocol-neutral core handler dispatch
+done: full cargo test passes after the source-fact, secret-material, and handler-layout prerequisite changes
 ```
 
 The next event-pipeline step is to replace the simplified message row proof
@@ -406,9 +412,10 @@ behavior.
 
 The next encryption handler step no longer needs a broad store scan contract:
 deferred handlers can receive exact fact payload context from the event bus when
-the dispatch path opts into it. `MaterializeKeyWraps` should now be implemented
-only when it can consume target local-secret and recipient-key facts and return
-real key-wrap facts. A handler that emits placeholder key-wrap facts without
+the dispatch path opts into it, and materialize intents now carry the exact
+source fact id. `MaterializeKeyWraps` should still wait until the target shared
+fact signer/envelope contract is explicit enough to reproduce poc-8 associated
+data. A handler that emits unsigned or placeholder key-wrap facts without
 source secret material remains intentionally rejected as cruft.
 
 ### Wave 4: Encryption Slice

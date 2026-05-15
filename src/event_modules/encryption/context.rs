@@ -135,10 +135,10 @@ pub fn requested_wrap_source_need(
 pub enum WrapSourceKind {
     FrontierRoot,
     HistoryNode {
-        start_minute: u64,
-        end_minute: u64,
-        prefix_bytes: u8,
-        leaf_prefix: FactId,
+        range_start: u64,
+        range_width: u64,
+        bit_depth: u16,
+        event_id_prefix: FactId,
     },
 }
 
@@ -174,10 +174,10 @@ pub fn history_node_wrap_source_offer(
     scope: FactScope,
     workspace_id: WorkspaceId,
     frontier_id: FrontierId,
-    start_minute: u64,
-    end_minute: u64,
-    prefix_bytes: u8,
-    leaf_prefix: FactId,
+    range_start: u64,
+    range_width: u64,
+    bit_depth: u16,
+    event_id_prefix: FactId,
 ) -> ContextOffer {
     wrap_source_offer(
         owner,
@@ -187,10 +187,10 @@ pub fn history_node_wrap_source_offer(
             frontier_id,
             frontier_created_at_ms: 0,
             kind: WrapSourceKind::HistoryNode {
-                start_minute,
-                end_minute,
-                prefix_bytes,
-                leaf_prefix,
+                range_start,
+                range_width,
+                bit_depth,
+                event_id_prefix,
             },
         },
     )
@@ -212,7 +212,7 @@ pub fn wrap_source_offer(
 
 pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSelector> {
     let bytes = selector.as_bytes();
-    if bytes.len() != 123 || bytes[0] != 3 {
+    if bytes.len() != 124 || bytes[0] != 3 {
         return None;
     }
     let workspace_id = bytes[1..33].try_into().ok()?;
@@ -226,10 +226,11 @@ pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSele
             kind: WrapSourceKind::FrontierRoot,
         }),
         2 => {
-            let start_minute = u64::from_be_bytes(bytes[74..82].try_into().ok()?);
-            let end_minute = u64::from_be_bytes(bytes[82..90].try_into().ok()?);
-            let prefix_bytes = bytes[90];
-            if prefix_bytes > 32 || start_minute > end_minute {
+            let range_start = u64::from_be_bytes(bytes[74..82].try_into().ok()?);
+            let range_width = u64::from_be_bytes(bytes[82..90].try_into().ok()?);
+            let bit_depth = u16::from_be_bytes(bytes[90..92].try_into().ok()?);
+            let event_id_prefix = bytes[92..124].try_into().ok()?;
+            if !valid_history_coordinate(range_start, range_width, bit_depth, event_id_prefix) {
                 return None;
             }
             Some(WrapSourceSelector {
@@ -237,10 +238,10 @@ pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSele
                 frontier_id,
                 frontier_created_at_ms,
                 kind: WrapSourceKind::HistoryNode {
-                    start_minute,
-                    end_minute,
-                    prefix_bytes,
-                    leaf_prefix: bytes[91..123].try_into().ok()?,
+                    range_start,
+                    range_width,
+                    bit_depth,
+                    event_id_prefix,
                 },
             })
         }
@@ -249,7 +250,7 @@ pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSele
 }
 
 pub fn encode_wrap_source_selector(source: &WrapSourceSelector) -> Selector {
-    let mut bytes = Vec::with_capacity(123);
+    let mut bytes = Vec::with_capacity(124);
     bytes.push(3);
     bytes.extend_from_slice(&source.workspace_id);
     bytes.extend_from_slice(&source.frontier_id);
@@ -257,22 +258,52 @@ pub fn encode_wrap_source_selector(source: &WrapSourceSelector) -> Selector {
     match source.kind {
         WrapSourceKind::FrontierRoot => {
             bytes.push(1);
-            bytes.extend_from_slice(&[0; 49]);
+            bytes.extend_from_slice(&[0; 50]);
         }
         WrapSourceKind::HistoryNode {
-            start_minute,
-            end_minute,
-            prefix_bytes,
-            leaf_prefix,
+            range_start,
+            range_width,
+            bit_depth,
+            event_id_prefix,
         } => {
             bytes.push(2);
-            bytes.extend_from_slice(&start_minute.to_be_bytes());
-            bytes.extend_from_slice(&end_minute.to_be_bytes());
-            bytes.push(prefix_bytes);
-            bytes.extend_from_slice(&leaf_prefix);
+            bytes.extend_from_slice(&range_start.to_be_bytes());
+            bytes.extend_from_slice(&range_width.to_be_bytes());
+            bytes.extend_from_slice(&bit_depth.to_be_bytes());
+            bytes.extend_from_slice(&event_id_prefix);
         }
     }
     Selector::from_bytes(bytes)
+}
+
+fn valid_history_coordinate(
+    range_start: u64,
+    range_width: u64,
+    bit_depth: u16,
+    event_id_prefix: FactId,
+) -> bool {
+    range_width != 0
+        && range_width.is_power_of_two()
+        && range_start % range_width == 0
+        && bit_depth <= 256
+        && event_id_prefix == mask_prefix_to_depth(event_id_prefix, bit_depth)
+        && (range_width == 1 || (bit_depth == 0 && event_id_prefix == [0; 32]))
+}
+
+fn mask_prefix_to_depth(mut prefix: FactId, bit_depth: u16) -> FactId {
+    let bit_depth = bit_depth as usize;
+    if bit_depth >= 256 {
+        return prefix;
+    }
+    let byte_index = bit_depth / 8;
+    let remaining_bits = bit_depth % 8;
+    if remaining_bits == 0 {
+        prefix[byte_index..].fill(0);
+    } else {
+        prefix[byte_index] &= 0xff << (8 - remaining_bits);
+        prefix[byte_index + 1..].fill(0);
+    }
+    prefix
 }
 
 pub fn decode_proactive_wrap_need(selector: &Selector) -> Option<(WorkspaceId, u64)> {
