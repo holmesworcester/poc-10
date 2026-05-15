@@ -1,4 +1,5 @@
 pub mod encryption;
+pub mod identity_endpoint;
 pub mod identity_user;
 pub mod identity_workspace;
 pub mod sealed_message;
