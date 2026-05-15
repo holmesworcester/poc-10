@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 use super::connection_request;
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
-use crate::protocol::cli::Context;
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::worker;
 use crate::workers::connection as connection_worker;
 

@@ -2,7 +2,7 @@
 //!
 //! `Modules` is the bridge between the generic `EventRegistry` trait and the
 //! free functions in `event_modules`. All registry state (sync index,
-//! connection peers, etc.) lives on `Protocol` and `cli::Context`; this
+//! connection peers, etc.) lives on `Protocol` and `commands::Context`; this
 //! struct exists only so callers can hold a `dyn EventRegistry` without
 //! naming the concrete protocol shell.
 

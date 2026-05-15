@@ -17,6 +17,11 @@ use super::codec;
 use super::queries as message_queries;
 use super::types::{MessageEvent, EXPIRES_NEVER, UNIX_MINUTE_MS};
 
+pub(crate) use super::cli::{
+    derive_message_leaf, hex_id, list_for_display, parse_hex_id, resolve_selector,
+    visible_reaction_rows,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendMessage {
     pub workspace_id: EventId,
@@ -150,6 +155,8 @@ pub fn require_local_membership(
     Ok(row)
 }
 
+pub(crate) use require_local_membership as require_membership;
+
 /// Compute the next-authoring timestamp for events in this workspace.
 /// Folds in both content (`message`) and protocol (`content_event`)
 /// timestamps so concurrent authoring across event families doesn't go
@@ -163,6 +170,8 @@ pub fn next_authoring_timestamp(store: &Store, workspace_id: EventId) -> Result<
         )?;
     logical_clock::next_timestamp(store, from_messages.max(from_content))
 }
+
+pub(crate) use next_authoring_timestamp as next_timestamp;
 
 fn max_timestamp_for_messages(store: &Store, workspace_id: EventId) -> Result<u64, String> {
     let mut max = 0u64;

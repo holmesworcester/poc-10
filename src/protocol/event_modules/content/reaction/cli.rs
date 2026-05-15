@@ -5,8 +5,8 @@
 //! projection, display grouping, or message deletion cleanup; those stay in the
 //! reaction projector/schema and content purge worker.
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
-use crate::protocol::cli::Context;
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::content::message;
 use crate::protocol::event_modules::identity::endpoint;
 use crate::protocol::event_modules::types::EventId;
@@ -36,8 +36,11 @@ pub struct ReactSummary {
 impl ReactSummary {
     pub fn lines(&self) -> Vec<String> {
         vec![
-            format!("event_id: {}", message::cli::hex_id(self.event_id)),
-            format!("target: {}", message::cli::hex_id(self.target_message_id)),
+            format!("event_id: {}", message::commands::hex_id(self.event_id)),
+            format!(
+                "target: {}",
+                message::commands::hex_id(self.target_message_id)
+            ),
             format!("emoji: {}", self.emoji),
         ]
     }
@@ -46,21 +49,21 @@ impl ReactSummary {
 fn run_react_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(3, REACT_USAGE)?;
     let workspace_id =
-        message::cli::parse_hex_id(args.get(0).expect("length checked"), REACT_USAGE)?;
-    let target = message::cli::resolve_selector(
+        message::commands::parse_hex_id(args.get(0).expect("length checked"), REACT_USAGE)?;
+    let target = message::commands::resolve_selector(
         &context.store,
         workspace_id,
         args.get(1).expect("length checked"),
     )?;
     let emoji = args.get(2).expect("length checked").to_string();
 
-    let membership = message::cli::require_membership(&context.store, workspace_id)?;
+    let membership = message::commands::require_membership(&context.store, workspace_id)?;
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
 
-    let timestamp = message::cli::next_timestamp(&context.store, workspace_id)?;
+    let timestamp = message::commands::next_timestamp(&context.store, workspace_id)?;
     let removal_frontier_id =
-        message::cli::require_active_frontier_id(&context.store, workspace_id)?;
+        message::commands::require_active_frontier_id(&context.store, workspace_id)?;
     let event_id_in_minute = reaction_event_id_in_minute(
         &workspace_id,
         &membership.user_authority_event_id,
@@ -68,7 +71,7 @@ fn run_react_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutp
         &removal_frontier_id,
         timestamp,
     );
-    let leaf = message::cli::derive_message_leaf(
+    let leaf = message::commands::derive_message_leaf(
         &context.store,
         &context.protocol,
         workspace_id,

@@ -7,9 +7,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
 use crate::core::store::Store;
-use crate::protocol::cli::Context;
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::content::reaction;
 use crate::protocol::event_modules::identity::{endpoint, user};
 use crate::protocol::event_modules::types::EventId;
@@ -259,7 +259,7 @@ fn files_grouped_by_message_for_display(
     store: &Store,
     workspace_id: EventId,
 ) -> Result<BTreeMap<EventId, Vec<super::super::file::types::FileRow>>, String> {
-    let rows = super::super::file::cli::visible_file_rows(store, workspace_id)?;
+    let rows = super::super::file::commands::visible_file_rows(store, workspace_id)?;
     let mut grouped: BTreeMap<EventId, Vec<super::super::file::types::FileRow>> = BTreeMap::new();
     for row in rows {
         grouped.entry(row.message_id).or_default().push(row);
@@ -353,15 +353,6 @@ pub fn resolve_selector(
         parse_hex_id(selector, "MESSAGE_SELECTOR")
     }
 }
-
-// CLI authoring helpers that read store state (membership lookup,
-// active-frontier resolution, next-timestamp, expires-at computation) live
-// in `commands.rs` so peer CLIs and tests can share them. The wrappers below
-// keep `message::cli::*` callable as a compatibility surface for the rest of
-// the CLI tree. `derive_message_leaf` lives in this `cli.rs` because it
-// drives the encryption worker — commands.rs must not call worker::run.
-pub(crate) use commands::require_local_membership as require_membership;
-pub(crate) use commands::{next_authoring_timestamp as next_timestamp, require_active_frontier_id};
 
 /// Derive (or look up) the per-event leaf for one
 /// `(workspace_id, removal_frontier_id, created_at_ms,

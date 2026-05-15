@@ -16,9 +16,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
 use crate::core::store::Store;
-use crate::protocol::cli::Context;
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::content::{file, file_slice, message};
 use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, user, workspace};
 use crate::protocol::event_modules::types::EventId;
@@ -58,12 +58,12 @@ pub struct SendFileSummary {
 impl SendFileSummary {
     pub fn lines(&self) -> Vec<String> {
         vec![
-            format!("event_id: {}", message::cli::hex_id(self.message_id)),
+            format!("event_id: {}", message::commands::hex_id(self.message_id)),
             format!(
                 "file_event_id: {}",
-                message::cli::hex_id(self.file_event_id)
+                message::commands::hex_id(self.file_event_id)
             ),
-            format!("file_id: {}", message::cli::hex_id(self.file_id)),
+            format!("file_id: {}", message::commands::hex_id(self.file_id)),
             format!("filename: {}", self.filename),
             format!("mime: {}", self.mime_type),
             format!("blob_bytes: {}", self.blob_bytes),
@@ -106,7 +106,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         &removal_frontier_id,
         timestamp,
     );
-    let message_leaf = message::cli::derive_message_leaf(
+    let message_leaf = message::commands::derive_message_leaf(
         &context.store,
         &context.protocol,
         parsed.workspace_id,
@@ -152,7 +152,7 @@ fn run_send_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
         &removal_frontier_id,
         timestamp,
     );
-    let file_leaf = message::cli::derive_message_leaf(
+    let file_leaf = message::commands::derive_message_leaf(
         &context.store,
         &context.protocol,
         parsed.workspace_id,
@@ -255,7 +255,7 @@ impl SendFileArgs {
             return Err(SEND_FILE_USAGE.to_string());
         }
         let workspace_id =
-            message::cli::parse_hex_id(args.get(0).expect("length checked"), SEND_FILE_USAGE)?;
+            message::commands::parse_hex_id(args.get(0).expect("length checked"), SEND_FILE_USAGE)?;
         let text = args.get(1).expect("length checked").to_string();
         let mut file_path = None;
         let mut mime_type = "application/octet-stream".to_string();
@@ -322,7 +322,7 @@ fn run_view_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
         endpoint_shared::schema::workspace_ids_for_endpoint(&context.store, local.endpoint)?;
 
     let workspace_id = match arg {
-        Some(value) => message::cli::parse_hex_id(value, VIEW_USAGE)?,
+        Some(value) => message::commands::parse_hex_id(value, VIEW_USAGE)?,
         None => match joined.len() {
             0 => return Err("no joined workspaces; create or accept one first".to_string()),
             1 => joined[0],
@@ -342,11 +342,11 @@ fn run_view_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
     let workspace_row = workspace::schema::decode_workspace_row(&workspace_id, &workspace_value)?;
 
     let users = workspace_user_view(&context.store, workspace_id, local.endpoint)?;
-    let messages = message::cli::list_for_display(&context.store, workspace_id, 0)?;
+    let messages = message::commands::list_for_display(&context.store, workspace_id, 0)?;
     let files_by_message = {
         let mut grouped: std::collections::BTreeMap<EventId, Vec<file::types::FileRow>> =
             std::collections::BTreeMap::new();
-        for row in file::cli::visible_file_rows(&context.store, workspace_id)? {
+        for row in file::commands::visible_file_rows(&context.store, workspace_id)? {
             grouped.entry(row.message_id).or_default().push(row);
         }
         grouped
@@ -358,11 +358,11 @@ fn run_view_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutpu
     lines.push("IDENTITY:".to_string());
     lines.push(format!(
         "  endpoint_id: {}",
-        message::cli::hex_id(local.endpoint)
+        message::commands::hex_id(local.endpoint)
     ));
     lines.push(format!(
         "  signing_public_key: {}",
-        message::cli::hex_id(local.signing_public_key)
+        message::commands::hex_id(local.signing_public_key)
     ));
     lines.push(String::new());
     lines.push("WORKSPACE:".to_string());
@@ -509,7 +509,7 @@ fn reactions_with_authors(
 ) -> Result<BTreeMap<EventId, Vec<(String, EventId)>>, String> {
     // Reuse the message-cli helper that opens sealed reaction rows alongside
     // cleartext rows; the visible set must match the `messages` listing.
-    let rows = message::cli::visible_reaction_rows(store, workspace_id)?;
+    let rows = message::commands::visible_reaction_rows(store, workspace_id)?;
     let mut grouped: BTreeMap<EventId, Vec<(String, EventId)>> = BTreeMap::new();
     let mut seen: BTreeMap<EventId, std::collections::HashSet<(EventId, String)>> = BTreeMap::new();
     for row in rows {
@@ -586,7 +586,7 @@ fn format_file_display(
 }
 
 fn short_user_label(id: &EventId) -> String {
-    let hex = message::cli::hex_id(*id);
+    let hex = message::commands::hex_id(*id);
     let len = hex.len().min(8);
     hex[..len].to_string()
 }

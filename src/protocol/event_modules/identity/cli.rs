@@ -10,10 +10,10 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
 use crate::core::logical_clock;
 use crate::core::store::Store;
-use crate::protocol::cli::Context;
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::connection::connection_request;
 use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::types::EventId;

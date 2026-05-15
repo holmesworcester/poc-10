@@ -330,15 +330,18 @@ mod tests {
 
         let output = project_signed(&envelope, &event).expect("project device invite");
 
-        assert_eq!(output.labels.len(), 0);
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::DEVICE_INVITES);
+        assert_eq!(output.legacy_labels().len(), 0);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::DEVICE_INVITES);
         assert_eq!(
-            output.rows[0].key,
+            output.legacy_rows()[0].key,
             schema::device_invite_key(workspace_id, device_invite_id)
         );
-        let decoded = schema::decode_device_invite_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        let decoded = schema::decode_device_invite_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(decoded.workspace_id, workspace_id);
         assert_eq!(decoded.device_invite_id, device_invite_id);
         assert_eq!(decoded.user_authority_event_id, user_id);
@@ -448,8 +451,11 @@ mod tests {
         );
 
         let output = project_signed(&envelope, &event).expect("project device invite");
-        let decoded = schema::decode_device_invite_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        let decoded = schema::decode_device_invite_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(decoded.workspace_id, workspace_id);
         assert_eq!(decoded.user_authority_event_id, user_id);
         assert_eq!(decoded.user_invite_event_id, None);

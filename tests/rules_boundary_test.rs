@@ -86,11 +86,23 @@ fn strip_line_comments(text: &str) -> String {
 
 fn worker_implementation_files(root: &Path) -> Vec<std::path::PathBuf> {
     let common_root = root.join("src/workers/pipeline_helpers");
+    let non_worker_boundaries = [
+        "event_lifecycle.rs",
+        "event_retention.rs",
+        "pipeline_helpers.rs",
+        "post_admission_purge.rs",
+        "worker_catalog.rs",
+    ];
     rust_files(&root.join("src/workers"))
         .into_iter()
         .filter(|path| {
             path.file_name()
                 .is_none_or(|name| name != "mod.rs" && name != "schema.rs")
+        })
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| !non_worker_boundaries.contains(&name))
         })
         .filter(|path| {
             !path.starts_with(&common_root)
@@ -133,6 +145,31 @@ fn meaningful_mod_lines(text: &str) -> Vec<&str> {
         .collect()
 }
 
+fn is_sibling_manifest(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "rs") && path.with_extension("").is_dir()
+}
+
+fn declaration_manifest_violations(root: &Path, path: &Path) -> Vec<String> {
+    let text = source_text(path);
+    meaningful_mod_lines(&text)
+        .into_iter()
+        .filter(|line| {
+            !(line.starts_with("pub mod ") && line.ends_with(';') && !line.contains('{'))
+                && !(line.starts_with("mod ") && line.ends_with(';') && !line.contains('{'))
+                && !(line.starts_with("pub use ") && line.ends_with(';') && !line.contains('{'))
+                && !(line.starts_with("use ") && line.ends_with(';') && !line.contains('{'))
+                && *line != "#[cfg(test)]"
+                && *line != "mod cli_tests;"
+        })
+        .map(|line| {
+            format!(
+                "{} contains non-declaration line: {line}",
+                path.strip_prefix(root).unwrap().display()
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn event_modules_do_not_use_event_rs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
@@ -147,29 +184,51 @@ fn event_modules_do_not_use_event_rs() {
 fn event_modules_are_directories() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
     // event_from_bytes.rs and modules.rs are registry plumbing for the
-    // event_modules root, not event modules of their own. They are
-    // pub(crate)/pub re-exported through mod.rs; their behavior is dispatch,
-    // not event syntax.
-    let registry_plumbing = ["event_from_bytes.rs", "modules.rs"];
-    let offenders = std::fs::read_dir(root)
+    // event_modules root, not event modules of their own. Domain manifests now
+    // live as sibling files (`content.rs` + `content/`) so there is no mod.rs
+    // hiding place.
+    let root_shared = [
+        "event_from_bytes.rs",
+        "modules.rs",
+        "schema.rs",
+        "queries.rs",
+        "types.rs",
+    ];
+    let mut offenders = Vec::new();
+    for path in std::fs::read_dir(&root)
         .expect("read event modules")
         .map(|entry| entry.expect("dir entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .filter(|path| {
-            path.file_name().is_none_or(|name| {
-                name != "mod.rs"
-                    && name != "worker.rs"
-                    && name != "schema.rs"
-                    && name != "queries.rs"
-            }) && path.file_name().is_none_or(|name| name != "types.rs")
-                && path
-                    .file_name()
-                    .is_none_or(|name| !registry_plumbing.iter().any(|allowed| *allowed == name))
-        })
-        .collect::<Vec<_>>();
+    {
+        if path.is_dir() {
+            if !path.with_extension("rs").exists() {
+                offenders.push(format!(
+                    "{} missing sibling manifest",
+                    path.strip_prefix(&root).unwrap().display()
+                ));
+            }
+            continue;
+        }
+        if !path.extension().is_some_and(|ext| ext == "rs") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if root_shared.contains(&name) {
+            continue;
+        }
+        if !is_sibling_manifest(&path) {
+            offenders.push(format!(
+                "{} is not paired with a directory",
+                path.strip_prefix(&root).unwrap().display()
+            ));
+        }
+    }
     assert!(
         offenders.is_empty(),
-        "event modules must be directories: {offenders:?}"
+        "event modules use sibling declaration manifests paired with directories:\n{}",
+        offenders.join("\n")
     );
 }
 
@@ -178,7 +237,7 @@ fn core_file_set_stays_small_and_named() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core");
     let allowed = [
         "app.rs",
-        "cli.rs",
+        "commands.rs",
         "context.rs",
         "crypto.rs",
         "crux_runner.rs",
@@ -243,27 +302,27 @@ fn daemon_runner_is_core_and_protocol_supplies_workers() {
         "daemon runtime orchestration must not be a protocol module"
     );
 
-    let protocol_mod = source_text(&root.join("src/protocol/mod.rs"));
+    let protocol_mod = source_text(&root.join("src/protocol/assembly.rs"));
     assert!(
         !protocol_mod.contains("pub mod daemon"),
-        "src/protocol/mod.rs must not export a daemon module"
+        "src/protocol/assembly.rs must not export a daemon module"
     );
     assert!(
         protocol_mod.contains("impl EventRegistry for Protocol")
             && protocol_mod.contains("impl DaemonProtocol for Protocol")
             && protocol_mod.contains("impl ProtocolSpec for Protocol"),
-        "src/protocol/mod.rs should stay focused on protocol assembly and core integration traits"
+        "src/protocol/assembly.rs should stay focused on protocol assembly and core integration traits"
     );
     assert!(
         !protocol_mod.contains("pub fn modules"),
         "Protocol must expose registry traits, not its internal event-module collection"
     );
     assert!(
-        !protocol_mod.contains("impl EventRegistry for cli::Context"),
-        "context-specific worker trait impls belong beside protocol::cli::Context"
+        !protocol_mod.contains("impl EventRegistry for commands::Context"),
+        "context-specific worker trait impls belong beside protocol::commands::Context"
     );
 
-    let protocol_cli = source_text(&root.join("src/protocol/cli.rs"));
+    let protocol_cli = source_text(&root.join("src/protocol/commands.rs"));
     assert!(
         !protocol_cli.contains("daemon::commands"),
         "protocol command aggregation should not register application daemon commands"
@@ -271,7 +330,7 @@ fn daemon_runner_is_core_and_protocol_supplies_workers() {
     assert!(
         protocol_cli.contains("impl EventRegistry for Context")
             && protocol_cli.contains("impl DaemonWorkerContext for Context"),
-        "protocol::cli::Context should expose the store/registry shape shared by CLI and daemon workers"
+        "protocol::commands::Context should expose the store/registry shape shared by CLI and daemon workers"
     );
 
     let main = source_text(&root.join("src/main.rs"));
@@ -291,7 +350,7 @@ fn daemon_runner_is_core_and_protocol_supplies_workers() {
         "core daemon should run opaque worker objects without naming protocol workers"
     );
 
-    let workers = source_text(&root.join("src/workers/mod.rs"));
+    let workers = source_text(&root.join("src/workers/worker_catalog.rs"));
     assert!(
         workers.contains("pub fn daemon_workers")
             && workers.contains("transit_in::daemon_worker")
@@ -304,11 +363,11 @@ fn daemon_runner_is_core_and_protocol_supplies_workers() {
 
 #[test]
 fn domain_roots_contain_only_children_and_shared_domain_files() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = crate_root.join("src/protocol/event_modules");
     let allowed_domain_files = [
         "cli_tests.rs",
         "commands.rs",
-        "mod.rs",
         "worker.rs",
         "schema.rs",
         "queries.rs",
@@ -323,14 +382,21 @@ fn domain_roots_contain_only_children_and_shared_domain_files() {
         }
         for entry in std::fs::read_dir(&path).expect("read domain module") {
             let candidate = entry.expect("dir entry").path();
-            if candidate.is_file()
-                && !candidate
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| allowed_domain_files.contains(&name))
-            {
-                offenders.push(candidate.strip_prefix(&root).unwrap().display().to_string());
+            if !candidate.is_file() {
+                continue;
             }
+            let name = candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if allowed_domain_files.contains(&name) {
+                continue;
+            }
+            if is_sibling_manifest(&candidate) {
+                offenders.extend(declaration_manifest_violations(crate_root, &candidate));
+                continue;
+            }
+            offenders.push(candidate.strip_prefix(&root).unwrap().display().to_string());
         }
     }
 
@@ -496,9 +562,9 @@ fn scoped_cli_files_do_not_own_transport_or_cross_cli_operations() {
         "accept_available",
         "DrainUntilIdle",
         "DrainReadyBatch",
-        "::cli::run_",
-        "::cli::drain_",
-        "::cli::exchange_",
+        "::commands::run_",
+        "::commands::drain_",
+        "::commands::exchange_",
     ];
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
@@ -573,7 +639,6 @@ fn event_module_files_use_only_standard_concern_names() {
         "codec.rs",
         "commands.rs",
         "crypto.rs",
-        "mod.rs",
         "projector.rs",
         "queries.rs",
         "registry_meta.rs",
@@ -591,6 +656,9 @@ fn event_module_files_use_only_standard_concern_names() {
         .filter(|path| {
             let name = path.file_name().and_then(|n| n.to_str());
             if name.is_some_and(|n| allowed.contains(&n)) {
+                return false;
+            }
+            if is_sibling_manifest(path) {
                 return false;
             }
             // Allow registry plumbing only at the immediate event_modules root.
@@ -625,7 +693,13 @@ fn child_event_module_directories_have_canonical_shape() {
             if !child.is_dir() {
                 continue;
             }
-            for required in ["mod.rs", "types.rs", "codec.rs"] {
+            if !child.with_extension("rs").exists() {
+                offenders.push(format!(
+                    "{}.rs",
+                    child.strip_prefix(&root).unwrap().display()
+                ));
+            }
+            for required in ["types.rs", "codec.rs"] {
                 if !child.join(required).exists() {
                     offenders.push(format!(
                         "{}/{}",
@@ -698,13 +772,14 @@ fn workers_folder_has_standard_catalog_shape() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workers_root = root.join("src/workers");
     let required = [
-        "mod.rs",
         "README.md",
+        "pipeline_helpers.rs",
         "pipeline_helpers",
-        "pipeline_helpers/mod.rs",
         "pipeline_helpers/event_pipeline.rs",
-        "pipeline_helpers/event_lifecycle.rs",
-        "pipeline_helpers/purging.rs",
+        "event_lifecycle.rs",
+        "event_retention.rs",
+        "post_admission_purge.rs",
+        "worker_catalog.rs",
         "transit_in.rs",
         "connection.rs",
         "content_purge.rs",
@@ -739,7 +814,7 @@ fn socket_receive_is_transit_in_and_outbound_is_transit_out() {
         "connection policy should live in the connection worker, with facts in event modules/projectors and bytes in transit workers"
     );
 
-    let catalog = source_text(&root.join("src/workers/mod.rs"));
+    let catalog = source_text(&root.join("src/workers/worker_catalog.rs"));
     assert!(
         catalog.contains("transit_in::daemon_worker()")
             && catalog.contains("event_admission::daemon_worker()")
@@ -780,7 +855,7 @@ fn worker_files_do_not_own_cli_parsing_or_user_formatting() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = worker_implementation_files(root);
     let forbidden = [
-        "crate::core::cli",
+        "crate::core::commands",
         "CliArgs",
         "CliCommand",
         "CliOutput",
@@ -963,16 +1038,21 @@ fn transit_provenance_is_constructed_by_projector_api_not_literals() {
 fn commands_files_live_only_in_event_modules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
+    let allowed_shells = [
+        root.join("src/commands.rs"),
+        root.join("src/core/commands.rs"),
+        root.join("src/protocol/commands.rs"),
+    ];
     let offenders = rust_files(&root.join("src"))
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "commands.rs"))
-        .filter(|path| !path.starts_with(&event_root))
+        .filter(|path| !path.starts_with(&event_root) && !allowed_shells.contains(path))
         .map(|path| path.strip_prefix(root).unwrap().display().to_string())
         .collect::<Vec<_>>();
 
     assert!(
         offenders.is_empty(),
-        "commands.rs is reserved for event modules; CLI adapters should use scoped cli.rs files:\n{}",
+        "commands.rs belongs to event modules or the thin root/core/protocol command shells:\n{}",
         offenders.join("\n")
     );
 }
@@ -981,18 +1061,16 @@ fn commands_files_live_only_in_event_modules() {
 fn cli_files_live_with_event_modules_or_the_protocol_shell() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
-    let core_cli = root.join("src/core/cli.rs");
-    let protocol_cli = root.join("src/protocol/cli.rs");
     let offenders = rust_files(&root.join("src"))
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
-        .filter(|path| !path.starts_with(&event_root) && path != &protocol_cli && path != &core_cli)
+        .filter(|path| !path.starts_with(&event_root))
         .map(|path| path.strip_prefix(root).unwrap().display().to_string())
         .collect::<Vec<_>>();
 
     assert!(
         offenders.is_empty(),
-        "CLI adapters belong beside event modules; src/protocol/cli.rs may aggregate protocol commands and src/core/cli.rs may run generic command specs:\n{}",
+        "CLI adapters belong beside event modules; root/core/protocol command shells use commands.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -1418,12 +1496,11 @@ fn event_store_lifecycle_is_worker_owned_not_schema_owned() {
     ] {
         assert!(
             !protocol_schema.contains(forbidden),
-            "protocol/event_modules/schema.rs should define rows and keys only; event lifecycle belongs in workers/pipeline_helpers/event_lifecycle.rs"
+            "protocol/event_modules/schema.rs should define rows and keys only; event lifecycle belongs in workers/event_lifecycle.rs"
         );
     }
 
-    let event_lifecycle =
-        source_text(&root.join("src/workers/pipeline_helpers/event_lifecycle.rs"));
+    let event_lifecycle = source_text(&root.join("src/workers/event_lifecycle.rs"));
     for required in [
         "pub(crate) fn insert_event(",
         "pub(crate) fn set_event_status(",
@@ -1432,7 +1509,7 @@ fn event_store_lifecycle_is_worker_owned_not_schema_owned() {
     ] {
         assert!(
             event_lifecycle.contains(required),
-            "workers/pipeline_helpers/event_lifecycle.rs should own generic event lifecycle operation {required}"
+            "workers/event_lifecycle.rs should own generic event lifecycle operation {required}"
         );
     }
 }
@@ -1446,12 +1523,12 @@ fn local_retention_purge_is_worker_owned_not_schema_owned() {
         "protocol/event_modules/schema.rs declares event-store rows and codecs; local retention purge belongs in workers"
     );
 
-    let purging = source_text(&root.join("src/workers/pipeline_helpers/purging.rs"));
+    let event_retention = source_text(&root.join("src/workers/event_retention.rs"));
     assert!(
-        purging.contains("fn purge_event_storage_in_tx")
-            && purging.contains("local retention cleanup only")
-            && purging.contains("not a protocol deletion event"),
-        "workers/pipeline_helpers should own and document event-byte retention cleanup"
+        event_retention.contains("fn purge_event_storage_in_tx")
+            && event_retention.contains("local retention cleanup only")
+            && event_retention.contains("not a protocol deletion event"),
+        "workers/event_retention.rs should own and document event-byte retention cleanup"
     );
 }
 
@@ -1589,7 +1666,7 @@ fn network_admission_does_not_reconstruct_connection_request_dependencies() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let transit_projector =
         source_text(&root.join("src/protocol/event_modules/connection/transit/projector.rs"));
-    let registry = source_text(&root.join("src/protocol/event_modules/mod.rs"));
+    let registry = source_text(&root.join("src/protocol/event_modules.rs"));
     let request_codec = source_text(
         &root.join("src/protocol/event_modules/connection/connection_request/codec.rs"),
     );
@@ -1680,7 +1757,7 @@ fn event_module_commands_do_not_drive_workers_cli_or_transport_queues() {
         "worker::run",
         "DrainUntilIdle",
         "DrainReadyBatch",
-        "crate::core::cli",
+        "crate::core::commands",
         "CliArgs",
         "CliCommand",
         "CliOutput",
@@ -1986,7 +2063,7 @@ fn new_poc8_modules_document_responsibility_boundaries() {
         root.join("src/protocol/event_modules/identity/cli.rs"),
         root.join("src/workers/connection.rs"),
         root.join("src/workers/transit_out.rs"),
-        root.join("src/workers/pipeline_helpers/mod.rs"),
+        root.join("src/workers/pipeline_helpers.rs"),
         root.join("src/workers/content_purge.rs"),
         root.join("src/workers/encryption.rs"),
         root.join("tests/content_cli_test.rs"),
@@ -2199,7 +2276,7 @@ fn proposed_event_carries_deterministic_id_and_record() {
 }
 
 #[test]
-fn projection_output_contains_rows_deletes_and_labels_not_events() {
+fn legacy_pipeline_projection_output_wraps_core_output_and_adapts_table_parts() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(root.join("src/workers/pipeline_helpers/event_pipeline.rs"))
         .expect("read worker");
@@ -2208,12 +2285,28 @@ fn projection_output_contains_rows_deletes_and_labels_not_events() {
         .expect("ProjectionOutput");
     let body = &text[start..text[start..].find("impl ProjectionOutput").unwrap() + start];
     assert!(
-        body.contains("pub rows: Vec<TableRow>")
-            && body.contains("pub deletes: Vec<TableDelete>")
-            && body.contains("pub labels: Vec<schema::EventLabel>")
-            && !body.contains("EventRecord")
-            && !body.contains("events"),
-        "ProjectionOutput is projector-facing and must carry rows/labels/deletes only, not events"
+        body.contains("output: CoreProjectionOutput")
+            && !body.contains("pub rows:")
+            && !body.contains("pub deletes:")
+            && !body.contains("pub labels:"),
+        "legacy ProjectionOutput must wrap core ProjectionOutput without exposing public row/delete/label fields"
+    );
+
+    let impl_start = text[start..]
+        .find("impl ProjectionOutput")
+        .map(|offset| start + offset)
+        .expect("ProjectionOutput impl");
+    let impl_body = &text[impl_start
+        ..text[impl_start..]
+            .find("pub enum ProjectionDecision")
+            .unwrap()
+            + impl_start];
+    assert!(
+        impl_body.contains("AtomicIntent::PutRow(row).into_intent()")
+            && impl_body.contains("AtomicIntent::DeleteRow(delete).into_intent()")
+            && impl_body.contains("schema::event_label_rows(labels)")
+            && impl_body.contains("projection_parts(rows, deletes, labels)"),
+        "legacy ProjectionOutput adapters must convert rows, deletes, and labels into core atomic intents"
     );
 }
 
@@ -2270,7 +2363,7 @@ fn protocol_network_module_does_not_exist() {
 #[test]
 fn protocol_cli_does_not_use_socket_primitives() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = [root.join("src/protocol/cli.rs")];
+    let files = [root.join("src/protocol/commands.rs")];
     let forbidden = [
         "TcpStream",
         "TcpListener",
@@ -2285,7 +2378,7 @@ fn protocol_cli_does_not_use_socket_primitives() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "protocol/cli.rs may invoke core TCP runtime helpers, but must not own socket/frame mechanics:\n{}",
+        "protocol/commands.rs may invoke core TCP runtime helpers, but must not own socket/frame mechanics:\n{}",
         violations.join("\n")
     );
 }

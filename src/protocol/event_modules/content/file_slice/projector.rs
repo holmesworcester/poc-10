@@ -62,18 +62,18 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                 .unwrap_or(false)
         });
     if descriptor_deleted_by_author {
-        return Ok(ProjectionOutput {
-            rows: vec![purge_instruction_row(
+        return Ok(ProjectionOutput::from_parts(
+            vec![purge_instruction_row(
                 slice.workspace_id,
                 event.context.event_id,
                 PurgeKind::FileSlice,
             )],
-            deletes: vec![TableDelete {
+            vec![TableDelete {
                 table: schema::FILE_SLICES,
                 key: schema::file_slice_key(slice.workspace_id, slice.file_id, slice.slice_number),
             }],
-            labels: Vec::new(),
-        });
+            Vec::new(),
+        ));
     }
 
     let signer = event
@@ -364,10 +364,13 @@ mod tests {
         let event = context_for(&built);
         let output = project(&event).expect("project slice");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::FILE_SLICES);
-        let row = schema::decode_file_slice_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::FILE_SLICES);
+        let row = schema::decode_file_slice_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(row.workspace_id, [7; 32]);
         assert_eq!(row.slice_number, 0);
         assert_eq!(row.slice_event_id, built.slice_event_id);
@@ -405,13 +408,13 @@ mod tests {
 
         let output = project(&event).expect("project slice under deleted descriptor");
 
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(
-            output.rows[0].table,
+            output.legacy_rows()[0].table,
             crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
         );
-        assert_eq!(output.deletes.len(), 1);
-        assert_eq!(output.deletes[0].table, schema::FILE_SLICES);
+        assert_eq!(output.legacy_deletes().len(), 1);
+        assert_eq!(output.legacy_deletes()[0].table, schema::FILE_SLICES);
     }
 
     #[test]

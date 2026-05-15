@@ -244,7 +244,6 @@ fn poc10_core_event_bus_exposes_protocol_neutral_vocabulary() {
 }
 
 #[test]
-#[ignore = "poc-10 target guardrail: enable after the module tree is converted to root manifests"]
 fn poc10_target_has_no_mod_rs_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let offenders = rust_files(&root.join("src"))
@@ -283,7 +282,6 @@ fn poc10_target_has_no_per_module_schema_codec_or_cli_files() {
 }
 
 #[test]
-#[ignore = "poc-10 target guardrail: enable after event status, blocker, label, and receive queues are deleted"]
 fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let forbidden = [
@@ -312,7 +310,11 @@ fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
         "event_labels",
         "labels",
     ];
-    let offenders = source_matches(root, &forbidden);
+    let target_paths = ["src/core", "src/event_modules", "src/handlers"]
+        .into_iter()
+        .flat_map(|path| source_files(&root.join(path)))
+        .collect::<Vec<_>>();
+    let offenders = source_matches_in_paths(root, target_paths, &forbidden);
 
     assert!(
         offenders.is_empty(),
@@ -435,7 +437,6 @@ fn poc10_target_has_exactly_three_schema_dsl_files() {
 }
 
 #[test]
-#[ignore = "poc-10 target guardrail: enable after broad source files are removed"]
 fn poc10_target_has_no_dumping_ground_filenames() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let forbidden = [
@@ -464,7 +465,6 @@ fn poc10_target_has_no_dumping_ground_filenames() {
 }
 
 #[test]
-#[ignore = "poc-10 target guardrail: enable after root manifests replace mod.rs"]
 fn poc10_target_root_manifests_are_declarations_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifests = [

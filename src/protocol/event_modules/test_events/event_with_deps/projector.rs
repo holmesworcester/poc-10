@@ -121,8 +121,8 @@ mod tests {
     fn shared_event_projects_no_rows() {
         let output = project(&inner_bytes_fixture()).expect("project shared");
 
-        assert!(output.rows.is_empty());
-        assert!(output.labels.is_empty());
+        assert!(output.legacy_rows().is_empty());
+        assert!(output.legacy_labels().is_empty());
     }
 
     #[test]
@@ -135,10 +135,13 @@ mod tests {
 
         let output = project(&staged).expect("project staged");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::STAGED_EVENTS_WITH_DEPS);
-        assert_eq!(output.rows[0].key, 17u64.to_be_bytes());
-        assert_eq!(output.rows[0].value, inner_bytes);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(
+            output.legacy_rows()[0].table,
+            schema::STAGED_EVENTS_WITH_DEPS
+        );
+        assert_eq!(output.legacy_rows()[0].key, 17u64.to_be_bytes());
+        assert_eq!(output.legacy_rows()[0].value, inner_bytes);
     }
 
     #[test]

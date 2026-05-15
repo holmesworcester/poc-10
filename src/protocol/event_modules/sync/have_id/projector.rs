@@ -83,12 +83,12 @@ mod tests {
         let record = codec::outbound_record(have_event()).expect("record");
         let output = project(&context_for(&record)).expect("project outgoing");
 
-        assert_eq!(output.rows.len(), 2);
+        assert_eq!(output.legacy_rows().len(), 2);
         assert_eq!(
-            output.rows[0].table,
+            output.legacy_rows()[0].table,
             connection::schema::CONNECTION_SCOPED_EVENTS
         );
-        assert_eq!(output.rows[1].table, worker_schema::TRANSIT_OUT);
+        assert_eq!(output.legacy_rows()[1].table, worker_schema::TRANSIT_OUT);
     }
 
     #[test]
@@ -97,9 +97,9 @@ mod tests {
         let record = codec::inbound_record_from_wire(bytes).expect("record");
         let output = project(&context_for(&record)).expect("project incoming");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, worker_schema::SYNC_IN_EVENTS);
-        assert_eq!(output.rows[0].value, record.canonical_bytes);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, worker_schema::SYNC_IN_EVENTS);
+        assert_eq!(output.legacy_rows()[0].value, record.canonical_bytes);
     }
 
     #[test]

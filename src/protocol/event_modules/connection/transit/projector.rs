@@ -545,10 +545,10 @@ mod tests {
 
         let output = project_network_in(&store, &inbound, true).expect("project frame");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, worker_schema::CANONICAL_IN);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, worker_schema::CANONICAL_IN);
         store
-            .insert_table_rows(output.rows)
+            .insert_table_rows(output.legacy_rows())
             .expect("insert canonical rows");
         let queued = worker_schema::claim_canonical_in(&store, 1).expect("claim canonical");
         assert_eq!(queued.len(), 1);

@@ -17,26 +17,24 @@
 //! should mostly be another module like this one: select schemas, provide a
 //! registry, and hand core a command list plus a worker catalog.
 
-pub mod cli;
-pub mod event_modules;
-pub mod wire;
-
 use std::path::Path;
 use std::sync::Arc;
 
+use super::commands;
+use super::event_modules;
+use super::event_modules::types::{EventRecord, ReceiveMetadata};
+use super::event_modules::worker::{
+    AdmitDecision, EventRegistry, EventWithContext, ProjectionDecision, ProjectionOutput,
+    ReceivedRecord,
+};
+use super::event_modules::Modules;
 use crate::core::{
     app::ProtocolSpec,
-    cli::CliCommand,
+    commands::CliCommand,
     daemon::{DaemonProtocol, Worker},
     network_queues::{self, InboundNetworkRow},
     store::{Schema, Store},
 };
-use event_modules::types::{EventRecord, ReceiveMetadata};
-use event_modules::worker::{
-    AdmitDecision, EventRegistry, EventWithContext, ProjectionDecision, ProjectionOutput,
-    ReceivedRecord,
-};
-use event_modules::Modules;
 
 #[derive(Debug, Clone, Default)]
 pub struct Protocol {
@@ -61,7 +59,7 @@ impl Protocol {
     }
 
     /// Protocol-wide negentropy sync index. Exposed so callers running the
-    /// protocol directly (without a `cli::Context`) can pass it into the
+    /// protocol directly (without a command context) can pass it into the
     /// sync/transit workers; the daemon path obtains the same kind of
     /// reference through `DaemonWorkerContext::sync_index` on `Context`.
     pub fn sync_index(&self) -> &event_modules::sync::SyncIndex {
@@ -129,7 +127,7 @@ impl EventRegistry for Protocol {
 // Core daemon integration: the runner owns scheduling and lifecycle, while the
 // protocol supplies the context type and named worker catalog.
 impl DaemonProtocol for Protocol {
-    type Context = cli::Context;
+    type Context = commands::Context;
 
     fn daemon_db_path(context: &Self::Context) -> &Path {
         &context.db_path
@@ -146,10 +144,10 @@ impl ProtocolSpec for Protocol {
     const NAME: &'static str = "topo";
 
     fn open_context(db_path: impl AsRef<Path>) -> Result<Self::Context, String> {
-        cli::Context::open(db_path)
+        commands::Context::open(db_path)
     }
 
     fn commands() -> Vec<CliCommand<Self::Context>> {
-        cli::commands()
+        commands::commands()
     }
 }

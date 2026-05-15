@@ -2,7 +2,7 @@
 //!
 //! Scope: a single count CLI/test helpers use to observe queue depth.
 //! Enqueue/drain/clear live in the workers that own the bookkeeping
-//! (`workers::sync` drains the queue each tick; `workers::pipeline_helpers::purging`
+//! (`workers::sync` drains the queue each tick; `workers::event_retention`
 //! enqueues when canonical bytes are dropped from `EVENTS`).
 
 use crate::core::store::Store;

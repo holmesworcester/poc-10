@@ -207,16 +207,16 @@ mod tests {
 
         let output = project_signed(&envelope, &event).expect("project endpoint shared");
 
-        assert_eq!(output.labels.len(), 0);
-        assert_eq!(output.rows.len(), 2);
-        assert_eq!(output.rows[0].table, schema::ENDPOINT_SHARED);
+        assert_eq!(output.legacy_labels().len(), 0);
+        assert_eq!(output.legacy_rows().len(), 2);
+        assert_eq!(output.legacy_rows()[0].table, schema::ENDPOINT_SHARED);
         assert_eq!(
-            output.rows[0].key,
+            output.legacy_rows()[0].key,
             schema::endpoint_shared_key([1; 32], endpoint_shared_id)
         );
-        assert_eq!(output.rows[1].table, schema::ENDPOINT_MEMBERSHIPS);
+        assert_eq!(output.legacy_rows()[1].table, schema::ENDPOINT_MEMBERSHIPS);
         assert_eq!(
-            output.rows[1].key,
+            output.legacy_rows()[1].key,
             schema::endpoint_membership_key([3; 32], [1; 32])
         );
     }
@@ -345,8 +345,11 @@ mod tests {
         );
 
         let output = project_signed(&envelope, &event).expect("project invite-server endpoint");
-        let row = schema::decode_endpoint_shared_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode endpoint row");
+        let row = schema::decode_endpoint_shared_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode endpoint row");
 
         assert_eq!(row.endpoint_role, EndpointRole::InviteServer);
         assert_eq!(row.user_authority_event_id, invite_server_id);

@@ -53,27 +53,27 @@ mod tests {
         let bytes = codec::encode(&local);
         let output = project(&bytes).expect("project endpoint");
 
-        assert_eq!(output.rows.len(), 4);
+        assert_eq!(output.legacy_rows().len(), 4);
         assert!(output
-            .rows
+            .legacy_rows()
             .iter()
             .any(|row| row.table == schema::LOCAL_ENDPOINT
                 && row.key == b"local"
                 && row.value == local.endpoint));
         assert!(output
-            .rows
+            .legacy_rows()
             .iter()
             .any(|row| row.table == schema::LOCAL_ENDPOINT_SECRET
                 && row.key == b"local"
                 && row.value == local.secret));
         assert!(output
-            .rows
+            .legacy_rows()
             .iter()
             .any(|row| row.table == schema::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY
                 && row.key == b"local"
                 && row.value == local.signing_public_key));
         assert!(output
-            .rows
+            .legacy_rows()
             .iter()
             .any(|row| row.table == schema::LOCAL_ENDPOINT_SIGNING_SECRET
                 && row.key == b"local"

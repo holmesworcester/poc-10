@@ -43,11 +43,11 @@ mod tests {
         let event = InviteSecretEvent::new([7; 32]);
         let output = project(&codec::encode(&event)).expect("project invite secret");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::INVITE_SECRETS);
-        assert_eq!(output.rows[0].key, event.bootstrap_hash);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::INVITE_SECRETS);
+        assert_eq!(output.legacy_rows()[0].key, event.bootstrap_hash);
         assert_eq!(
-            schema::decode_invite_secret_row(&output.rows[0].value)
+            schema::decode_invite_secret_row(&output.legacy_rows()[0].value)
                 .expect("decode invite secret row"),
             schema::InviteSecretRow {
                 bootstrap_secret: event.bootstrap_secret,

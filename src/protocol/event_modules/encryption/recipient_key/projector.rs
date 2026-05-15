@@ -108,7 +108,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
             recipient_key.endpoint_shared_id,
             recipient_key.workspace_id,
         )?;
-        output.deletes.push(TableDelete {
+        output.push_table_delete(TableDelete {
             table: schema::RECIPIENT_KEYS,
             key: schema::recipient_key_key(
                 recipient_key.workspace_id,
@@ -121,7 +121,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         // resurrection of the predecessor's row. The label payload names
         // the successor (this event's id) so a debugger / future query
         // can follow the chain.
-        output.labels.push(EventLabel {
+        output.push_event_label(EventLabel {
             event_id: recipient_key.previous_recipient_key_id,
             label: superseded_label(&event.context.event_id),
         });
@@ -268,10 +268,13 @@ mod tests {
 
         let output = project(&event).expect("project recipient key");
 
-        assert_eq!(output.rows.len(), 2);
-        assert_eq!(output.rows[0].table, schema::RECIPIENT_KEYS);
-        let row = schema::decode_recipient_key_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        assert_eq!(output.legacy_rows().len(), 2);
+        assert_eq!(output.legacy_rows()[0].table, schema::RECIPIENT_KEYS);
+        let row = schema::decode_recipient_key_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(row.workspace_id, [1; 32]);
         assert_eq!(row.recipient_key_id, event.context.event_id);
         assert_eq!(row.endpoint_shared_id, signer_id);
@@ -382,32 +385,33 @@ mod tests {
         let output = project(&event).expect("project supersession");
 
         assert_eq!(
-            output.rows.len(),
+            output.legacy_rows().len(),
             2,
             "must write one new row and one reconcile hint"
         );
         assert_eq!(
-            output.deletes.len(),
+            output.legacy_deletes().len(),
             1,
             "supersession must emit one TableDelete for the predecessor row"
         );
-        assert_eq!(output.deletes[0].table, schema::RECIPIENT_KEYS);
+        assert_eq!(output.legacy_deletes()[0].table, schema::RECIPIENT_KEYS);
         assert_eq!(
-            output.deletes[0].key,
+            output.legacy_deletes()[0].key,
             schema::recipient_key_key([1; 32], predecessor_id),
             "the deleted row key must be the predecessor's"
         );
         assert_eq!(
-            output.labels.len(),
+            output.legacy_labels().len(),
             1,
             "supersession must emit one EventLabel marking the predecessor"
         );
         assert_eq!(
-            output.labels[0].event_id, predecessor_id,
+            output.legacy_labels()[0].event_id,
+            predecessor_id,
             "the label must be attached to the predecessor's event id"
         );
         assert_eq!(
-            output.labels[0].label,
+            output.legacy_labels()[0].label,
             super::super::types::superseded_label(&event.context.event_id),
             "the label payload must name the successor recipient_key event"
         );
@@ -450,17 +454,17 @@ mod tests {
         let output = project(&event).expect("project superseded predecessor");
 
         assert!(
-            output.rows.is_empty(),
+            output.legacy_rows().is_empty(),
             "predecessor with supersession label must not write the recipient_keys row \
              (would resurrect the row the supersession projector deleted), got {} rows",
-            output.rows.len()
+            output.legacy_rows().len()
         );
         assert!(
-            output.deletes.is_empty(),
+            output.legacy_deletes().is_empty(),
             "fresh recipient_key (no previous_recipient_key_id) must not emit deletes"
         );
         assert!(
-            output.labels.is_empty(),
+            output.legacy_labels().is_empty(),
             "fresh recipient_key must not emit a supersession label of its own"
         );
     }

@@ -32,8 +32,8 @@ use crate::protocol::event_modules::encryption::disappearing_messages_setting::q
 use crate::protocol::event_modules::identity::workspace::queries as workspace_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::workers::encryption as encryption_worker;
+use crate::workers::event_retention;
 use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
-use crate::workers::pipeline_helpers::purging;
 use crate::workers::DaemonWorkerContext;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -222,7 +222,7 @@ fn process_job<R: EventRegistry>(
                 job.author_user_id,
                 job.created_at_ms / UNIX_MINUTE_MS,
             )])?;
-            purging::purge_event_storage_in_tx(tx_store, &job.message_id)?;
+            event_retention::purge_event_storage_in_tx(tx_store, &job.message_id)?;
             Ok::<_, rusqlite::Error>(deleted)
         })
         .map_err(|err| format!("expire message cleanup: {err}"))?;

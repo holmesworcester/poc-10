@@ -37,9 +37,9 @@ mod tests {
         let bytes = codec::encode(&event).expect("encode workspace");
         let output = project(&bytes).expect("project workspace");
 
-        assert_eq!(output.labels.len(), 0);
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::WORKSPACES);
-        assert_eq!(output.rows[0].key, event_id(&bytes));
+        assert_eq!(output.legacy_labels().len(), 0);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::WORKSPACES);
+        assert_eq!(output.legacy_rows()[0].key, event_id(&bytes));
     }
 }

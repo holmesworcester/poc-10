@@ -10,9 +10,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
 use crate::core::store::Store;
-use crate::protocol::cli::Context;
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::content::{file_slice, message};
 use crate::protocol::event_modules::types::EventId;
 
@@ -95,15 +95,15 @@ impl FileSummary {
         out.push(format!("       mime: {}", self.mime_type));
         out.push(format!(
             "       id: {}",
-            message::cli::hex_id(self.file_event_id)
+            message::commands::hex_id(self.file_event_id)
         ));
         out.push(format!(
             "       file_id: {}",
-            message::cli::hex_id(self.file_id)
+            message::commands::hex_id(self.file_id)
         ));
         out.push(format!(
             "       message: {}",
-            message::cli::hex_id(self.message_id)
+            message::commands::hex_id(self.message_id)
         ));
         out
     }
@@ -131,7 +131,7 @@ fn run_files_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutp
         return Err(FILES_USAGE.to_string());
     }
     let workspace_id =
-        message::cli::parse_hex_id(args.get(0).expect("length checked"), FILES_USAGE)?;
+        message::commands::parse_hex_id(args.get(0).expect("length checked"), FILES_USAGE)?;
     let limit = match args.get(1) {
         Some(value) => value
             .parse::<usize>()
@@ -151,7 +151,7 @@ fn run_files_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutp
 fn run_save_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(3, SAVE_FILE_USAGE)?;
     let workspace_id =
-        message::cli::parse_hex_id(args.get(0).expect("length checked"), SAVE_FILE_USAGE)?;
+        message::commands::parse_hex_id(args.get(0).expect("length checked"), SAVE_FILE_USAGE)?;
     let file_event_id = resolve_file_selector(
         &context.store,
         workspace_id,
@@ -161,7 +161,7 @@ fn run_save_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
 
     let sealed = queries::sealed_file_row_by_id(&context.store, workspace_id, file_event_id)?
         .ok_or_else(|| "file does not exist".to_string())?;
-    if message::cli::is_deleted_by_author(
+    if message::commands::is_deleted_by_author(
         &context.store,
         &sealed.message_id,
         &sealed.author_user_id,
@@ -210,7 +210,10 @@ fn run_save_file_command(context: &mut Context, args: CliArgs<'_>) -> Result<Cli
     fs::write(&out_path, &bytes).map_err(|err| format!("write {}: {err}", out_path.display()))?;
 
     Ok(CliOutput::lines(vec![
-        format!("file_event_id: {}", message::cli::hex_id(file_event_id)),
+        format!(
+            "file_event_id: {}",
+            message::commands::hex_id(file_event_id)
+        ),
         format!("filename: {}", row.filename),
         format!("output_path: {}", out_path.display()),
         format!("bytes_written: {}", bytes.len()),
@@ -255,7 +258,7 @@ pub fn list_summaries(
 
 // Sealed file descriptor decryption + filtered listing live in
 // `commands.rs`. The cli re-exports `visible_file_rows` so peer CLIs
-// that already reference `file::cli::visible_file_rows` keep building.
+// that already reference `file::commands::visible_file_rows` keep building.
 pub(crate) use commands::visible_file_rows;
 
 fn resolve_file_selector(
@@ -276,7 +279,7 @@ fn resolve_file_selector(
             .ok_or_else(|| format!("file #{number} does not exist"))?;
         Ok(row.file_event_id)
     } else {
-        message::cli::parse_hex_id(selector, "FILE_SELECTOR")
+        message::commands::parse_hex_id(selector, "FILE_SELECTOR")
     }
 }
 

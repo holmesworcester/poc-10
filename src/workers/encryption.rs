@@ -74,8 +74,8 @@ use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::{self, EventRegistry};
-use crate::workers::pipeline_helpers::{event_lifecycle, purging};
 use crate::workers::{dependency_unblock, schema as worker_schema};
+use crate::workers::{event_lifecycle, event_retention};
 
 use crate::protocol::event_modules::encryption::{
     key_request, key_wrap, local_history_node_secret, local_key_secret, local_recipient_key,
@@ -121,8 +121,8 @@ pub enum Work {
     },
     /// Retire one deleted event's per-event leaf by walking the tree from the
     /// closest retained ancestor down to the leaf, materializing splits at
-    /// every level so siblings retain implicit cover, then purging the leaf
-    /// row and canonical bytes.
+    /// every level so siblings retain implicit cover, then purge the leaf row
+    /// and canonical bytes.
     RetireDeletedEventLeaf {
         workspace_id: EventId,
         removal_frontier_id: EventId,
@@ -370,7 +370,9 @@ fn purge_retired_history_node_bytes(
     retired_node_id: EventId,
 ) -> Result<PurgeRetiredHistoryNodeBytesReport, String> {
     let purged = store
-        .write_transaction(|store| purging::purge_event_storage_in_tx(store, &retired_node_id))
+        .write_transaction(|store| {
+            event_retention::purge_event_storage_in_tx(store, &retired_node_id)
+        })
         .map_err(|err| format!("purge retired history node bytes: {err}"))?;
     Ok(PurgeRetiredHistoryNodeBytesReport { purged })
 }
@@ -1231,7 +1233,7 @@ struct WipeTarget {
 ///    every depth where the deleted leaf's coord diverges from a surviving
 ///    leaf's coord. At each divergence, admit both descend and sibling.
 /// 4. Wipe phase: exact-delete every descending-side row (rows on the path
-///    from F root to the leaf) AND the F root row itself, purging their
+///    from F root to the leaf) AND the F root row itself, removing their
 ///    canonical bytes from `event_modules.events` and writing tombstone
 ///    rows into `local_history_node_tombstones`. Only sibling rows
 ///    (off-path covers) and unrelated rows survive.
@@ -1400,7 +1402,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
                 local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
                 vec![leaf_secret_key.clone()],
             )?;
-            if purging::purge_event_storage_in_tx(store, &leaf_id)? {
+            if event_retention::purge_event_storage_in_tx(store, &leaf_id)? {
                 counts.purged += 1;
             }
             // The leaf is its own replacement; it's gone, so the replacement
@@ -1764,7 +1766,7 @@ where
                 counts.wiped += 1;
             }
         }
-        if purging::purge_event_storage_in_tx(tx_store, &target.event_id)? {
+        if event_retention::purge_event_storage_in_tx(tx_store, &target.event_id)? {
             counts.purged += 1;
         }
         let inserted = tx_store.insert_table_rows_in_tx(vec![
@@ -2052,7 +2054,7 @@ fn purge_retired_recipient_material(
                 pending_key_unwrap_row_keys,
             )?;
             for event_id in &event_ids_to_purge {
-                purging::purge_event_storage_in_tx(store, event_id)?;
+                event_retention::purge_event_storage_in_tx(store, event_id)?;
             }
             Ok(())
         })
@@ -2092,7 +2094,7 @@ mod tests {
     use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, signed, workspace};
     use crate::protocol::event_modules::types::{event_id, EventStatus};
     use crate::protocol::Protocol;
-    use crate::workers::pipeline_helpers::event_lifecycle;
+    use crate::workers::event_lifecycle;
 
     use super::*;
 

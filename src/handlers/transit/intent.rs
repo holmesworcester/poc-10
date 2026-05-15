@@ -9,6 +9,7 @@ use crate::core::intents::{Intent, IntentExecution, IntentKind};
 pub type HandlerId = [u8; 32];
 
 pub const TRANSIT_WRAP_CONNECTION_BATCH: &str = "transit_wrap_connection_batch";
+pub const TRANSIT_SEND_ON_CONNECTION: &str = "send_on_connection";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitWrapConnectionBatch {
@@ -18,13 +19,19 @@ pub struct TransitWrapConnectionBatch {
     /// Names the connection secret dependency to load. The secret material is
     /// intentionally not embedded in the intent payload.
     pub connection_secret_id: HandlerId,
-    /// Protocol outbox row keys represented by this batch. Connection send
+    /// Deterministic send item keys represented by this batch. Connection send
     /// handlers mark these only after network send succeeds.
-    pub transit_out_keys: Vec<Vec<u8>>,
+    pub send_item_keys: Vec<Vec<u8>>,
     /// Canonical event bytes to be wrapped. Transit may inspect these only as
     /// plaintext inputs to packaging; connection transport receives only the
     /// resulting opaque frame.
     pub canonical_events: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitSendOnConnection {
+    pub connection_id: HandlerId,
+    pub event_id: HandlerId,
 }
 
 pub fn wrap_connection_batch_intent(input: TransitWrapConnectionBatch) -> Intent {
@@ -33,7 +40,7 @@ pub fn wrap_connection_batch_intent(input: TransitWrapConnectionBatch) -> Intent
     push_id(&mut payload, &input.sender_endpoint);
     push_id(&mut payload, &input.recipient_endpoint);
     push_id(&mut payload, &input.connection_secret_id);
-    push_vecs(&mut payload, &input.transit_out_keys);
+    push_vecs(&mut payload, &input.send_item_keys);
     push_vecs(&mut payload, &input.canonical_events);
 
     Intent::new(
@@ -58,7 +65,7 @@ pub fn decode_wrap_connection_batch(intent: &Intent) -> Result<TransitWrapConnec
     let sender_endpoint = reader.id()?;
     let recipient_endpoint = reader.id()?;
     let connection_secret_id = reader.id()?;
-    let transit_out_keys = reader.vecs()?;
+    let send_item_keys = reader.vecs()?;
     let canonical_events = reader.vecs()?;
     reader.finish()?;
 
@@ -71,9 +78,51 @@ pub fn decode_wrap_connection_batch(intent: &Intent) -> Result<TransitWrapConnec
         sender_endpoint,
         recipient_endpoint,
         connection_secret_id,
-        transit_out_keys,
+        send_item_keys,
         canonical_events,
     })
+}
+
+pub fn send_on_connection_intent(input: TransitSendOnConnection) -> Intent {
+    let mut payload = Vec::with_capacity(65);
+    payload.push(1);
+    push_id(&mut payload, &input.connection_id);
+    push_id(&mut payload, &input.event_id);
+
+    Intent::new(
+        IntentKind::new(TRANSIT_SEND_ON_CONNECTION).expect("valid transit send intent kind"),
+        IntentExecution::Deferred,
+        connection_event_key(input.connection_id, input.event_id),
+        payload,
+    )
+}
+
+pub fn decode_send_on_connection(intent: &Intent) -> Result<TransitSendOnConnection, String> {
+    if intent.kind.as_str() != TRANSIT_SEND_ON_CONNECTION {
+        return Err("expected send_on_connection intent".to_string());
+    }
+    if intent.execution != IntentExecution::Deferred {
+        return Err("send_on_connection intent must be deferred".to_string());
+    }
+    if intent.payload.len() != 65 || intent.payload[0] != 1 {
+        return Err("send_on_connection payload is malformed".to_string());
+    }
+    let connection_id = intent.payload[1..33].try_into().unwrap();
+    let event_id = intent.payload[33..65].try_into().unwrap();
+    if intent.key != connection_event_key(connection_id, event_id) {
+        return Err("send_on_connection key does not match payload".to_string());
+    }
+    Ok(TransitSendOnConnection {
+        connection_id,
+        event_id,
+    })
+}
+
+fn connection_event_key(connection_id: HandlerId, event_id: HandlerId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(64);
+    key.extend_from_slice(&connection_id);
+    key.extend_from_slice(&event_id);
+    key
 }
 
 fn push_id(out: &mut Vec<u8>, id: &HandlerId) {

@@ -22,7 +22,7 @@ use std::time::Duration;
 use cli_harness::*;
 
 // ---------------------------------------------------------------------------
-// Test 1: single-peer determinism — purging the same id set twice (with
+// Test 1: single-peer determinism — purge the same id set twice (with
 // different drain orderings simulated by clock jitter) reaches the same
 // root summary, and the pending-purge queue empties after the daemon
 // drainer ticks.

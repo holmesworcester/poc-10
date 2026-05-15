@@ -8,10 +8,10 @@
 
 use std::io::{self, BufRead};
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
 use crate::core::logical_clock;
 use crate::core::store::Store;
-use crate::protocol::cli::Context;
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::content::message::queries as message_queries;
 use crate::protocol::event_modules::content::message::types::UNIX_MINUTE_MS;
 use crate::protocol::event_modules::identity::{admin, endpoint};

@@ -322,13 +322,13 @@ mod tests {
         })
         .expect("project response");
 
-        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
-        assert_eq!(output.rows[0].key, connection_id);
-        assert_eq!(output.rows[1].table, schema::REQUEST_CONNECTIONS);
-        assert_eq!(output.rows[2].table, schema::CONNECTIONS);
-        assert_eq!(output.rows[2].key, connection_id);
-        assert_eq!(output.rows[2].value, [1; 32]);
-        assert_eq!(output.rows[3].table, schema::TRANSPORT_TARGETS);
+        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows()[0].key, connection_id);
+        assert_eq!(output.legacy_rows()[1].table, schema::REQUEST_CONNECTIONS);
+        assert_eq!(output.legacy_rows()[2].table, schema::CONNECTIONS);
+        assert_eq!(output.legacy_rows()[2].key, connection_id);
+        assert_eq!(output.legacy_rows()[2].value, [1; 32]);
+        assert_eq!(output.legacy_rows()[3].table, schema::TRANSPORT_TARGETS);
     }
 
     #[test]
@@ -370,11 +370,14 @@ mod tests {
         })
         .expect("project response");
 
-        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
-        assert_eq!(output.rows[2].table, schema::CONNECTIONS);
-        assert_eq!(output.rows[2].value, fixture.responder_endpoint);
-        assert_eq!(output.rows[3].table, schema::TRANSPORT_TARGETS);
-        assert_eq!(output.rows[3].value, origin.to_string().into_bytes());
+        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows()[2].table, schema::CONNECTIONS);
+        assert_eq!(output.legacy_rows()[2].value, fixture.responder_endpoint);
+        assert_eq!(output.legacy_rows()[3].table, schema::TRANSPORT_TARGETS);
+        assert_eq!(
+            output.legacy_rows()[3].value,
+            origin.to_string().into_bytes()
+        );
     }
 
     #[test]

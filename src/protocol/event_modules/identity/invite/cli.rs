@@ -6,8 +6,8 @@
 
 use std::net::SocketAddr;
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
-use crate::protocol::cli::Context;
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::worker;
 
 const INVITE_USAGE: &str = "invite --public-addr ADDR";

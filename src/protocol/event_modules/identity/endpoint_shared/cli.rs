@@ -4,8 +4,8 @@
 //! not create endpoint shares, accept links, or open transport; those operations
 //! are cross-leaf workflows and stay outside this leaf CLI.
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
-use crate::protocol::cli::Context;
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::identity::invite;
 use crate::protocol::event_modules::types::EventId;
 

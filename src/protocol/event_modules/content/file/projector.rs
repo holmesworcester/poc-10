@@ -148,13 +148,13 @@ fn file_purge_output(
     file_id: [u8; 32],
     author_user_id: [u8; 32],
 ) -> ProjectionOutput {
-    ProjectionOutput {
-        rows: vec![purge_instruction_row(
+    ProjectionOutput::from_parts(
+        vec![purge_instruction_row(
             workspace_id,
             file_event_id,
             PurgeKind::File,
         )],
-        deletes: vec![
+        vec![
             TableDelete {
                 table: schema::FILES,
                 key: schema::file_key(workspace_id, file_event_id),
@@ -168,11 +168,11 @@ fn file_purge_output(
                 key: schema::file_by_file_id_key(workspace_id, file_id, file_event_id),
             },
         ],
-        labels: vec![EventLabel {
+        vec![EventLabel {
             event_id: file_event_id,
             label: file_deletion_label(&author_user_id),
         }],
-    }
+    )
 }
 
 #[cfg(test)]
@@ -407,12 +407,15 @@ mod tests {
         let built = build_descriptor("photo.jpg", "image/jpeg");
         let event = context_for(&built);
         let output = project(&event).expect("project file");
-        assert_eq!(output.rows.len(), 3);
-        assert_eq!(output.rows[0].table, schema::FILES);
-        assert_eq!(output.rows[1].table, schema::FILES_BY_MESSAGE);
-        assert_eq!(output.rows[2].table, schema::FILES_BY_FILE_ID);
-        let row = schema::decode_sealed_file_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        assert_eq!(output.legacy_rows().len(), 3);
+        assert_eq!(output.legacy_rows()[0].table, schema::FILES);
+        assert_eq!(output.legacy_rows()[1].table, schema::FILES_BY_MESSAGE);
+        assert_eq!(output.legacy_rows()[2].table, schema::FILES_BY_FILE_ID);
+        let row = schema::decode_sealed_file_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(row.workspace_id, built.workspace_id);
         assert_eq!(row.file_event_id, built.file_event_id);
         assert_eq!(row.local_history_node_secret_id, built.leaf_id);
@@ -463,18 +466,22 @@ mod tests {
 
         let output = project(&event).expect("project deleted file");
 
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(
-            output.rows[0].table,
+            output.legacy_rows()[0].table,
             crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
         );
-        assert_eq!(output.deletes.len(), 3);
-        let delete_tables: Vec<_> = output.deletes.iter().map(|delete| delete.table).collect();
+        assert_eq!(output.legacy_deletes().len(), 3);
+        let delete_tables: Vec<_> = output
+            .legacy_deletes()
+            .iter()
+            .map(|delete| delete.table)
+            .collect();
         assert!(delete_tables.contains(&schema::FILES));
         assert!(delete_tables.contains(&schema::FILES_BY_MESSAGE));
         assert!(delete_tables.contains(&schema::FILES_BY_FILE_ID));
-        assert_eq!(output.labels.len(), 1);
-        assert_eq!(output.labels[0].event_id, built.file_event_id);
+        assert_eq!(output.legacy_labels().len(), 1);
+        assert_eq!(output.legacy_labels()[0].event_id, built.file_event_id);
     }
 
     #[test]
@@ -496,14 +503,14 @@ mod tests {
 
         let output = project(&event).expect("project file under deleted message");
 
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(
-            output.rows[0].table,
+            output.legacy_rows()[0].table,
             crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
         );
-        assert_eq!(output.deletes.len(), 3);
-        assert_eq!(output.labels.len(), 1);
-        assert_eq!(output.labels[0].event_id, built.file_event_id);
+        assert_eq!(output.legacy_deletes().len(), 3);
+        assert_eq!(output.legacy_labels().len(), 1);
+        assert_eq!(output.legacy_labels()[0].event_id, built.file_event_id);
     }
 
     #[test]

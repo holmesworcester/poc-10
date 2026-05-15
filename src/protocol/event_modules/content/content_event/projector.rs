@@ -125,11 +125,14 @@ mod tests {
 
         let output = project(&event).expect("project content");
 
-        assert_eq!(output.labels.len(), 0);
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::CONTENT_EVENTS);
-        let row = schema::decode_content_event_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        assert_eq!(output.legacy_labels().len(), 0);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::CONTENT_EVENTS);
+        let row = schema::decode_content_event_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(row.workspace_id, [7; 32]);
         assert_eq!(row.event_id, event_id);
         assert_eq!(row.payload_bytes, 3);

@@ -5,9 +5,9 @@
 //! applied everything. These summaries are intentionally close to the event
 //! module so black-box tests can stay small.
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
 use crate::core::logical_clock;
-use crate::protocol::cli::Context;
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::schema as event_schema;
 use crate::protocol::event_modules::types::EventIndexEntry;
 use crate::protocol::event_modules::worker::{self, CommandOutput};

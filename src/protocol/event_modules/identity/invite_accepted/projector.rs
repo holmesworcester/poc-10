@@ -110,11 +110,14 @@ mod tests {
 
         let output = project(&event).expect("project acceptance");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::INVITES_ACCEPTED);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::INVITES_ACCEPTED);
         assert_eq!(
-            schema::decode_invite_accepted_row(&output.rows[0].key, &output.rows[0].value)
-                .expect("decode row"),
+            schema::decode_invite_accepted_row(
+                &output.legacy_rows()[0].key,
+                &output.legacy_rows()[0].value
+            )
+            .expect("decode row"),
             super::super::types::InviteAcceptedRow {
                 accepted_endpoint_id: [5; 32],
                 workspace_id: [1; 32],

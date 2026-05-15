@@ -1,8 +1,8 @@
-//! Topo CLI command registry.
+//! Topo command registry.
 //!
 //! This file is intentionally a shell. Command names, argv parsing, help text,
 //! worker calls, follow-up queries, and output formatting belong in the closest
-//! scoped `cli.rs` under `event_modules/`. The protocol shell only assembles
+//! scoped command adapter under `event_modules/`. The protocol shell only assembles
 //! those command specs, adds whole-protocol status aliases, and provides the
 //! small context object those specs share.
 //!
@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
 use crate::core::logical_clock;
 use crate::core::network_queues::InboundNetworkRow;
 use crate::core::store::Store;

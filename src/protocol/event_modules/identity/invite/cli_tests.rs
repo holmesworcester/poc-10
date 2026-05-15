@@ -1,5 +1,5 @@
-use crate::core::cli::{self, CliOutput};
-use crate::protocol::cli::Context;
+use crate::core::commands::{self as command_runner, CliOutput};
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::identity::endpoint;
 
 use super::{commands, schema};
@@ -15,7 +15,8 @@ fn invite_cli_creates_local_endpoint_and_local_invite_secret() {
         "127.0.0.1:43123".to_string(),
     ];
 
-    let output = cli::run(&super::cli::commands(), &mut context, &args).expect("run invite CLI");
+    let output =
+        command_runner::run(&super::cli::commands(), &mut context, &args).expect("run invite CLI");
 
     let CliOutput { lines } = output;
     assert_eq!(lines.len(), 1);

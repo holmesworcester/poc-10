@@ -8,23 +8,37 @@ use crate::core::intents::{Intent, IntentExecution, IntentKind};
 
 pub const CONNECTION_SEND_FRAME: &str = "connection_send_frame";
 pub const CONNECTION_MARK_SENT: &str = "connection_mark_sent";
+pub const CONNECTION_SEND_REQUEST: &str = "connection_send_request";
+pub const CONNECTION_SEND_RESPONSE: &str = "connection_send_response";
+
+pub type HandlerId = [u8; 32];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionSendFrame {
     pub target_addr: String,
-    pub transit_out_keys: Vec<Vec<u8>>,
+    pub send_item_keys: Vec<Vec<u8>>,
     pub frame: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionMarkSent {
-    pub transit_out_keys: Vec<Vec<u8>>,
+    pub send_item_keys: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionSendRequest {
+    pub request_id: HandlerId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionSendResponse {
+    pub request_id: HandlerId,
 }
 
 pub fn send_frame_intent(input: ConnectionSendFrame) -> Intent {
     let mut payload = Vec::new();
     push_bytes(&mut payload, input.target_addr.as_bytes());
-    push_vecs(&mut payload, &input.transit_out_keys);
+    push_vecs(&mut payload, &input.send_item_keys);
     push_bytes(&mut payload, &input.frame);
 
     Intent::new(
@@ -46,7 +60,7 @@ pub fn decode_send_frame(intent: &Intent) -> Result<ConnectionSendFrame, String>
     let mut reader = Reader::new(&intent.payload);
     let target_addr = String::from_utf8(reader.bytes()?.to_vec())
         .map_err(|_| "connection send target must be utf8".to_string())?;
-    let transit_out_keys = reader.vecs()?;
+    let send_item_keys = reader.vecs()?;
     let frame = reader.bytes()?.to_vec();
     reader.finish()?;
 
@@ -56,19 +70,19 @@ pub fn decode_send_frame(intent: &Intent) -> Result<ConnectionSendFrame, String>
 
     Ok(ConnectionSendFrame {
         target_addr,
-        transit_out_keys,
+        send_item_keys,
         frame,
     })
 }
 
 pub fn mark_sent_intent(input: ConnectionMarkSent) -> Intent {
     let mut payload = Vec::new();
-    push_vecs(&mut payload, &input.transit_out_keys);
+    push_vecs(&mut payload, &input.send_item_keys);
 
     Intent::new(
         IntentKind::new(CONNECTION_MARK_SENT).expect("valid connection mark sent intent kind"),
         IntentExecution::Deferred,
-        b"transit_out".to_vec(),
+        b"connection_send_items".to_vec(),
         payload,
     )
 }
@@ -82,10 +96,61 @@ pub fn decode_mark_sent(intent: &Intent) -> Result<ConnectionMarkSent, String> {
     }
 
     let mut reader = Reader::new(&intent.payload);
-    let transit_out_keys = reader.vecs()?;
+    let send_item_keys = reader.vecs()?;
     reader.finish()?;
 
-    Ok(ConnectionMarkSent { transit_out_keys })
+    Ok(ConnectionMarkSent { send_item_keys })
+}
+
+pub fn send_request_intent(input: ConnectionSendRequest) -> Intent {
+    single_id_intent(CONNECTION_SEND_REQUEST, input.request_id)
+}
+
+pub fn decode_send_request(intent: &Intent) -> Result<ConnectionSendRequest, String> {
+    Ok(ConnectionSendRequest {
+        request_id: decode_single_id(intent, CONNECTION_SEND_REQUEST)?,
+    })
+}
+
+pub fn send_response_intent(input: ConnectionSendResponse) -> Intent {
+    single_id_intent(CONNECTION_SEND_RESPONSE, input.request_id)
+}
+
+pub fn decode_send_response(intent: &Intent) -> Result<ConnectionSendResponse, String> {
+    Ok(ConnectionSendResponse {
+        request_id: decode_single_id(intent, CONNECTION_SEND_RESPONSE)?,
+    })
+}
+
+fn single_id_intent(kind: &str, id: HandlerId) -> Intent {
+    let mut payload = Vec::with_capacity(33);
+    payload.push(1);
+    payload.extend_from_slice(&id);
+    Intent::new(
+        IntentKind::new(kind).expect("valid connection intent kind"),
+        IntentExecution::Deferred,
+        id,
+        payload,
+    )
+}
+
+fn decode_single_id(intent: &Intent, expected_kind: &str) -> Result<HandlerId, String> {
+    if intent.kind.as_str() != expected_kind {
+        return Err(format!("expected {expected_kind} intent"));
+    }
+    if intent.execution != IntentExecution::Deferred {
+        return Err(format!("{expected_kind} intent must be deferred"));
+    }
+    if intent.payload.len() != 33 || intent.payload[0] != 1 {
+        return Err(format!("{expected_kind} payload is malformed"));
+    }
+    let id = intent.payload[1..33].try_into().unwrap();
+    if intent.key != id {
+        return Err(format!(
+            "{expected_kind} idempotence key does not match payload"
+        ));
+    }
+    Ok(id)
 }
 
 fn push_vecs(out: &mut Vec<u8>, values: &[Vec<u8>]) {

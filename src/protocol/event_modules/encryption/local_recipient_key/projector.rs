@@ -31,15 +31,18 @@ mod tests {
         let event_id = crate::protocol::event_modules::types::event_id(&bytes);
         let output = project(&bytes).expect("project local recipient key");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::LOCAL_RECIPIENT_KEYS);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::LOCAL_RECIPIENT_KEYS);
         assert_eq!(
-            output.rows[0].key,
+            output.legacy_rows()[0].key,
             schema::local_recipient_key_key(event.workspace_id, event_id)
         );
         assert_eq!(
-            schema::decode_local_recipient_key_row(&output.rows[0].key, &output.rows[0].value)
-                .expect("decode row"),
+            schema::decode_local_recipient_key_row(
+                &output.legacy_rows()[0].key,
+                &output.legacy_rows()[0].value
+            )
+            .expect("decode row"),
             super::super::types::LocalRecipientKeyRow {
                 workspace_id: event.workspace_id,
                 local_recipient_key_id: event_id,

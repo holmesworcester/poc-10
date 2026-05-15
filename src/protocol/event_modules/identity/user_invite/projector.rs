@@ -254,17 +254,20 @@ mod tests {
         ))
         .expect("project user_invite");
 
-        assert!(output.labels.is_empty());
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::USER_INVITES);
+        assert!(output.legacy_labels().is_empty());
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::USER_INVITES);
         assert_eq!(
-            output.rows[0].key,
+            output.legacy_rows()[0].key,
             schema::user_invite_key(&workspace_id, &event_id(&record.canonical_bytes))
         );
         assert_eq!(
-            schema::decode_user_invite_row(&output.rows[0].key, &output.rows[0].value)
-                .expect("decode row")
-                .public_key,
+            schema::decode_user_invite_row(
+                &output.legacy_rows()[0].key,
+                &output.legacy_rows()[0].value
+            )
+            .expect("decode row")
+            .public_key,
             [3; 32]
         );
     }
@@ -358,9 +361,12 @@ mod tests {
         ))
         .expect("project admin-signed user_invite");
 
-        assert_eq!(output.rows.len(), 1);
-        let row = schema::decode_user_invite_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        assert_eq!(output.legacy_rows().len(), 1);
+        let row = schema::decode_user_invite_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(row.workspace_id, workspace_id);
         assert_eq!(row.authority_event_id, admin_id);
     }

@@ -286,11 +286,11 @@ mod tests {
 
         let output = project(&event).expect("project");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::PENDING_KEY_REQUESTS);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::PENDING_KEY_REQUESTS);
         let row = schema::decode_pending_key_request_row(
-            output.rows[0].key.clone(),
-            &output.rows[0].value,
+            output.legacy_rows()[0].key.clone(),
+            &output.legacy_rows()[0].value,
         )
         .expect("decode row");
         assert_eq!(row.workspace_id, [1; 32]);

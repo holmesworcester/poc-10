@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::cli::{self, CliCommand};
+use crate::core::commands::{self, CliCommand};
 use crate::core::daemon::{self, DaemonProtocol};
 
 pub trait ProtocolSpec: DaemonProtocol {
@@ -25,7 +25,7 @@ where
     let mut context = P::open_context(db_path)?;
     let mut commands = daemon::commands::<P>();
     commands.extend(P::commands());
-    let output = cli::run(&commands, &mut context, &command_args)?;
+    let output = commands::run(&commands, &mut context, &command_args)?;
     for line in output.lines {
         println!("{line}");
     }

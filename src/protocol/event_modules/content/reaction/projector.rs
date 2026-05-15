@@ -46,13 +46,13 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         });
     if target_deleted_by_author {
         let key = schema::reaction_key(reaction.workspace_id, event.context.event_id);
-        return Ok(ProjectionOutput {
-            rows: vec![purge_instruction_row(
+        return Ok(ProjectionOutput::from_parts(
+            vec![purge_instruction_row(
                 reaction.workspace_id,
                 event.context.event_id,
                 PurgeKind::Reaction,
             )],
-            deletes: vec![
+            vec![
                 TableDelete {
                     table: schema::REACTIONS,
                     key: key.clone(),
@@ -62,8 +62,8 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                     key,
                 },
             ],
-            labels: Vec::new(),
-        });
+            Vec::new(),
+        ));
     }
 
     let signer = event
@@ -364,10 +364,13 @@ mod tests {
         );
         let output = project(&event).expect("project reaction");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::SEALED_REACTIONS);
-        let row = schema::decode_sealed_reaction_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::SEALED_REACTIONS);
+        let row = schema::decode_sealed_reaction_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(row.workspace_id, workspace_id);
         assert_eq!(row.reaction_id, built.reaction_id);
         assert_eq!(row.target_message_id, target_id);
@@ -419,13 +422,17 @@ mod tests {
 
         let output = project(&event).expect("project reaction under deleted message");
 
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(
-            output.rows[0].table,
+            output.legacy_rows()[0].table,
             crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
         );
-        assert_eq!(output.deletes.len(), 2);
-        let delete_tables: Vec<_> = output.deletes.iter().map(|delete| delete.table).collect();
+        assert_eq!(output.legacy_deletes().len(), 2);
+        let delete_tables: Vec<_> = output
+            .legacy_deletes()
+            .iter()
+            .map(|delete| delete.table)
+            .collect();
         assert!(delete_tables.contains(&schema::REACTIONS));
         assert!(delete_tables.contains(&schema::SEALED_REACTIONS));
     }

@@ -2,9 +2,9 @@
 //!
 //! This file is intentionally below the protocol. It knows how to apply declared
 //! schemas, run transactions, and read or write keyed byte rows. It does not
-//! know what any row means. Event admission, labels, missing-dep edges, network
-//! targets, and sync queues are all protocol or IO concepts layered on top of
-//! these primitives.
+//! know what any row means. Event admission, projection context, dependency
+//! edges, network targets, and sync work are all protocol or IO concepts layered
+//! on top of these primitives.
 //!
 //! The critical path is short:
 //! 1. Open a store with the schemas declared by core IO and the selected

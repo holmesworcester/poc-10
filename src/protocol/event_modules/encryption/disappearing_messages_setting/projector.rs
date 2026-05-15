@@ -298,12 +298,12 @@ mod tests {
             context,
         };
         let output = project(&event).expect("project authorized setting");
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.deletes.len(), 0);
-        assert_eq!(output.labels.len(), 0);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_deletes().len(), 0);
+        assert_eq!(output.legacy_labels().len(), 0);
         let decoded = super::super::schema::decode_active_setting_row(
-            &output.rows[0].key,
-            &output.rows[0].value,
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
         )
         .expect("decode setting row");
         assert_eq!(decoded.ttl_minutes, 5);
@@ -429,10 +429,10 @@ mod tests {
             context,
         };
         let output = project(&event).expect("equal floor must admit");
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.legacy_rows().len(), 1);
         let decoded = super::super::schema::decode_active_setting_row(
-            &output.rows[0].key,
-            &output.rows[0].value,
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
         )
         .expect("decode setting row");
         assert_eq!(decoded.expires_at_or_before_minute, 50);
@@ -458,10 +458,10 @@ mod tests {
             context,
         };
         let output = project(&event).expect("higher floor must admit");
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.legacy_rows().len(), 1);
         let decoded = super::super::schema::decode_active_setting_row(
-            &output.rows[0].key,
-            &output.rows[0].value,
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
         )
         .expect("decode setting row");
         assert_eq!(decoded.expires_at_or_before_minute, 75);

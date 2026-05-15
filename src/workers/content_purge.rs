@@ -20,8 +20,8 @@
 //! rows left behind by a crashed prior tick.
 //! Outputs: `content.message_tombstones` rows and row/event deletes inside
 //! the purge transaction; the leaf retirement step runs after commit and
-//! writes a sibling-tombstone history-node event while purging retired
-//! bytes.
+//! writes a sibling-tombstone history-node event while event_retention removes
+//! retired bytes.
 //! Consume: purged event rows leave the durable deletion label/tombstone
 //! facts behind so semantic deletion survives without keeping ciphertext
 //! bytes. Cascaded reactions/files/slices still ride on the same durable
@@ -46,8 +46,8 @@ use crate::protocol::event_modules::content::{
 use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::types::EventId;
 use crate::workers::encryption as encryption_worker;
+use crate::workers::event_retention;
 use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
-use crate::workers::pipeline_helpers::purging;
 use crate::workers::DaemonWorkerContext;
 
 use message_deletion::schema::{
@@ -302,7 +302,7 @@ fn process_message(
             vec![message::schema::message_key(event.workspace_id, message_id)],
         )
         .map_err(|err| format!("delete message row: {err}"))?;
-    if purging::purge_event_storage_in_tx(store, &message_id)
+    if event_retention::purge_event_storage_in_tx(store, &message_id)
         .map_err(|err| format!("purge message event: {err}"))?
     {
         report.event_bytes_purged += 1;
@@ -346,7 +346,7 @@ fn process_reaction(
             )],
         )
         .map_err(|err| format!("delete reaction row: {err}"))?;
-    if purging::purge_event_storage_in_tx(store, &reaction_id)
+    if event_retention::purge_event_storage_in_tx(store, &reaction_id)
         .map_err(|err| format!("purge reaction event: {err}"))?
     {
         report.event_bytes_purged += 1;
@@ -455,7 +455,7 @@ fn process_file(
             .map_err(|err| format!("enqueue cascade file slice instructions: {err}"))?;
     }
 
-    if purging::purge_event_storage_in_tx(store, &file_event_id)
+    if event_retention::purge_event_storage_in_tx(store, &file_event_id)
         .map_err(|err| format!("purge file event: {err}"))?
     {
         report.event_bytes_purged += 1;
@@ -490,7 +490,7 @@ fn process_file_slice(
     report.file_slice_rows_deleted += store
         .delete_table_rows_in_tx(file_slice::schema::FILE_SLICES, vec![slot_key])
         .map_err(|err| format!("delete file slice row: {err}"))?;
-    if purging::purge_event_storage_in_tx(store, &slice_event_id)
+    if event_retention::purge_event_storage_in_tx(store, &slice_event_id)
         .map_err(|err| format!("purge file slice event: {err}"))?
     {
         report.event_bytes_purged += 1;
@@ -618,7 +618,7 @@ mod tests {
     use crate::protocol::event_modules::schema::{self as event_schema, EventLabel};
     use crate::protocol::event_modules::types::{event_id, EventStatus};
     use crate::protocol::Protocol;
-    use crate::workers::pipeline_helpers::event_lifecycle;
+    use crate::workers::event_lifecycle;
 
     use super::*;
 

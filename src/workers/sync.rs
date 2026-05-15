@@ -302,7 +302,7 @@ pub struct SyncIndexReport {
 /// Summary of one pending-purge drain pass.
 ///
 /// The pending-purge queue is fed by the worker-owned local-retention purge
-/// helper (`pipeline_helpers::purging`); each row records "negentropy still
+/// helper (`event_retention`); each row records "negentropy still
 /// owes a purge of this event id." A drain reads up to `limit` rows in
 /// deterministic key order, removes the matching ids from the in-memory
 /// `SyncIndex`, then deletes the queue rows. The in-memory remove is

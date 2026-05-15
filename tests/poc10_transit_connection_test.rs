@@ -9,7 +9,7 @@ fn connection_drain_output() -> HandlerOutput {
             sender_endpoint: [2; 32],
             recipient_endpoint: [3; 32],
             connection_secret_id: [4; 32],
-            transit_out_keys: vec![b"out-key-1".to_vec(), b"out-key-2".to_vec()],
+            send_item_keys: vec![b"out-key-1".to_vec(), b"out-key-2".to_vec()],
             canonical_events: vec![b"event:a".to_vec(), b"event:b".to_vec()],
         },
     ))
@@ -24,7 +24,7 @@ fn completed_transit_packaging_output(
     HandlerOutput::new().intent(connection::send_frame_intent(
         connection::ConnectionSendFrame {
             target_addr: target_addr.to_string(),
-            transit_out_keys: batch.transit_out_keys,
+            send_item_keys: batch.send_item_keys,
             frame: opaque_frame,
         },
     ))
@@ -34,7 +34,7 @@ fn connection_send_success_output(send_intent: &topo::core::intents::Intent) -> 
     let send = connection::decode_send_frame(send_intent).expect("decode send intent");
     HandlerOutput::new().intent(connection::mark_sent_intent(
         connection::ConnectionMarkSent {
-            transit_out_keys: send.transit_out_keys,
+            send_item_keys: send.send_item_keys,
         },
     ))
 }
@@ -83,7 +83,7 @@ fn transit_packaging_completion_emits_opaque_connection_send_frame() {
     let send = connection::decode_send_frame(&wrapped.intents[0]).unwrap();
     assert_eq!(send.target_addr, "127.0.0.1:44000");
     assert_eq!(
-        send.transit_out_keys,
+        send.send_item_keys,
         vec![b"out-key-1".to_vec(), b"out-key-2".to_vec()]
     );
     assert_eq!(send.frame, b"opaque-transit-frame".to_vec());
@@ -95,7 +95,7 @@ fn transit_packaging_completion_emits_opaque_connection_send_frame() {
 }
 
 #[test]
-fn connection_send_ack_marks_only_transit_out_keys() {
+fn connection_send_ack_marks_only_deferred_send_items() {
     let drain = connection_drain_output();
     let wrapped = completed_transit_packaging_output(
         &drain.intents[0],
@@ -112,7 +112,7 @@ fn connection_send_ack_marks_only_transit_out_keys() {
     );
     let mark = connection::decode_mark_sent(&sent.intents[0]).unwrap();
     assert_eq!(
-        mark.transit_out_keys,
+        mark.send_item_keys,
         vec![b"out-key-1".to_vec(), b"out-key-2".to_vec()]
     );
 }

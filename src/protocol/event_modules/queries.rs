@@ -3,7 +3,7 @@
 //! Scope: status counts and bounded scans used by the CLI for `status`
 //! summaries and by workers (sync, content purge, transit, connection)
 //! for ordinary read paths. Mutations to `EVENTS`, `READY_EVENTS`, and
-//! the dependency tables stay in `workers::pipeline_helpers::event_lifecycle`
+//! the dependency tables stay in `workers::event_lifecycle`
 //! and the event-admission worker.
 
 use crate::core::store::Store;

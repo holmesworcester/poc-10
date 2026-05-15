@@ -188,19 +188,22 @@ mod tests {
         };
         let output = project(&event).expect("project deletion");
 
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(
-            output.rows[0].table,
+            output.legacy_rows()[0].table,
             crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
         );
         let mut expected_key = workspace_id.to_vec();
         expected_key.extend_from_slice(&target_id);
-        assert_eq!(output.rows[0].key, expected_key);
-        assert_eq!(output.rows[0].value, vec![PurgeKind::File.as_byte()]);
-        assert!(output.deletes.is_empty());
-        assert_eq!(output.labels.len(), 1);
-        assert_eq!(output.labels[0].event_id, target_id);
-        assert_eq!(output.labels[0].label, deletion_label(&author_id));
+        assert_eq!(output.legacy_rows()[0].key, expected_key);
+        assert_eq!(
+            output.legacy_rows()[0].value,
+            vec![PurgeKind::File.as_byte()]
+        );
+        assert!(output.legacy_deletes().is_empty());
+        assert_eq!(output.legacy_labels().len(), 1);
+        assert_eq!(output.legacy_labels()[0].event_id, target_id);
+        assert_eq!(output.legacy_labels()[0].label, deletion_label(&author_id));
     }
 
     #[test]

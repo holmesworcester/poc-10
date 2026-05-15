@@ -236,10 +236,13 @@ mod tests {
         ))
         .expect("project request");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
-        assert_eq!(output.rows[0].key, types::event_id(&record.canonical_bytes));
-        assert_eq!(output.rows[0].value, record.canonical_bytes);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(
+            output.legacy_rows()[0].key,
+            types::event_id(&record.canonical_bytes)
+        );
+        assert_eq!(output.legacy_rows()[0].value, record.canonical_bytes);
     }
 
     #[test]
@@ -259,11 +262,17 @@ mod tests {
         ))
         .expect("project request");
 
-        assert_eq!(output.rows.len(), 2);
-        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
-        assert_eq!(output.rows[1].table, schema::PENDING_CONNECTION_ATTEMPTS);
-        assert_eq!(output.rows[1].key, types::event_id(&record.canonical_bytes));
-        assert_eq!(output.rows[1].value, addr.to_string().into_bytes());
+        assert_eq!(output.legacy_rows().len(), 2);
+        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(
+            output.legacy_rows()[1].table,
+            schema::PENDING_CONNECTION_ATTEMPTS
+        );
+        assert_eq!(
+            output.legacy_rows()[1].key,
+            types::event_id(&record.canonical_bytes)
+        );
+        assert_eq!(output.legacy_rows()[1].value, addr.to_string().into_bytes());
     }
 
     #[test]
@@ -279,8 +288,8 @@ mod tests {
         ))
         .expect("project local scoped request");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
     }
 
     #[test]
@@ -305,8 +314,8 @@ mod tests {
         })
         .expect("project received request");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
     }
 
     #[test]
@@ -337,11 +346,20 @@ mod tests {
         })
         .expect("project received request");
 
-        assert_eq!(output.rows.len(), 2);
-        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
-        assert_eq!(output.rows[1].table, schema::PENDING_CONNECTION_RESPONSES);
-        assert_eq!(output.rows[1].key, types::event_id(&record.canonical_bytes));
-        assert_eq!(output.rows[1].value, listen.to_string().into_bytes());
+        assert_eq!(output.legacy_rows().len(), 2);
+        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(
+            output.legacy_rows()[1].table,
+            schema::PENDING_CONNECTION_RESPONSES
+        );
+        assert_eq!(
+            output.legacy_rows()[1].key,
+            types::event_id(&record.canonical_bytes)
+        );
+        assert_eq!(
+            output.legacy_rows()[1].value,
+            listen.to_string().into_bytes()
+        );
     }
 
     #[test]
@@ -367,8 +385,8 @@ mod tests {
         })
         .expect("project received scoped request");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
     }
 
     #[test]

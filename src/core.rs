@@ -7,7 +7,7 @@
 //! whatever protocol sits above it.
 
 pub mod app;
-pub mod cli;
+pub mod commands;
 pub mod context;
 pub mod crux_runner;
 pub mod crypto;

@@ -6,8 +6,8 @@
 //! the protocol fact lives in `commands`/`projector`, and byte retention
 //! belongs to the worker.
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
-use crate::protocol::cli::Context;
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::content::message;
 use crate::protocol::event_modules::identity::endpoint;
 use crate::protocol::event_modules::types::EventId;
@@ -36,10 +36,10 @@ pub struct DeleteSummary {
 impl DeleteSummary {
     pub fn lines(&self) -> Vec<String> {
         vec![
-            format!("event_id: {}", message::cli::hex_id(self.event_id)),
+            format!("event_id: {}", message::commands::hex_id(self.event_id)),
             format!(
                 "target: {}",
-                message::cli::hex_id(self.target_file_event_id)
+                message::commands::hex_id(self.target_file_event_id)
             ),
         ]
     }
@@ -48,18 +48,18 @@ impl DeleteSummary {
 fn run_delete_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(2, DELETE_USAGE)?;
     let workspace_id =
-        message::cli::parse_hex_id(args.get(0).expect("length checked"), DELETE_USAGE)?;
+        message::commands::parse_hex_id(args.get(0).expect("length checked"), DELETE_USAGE)?;
     let target = resolve_file_selector(
         &context.store,
         workspace_id,
         args.get(1).expect("length checked"),
     )?;
 
-    let membership = message::cli::require_membership(&context.store, workspace_id)?;
+    let membership = message::commands::require_membership(&context.store, workspace_id)?;
     let local = endpoint::commands::local_keypair(&context.store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
 
-    let timestamp = message::cli::next_timestamp(&context.store, workspace_id)?;
+    let timestamp = message::commands::next_timestamp(&context.store, workspace_id)?;
     let delete = commands::delete(commands::DeleteFile {
         workspace_id,
         created_at_ms: timestamp,
@@ -111,7 +111,7 @@ fn resolve_file_selector(
         if number == 0 {
             return Err(format!("invalid file selector: {selector}"));
         }
-        let rows = crate::protocol::event_modules::content::file::cli::visible_file_rows(
+        let rows = crate::protocol::event_modules::content::file::commands::visible_file_rows(
             store,
             workspace_id,
         )?;
@@ -120,6 +120,6 @@ fn resolve_file_selector(
             .ok_or_else(|| format!("file #{number} does not exist"))?;
         Ok(row.file_event_id)
     } else {
-        message::cli::parse_hex_id(selector, "FILE_SELECTOR")
+        message::commands::parse_hex_id(selector, "FILE_SELECTOR")
     }
 }

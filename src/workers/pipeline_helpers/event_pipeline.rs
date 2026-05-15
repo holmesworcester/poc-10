@@ -81,15 +81,18 @@
 //! Fairness: explicit workers are batch-limited; compatibility helpers are
 //! bounded by command event count or caller-provided batch size.
 
+use crate::core::intents::AtomicIntent;
+pub use crate::core::intents::TableDelete;
 use crate::core::network_queues::{self, InboundNetworkRow};
-use crate::core::store::{Store, TableName, TableRow};
+use crate::core::projection::ProjectionOutput as CoreProjectionOutput;
+use crate::core::store::{SchemaDefinition, Store, TableName, TableRow};
 use crate::protocol::event_modules::types::{
     event_id, EventId, EventIndexEntry, EventRecord, EventStatus, ReceiveMetadata,
 };
 
 use crate::protocol::event_modules::schema;
 use crate::workers::dependency_unblock;
-use crate::workers::pipeline_helpers::event_lifecycle;
+use crate::workers::event_lifecycle;
 use crate::workers::schema as worker_schema;
 
 /// Default upper bound for one ready-event drain.
@@ -154,77 +157,159 @@ impl From<EventRecord> for ProposedEvent {
     }
 }
 
-/// One exact row deletion requested by a projector.
-///
-/// This is still row-shaped output, not an imperative storage escape hatch.
-/// Projectors choose keys from event bytes and context; the common worker owns
-/// applying the delete in the same transaction as row/label writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableDelete {
-    pub table: TableName,
-    pub key: Vec<u8>,
-}
-
-/// Declarative output of a projector.
-///
-/// A projector may only return rows in protocol-owned state: ordinary table
-/// rows, exact row deletes, and generic event labels. It may not emit more
-/// events, call a worker, send bytes, or query broad state. If projection
-/// appears to need one of those powers, the event module should write a queue
-/// row and let its domain worker perform the active step later.
+/// Compatibility adapter for legacy protocol projectors that still describe
+/// table mutations directly. The worker-facing boundary is the target
+/// `core::projection::ProjectionOutput`; table writes and deletes are carried as
+/// atomic intents and event-label writes are the same atomic table writes plus
+/// the normal label reprojection wakeup when applied.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionOutput {
-    pub rows: Vec<TableRow>,
-    pub deletes: Vec<TableDelete>,
-    pub labels: Vec<schema::EventLabel>,
+    output: CoreProjectionOutput,
 }
 
 impl ProjectionOutput {
+    pub fn new(output: CoreProjectionOutput) -> Self {
+        Self { output }
+    }
+
     pub fn rows(rows: Vec<TableRow>) -> Self {
-        Self {
-            rows,
-            deletes: Vec::new(),
-            labels: Vec::new(),
-        }
+        projection_table_writes(rows)
     }
 
     pub fn deletes(deletes: Vec<TableDelete>) -> Self {
-        Self {
-            rows: Vec::new(),
-            deletes,
-            labels: Vec::new(),
-        }
+        projection_table_deletes(deletes)
     }
 
     pub fn labels(labels: Vec<schema::EventLabel>) -> Self {
-        Self {
-            rows: Vec::new(),
-            deletes: Vec::new(),
-            labels,
-        }
+        projection_event_labels(labels)
     }
 
     pub fn rows_and_labels(rows: Vec<TableRow>, labels: Vec<schema::EventLabel>) -> Self {
-        Self {
-            rows,
-            deletes: Vec::new(),
-            labels,
-        }
+        projection_table_writes_and_event_labels(rows, labels)
     }
 
     pub fn deletes_and_labels(deletes: Vec<TableDelete>, labels: Vec<schema::EventLabel>) -> Self {
-        Self {
-            rows: Vec::new(),
-            deletes,
-            labels,
+        projection_table_deletes_and_event_labels(deletes, labels)
+    }
+
+    pub fn from_parts(
+        rows: Vec<TableRow>,
+        deletes: Vec<TableDelete>,
+        labels: Vec<schema::EventLabel>,
+    ) -> Self {
+        projection_parts(rows, deletes, labels)
+    }
+
+    pub fn push_table_write(&mut self, row: TableRow) {
+        self.output =
+            std::mem::take(&mut self.output).intent(AtomicIntent::PutRow(row).into_intent());
+    }
+
+    pub fn push_table_delete(&mut self, delete: TableDelete) {
+        self.output =
+            std::mem::take(&mut self.output).intent(AtomicIntent::DeleteRow(delete).into_intent());
+    }
+
+    pub fn push_event_label(&mut self, label: schema::EventLabel) {
+        for row in schema::event_label_rows(vec![label]) {
+            self.push_table_write(row);
         }
     }
 
-    pub fn append(&mut self, mut other: Self) {
-        self.rows.append(&mut other.rows);
-        self.deletes.append(&mut other.deletes);
-        self.labels.append(&mut other.labels);
+    pub fn append(&mut self, other: Self) {
+        self.output.needs.extend(other.output.needs);
+        self.output.offers.extend(other.output.offers);
+        self.output.intents.extend(other.output.intents);
     }
+
+    pub fn legacy_rows(&self) -> Vec<TableRow> {
+        self.legacy_parts().0
+    }
+
+    pub fn legacy_deletes(&self) -> Vec<TableDelete> {
+        self.legacy_parts().1
+    }
+
+    pub fn legacy_labels(&self) -> Vec<schema::EventLabel> {
+        self.legacy_parts().2
+    }
+
+    fn as_core(&self) -> &CoreProjectionOutput {
+        &self.output
+    }
+
+    fn into_core(self) -> CoreProjectionOutput {
+        self.output
+    }
+
+    fn legacy_parts(&self) -> (Vec<TableRow>, Vec<TableDelete>, Vec<schema::EventLabel>) {
+        let allowed_tables = projection_allowed_tables();
+        let mut rows = Vec::new();
+        let mut deletes = Vec::new();
+        let mut labels = Vec::new();
+        for intent in &self.output.intents {
+            match AtomicIntent::from_intent(intent, &allowed_tables)
+                .expect("legacy projection output must carry atomic row intents")
+            {
+                AtomicIntent::PutRow(row) if row.table == schema::EVENT_LABELS => {
+                    labels.push(decode_event_label_row(&row));
+                }
+                AtomicIntent::PutRow(row) => rows.push(row),
+                AtomicIntent::DeleteRow(delete) => deletes.push(delete),
+            }
+        }
+        (rows, deletes, labels)
+    }
+}
+
+impl From<CoreProjectionOutput> for ProjectionOutput {
+    fn from(output: CoreProjectionOutput) -> Self {
+        Self::new(output)
+    }
+}
+
+pub(crate) fn projection_table_writes(rows: Vec<TableRow>) -> ProjectionOutput {
+    projection_parts(rows, Vec::new(), Vec::new())
+}
+
+pub(crate) fn projection_table_deletes(deletes: Vec<TableDelete>) -> ProjectionOutput {
+    projection_parts(Vec::new(), deletes, Vec::new())
+}
+
+pub(crate) fn projection_event_labels(labels: Vec<schema::EventLabel>) -> ProjectionOutput {
+    projection_parts(Vec::new(), Vec::new(), labels)
+}
+
+pub(crate) fn projection_table_writes_and_event_labels(
+    rows: Vec<TableRow>,
+    labels: Vec<schema::EventLabel>,
+) -> ProjectionOutput {
+    projection_parts(rows, Vec::new(), labels)
+}
+
+pub(crate) fn projection_table_deletes_and_event_labels(
+    deletes: Vec<TableDelete>,
+    labels: Vec<schema::EventLabel>,
+) -> ProjectionOutput {
+    projection_parts(Vec::new(), deletes, labels)
+}
+
+pub(crate) fn projection_parts(
+    rows: Vec<TableRow>,
+    deletes: Vec<TableDelete>,
+    labels: Vec<schema::EventLabel>,
+) -> ProjectionOutput {
+    let mut output = CoreProjectionOutput::new();
+    for row in rows
+        .into_iter()
+        .chain(schema::event_label_rows(labels).into_iter())
+    {
+        output = output.intent(AtomicIntent::PutRow(row).into_intent());
+    }
+    for delete in deletes {
+        output = output.intent(AtomicIntent::DeleteRow(delete).into_intent());
+    }
+    ProjectionOutput::new(output)
 }
 
 /// Scheduler-visible decision made by a projector.
@@ -712,11 +797,7 @@ where
             let changes = registry
                 .project_network_in(store, &inbound)
                 .map_err(module_error)?;
-            let canonical_rows = changes
-                .rows
-                .iter()
-                .filter(|row| row.table == worker_schema::CANONICAL_IN)
-                .count();
+            let canonical_rows = count_atomic_puts(&changes, worker_schema::CANONICAL_IN)?;
             write_projection_output_in_tx(store, changes)?;
             network_queues::delete_inbound_in_tx(store, std::slice::from_ref(&inbound))?;
             Ok(canonical_rows)
@@ -1346,21 +1427,80 @@ fn write_projection_output_in_tx(
     store: &Store,
     changes: ProjectionOutput,
 ) -> rusqlite::Result<usize> {
-    let rows = store.insert_table_rows_in_tx(changes.rows)?;
-    let mut labels = 0;
-    for label in changes.labels {
-        let inserted =
-            store.insert_table_rows_in_tx(schema::event_label_rows(vec![label.clone()]))?;
-        if inserted > 0 {
-            labels += inserted;
-            enqueue_label_reprojections_in_tx(store, &label.event_id)?;
+    let changes = changes.into_core();
+    if !changes.needs.is_empty() || !changes.offers.is_empty() {
+        return Err(module_error(
+            "legacy event pipeline cannot persist target context needs/offers yet".to_string(),
+        ));
+    }
+
+    let mut applied = 0;
+    let allowed_tables = projection_allowed_tables();
+    for intent in changes.intents {
+        match AtomicIntent::from_intent(&intent, &allowed_tables).map_err(module_error)? {
+            AtomicIntent::PutRow(row) => {
+                let label_event_id = event_label_id_from_row(&row)?;
+                let inserted = store.insert_table_rows_in_tx(vec![row])?;
+                applied += inserted;
+                if inserted > 0 {
+                    if let Some(event_id) = label_event_id {
+                        enqueue_label_reprojections_in_tx(store, &event_id)?;
+                    }
+                }
+            }
+            AtomicIntent::DeleteRow(delete) => {
+                applied += store.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
+            }
         }
     }
-    let mut deletes = 0;
-    for delete in changes.deletes {
-        deletes += store.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
+    Ok(applied)
+}
+
+fn count_atomic_puts(changes: &ProjectionOutput, table: TableName) -> rusqlite::Result<usize> {
+    let allowed_tables = projection_allowed_tables();
+    let mut count = 0usize;
+    for intent in &changes.as_core().intents {
+        match AtomicIntent::from_intent(intent, &allowed_tables).map_err(module_error)? {
+            AtomicIntent::PutRow(row) if row.table == table => count += 1,
+            _ => {}
+        }
     }
-    Ok(rows + labels + deletes)
+    Ok(count)
+}
+
+fn event_label_id_from_row(row: &TableRow) -> rusqlite::Result<Option<EventId>> {
+    if row.table != schema::EVENT_LABELS {
+        return Ok(None);
+    }
+    if row.key.len() < 32 {
+        return Err(module_error(
+            "event label row key is shorter than event id".to_string(),
+        ));
+    }
+    let mut event_id = [0u8; 32];
+    event_id.copy_from_slice(&row.key[..32]);
+    Ok(Some(event_id))
+}
+
+fn decode_event_label_row(row: &TableRow) -> schema::EventLabel {
+    let mut event_id = [0u8; 32];
+    event_id.copy_from_slice(&row.key[..32]);
+    schema::EventLabel {
+        event_id,
+        label: row.value.clone(),
+    }
+}
+
+fn projection_allowed_tables() -> Vec<TableName> {
+    crate::protocol::event_modules::schemas()
+        .into_iter()
+        .chain(worker_schema::SCHEMAS.iter().copied())
+        .chain(network_queues::SCHEMAS.iter().copied())
+        .filter_map(|schema| match schema.definition {
+            SchemaDefinition::RowTable(table) => Some(table),
+            SchemaDefinition::Sql(_) => None,
+        })
+        .collect()
 }
 
 fn enqueue_label_reprojections_in_tx(store: &Store, event_id: &EventId) -> rusqlite::Result<usize> {

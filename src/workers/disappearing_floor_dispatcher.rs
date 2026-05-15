@@ -243,7 +243,7 @@ mod tests {
     use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
     use crate::protocol::event_modules::types::{event_id, EventId, EventStatus};
     use crate::protocol::Protocol;
-    use crate::workers::pipeline_helpers::event_lifecycle;
+    use crate::workers::event_lifecycle;
 
     use super::*;
 

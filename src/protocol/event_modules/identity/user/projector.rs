@@ -148,11 +148,12 @@ mod tests {
         let output = project(&context(&user_record, Some((invite_id, invite_record))))
             .expect("project user");
 
-        assert!(output.labels.is_empty());
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::USERS);
+        assert!(output.legacy_labels().is_empty());
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::USERS);
         let row =
-            schema::decode_user_row(&output.rows[0].key, &output.rows[0].value).expect("decode");
+            schema::decode_user_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
+                .expect("decode");
         assert_eq!(row.workspace_id, workspace_id());
         assert_eq!(row.user_id, event_id(&user_record.canonical_bytes));
         assert_eq!(row.user_invite_id, invite_id);

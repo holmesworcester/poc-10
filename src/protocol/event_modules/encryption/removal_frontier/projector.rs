@@ -228,10 +228,13 @@ mod tests {
 
         let output = project(&event).expect("project frontier");
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::REMOVAL_FRONTIERS);
-        let row = schema::decode_removal_frontier_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::REMOVAL_FRONTIERS);
+        let row = schema::decode_removal_frontier_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(row.workspace_id, [1; 32]);
         assert_eq!(row.removal_frontier_id, event.context.event_id);
         assert_eq!(row.authority_admin_id, admin_id);
@@ -277,8 +280,11 @@ mod tests {
 
         let output = project(&event).expect("project frontier");
 
-        let row = schema::decode_removal_frontier_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        let row = schema::decode_removal_frontier_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(row.removal_event_ids, vec![ref_id]);
     }
 

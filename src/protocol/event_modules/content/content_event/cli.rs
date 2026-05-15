@@ -5,9 +5,9 @@
 //! read from the local endpoint and endpoint-membership projections, then passed
 //! into the content command explicitly.
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
 use crate::core::logical_clock;
-use crate::protocol::cli::Context;
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker;

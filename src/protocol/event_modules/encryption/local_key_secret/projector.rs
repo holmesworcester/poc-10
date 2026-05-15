@@ -98,10 +98,13 @@ mod tests {
 
         let output = project(&event).expect("project local secret");
 
-        assert_eq!(output.rows.len(), 2);
-        assert_eq!(output.rows[0].table, schema::LOCAL_KEY_SECRETS);
-        let row = schema::decode_local_key_secret_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode row");
+        assert_eq!(output.legacy_rows().len(), 2);
+        assert_eq!(output.legacy_rows()[0].table, schema::LOCAL_KEY_SECRETS);
+        let row = schema::decode_local_key_secret_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode row");
         assert_eq!(row.workspace_id, [1; 32]);
         assert_eq!(row.removal_frontier_id, frontier_id);
         assert_eq!(row.local_key_secret_id, event.context.event_id);

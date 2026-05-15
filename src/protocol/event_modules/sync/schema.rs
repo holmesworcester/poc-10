@@ -18,7 +18,7 @@
 //! intentionally dropped.
 //!
 //! This file owns the durable per-event row that records "negentropy still
-//! has not been told that this event id was purged." The purging helper
+//! has not been told that this event id was purged." The event_retention helper
 //! enqueues one row per purged event in the same transaction as the
 //! canonical-bytes delete; the negentropy purge drainer worker drains the
 //! rows on the next daemon tick and removes the matching ids from the

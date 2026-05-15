@@ -168,7 +168,17 @@ impl FileRow {
             size = self.blob_bytes,
             mime = self.mime_type,
             slices = self.total_slices,
-            file = super::super::message::cli::hex_id(self.file_event_id)
+            file = hex_id(self.file_event_id)
         )
     }
+}
+
+fn hex_id(id: EventId) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in id {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    out
 }

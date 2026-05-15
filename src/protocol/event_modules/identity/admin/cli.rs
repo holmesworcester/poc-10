@@ -6,10 +6,10 @@
 //! workspaces, or transport state; those cross-leaf workflows stay in the
 //! identity root CLI.
 
-use crate::core::cli::{CliArgs, CliCommand, CliOutput};
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
 use crate::core::logical_clock;
 use crate::core::store::Store;
-use crate::protocol::cli::Context;
+use crate::protocol::commands::Context;
 use crate::protocol::event_modules::identity::{endpoint, endpoint_shared, invite, user};
 use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::types::EventId;

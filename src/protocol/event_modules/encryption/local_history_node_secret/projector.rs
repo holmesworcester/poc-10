@@ -77,12 +77,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         {
             return Err("local history node cannot tombstone its own coordinate".to_string());
         }
-        output.rows.push(schema::local_history_node_tombstone_row(
+        output.push_table_write(schema::local_history_node_tombstone_row(
             &node,
             event.context.event_id,
             tombstone_node_id,
         ));
-        output.deletes.push(TableDelete {
+        output.push_table_delete(TableDelete {
             table: schema::LOCAL_HISTORY_NODE_SECRETS,
             key: schema::local_history_node_secret_key(
                 retired.workspace_id,
@@ -326,11 +326,14 @@ mod tests {
 
         let output = project(&event).expect("project minute_node");
 
-        assert_eq!(output.rows.len(), 2);
-        assert_eq!(output.rows[0].table, schema::LOCAL_HISTORY_NODE_SECRETS);
+        assert_eq!(output.legacy_rows().len(), 2);
+        assert_eq!(
+            output.legacy_rows()[0].table,
+            schema::LOCAL_HISTORY_NODE_SECRETS
+        );
         let row = schema::decode_local_history_node_secret_row(
-            &output.rows[0].key,
-            &output.rows[0].value,
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
         )
         .expect("decode row");
         assert_eq!(row.range_start, 1_700_000);
@@ -365,10 +368,10 @@ mod tests {
 
         let output = project(&event).expect("project leaf");
 
-        assert_eq!(output.rows.len(), 2);
+        assert_eq!(output.legacy_rows().len(), 2);
         let row = schema::decode_local_history_node_secret_row(
-            &output.rows[0].key,
-            &output.rows[0].value,
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
         )
         .expect("decode leaf");
         assert_eq!(row.bit_depth, TRIE_LEAF_BIT_DEPTH);

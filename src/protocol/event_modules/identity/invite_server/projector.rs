@@ -207,17 +207,20 @@ mod tests {
         ))
         .expect("project invite_server");
 
-        assert!(output.labels.is_empty());
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::INVITE_SERVERS);
+        assert!(output.legacy_labels().is_empty());
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::INVITE_SERVERS);
         assert_eq!(
-            output.rows[0].key,
+            output.legacy_rows()[0].key,
             schema::invite_server_key(&workspace_id, &event_id(&record.canonical_bytes))
         );
         assert_eq!(
-            schema::decode_invite_server_row(&output.rows[0].key, &output.rows[0].value)
-                .expect("decode row")
-                .public_key,
+            schema::decode_invite_server_row(
+                &output.legacy_rows()[0].key,
+                &output.legacy_rows()[0].value
+            )
+            .expect("decode row")
+            .public_key,
             [3; 32]
         );
     }

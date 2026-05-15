@@ -76,8 +76,8 @@ pub fn purge_instruction_key(workspace_id: EventId, target_event_id: EventId) ->
 }
 
 /// Row written by a deletion projector to enqueue one target event for
-/// purging. The kind tag lets the worker dispatch to the right branch
-/// without having to load the bytes first.
+/// local retention purge. The kind tag lets the worker dispatch to the right
+/// branch without having to load the bytes first.
 pub fn purge_instruction_row(
     workspace_id: EventId,
     target_event_id: EventId,

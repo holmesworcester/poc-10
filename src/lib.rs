@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod core;
 pub mod event_modules;
 pub mod handlers;

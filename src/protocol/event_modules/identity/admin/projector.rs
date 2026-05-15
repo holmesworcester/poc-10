@@ -331,15 +331,16 @@ mod tests {
         )
         .expect("project signed bootstrap admin");
 
-        assert_eq!(output.labels.len(), 0);
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::ADMINS);
+        assert_eq!(output.legacy_labels().len(), 0);
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::ADMINS);
         assert_eq!(
-            output.rows[0].key,
+            output.legacy_rows()[0].key,
             schema::admin_key(&workspace_id, &event_id(&record.canonical_bytes))
         );
         let row =
-            schema::decode_admin_row(&output.rows[0].key, &output.rows[0].value).expect("row");
+            schema::decode_admin_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
+                .expect("row");
         assert_eq!(row.workspace_id, workspace_id);
         assert_eq!(row.admin_id, event_id(&record.canonical_bytes));
         assert_eq!(row.public_key, workspace_public_key);
@@ -517,7 +518,8 @@ mod tests {
         .expect("project signed non-root admin");
 
         let row =
-            schema::decode_admin_row(&output.rows[0].key, &output.rows[0].value).expect("row");
+            schema::decode_admin_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
+                .expect("row");
         assert_eq!(row.public_key, [11; 32]);
         assert_eq!(row.user_event_id, user_id);
         assert_eq!(row.authority_event_id, authority_id);
@@ -684,7 +686,8 @@ mod tests {
         .expect("project signed admin");
 
         let row =
-            schema::decode_admin_row(&output.rows[0].key, &output.rows[0].value).expect("row");
+            schema::decode_admin_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
+                .expect("row");
         assert_eq!(row.admin_id, event_id(&record.canonical_bytes));
         assert_eq!(row.authority_event_id, authority_id);
         assert_eq!(row.user_event_id, target_user_id);

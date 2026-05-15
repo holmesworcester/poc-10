@@ -41,8 +41,8 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     if is_deleted_by_author {
         let key = schema::message_key(message.workspace_id, event.context.event_id);
         let sealed_key = schema::message_key(message.workspace_id, event.context.event_id);
-        let output = ProjectionOutput {
-            rows: vec![
+        let output = ProjectionOutput::from_parts(
+            vec![
                 schema::message_tombstone_row(
                     message.workspace_id,
                     event.context.event_id,
@@ -55,7 +55,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                     PurgeKind::Message,
                 ),
             ],
-            deletes: vec![
+            vec![
                 TableDelete {
                     table: schema::MESSAGES,
                     key,
@@ -65,8 +65,8 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                     key: sealed_key,
                 },
             ],
-            labels: Vec::new(),
-        };
+            Vec::new(),
+        );
         return Ok(output);
     }
 
@@ -433,10 +433,13 @@ mod tests {
         let event = context_for(&built, signer_id, signer_record, author_id, author_record);
 
         let output = project(&event).expect("project message");
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::SEALED_MESSAGES);
-        let row = schema::decode_sealed_message_row(&output.rows[0].key, &output.rows[0].value)
-            .expect("decode sealed row");
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::SEALED_MESSAGES);
+        let row = schema::decode_sealed_message_row(
+            &output.legacy_rows()[0].key,
+            &output.legacy_rows()[0].value,
+        )
+        .expect("decode sealed row");
         assert_eq!(row.workspace_id, workspace_id);
         assert_eq!(row.message_id, built.message_id);
         assert_eq!(row.author_user_id, author_id);
@@ -539,18 +542,18 @@ mod tests {
         event.context.labels.push(deletion_label(&author_id));
 
         let output = project(&event).expect("project deleted message");
-        assert_eq!(output.rows.len(), 2);
-        assert_eq!(output.rows[0].table, schema::MESSAGE_TOMBSTONES);
+        assert_eq!(output.legacy_rows().len(), 2);
+        assert_eq!(output.legacy_rows()[0].table, schema::MESSAGE_TOMBSTONES);
         assert_eq!(
-            output.rows[1].table,
+            output.legacy_rows()[1].table,
             crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
         );
         // For self-deletes the label is already on the event (set by the
         // deletion projector); we don't double-write it.
-        assert!(output.labels.is_empty());
+        assert!(output.legacy_labels().is_empty());
         // Two deletes: read-model (MESSAGES) + ciphertext (SEALED_MESSAGES).
-        assert_eq!(output.deletes.len(), 2);
-        let tables: Vec<_> = output.deletes.iter().map(|d| d.table).collect();
+        assert_eq!(output.legacy_deletes().len(), 2);
+        let tables: Vec<_> = output.legacy_deletes().iter().map(|d| d.table).collect();
         assert!(tables.contains(&schema::MESSAGES));
         assert!(tables.contains(&schema::SEALED_MESSAGES));
     }
@@ -580,9 +583,9 @@ mod tests {
 
         let output = project(&event).expect("deleted message can project without deps");
 
-        assert_eq!(output.rows.len(), 2);
-        assert_eq!(output.rows[0].table, schema::MESSAGE_TOMBSTONES);
-        assert_eq!(output.deletes.len(), 2);
+        assert_eq!(output.legacy_rows().len(), 2);
+        assert_eq!(output.legacy_rows()[0].table, schema::MESSAGE_TOMBSTONES);
+        assert_eq!(output.legacy_deletes().len(), 2);
     }
 
     fn build_with_expiry(
@@ -668,10 +671,10 @@ mod tests {
         event.context.now_unix_minute = Some(102);
 
         let output = project(&event).expect("project before-expiry message");
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::SEALED_MESSAGES);
-        assert!(output.deletes.is_empty());
-        assert!(output.labels.is_empty());
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::SEALED_MESSAGES);
+        assert!(output.legacy_deletes().is_empty());
+        assert!(output.legacy_labels().is_empty());
     }
 
     #[test]
@@ -724,10 +727,10 @@ mod tests {
         event.context.now_unix_minute = Some(u64::MAX - 1);
 
         let output = project(&event).expect("project never-expire message");
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].table, schema::SEALED_MESSAGES);
-        assert!(output.deletes.is_empty());
-        assert!(output.labels.is_empty());
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, schema::SEALED_MESSAGES);
+        assert!(output.legacy_deletes().is_empty());
+        assert!(output.legacy_labels().is_empty());
     }
 
     #[test]
@@ -747,8 +750,8 @@ mod tests {
         event.context.labels.push(deletion_label(&[42; 32]));
 
         let output = project(&event).expect("project not-by-author label");
-        assert_eq!(output.rows.len(), 1);
-        assert!(output.deletes.is_empty());
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert!(output.legacy_deletes().is_empty());
     }
 
     #[test]

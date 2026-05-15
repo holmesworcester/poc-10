@@ -108,10 +108,10 @@ fn unknown_signed_identity_payloads_are_rejected_at_admission() {
 }
 
 fn run_protocol_cli(db: &std::path::Path, args: &[&str]) -> String {
-    let mut context = crate::protocol::cli::Context::open(db).expect("open cli context");
+    let mut context = crate::protocol::commands::Context::open(db).expect("open cli context");
     let command_args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
-    let output = crate::core::cli::run(
-        &crate::protocol::cli::commands(),
+    let output = crate::core::commands::run(
+        &crate::protocol::commands::commands(),
         &mut context,
         &command_args,
     )
