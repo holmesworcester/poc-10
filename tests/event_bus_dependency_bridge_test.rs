@@ -4,10 +4,12 @@ use std::collections::BTreeSet;
 use topo::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactId, FactScope};
-use topo::core::intents::{Intent, IntentExecution, IntentKind};
+use topo::core::handler_dispatch::{HandlerContext, RowIntentHandler};
+use topo::core::intents::{AtomicIntent, Intent, IntentExecution, IntentKind};
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
-use topo::protocol::event_modules::test_events::event_with_deps::{codec, types};
+use topo::core::store::{Store, TableRow};
+use topo::protocol::event_modules::test_events::event_with_deps::{codec, schema, types};
 
 fn event_fact(event: types::EventWithDeps) -> Fact {
     let bytes = codec::encode(&event);
@@ -20,6 +22,14 @@ fn event_with_deps(timestamp: u64, dependencies: Vec<FactId>, payload: u8) -> Fa
         dependencies,
         payload: [payload; types::PAYLOAD_BYTES],
     })
+}
+
+fn staged_event(index: u64, inner_bytes: Vec<u8>) -> Fact {
+    Fact::new(
+        FactScope::Local,
+        0,
+        codec::encode_staged(&types::StagedEventWithDeps { index, inner_bytes }),
+    )
 }
 
 #[test]
@@ -103,6 +113,35 @@ fn event_with_deps_bridge_never_exposes_failed_dependency_context() {
     assert!(bus.context(&child.id).unwrap().needs.is_empty());
 }
 
+#[test]
+fn staged_event_bridge_writes_row_through_atomic_row_intent_handler() {
+    let store = Store::open_memory_with_schemas(schema::SCHEMAS).expect("open staged event schema");
+    let inner = event_with_deps(42, vec![[1; 32], [2; 32]], 7);
+    let staged = staged_event(17, inner.bytes.clone());
+    let mut bus = EventBus::new();
+
+    bus.submit_fact(staged);
+    let projected = bus
+        .drain(&StagedEventBridge, &[], 10)
+        .expect("project staged event");
+    assert_eq!(projected.projections, 1);
+    assert_eq!(projected.intents, 1);
+
+    let handler = RowIntentHandler::new(&store, &[schema::STAGED_EVENTS_WITH_DEPS]);
+    let applied = bus
+        .dispatch_intents(&handler, &HandlerContext, 10)
+        .expect("apply staged row intent");
+
+    assert_eq!(applied.handled, 1);
+    assert!(bus.intents().is_empty());
+    assert_eq!(
+        store
+            .table_rows(schema::STAGED_EVENTS_WITH_DEPS)
+            .expect("staged rows"),
+        vec![(17u64.to_be_bytes().to_vec(), inner.bytes)]
+    );
+}
+
 struct EventWithDepsBridge {
     role: Role,
     rejected: std::cell::RefCell<BTreeSet<FactId>>,
@@ -124,6 +163,26 @@ impl EventWithDepsBridge {
 
     fn allow(&self, id: FactId) {
         self.rejected.borrow_mut().remove(&id);
+    }
+}
+
+struct StagedEventBridge;
+
+impl Projector for StagedEventBridge {
+    fn project(
+        &self,
+        fact: &Fact,
+        _context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        let staged = codec::decode_staged(&fact.bytes)?;
+        Ok(ProjectionOutput::new().intent(
+            AtomicIntent::PutRow(TableRow {
+                table: schema::STAGED_EVENTS_WITH_DEPS,
+                key: staged.index.to_be_bytes().to_vec(),
+                value: staged.inner_bytes,
+            })
+            .into_intent(),
+        ))
     }
 }
 
