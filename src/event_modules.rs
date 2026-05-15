@@ -6,4 +6,5 @@ pub mod identity_workspace;
 pub mod sealed_message;
 pub mod signed_fact;
 pub mod sync;
+pub mod sync_compare;
 pub mod transit;
