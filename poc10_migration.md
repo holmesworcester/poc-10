@@ -367,12 +367,14 @@ done: target-tree sealed_message projector keeps signer and secret needs standin
 done: overlapping secret coverage offers emit one deterministic open_message intent without key amplification
 done: target-tree deletion update context purges messages before keys arrive
 done: opened messages retain only deletion update context so later deletes can wake purge
+done: intent handlers declare accepted intent kinds so mixed queues do not route follow-up intents to the wrong handler
+done: open_message and purge_event handlers translate deferred work into atomic row put/delete intents
 ```
 
-The next event-pipeline step is to put handlers behind the new deferred intents:
-`open_message` should become a handler-owned decrypt/materialize operation and
-`purge_event` should drive the existing physical purge/retire behavior through
-an idempotent handler contract.
+The next event-pipeline step is to replace the handler proof rows with real
+crypto/materialization and physical purge behavior: `open_message` should use
+local secret rows to decrypt, while `purge_event` should delegate to the
+existing broad purge/retire effect logic through an idempotent handler contract.
 
 ### Wave 4: Encryption Slice
 

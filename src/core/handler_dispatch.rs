@@ -30,6 +30,10 @@ impl HandlerOutput {
 }
 
 pub trait IntentHandler {
+    fn accepts(&self, _intent: &Intent) -> bool {
+        true
+    }
+
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String>;
 }
 
@@ -48,6 +52,10 @@ impl<'a> RowIntentHandler<'a> {
 }
 
 impl IntentHandler for RowIntentHandler<'_> {
+    fn accepts(&self, intent: &Intent) -> bool {
+        matches!(intent.kind.as_str(), "put_row" | "delete_row")
+    }
+
     fn handle(&self, intent: &Intent, _context: &HandlerContext) -> Result<HandlerOutput, String> {
         match AtomicIntent::from_intent(intent, self.allowed_tables)? {
             AtomicIntent::PutRow(row) => {

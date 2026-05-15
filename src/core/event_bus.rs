@@ -172,17 +172,19 @@ impl EventBus {
         limit: usize,
     ) -> Result<DispatchReport, String> {
         let mut report = DispatchReport::default();
-        while report.handled < limit && !self.intents.is_empty() {
-            let intent = self.pop_intent_front()?;
+        while report.handled < limit {
+            let Some((intent_index, intent)) = self.pop_next_intent(handler)? else {
+                break;
+            };
             let output = match handler.handle(&intent, context) {
                 Ok(output) => output,
                 Err(err) => {
-                    self.restore_intent_front(intent)?;
+                    self.restore_intent(intent_index, intent)?;
                     return Err(err);
                 }
             };
             if let Err(err) = self.validate_intents(&output.intents) {
-                self.restore_intent_front(intent)?;
+                self.restore_intent(intent_index, intent)?;
                 return Err(err);
             }
             for fact in output.facts {
@@ -312,14 +314,25 @@ impl EventBus {
         Ok(true)
     }
 
-    fn pop_intent_front(&mut self) -> Result<Intent, String> {
-        let intent = self.intents.remove(0);
+    fn pop_next_intent(
+        &mut self,
+        handler: &impl IntentHandler,
+    ) -> Result<Option<(usize, Intent)>, String> {
+        let Some(index) = self
+            .intents
+            .iter()
+            .position(|intent| handler.accepts(intent))
+        else {
+            return Ok(None);
+        };
+        let intent = self.intents.remove(index);
         self.rebuild_intent_keys()?;
-        Ok(intent)
+        Ok(Some((index, intent)))
     }
 
-    fn restore_intent_front(&mut self, intent: Intent) -> Result<(), String> {
-        self.intents.insert(0, intent);
+    fn restore_intent(&mut self, index: usize, intent: Intent) -> Result<(), String> {
+        let index = index.min(self.intents.len());
+        self.intents.insert(index, intent);
         self.rebuild_intent_keys()
     }
 
@@ -942,6 +955,33 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_handler_skips_unaccepted_intents() {
+        let mut bus = EventBus::new();
+        bus.submit_intent(Intent::new(
+            IntentKind::new("other_handler").unwrap(),
+            IntentExecution::Deferred,
+            b"other",
+            b"payload",
+        ))
+        .expect("submit other");
+        bus.submit_intent(Intent::new(
+            IntentKind::new("selected_handler").unwrap(),
+            IntentExecution::Deferred,
+            b"selected",
+            b"payload",
+        ))
+        .expect("submit selected");
+
+        let report = bus
+            .dispatch_intents(&SelectedHandler, &HandlerContext, 10)
+            .expect("dispatch selected");
+
+        assert_eq!(report.handled, 1);
+        assert_eq!(bus.intents().len(), 1);
+        assert_eq!(bus.intents()[0].kind.as_str(), "other_handler");
+    }
+
+    #[test]
     fn failed_handler_keeps_intent_available_for_retry() {
         let mut bus = EventBus::new();
         let handler = FailOnceHandler {
@@ -1384,6 +1424,22 @@ mod tests {
                     intent.key.clone(),
                     b"followup",
                 )))
+        }
+    }
+
+    struct SelectedHandler;
+
+    impl IntentHandler for SelectedHandler {
+        fn accepts(&self, intent: &Intent) -> bool {
+            intent.kind.as_str() == "selected_handler"
+        }
+
+        fn handle(
+            &self,
+            _intent: &Intent,
+            _context: &HandlerContext,
+        ) -> Result<HandlerOutput, String> {
+            Ok(HandlerOutput::new())
         }
     }
 

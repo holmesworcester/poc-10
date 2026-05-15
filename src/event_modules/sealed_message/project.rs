@@ -1,10 +1,10 @@
 //! Poc-10 sealed-message projector.
 
 use crate::core::facts::Fact;
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use super::context;
+use super::intent::{self, OpenMessageIntent, PurgeEventIntent};
 use super::layout;
 
 #[derive(Debug, Clone, Default)]
@@ -59,23 +59,23 @@ fn project_message(fact: &Fact, context: &ProjectionContext) -> Result<Projectio
         .any(|offer| offer.role == deletion_need.role && offer.selector == deletion_need.selector);
 
     if has_deletion {
-        return Ok(ProjectionOutput::new().intent(Intent::new(
-            IntentKind::new("purge_event").expect("valid intent kind"),
-            IntentExecution::Deferred,
-            purge_message_key(message.workspace_id, fact.id),
-            fact.id,
-        )));
+        return Ok(
+            ProjectionOutput::new().intent(intent::purge_event_intent(PurgeEventIntent {
+                workspace_id: message.workspace_id,
+                message_id: fact.id,
+            })),
+        );
     }
 
     if has_signer && has_secret {
-        return Ok(ProjectionOutput::new()
-            .need(deletion_need)
-            .intent(Intent::new(
-                IntentKind::new("open_message").expect("valid intent kind"),
-                IntentExecution::Deferred,
-                open_message_key(message.workspace_id, fact.id),
-                open_message_payload(fact.id, message.minute, message.leaf_id),
-            )));
+        return Ok(ProjectionOutput::new().need(deletion_need).intent(
+            intent::open_message_intent(OpenMessageIntent {
+                workspace_id: message.workspace_id,
+                message_id: fact.id,
+                minute: message.minute,
+                leaf_id: message.leaf_id,
+            }),
+        ));
     }
 
     Ok(ProjectionOutput::new()
@@ -114,24 +114,4 @@ fn project_message_deletion(fact: &Fact) -> Result<ProjectionOutput, String> {
         fact.scope.clone(),
         deletion.target_id,
     )))
-}
-
-fn open_message_key(workspace_id: [u8; 32], message_id: [u8; 32]) -> Vec<u8> {
-    let mut key = workspace_id.to_vec();
-    key.extend_from_slice(&message_id);
-    key
-}
-
-fn purge_message_key(workspace_id: [u8; 32], message_id: [u8; 32]) -> Vec<u8> {
-    let mut key = workspace_id.to_vec();
-    key.extend_from_slice(&message_id);
-    key
-}
-
-fn open_message_payload(message_id: [u8; 32], minute: u64, leaf_id: [u8; 32]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(72);
-    payload.extend_from_slice(&message_id);
-    payload.extend_from_slice(&minute.to_be_bytes());
-    payload.extend_from_slice(&leaf_id);
-    payload
 }
