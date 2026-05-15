@@ -107,3 +107,9 @@ table invite_accepted_rows {
   column value bytes;
   row_key (key);
 }
+
+table invite_server_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
