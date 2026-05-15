@@ -663,6 +663,7 @@ mod tests {
                 "admin_rows",
                 "reaction_rows",
                 "connection_request_rows",
+                "connection_response_rows",
             ]
         );
         assert_eq!(
