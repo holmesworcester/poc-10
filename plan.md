@@ -176,6 +176,64 @@ Recent target work:
     not yet wired. The demo prints the envelope decode plus plaintext
     recovery and stops short of pretending to materialise a row from a
     signed envelope.
+- Wave 5 event modules (event-module ports + receive-side envelope guard)
+  - `src/event_modules/connection_ephemeral_secret/`,
+    `src/event_modules/disappearing_messages_setting/`,
+    `src/event_modules/removal_frontier/`, and
+    `src/event_modules/local_history_node_secret/` port the remaining
+    legacy-only event types into the target tree using the same template
+    as the wave-4 lanes. Skipped legacy validations are documented in each
+    `project.rs` parity-gap comment block.
+- Wave 5 handler shape: envelope-decode guards only
+  - `src/handlers/transit/driver.rs` and
+    `src/handlers/connection_response/driver.rs` initially landed with full
+    fact-construction + AEAD + handshake key schedule code. The poc10
+    intent-cleanliness guardrail rejected those bodies because handlers
+    must not own fact wire layouts or crypto helpers — that work belongs
+    under `src/event_modules/<module>/create.rs`. Both drivers were
+    reverted to envelope-decode + dependency-context check + a
+    `NOT_YET_WIRED` error so intents stay queued. The lifted helpers will
+    return when their event modules land a `create.rs` (target encryption
+    already established the pattern).
+  - `src/handlers/network_send/driver.rs` was reverted for the same
+    reason: it had constructed an idempotence cursor fact inline via
+    `Fact::new`. The cursor fact wire shape will reappear as a proper
+    event module; for now the driver validates the frame envelope and
+    returns `TCP_SEND_NOT_WIRED`.
+  - `src/handlers/connection_response.rs` manifest dropped its
+    `pub use` re-exports to satisfy the manifests-are-declarations-only
+    guardrail; callers go through the explicit `driver::` / `intent::`
+    submodule paths.
+- Target CLI binary entry: `topo poc10-demo`
+  - `src/poc10_demo.rs` carries the target-tree walkthrough as a library
+    function. `src/main.rs` dispatches the `poc10-demo` subcommand to it
+    so the walkthrough is reachable through the real `topo` binary, the
+    same binary the poc-8 e2e tests already drive via
+    `tests/cli_harness/`. The example
+    `cargo run --example poc10_demo` is now a thin wrapper that calls the
+    same library entry point.
+  - `tests/poc10_topo_cli_test.rs` follows the poc-8 black-box CLI test
+    pattern: build the `topo` binary once, spawn it through
+    `cli_harness::topo`, assert each step of the walkthrough's stdout.
+    This is the poc-10 entry point analogue of `cli_surface_test`.
+- Pending follow-ups exposed by the wave-5 revert
+  - Lift `package_transit_frame`, `pack_inner_payload`,
+    `derive_transit_nonce`, `transit_aad`, `pick_size_class`,
+    `sendable_fact_bytes`, and `require_sendable_fact_bytes` from the
+    deleted `src/handlers/transit/driver.rs` content into
+    `src/event_modules/transit/create.rs`. The handler then calls into
+    the event module to produce its real output, with the cleanliness
+    guardrail untouched. Three `transit_send_guard_*` tests in
+    `tests/poc10_transit_connection_test.rs` are `#[ignore]`'d with a
+    clear message until the helpers land in `create.rs`.
+  - Lift the connection_response key-schedule helpers (DH(eph_r, eph_i),
+    DH(static_r, eph_i), HKDF response key, transcript-bound connection
+    secret) from the deleted `src/handlers/connection_response/driver.rs`
+    content into `src/event_modules/connection_response/create.rs` and
+    reactivate the happy-path test in
+    `tests/poc10_connection_response_handler_test.rs`.
+  - Define a `network_send_cursor` event module so the deferred-send
+    cursor fact can return without violating the handler guardrail.
 
 Important caveats from the latest read-only audit:
 
