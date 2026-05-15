@@ -401,6 +401,9 @@ done: target history-node wrap sources use production-shaped range_start/range_w
 done: connection/transit handler intent payload layouts are split under handler submodules instead of accumulating in broad handler files
 done: active guardrails now check handler intent files, opaque connection frame boundaries, and protocol-neutral core handler dispatch
 done: full cargo test passes after the source-fact, secret-material, and handler-layout prerequisite changes
+done: target sync range roots now name explicit message event ids, exact dependency ids, and exact key-wrap ids
+done: target sync key context is key-wrap availability, not an abstract key offer
+done: target sync chooses a ready root deterministically instead of letting one missing key block another sendable root
 ```
 
 The next event-pipeline step is to replace the simplified message row proof

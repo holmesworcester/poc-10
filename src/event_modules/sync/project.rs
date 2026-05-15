@@ -27,8 +27,8 @@ impl Projector for SyncContextProjector {
                 project_sync_range_request(fact, projection_context)
             }
             Some(layout::TYPE_ENCRYPTED_ROOT) => project_encrypted_root(fact),
-            Some(layout::TYPE_DEPENDENCY) => project_dependency(fact),
-            Some(layout::TYPE_KEY_OFFER) => project_key_offer(fact),
+            Some(layout::TYPE_SHARED_EVENT) => project_shared_event(fact),
+            Some(layout::TYPE_KEY_WRAP_AVAILABLE) => project_key_wrap_available(fact),
             _ => Err("unknown sync context fact type".to_string()),
         }
     }
@@ -42,42 +42,51 @@ fn project_sync_range_request(
     let scope = context::workspace_scope(request.workspace_id);
     require_fact_scope(fact, &scope)?;
     let range_need = context::range_event_need(fact.id, scope.clone(), request.start, request.end);
-    let Some((root_offer, root)) = projection_context
+    let roots = projection_context
         .offers()
         .iter()
-        .find(|offer| offer.role == context::range_event_role())
-        .and_then(|offer| {
-            context::decode_range_offer_selector(&offer.selector).map(|root| (offer, root))
-        })
-    else {
+        .filter(|offer| offer.role == context::range_event_role())
+        .filter_map(|offer| context::decode_range_offer_selector(&offer.selector))
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
         return Ok(ProjectionOutput::new().need(range_need));
     };
-    let dep_need = context::exact_event_need(fact.id, scope.clone(), root.dependency_id);
-    let key_need = context::key_offer_need(fact.id, scope, root.key_id);
-    let has_dep = projection_context
-        .offers()
-        .iter()
-        .any(|offer| offer.role == dep_need.role && offer.selector == dep_need.selector);
-    let has_key = projection_context
-        .offers()
-        .iter()
-        .any(|offer| offer.role == key_need.role && offer.selector == key_need.selector);
 
-    if has_dep && has_key {
+    let mut output = ProjectionOutput::new().need(range_need);
+    let mut ready = roots
+        .iter()
+        .copied()
+        .filter(|root| {
+            let dep_need = context::exact_event_need(fact.id, scope.clone(), root.dependency_id);
+            let key_need = context::key_wrap_need(fact.id, scope.clone(), root.key_wrap_id);
+            has_exact_offer(projection_context, &dep_need)
+                && has_exact_offer(projection_context, &key_need)
+        })
+        .collect::<Vec<_>>();
+    ready.sort_by_key(|root| (root.timestamp, root.event_id));
+    if let Some(root) = ready.first().copied() {
         return Ok(
             ProjectionOutput::new().intent(intent::send_on_connection_intent(
                 request.connection_id,
-                root_offer.payload_ref,
+                root.event_id,
                 root.dependency_id,
-                root.key_id,
+                root.key_wrap_id,
             )),
         );
     }
 
-    Ok(ProjectionOutput::new()
-        .need(range_need)
-        .need(dep_need)
-        .need(key_need))
+    for root in roots {
+        let dep_need = context::exact_event_need(fact.id, scope.clone(), root.dependency_id);
+        let key_need = context::key_wrap_need(fact.id, scope.clone(), root.key_wrap_id);
+        if !has_exact_offer(projection_context, &dep_need) {
+            output = output.need(dep_need);
+        }
+        if !has_exact_offer(projection_context, &key_need) {
+            output = output.need(key_need);
+        }
+    }
+
+    Ok(output)
 }
 
 fn project_encrypted_root(fact: &Fact) -> Result<ProjectionOutput, String> {
@@ -89,29 +98,52 @@ fn project_encrypted_root(fact: &Fact) -> Result<ProjectionOutput, String> {
             fact.id,
             scope.clone(),
             fact.timestamp,
+            root.event_id,
             root.dependency_id,
-            root.key_id,
+            root.key_wrap_id,
         ))
-        .offer(context::exact_event_offer(fact.id, scope, fact.id, fact.id)))
+        .offer(context::exact_event_offer(
+            fact.id,
+            scope,
+            root.event_id,
+            fact.id,
+        )))
 }
 
-fn project_dependency(fact: &Fact) -> Result<ProjectionOutput, String> {
-    let dependency = layout::decode_dependency(&fact.bytes)?;
-    let scope = context::workspace_scope(dependency.workspace_id);
+fn project_shared_event(fact: &Fact) -> Result<ProjectionOutput, String> {
+    let shared = layout::decode_shared_event(&fact.bytes)?;
+    let scope = context::workspace_scope(shared.workspace_id);
     require_fact_scope(fact, &scope)?;
     Ok(ProjectionOutput::new().offer(context::exact_event_offer(
         fact.id,
         scope,
-        dependency.event_id,
+        shared.event_id,
         fact.id,
     )))
 }
 
-fn project_key_offer(fact: &Fact) -> Result<ProjectionOutput, String> {
-    let key = layout::decode_key_offer(&fact.bytes)?;
+fn project_key_wrap_available(fact: &Fact) -> Result<ProjectionOutput, String> {
+    let key = layout::decode_key_wrap_available(&fact.bytes)?;
     let scope = context::workspace_scope(key.workspace_id);
     require_fact_scope(fact, &scope)?;
-    Ok(ProjectionOutput::new().offer(context::key_offer(fact.id, scope, key.key_id)))
+    Ok(ProjectionOutput::new()
+        .offer(context::exact_event_offer(
+            fact.id,
+            scope.clone(),
+            key.key_wrap_id,
+            fact.id,
+        ))
+        .offer(context::key_wrap_offer(fact.id, scope, key.key_wrap_id)))
+}
+
+fn has_exact_offer(
+    projection_context: &ProjectionContext,
+    need: &crate::core::context::ContextNeed,
+) -> bool {
+    projection_context
+        .offers()
+        .iter()
+        .any(|offer| offer.role == need.role && offer.selector == need.selector)
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {
