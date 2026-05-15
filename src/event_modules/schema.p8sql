@@ -185,3 +185,9 @@ table removal_frontier_rows {
   column value bytes;
   row_key (key);
 }
+
+table local_history_node_secret_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}

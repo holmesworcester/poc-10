@@ -18,6 +18,7 @@ pub mod identity_invite_server;
 pub mod identity_user;
 pub mod identity_user_invite;
 pub mod identity_workspace;
+pub mod local_history_node_secret;
 pub mod removal_frontier;
 pub mod sealed_message;
 pub mod signed_fact;
