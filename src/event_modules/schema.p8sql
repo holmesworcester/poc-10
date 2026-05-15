@@ -7,6 +7,12 @@ table message_rows {
   row_key (key);
 }
 
+table sealed_message_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
 table file_rows {
   column key bytes;
   column value bytes;
@@ -26,12 +32,6 @@ table recipient_key_rows {
 }
 
 table key_wrap_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table opened_content_rows {
   column key bytes;
   column value bytes;
   row_key (key);

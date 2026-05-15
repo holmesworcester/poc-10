@@ -248,11 +248,11 @@ network_out
 
 ```text
 message_rows
+sealed_message_rows
 file_rows
 workspace_rows
 recipient_key_rows
 key_wrap_rows
-opened_content_rows
 ```
 
 `handlers/schema.p8sql` contains only handler checkpoint or operational state:

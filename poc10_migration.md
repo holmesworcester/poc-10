@@ -364,18 +364,20 @@ done: event_with_deps owns a poc-10 projector surface beside its legacy row proj
 done: secret_coverage matcher proves range offers can wake point needs
 done: target-tree identity_workspace projector materializes a workspace row through AtomicIntent::PutRow
 done: target-tree sealed_message projector keeps signer and secret needs standing until both context offers are present
-done: overlapping secret coverage offers emit one deterministic opened-row atomic intent without key amplification
+done: signer context materializes sealed_message_rows before secret coverage is available
+done: overlapping secret coverage offers emit one deterministic message_rows atomic intent without key amplification
 done: target-tree deletion update context purges messages before keys arrive
 done: opened messages retain only deletion update context so later deletes wake row cleanup and retention purge intent
 done: intent handlers declare accepted intent kinds so mixed queues do not route follow-up intents to the wrong handler
-done: projection-owned opened row put/delete stays inside sealed_message projection rather than handler code
+done: projection-owned message row put/delete stays inside sealed_message projection rather than handler code
 ```
 
-The next event-pipeline step is to replace the opened-row proof with the real
-poc-8 message shape: sealed message rows are durable projection output, and
-opening is deterministic read/projection work using local history node secrets.
-`purge_event` remains a deferred retention intent, but its handler should not
-exist until it preserves the existing broad purge/retire/cascade behavior.
+The next event-pipeline step is to replace the simplified message row proof
+with the real poc-8 row values: sealed message rows are durable projection
+output, and opening is deterministic read/projection work using local history
+node secrets. `purge_event` remains a deferred retention intent, but its handler
+should not exist until it preserves the existing broad purge/retire/cascade
+behavior.
 
 ### Wave 4: Encryption Slice
 

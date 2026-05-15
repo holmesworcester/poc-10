@@ -7,7 +7,10 @@ use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use super::context;
 use super::intent::{self, PurgeEventIntent};
 use super::layout;
-use super::opened_rows::{opened_message_row, OpenedContentRow, OPENED_CONTENT_ROWS};
+use super::rows::{
+    message_row, sealed_message_row, MessageRow, SealedMessageRow, MESSAGE_ROWS,
+    SEALED_MESSAGE_ROWS,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct SealedMessageProjector;
@@ -64,7 +67,14 @@ fn project_message(fact: &Fact, context: &ProjectionContext) -> Result<Projectio
         return Ok(ProjectionOutput::new()
             .intent(
                 AtomicIntent::DeleteRow(TableDelete {
-                    table: OPENED_CONTENT_ROWS,
+                    table: MESSAGE_ROWS,
+                    key: fact.id.to_vec(),
+                })
+                .into_intent(),
+            )
+            .intent(
+                AtomicIntent::DeleteRow(TableDelete {
+                    table: SEALED_MESSAGE_ROWS,
                     key: fact.id.to_vec(),
                 })
                 .into_intent(),
@@ -75,21 +85,42 @@ fn project_message(fact: &Fact, context: &ProjectionContext) -> Result<Projectio
             })));
     }
 
+    if !has_signer {
+        return Ok(ProjectionOutput::new()
+            .need(signer_need)
+            .need(secret_need)
+            .need(deletion_need));
+    }
+
+    let sealed_row = AtomicIntent::PutRow(sealed_message_row(SealedMessageRow {
+        message_id: fact.id,
+        workspace_id: message.workspace_id,
+        signer_id: message.signer_id,
+        frontier_id: message.frontier_id,
+        minute: message.minute,
+        leaf_id: message.leaf_id,
+        ciphertext: message.ciphertext.clone(),
+    })?)
+    .into_intent();
+
     if has_signer && has_secret {
-        return Ok(ProjectionOutput::new().need(deletion_need).intent(
-            AtomicIntent::PutRow(opened_message_row(OpenedContentRow {
-                message_id: fact.id,
-                minute: message.minute,
-                leaf_id: message.leaf_id,
-            }))
-            .into_intent(),
-        ));
+        return Ok(ProjectionOutput::new()
+            .need(deletion_need)
+            .intent(sealed_row)
+            .intent(
+                AtomicIntent::PutRow(message_row(MessageRow {
+                    message_id: fact.id,
+                    minute: message.minute,
+                    leaf_id: message.leaf_id,
+                }))
+                .into_intent(),
+            ));
     }
 
     Ok(ProjectionOutput::new()
-        .need(signer_need)
         .need(secret_need)
-        .need(deletion_need))
+        .need(deletion_need)
+        .intent(sealed_row))
 }
 
 fn project_signer_pubkey(fact: &Fact) -> Result<ProjectionOutput, String> {

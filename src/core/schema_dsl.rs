@@ -648,11 +648,11 @@ mod tests {
             table_names(&event_modules),
             vec![
                 "message_rows",
+                "sealed_message_rows",
                 "file_rows",
                 "workspace_rows",
                 "recipient_key_rows",
                 "key_wrap_rows",
-                "opened_content_rows",
             ]
         );
         assert_eq!(
