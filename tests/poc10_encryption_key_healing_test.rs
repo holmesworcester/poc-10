@@ -1,3 +1,4 @@
+use topo::core::crypto;
 use topo::core::event_bus::EventBus;
 use topo::core::facts::Fact;
 use topo::core::intents::AtomicIntent;
@@ -8,8 +9,8 @@ use topo::event_modules::encryption::context::{
     WrapSourceKind, WrapSourceMatcher,
 };
 use topo::event_modules::encryption::fact::{
-    KeyRequestFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, RecipientKeyFact,
-    RemovalFrontierFact, NO_PREVIOUS_RECIPIENT_KEY,
+    KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, RecipientKeyFact,
+    RemovalFrontierFact, WrappedSecretKind, NO_PREVIOUS_RECIPIENT_KEY,
 };
 use topo::event_modules::encryption::intent::{
     decode_materialize_key_wraps_intent, decode_purge_retired_recipient_material_intent,
@@ -24,6 +25,7 @@ use topo::event_modules::sealed_message::fact::{
 use topo::event_modules::sealed_message::rows::{MESSAGE_ROWS, SEALED_MESSAGE_ROWS};
 use topo::event_modules::sealed_message::{layout as message_layout, project as message_project};
 use topo::event_modules::signed_fact::{self, fact::LocalSignerSecretFact};
+use topo::event_modules::sync::context as sync_context;
 
 #[test]
 fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appears() {
@@ -323,6 +325,101 @@ fn encryption_history_node_offer_wakes_and_opens_sealed_message() {
 }
 
 #[test]
+fn signed_key_wrap_waits_for_authorized_signer_then_offers_sync_key() {
+    let workspace = [43; 32];
+    let signer_id = [44; 32];
+    let signer_private_key = [45; 32];
+    let signed_wrap = signed_key_wrap_fact(workspace, signer_id, signer_private_key);
+    let signer = signer_pubkey_fact(
+        workspace,
+        signer_id,
+        crypto::ed25519_public_key(&signer_private_key),
+    );
+    let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
+    let matchers = [&signer_matcher as &dyn ContextMatcher];
+    let mut bus = EventBus::new();
+
+    bus.submit_fact(signed_wrap.clone());
+    bus.drain(&CombinedProjector, &matchers, 10)
+        .expect("signed wrap waits for signer authority");
+
+    let waiting = bus.context(&signed_wrap.id).expect("waiting context");
+    assert!(waiting
+        .needs
+        .iter()
+        .any(|need| need.role == message_context::signer_role()
+            && need.selector.as_bytes() == signer_id));
+    assert!(waiting.offers.is_empty());
+
+    bus.submit_fact(signer);
+    let report = bus
+        .drain(&CombinedProjector, &matchers, 10)
+        .expect("signer wakes signed key wrap");
+
+    assert!(report.wakes >= 1);
+    let ready = bus
+        .context(&signed_wrap.id)
+        .expect("ready key-wrap context");
+    assert!(ready.needs.is_empty());
+    assert!(ready.offers.iter().any(|offer| {
+        offer.role == sync_context::key_wrap_role()
+            && offer.selector.as_bytes() == signed_wrap.id
+            && offer.payload_ref == signed_wrap.id
+    }));
+    assert!(ready.offers.iter().any(|offer| {
+        offer.role == sync_context::exact_event_role()
+            && offer.selector.as_bytes() == signed_wrap.id
+            && offer.payload_ref == signed_wrap.id
+    }));
+}
+
+#[test]
+fn signed_key_wrap_rejects_signer_public_key_mismatch() {
+    let workspace = [46; 32];
+    let signer_id = [47; 32];
+    let signer_private_key = [48; 32];
+    let signed_wrap = signed_key_wrap_fact(workspace, signer_id, signer_private_key);
+    let wrong_signer =
+        signer_pubkey_fact(workspace, signer_id, crypto::ed25519_public_key(&[49; 32]));
+    let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
+    let matchers = [&signer_matcher as &dyn ContextMatcher];
+    let mut bus = EventBus::new();
+
+    bus.submit_fact(signed_wrap.clone());
+    bus.submit_fact(wrong_signer);
+    bus.drain(&CombinedProjector, &matchers, 10)
+        .expect("wrong signer pubkey is not authority");
+
+    let context = bus.context(&signed_wrap.id).expect("still waiting");
+    assert!(context
+        .needs
+        .iter()
+        .any(|need| need.role == message_context::signer_role()));
+    assert!(!context
+        .offers
+        .iter()
+        .any(|offer| offer.role == sync_context::key_wrap_role()));
+}
+
+#[test]
+fn signed_key_wrap_rejects_envelope_signer_mismatch() {
+    let workspace = [50; 32];
+    let wrap_signer = [51; 32];
+    let envelope_signer = [52; 32];
+    let payload = encryption_layout::encode_key_wrap(&key_wrap_fact(workspace, wrap_signer))
+        .expect("encode key wrap");
+    let bytes = signed_fact::create::sign_payload_bytes(envelope_signer, &[53; 32], payload)
+        .expect("sign key wrap");
+    let fact = Fact::new(workspace_scope(workspace), 10, bytes);
+
+    let err = encryption_project::EncryptionProjector::new()
+        .project(&fact, &ProjectionContext::new(Vec::new()))
+        .expect_err("envelope signer mismatch must fail");
+
+    assert!(err.contains("key wrap signer does not match signed envelope signer"));
+}
+
+#[test]
 fn recipient_key_projector_revalidates_wrap_source_context_before_wrapping() {
     let workspace = [50; 32];
     let endpoint = [51; 32];
@@ -370,7 +467,8 @@ impl Projector for CombinedProjector {
             | Some(encryption_layout::TYPE_REMOVAL_FRONTIER)
             | Some(encryption_layout::TYPE_LOCAL_KEY_SECRET)
             | Some(encryption_layout::TYPE_LOCAL_HISTORY_NODE_SECRET)
-            | Some(encryption_layout::TYPE_KEY_REQUEST) => {
+            | Some(encryption_layout::TYPE_KEY_REQUEST)
+            | Some(signed_fact::layout::TYPE_SIGNED_FACT) => {
                 encryption_project::EncryptionProjector::new().project(fact, context)
             }
             Some(signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET) => {
@@ -534,6 +632,51 @@ fn signer_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
         })
         .expect("encode signer"),
     )
+}
+
+fn signer_pubkey_fact(workspace_id: [u8; 32], signer_id: [u8; 32], public_key: [u8; 32]) -> Fact {
+    Fact::new(
+        workspace_scope(workspace_id),
+        0,
+        message_layout::encode_signer_pubkey(&SignerPubkeyFact {
+            signer_id,
+            public_key,
+        })
+        .expect("encode signer"),
+    )
+}
+
+fn signed_key_wrap_fact(
+    workspace_id: [u8; 32],
+    signer_id: [u8; 32],
+    signer_private_key: [u8; 32],
+) -> Fact {
+    let payload = encryption_layout::encode_key_wrap(&key_wrap_fact(workspace_id, signer_id))
+        .expect("encode key wrap");
+    let bytes = signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+        .expect("sign key wrap");
+    Fact::new(workspace_scope(workspace_id), 10, bytes)
+}
+
+fn key_wrap_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> KeyWrapFact {
+    KeyWrapFact {
+        workspace_id,
+        created_at_ms: 10,
+        signer_endpoint_id: signer_id,
+        frontier_id: [0x53; 32],
+        wrapped_secret_kind: WrappedSecretKind::FrontierRoot,
+        wrapped_secret_id: [0x54; 32],
+        wrapped_source_secret_id: [0; 32],
+        wrapped_tombstone_node_id: [0; 32],
+        range_start: 0,
+        range_width: 0,
+        bit_depth: 0,
+        event_id_prefix: [0; 32],
+        recipient_key_id: [0x55; 32],
+        sender_wrap_public_key: [0x56; 32],
+        nonce: [0x57; 24],
+        ciphertext: [0x58; 48],
+    }
 }
 
 fn byte_prefix(value: u8) -> [u8; 32] {

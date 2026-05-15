@@ -17,6 +17,7 @@ use super::intent::{
 use super::layout;
 use crate::event_modules::sealed_message;
 use crate::event_modules::signed_fact;
+use crate::event_modules::sync;
 
 #[derive(Debug, Clone, Default)]
 pub struct EncryptionProjector;
@@ -39,6 +40,7 @@ impl Projector for EncryptionProjector {
             Some(layout::TYPE_LOCAL_KEY_SECRET) => project_local_key_secret(fact),
             Some(layout::TYPE_LOCAL_HISTORY_NODE_SECRET) => project_local_history_node_secret(fact),
             Some(layout::TYPE_KEY_REQUEST) => project_key_request(fact, context),
+            Some(signed_fact::layout::TYPE_SIGNED_FACT) => project_signed_key_wrap(fact, context),
             _ => Err("unknown encryption fact type".to_string()),
         }
     }
@@ -225,6 +227,41 @@ fn project_key_request(
     Ok(output)
 }
 
+fn project_signed_key_wrap(
+    fact: &Fact,
+    projection_context: &ProjectionContext,
+) -> Result<ProjectionOutput, String> {
+    let envelope = signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+    if envelope.inner_type != layout::TYPE_KEY_WRAP {
+        return Err("signed fact does not contain an encryption key wrap".to_string());
+    }
+    let wrap = layout::decode_key_wrap(&envelope.payload)?;
+    let scope = sealed_message::context::workspace_scope(wrap.workspace_id);
+    require_fact_scope(fact, &scope)?;
+    if envelope.signer_id != wrap.signer_endpoint_id {
+        return Err("key wrap signer does not match signed envelope signer".to_string());
+    }
+
+    let signer_need =
+        sealed_message::context::signer_need(fact.id, scope.clone(), envelope.signer_id);
+    if !has_matching_signer_public_key(
+        projection_context,
+        &signer_need,
+        &envelope.signer_public_key,
+    ) {
+        return Ok(ProjectionOutput::new().need(signer_need));
+    }
+
+    Ok(ProjectionOutput::new()
+        .offer(sync::context::exact_event_offer(
+            fact.id,
+            scope.clone(),
+            fact.id,
+            fact.id,
+        ))
+        .offer(sync::context::key_wrap_offer(fact.id, scope, fact.id)))
+}
+
 fn matching_wrap_sources_with_signer(
     offers: &[ContextOffer],
     need: &crate::core::context::ContextNeed,
@@ -281,6 +318,25 @@ fn has_exact_offer(offers: &[ContextOffer], need: &crate::core::context::Context
     offers
         .iter()
         .any(|offer| offer.role == need.role && offer.selector == need.selector)
+}
+
+fn has_matching_signer_public_key(
+    projection_context: &ProjectionContext,
+    need: &crate::core::context::ContextNeed,
+    signer_public_key: &[u8; 32],
+) -> bool {
+    projection_context
+        .matched_context()
+        .iter()
+        .filter(|matched| matched.need.role == need.role && matched.need.selector == need.selector)
+        .any(|matched| {
+            sealed_message::layout::decode_signer_pubkey(&matched.payload.bytes)
+                .map(|signer| {
+                    signer.signer_id.as_slice() == need.selector.as_bytes()
+                        && signer.public_key == *signer_public_key
+                })
+                .unwrap_or(false)
+        })
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {
