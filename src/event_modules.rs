@@ -6,6 +6,7 @@ pub mod content_reaction;
 pub mod encryption;
 pub mod identity_admin;
 pub mod identity_endpoint;
+pub mod identity_endpoint_shared;
 pub mod identity_invite_accepted;
 pub mod identity_invite_server;
 pub mod identity_user;
