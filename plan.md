@@ -73,6 +73,29 @@ Recent target work:
   - `src/handlers/*/intent.rs` are deliberately kept off `core/wire` imports by
     the intent cleanliness guardrail, so this hygiene only applies inside
     event-module layout and intent files
+- Current parallel target-architecture wave
+  - `src/event_modules/transit/layout.rs` adds `TransitSmallV1` and
+    `TransitLargeV1` fixed wire layouts with golden-bytes coverage, unblocking
+    the transit/receive lanes
+  - `src/handlers/handle_sync/` and `src/handlers/sync_index_update/` land as
+    real-but-minimal `IntentHandler` drivers with declared exact `input_fact_ids`
+    and a focused poc10 test; both stay off the live worker registration path
+    until Wave 6
+  - `src/event_modules/identity_user/` and `src/event_modules/identity_endpoint/`
+    port the simplest legacy identity fact families into the target tree with
+    `{fact,layout,project,rows}.rs` and matching `poc10_identity_*_projector`
+    tests
+  - `src/commands/` replaces the empty manifest with `CommandContext` (a
+    read-only struct that deliberately cannot reach worker or registry code)
+    plus a target `send_message` command exercised by
+    `tests/poc10_send_message_command_test.rs`
+  - `examples/poc10_demo.rs` now opens the sealed message into `message_rows`
+    after admitting a leaf-depth secret-coverage offer, demonstrating the
+    full sealed→opened row path through the target architecture
+- Pending parallel slice
+  - the encryption split-by-fact-family refactor lives on branch
+    `worktree-agent-a6a75815fab2702dd` but conflicts with the wire-primitive
+    cleanup; rebase or redo it after the current wire-vocabulary base settles
 
 Important caveats from the latest read-only audit:
 
