@@ -8,19 +8,13 @@
 //! a present address consume the same number of bytes so the fact stays
 //! self-describing without a length prefix.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-
 use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 
+use super::addr::{decode_optional_addr, encode_optional_addr, ADDR_BLOCK_BYTES};
 use super::fact::ConnectionRequestFact;
 
 pub const TYPE_CONNECTION_REQUEST: u8 = 42;
-
-const ADDR_FAMILY_NONE: u8 = 0;
-const ADDR_FAMILY_V4: u8 = 4;
-const ADDR_FAMILY_V6: u8 = 6;
-const ADDR_BLOCK_BYTES: usize = 1 + 16 + 2;
 
 pub const FACT_BYTES: usize =
     1 + 32 + 32 + 32 + 32 + 32 + ED25519_SIGNATURE_BYTES + 32 + 32 + 32 + ADDR_BLOCK_BYTES;
@@ -41,7 +35,8 @@ pub fn encode_fact(fact: &ConnectionRequestFact) -> Result<Vec<u8>, String> {
     cursor += 32;
     out[cursor..cursor + 32].copy_from_slice(&fact.initiator_ephemeral_public_key);
     cursor += 32;
-    encode_optional_addr(fact.from_listen_addr, &mut out[cursor..cursor + ADDR_BLOCK_BYTES])?;
+    let addr_bytes = encode_optional_addr(fact.from_listen_addr)?;
+    out[cursor..cursor + ADDR_BLOCK_BYTES].copy_from_slice(&addr_bytes);
     Ok(out)
 }
 
@@ -73,7 +68,9 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionRequestFact, String> {
     let mut initiator_ephemeral_public_key = [0; 32];
     initiator_ephemeral_public_key.copy_from_slice(&bytes[cursor..cursor + 32]);
     cursor += 32;
-    let from_listen_addr = decode_optional_addr(&bytes[cursor..cursor + ADDR_BLOCK_BYTES])?;
+    let mut addr_bytes = [0u8; ADDR_BLOCK_BYTES];
+    addr_bytes.copy_from_slice(&bytes[cursor..cursor + ADDR_BLOCK_BYTES]);
+    let from_listen_addr = decode_optional_addr(&addr_bytes)?;
     Ok(ConnectionRequestFact {
         from_endpoint,
         to_endpoint,
@@ -86,63 +83,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionRequestFact, String> {
         initiator_ephemeral_public_key,
         from_listen_addr,
     })
-}
-
-fn encode_optional_addr(addr: Option<SocketAddr>, out: &mut [u8]) -> Result<(), String> {
-    wire::expect_len(out, ADDR_BLOCK_BYTES).map_err(wire_err)?;
-    match addr {
-        None => {
-            wire::put_u8(ADDR_FAMILY_NONE, &mut out[0..1]).map_err(wire_err)?;
-            // address bytes and port already zero from initial fill
-        }
-        Some(addr) => match addr.ip() {
-            IpAddr::V4(ip) => {
-                wire::put_u8(ADDR_FAMILY_V4, &mut out[0..1]).map_err(wire_err)?;
-                out[1..5].copy_from_slice(&ip.octets());
-                wire::put_u16be(addr.port(), &mut out[17..19]).map_err(wire_err)?;
-            }
-            IpAddr::V6(ip) => {
-                wire::put_u8(ADDR_FAMILY_V6, &mut out[0..1]).map_err(wire_err)?;
-                out[1..17].copy_from_slice(&ip.octets());
-                wire::put_u16be(addr.port(), &mut out[17..19]).map_err(wire_err)?;
-            }
-        },
-    }
-    Ok(())
-}
-
-fn decode_optional_addr(bytes: &[u8]) -> Result<Option<SocketAddr>, String> {
-    wire::expect_len(bytes, ADDR_BLOCK_BYTES).map_err(wire_err)?;
-    let family = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
-    let raw = &bytes[1..17];
-    let port = wire::take_u16be(&bytes[17..19]).map_err(wire_err)?;
-    match family {
-        ADDR_FAMILY_NONE => {
-            if raw.iter().any(|byte| *byte != 0) || port != 0 {
-                return Err("absent listen addr must zero its address bytes".to_string());
-            }
-            Ok(None)
-        }
-        ADDR_FAMILY_V4 => {
-            if raw[4..].iter().any(|byte| *byte != 0) {
-                return Err("ipv4 listen addr must zero its trailing bytes".to_string());
-            }
-            let octets = [raw[0], raw[1], raw[2], raw[3]];
-            Ok(Some(SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::from(octets)),
-                port,
-            )))
-        }
-        ADDR_FAMILY_V6 => {
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(raw);
-            Ok(Some(SocketAddr::new(
-                IpAddr::V6(Ipv6Addr::from(octets)),
-                port,
-            )))
-        }
-        other => Err(format!("unknown listen addr family {other}")),
-    }
 }
 
 fn wire_err(err: wire::WireError) -> String {

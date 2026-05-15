@@ -66,10 +66,7 @@ mod tests {
     fn fact() -> SyncCompareFact {
         SyncCompareFact {
             connection_id: [4; 32],
-            range: TimestampRange {
-                start: 10,
-                end: 20,
-            },
+            range: TimestampRange { start: 10, end: 20 },
             summary: RangeSummary {
                 count: 3,
                 fingerprint: [7; 32],

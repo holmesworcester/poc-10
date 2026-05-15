@@ -44,7 +44,8 @@ impl Projector for InviteServerProjector {
         if invite_server.public_key == [0; 32] {
             return Err("invite_server fact has empty public_key".to_string());
         }
-        Ok(ProjectionOutput::new()
-            .intent(AtomicIntent::PutRow(invite_server_row(fact.id, &invite_server)?).into_intent()))
+        Ok(ProjectionOutput::new().intent(
+            AtomicIntent::PutRow(invite_server_row(fact.id, &invite_server)?).into_intent(),
+        ))
     }
 }

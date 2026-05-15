@@ -44,8 +44,7 @@ impl Projector for InviteAcceptedProjector {
         {
             return Err("invite_accepted fact has empty event id field".to_string());
         }
-        Ok(ProjectionOutput::new().intent(
-            AtomicIntent::PutRow(invite_accepted_row(fact.id, &accepted)?).into_intent(),
-        ))
+        Ok(ProjectionOutput::new()
+            .intent(AtomicIntent::PutRow(invite_accepted_row(fact.id, &accepted)?).into_intent()))
     }
 }

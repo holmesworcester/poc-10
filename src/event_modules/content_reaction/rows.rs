@@ -45,7 +45,8 @@ pub fn reaction_row(input: ReactionRow) -> Result<TableRow, String> {
     let slot = FixedSlot::<REACTION_CIPHERTEXT_BYTES>::new(&input.ciphertext)
         .map_err(|err| format!("{err:?}"))?;
     let mut encoded = vec![0; 4 + REACTION_CIPHERTEXT_BYTES];
-    slot.encode(&mut encoded).map_err(|err| format!("{err:?}"))?;
+    slot.encode(&mut encoded)
+        .map_err(|err| format!("{err:?}"))?;
     value.extend_from_slice(&encoded);
     Ok(TableRow {
         table: REACTION_ROWS,

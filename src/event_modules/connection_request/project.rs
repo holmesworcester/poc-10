@@ -45,8 +45,7 @@ impl Projector for ConnectionRequestProjector {
         if request.from_endpoint == request.to_endpoint {
             return Err("connection request endpoints must differ".to_string());
         }
-        Ok(ProjectionOutput::new().intent(
-            AtomicIntent::PutRow(connection_request_row(fact.id, &request)?).into_intent(),
-        ))
+        Ok(ProjectionOutput::new()
+            .intent(AtomicIntent::PutRow(connection_request_row(fact.id, &request)?).into_intent()))
     }
 }

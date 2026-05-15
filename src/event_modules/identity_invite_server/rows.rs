@@ -23,10 +23,7 @@ pub struct InviteServerRow {
     pub authority_event_id: FactId,
 }
 
-pub fn invite_server_key(
-    workspace_id: &WorkspaceId,
-    invite_server_id: &InviteServerId,
-) -> Vec<u8> {
+pub fn invite_server_key(workspace_id: &WorkspaceId, invite_server_id: &InviteServerId) -> Vec<u8> {
     let mut key = Vec::with_capacity(64);
     key.extend_from_slice(workspace_id);
     key.extend_from_slice(invite_server_id);

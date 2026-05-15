@@ -2,9 +2,7 @@ use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::event_modules::sync_compare::fact::{
-    RangeSummary, SyncCompareFact, TimestampRange,
-};
+use topo::event_modules::sync_compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 use topo::event_modules::sync_compare::{layout, project, rows};
 
 fn sample_fact() -> SyncCompareFact {

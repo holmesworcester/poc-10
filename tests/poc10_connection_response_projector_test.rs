@@ -88,5 +88,8 @@ fn connection_response_projector_rejects_malformed_bytes() {
     let err = bus
         .drain(&project::ConnectionResponseProjector::new(), &[], 10)
         .expect_err("malformed bytes must fail projection");
-    assert!(err.contains("connection response") || err.contains("Length"), "{err}");
+    assert!(
+        err.contains("connection response") || err.contains("Length"),
+        "{err}"
+    );
 }
