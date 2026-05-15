@@ -661,6 +661,7 @@ mod tests {
                 "local_endpoint_signing_secret_rows",
                 "content_event_rows",
                 "invite_accepted_rows",
+                "invite_server_rows",
             ]
         );
         assert_eq!(
