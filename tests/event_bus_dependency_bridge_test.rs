@@ -128,7 +128,7 @@ fn staged_event_bridge_writes_row_through_atomic_row_intent_handler() {
 
     let handler = RowIntentHandler::new(&store, &[schema::STAGED_EVENTS_WITH_DEPS]);
     let applied = bus
-        .dispatch_intents(&handler, &HandlerContext, 10)
+        .dispatch_intents(&handler, &HandlerContext::new(), 10)
         .expect("apply staged row intent");
 
     assert_eq!(applied.handled, 1);

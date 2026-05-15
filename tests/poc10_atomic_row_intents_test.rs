@@ -41,7 +41,7 @@ fn row_handler_applies_projector_message_row_put_and_delete_intents() {
     )
     .expect("submit message row");
     let rows = bus
-        .dispatch_intents(&row_handler, &HandlerContext, 10)
+        .dispatch_intents(&row_handler, &HandlerContext::new(), 10)
         .expect("row handler");
     assert_eq!(rows.handled, 2);
 
@@ -79,7 +79,7 @@ fn row_handler_applies_projector_message_row_put_and_delete_intents() {
         .into_intent(),
     )
     .expect("submit sealed delete");
-    bus.dispatch_intents(&row_handler, &HandlerContext, 10)
+    bus.dispatch_intents(&row_handler, &HandlerContext::new(), 10)
         .expect("delete row");
 
     assert!(store

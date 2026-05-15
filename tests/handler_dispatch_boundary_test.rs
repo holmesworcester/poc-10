@@ -28,7 +28,7 @@ fn handler_dispatch_output_boundary_is_facts_and_followup_intents_only() {
     );
 
     let output = EmitsFactAndFollowup
-        .handle(&input, &HandlerContext)
+        .handle(&input, &HandlerContext::new())
         .expect("handler output");
 
     let HandlerOutput { facts, intents } = output;

@@ -198,6 +198,15 @@ impl EventBus {
         })
     }
 
+    pub fn dispatch_deferred_intents_with_fact_context(
+        &mut self,
+        handler: &impl IntentHandler,
+        limit: usize,
+    ) -> Result<DispatchReport, String> {
+        let context = HandlerContext::with_facts(self.facts.values().cloned());
+        self.dispatch_deferred_intents(handler, &context, limit)
+    }
+
     fn dispatch_intents_matching(
         &mut self,
         handler: &impl IntentHandler,
@@ -993,7 +1002,7 @@ mod tests {
         .expect("submit trigger intent");
 
         let report = bus
-            .dispatch_intents(&FactAndIntentHandler, &HandlerContext, 1)
+            .dispatch_intents(&FactAndIntentHandler, &HandlerContext::new(), 1)
             .expect("dispatch handler");
 
         assert_eq!(report.handled, 1);
@@ -1030,7 +1039,7 @@ mod tests {
         .expect("submit selected");
 
         let report = bus
-            .dispatch_intents(&SelectedHandler, &HandlerContext, 10)
+            .dispatch_intents(&SelectedHandler, &HandlerContext::new(), 10)
             .expect("dispatch selected");
 
         assert_eq!(report.handled, 1);
@@ -1057,14 +1066,14 @@ mod tests {
         .expect("submit deferred");
 
         let atomic = bus
-            .dispatch_atomic_intents(&AcceptAllHandler, &HandlerContext, 10)
+            .dispatch_atomic_intents(&AcceptAllHandler, &HandlerContext::new(), 10)
             .expect("dispatch atomic");
         assert_eq!(atomic.handled, 1);
         assert_eq!(bus.intents().len(), 1);
         assert_eq!(bus.intents()[0].execution, IntentExecution::Deferred);
 
         let deferred = bus
-            .dispatch_deferred_intents(&AcceptAllHandler, &HandlerContext, 10)
+            .dispatch_deferred_intents(&AcceptAllHandler, &HandlerContext::new(), 10)
             .expect("dispatch deferred");
         assert_eq!(deferred.handled, 1);
         assert!(bus.intents().is_empty());
@@ -1085,16 +1094,61 @@ mod tests {
         .expect("submit retry intent");
 
         let err = bus
-            .dispatch_intents(&handler, &HandlerContext, 10)
+            .dispatch_intents(&handler, &HandlerContext::new(), 10)
             .expect_err("handler fails once");
         assert!(err.contains("handler unavailable"), "{err}");
         assert_eq!(bus.intents().len(), 1);
 
         let report = bus
-            .dispatch_intents(&handler, &HandlerContext, 10)
+            .dispatch_intents(&handler, &HandlerContext::new(), 10)
             .expect("handler retry succeeds");
         assert_eq!(report.handled, 1);
         assert!(bus.intents().is_empty());
+    }
+
+    #[test]
+    fn deferred_dispatch_helper_exposes_exact_fact_payloads_to_handler() {
+        let fact = Fact::new(FactScope::Global, 7, b"effect-input".to_vec());
+        let mut bus = EventBus::new();
+        bus.submit_fact(fact.clone());
+        bus.drain(&NoopProjector, &[], 10).expect("clear pending");
+        bus.submit_intent(Intent::new(
+            IntentKind::new("read_named_fact").unwrap(),
+            IntentExecution::Deferred,
+            fact.id,
+            Vec::new(),
+        ))
+        .expect("submit fact-reading intent");
+
+        let report = bus
+            .dispatch_deferred_intents_with_fact_context(&ReadNamedFactHandler, 10)
+            .expect("dispatch with fact context");
+
+        assert_eq!(report.handled, 1);
+        assert_eq!(report.intents, 1);
+        assert_eq!(bus.intents().len(), 1);
+        assert_eq!(bus.intents()[0].payload, b"effect-input");
+    }
+
+    #[test]
+    fn ordinary_dispatch_does_not_expose_event_bus_facts_to_handler_context() {
+        let fact = Fact::new(FactScope::Global, 7, b"effect-input".to_vec());
+        let mut bus = EventBus::new();
+        bus.submit_fact(fact.clone());
+        bus.submit_intent(Intent::new(
+            IntentKind::new("read_named_fact").unwrap(),
+            IntentExecution::Deferred,
+            fact.id,
+            Vec::new(),
+        ))
+        .expect("submit fact-reading intent");
+
+        let err = bus
+            .dispatch_deferred_intents(&ReadNamedFactHandler, &HandlerContext::new(), 10)
+            .expect_err("plain context has no facts");
+
+        assert!(err.contains("handler context missing fact"), "{err}");
+        assert_eq!(bus.intents().len(), 1);
     }
 
     #[test]
@@ -1119,7 +1173,7 @@ mod tests {
         let err = bus
             .dispatch_intents(
                 &ConflictingIntentHandler { fact: fact.clone() },
-                &HandlerContext,
+                &HandlerContext::new(),
                 10,
             )
             .expect_err("handler output conflicts");
@@ -1646,6 +1700,45 @@ mod tests {
                     b"same",
                     b"new",
                 )))
+        }
+    }
+
+    struct ReadNamedFactHandler;
+
+    impl IntentHandler for ReadNamedFactHandler {
+        fn accepts(&self, intent: &Intent) -> bool {
+            intent.kind.as_str() == "read_named_fact"
+        }
+
+        fn handle(
+            &self,
+            intent: &Intent,
+            context: &HandlerContext,
+        ) -> Result<HandlerOutput, String> {
+            let fact_id: FactId = intent
+                .key
+                .as_slice()
+                .try_into()
+                .map_err(|_| "read_named_fact intent key must be a fact id".to_string())?;
+            let fact = context.require_fact(&fact_id)?;
+            Ok(HandlerOutput::new().intent(Intent::new(
+                IntentKind::new("fact_effect_done").unwrap(),
+                IntentExecution::Deferred,
+                fact.id,
+                fact.bytes.clone(),
+            )))
+        }
+    }
+
+    struct NoopProjector;
+
+    impl Projector for NoopProjector {
+        fn project(
+            &self,
+            _fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new())
         }
     }
 

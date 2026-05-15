@@ -31,7 +31,7 @@ fn workspace_projector_materializes_row_through_atomic_intent() {
 
     let handler = RowIntentHandler::new(&store, &[rows::WORKSPACE_ROWS]);
     let applied = bus
-        .dispatch_intents(&handler, &HandlerContext, 10)
+        .dispatch_intents(&handler, &HandlerContext::new(), 10)
         .expect("apply workspace row intent");
 
     assert_eq!(applied.handled, 1);

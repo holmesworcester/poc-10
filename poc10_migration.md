@@ -388,6 +388,13 @@ done: identity_workspace row layout moved out of project.rs into rows.rs so proj
 done: active target guardrails now cover manifests, schema DSL files, layout files, project row definitions, handler context ownership, and CLI-equivalent parsing/printing
 done: poc10 sync context proof shows a timestamp range request can pull out-of-range event deps and out-of-range key offers before sending encrypted roots
 done: poc10 transit/connection interface proof keeps connection drain, transit wrapping, connection send, and send acknowledgement as distinct intent steps
+done: deferred handler dispatch can opt into exact fact payload context without giving ordinary handlers broad event-bus access
+done: key_wrap has a target fixed-width fact layout, wrap-secret kind tags, and deterministic coordinate keys for root/history-node wraps
+done: target sync context module now lives under src/event_modules/sync without legacy mod.rs/schema.rs/codec.rs/cli.rs shape
+done: target sync intent payload construction is isolated in intent.rs so project.rs only composes validated helpers
+done: target transit and connection intent payload layouts live under src/handlers and expose the handler boundary without owning event facts
+done: guardrails reject fake crypto/fact wire layouts inside handlers so wrap facts must be authored by event-module semantics
+done: full cargo test passes after the target key-wrap, sync, transit/connection, and handler-context integration
 ```
 
 The next event-pipeline step is to replace the simplified message row proof
@@ -397,11 +404,12 @@ node secrets. `purge_event` remains a deferred retention intent, but its handler
 should not exist until it preserves the existing broad purge/retire/cascade
 behavior.
 
-The next encryption handler step needs one missing core contract before it can
-be real: a deferred handler must be able to read the matched local source
-secret and recipient key payloads, or receive those exact payload facts through
-an explicit handler context. A handler that emits placeholder key-wrap facts
-without source secret material is intentionally rejected as cruft.
+The next encryption handler step no longer needs a broad store scan contract:
+deferred handlers can receive exact fact payload context from the event bus when
+the dispatch path opts into it. `MaterializeKeyWraps` should now be implemented
+only when it can consume target local-secret and recipient-key facts and return
+real key-wrap facts. A handler that emits placeholder key-wrap facts without
+source secret material remains intentionally rejected as cruft.
 
 ### Wave 4: Encryption Slice
 

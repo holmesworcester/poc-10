@@ -1,11 +1,38 @@
 //! Intent handler contract.
 
-use crate::core::facts::Fact;
+use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{AtomicIntent, Intent};
 use crate::core::store::{Store, TableName};
+use std::collections::BTreeMap;
 
-#[derive(Debug, Default)]
-pub struct HandlerContext;
+#[derive(Debug, Clone, Default)]
+pub struct HandlerContext {
+    facts: BTreeMap<FactId, Fact>,
+}
+
+impl HandlerContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_facts(facts: impl IntoIterator<Item = Fact>) -> Self {
+        Self {
+            facts: facts
+                .into_iter()
+                .map(|fact| (fact.id, fact))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    pub fn fact(&self, id: &FactId) -> Option<&Fact> {
+        self.facts.get(id)
+    }
+
+    pub fn require_fact(&self, id: &FactId) -> Result<&Fact, String> {
+        self.fact(id)
+            .ok_or_else(|| format!("handler context missing fact {id:?}"))
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HandlerOutput {
@@ -99,6 +126,17 @@ mod tests {
     }
 
     #[test]
+    fn handler_context_exposes_only_exact_scoped_fact_lookup() {
+        let fact = Fact::new(FactScope::Local, 7, b"bytes".to_vec());
+        let missing = [9; 32];
+
+        assert!(HandlerContext::new().fact(&fact.id).is_none());
+        let context = HandlerContext::with_facts([fact.clone()]);
+        assert_eq!(context.require_fact(&fact.id).expect("fact"), &fact);
+        assert!(context.fact(&missing).is_none());
+    }
+
+    #[test]
     fn row_intent_handler_applies_put_and_delete_through_registered_tables() {
         let store = Store::open_memory_with_schemas(&[Schema::durable_row_table(
             "handler.rows.v1",
@@ -118,7 +156,7 @@ mod tests {
         )
         .expect("submit put");
         let put = bus
-            .dispatch_intents(&handler, &HandlerContext, 10)
+            .dispatch_intents(&handler, &HandlerContext::new(), 10)
             .expect("dispatch put");
         assert_eq!(put.handled, 1);
         assert_eq!(
@@ -135,7 +173,7 @@ mod tests {
         )
         .expect("submit delete");
         let delete = bus
-            .dispatch_intents(&handler, &HandlerContext, 10)
+            .dispatch_intents(&handler, &HandlerContext::new(), 10)
             .expect("dispatch delete");
         assert_eq!(delete.handled, 1);
         assert!(store.table_rows(TEST_TABLE).expect("rows").is_empty());
@@ -168,7 +206,7 @@ mod tests {
         )
         .expect("submit conflicting put");
         let err = bus
-            .dispatch_intents(&handler, &HandlerContext, 10)
+            .dispatch_intents(&handler, &HandlerContext::new(), 10)
             .expect_err("conflicting put fails");
 
         assert!(err.contains("apply put_row intent"), "{err}");

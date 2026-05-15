@@ -607,3 +607,52 @@ fn target_handlers_do_not_own_projection_rows_or_projector_context() {
         offenders.join("\n")
     );
 }
+
+#[test]
+fn target_handlers_do_not_define_fact_wire_layouts_or_fake_crypto_facts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let handler_root = root.join("src/handlers");
+    if !handler_root.exists() {
+        return;
+    }
+
+    let mut offenders = Vec::new();
+    for path in rust_files(&handler_root) {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        for forbidden in [
+            "crate::core::facts",
+            "Fact::new",
+            "FactScope",
+            "ScopeKind",
+            "const TYPE_",
+            "pub const TYPE_",
+            "FixedLayout",
+            "FixedSlot",
+            "crate::core::wire",
+            "wire::",
+            "put_u8",
+            "take_u8",
+            "expect_len",
+            "ciphertext",
+            "nonce",
+            "encrypt",
+            "decrypt",
+            "placeholder",
+            "fake",
+        ] {
+            if production.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "handlers must not define protocol fact wire layouts, event-module fact tags, or crypto-shaped placeholder facts; put fact shapes and fixed bytes under src/event_modules:\n{}",
+        offenders.join("\n")
+    );
+}
