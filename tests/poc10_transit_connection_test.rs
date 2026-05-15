@@ -40,6 +40,19 @@ fn connection_send_success_output(send_intent: &topo::core::intents::Intent) -> 
 }
 
 #[test]
+fn sync_send_on_connection_names_ordered_fact_bundle() {
+    let intent = transit::send_on_connection_intent(transit::TransitSendOnConnection {
+        connection_id: [9; 32],
+        fact_ids: vec![[1; 32], [2; 32], [3; 32]],
+    });
+
+    assert_eq!(intent.kind.as_str(), transit::TRANSIT_SEND_ON_CONNECTION);
+    let decoded = transit::decode_send_on_connection(&intent).unwrap();
+    assert_eq!(decoded.connection_id, [9; 32]);
+    assert_eq!(decoded.fact_ids, vec![[1; 32], [2; 32], [3; 32]]);
+}
+
+#[test]
 fn connection_drain_emits_transit_wrap_not_network_send() {
     let output = connection_drain_output();
 
@@ -121,6 +134,7 @@ fn connection_send_ack_marks_only_deferred_send_items() {
 fn intent_kind_names_keep_crypto_and_transport_boundaries_separate() {
     for kind in [
         transit::TRANSIT_WRAP_CONNECTION_BATCH,
+        transit::TRANSIT_SEND_ON_CONNECTION,
         connection::CONNECTION_SEND_FRAME,
         connection::CONNECTION_MARK_SENT,
     ] {

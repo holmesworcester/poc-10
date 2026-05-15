@@ -293,10 +293,10 @@ pub fn is_deleted_by_author(
     author_user_id: &EventId,
 ) -> Result<bool, String> {
     use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author;
-    let labels = crate::protocol::event_modules::rows::event_labels(store, message_id)
+    let updates = crate::protocol::event_modules::rows::context_updates(store, message_id)
         .map_err(|err| format!("load deletion updates: {err}"))?;
-    Ok(labels.iter().any(|label| {
-        deletion_label_author(label)
+    Ok(updates.iter().any(|update| {
+        deletion_label_author(update)
             .map(|author| author == *author_user_id)
             .unwrap_or(false)
     }))

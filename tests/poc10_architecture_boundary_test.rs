@@ -213,8 +213,8 @@ fn poc10_core_event_bus_exposes_protocol_neutral_vocabulary() {
         "recently_valid_events",
         "event_receive_context",
         "applied_shared_events",
-        "dependency_labels",
-        "event_labels",
+        "dependency_updates",
+        "context_updates",
         "canonical.in",
         "sync.in",
         "transit.out",
@@ -291,7 +291,7 @@ fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
         "event_modules.missing_deps_by_blocked_event",
         "event_modules.dependents_by_dep",
         "event_modules.deps_by_dependent",
-        "event_modules.labels",
+        "event_modules.context_updates",
         "event_modules.pending_reprojections",
         "event_modules.recently_valid_events",
         "event_modules.event_receive_context",
@@ -305,9 +305,9 @@ fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
         "recently_valid_events",
         "event_receive_context",
         "applied_shared_events",
-        "dependency_labels",
-        "event_labels",
-        "labels",
+        "dependency_updates",
+        "context_updates",
+        "updates",
     ];
     let target_paths = ["src/core", "src/event_modules", "src/handlers"]
         .into_iter()
@@ -388,7 +388,7 @@ fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
         "updates:",
         ".rows",
         ".deletes",
-        ".labels",
+        ".updates",
     ];
     let offenders = source_matches_in_paths(root, projector_paths, &forbidden);
 

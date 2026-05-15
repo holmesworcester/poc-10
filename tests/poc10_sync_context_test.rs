@@ -6,6 +6,7 @@ use topo::event_modules::sync::fact::{
     EncryptedRootFact, KeyWrapAvailableFact, SharedEventFact, SyncRangeRequestFact,
 };
 use topo::event_modules::sync::{layout, project};
+use topo::handlers::transit;
 
 #[test]
 fn sync_request_sends_encrypted_message_when_out_of_range_dep_and_key_arrive() {
@@ -50,10 +51,13 @@ fn sync_request_sends_encrypted_message_when_out_of_range_dep_and_key_arrive() {
 
     assert!(ready.wakes >= 1);
     assert_eq!(bus.intents().len(), 1);
-    assert_eq!(bus.intents()[0].kind.as_str(), "send_on_connection");
     assert_eq!(
-        decode_send_payload(&bus.intents()[0].payload),
-        (message_event_id, dep_id, key_wrap_id)
+        bus.intents()[0].kind.as_str(),
+        transit::TRANSIT_SEND_ON_CONNECTION
+    );
+    assert_eq!(
+        decode_send_fact_ids(&bus.intents()[0]),
+        vec![message_event_id, dep_id, key_wrap_id]
     );
     assert!(
         bus.context(&request.id)
@@ -149,8 +153,8 @@ fn sync_request_sends_ready_root_when_an_earlier_root_is_missing_a_key() {
 
     assert_eq!(bus.intents().len(), 1);
     assert_eq!(
-        decode_send_payload(&bus.intents()[0].payload),
-        (ready_event_id, ready_dep_id, ready_key_wrap_id)
+        decode_send_fact_ids(&bus.intents()[0]),
+        vec![ready_event_id, ready_dep_id, ready_key_wrap_id]
     );
 }
 
@@ -217,13 +221,10 @@ fn key_wrap_available_fact(workspace_id: [u8; 32], timestamp: u64, key_wrap_id: 
     )
 }
 
-fn decode_send_payload(payload: &[u8]) -> ([u8; 32], [u8; 32], [u8; 32]) {
-    assert_eq!(payload.len(), 96);
-    (
-        payload[0..32].try_into().unwrap(),
-        payload[32..64].try_into().unwrap(),
-        payload[64..96].try_into().unwrap(),
-    )
+fn decode_send_fact_ids(intent: &topo::core::intents::Intent) -> Vec<[u8; 32]> {
+    transit::decode_send_on_connection(intent)
+        .expect("decode send_on_connection")
+        .fact_ids
 }
 
 fn id(value: u8) -> [u8; 32] {

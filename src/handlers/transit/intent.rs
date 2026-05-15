@@ -31,7 +31,9 @@ pub struct TransitWrapConnectionBatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitSendOnConnection {
     pub connection_id: HandlerId,
-    pub event_id: HandlerId,
+    /// Ordered fact ids that must travel together for the receiver to project
+    /// the requested range item without a follow-up key/dependency round trip.
+    pub fact_ids: Vec<HandlerId>,
 }
 
 pub fn wrap_connection_batch_intent(input: TransitWrapConnectionBatch) -> Intent {
@@ -84,15 +86,15 @@ pub fn decode_wrap_connection_batch(intent: &Intent) -> Result<TransitWrapConnec
 }
 
 pub fn send_on_connection_intent(input: TransitSendOnConnection) -> Intent {
-    let mut payload = Vec::with_capacity(65);
+    let mut payload = Vec::with_capacity(37 + input.fact_ids.len() * 32);
     payload.push(1);
     push_id(&mut payload, &input.connection_id);
-    push_id(&mut payload, &input.event_id);
+    push_ids(&mut payload, &input.fact_ids);
 
     Intent::new(
         IntentKind::new(TRANSIT_SEND_ON_CONNECTION).expect("valid transit send intent kind"),
         IntentExecution::Deferred,
-        connection_event_key(input.connection_id, input.event_id),
+        connection_fact_ids_key(input.connection_id, &input.fact_ids),
         payload,
     )
 }
@@ -104,25 +106,33 @@ pub fn decode_send_on_connection(intent: &Intent) -> Result<TransitSendOnConnect
     if intent.execution != IntentExecution::Deferred {
         return Err("send_on_connection intent must be deferred".to_string());
     }
-    if intent.payload.len() != 65 || intent.payload[0] != 1 {
+    if intent.payload.len() < 37 || intent.payload[0] != 1 {
         return Err("send_on_connection payload is malformed".to_string());
     }
-    let connection_id = intent.payload[1..33].try_into().unwrap();
-    let event_id = intent.payload[33..65].try_into().unwrap();
-    if intent.key != connection_event_key(connection_id, event_id) {
+    let mut reader = Reader::new(&intent.payload[1..]);
+    let connection_id = reader.id()?;
+    let fact_ids = reader.ids()?;
+    reader.finish()?;
+    if fact_ids.is_empty() {
+        return Err("send_on_connection must name at least one fact".to_string());
+    }
+    if intent.key != connection_fact_ids_key(connection_id, &fact_ids) {
         return Err("send_on_connection key does not match payload".to_string());
     }
     Ok(TransitSendOnConnection {
         connection_id,
-        event_id,
+        fact_ids,
     })
 }
 
-fn connection_event_key(connection_id: HandlerId, event_id: HandlerId) -> Vec<u8> {
-    let mut key = Vec::with_capacity(64);
-    key.extend_from_slice(&connection_id);
-    key.extend_from_slice(&event_id);
-    key
+fn connection_fact_ids_key(connection_id: HandlerId, fact_ids: &[HandlerId]) -> Vec<u8> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"topo:send-on-connection:v1:");
+    hash.update(&connection_id);
+    for fact_id in fact_ids {
+        hash.update(fact_id);
+    }
+    hash.finalize().as_bytes().to_vec()
 }
 
 fn push_id(out: &mut Vec<u8>, id: &HandlerId) {
@@ -133,6 +143,13 @@ fn push_vecs(out: &mut Vec<u8>, values: &[Vec<u8>]) {
     out.extend_from_slice(&(values.len() as u32).to_be_bytes());
     for value in values {
         push_bytes(out, value);
+    }
+}
+
+fn push_ids(out: &mut Vec<u8>, values: &[HandlerId]) {
+    out.extend_from_slice(&(values.len() as u32).to_be_bytes());
+    for value in values {
+        push_id(out, value);
     }
 }
 
@@ -153,6 +170,15 @@ impl<'a> Reader<'a> {
 
     fn id(&mut self) -> Result<HandlerId, String> {
         Ok(self.take(32)?.try_into().unwrap())
+    }
+
+    fn ids(&mut self) -> Result<Vec<HandlerId>, String> {
+        let len = self.u32()? as usize;
+        let mut values = Vec::with_capacity(len);
+        for _ in 0..len {
+            values.push(self.id()?);
+        }
+        Ok(values)
     }
 
     fn vecs(&mut self) -> Result<Vec<Vec<u8>>, String> {

@@ -8,7 +8,7 @@
 //! Supersession: when the canonical event carries a non-zero
 //! `previous_recipient_key_id`, the projector also exact-deletes the old
 //! `RECIPIENT_KEYS` row in the same projection AND emits a supersession
-//! label on the predecessor's event id. The single event then acts as both
+//! context update on the predecessor's event id. The single event then acts as both
 //! the tombstone of the old pubkey and the introduction of the new one
 //! (per `RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
 //! Wrap-Bound Deletion"). Validation requires the predecessor to be issued
@@ -17,9 +17,9 @@
 //!
 //! Re-delivery defense: if this projection is for a non-supersession
 //! `recipient_key` event whose own id ALREADY carries a supersession
-//! label, the projector skips writing the row. The label is the
+//! context update, the projector skips writing the row. The update is the
 //! persistent supersession marker — once a recipient_key has been
-//! retired (its successor was admitted first, label was written), a
+//! retired (its successor was admitted first, the update was written), a
 //! later re-delivery of the predecessor bytes via a peer that hasn't
 //! yet seen the successor projects through this branch and the row
 //! stays deleted. Both peers converge on identical EVENTS state because
@@ -27,7 +27,7 @@
 //! suppressed.
 
 use crate::protocol::event_modules::identity::{endpoint_shared, signed};
-use crate::protocol::event_modules::rows::EventLabel;
+use crate::protocol::event_modules::rows::ContextUpdate;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
@@ -78,7 +78,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
 
     // Re-delivery suppression. If this event's own id already carries a
-    // supersession label (because a successor recipient_key was admitted
+    // supersession update (because a successor recipient_key was admitted
     // and projected earlier on this peer), do not write the recipient_keys
     // row. The supersession projector deleted it; a re-delivery must not
     // resurrect it. The event itself stays admitted to EVENTS so both
@@ -88,7 +88,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         .context
         .updates
         .iter()
-        .any(|label| is_superseded_label(label));
+        .any(|update| is_superseded_label(update));
     let mut output = if already_superseded {
         ProjectionOutput::table_writes(Vec::new())
     } else {
@@ -115,15 +115,15 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                 recipient_key.previous_recipient_key_id,
             ),
         });
-        // Mark the predecessor's event id with a supersession label so a
+        // Mark the predecessor's event id with a supersession update so a
         // later re-projection of the predecessor's own bytes (e.g. on a
         // fresh peer that admits the successor first) suppresses the
-        // resurrection of the predecessor's row. The label payload names
+        // resurrection of the predecessor's row. The update payload names
         // the successor (this event's id) so a debugger / future query
         // can follow the chain.
-        output.push_context_update(EventLabel {
+        output.push_context_update(ContextUpdate {
             event_id: recipient_key.previous_recipient_key_id,
-            label: superseded_label(&event.context.event_id),
+            update: superseded_label(&event.context.event_id),
         });
     }
 
@@ -403,17 +403,17 @@ mod tests {
         assert_eq!(
             output.legacy_context_updates().len(),
             1,
-            "supersession must emit one EventLabel marking the predecessor"
+            "supersession must emit one ContextUpdate marking the predecessor"
         );
         assert_eq!(
             output.legacy_context_updates()[0].event_id,
             predecessor_id,
-            "the label must be attached to the predecessor's event id"
+            "the update must be attached to the predecessor's event id"
         );
         assert_eq!(
-            output.legacy_context_updates()[0].label,
+            output.legacy_context_updates()[0].update,
             super::super::types::superseded_label(&event.context.event_id),
-            "the label payload must name the successor recipient_key event"
+            "the update payload must name the successor recipient_key event"
         );
     }
 

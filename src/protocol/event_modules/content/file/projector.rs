@@ -20,7 +20,7 @@ use crate::protocol::event_modules::content::message_deletion::rows::{
 use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author as message_deletion_label_author;
 use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
 use crate::protocol::event_modules::leaf_history_node;
-use crate::protocol::event_modules::rows::EventLabel;
+use crate::protocol::event_modules::rows::ContextUpdate;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
 use super::{commands, layout, rows};
@@ -168,9 +168,9 @@ fn file_purge_output(
                 key: rows::file_by_file_id_key(workspace_id, file_id, file_event_id),
             },
         ],
-        vec![EventLabel {
+        vec![ContextUpdate {
             event_id: file_event_id,
-            label: file_deletion_label(&author_user_id),
+            update: file_deletion_label(&author_user_id),
         }],
     )
 }

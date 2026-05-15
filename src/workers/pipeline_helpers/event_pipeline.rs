@@ -13,8 +13,8 @@
 //! ```text
 //! command -> ProposedEvent
 //!          -> admit canonical bytes by deterministic event id
-//!          -> project with Applied direct dependencies plus labels
-//!          -> either apply rows/labels or let the projector wait for deps
+//!          -> project with Applied direct dependencies plus context updates
+//!          -> either apply rows/context updates or let the projector wait for deps
 //!          -> mark newly unblocked events ready
 //! ```
 //!
@@ -66,11 +66,11 @@
 //! Inputs: command outputs, decoded records, received records, transit input,
 //! and selected compatibility drain work supplied by CLI/test call sites.
 //! State: durable event rows, ready/blocker indexes, retained direct dependency
-//! edges, generic labels, and worker queue rows declared in `workers::queue_rows`.
+//! edges, generic context updates, and worker queue rows declared in `workers::queue_rows`.
 //! Step: admit local canonical records directly, drain queued canonical transit
 //! records, project ready durable events, or run bounded compatibility drains
 //! according to the supplied work item.
-//! Outputs: durable event rows, projector rows/labels, `canonical.in`,
+//! Outputs: durable event rows, projector rows/context updates, `canonical.in`,
 //! `event_modules.ready_events`, `event_modules.recently_valid_events`,
 //! `event_modules.pending_reprojections`, and `event_modules.applied_shared_events`.
 //! Consume: queue rows are deleted only after the relevant event is accepted,
@@ -180,20 +180,20 @@ impl ProjectionOutput {
         projection_table_deletes(deletes)
     }
 
-    pub fn context_updates(updates: Vec<rows::EventLabel>) -> Self {
+    pub fn context_updates(updates: Vec<rows::ContextUpdate>) -> Self {
         projection_context_updates(updates)
     }
 
     pub fn table_writes_and_context_updates(
         rows: Vec<TableRow>,
-        updates: Vec<rows::EventLabel>,
+        updates: Vec<rows::ContextUpdate>,
     ) -> Self {
         projection_table_writes_and_context_updates(rows, updates)
     }
 
     pub fn table_deletes_and_context_updates(
         deletes: Vec<TableDelete>,
-        updates: Vec<rows::EventLabel>,
+        updates: Vec<rows::ContextUpdate>,
     ) -> Self {
         projection_table_deletes_and_context_updates(deletes, updates)
     }
@@ -201,7 +201,7 @@ impl ProjectionOutput {
     pub fn from_atomic_parts(
         rows: Vec<TableRow>,
         deletes: Vec<TableDelete>,
-        updates: Vec<rows::EventLabel>,
+        updates: Vec<rows::ContextUpdate>,
     ) -> Self {
         projection_parts(rows, deletes, updates)
     }
@@ -216,8 +216,8 @@ impl ProjectionOutput {
             std::mem::take(&mut self.output).intent(AtomicIntent::DeleteRow(delete).into_intent());
     }
 
-    pub fn push_context_update(&mut self, update: rows::EventLabel) {
-        for row in rows::event_label_rows(vec![update]) {
+    pub fn push_context_update(&mut self, update: rows::ContextUpdate) {
+        for row in rows::context_update_rows(vec![update]) {
             self.push_table_write(row);
         }
     }
@@ -236,7 +236,7 @@ impl ProjectionOutput {
         self.legacy_parts().1
     }
 
-    pub fn legacy_context_updates(&self) -> Vec<rows::EventLabel> {
+    pub fn legacy_context_updates(&self) -> Vec<rows::ContextUpdate> {
         self.legacy_parts().2
     }
 
@@ -248,7 +248,7 @@ impl ProjectionOutput {
         self.output
     }
 
-    fn legacy_parts(&self) -> (Vec<TableRow>, Vec<TableDelete>, Vec<rows::EventLabel>) {
+    fn legacy_parts(&self) -> (Vec<TableRow>, Vec<TableDelete>, Vec<rows::ContextUpdate>) {
         let allowed_tables = projection_allowed_tables();
         let mut rows = Vec::new();
         let mut deletes = Vec::new();
@@ -257,8 +257,8 @@ impl ProjectionOutput {
             match AtomicIntent::from_intent(intent, &allowed_tables)
                 .expect("legacy projection output must carry atomic row intents")
             {
-                AtomicIntent::PutRow(row) if row.table == rows::EVENT_LABELS => {
-                    updates.push(decode_event_label_row(&row));
+                AtomicIntent::PutRow(row) if row.table == rows::CONTEXT_UPDATES => {
+                    updates.push(decode_context_update_row(&row));
                 }
                 AtomicIntent::PutRow(row) => rows.push(row),
                 AtomicIntent::DeleteRow(delete) => deletes.push(delete),
@@ -282,20 +282,20 @@ pub(crate) fn projection_table_deletes(deletes: Vec<TableDelete>) -> ProjectionO
     projection_parts(Vec::new(), deletes, Vec::new())
 }
 
-pub(crate) fn projection_context_updates(updates: Vec<rows::EventLabel>) -> ProjectionOutput {
+pub(crate) fn projection_context_updates(updates: Vec<rows::ContextUpdate>) -> ProjectionOutput {
     projection_parts(Vec::new(), Vec::new(), updates)
 }
 
 pub(crate) fn projection_table_writes_and_context_updates(
     rows: Vec<TableRow>,
-    updates: Vec<rows::EventLabel>,
+    updates: Vec<rows::ContextUpdate>,
 ) -> ProjectionOutput {
     projection_parts(rows, Vec::new(), updates)
 }
 
 pub(crate) fn projection_table_deletes_and_context_updates(
     deletes: Vec<TableDelete>,
-    updates: Vec<rows::EventLabel>,
+    updates: Vec<rows::ContextUpdate>,
 ) -> ProjectionOutput {
     projection_parts(Vec::new(), deletes, updates)
 }
@@ -303,12 +303,12 @@ pub(crate) fn projection_table_deletes_and_context_updates(
 pub(crate) fn projection_parts(
     rows: Vec<TableRow>,
     deletes: Vec<TableDelete>,
-    updates: Vec<rows::EventLabel>,
+    updates: Vec<rows::ContextUpdate>,
 ) -> ProjectionOutput {
     let mut output = CoreProjectionOutput::new();
     for row in rows
         .into_iter()
-        .chain(rows::event_label_rows(updates).into_iter())
+        .chain(rows::context_update_rows(updates).into_iter())
     {
         output = output.intent(AtomicIntent::PutRow(row).into_intent());
     }
@@ -887,7 +887,8 @@ where
                 .collect::<Vec<_>>();
             let mut total = ApplyReadyReport::default();
             for event in pending {
-                let report = reproject_label_woken_event_tx(store, registry, &event.event_id)?;
+                let report =
+                    reproject_context_update_woken_event_tx(store, registry, &event.event_id)?;
                 total.applied_events += report.applied_events;
                 total.unblocked_events += report.unblocked_events;
                 total.reprojected_events += report.reprojected_events;
@@ -1205,7 +1206,7 @@ fn store_durable_event_tx(
 
 /// Claim and project one ready durable event.
 ///
-/// The projector sees Applied direct dependencies and labels, then returns a
+/// The projector sees Applied direct dependencies and context updates, then returns a
 /// lifecycle decision. Apply moves Ready -> Applied and writes projector rows;
 /// WaitForDeps moves Ready -> Blocked and writes blocker edges. Context load,
 /// projector call, status change, and row writes all happen in the caller's
@@ -1293,7 +1294,7 @@ fn apply_projection_decision_in_tx(
     Ok(())
 }
 
-fn reproject_label_woken_event_tx(
+fn reproject_context_update_woken_event_tx(
     store: &Store,
     modules: &impl EventRegistry,
     event_id: &EventId,
@@ -1303,7 +1304,7 @@ fn reproject_label_woken_event_tx(
         return Ok(report);
     };
     if status == EventStatus::Ready {
-        // Ready events will see the new labels on their normal Ready -> Applied
+        // Ready events will see the new context updates on their normal Ready -> Applied
         // pass. Reprojecting here would race the lifecycle claim path.
         return Ok(report);
     }
@@ -1323,7 +1324,7 @@ fn reproject_label_woken_event_tx(
             }
         }
         EventStatus::Blocked => {
-            // Label wake is opportunistic for blocked events. If the projector
+            // Context-update wake is opportunistic for blocked events. If the projector
             // can make a semantic deletion decision from the event bytes plus
             // available context, it writes purge/delete output now. If it still
             // needs a missing dependency, the ordinary missing-dependency edge
@@ -1407,7 +1408,7 @@ fn load_event_context_in_tx(
         if event_lifecycle::event_is_applied(store, &dependency)? {
             if let Some(bytes) = rows::event_bytes(store, &dependency)? {
                 let record = modules.event_from_bytes(bytes).map_err(module_error)?;
-                let updates = rows::event_labels(store, &dependency).map_err(module_error)?;
+                let updates = rows::context_updates(store, &dependency).map_err(module_error)?;
                 dependencies.push(DependencyContext {
                     event_id: dependency,
                     record,
@@ -1422,7 +1423,7 @@ fn load_event_context_in_tx(
     Ok(EventContext {
         event_id: *event_id,
         dependencies,
-        updates: rows::event_labels(store, event_id).map_err(module_error)?,
+        updates: rows::context_updates(store, event_id).map_err(module_error)?,
         receive,
         now_unix_minute,
     })
@@ -1444,12 +1445,12 @@ fn write_projection_output_in_tx(
     for intent in changes.intents {
         match AtomicIntent::from_intent(&intent, &allowed_tables).map_err(module_error)? {
             AtomicIntent::PutRow(row) => {
-                let label_event_id = event_label_id_from_row(&row)?;
+                let context_update_event_id = context_update_event_id_from_row(&row)?;
                 let inserted = store.insert_table_rows_in_tx(vec![row])?;
                 applied += inserted;
                 if inserted > 0 {
-                    if let Some(event_id) = label_event_id {
-                        enqueue_label_reprojections_in_tx(store, &event_id)?;
+                    if let Some(event_id) = context_update_event_id {
+                        enqueue_context_update_reprojections_in_tx(store, &event_id)?;
                     }
                 }
             }
@@ -1473,13 +1474,13 @@ fn count_atomic_puts(changes: &ProjectionOutput, table: TableName) -> rusqlite::
     Ok(count)
 }
 
-fn event_label_id_from_row(row: &TableRow) -> rusqlite::Result<Option<EventId>> {
-    if row.table != rows::EVENT_LABELS {
+fn context_update_event_id_from_row(row: &TableRow) -> rusqlite::Result<Option<EventId>> {
+    if row.table != rows::CONTEXT_UPDATES {
         return Ok(None);
     }
     if row.key.len() < 32 {
         return Err(module_error(
-            "event label row key is shorter than event id".to_string(),
+            "context update row key is shorter than event id".to_string(),
         ));
     }
     let mut event_id = [0u8; 32];
@@ -1487,12 +1488,12 @@ fn event_label_id_from_row(row: &TableRow) -> rusqlite::Result<Option<EventId>> 
     Ok(Some(event_id))
 }
 
-fn decode_event_label_row(row: &TableRow) -> rows::EventLabel {
+fn decode_context_update_row(row: &TableRow) -> rows::ContextUpdate {
     let mut event_id = [0u8; 32];
     event_id.copy_from_slice(&row.key[..32]);
-    rows::EventLabel {
+    rows::ContextUpdate {
         event_id,
-        label: row.value.clone(),
+        update: row.value.clone(),
     }
 }
 
@@ -1508,7 +1509,10 @@ fn projection_allowed_tables() -> Vec<TableName> {
         .collect()
 }
 
-fn enqueue_label_reprojections_in_tx(store: &Store, event_id: &EventId) -> rusqlite::Result<usize> {
+fn enqueue_context_update_reprojections_in_tx(
+    store: &Store,
+    event_id: &EventId,
+) -> rusqlite::Result<usize> {
     let mut rows = vec![worker_rows::pending_reprojection_row(*event_id)];
     for dependent in event_lifecycle::direct_dependents(store, event_id)? {
         rows.push(worker_rows::pending_reprojection_row(dependent));

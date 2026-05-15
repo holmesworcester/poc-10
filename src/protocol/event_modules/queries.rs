@@ -13,10 +13,10 @@ use crate::protocol::event_modules::types::{
 
 use super::rows::{
     self, decode_stored_event_index, read_event, BLOCKED_EVENTS_BY_MISSING_DEP, EVENTS,
-    EVENT_LABELS,
+    CONTEXT_UPDATES,
 };
 
-const MAX_LABELS_PER_EVENT: usize = 4096;
+const MAX_CONTEXT_UPDATES_PER_EVENT: usize = 4096;
 
 pub fn max_timestamp(store: &Store) -> rusqlite::Result<u64> {
     let mut max = 0u64;
@@ -97,9 +97,9 @@ pub fn event_bytes(store: &Store, event_id: &EventId) -> rusqlite::Result<Option
     read_event(store, event_id).map(|event| event.map(|event| event.canonical_bytes))
 }
 
-pub fn event_labels(store: &Store, event_id: &EventId) -> Result<Vec<Vec<u8>>, String> {
+pub fn context_updates(store: &Store, event_id: &EventId) -> Result<Vec<Vec<u8>>, String> {
     store
-        .table_rows_with_key_prefix(EVENT_LABELS, event_id, MAX_LABELS_PER_EVENT)
+        .table_rows_with_key_prefix(CONTEXT_UPDATES, event_id, MAX_CONTEXT_UPDATES_PER_EVENT)
         .map_err(|err| format!("load event updates: {err}"))
-        .map(|rows| rows.into_iter().map(|(_, label)| label).collect())
+        .map(|rows| rows.into_iter().map(|(_, update)| update).collect())
 }

@@ -4,6 +4,8 @@ use topo::core::facts::Fact;
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
+use topo::core::store::Store;
 use topo::event_modules::encryption::context::{
     self as encryption_context, frontier_role, recipient_key_role, recipient_superseded_role,
     WrapSourceKind, WrapSourceMatcher,
@@ -15,7 +17,9 @@ use topo::event_modules::encryption::fact::{
 use topo::event_modules::encryption::intent::{
     decode_materialize_key_wraps_intent, decode_purge_retired_recipient_material_intent,
 };
-use topo::event_modules::encryption::{layout as encryption_layout, project as encryption_project};
+use topo::event_modules::encryption::{
+    create as encryption_create, layout as encryption_layout, project as encryption_project,
+};
 use topo::event_modules::sealed_message::context::{
     self as message_context, workspace_scope, SecretCoverageMatcher,
 };
@@ -26,6 +30,7 @@ use topo::event_modules::sealed_message::rows::{MESSAGE_ROWS, SEALED_MESSAGE_ROW
 use topo::event_modules::sealed_message::{layout as message_layout, project as message_project};
 use topo::event_modules::signed_fact::{self, fact::LocalSignerSecretFact};
 use topo::event_modules::sync::context as sync_context;
+use topo::handlers::materialize_key_wraps::MaterializeKeyWrapsHandler;
 
 #[test]
 fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appears() {
@@ -195,6 +200,116 @@ fn duplicate_key_requests_converge_on_one_wrap_intent_without_request_entropy() 
         recipient_key_fact(workspace, requester, [13; 32], 50).id
     );
     assert_eq!(intent.source, WrapSourceKind::FrontierRoot);
+}
+
+#[test]
+fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
+    let workspace = [14; 32];
+    let requester = [15; 32];
+    let responder = [16; 32];
+    let frontier = removal_frontier_fact(workspace, responder, 10);
+    let recipient = recipient_key_fact(workspace, requester, [17; 32], 50);
+    let root = local_key_secret_fact(workspace, frontier.id, responder, 10);
+    let signer = local_signer_secret_fact(workspace, responder);
+    let signer_pubkey = signer_pubkey_fact(
+        workspace,
+        responder,
+        crypto::ed25519_public_key(&[0x42; 32]),
+    );
+    let request = key_request_fact(
+        workspace,
+        requester,
+        responder,
+        frontier.id,
+        recipient.id,
+        70,
+    );
+    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE])
+        .expect("open core schema store");
+    let projector = CombinedProjector;
+    let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
+    let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
+    let wrap_matcher = WrapSourceMatcher::new();
+    let signer_secret_matcher =
+        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
+    let signer_pubkey_matcher = ExactSelectorMatcher::new(message_context::signer_role());
+    let matchers = [
+        &recipient_matcher as &dyn ContextMatcher,
+        &frontier_matcher as &dyn ContextMatcher,
+        &wrap_matcher as &dyn ContextMatcher,
+        &signer_secret_matcher as &dyn ContextMatcher,
+        &signer_pubkey_matcher as &dyn ContextMatcher,
+    ];
+    let mut bus = EventBus::new();
+
+    for fact in [
+        frontier.clone(),
+        recipient.clone(),
+        root.clone(),
+        signer.clone(),
+        signer_pubkey,
+        request,
+    ] {
+        bus.submit_fact(fact);
+    }
+    bus.drain(&projector, &matchers, 100)
+        .expect("key request emits materialize intent");
+    assert_eq!(bus.intents().len(), 1);
+    let intent = decode_materialize_key_wraps_intent(&bus.intents()[0]).expect("wrap intent");
+    assert_eq!(intent.recipient_key_id, recipient.id);
+    assert_eq!(intent.source_fact_id, root.id);
+    assert_eq!(intent.signer_secret_fact_id, signer.id);
+    bus.save(&store).expect("save bus with pending wrap intent");
+
+    let mut restarted = EventBus::load(&store).expect("load bus with wrap intent");
+    assert_eq!(restarted.intents().len(), 1);
+    let expected_signed_wrap = encryption_create::materialize_signed_key_wrap_fact(
+        &intent, &recipient, &root, &signer,
+    )
+    .expect("materialize expected signed wrap");
+    let dispatch = restarted
+        .dispatch_deferred_intents_with_fact_context(&MaterializeKeyWrapsHandler::new(), 10)
+        .expect("dispatch materialize handler after restart");
+
+    assert_eq!(dispatch.handled, 1);
+    assert_eq!(dispatch.facts, 1);
+    assert!(restarted.intents().is_empty());
+    assert!(restarted.has_fact(&expected_signed_wrap.id));
+
+    restarted
+        .drain(&projector, &matchers, 100)
+        .expect("project signed key wrap");
+    let signed_context = restarted
+        .context(&expected_signed_wrap.id)
+        .expect("signed wrap projected context");
+    assert!(signed_context.needs.is_empty());
+    assert!(signed_context.offers.iter().any(|offer| {
+        offer.role == sync_context::key_wrap_role()
+            && offer.selector.as_bytes() == expected_signed_wrap.id
+            && offer.payload_ref == expected_signed_wrap.id
+    }));
+    assert!(signed_context.offers.iter().any(|offer| {
+        offer.role == sync_context::exact_event_role()
+            && offer.selector.as_bytes() == expected_signed_wrap.id
+            && offer.payload_ref == expected_signed_wrap.id
+    }));
+
+    let envelope =
+        signed_fact::layout::decode_signed_fact(&expected_signed_wrap.bytes).expect("signed wrap");
+    assert_eq!(envelope.signer_id, responder);
+    assert_eq!(envelope.signer_public_key, crypto::ed25519_public_key(&[0x42; 32]));
+    let wrap = encryption_layout::decode_key_wrap(&envelope.payload).expect("key wrap payload");
+    assert_eq!(wrap.wrapped_secret_kind, WrappedSecretKind::FrontierRoot);
+    assert_eq!(wrap.wrapped_secret_id, root.id);
+    assert_eq!(wrap.recipient_key_id, recipient.id);
+    assert!(wrap.sender_wrap_public_key.iter().any(|byte| *byte != 0));
+    assert!(wrap.nonce.iter().any(|byte| *byte != 0));
+    assert_ne!(wrap.ciphertext, [0x66; 48]);
+
+    restarted.save(&store).expect("save after dispatch and projection");
+    let loaded = EventBus::load(&store).expect("reload after dispatch");
+    assert!(loaded.intents().is_empty());
+    assert!(loaded.context(&expected_signed_wrap.id).is_some());
 }
 
 #[test]

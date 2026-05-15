@@ -1,16 +1,16 @@
 //! Projector for signed file deletions.
 //!
-//! Deletion is projected as a generic event label attached to the target
+//! Deletion is projected as a generic context update attached to the target
 //! file event id plus a purge intent for physical cleanup. The deletion event
 //! does not depend on the target file event, so it cannot inspect the target
 //! author here; the file projector and the purge worker authorize row cleanup
-//! against the retained label when the target bytes are available.
+//! against the retained update when the target bytes are available.
 
 use crate::protocol::event_modules::content::message_deletion::rows::{
     purge_instruction_row, PurgeKind,
 };
 use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
-use crate::protocol::event_modules::rows::EventLabel;
+use crate::protocol::event_modules::rows::ContextUpdate;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
 use super::layout;
@@ -68,9 +68,9 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
             deletion.target_file_event_id,
             PurgeKind::File,
         )],
-        vec![EventLabel {
+        vec![ContextUpdate {
             event_id: deletion.target_file_event_id,
-            label: deletion_label(&deletion.author_user_id),
+            update: deletion_label(&deletion.author_user_id),
         }],
     ))
 }
@@ -203,7 +203,10 @@ mod tests {
         assert!(output.legacy_deletes().is_empty());
         assert_eq!(output.legacy_context_updates().len(), 1);
         assert_eq!(output.legacy_context_updates()[0].event_id, target_id);
-        assert_eq!(output.legacy_context_updates()[0].label, deletion_label(&author_id));
+        assert_eq!(
+            output.legacy_context_updates()[0].update,
+            deletion_label(&author_id)
+        );
     }
 
     #[test]

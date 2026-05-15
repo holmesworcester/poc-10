@@ -59,6 +59,10 @@ fn production_text_before_unit_tests(text: &str) -> &str {
         .unwrap_or(text)
 }
 
+fn is_cli_adapter_filename(name: &std::ffi::OsStr) -> bool {
+    matches!(name.to_str(), Some("cli.rs" | "command_line.rs"))
+}
+
 /// Strip line comments (`// ...`) and outer-doc lines (`/// ...`,
 /// `//! ...`) from a slice of source text. Behavior lints look for
 /// real call sites, not narrative prose that happens to mention a
@@ -1060,19 +1064,19 @@ fn commands_files_live_only_in_event_modules() {
 }
 
 #[test]
-fn cli_files_live_with_event_modules_or_the_protocol_shell() {
+fn cli_adapter_files_live_with_event_modules_or_the_protocol_shell() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
     let offenders = rust_files(&root.join("src"))
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
+        .filter(|path| path.file_name().is_some_and(is_cli_adapter_filename))
         .filter(|path| !path.starts_with(&event_root))
         .map(|path| path.strip_prefix(root).unwrap().display().to_string())
         .collect::<Vec<_>>();
 
     assert!(
         offenders.is_empty(),
-        "CLI adapters belong beside event modules; root/core/protocol command shells use commands.rs:\n{}",
+        "CLI adapters (cli.rs and command_line.rs) belong beside event modules; root/core/protocol command shells use commands.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -1314,8 +1318,8 @@ fn store_uses_generic_storage_vocabulary() {
     let files = [root.join("src/core/store.rs")];
     let forbidden = [
         "bucket",
-        "EventLabel",
-        "event_labels",
+        "ContextUpdate",
+        "context_updates",
         "module_rows",
         "payload_len",
         "Network",
@@ -1475,9 +1479,9 @@ fn protocol_event_schema_owns_common_fact_indexes() {
         "pub const MISSING_DEPS_BY_BLOCKED_EVENT",
         "pub const DEPENDENTS_BY_DEP",
         "pub const DEPS_BY_DEPENDENT",
-        "pub const EVENT_LABELS",
+        "pub const CONTEXT_UPDATES",
         "pub(crate) fn event_row(",
-        "pub fn event_labels(",
+        "pub fn context_updates(",
     ] {
         assert!(
             text.contains(required),
@@ -2307,7 +2311,7 @@ fn legacy_pipeline_projection_output_wraps_core_output_and_adapts_table_parts() 
     assert!(
         impl_body.contains("AtomicIntent::PutRow(row).into_intent()")
             && impl_body.contains("AtomicIntent::DeleteRow(delete).into_intent()")
-            && impl_body.contains("rows::event_label_rows(updates)")
+            && impl_body.contains("rows::context_update_rows(updates)")
             && impl_body.contains("projection_parts(rows, deletes, updates)"),
         "legacy ProjectionOutput adapters must convert table writes, table deletes, and context updates into core atomic intents"
     );

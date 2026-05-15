@@ -1,26 +1,22 @@
-//! Deferred sync intent layouts.
+//! Deferred sync intent constructors.
+//!
+//! Sync decides which facts must travel together. Transit owns the handler
+//! payload and idempotence key for sending those facts on a connection.
 
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
-
-use super::context;
 use super::fact::{ConnectionId, EventId, KeyWrapId};
 
-pub const SEND_ON_CONNECTION: &str = "send_on_connection";
+pub use crate::handlers::transit::TRANSIT_SEND_ON_CONNECTION as SEND_ON_CONNECTION;
 
 pub fn send_on_connection_intent(
     connection_id: ConnectionId,
     event_id: EventId,
     dependency_id: EventId,
     key_wrap_id: KeyWrapId,
-) -> Intent {
-    let mut payload = Vec::with_capacity(96);
-    payload.extend_from_slice(&event_id);
-    payload.extend_from_slice(&dependency_id);
-    payload.extend_from_slice(&key_wrap_id);
-    Intent::new(
-        IntentKind::new(SEND_ON_CONNECTION).expect("valid sync intent kind"),
-        IntentExecution::Deferred,
-        context::send_on_connection_key(connection_id, event_id),
-        payload,
+) -> crate::core::intents::Intent {
+    crate::handlers::transit::send_on_connection_intent(
+        crate::handlers::transit::TransitSendOnConnection {
+            connection_id,
+            fact_ids: vec![event_id, dependency_id, key_wrap_id],
+        },
     )
 }

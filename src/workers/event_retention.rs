@@ -120,7 +120,7 @@ pub(crate) fn purge_event_storage_in_tx(
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::event_modules::rows::{self as event_schema, EventLabel};
+    use crate::protocol::event_modules::rows::{self as event_schema, ContextUpdate};
     use crate::protocol::event_modules::sync::queries as negentropy_purge_queries;
     use crate::protocol::event_modules::sync::rows as negentropy_purges;
     use crate::protocol::event_modules::types::{event_id, EventRecord, EventScope};
@@ -149,9 +149,9 @@ mod tests {
         event_lifecycle::insert_blocked_event_missing_dep(&store, &missing_dep_id, &target_id)
             .expect("insert missing dependency edge");
         store
-            .insert_table_rows(event_schema::event_label_rows(vec![EventLabel {
+            .insert_table_rows(event_schema::context_update_rows(vec![ContextUpdate {
                 event_id: target_id,
-                label: label.clone(),
+                update: label.clone(),
             }]))
             .expect("insert label");
 
@@ -178,7 +178,7 @@ mod tests {
                 .expect("reverse deps")
         );
         assert_eq!(
-            event_schema::event_labels(&store, &target_id).expect("labels"),
+            event_schema::context_updates(&store, &target_id).expect("labels"),
             vec![label]
         );
     }

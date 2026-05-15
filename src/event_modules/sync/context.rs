@@ -4,7 +4,7 @@ use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
 
-use super::fact::{ConnectionId, EventId, KeyWrapId, WorkspaceId};
+use super::fact::{EventId, KeyWrapId, WorkspaceId};
 
 pub fn range_event_role() -> Role {
     Role::new("sync_range_event").expect("valid range role")
@@ -214,11 +214,4 @@ pub fn range_event_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Con
         offer_owner: offer.owner,
         payload_ref: offer.payload_ref,
     })
-}
-
-pub fn send_on_connection_key(connection_id: ConnectionId, event_id: EventId) -> Vec<u8> {
-    let mut key = Vec::with_capacity(64);
-    key.extend_from_slice(&connection_id);
-    key.extend_from_slice(&event_id);
-    key
 }

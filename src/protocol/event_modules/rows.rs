@@ -11,12 +11,12 @@
 //! edge tables make admission incremental: inserting a newly applied dependency
 //! only has to inspect events known to be waiting on that dependency. The two
 //! retained direct-dependency edge tables keep every declared edge, including
-//! edges that are already satisfied, so a later label write can wake exactly the
-//! labeled event and its direct dependents. `TIMESTAMP_EVENTS` gives sync a
+//! edges that are already satisfied, so a later context update can wake exactly
+//! the updated event and its direct dependents. `TIMESTAMP_EVENTS` gives sync a
 //! timestamp-ordered feed of shared event ids without teaching core what an
 //! event is. Operational worker queues live under `src/workers/rows.rs`.
-//! Labels are generic, bounded context for projectors; richer read models belong
-//! in scoped module rows files.
+//! Context updates are generic, bounded context for projectors; richer read
+//! models belong in scoped module rows files.
 
 use crate::core::store::{table_error, Schema, Store, TableName, TableRow};
 use crate::protocol::event_modules::types::{
@@ -32,7 +32,7 @@ pub const MISSING_DEPS_BY_BLOCKED_EVENT: TableName =
     TableName::new("event_modules.missing_deps_by_blocked_event");
 pub const DEPENDENTS_BY_DEP: TableName = TableName::new("event_modules.dependents_by_dep");
 pub const DEPS_BY_DEPENDENT: TableName = TableName::new("event_modules.deps_by_dependent");
-pub const EVENT_LABELS: TableName = TableName::new("event_modules.labels");
+pub const CONTEXT_UPDATES: TableName = TableName::new("event_modules.context_updates");
 
 pub const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("event_modules.events.v1", EVENTS),
@@ -48,7 +48,7 @@ pub const SCHEMAS: &[Schema] = &[
     ),
     Schema::durable_row_table("event_modules.dependents_by_dep.v1", DEPENDENTS_BY_DEP),
     Schema::durable_row_table("event_modules.deps_by_dependent.v1", DEPS_BY_DEPENDENT),
-    Schema::durable_row_table("event_modules.labels.v1", EVENT_LABELS),
+    Schema::durable_row_table("event_modules.context_updates.v1", CONTEXT_UPDATES),
 ];
 
 // Read-only views over the common event-pipeline tables.
@@ -96,17 +96,17 @@ pub fn event_bytes(store: &Store, event_id: &EventId) -> rusqlite::Result<Option
     super::queries::event_bytes(store, event_id)
 }
 
-pub fn event_labels(store: &Store, event_id: &EventId) -> Result<Vec<Vec<u8>>, String> {
-    super::queries::event_labels(store, event_id)
+pub fn context_updates(store: &Store, event_id: &EventId) -> Result<Vec<Vec<u8>>, String> {
+    super::queries::context_updates(store, event_id)
 }
 
 const EVENT_ROW_HEADER_BYTES: usize = 8 + 8 + 1 + 1 + 1 + 1 + 32;
 pub(crate) const MAX_DEPENDENCY_ROWS_PER_EVENT: usize = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventLabel {
+pub struct ContextUpdate {
     pub event_id: EventId,
-    pub label: Vec<u8>,
+    pub update: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,13 +155,13 @@ pub fn event_index_entries_in_timestamp_range(
         .collect()
 }
 
-pub fn event_label_rows(updates: Vec<EventLabel>) -> Vec<TableRow> {
+pub fn context_update_rows(updates: Vec<ContextUpdate>) -> Vec<TableRow> {
     updates
         .into_iter()
-        .map(|label| TableRow {
-            table: EVENT_LABELS,
-            key: event_label_key(&label.event_id, &label.label),
-            value: label.label,
+        .map(|update| TableRow {
+            table: CONTEXT_UPDATES,
+            key: context_update_key(&update.event_id, &update.update),
+            value: update.update,
         })
         .collect()
 }
@@ -446,10 +446,10 @@ pub(crate) fn split_edge_key(key: &[u8]) -> rusqlite::Result<(EventId, EventId)>
     ))
 }
 
-fn event_label_key(event_id: &EventId, label: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(event_id.len() + label.len());
+fn context_update_key(event_id: &EventId, update: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(event_id.len() + update.len());
     key.extend_from_slice(event_id);
-    key.extend_from_slice(label);
+    key.extend_from_slice(update);
     key
 }
 

@@ -509,7 +509,7 @@ fn message_purge_is_authorized(
     if message::queries::message_tombstone_exists(store, event.workspace_id, message_id)? {
         return Ok(true);
     }
-    let labels = event_queries::event_labels(store, &message_id)?;
+    let labels = event_queries::context_updates(store, &message_id)?;
     Ok(labels.iter().any(|label| {
         message_deletion::types::deletion_label_author(label)
             .map(|author| author == event.author_user_id)
@@ -525,7 +525,7 @@ fn file_purge_is_authorized(
     if message::queries::message_tombstone_exists(store, event.workspace_id, event.message_id)? {
         return Ok(true);
     }
-    let labels = event_queries::event_labels(store, &file_event_id)?;
+    let labels = event_queries::context_updates(store, &file_event_id)?;
     Ok(labels.iter().any(|label| {
         file_deletion::types::deletion_label_author(label)
             .map(|author| author == event.author_user_id)
@@ -615,7 +615,7 @@ fn _unused_keep_imports_alive() -> Option<&'static str> {
 mod tests {
     use crate::protocol::event_modules::content::message::types::MessagePlaintext;
     use crate::protocol::event_modules::content::reaction::types::ReactionPlaintext;
-    use crate::protocol::event_modules::rows::{self as event_schema, EventLabel};
+    use crate::protocol::event_modules::rows::{self as event_schema, ContextUpdate};
     use crate::protocol::event_modules::types::{event_id, EventStatus};
     use crate::protocol::Protocol;
     use crate::workers::event_lifecycle;
@@ -733,9 +733,9 @@ mod tests {
             ])
             .expect("insert read rows");
         store
-            .insert_table_rows(event_schema::event_label_rows(vec![EventLabel {
+            .insert_table_rows(event_schema::context_update_rows(vec![ContextUpdate {
                 event_id: message_id,
-                label: message_deletion::types::deletion_label(&AUTHOR),
+                update: message_deletion::types::deletion_label(&AUTHOR),
             }]))
             .expect("insert deletion label");
 
@@ -785,9 +785,9 @@ mod tests {
         event_lifecycle::insert_event(&store, &message_record, EventStatus::Applied)
             .expect("insert message event");
         store
-            .insert_table_rows(event_schema::event_label_rows(vec![EventLabel {
+            .insert_table_rows(event_schema::context_update_rows(vec![ContextUpdate {
                 event_id: message_id,
-                label: message_deletion::types::deletion_label(&[9; 32]),
+                update: message_deletion::types::deletion_label(&[9; 32]),
             }]))
             .expect("insert non-author deletion label");
         enqueue_message_purge(&store, WORKSPACE, message_id);
