@@ -190,11 +190,13 @@ Recent target work:
     fact-construction + AEAD + handshake key schedule code. The poc10
     intent-cleanliness guardrail rejected those bodies because handlers
     must not own fact wire layouts or crypto helpers — that work belongs
-    under `src/event_modules/<module>/create.rs`. Both drivers were
-    reverted to envelope-decode + dependency-context check + a
-    `NOT_YET_WIRED` error so intents stay queued. The lifted helpers will
-    return when their event modules land a `create.rs` (target encryption
-    already established the pattern).
+    under `src/event_modules/<module>/create.rs`. The transit driver now
+    performs only exact-input loading plus the event-module sendability guard
+    from `src/event_modules/transit/create.rs`, then returns
+    `NOT_YET_WIRED` so the intent stays queued. The connection-response driver
+    remains an envelope/dependency-context guard until its key-schedule
+    helpers move under `src/event_modules/connection_response/create.rs`
+    (target encryption already established the pattern).
   - `src/handlers/network_send/driver.rs` was reverted for the same
     reason: it had constructed an idempotence cursor fact inline via
     `Fact::new`. The cursor fact wire shape will reappear as a proper
@@ -217,15 +219,12 @@ Recent target work:
     `cli_harness::topo`, assert each step of the walkthrough's stdout.
     This is the poc-10 entry point analogue of `cli_surface_test`.
 - Pending follow-ups exposed by the wave-5 revert
-  - Lift `package_transit_frame`, `pack_inner_payload`,
-    `derive_transit_nonce`, `transit_aad`, `pick_size_class`,
-    `sendable_fact_bytes`, and `require_sendable_fact_bytes` from the
-    deleted `src/handlers/transit/driver.rs` content into
-    `src/event_modules/transit/create.rs`. The handler then calls into
-    the event module to produce its real output, with the cleanliness
-    guardrail untouched. Three `transit_send_guard_*` tests in
-    `tests/poc10_transit_connection_test.rs` are `#[ignore]`'d with a
-    clear message until the helpers land in `create.rs`.
+  - `src/event_modules/transit/create.rs` now owns the sendability guard, and
+    the `transit_send_guard_*` tests are active again. The remaining transit
+    work is to lift `package_transit_frame`, `pack_inner_payload`,
+    `derive_transit_nonce`, `transit_aad`, and `pick_size_class` into that
+    event module so the handler can produce real follow-up intents without
+    owning frame layout or crypto code.
   - Lift the connection_response key-schedule helpers (DH(eph_r, eph_i),
     DH(static_r, eph_i), HKDF response key, transcript-bound connection
     secret) from the deleted `src/handlers/connection_response/driver.rs`
@@ -234,6 +233,20 @@ Recent target work:
     `tests/poc10_connection_response_handler_test.rs`.
   - Define a `network_send_cursor` event module so the deferred-send
     cursor fact can return without violating the handler guardrail.
+
+Mechanical/delegable follow-ups:
+
+- Port the remaining raw target projector parity gaps to signed-envelope input
+  where the legacy module requires authenticated shared facts. This is mostly
+  repetitive per event family: decode signed envelope, verify the expected
+  inner type, then keep the existing body projection rules narrow.
+- Replace test-only RowIntentHandler dispatches with
+  `drain_applying_atomic_rows` where the test is meant to exercise the target
+  projection path rather than the compatibility handler.
+- Split the broad target encryption module after the signed key-wrap receive
+  path stops moving: recipient key, key request, key wrap, local secret,
+  frontier/source, and secret coverage can each follow the current
+  `{fact, layout, create, project, rows/context}` pattern.
 
 Important caveats from the latest read-only audit:
 

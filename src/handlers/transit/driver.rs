@@ -5,11 +5,10 @@
 //! AEAD-input derivation, AEAD encryption into the fixed slot, and the
 //! `transit_network_send` follow-up intent. The poc10 intent-cleanliness
 //! guardrail rejects fact / wire-layout / AEAD machinery inside
-//! `src/handlers/`: that code belongs in `src/event_modules/transit/`
-//! (which already owns the frame layouts). Until those helpers move into
-//! `event_modules/transit/create.rs`, the driver decodes its intent,
-//! validates the requested fact ids look sendable, and returns
-//! `NOT_YET_WIRED` so the intent stays queued.
+//! `src/handlers/`: that code belongs in `src/event_modules/transit/`.
+//! The current driver decodes its intent, asks the transit event module to
+//! validate that requested fact ids are sendable, and returns `NOT_YET_WIRED`
+//! so the intent stays queued until real frame packaging lands.
 //!
 //! This is therefore an *envelope-decode + sendability guard* handler, not
 //! real transit packaging. The `receive_transit` driver follows the same
@@ -17,6 +16,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::Intent;
+use crate::event_modules::transit::create;
 
 use super::intent::{decode_send_on_connection, TRANSIT_SEND_ON_CONNECTION};
 
@@ -40,8 +40,12 @@ impl IntentHandler for TransitSendOnConnectionHandler {
         Ok(decode_send_on_connection(intent)?.fact_ids)
     }
 
-    fn handle(&self, intent: &Intent, _context: &HandlerContext) -> Result<HandlerOutput, String> {
-        let _input = decode_send_on_connection(intent)?;
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+        let input = decode_send_on_connection(intent)?;
+        for fact_id in &input.fact_ids {
+            let fact = context.require_fact(fact_id)?;
+            create::require_sendable_fact(fact)?;
+        }
         Err(NOT_YET_WIRED.to_string())
     }
 }

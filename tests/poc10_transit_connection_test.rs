@@ -55,14 +55,7 @@ fn sync_send_on_connection_names_ordered_fact_bundle() {
     assert_eq!(decoded.fact_ids, vec![[1; 32], [2; 32], [3; 32]]);
 }
 
-// The send guard tests below exercised `sendable_fact_bytes` on the
-// `TransitSendOnConnectionHandler` driver. That helper has moved off the
-// handler boundary (the poc10 intent-cleanliness guardrail keeps fact
-// inspection out of `src/handlers/`); it will reappear under
-// `src/event_modules/transit/create.rs` and the tests will be ported
-// there. Ignored for now so the suite stays green during the move.
 #[test]
-#[ignore = "send guard moved off handler boundary; will be tested in event_modules/transit/create.rs"]
 fn transit_send_guard_refuses_forged_local_fact_reference() {
     let fact = Fact::new(
         FactScope::Local,
@@ -90,7 +83,6 @@ fn transit_send_guard_refuses_forged_local_fact_reference() {
 }
 
 #[test]
-#[ignore = "send guard moved off handler boundary; will be tested in event_modules/transit/create.rs"]
 fn transit_send_guard_refuses_forged_private_tag_reference() {
     for private_tag in [
         signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET,
@@ -121,10 +113,27 @@ fn transit_send_guard_refuses_forged_private_tag_reference() {
 }
 
 #[test]
-#[ignore = "send guard moved off handler boundary; will be tested in event_modules/transit/create.rs"]
 fn transit_send_guard_accepts_normal_shared_facts() {
-    // body intentionally empty: `sendable_fact_bytes` lives in the event
-    // module that has not landed yet.
+    let fact = Fact::new(
+        sync::context::workspace_scope([7; 32]),
+        1,
+        sync::layout::encode_shared_event(&sync::fact::SharedEventFact {
+            workspace_id: [7; 32],
+            event_id: [8; 32],
+        })
+        .expect("encode shared event"),
+    );
+    let intent = transit::send_on_connection_intent(transit::TransitSendOnConnection {
+        connection_id: [9; 32],
+        fact_ids: vec![fact.id],
+    });
+    let context = HandlerContext::with_facts([fact]);
+
+    let err = transit::TransitSendOnConnectionHandler::new()
+        .handle(&intent, &context)
+        .expect_err("packaging is not wired yet");
+
+    assert_eq!(err, transit::driver::NOT_YET_WIRED);
 }
 
 #[test]
