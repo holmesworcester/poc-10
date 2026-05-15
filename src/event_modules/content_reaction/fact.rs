@@ -1,0 +1,25 @@
+//! Content-reaction fact shape for the poc-10 target tree.
+//!
+//! A reaction is a workspace-scoped emoji attached to a target message. The
+//! emoji is sealed in a fixed-width ciphertext slot; the canonical fact body
+//! carries the public envelope (workspace, target, author, nonce, ciphertext).
+//! Per-message encryption metadata (history-node secret, frontier) is intentionally
+//! omitted in this slice — see `project.rs` for the parity-gap notes.
+
+use crate::core::facts::FactId;
+
+pub const REACTION_CIPHERTEXT_BYTES: usize = 80; // 64 emoji bytes + 16 poly1305 tag
+pub const REACTION_NONCE_BYTES: usize = 24;
+
+pub type WorkspaceId = FactId;
+pub type AuthorId = FactId;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentReactionFact {
+    pub workspace_id: WorkspaceId,
+    pub created_at_ms: u64,
+    pub target_message_id: FactId,
+    pub author_user_id: AuthorId,
+    pub nonce: [u8; REACTION_NONCE_BYTES],
+    pub ciphertext: Vec<u8>,
+}

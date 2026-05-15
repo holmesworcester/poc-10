@@ -1,4 +1,5 @@
 pub mod content_event;
+pub mod content_reaction;
 pub mod encryption;
 pub mod identity_admin;
 pub mod identity_endpoint;

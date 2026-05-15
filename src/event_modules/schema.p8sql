@@ -78,8 +78,13 @@ table content_event_rows {
   column value bytes;
   row_key (key);
 }
-
 table admin_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
+table reaction_rows {
   column key bytes;
   column value bytes;
   row_key (key);
