@@ -4,7 +4,6 @@ use crate::core::facts::Fact;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use super::context;
-use super::intent;
 use super::layout;
 
 #[derive(Debug, Clone, Default)]
@@ -65,14 +64,14 @@ fn project_sync_range_request(
         .collect::<Vec<_>>();
     ready.sort_by_key(|root| (root.timestamp, root.event_id));
     if let Some(root) = ready.first().copied() {
-        return Ok(
-            ProjectionOutput::new().intent(intent::send_on_connection_intent(
-                request.connection_id,
-                root.event_id,
-                root.dependency_id,
-                root.key_wrap_id,
-            )),
-        );
+        return Ok(ProjectionOutput::new().intent(
+            crate::handlers::transit::send_on_connection_intent(
+                crate::handlers::transit::TransitSendOnConnection {
+                    connection_id: request.connection_id,
+                    fact_ids: vec![root.event_id, root.dependency_id, root.key_wrap_id],
+                },
+            ),
+        ));
     }
 
     for root in roots {
