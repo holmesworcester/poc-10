@@ -664,6 +664,7 @@ mod tests {
                 "reaction_rows",
                 "connection_request_rows",
                 "connection_response_rows",
+                "invite_accepted_rows",
             ]
         );
         assert_eq!(
