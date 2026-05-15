@@ -120,9 +120,8 @@ Current hard gaps:
 - The current target `SendOnConnection` handler must not be considered live
   behavior. It validates sendability and keeps the intent retryable, but does
   not yet produce a transit-wrap or network-send handoff.
-- Some target tests and compatibility bridges still apply atomic rows with the
-  old RowIntentHandler path. New target paths should use projection drain with
-  atomic row application.
+- Atomic row intents are applied by target projection drain with atomic row
+  application. The old RowIntentHandler compatibility path has been removed.
 - Finish the full target receive path for signed key-wrap facts. Incoming signed
   envelopes containing key-wrap payloads must validate signature, signer
   authority, recipient key, and frontier context before producing key-wrap rows,

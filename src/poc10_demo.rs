@@ -14,8 +14,6 @@ use crate::commands::send_message::{associated_data, recover_text, send_message}
 use crate::core::crypto;
 use crate::core::event_bus::EventBus;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::handler_dispatch::{HandlerContext, RowIntentHandler};
-use crate::core::intents::AtomicIntent;
 use crate::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
@@ -33,8 +31,7 @@ use crate::event_modules::sealed_message::fact::{
 };
 use crate::event_modules::sealed_message::layout::decode_sealed_message;
 use crate::event_modules::sealed_message::rows::{
-    decode_message_row, decode_sealed_message_row, message_row, MessageRow, MESSAGE_ROWS,
-    SEALED_MESSAGE_ROWS,
+    decode_sealed_message_row, MESSAGE_ROWS, SEALED_MESSAGE_ROWS,
 };
 use crate::event_modules::sealed_message::{layout as message_layout, project as message_project};
 use crate::event_modules::signed_fact::fact::LocalSignerSecretFact;
@@ -243,69 +240,22 @@ pub fn run() -> Result<(), String> {
     }
 
     // -----------------------------------------------------------------------
-    // Step 3: open the sealed message into message_rows.
+    // Step 3: confirm the current target slice stops at sealed rows.
     //
-    // The SealedMessageProjector never emits a message_row PutRow intent
-    // directly. In the production path the `unwrap_key_wrap` worker receives
-    // a MaterializeKeyWraps intent, performs actual Curve25519 ECDH + XChaCha20
-    // decryption using the local recipient's private key, and then emits the
-    // MessageRow. The projector only handles the structural context (signer,
-    // secret-coverage, deletion); it does not hold the private key material
-    // needed to produce plaintext.
-    //
-    // With all three context pieces satisfied (signer + leaf-depth secret
-    // coverage + no deletion), the message reaches the "has_signer && has_secret"
-    // branch and the projector emits only a deletion_need. The actual
-    // MESSAGE_ROWS put must come from the decryption handler.
-    //
-    // To keep this demo end-to-end without real crypto we synthesise the
-    // MessageRow from the sealed_message_row we just read, mirroring exactly
-    // what the decryption worker would write after a successful AEAD open.
-    header(3, "open sealed message into message_rows");
+    // The target tree does not yet have a real signed-envelope admission
+    // dispatcher or a real open-message projector path. Do not synthesize a
+    // plaintext row here: doing so would make this walkthrough look more wired
+    // than it is.
+    header(3, "confirm opened message rows are not synthesized");
     let sealed_rows = store
         .table_rows(SEALED_MESSAGE_ROWS)
-        .map_err(|err| format!("read sealed rows for open: {err:?}"))?;
+        .map_err(|err| format!("read sealed rows: {err:?}"))?;
     println!("  sealed_message_rows available: {}", sealed_rows.len());
-    for (key, value) in &sealed_rows {
-        let sealed = decode_sealed_message_row(key, value)
-            .map_err(|err| format!("decode sealed row: {err}"))?;
-        // Synthesise the MessageRow that the decryption worker would produce.
-        // In production this step requires ECDH + XChaCha20-Poly1305 to verify
-        // the ciphertext; here we trust the test fixture and emit the row
-        // directly as the worker would via submit_intent + dispatch_intents.
-        let opened = message_row(MessageRow {
-            workspace_id: sealed.workspace_id,
-            message_id: sealed.message_id,
-            created_at_ms: sealed.created_at_ms,
-            author_user_id: sealed.author_user_id,
-            signer_id: sealed.signer_id,
-            minute: sealed.minute,
-            leaf_id: sealed.leaf_id,
-        });
-        bus.submit_intent(AtomicIntent::PutRow(opened).into_intent())
-            .map_err(|err| format!("submit message row intent: {err}"))?;
-    }
-    let row_handler = RowIntentHandler::new(&store, &[MESSAGE_ROWS]);
-    let open_report = bus
-        .dispatch_intents(&row_handler, &HandlerContext::new(), 32)
-        .map_err(|err| format!("dispatch message row intents: {err}"))?;
-    println!("  dispatch: handled={}", open_report.handled);
-
     let message_rows_read = store
         .table_rows(MESSAGE_ROWS)
         .map_err(|err| format!("read message rows: {err:?}"))?;
     println!("  message_rows (opened): {}", message_rows_read.len());
-    for (key, value) in &message_rows_read {
-        let row =
-            decode_message_row(key, value).map_err(|err| format!("decode message row: {err}"))?;
-        println!(
-            "    -> message_id={} leaf_id={} minute={} author={}",
-            hex(&row.message_id),
-            hex(&row.leaf_id),
-            row.minute,
-            hex(&row.author_user_id),
-        );
-    }
+    println!("  open-message target path remains unwired; no fake plaintext row was written.");
 
     // -----------------------------------------------------------------------
     // Step 4: produce a fact through the commands lane (`send_message`)
@@ -362,10 +312,9 @@ pub fn run() -> Result<(), String> {
     println!(
         "satisfies has_secret in the projector, reducing the standing needs to deletion only."
     );
-    println!("MESSAGE_ROWS materialises when the decryption worker calls submit_intent with a");
-    println!("PutRow(message_row(...)) after AEAD-opening the ciphertext; the demo synthesises");
-    println!("this intent directly (no private-key material available) and dispatches it via");
-    println!("RowIntentHandler. No legacy code path was used.");
+    println!("MESSAGE_ROWS should materialise only when the target signed-envelope admission");
+    println!("and real open-message path are wired. No fake plaintext row or compatibility");
+    println!("row handler is used here. No legacy code path was used.");
     Ok(())
 }
 

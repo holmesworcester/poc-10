@@ -240,9 +240,9 @@ Mechanical/delegable follow-ups:
   where the legacy module requires authenticated shared facts. This is mostly
   repetitive per event family: decode signed envelope, verify the expected
   inner type, then keep the existing body projection rules narrow.
-- Replace test-only RowIntentHandler dispatches with
-  `drain_applying_atomic_rows` where the test is meant to exercise the target
-  projection path rather than the compatibility handler.
+- Remove remaining compatibility bridges only when the target path has an
+  equivalent boundary. `RowIntentHandler` has been removed; target atomic rows
+  now flow through `drain_applying_atomic_rows`.
 - Split the broad target encryption module after the signed key-wrap receive
   path stops moving: recipient key, key request, key wrap, local secret,
   frontier/source, and secret coverage can each follow the current
@@ -269,8 +269,8 @@ Important caveats from the latest read-only audit:
   packaging path. It validates sendability and returns an error so the intent
   stays queued until transit wrapping is implemented.
 - Atomic row intents now have a target projection-drain path that applies them
-  immediately, but some isolated tests and legacy bridges still use the old
-  RowIntentHandler compatibility surface.
+  immediately; the old `RowIntentHandler` compatibility surface has been
+  removed.
 - Deferred handlers now receive exact declared fact inputs in the target EventBus
   helper. Continue pushing handlers toward exact input declarations rather than
   broad store/query access.
@@ -303,9 +303,10 @@ Next hard slices, in order:
    envelope, signer authority, recipient key, frontier/source context, and then
    emit key-wrap rows, secret coverage offers, and unwrap intents.
 3. Finish handler/core execution semantics before wiring live paths.
-   The target exact-input and atomic-drain primitives exist. Next, migrate the
-   remaining target tests and live paths off RowIntentHandler compatibility, and
-   keep successful deferred handlers limited to durable progress.
+   The target exact-input and atomic-drain primitives exist, and the
+   RowIntentHandler compatibility bridge is gone. Next, keep successful
+   deferred handlers limited to durable progress and retire remaining stubs as
+   their event-module create/read helpers land.
 4. Finish purge split.
    Keep `PurgeEventHandler` as exact retained fact purge, then add bounded
    handlers for cascade discovery, secret retirement, and sync-index purge or
