@@ -651,6 +651,7 @@ mod tests {
                 "sealed_message_rows",
                 "message_tombstone_rows",
                 "file_rows",
+                "file_slice_rows",
                 "workspace_rows",
                 "recipient_key_rows",
                 "key_wrap_rows",

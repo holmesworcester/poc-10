@@ -25,6 +25,12 @@ table file_rows {
   row_key (key);
 }
 
+table file_slice_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
 table workspace_rows {
   column key bytes;
   column value bytes;
