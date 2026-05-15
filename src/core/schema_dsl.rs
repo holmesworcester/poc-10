@@ -659,6 +659,7 @@ mod tests {
                 "local_endpoint_secret_rows",
                 "local_endpoint_signing_public_key_rows",
                 "local_endpoint_signing_secret_rows",
+                "identity_endpoint_shared_rows",
                 "content_event_rows",
                 "admin_rows",
                 "reaction_rows",
