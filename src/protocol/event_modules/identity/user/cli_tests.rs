@@ -4,7 +4,7 @@ use crate::protocol::event_modules::worker;
 use crate::protocol::Protocol;
 
 use super::commands::{self, CreateUser};
-use super::schema;
+use super::rows;
 
 #[test]
 fn admits_workspace_invite_user_join_flow_and_projects_rows() {
@@ -50,24 +50,24 @@ fn admits_workspace_invite_user_join_flow_and_projects_rows() {
     .expect("create user");
     let (user_created, _) = worker::run(&store, &protocol, user).expect("admit user");
 
-    let invite_row_key = user_invite::schema::user_invite_key(
+    let invite_row_key = user_invite::rows::user_invite_key(
         &workspace_created.workspace_id,
         &invite_created.user_invite_id,
     );
     let invite_row = store
-        .table_row(user_invite::schema::USER_INVITES, &invite_row_key)
+        .table_row(user_invite::rows::USER_INVITES, &invite_row_key)
         .expect("load invite row")
         .expect("invite row exists");
-    let invite_row = user_invite::schema::decode_user_invite_row(&invite_row_key, &invite_row)
+    let invite_row = user_invite::rows::decode_user_invite_row(&invite_row_key, &invite_row)
         .expect("decode invite row");
     assert_eq!(invite_row.public_key, invite_public_key);
 
-    let user_row_key = schema::user_key(&workspace_created.workspace_id, &user_created.user_id);
+    let user_row_key = rows::user_key(&workspace_created.workspace_id, &user_created.user_id);
     let user_row = store
-        .table_row(schema::USERS, &user_row_key)
+        .table_row(rows::USERS, &user_row_key)
         .expect("load user row")
         .expect("user row exists");
-    let user_row = schema::decode_user_row(&user_row_key, &user_row).expect("decode user row");
+    let user_row = rows::decode_user_row(&user_row_key, &user_row).expect("decode user row");
     assert_eq!(user_row.workspace_id, workspace_created.workspace_id);
     assert_eq!(user_row.user_invite_id, invite_created.user_invite_id);
     assert_eq!(user_row.public_key, user_public_key);
@@ -204,12 +204,12 @@ fn join_store_receives_shared_workspace_and_invite_records_then_creates_user() {
     .expect("create user");
     let (user_created, _) = worker::run(&join_store, &protocol, user).expect("admit user");
 
-    let user_row_key = schema::user_key(&workspace_created.workspace_id, &user_created.user_id);
+    let user_row_key = rows::user_key(&workspace_created.workspace_id, &user_created.user_id);
     let user_row = join_store
-        .table_row(schema::USERS, &user_row_key)
+        .table_row(rows::USERS, &user_row_key)
         .expect("load user row")
         .expect("user row exists");
-    let user_row = schema::decode_user_row(&user_row_key, &user_row).expect("decode user row");
+    let user_row = rows::decode_user_row(&user_row_key, &user_row).expect("decode user row");
     assert_eq!(user_row.workspace_id, workspace_created.workspace_id);
     assert_eq!(user_row.user_invite_id, invite_created.user_invite_id);
     assert_eq!(user_row.username, "alice");

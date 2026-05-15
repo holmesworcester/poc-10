@@ -15,27 +15,27 @@
 
 use crate::protocol::event_modules::content::file;
 use crate::protocol::event_modules::content::file_deletion::types::deletion_label_author as file_deletion_label_author;
-use crate::protocol::event_modules::content::message_deletion::schema::{
+use crate::protocol::event_modules::content::message_deletion::rows::{
     purge_instruction_row, PurgeKind,
 };
 use crate::protocol::event_modules::identity::{endpoint_shared, signed};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
-use super::{codec, schema};
+use super::{layout, rows};
 
 const SLICE_TAG_BYTES: u64 = 16;
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let (slice, file_event_id) = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let (slice, file_event_id) = layout::decode(&envelope.payload)?;
     if event.record.workspace_id != Some(slice.workspace_id) {
         return Err("file slice workspace metadata does not match event body".to_string());
     }
 
     let descriptor = event.context.require_dependency(&file_event_id)?;
-    let descriptor_envelope = file::codec::decode_signed(&descriptor.canonical_bytes)
+    let descriptor_envelope = file::layout::decode_signed(&descriptor.canonical_bytes)
         .map_err(|_| "file slice descriptor dependency is not a signed file".to_string())?;
-    let descriptor_file = file::codec::decode(&descriptor_envelope.payload)
+    let descriptor_file = file::layout::decode(&descriptor_envelope.payload)
         .map_err(|_| "file slice descriptor dependency is not a signed file".to_string())?;
     if descriptor_file.workspace_id != slice.workspace_id {
         return Err("file slice descriptor workspace does not match slice".to_string());
@@ -69,8 +69,8 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                 PurgeKind::FileSlice,
             )],
             vec![TableDelete {
-                table: schema::FILE_SLICES,
-                key: schema::file_slice_key(slice.workspace_id, slice.file_id, slice.slice_number),
+                table: rows::FILE_SLICES,
+                key: rows::file_slice_key(slice.workspace_id, slice.file_id, slice.slice_number),
             }],
             Vec::new(),
         ));
@@ -79,12 +79,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let signer = event
         .context
         .require_dependency(&envelope.signer_endpoint_shared_id)?;
-    let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
+    let signer_envelope = signed::layout::decode(&signer.canonical_bytes)
         .map_err(|_| "file slice signer dependency is not a signed endpoint_shared".to_string())?;
-    if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    if signer_envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err("file slice signer dependency is not a signed endpoint_shared".to_string());
     }
-    let signer_endpoint_shared = endpoint_shared::codec::decode(&signer_envelope.payload)
+    let signer_endpoint_shared = endpoint_shared::layout::decode(&signer_envelope.payload)
         .map_err(|_| "file slice signer dependency is not a signed endpoint_shared".to_string())?;
     if signer_endpoint_shared.workspace_id != slice.workspace_id {
         return Err("file slice signer endpoint_shared workspace does not match slice".to_string());
@@ -120,7 +120,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     if slice_start.saturating_add(slice_len) > total_ciphertext_len {
         return Err("file slice extends past descriptor ciphertext bounds".to_string());
     }
-    let verified_ciphertext = codec::extract_verified_slice_bytes(
+    let verified_ciphertext = layout::extract_verified_slice_bytes(
         &descriptor_file.root_hash,
         &slice.proof,
         slice_start,
@@ -128,7 +128,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     )
     .map_err(|err| format!("file slice bao verification failed: {err}"))?;
 
-    Ok(ProjectionOutput::rows(vec![schema::file_slice_row(
+    Ok(ProjectionOutput::rows(vec![rows::file_slice_row(
         event.context.event_id,
         envelope.signer_endpoint_shared_id,
         &slice,
@@ -166,13 +166,13 @@ mod tests {
             plaintext_len: 0,
             proof: Vec::new(),
         };
-        let payload = codec::encode(&event, &[0; 32]).expect("encode for pubkey");
-        codec::sign([0; 32], private_key, payload).signer_public_key
+        let payload = layout::encode(&event, &[0; 32]).expect("encode for pubkey");
+        layout::sign([0; 32], private_key, payload).signer_public_key
     }
 
     fn endpoint_shared_record(workspace_id: [u8; 32], signing_public_key: [u8; 32]) -> Record {
         let payload =
-            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+            endpoint_shared::layout::encode(&endpoint_shared::types::EndpointSharedEvent {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id: [50; 32],
@@ -217,8 +217,8 @@ mod tests {
             nonce: descriptor_nonce,
             ciphertext: [0; file::types::FILE_DESCRIPTOR_CIPHERTEXT_BYTES],
         };
-        let aad = file::codec::descriptor_associated_data(&event, descriptor_signer);
-        event.ciphertext = file::codec::seal_descriptor_slot(
+        let aad = file::layout::descriptor_associated_data(&event, descriptor_signer);
+        event.ciphertext = file::layout::seal_descriptor_slot(
             &KEY_SECRET,
             &event.nonce,
             &aad,
@@ -228,10 +228,10 @@ mod tests {
             },
         )
         .expect("seal descriptor");
-        let payload = file::codec::encode(&event).expect("encode file");
-        let envelope = file::codec::sign(descriptor_signer, &descriptor_signer_private, payload);
-        let bytes = file::codec::encode_signed(&envelope);
-        file::codec::signed_record_from_bytes(bytes).expect("record")
+        let payload = file::layout::encode(&event).expect("encode file");
+        let envelope = file::layout::sign(descriptor_signer, &descriptor_signer_private, payload);
+        let bytes = file::layout::encode_signed(&envelope);
+        file::layout::signed_record_from_bytes(bytes).expect("record")
     }
 
     struct BuiltSlice {
@@ -268,7 +268,7 @@ mod tests {
             let start = (k as usize) * slice_bytes as usize;
             let end = ((k + 1) as usize * slice_bytes as usize).min(plaintext.len());
             let slice_plain = &plaintext[start..end];
-            let ciphertext = codec::seal_slice(
+            let ciphertext = layout::seal_slice(
                 &KEY_SECRET,
                 &workspace_id,
                 &file_id,
@@ -301,7 +301,7 @@ mod tests {
         let chunk = slice_bytes as u64 + XCHACHA20_POLY1305_TAG_BYTES as u64;
         let slice_start = u64::from(slice_number) * chunk;
         let slice_len = slice_plaintext_len as u64 + XCHACHA20_POLY1305_TAG_BYTES as u64;
-        let slice = codec::build_slice(super::super::types::BuildSlice {
+        let slice = layout::build_slice(super::super::types::BuildSlice {
             workspace_id,
             created_at_ms: 5,
             file_id,
@@ -314,11 +314,11 @@ mod tests {
             slice_len,
         })
         .expect("build slice");
-        let payload = codec::encode(&slice, &descriptor_id).expect("encode");
-        let envelope = codec::sign(signer_id, &signer_private_key, payload);
-        let bytes = codec::encode_signed(&envelope);
+        let payload = layout::encode(&slice, &descriptor_id).expect("encode");
+        let envelope = layout::sign(signer_id, &signer_private_key, payload);
+        let bytes = layout::encode_signed(&envelope);
         let slice_event_id = event_id(&bytes);
-        let record = codec::signed_record_from_bytes(bytes).expect("record");
+        let record = layout::signed_record_from_bytes(bytes).expect("record");
 
         BuiltSlice {
             record,
@@ -365,8 +365,8 @@ mod tests {
         let output = project(&event).expect("project slice");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::FILE_SLICES);
-        let row = schema::decode_file_slice_row(
+        assert_eq!(output.legacy_rows()[0].table, rows::FILE_SLICES);
+        let row = rows::decode_file_slice_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -390,9 +390,9 @@ mod tests {
         let built = build_slice(0, 1024, 2);
         let mut event = context_for(&built);
         let descriptor_envelope =
-            file::codec::decode_signed(&built.descriptor_record.canonical_bytes)
+            file::layout::decode_signed(&built.descriptor_record.canonical_bytes)
                 .expect("descriptor envelope");
-        let descriptor = file::codec::decode(&descriptor_envelope.payload).expect("descriptor");
+        let descriptor = file::layout::decode(&descriptor_envelope.payload).expect("descriptor");
         event
             .context
             .dependencies
@@ -411,23 +411,23 @@ mod tests {
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(
             output.legacy_rows()[0].table,
-            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+            crate::protocol::event_modules::content::message_deletion::rows::PURGE_INSTRUCTIONS
         );
         assert_eq!(output.legacy_deletes().len(), 1);
-        assert_eq!(output.legacy_deletes()[0].table, schema::FILE_SLICES);
+        assert_eq!(output.legacy_deletes()[0].table, rows::FILE_SLICES);
     }
 
     #[test]
     fn rejects_slice_whose_proof_does_not_match_descriptor_root_hash() {
         let mut built = build_slice(0, 1024, 1);
-        let envelope = codec::decode_signed(&built.record.canonical_bytes).expect("decode signed");
-        let (mut slice, descriptor_id) = codec::decode(&envelope.payload).expect("decode");
+        let envelope = layout::decode_signed(&built.record.canonical_bytes).expect("decode signed");
+        let (mut slice, descriptor_id) = layout::decode(&envelope.payload).expect("decode");
         slice.proof[0] ^= 1;
-        let payload = codec::encode(&slice, &descriptor_id).expect("re-encode");
-        let resigned = codec::sign(built.signer_id, &[9; 32], payload);
-        let bytes = codec::encode_signed(&resigned);
+        let payload = layout::encode(&slice, &descriptor_id).expect("re-encode");
+        let resigned = layout::sign(built.signer_id, &[9; 32], payload);
+        let bytes = layout::encode_signed(&resigned);
         built.slice_event_id = crate::protocol::event_modules::types::event_id(&bytes);
-        built.record = codec::signed_record_from_bytes(bytes).expect("record");
+        built.record = layout::signed_record_from_bytes(bytes).expect("record");
 
         let event = context_for(&built);
         let err = project(&event).expect_err("bad proof must fail");
@@ -440,14 +440,14 @@ mod tests {
         // Construct a slice whose local_history_node_secret_id diverges from the
         // descriptor's. We do that by re-encoding the slice payload with a
         // tampered local_history_node_secret_id and re-signing.
-        let envelope = codec::decode_signed(&built.record.canonical_bytes).expect("decode signed");
-        let (mut slice, descriptor_id) = codec::decode(&envelope.payload).expect("decode");
+        let envelope = layout::decode_signed(&built.record.canonical_bytes).expect("decode signed");
+        let (mut slice, descriptor_id) = layout::decode(&envelope.payload).expect("decode");
         slice.local_history_node_secret_id = [200; 32];
-        let payload = codec::encode(&slice, &descriptor_id).expect("re-encode");
-        let resigned = codec::sign(built.signer_id, &[9; 32], payload);
-        let bytes = codec::encode_signed(&resigned);
+        let payload = layout::encode(&slice, &descriptor_id).expect("re-encode");
+        let resigned = layout::sign(built.signer_id, &[9; 32], payload);
+        let bytes = layout::encode_signed(&resigned);
         let new_id = crate::protocol::event_modules::types::event_id(&bytes);
-        let new_record = codec::signed_record_from_bytes(bytes).expect("record");
+        let new_record = layout::signed_record_from_bytes(bytes).expect("record");
         let mut tampered = built;
         tampered.slice_event_id = new_id;
         tampered.record = new_record;
@@ -486,7 +486,7 @@ mod tests {
             plaintext_len: 0,
             proof: Vec::new(),
         };
-        let payload = codec::encode(&event, &[12; 32]).expect("encode");
+        let payload = layout::encode(&event, &[12; 32]).expect("encode");
         assert_eq!(
             crate::protocol::event_modules::event_from_bytes(payload)
                 .expect_err("raw slice must fail"),

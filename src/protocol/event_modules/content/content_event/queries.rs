@@ -7,7 +7,7 @@
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{decode_content_event_row, CONTENT_EVENTS};
+use super::rows::{decode_content_event_row, CONTENT_EVENTS};
 
 pub fn count_for_workspace(store: &Store, workspace_id: EventId) -> Result<usize, String> {
     store

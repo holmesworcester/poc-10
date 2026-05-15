@@ -253,25 +253,25 @@ impl PerfFixture {
     }
 
     fn sealed_message_exists(&self, message_id: EventId) -> bool {
-        let key = message::schema::message_key(self.workspace_id, message_id);
+        let key = message::rows::message_key(self.workspace_id, message_id);
         self.store
-            .table_row(message::schema::SEALED_MESSAGES, &key)
+            .table_row(message::rows::SEALED_MESSAGES, &key)
             .expect("load sealed message")
             .is_some()
     }
 
     fn sealed_file_exists(&self, file_event_id: EventId) -> bool {
-        let key = file::schema::file_key(self.workspace_id, file_event_id);
+        let key = file::rows::file_key(self.workspace_id, file_event_id);
         self.store
-            .table_row(file::schema::FILES, &key)
+            .table_row(file::rows::FILES, &key)
             .expect("load sealed file")
             .is_some()
     }
 
     fn file_slice_exists(&self, file_id: EventId, slice_number: u32) -> bool {
-        let key = file_slice::schema::file_slice_key(self.workspace_id, file_id, slice_number);
+        let key = file_slice::rows::file_slice_key(self.workspace_id, file_id, slice_number);
         self.store
-            .table_row(file_slice::schema::FILE_SLICES, &key)
+            .table_row(file_slice::rows::FILE_SLICES, &key)
             .expect("load file slice")
             .is_some()
     }
@@ -479,7 +479,7 @@ fn build_file_events(
         let start = slice_number as usize * slice_bytes;
         let len = (blob_bytes - start).min(slice_bytes);
         fill_payload_slice(&mut plaintext[..len], slice_number);
-        let ciphertext = file_slice::codec::seal_slice(
+        let ciphertext = file_slice::layout::seal_slice(
             &fixture.key_secret,
             &fixture.workspace_id,
             &file_id,

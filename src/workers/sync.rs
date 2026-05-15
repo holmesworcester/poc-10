@@ -75,10 +75,10 @@ pub use crate::protocol::event_modules::sync::commands::{
 use crate::protocol::event_modules::sync::compare;
 use crate::protocol::event_modules::sync::compare::commands::ReadContext;
 use crate::protocol::event_modules::sync::compare::types::{RangeSummary, TimestampRange};
-use crate::protocol::event_modules::sync::schema as negentropy_purges;
+use crate::protocol::event_modules::sync::rows as negentropy_purges;
 use crate::protocol::event_modules::types::{EventId, EventIndexEntry};
 use crate::workers::pipeline_helpers::event_pipeline::{CommandOutput, ProposedEvent};
-use crate::workers::schema as worker_schema;
+use crate::workers::queue_rows as worker_rows;
 use crate::workers::{pipeline_helpers::event_pipeline as event_worker, DaemonWorkerContext};
 
 pub const DEFAULT_INBOUND_BATCH: usize = 1024;
@@ -521,7 +521,7 @@ fn drain_index_queue_once(
     index: &SyncIndex,
     limit: usize,
 ) -> Result<SyncIndexReport, String> {
-    let applied = worker_schema::claim_applied_shared_events(store, limit)
+    let applied = worker_rows::claim_applied_shared_events(store, limit)
         .map_err(|err| format!("claim applied shared events: {err}"))?;
     let keys = applied
         .iter()
@@ -535,7 +535,7 @@ fn drain_index_queue_once(
     }
     if !keys.is_empty() {
         store
-            .delete_table_rows(worker_schema::APPLIED_SHARED_EVENTS, keys)
+            .delete_table_rows(worker_rows::APPLIED_SHARED_EVENTS, keys)
             .map_err(|err| format!("consume applied shared events: {err}"))?;
     }
     Ok(report)
@@ -596,7 +596,7 @@ fn drain_in_events(
     limit: usize,
 ) -> Result<SyncWorkReport, String> {
     let limit = limit.max(1);
-    let works = worker_schema::claim_sync_in_events(store, limit)
+    let works = worker_rows::claim_sync_in_events(store, limit)
         .map_err(|err| format!("load sync in events: {err}"))?;
     drain_sync_works(store, index, works)
 }
@@ -608,7 +608,7 @@ fn drain_connection_in_events(
     limit: usize,
 ) -> Result<SyncWorkReport, String> {
     let limit = limit.max(1);
-    let works = worker_schema::claim_sync_in_events_for_connection(store, connection_id, limit)
+    let works = worker_rows::claim_sync_in_events_for_connection(store, connection_id, limit)
         .map_err(|err| format!("load sync in events: {err}"))?;
     drain_sync_works(store, index, works)
 }
@@ -616,7 +616,7 @@ fn drain_connection_in_events(
 fn drain_sync_works(
     store: &Store,
     index: &SyncIndex,
-    works: Vec<worker_schema::SyncInEvent>,
+    works: Vec<worker_rows::SyncInEvent>,
 ) -> Result<SyncWorkReport, String> {
     if works.is_empty() {
         return Ok(SyncWorkReport::default());
@@ -639,7 +639,7 @@ fn drain_sync_works(
         result.sent_events += report.sent_events;
         result.events.extend(report.events);
         for send in report.transit_out {
-            transit_out_rows.push(worker_schema::transit_out_row(
+            transit_out_rows.push(worker_rows::transit_out_row(
                 send.connection_id,
                 send.event_id,
             ));
@@ -655,7 +655,7 @@ fn drain_sync_works(
     }
     if !consumed.is_empty() {
         store
-            .delete_table_rows(worker_schema::SYNC_IN_EVENTS, consumed)
+            .delete_table_rows(worker_rows::SYNC_IN_EVENTS, consumed)
             .map_err(|err| format!("delete sync in events: {err}"))?;
     }
     Ok(result)
@@ -683,7 +683,7 @@ impl<'a> StoreSyncContext<'a> {
                 local_endpoint,
             )?);
             let remote = connection_remote_endpoint(store, connection_id)?;
-            workspace_ids.extend(endpoint_shared::schema::mutual_workspace_ids(
+            workspace_ids.extend(endpoint_shared::rows::mutual_workspace_ids(
                 store,
                 local_endpoint,
                 remote,
@@ -778,7 +778,7 @@ fn connection_ids_with_routes(
     store: &Store,
 ) -> Result<Vec<connection::types::ConnectionId>, String> {
     store
-        .table_rows(connection::schema::TRANSPORT_TARGETS)
+        .table_rows(connection::rows::TRANSPORT_TARGETS)
         .map_err(|err| format!("load transport targets: {err}"))?
         .into_iter()
         .map(|(key, _)| connection::types::connection_id_from_bytes(&key))
@@ -807,7 +807,7 @@ fn connection_remote_endpoint(
     connection_id: connection::types::ConnectionId,
 ) -> Result<EventId, String> {
     let bytes = store
-        .table_row(connection::schema::CONNECTIONS, &connection_id)
+        .table_row(connection::rows::CONNECTIONS, &connection_id)
         .map_err(|err| format!("load connection: {err}"))?
         .ok_or_else(|| "unknown connection".to_string())?;
     event_id_from_bytes(&bytes).map_err(|_| "stored endpoint id is malformed".to_string())
@@ -819,7 +819,7 @@ fn connection_invite_workspace(
 ) -> Result<Option<EventId>, String> {
     let Some(bytes) = store
         .table_row(
-            connection::schema::CONNECTION_INVITE_WORKSPACES,
+            connection::rows::CONNECTION_INVITE_WORKSPACES,
             &connection_id,
         )
         .map_err(|err| format!("load connection invite workspace: {err}"))?
@@ -834,7 +834,7 @@ fn connection_has_route(
     connection_id: connection::types::ConnectionId,
 ) -> Result<bool, String> {
     store
-        .table_row(connection::schema::TRANSPORT_TARGETS, &connection_id)
+        .table_row(connection::rows::TRANSPORT_TARGETS, &connection_id)
         .map(|row| row.is_some())
         .map_err(|err| format!("load transport target: {err}"))
 }
@@ -1112,8 +1112,8 @@ mod tests {
         let index = SyncIndex::default();
         store
             .insert_table_rows(vec![
-                connection::schema::connection_invite_workspace_row([3; 32], [5; 32]),
-                invite_accepted::schema::invite_accepted_row(
+                connection::rows::connection_invite_workspace_row([3; 32], [5; 32]),
+                invite_accepted::rows::invite_accepted_row(
                     [9; 32],
                     &invite_accepted::types::InviteAcceptedEvent {
                         workspace_id: [5; 32],
@@ -1144,7 +1144,7 @@ mod tests {
         let store = routed_sync_store(local, remote);
         let index = SyncIndex::default();
         store
-            .insert_table_rows(vec![connection::schema::connection_invite_workspace_row(
+            .insert_table_rows(vec![connection::rows::connection_invite_workspace_row(
                 [3; 32], [5; 32],
             )])
             .expect("insert invite workspace");
@@ -1181,9 +1181,9 @@ mod tests {
 
         let mut rows = endpoint::projector::local_endpoint(local);
         rows.extend([
-            connection::schema::connection_row(inbound_connection_id, remote.endpoint),
-            connection::schema::connection_row(response_connection_id, remote.endpoint),
-            connection::schema::transport_target_row(
+            connection::rows::connection_row(inbound_connection_id, remote.endpoint),
+            connection::rows::connection_row(response_connection_id, remote.endpoint),
+            connection::rows::transport_target_row(
                 response_connection_id,
                 "127.0.0.1:41000".parse().expect("route addr"),
             ),
@@ -1198,10 +1198,10 @@ mod tests {
             summary: compare::types::RangeSummary::default(),
             response_requested: true,
         };
-        let bytes = compare::codec::encode(&compare);
-        let record = compare::codec::inbound_record_from_wire(bytes).expect("inbound compare");
+        let bytes = compare::layout::encode(&compare);
+        let record = compare::layout::inbound_record_from_wire(bytes).expect("inbound compare");
         store
-            .insert_table_rows(vec![worker_schema::sync_in_event_row(
+            .insert_table_rows(vec![worker_rows::sync_in_event_row(
                 inbound_connection_id,
                 event_id(&record.canonical_bytes),
                 record.canonical_bytes,
@@ -1230,7 +1230,7 @@ mod tests {
             "local summary should produce response events"
         );
         assert!(
-            have_id::codec::is_event(&output.events[0].record().canonical_bytes),
+            have_id::layout::is_event(&output.events[0].record().canonical_bytes),
             "tick should drain inbound work before appending a fresh compare start"
         );
         for event in output.events {
@@ -1244,7 +1244,7 @@ mod tests {
         }
         assert_eq!(
             store
-                .table_row_count(worker_schema::SYNC_IN_EVENTS)
+                .table_row_count(worker_rows::SYNC_IN_EVENTS)
                 .expect("count sync in"),
             0
         );
@@ -1275,13 +1275,13 @@ mod tests {
 
         let mut rows = endpoint::projector::local_endpoint(local);
         rows.extend([
-            connection::schema::connection_row(inbound_connection_id, remote.endpoint),
-            connection::schema::connection_row(alternate_connection_id, remote.endpoint),
-            connection::schema::transport_target_row(
+            connection::rows::connection_row(inbound_connection_id, remote.endpoint),
+            connection::rows::connection_row(alternate_connection_id, remote.endpoint),
+            connection::rows::transport_target_row(
                 inbound_connection_id,
                 "127.0.0.1:41001".parse().expect("inbound route addr"),
             ),
-            connection::schema::transport_target_row(
+            connection::rows::transport_target_row(
                 alternate_connection_id,
                 "127.0.0.1:41000".parse().expect("alternate route addr"),
             ),
@@ -1296,10 +1296,10 @@ mod tests {
             summary: compare::types::RangeSummary::default(),
             response_requested: true,
         };
-        let bytes = compare::codec::encode(&compare);
-        let record = compare::codec::inbound_record_from_wire(bytes).expect("inbound compare");
+        let bytes = compare::layout::encode(&compare);
+        let record = compare::layout::inbound_record_from_wire(bytes).expect("inbound compare");
         store
-            .insert_table_rows(vec![worker_schema::sync_in_event_row(
+            .insert_table_rows(vec![worker_rows::sync_in_event_row(
                 inbound_connection_id,
                 event_id(&record.canonical_bytes),
                 record.canonical_bytes,
@@ -1345,8 +1345,8 @@ mod tests {
         let other_workspace_id = [8; 32];
         let mut rows = endpoint::projector::local_endpoint(local);
         rows.extend([
-            connection::schema::connection_row(connection_id, remote.endpoint),
-            connection::schema::connection_invite_workspace_row(connection_id, invite_workspace_id),
+            connection::rows::connection_row(connection_id, remote.endpoint),
+            connection::rows::connection_invite_workspace_row(connection_id, invite_workspace_id),
             endpoint_membership_row(
                 invite_workspace_id,
                 local.endpoint,
@@ -1399,8 +1399,8 @@ mod tests {
         let workspace_id = [5; 32];
         let mut rows = endpoint::projector::local_endpoint(local);
         rows.extend([
-            connection::schema::connection_row(connection_id, remote.endpoint),
-            connection::schema::transport_target_row(
+            connection::rows::connection_row(connection_id, remote.endpoint),
+            connection::rows::transport_target_row(
                 connection_id,
                 "127.0.0.1:41000".parse().expect("route addr"),
             ),
@@ -1443,7 +1443,7 @@ mod tests {
         signing_public_key: [u8; 32],
         seed: u8,
     ) -> crate::core::store::TableRow {
-        endpoint_shared::schema::endpoint_membership_row(
+        endpoint_shared::rows::endpoint_membership_row(
             [seed; 32],
             [seed.saturating_add(1); 32],
             &endpoint_shared::types::EndpointSharedEvent {

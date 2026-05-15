@@ -11,7 +11,7 @@ use crate::protocol::event_modules::types::{
     EventId, EventIndexEntry, EventStatus, EventStatusCounts,
 };
 
-use super::schema::{
+use super::rows::{
     self, decode_stored_event_index, read_event, BLOCKED_EVENTS_BY_MISSING_DEP, EVENTS,
     EVENT_LABELS,
 };
@@ -59,7 +59,7 @@ pub fn status_counts(store: &Store) -> rusqlite::Result<EventStatusCounts> {
 }
 
 pub fn body_bytes(store: &Store) -> rusqlite::Result<usize> {
-    schema::shared_body_bytes(store)
+    rows::shared_body_bytes(store)
 }
 
 pub fn event_index_entries_in_timestamp_range(
@@ -67,7 +67,7 @@ pub fn event_index_entries_in_timestamp_range(
     start_timestamp: u64,
     end_timestamp: u64,
 ) -> rusqlite::Result<Vec<EventIndexEntry>> {
-    schema::event_index_entries_in_timestamp_range(store, start_timestamp, end_timestamp)
+    rows::event_index_entries_in_timestamp_range(store, start_timestamp, end_timestamp)
 }
 
 pub fn has_shared_event_in_workspaces(

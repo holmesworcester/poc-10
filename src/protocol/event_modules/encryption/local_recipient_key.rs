@@ -6,9 +6,9 @@
 //! publish recipient keys, authorize endpoint membership, or wrap content keys;
 //! those are separate shared events and worker steps.
 
-pub mod codec;
 pub mod commands;
+pub mod layout;
 pub mod projector;
 pub mod queries;
-pub mod schema;
+pub mod rows;
 pub mod types;

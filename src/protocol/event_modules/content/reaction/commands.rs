@@ -10,10 +10,10 @@ use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::ReactionEvent;
 
-/// Sanity guard: every named id in a reaction event is non-zero. The codec
+/// Sanity guard: every named id in a reaction event is non-zero. The layout
 /// is intentionally lenient on decode; this helper is shared between the
 /// authoring path and the receive projector so a malformed peer event is
 /// rejected at projection time too.
@@ -63,7 +63,7 @@ pub struct PostReactionOutput {
 /// or a mismatched leaf id.
 pub fn open_sealed_reaction_row(
     store: &Store,
-    row: super::schema::SealedReactionRow,
+    row: super::rows::SealedReactionRow,
 ) -> Result<Option<super::types::ReactionRow>, String> {
     use crate::protocol::event_modules::encryption::local_history_node_secret;
     let unix_minute =
@@ -102,12 +102,12 @@ pub fn open_sealed_reaction_row(
     };
     let plaintext = crypto::xchacha20poly1305_decrypt(
         &leaf.node_secret,
-        &codec::associated_data(&event, row.signer_endpoint_shared_id),
+        &layout::associated_data(&event, row.signer_endpoint_shared_id),
         &event.nonce,
         &event.ciphertext,
     )
     .map_err(|err| format!("decrypt sealed reaction: {err}"))?;
-    let emoji = codec::decode_emoji_slot(&plaintext)?;
+    let emoji = layout::decode_emoji_slot(&plaintext)?;
     Ok(Some(super::types::ReactionRow {
         workspace_id: row.workspace_id,
         reaction_id: row.reaction_id,
@@ -123,7 +123,7 @@ pub fn post(input: PostReaction) -> Result<CommandOutput<PostReactionOutput>, St
     if input.emoji.trim().is_empty() {
         return Err("reaction emoji must not be empty".to_string());
     }
-    let plaintext = codec::encode_emoji_slot(&input.emoji)?;
+    let plaintext = layout::encode_emoji_slot(&input.emoji)?;
     let mut event = ReactionEvent {
         workspace_id: input.workspace_id,
         created_at_ms: input.created_at_ms,
@@ -137,7 +137,7 @@ pub fn post(input: PostReaction) -> Result<CommandOutput<PostReactionOutput>, St
     validate_event_ids(&event)?;
     let ciphertext = crypto::xchacha20poly1305_encrypt(
         &input.leaf_node_secret,
-        &codec::associated_data(&event, input.signer_endpoint_shared_id),
+        &layout::associated_data(&event, input.signer_endpoint_shared_id),
         &event.nonce,
         &plaintext,
     )?;
@@ -145,14 +145,14 @@ pub fn post(input: PostReaction) -> Result<CommandOutput<PostReactionOutput>, St
         .try_into()
         .map_err(|_| "reaction ciphertext length mismatch".to_string())?;
 
-    let payload = codec::encode(&event);
-    let envelope = codec::sign(
+    let payload = layout::encode(&event);
+    let envelope = layout::sign(
         input.signer_endpoint_shared_id,
         &input.signer_private_key,
         payload,
     );
-    let bytes = codec::encode_signed(&envelope);
-    let record = codec::signed_record_from_bytes(bytes)?;
+    let bytes = layout::encode_signed(&envelope);
+    let record = layout::signed_record_from_bytes(bytes)?;
     let reaction_id = crate::protocol::event_modules::types::event_id(&record.canonical_bytes);
     Ok(CommandOutput::with_events(
         PostReactionOutput {
@@ -194,17 +194,17 @@ mod tests {
             vec![[4; 32], [1; 32], [3; 32], [2; 32], [5; 32], [6; 32]]
         );
 
-        let envelope = codec::decode_signed(&record.canonical_bytes).expect("signed");
-        let event = codec::decode(&envelope.payload).expect("event");
+        let envelope = layout::decode_signed(&record.canonical_bytes).expect("signed");
+        let event = layout::decode(&envelope.payload).expect("event");
         let plaintext = crypto::xchacha20poly1305_decrypt(
             &[7; 32],
-            &codec::associated_data(&event, [4; 32]),
+            &layout::associated_data(&event, [4; 32]),
             &event.nonce,
             &event.ciphertext,
         )
         .expect("decrypt");
         assert_eq!(
-            codec::decode_emoji_slot(&plaintext).expect("decode emoji"),
+            layout::decode_emoji_slot(&plaintext).expect("decode emoji"),
             "secret-react"
         );
     }

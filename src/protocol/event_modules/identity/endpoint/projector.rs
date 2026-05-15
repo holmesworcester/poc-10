@@ -7,34 +7,34 @@
 use crate::core::store::TableRow;
 use crate::protocol::event_modules::worker::ProjectionOutput;
 
-use super::codec;
-use super::schema;
+use super::layout;
+use super::rows;
 use super::types::EndpointKeypair;
 
 pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
-    let event = codec::decode(bytes)?;
+    let event = layout::decode(bytes)?;
     Ok(ProjectionOutput::rows(local_endpoint(event)))
 }
 
 pub fn local_endpoint(endpoint: EndpointKeypair) -> Vec<TableRow> {
     vec![
         TableRow {
-            table: schema::LOCAL_ENDPOINT,
+            table: rows::LOCAL_ENDPOINT,
             key: b"local".to_vec(),
             value: endpoint.endpoint.to_vec(),
         },
         TableRow {
-            table: schema::LOCAL_ENDPOINT_SECRET,
+            table: rows::LOCAL_ENDPOINT_SECRET,
             key: b"local".to_vec(),
             value: endpoint.secret.to_vec(),
         },
         TableRow {
-            table: schema::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY,
+            table: rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY,
             key: b"local".to_vec(),
             value: endpoint.signing_public_key.to_vec(),
         },
         TableRow {
-            table: schema::LOCAL_ENDPOINT_SIGNING_SECRET,
+            table: rows::LOCAL_ENDPOINT_SIGNING_SECRET,
             key: b"local".to_vec(),
             value: endpoint.signing_secret.to_vec(),
         },
@@ -50,32 +50,32 @@ mod tests {
     #[test]
     fn project_writes_public_endpoint_and_secret_as_local_rows() {
         let local = commands::create_local_keypair().value;
-        let bytes = codec::encode(&local);
+        let bytes = layout::encode(&local);
         let output = project(&bytes).expect("project endpoint");
 
         assert_eq!(output.legacy_rows().len(), 4);
         assert!(output
             .legacy_rows()
             .iter()
-            .any(|row| row.table == schema::LOCAL_ENDPOINT
+            .any(|row| row.table == rows::LOCAL_ENDPOINT
                 && row.key == b"local"
                 && row.value == local.endpoint));
         assert!(output
             .legacy_rows()
             .iter()
-            .any(|row| row.table == schema::LOCAL_ENDPOINT_SECRET
+            .any(|row| row.table == rows::LOCAL_ENDPOINT_SECRET
                 && row.key == b"local"
                 && row.value == local.secret));
         assert!(output
             .legacy_rows()
             .iter()
-            .any(|row| row.table == schema::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY
+            .any(|row| row.table == rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY
                 && row.key == b"local"
                 && row.value == local.signing_public_key));
         assert!(output
             .legacy_rows()
             .iter()
-            .any(|row| row.table == schema::LOCAL_ENDPOINT_SIGNING_SECRET
+            .any(|row| row.table == rows::LOCAL_ENDPOINT_SIGNING_SECRET
                 && row.key == b"local"
                 && row.value == local.signing_secret));
     }

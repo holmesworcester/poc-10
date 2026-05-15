@@ -8,7 +8,7 @@
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{decode_removal_frontier_row, removal_frontier_key, REMOVAL_FRONTIERS};
+use super::rows::{decode_removal_frontier_row, removal_frontier_key, REMOVAL_FRONTIERS};
 use super::types::RemovalFrontierRow;
 
 pub fn get(

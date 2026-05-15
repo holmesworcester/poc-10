@@ -17,7 +17,7 @@
 //! Adding a new domain is one branch here plus one `pub fn event_from_bytes`
 //! in that domain's `mod.rs`.
 //!
-//! Per-event `codec::record_from_bytes` helpers stay in their owning leaf
+//! Per-event `layout::record_from_bytes` helpers stay in their owning leaf
 //! modules and are reached only via this dispatcher or that module's tests.
 
 use super::{connection, content, encryption, identity, sync, test_events};

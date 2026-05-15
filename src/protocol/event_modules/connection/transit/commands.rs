@@ -2,7 +2,7 @@
 //!
 //! This is the active boundary between connection state and network bytes. It
 //! accepts explicit endpoint keys and connection context, then returns opaque
-//! transit bytes. It does not admit events or mutate schema; event admission and
+//! transit bytes. It does not admit events or mutate rows; event admission and
 //! transit out decide what to do with the result.
 
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
@@ -12,7 +12,7 @@ use crate::core::crypto;
 use crate::protocol::event_modules::types::EventId;
 
 use super::super::types::ConnectionId;
-use super::codec;
+use super::layout;
 use super::types::{TransitEnvelope, BOOTSTRAP_PURPOSE, CONNECTION_PURPOSE};
 
 /// Plaintext byte budget for one transit batch. The cap is the inner plaintext,
@@ -20,7 +20,7 @@ use super::types::{TransitEnvelope, BOOTSTRAP_PURPOSE, CONNECTION_PURPOSE};
 /// caller via the `inner_size` closure passed to `batch_inner_events`.
 pub const TRANSIT_TARGET_PLAINTEXT_BYTES: usize = 32 * 1024 * 1024;
 
-/// Per-event length-prefix overhead written by the inner-event codec. Callers
+/// Per-event length-prefix overhead written by the inner-event layout. Callers
 /// that bin-pack transit items must include this in their plaintext accounting.
 pub const PER_EVENT_PLAINTEXT_OVERHEAD: usize = 4;
 
@@ -70,11 +70,11 @@ pub fn create_bootstrap(
         &local.secret,
         &recipient_endpoint,
         BOOTSTRAP_PURPOSE,
-        &codec::associated_data(&envelope),
+        &layout::associated_data(&envelope),
         &nonce,
         inner,
     )?;
-    Ok(codec::encode(&TransitEnvelope::Bootstrap {
+    Ok(layout::encode(&TransitEnvelope::Bootstrap {
         sender_endpoint: local.endpoint,
         recipient_endpoint,
         nonce,
@@ -101,11 +101,11 @@ pub fn create_connection_batch(
         nonce,
         ciphertext: Vec::new(),
     };
-    let plaintext = codec::encode_inner_events(&inners)?;
-    let associated_data = codec::associated_data(&envelope);
+    let plaintext = layout::encode_inner_events(&inners)?;
+    let associated_data = layout::associated_data(&envelope);
     let key = crypto::hkdf_sha256_key(connection_secret, CONNECTION_PURPOSE, &associated_data)?;
     let ciphertext = crypto::xchacha20poly1305_encrypt(&key, &associated_data, &nonce, &plaintext)?;
-    Ok(codec::encode(&TransitEnvelope::Connection {
+    Ok(layout::encode(&TransitEnvelope::Connection {
         connection_id,
         sender_endpoint,
         recipient_endpoint,
@@ -131,14 +131,14 @@ pub(crate) fn create_connection_handshake_response(
         nonce,
         ciphertext: Vec::new(),
     };
-    let associated_data = codec::associated_data(&envelope);
+    let associated_data = layout::associated_data(&envelope);
     let ciphertext = crypto::xchacha20poly1305_encrypt(
         response_key,
         &associated_data,
         &nonce,
         connection_event_bytes,
     )?;
-    Ok(codec::encode(
+    Ok(layout::encode(
         &TransitEnvelope::ConnectionHandshakeResponse {
             request_id,
             sender_endpoint,

@@ -9,7 +9,7 @@
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{decode_local_recipient_key_row, LOCAL_RECIPIENT_KEYS};
+use super::rows::{decode_local_recipient_key_row, LOCAL_RECIPIENT_KEYS};
 use super::types::LocalRecipientKeyRow;
 
 pub fn list_for_workspace(

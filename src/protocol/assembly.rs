@@ -72,7 +72,7 @@ pub fn schemas() -> Vec<Schema> {
     // it only receives these declarations during open.
     let mut schemas = event_modules::schemas();
     schemas.extend_from_slice(crate::core::logical_clock::SCHEMAS);
-    schemas.extend_from_slice(crate::workers::schema::SCHEMAS);
+    schemas.extend_from_slice(crate::workers::queue_rows::SCHEMAS);
     schemas.extend_from_slice(network_queues::SCHEMAS);
     schemas
 }
@@ -97,7 +97,7 @@ impl EventRegistry for Protocol {
         store: &Store,
         bytes: Vec<u8>,
         receive: Option<ReceiveMetadata>,
-        provenance: Option<crate::workers::schema::TransitProvenance>,
+        provenance: Option<crate::workers::queue_rows::TransitProvenance>,
     ) -> Result<ReceivedRecord, String> {
         self.modules
             .record_from_canonical_in(store, bytes, receive, provenance)

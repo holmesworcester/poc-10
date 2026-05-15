@@ -25,13 +25,13 @@
 //!
 //! This projector does not create response events, send bytes, query storage,
 //! or reconstruct invite dependencies. Transit supplies local receive context;
-//! the codec supplies canonical dependency ids; the common worker supplies only
+//! the layout supplies canonical dependency ids; the common worker supplies only
 //! dependencies that already reached `Applied`.
 
 use super::super::connection_ephemeral_secret;
-use super::super::schema as projection;
+use super::super::rows as projection;
 use super::super::types;
-use super::{codec, commands};
+use super::{commands, layout};
 use crate::protocol::event_modules::identity::invite;
 use crate::protocol::event_modules::types::ReceiveAuthorization;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
@@ -39,7 +39,7 @@ use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput}
 pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let bytes = envelope.record.canonical_bytes.clone();
     let receive = envelope.context.receive;
-    let event = codec::decode(&bytes)?;
+    let event = layout::decode(&bytes)?;
     let request_id = types::event_id(&bytes);
     // Always cache the canonical request bytes. Later connection response facts
     // use the request as dependency context to prove they answer this exact
@@ -63,7 +63,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
         let invite_secret = envelope
             .context
             .require_dependency(&event.invite_secret_event_id)?;
-        let invite_secret = invite::codec::decode(&invite_secret.canonical_bytes)
+        let invite_secret = invite::layout::decode(&invite_secret.canonical_bytes)
             .map_err(|_| "connection request dependency is not an invite secret".to_string())?;
         commands::validate_invite_signature(&event, &invite_secret)?;
         if let Some(addr) = event.from_listen_addr {
@@ -78,7 +78,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
         let ephemeral = envelope
             .context
             .require_dependency(&event.initiator_ephemeral_secret_event_id)?;
-        let ephemeral = connection_ephemeral_secret::codec::decode(&ephemeral.canonical_bytes)
+        let ephemeral = connection_ephemeral_secret::layout::decode(&ephemeral.canonical_bytes)
             .map_err(|_| "connection request dependency is not an ephemeral secret".to_string())?;
         if ephemeral.owner_endpoint != event.from_endpoint {
             return Err("connection request ephemeral owner does not match sender".to_string());
@@ -91,7 +91,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
         let invite_secret = envelope
             .context
             .require_dependency(&event.invite_secret_event_id)?;
-        let invite_secret = invite::codec::decode(&invite_secret.canonical_bytes)
+        let invite_secret = invite::layout::decode(&invite_secret.canonical_bytes)
             .map_err(|_| "connection request dependency is not an invite secret".to_string())?;
         commands::validate_invite_signature(&event, &invite_secret)?;
         if let Some(addr) = invite_secret.addr {
@@ -108,17 +108,17 @@ mod tests {
 
     use crate::protocol::event_modules::connection::connection_ephemeral_secret;
     use crate::protocol::event_modules::connection::connection_request::types::RequestEvent;
-    use crate::protocol::event_modules::connection::{schema, types};
+    use crate::protocol::event_modules::connection::{rows, types};
     use crate::protocol::event_modules::types::ReceiveMetadata;
     use crate::protocol::event_modules::worker::{DependencyContext, EventContext};
 
-    use super::codec;
+    use super::layout;
     use super::*;
 
     type Record = crate::protocol::event_modules::types::EventRecord;
 
     fn request_record() -> Record {
-        codec::record_from_bytes(codec::encode(&RequestEvent {
+        layout::record_from_bytes(layout::encode(&RequestEvent {
             from_endpoint: [1; 32],
             to_endpoint: [9; 32],
             nonce: [2; 32],
@@ -183,8 +183,9 @@ mod tests {
         invite_secret: invite::types::InviteSecretEvent,
         from_listen_addr: Option<SocketAddr>,
     ) -> (Record, [u8; 32], Record, [u8; 32], Record) {
-        let invite_record = invite::codec::record_from_bytes(invite::codec::encode(&invite_secret))
-            .expect("invite record");
+        let invite_record =
+            invite::layout::record_from_bytes(invite::layout::encode(&invite_secret))
+                .expect("invite record");
         let invite_secret_event_id = types::event_id(&invite_record.canonical_bytes);
         let ephemeral = connection_ephemeral_secret::types::EphemeralSecretEvent {
             owner_endpoint: [1; 32],
@@ -192,8 +193,8 @@ mod tests {
             ephemeral_public_key: crate::core::crypto::x25519_public_key(&[8; 32]),
             created_at_ms: 0,
         };
-        let ephemeral_record = connection_ephemeral_secret::codec::record_from_bytes(
-            connection_ephemeral_secret::codec::encode(&ephemeral),
+        let ephemeral_record = connection_ephemeral_secret::layout::record_from_bytes(
+            connection_ephemeral_secret::layout::encode(&ephemeral),
         )
         .expect("ephemeral record");
         let ephemeral_secret_event_id = types::event_id(&ephemeral_record.canonical_bytes);
@@ -213,7 +214,7 @@ mod tests {
             &invite_secret,
         )
         .expect("sign with invite");
-        let record = codec::record_from_bytes(codec::encode(&request)).expect("request record");
+        let record = layout::record_from_bytes(layout::encode(&request)).expect("request record");
         (
             record,
             invite_secret_event_id,
@@ -237,7 +238,7 @@ mod tests {
         .expect("project request");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows()[0].table, rows::CONNECTION_EVENTS);
         assert_eq!(
             output.legacy_rows()[0].key,
             types::event_id(&record.canonical_bytes)
@@ -263,10 +264,10 @@ mod tests {
         .expect("project request");
 
         assert_eq!(output.legacy_rows().len(), 2);
-        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows()[0].table, rows::CONNECTION_EVENTS);
         assert_eq!(
             output.legacy_rows()[1].table,
-            schema::PENDING_CONNECTION_ATTEMPTS
+            rows::PENDING_CONNECTION_ATTEMPTS
         );
         assert_eq!(
             output.legacy_rows()[1].key,
@@ -289,7 +290,7 @@ mod tests {
         .expect("project local scoped request");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows()[0].table, rows::CONNECTION_EVENTS);
     }
 
     #[test]
@@ -315,7 +316,7 @@ mod tests {
         .expect("project received request");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows()[0].table, rows::CONNECTION_EVENTS);
     }
 
     #[test]
@@ -347,10 +348,10 @@ mod tests {
         .expect("project received request");
 
         assert_eq!(output.legacy_rows().len(), 2);
-        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows()[0].table, rows::CONNECTION_EVENTS);
         assert_eq!(
             output.legacy_rows()[1].table,
-            schema::PENDING_CONNECTION_RESPONSES
+            rows::PENDING_CONNECTION_RESPONSES
         );
         assert_eq!(
             output.legacy_rows()[1].key,
@@ -386,7 +387,7 @@ mod tests {
         .expect("project received scoped request");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows()[0].table, rows::CONNECTION_EVENTS);
     }
 
     #[test]
@@ -445,7 +446,7 @@ mod tests {
         let (record, invite_secret_event_id, _, _, _) = authorized_request_record();
         let wrong_invite = invite::types::InviteSecretEvent::new([8; 32]);
         let wrong_invite_record =
-            invite::codec::record_from_bytes(invite::codec::encode(&wrong_invite))
+            invite::layout::record_from_bytes(invite::layout::encode(&wrong_invite))
                 .expect("wrong invite record");
 
         assert_eq!(
@@ -477,9 +478,9 @@ mod tests {
     fn rejects_scoped_request_when_invite_id_does_not_match() {
         let (record, invite_secret_event_id, invite_record, _, _) =
             scoped_authorized_request_record();
-        let mut request = codec::decode(&record.canonical_bytes).expect("decode request");
+        let mut request = layout::decode(&record.canonical_bytes).expect("decode request");
         request.invite_event_id = [9; 32];
-        let record = codec::record_from_bytes(codec::encode(&request)).expect("tampered request");
+        let record = layout::record_from_bytes(layout::encode(&request)).expect("tampered request");
 
         assert_eq!(
             project(&EventWithContext {
@@ -509,9 +510,9 @@ mod tests {
     #[test]
     fn rejects_received_request_when_invite_signature_does_not_match() {
         let (record, invite_secret_event_id, invite_record, _, _) = authorized_request_record();
-        let mut request = codec::decode(&record.canonical_bytes).expect("decode request");
+        let mut request = layout::decode(&record.canonical_bytes).expect("decode request");
         request.invite_signature = [9; crate::core::crypto::ED25519_SIGNATURE_BYTES];
-        let record = codec::record_from_bytes(codec::encode(&request)).expect("tampered request");
+        let record = layout::record_from_bytes(layout::encode(&request)).expect("tampered request");
 
         assert_eq!(
             project(&EventWithContext {

@@ -1,9 +1,9 @@
 //! Worker-owned lifecycle operations for the generic event store.
 //!
-//! Protocol schema declares tables and pure row encoders. This module owns the
+//! Protocol rows declares tables and pure row encoders. This module owns the
 //! active mechanics that change event lifecycle: idempotent insertion, ready
 //! claiming, status transitions, and dependency-edge maintenance. Keeping those
-//! verbs here prevents schema modules from becoming hidden workers while still
+//! verbs here prevents rows modules from becoming hidden workers while still
 //! letting the common event pipeline share one audited implementation.
 //!
 //! The invariant is that lifecycle changes remain generic. This module may move
@@ -12,7 +12,7 @@
 //! domain deletion policy, write module read models, or enqueue transport.
 
 use crate::core::store::Store;
-use crate::protocol::event_modules::schema;
+use crate::protocol::event_modules::rows;
 use crate::protocol::event_modules::types::{event_id, EventId, EventRecord, EventStatus};
 
 /// Insert a durable event and the generic indexes that make it schedulable.
@@ -22,25 +22,25 @@ pub(crate) fn insert_event(
     status: EventStatus,
 ) -> rusqlite::Result<bool> {
     let id = event_id(&event.canonical_bytes);
-    if store.table_row(schema::EVENTS, &id)?.is_some() {
+    if store.table_row(rows::EVENTS, &id)?.is_some() {
         return Ok(false);
     }
 
     let dependencies = unique_dependencies(&event.dependencies);
-    let mut rows = vec![schema::event_row(&id, event, status)?];
+    let mut rows = vec![rows::event_row(&id, event, status)?];
     if status == EventStatus::Ready {
-        rows.push(schema::ready_row(event.timestamp, &id));
+        rows.push(rows::ready_row(event.timestamp, &id));
     }
     if event.scope.is_shared() {
-        rows.push(schema::timestamp_row(
+        rows.push(rows::timestamp_row(
             event.timestamp,
             event.workspace_id,
             &id,
         ));
     }
     for dependency in &dependencies {
-        rows.push(schema::edge_row(schema::DEPENDENTS_BY_DEP, dependency, &id));
-        rows.push(schema::edge_row(schema::DEPS_BY_DEPENDENT, &id, dependency));
+        rows.push(rows::edge_row(rows::DEPENDENTS_BY_DEP, dependency, &id));
+        rows.push(rows::edge_row(rows::DEPS_BY_DEPENDENT, &id, dependency));
     }
     store.insert_table_rows_in_tx(rows)?;
     Ok(true)
@@ -51,7 +51,7 @@ pub(crate) fn event_status(
     store: &Store,
     event_id: &EventId,
 ) -> rusqlite::Result<Option<EventStatus>> {
-    schema::read_event(store, event_id).map(|event| event.map(|event| event.status))
+    rows::read_event(store, event_id).map(|event| event.map(|event| event.status))
 }
 
 /// Return whether an event has reached the generic Applied lifecycle state.
@@ -66,12 +66,12 @@ pub(crate) fn direct_dependents(
 ) -> rusqlite::Result<Vec<EventId>> {
     store
         .table_rows_with_key_prefix(
-            schema::DEPENDENTS_BY_DEP,
+            rows::DEPENDENTS_BY_DEP,
             dependency_id,
-            schema::MAX_DEPENDENCY_ROWS_PER_EVENT,
+            rows::MAX_DEPENDENCY_ROWS_PER_EVENT,
         )?
         .into_iter()
-        .map(|(key, _)| schema::split_edge_key(&key).map(|(_, dependent_id)| dependent_id))
+        .map(|(key, _)| rows::split_edge_key(&key).map(|(_, dependent_id)| dependent_id))
         .collect()
 }
 
@@ -81,14 +81,14 @@ pub(crate) fn insert_blocked_event_missing_dep(
     missing_dep_id: &EventId,
     blocked_event_id: &EventId,
 ) -> rusqlite::Result<bool> {
-    let primary = schema::edge_row(
-        schema::BLOCKED_EVENTS_BY_MISSING_DEP,
+    let primary = rows::edge_row(
+        rows::BLOCKED_EVENTS_BY_MISSING_DEP,
         missing_dep_id,
         blocked_event_id,
     );
     let inserted = store.insert_table_rows_in_tx(vec![primary])? > 0;
-    store.insert_table_rows_in_tx(vec![schema::edge_row(
-        schema::MISSING_DEPS_BY_BLOCKED_EVENT,
+    store.insert_table_rows_in_tx(vec![rows::edge_row(
+        rows::MISSING_DEPS_BY_BLOCKED_EVENT,
         blocked_event_id,
         missing_dep_id,
     )])?;
@@ -97,7 +97,7 @@ pub(crate) fn insert_blocked_event_missing_dep(
 
 /// Claim the oldest ready event id without mutating state.
 pub(crate) fn next_ready_event(store: &Store) -> rusqlite::Result<Option<EventId>> {
-    let mut rows = store.table_rows_with_key_prefix(schema::READY_EVENTS, &[], 1)?;
+    let mut rows = store.table_rows_with_key_prefix(rows::READY_EVENTS, &[], 1)?;
     let Some((_, value)) = rows.pop() else {
         return Ok(None);
     };
@@ -111,7 +111,7 @@ pub(crate) fn set_event_status(
     from: EventStatus,
     to: EventStatus,
 ) -> rusqlite::Result<bool> {
-    let Some(mut event) = schema::read_event(store, event_id)? else {
+    let Some(mut event) = rows::read_event(store, event_id)? else {
         return Ok(false);
     };
     if event.status != from {
@@ -119,16 +119,16 @@ pub(crate) fn set_event_status(
     }
 
     let old_ready_key =
-        (from == EventStatus::Ready).then(|| schema::ready_key(event.timestamp, event_id));
+        (from == EventStatus::Ready).then(|| rows::ready_key(event.timestamp, event_id));
     event.status = to;
-    let mut rows = vec![schema::stored_event_row(event_id, &event)?];
+    let mut rows = vec![rows::stored_event_row(event_id, &event)?];
     if to == EventStatus::Ready {
-        rows.push(schema::ready_row(event.timestamp, event_id));
+        rows.push(rows::ready_row(event.timestamp, event_id));
     }
 
     store.replace_table_rows_in_tx(rows)?;
     if let Some(key) = old_ready_key {
-        store.delete_table_rows_in_tx(schema::READY_EVENTS, vec![key])?;
+        store.delete_table_rows_in_tx(rows::READY_EVENTS, vec![key])?;
     }
     Ok(true)
 }
@@ -139,20 +139,20 @@ pub(crate) fn delete_blocked_events_by_missing_dep(
     missing_dep_id: &EventId,
 ) -> rusqlite::Result<usize> {
     let rows = store.table_rows_with_key_prefix(
-        schema::BLOCKED_EVENTS_BY_MISSING_DEP,
+        rows::BLOCKED_EVENTS_BY_MISSING_DEP,
         missing_dep_id,
-        schema::MAX_DEPENDENCY_ROWS_PER_EVENT,
+        rows::MAX_DEPENDENCY_ROWS_PER_EVENT,
     )?;
     let mut blocked_keys = Vec::with_capacity(rows.len());
     let mut reverse_keys = Vec::with_capacity(rows.len());
     for (key, _) in rows {
-        let (missing_dep, blocked_event_id) = schema::split_edge_key(&key)?;
+        let (missing_dep, blocked_event_id) = rows::split_edge_key(&key)?;
         blocked_keys.push(key);
-        reverse_keys.push(schema::edge_key(&blocked_event_id, &missing_dep));
+        reverse_keys.push(rows::edge_key(&blocked_event_id, &missing_dep));
     }
     let deleted =
-        store.delete_table_rows_in_tx(schema::BLOCKED_EVENTS_BY_MISSING_DEP, blocked_keys)?;
-    store.delete_table_rows_in_tx(schema::MISSING_DEPS_BY_BLOCKED_EVENT, reverse_keys)?;
+        store.delete_table_rows_in_tx(rows::BLOCKED_EVENTS_BY_MISSING_DEP, blocked_keys)?;
+    store.delete_table_rows_in_tx(rows::MISSING_DEPS_BY_BLOCKED_EVENT, reverse_keys)?;
     Ok(deleted)
 }
 
@@ -162,20 +162,20 @@ pub(crate) fn delete_missing_deps_by_blocked_event(
     blocked_event_id: &EventId,
 ) -> rusqlite::Result<usize> {
     let rows = store.table_rows_with_key_prefix(
-        schema::MISSING_DEPS_BY_BLOCKED_EVENT,
+        rows::MISSING_DEPS_BY_BLOCKED_EVENT,
         blocked_event_id,
-        schema::MAX_DEPENDENCY_ROWS_PER_EVENT,
+        rows::MAX_DEPENDENCY_ROWS_PER_EVENT,
     )?;
     let mut reverse_keys = Vec::with_capacity(rows.len());
     let mut blocked_keys = Vec::with_capacity(rows.len());
     for (key, _) in rows {
-        let (blocked_id, missing_dep) = schema::split_edge_key(&key)?;
+        let (blocked_id, missing_dep) = rows::split_edge_key(&key)?;
         reverse_keys.push(key);
-        blocked_keys.push(schema::edge_key(&missing_dep, &blocked_id));
+        blocked_keys.push(rows::edge_key(&missing_dep, &blocked_id));
     }
     let deleted =
-        store.delete_table_rows_in_tx(schema::MISSING_DEPS_BY_BLOCKED_EVENT, reverse_keys)?;
-    store.delete_table_rows_in_tx(schema::BLOCKED_EVENTS_BY_MISSING_DEP, blocked_keys)?;
+        store.delete_table_rows_in_tx(rows::MISSING_DEPS_BY_BLOCKED_EVENT, reverse_keys)?;
+    store.delete_table_rows_in_tx(rows::BLOCKED_EVENTS_BY_MISSING_DEP, blocked_keys)?;
     Ok(deleted)
 }
 
@@ -186,12 +186,12 @@ pub(crate) fn blocked_events_by_missing_dep(
 ) -> rusqlite::Result<Vec<EventId>> {
     store
         .table_rows_with_key_prefix(
-            schema::BLOCKED_EVENTS_BY_MISSING_DEP,
+            rows::BLOCKED_EVENTS_BY_MISSING_DEP,
             missing_dep_id,
-            schema::MAX_DEPENDENCY_ROWS_PER_EVENT,
+            rows::MAX_DEPENDENCY_ROWS_PER_EVENT,
         )?
         .into_iter()
-        .map(|(key, _)| schema::split_edge_key(&key).map(|(_, blocked_event_id)| blocked_event_id))
+        .map(|(key, _)| rows::split_edge_key(&key).map(|(_, blocked_event_id)| blocked_event_id))
         .collect()
 }
 
@@ -201,7 +201,7 @@ pub(crate) fn blocked_event_has_missing_deps(
     blocked_event_id: &EventId,
 ) -> rusqlite::Result<bool> {
     store
-        .table_rows_with_key_prefix(schema::MISSING_DEPS_BY_BLOCKED_EVENT, blocked_event_id, 1)
+        .table_rows_with_key_prefix(rows::MISSING_DEPS_BY_BLOCKED_EVENT, blocked_event_id, 1)
         .map(|rows| !rows.is_empty())
 }
 

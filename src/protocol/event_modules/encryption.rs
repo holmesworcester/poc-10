@@ -4,7 +4,7 @@
 //! module root stays as registry plumbing: child modules own their event syntax,
 //! commands, projection rows, and tests.
 
-pub mod cli;
+pub mod command_line;
 pub mod disappearing_messages_setting;
 pub mod key_request;
 pub mod key_wrap;
@@ -21,28 +21,28 @@ use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput}
 pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionOutput>, String> {
     let bytes = &event.record.canonical_bytes;
     match bytes.first().copied() {
-        Some(local_recipient_key::codec::TYPE_LOCAL_RECIPIENT_KEY) => {
+        Some(local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY) => {
             Ok(Some(local_recipient_key::projector::project(bytes)?))
         }
-        Some(local_key_secret::codec::TYPE_LOCAL_KEY_SECRET) => {
+        Some(local_key_secret::layout::TYPE_LOCAL_KEY_SECRET) => {
             Ok(Some(local_key_secret::projector::project(event)?))
         }
-        Some(local_history_node_secret::codec::TYPE_LOCAL_HISTORY_NODE_SECRET) => {
+        Some(local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET) => {
             Ok(Some(local_history_node_secret::projector::project(event)?))
         }
-        Some(recipient_key::codec::TYPE_SIGNED_RECIPIENT_KEY) => {
+        Some(recipient_key::layout::TYPE_SIGNED_RECIPIENT_KEY) => {
             Ok(Some(recipient_key::projector::project(event)?))
         }
-        Some(removal_frontier::codec::TYPE_SIGNED_REMOVAL_FRONTIER) => {
+        Some(removal_frontier::layout::TYPE_SIGNED_REMOVAL_FRONTIER) => {
             Ok(Some(removal_frontier::projector::project(event)?))
         }
-        Some(key_wrap::codec::TYPE_SIGNED_KEY_WRAP) => {
+        Some(key_wrap::layout::TYPE_SIGNED_KEY_WRAP) => {
             Ok(Some(key_wrap::projector::project(event)?))
         }
-        Some(key_request::codec::TYPE_SIGNED_KEY_REQUEST) => {
+        Some(key_request::layout::TYPE_SIGNED_KEY_REQUEST) => {
             Ok(Some(key_request::projector::project(event)?))
         }
-        Some(disappearing_messages_setting::codec::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING) => {
+        Some(disappearing_messages_setting::layout::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING) => {
             Ok(Some(disappearing_messages_setting::projector::project(
                 event,
             )?))
@@ -56,19 +56,19 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
 pub fn is_encryption_tag(tag: u8) -> bool {
     matches!(
         tag,
-        local_recipient_key::codec::TYPE_LOCAL_RECIPIENT_KEY
-            | local_key_secret::codec::TYPE_LOCAL_KEY_SECRET
-            | local_history_node_secret::codec::TYPE_LOCAL_HISTORY_NODE_SECRET
-            | recipient_key::codec::TYPE_RECIPIENT_KEY
-            | recipient_key::codec::TYPE_SIGNED_RECIPIENT_KEY
-            | removal_frontier::codec::TYPE_REMOVAL_FRONTIER
-            | removal_frontier::codec::TYPE_SIGNED_REMOVAL_FRONTIER
-            | key_wrap::codec::TYPE_KEY_WRAP
-            | key_wrap::codec::TYPE_SIGNED_KEY_WRAP
-            | key_request::codec::TYPE_KEY_REQUEST
-            | key_request::codec::TYPE_SIGNED_KEY_REQUEST
-            | disappearing_messages_setting::codec::TYPE_DISAPPEARING_MESSAGES_SETTING
-            | disappearing_messages_setting::codec::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING
+        local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY
+            | local_key_secret::layout::TYPE_LOCAL_KEY_SECRET
+            | local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
+            | recipient_key::layout::TYPE_RECIPIENT_KEY
+            | recipient_key::layout::TYPE_SIGNED_RECIPIENT_KEY
+            | removal_frontier::layout::TYPE_REMOVAL_FRONTIER
+            | removal_frontier::layout::TYPE_SIGNED_REMOVAL_FRONTIER
+            | key_wrap::layout::TYPE_KEY_WRAP
+            | key_wrap::layout::TYPE_SIGNED_KEY_WRAP
+            | key_request::layout::TYPE_KEY_REQUEST
+            | key_request::layout::TYPE_SIGNED_KEY_REQUEST
+            | disappearing_messages_setting::layout::TYPE_DISAPPEARING_MESSAGES_SETTING
+            | disappearing_messages_setting::layout::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING
     )
 }
 
@@ -80,36 +80,38 @@ pub fn event_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         .first()
         .ok_or_else(|| "empty encryption event bytes".to_string())?;
     match *tag {
-        local_recipient_key::codec::TYPE_LOCAL_RECIPIENT_KEY => {
-            local_recipient_key::codec::record_from_bytes(bytes)
+        local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY => {
+            local_recipient_key::layout::record_from_bytes(bytes)
         }
-        local_key_secret::codec::TYPE_LOCAL_KEY_SECRET => {
-            local_key_secret::codec::record_from_bytes(bytes)
+        local_key_secret::layout::TYPE_LOCAL_KEY_SECRET => {
+            local_key_secret::layout::record_from_bytes(bytes)
         }
-        local_history_node_secret::codec::TYPE_LOCAL_HISTORY_NODE_SECRET => {
-            local_history_node_secret::codec::record_from_bytes(bytes)
+        local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET => {
+            local_history_node_secret::layout::record_from_bytes(bytes)
         }
-        recipient_key::codec::TYPE_RECIPIENT_KEY => Err("recipient_key must be signed".to_string()),
-        recipient_key::codec::TYPE_SIGNED_RECIPIENT_KEY => {
-            recipient_key::codec::signed_record_from_bytes(bytes)
+        recipient_key::layout::TYPE_RECIPIENT_KEY => {
+            Err("recipient_key must be signed".to_string())
         }
-        removal_frontier::codec::TYPE_REMOVAL_FRONTIER => {
+        recipient_key::layout::TYPE_SIGNED_RECIPIENT_KEY => {
+            recipient_key::layout::signed_record_from_bytes(bytes)
+        }
+        removal_frontier::layout::TYPE_REMOVAL_FRONTIER => {
             Err("removal_frontier must be signed".to_string())
         }
-        removal_frontier::codec::TYPE_SIGNED_REMOVAL_FRONTIER => {
-            removal_frontier::codec::signed_record_from_bytes(bytes)
+        removal_frontier::layout::TYPE_SIGNED_REMOVAL_FRONTIER => {
+            removal_frontier::layout::signed_record_from_bytes(bytes)
         }
-        key_wrap::codec::TYPE_KEY_WRAP => Err("key_wrap must be signed".to_string()),
-        key_wrap::codec::TYPE_SIGNED_KEY_WRAP => key_wrap::codec::signed_record_from_bytes(bytes),
-        key_request::codec::TYPE_KEY_REQUEST => Err("key_request must be signed".to_string()),
-        key_request::codec::TYPE_SIGNED_KEY_REQUEST => {
-            key_request::codec::signed_record_from_bytes(bytes)
+        key_wrap::layout::TYPE_KEY_WRAP => Err("key_wrap must be signed".to_string()),
+        key_wrap::layout::TYPE_SIGNED_KEY_WRAP => key_wrap::layout::signed_record_from_bytes(bytes),
+        key_request::layout::TYPE_KEY_REQUEST => Err("key_request must be signed".to_string()),
+        key_request::layout::TYPE_SIGNED_KEY_REQUEST => {
+            key_request::layout::signed_record_from_bytes(bytes)
         }
-        disappearing_messages_setting::codec::TYPE_DISAPPEARING_MESSAGES_SETTING => {
+        disappearing_messages_setting::layout::TYPE_DISAPPEARING_MESSAGES_SETTING => {
             Err("disappearing_messages_setting must be signed".to_string())
         }
-        disappearing_messages_setting::codec::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING => {
-            disappearing_messages_setting::codec::signed_record_from_bytes(bytes)
+        disappearing_messages_setting::layout::TYPE_SIGNED_DISAPPEARING_MESSAGES_SETTING => {
+            disappearing_messages_setting::layout::signed_record_from_bytes(bytes)
         }
         other => Err(format!("unknown encryption event type {other}")),
     }

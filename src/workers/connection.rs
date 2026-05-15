@@ -24,7 +24,7 @@ use std::{
 use crate::core::daemon::{StepContext, Worker};
 use crate::core::store::Store;
 use crate::protocol::event_modules::connection::{
-    connection_ephemeral_secret, connection_request, connection_response, schema, transit, types,
+    connection_ephemeral_secret, connection_request, connection_response, rows, transit, types,
 };
 use crate::protocol::event_modules::identity::{endpoint, invite};
 use crate::protocol::event_modules::queries as event_queries;
@@ -258,7 +258,7 @@ fn connection_request_frame(
     attempt: PendingConnectionAttempt,
 ) -> Result<Vec<u8>, String> {
     let request_bytes = connection_event_bytes(store, attempt.request_id)?;
-    let request = connection_request::codec::decode(&request_bytes)
+    let request = connection_request::layout::decode(&request_bytes)
         .map_err(|_| "pending connection attempt is not a request event".to_string())?;
     let local = local_endpoint(store)?;
     if local.endpoint != request.from_endpoint {
@@ -308,7 +308,7 @@ fn existing_connection_response_frame(
     connection_id: types::ConnectionId,
 ) -> Result<Vec<u8>, String> {
     let response_bytes = connection_event_bytes(store, connection_id)?;
-    let response = connection_response::codec::decode(&response_bytes)
+    let response = connection_response::layout::decode(&response_bytes)
         .map_err(|_| "stored connection event is not a response".to_string())?;
     let request = connection_request_for_response(store, request_id)?
         .ok_or_else(|| "missing connection request event".to_string())?;
@@ -357,7 +357,7 @@ fn connection_request_for_response(
     else {
         return Ok(None);
     };
-    connection_request::codec::decode(&bytes).map(Some)
+    connection_request::layout::decode(&bytes).map(Some)
 }
 
 fn invite_secret_for_response(
@@ -367,7 +367,7 @@ fn invite_secret_for_response(
     let bytes = event_queries::event_bytes(store, invite_secret_event_id)
         .map_err(|err| format!("load invite secret event: {err}"))?
         .ok_or_else(|| "missing invite secret event".to_string())?;
-    invite::codec::decode(&bytes)
+    invite::layout::decode(&bytes)
         .map_err(|_| "connection dependency is not an invite secret".to_string())
 }
 
@@ -378,13 +378,13 @@ fn responder_ephemeral_for_response(
     let bytes = event_queries::event_bytes(store, responder_ephemeral_event_id)
         .map_err(|err| format!("load responder ephemeral event: {err}"))?
         .ok_or_else(|| "missing responder ephemeral event".to_string())?;
-    connection_ephemeral_secret::codec::decode(&bytes)
+    connection_ephemeral_secret::layout::decode(&bytes)
         .map_err(|_| "connection dependency is not a responder ephemeral".to_string())
 }
 
 fn connection_event_bytes(store: &Store, event_id: EventId) -> Result<Vec<u8>, String> {
     store
-        .table_row(schema::CONNECTION_EVENTS, &event_id)
+        .table_row(rows::CONNECTION_EVENTS, &event_id)
         .map_err(|err| format!("load connection event: {err}"))?
         .ok_or_else(|| "unknown connection event".to_string())
 }
@@ -394,7 +394,7 @@ fn connection_id_for_request(
     request_id: EventId,
 ) -> Result<Option<types::ConnectionId>, String> {
     let Some(bytes) = store
-        .table_row(schema::REQUEST_CONNECTIONS, &request_id)
+        .table_row(rows::REQUEST_CONNECTIONS, &request_id)
         .map_err(|err| format!("load request connection: {err}"))?
     else {
         return Ok(None);
@@ -408,7 +408,7 @@ fn remember_connection_route(
     addr: SocketAddr,
 ) -> Result<(), String> {
     store
-        .insert_table_rows(vec![schema::transport_target_row(connection_id, addr)])
+        .insert_table_rows(vec![rows::transport_target_row(connection_id, addr)])
         .map(|_| ())
         .map_err(|err| format!("remember connection route: {err}"))
 }
@@ -417,7 +417,7 @@ fn pending_connection_attempts(
     store: &Store,
     limit: usize,
 ) -> Result<Vec<PendingConnectionAttempt>, String> {
-    pending_connection_rows(store, schema::PENDING_CONNECTION_ATTEMPTS, limit)?
+    pending_connection_rows(store, rows::PENDING_CONNECTION_ATTEMPTS, limit)?
         .into_iter()
         .map(|(request_id, addr)| Ok(PendingConnectionAttempt { request_id, addr }))
         .collect()
@@ -427,7 +427,7 @@ fn pending_connection_responses(
     store: &Store,
     limit: usize,
 ) -> Result<Vec<PendingConnectionResponse>, String> {
-    pending_connection_rows(store, schema::PENDING_CONNECTION_RESPONSES, limit)?
+    pending_connection_rows(store, rows::PENDING_CONNECTION_RESPONSES, limit)?
         .into_iter()
         .map(|(request_id, addr)| Ok(PendingConnectionResponse { request_id, addr }))
         .collect()
@@ -460,11 +460,11 @@ fn event_id_from_bytes(bytes: &[u8]) -> Result<EventId, String> {
 }
 
 fn delete_pending_connection_attempt(store: &Store, request_id: EventId) -> Result<(), String> {
-    delete_pending_connection_row(store, schema::PENDING_CONNECTION_ATTEMPTS, request_id)
+    delete_pending_connection_row(store, rows::PENDING_CONNECTION_ATTEMPTS, request_id)
 }
 
 fn delete_pending_connection_response(store: &Store, request_id: EventId) -> Result<(), String> {
-    delete_pending_connection_row(store, schema::PENDING_CONNECTION_RESPONSES, request_id)
+    delete_pending_connection_row(store, rows::PENDING_CONNECTION_RESPONSES, request_id)
 }
 
 fn delete_pending_connection_row(
@@ -496,8 +496,8 @@ mod tests {
             .expect("test socket addr");
         let mut rows = endpoint::projector::local_endpoint(local);
         rows.extend([
-            schema::pending_connection_attempt_row(request_id, addr),
-            schema::request_connection_row(request_id, connection_id),
+            rows::pending_connection_attempt_row(request_id, addr),
+            rows::request_connection_row(request_id, connection_id),
         ]);
         store
             .insert_table_rows(rows)
@@ -515,13 +515,13 @@ mod tests {
         assert_eq!(output.attempts_completed, 1);
         assert_eq!(
             store
-                .table_row_count(schema::PENDING_CONNECTION_ATTEMPTS)
+                .table_row_count(rows::PENDING_CONNECTION_ATTEMPTS)
                 .expect("count pending"),
             0
         );
         assert_eq!(
             store
-                .table_row(schema::TRANSPORT_TARGETS, &connection_id)
+                .table_row(rows::TRANSPORT_TARGETS, &connection_id)
                 .expect("route row"),
             Some(addr.to_string().into_bytes())
         );

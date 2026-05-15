@@ -7,14 +7,14 @@
 use crate::protocol::event_modules::identity::{signed, user_invite};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, schema};
+use super::{layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = signed::codec::decode(&event.record.canonical_bytes)?;
-    if envelope.inner_type != codec::TYPE_USER {
+    let envelope = signed::layout::decode(&event.record.canonical_bytes)?;
+    if envelope.inner_type != layout::TYPE_USER {
         return Err("expected signed user".to_string());
     }
-    let user = codec::decode(&envelope.payload)?;
+    let user = layout::decode(&envelope.payload)?;
     if user.username.trim().is_empty() {
         return Err("username must not be empty".to_string());
     }
@@ -22,12 +22,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let signer = event
         .context
         .require_dependency(&envelope.signer_event_id)?;
-    let invite_envelope = signed::codec::decode(&signer.canonical_bytes)
+    let invite_envelope = signed::layout::decode(&signer.canonical_bytes)
         .map_err(|_| "user signer must be user_invite".to_string())?;
-    if invite_envelope.inner_type != user_invite::codec::TYPE_USER_INVITE {
+    if invite_envelope.inner_type != user_invite::layout::TYPE_USER_INVITE {
         return Err("user signer must be user_invite".to_string());
     }
-    let invite = user_invite::codec::decode(&invite_envelope.payload)?;
+    let invite = user_invite::layout::decode(&invite_envelope.payload)?;
     if envelope.signer_public_key != invite.public_key {
         return Err("signed user signer key does not match user_invite public key".to_string());
     }
@@ -35,7 +35,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("user workspace does not match user_invite workspace".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![schema::user_row(
+    Ok(ProjectionOutput::rows(vec![rows::user_row(
         user.workspace_id,
         event.context.event_id,
         envelope.signer_event_id,
@@ -70,7 +70,7 @@ mod tests {
             public_key: signer_public_key(&WORKSPACE_PRIVATE),
             name: "Workspace".to_string(),
         };
-        let bytes = crate::protocol::event_modules::identity::workspace::codec::encode(&workspace)
+        let bytes = crate::protocol::event_modules::identity::workspace::layout::encode(&workspace)
             .expect("encode workspace");
         event_id(&bytes)
     }
@@ -88,7 +88,7 @@ mod tests {
         let signed_invite = signed::commands::sign_payload(
             workspace_id,
             &WORKSPACE_PRIVATE,
-            user_invite::codec::encode(&invite),
+            user_invite::layout::encode(&invite),
         )
         .expect("sign invite");
         (
@@ -112,7 +112,7 @@ mod tests {
         let signed_user = signed::commands::sign_payload(
             signer_event_id,
             signer_private_key,
-            codec::encode(&user).expect("encode user"),
+            layout::encode(&user).expect("encode user"),
         )
         .expect("sign user");
         signed_user.events[0].record().clone()
@@ -150,9 +150,9 @@ mod tests {
 
         assert!(output.legacy_labels().is_empty());
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::USERS);
+        assert_eq!(output.legacy_rows()[0].table, rows::USERS);
         let row =
-            schema::decode_user_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
+            rows::decode_user_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
                 .expect("decode");
         assert_eq!(row.workspace_id, workspace_id());
         assert_eq!(row.user_id, event_id(&user_record.canonical_bytes));
@@ -182,8 +182,8 @@ mod tests {
             name: "Workspace".to_string(),
         };
         let workspace_record =
-            crate::protocol::event_modules::identity::workspace::codec::record_from_bytes(
-                crate::protocol::event_modules::identity::workspace::codec::encode(&workspace)
+            crate::protocol::event_modules::identity::workspace::layout::record_from_bytes(
+                crate::protocol::event_modules::identity::workspace::layout::encode(&workspace)
                     .expect("encode workspace"),
             )
             .expect("workspace record");

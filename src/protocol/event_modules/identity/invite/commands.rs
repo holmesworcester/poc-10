@@ -17,7 +17,7 @@ use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::super::endpoint;
-use super::codec;
+use super::layout;
 use super::types::{Invite, InviteSecretEvent};
 
 const INVITE_PREFIX: &str = "topo://invite/";
@@ -43,7 +43,7 @@ pub fn create(
     let bootstrap_secret = nonce32();
     let workspace_id = nonce32();
     let secret_event = InviteSecretEvent::new_with_addr(bootstrap_secret, public_addr);
-    let bytes = codec::encode(&secret_event);
+    let bytes = layout::encode(&secret_event);
     CommandOutput::with_events(
         format!(
             "{INVITE_PREFIX}{INVITE_VERSION}/{INVITE_KIND}/{LABEL_INVITE_ID}.{invite_id}/{LABEL_INVITE_PRIVKEY}.{invite_secret}/{LABEL_WORKSPACE}.{workspace}/{LABEL_ENDPOINT_ID}.{endpoint}/{LABEL_ADDRESS}.{address}",
@@ -53,7 +53,7 @@ pub fn create(
             endpoint = encode_hex(&local.endpoint),
             address = encode_address(public_addr),
         ),
-        vec![codec::record_from_bytes(bytes).expect("encoded invite secret is valid")],
+        vec![layout::record_from_bytes(bytes).expect("encoded invite secret is valid")],
     )
 }
 
@@ -109,7 +109,7 @@ pub fn create_scoped_with_role(
         invite_event_id,
         public_addr,
     );
-    let bytes = codec::encode(&secret_event);
+    let bytes = layout::encode(&secret_event);
     let user_part = user_authority_event_id
         .map(|user_id| format!("/{LABEL_USER_ID}.{}", encode_hex(&user_id)))
         .unwrap_or_default();
@@ -125,7 +125,7 @@ pub fn create_scoped_with_role(
             endpoint = encode_hex(&local.endpoint),
             address = encode_address(public_addr),
         ),
-        vec![codec::record_from_bytes(bytes).expect("encoded invite secret is valid")],
+        vec![layout::record_from_bytes(bytes).expect("encoded invite secret is valid")],
     )
 }
 
@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(invite.addr, public_addr);
 
         let secret_event =
-            codec::decode(&record.canonical_bytes).expect("decode local invite secret");
+            layout::decode(&record.canonical_bytes).expect("decode local invite secret");
         assert_eq!(
             secret_event.bootstrap_hash,
             secret_hash(&invite.bootstrap_secret)

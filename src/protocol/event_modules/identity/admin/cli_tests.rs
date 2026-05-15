@@ -3,7 +3,7 @@ use crate::protocol::event_modules::identity::workspace;
 use crate::protocol::event_modules::worker;
 use crate::protocol::Protocol;
 
-use super::{commands, schema};
+use super::{commands, rows};
 
 #[test]
 fn receipt_replays_bootstrap_then_admin_authorized_grant_without_daemon() {
@@ -68,11 +68,11 @@ fn receipt_replays_bootstrap_then_admin_authorized_grant_without_daemon() {
     .expect("drain ready events");
     assert_eq!(drained.applied_events, 2);
 
-    let rows = receiver.table_rows(schema::ADMINS).expect("admin rows");
+    let rows = receiver.table_rows(rows::ADMINS).expect("admin rows");
     assert_eq!(rows.len(), 2);
     let projected = rows
         .into_iter()
-        .map(|(key, value)| schema::decode_admin_row(&key, &value).expect("admin row"))
+        .map(|(key, value)| rows::decode_admin_row(&key, &value).expect("admin row"))
         .collect::<Vec<_>>();
     assert!(projected
         .iter()

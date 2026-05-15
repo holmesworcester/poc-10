@@ -19,7 +19,7 @@ use crate::protocol::event_modules::encryption::disappearing_messages_setting;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
 
-use super::codec;
+use super::layout;
 use super::types::{WorkspaceEvent, WorkspacePublicKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,8 +51,8 @@ pub fn create(input: CreateWorkspace) -> Result<CommandOutput<CreateWorkspaceOut
         public_key: input.public_key,
         name: input.name,
     };
-    let bytes = codec::encode(&event)?;
-    let record = codec::record_from_bytes(bytes)?;
+    let bytes = layout::encode(&event)?;
+    let record = layout::record_from_bytes(bytes)?;
     let workspace_proposed = ProposedEvent::new(record);
     let workspace_id = workspace_proposed.event_id();
 
@@ -128,7 +128,7 @@ mod tests {
             event_id(&workspace_proposed.record().canonical_bytes)
         );
 
-        let decoded = codec::decode(&workspace_proposed.record().canonical_bytes)
+        let decoded = layout::decode(&workspace_proposed.record().canonical_bytes)
             .expect("decode proposed workspace");
         assert_eq!(decoded.created_at_ms, 77);
         assert_eq!(decoded.public_key, public_key);
@@ -164,9 +164,9 @@ mod tests {
         // The initial setting is the second emitted event.
         let setting_record = output.events[1].record();
         let envelope =
-            disappearing_messages_setting::codec::decode_signed(&setting_record.canonical_bytes)
+            disappearing_messages_setting::layout::decode_signed(&setting_record.canonical_bytes)
                 .expect("decode signed setting");
-        let setting = disappearing_messages_setting::codec::decode(&envelope.payload)
+        let setting = disappearing_messages_setting::layout::decode(&envelope.payload)
             .expect("decode setting");
         assert_eq!(setting.ttl_minutes, 5);
         assert_eq!(setting.workspace_id, output.value.workspace_id);

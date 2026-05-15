@@ -68,7 +68,7 @@ pub fn start_with_summary(
     let mut report = SyncReport::default();
     report
         .events
-        .push(super::codec::outbound_record(CompareEvent {
+        .push(super::layout::outbound_record(CompareEvent {
             connection_id,
             range,
             summary,
@@ -85,8 +85,8 @@ pub fn handle_inbound_event(
     bytes: &[u8],
 ) -> Result<SyncReport, String> {
     let mut report = SyncReport::default();
-    if super::codec::is_event(bytes) {
-        let event = super::codec::decode(bytes)?;
+    if super::layout::is_event(bytes) {
+        let event = super::layout::decode(bytes)?;
         ensure_connection(event.connection_id, expected_connection_id)?;
         let local = context.summary(event.range)?;
         if local != event.summary {
@@ -102,21 +102,21 @@ pub fn handle_inbound_event(
         }
         return Ok(report);
     }
-    if have_id::codec::is_event(bytes) {
-        let event = have_id::codec::decode(bytes)?;
+    if have_id::layout::is_event(bytes) {
+        let event = have_id::layout::decode(bytes)?;
         ensure_connection(event.connection_id, expected_connection_id)?;
         if !context.has_event(&event.id)? {
             report
                 .events
-                .push(need_id::codec::outbound_record(NeedIdEvent {
+                .push(need_id::layout::outbound_record(NeedIdEvent {
                     connection_id: response_connection_id,
                     id: event.id,
                 })?);
         }
         return Ok(report);
     }
-    if need_id::codec::is_event(bytes) {
-        let event = need_id::codec::decode(bytes)?;
+    if need_id::layout::is_event(bytes) {
+        let event = need_id::layout::decode(bytes)?;
         ensure_connection(event.connection_id, expected_connection_id)?;
         // Need-id is intentionally not treated as proof that we should send the
         // event. Peers can guess ids, replay ids, or request ids from stale
@@ -151,7 +151,7 @@ fn compare_response(
     let mut records = Vec::new();
     if local.count == 0 {
         if response_requested {
-            records.push(super::codec::outbound_record(CompareEvent {
+            records.push(super::layout::outbound_record(CompareEvent {
                 connection_id,
                 range,
                 summary: local,
@@ -167,14 +167,14 @@ fn compare_response(
             .fresh_have_entries(connection_id, context.dependency_closure_entries(&entries)?)?;
         let entries = context.fresh_have_entries(connection_id, entries)?;
         for entry in dep_entries.into_iter().chain(entries.into_iter()) {
-            records.push(have_id::codec::outbound_record(HaveIdEvent {
+            records.push(have_id::layout::outbound_record(HaveIdEvent {
                 connection_id,
                 timestamp: entry.timestamp,
                 id: entry.event_id,
             })?);
         }
         if response_requested && remote.count > 0 {
-            records.push(super::codec::outbound_record(CompareEvent {
+            records.push(super::layout::outbound_record(CompareEvent {
                 connection_id,
                 range,
                 summary: local,
@@ -193,14 +193,14 @@ fn compare_response(
             .fresh_have_entries(connection_id, context.dependency_closure_entries(&entries)?)?;
         let entries = context.fresh_have_entries(connection_id, entries)?;
         for entry in dep_entries.into_iter().chain(entries.into_iter()) {
-            records.push(have_id::codec::outbound_record(HaveIdEvent {
+            records.push(have_id::layout::outbound_record(HaveIdEvent {
                 connection_id,
                 timestamp: entry.timestamp,
                 id: entry.event_id,
             })?);
         }
         if response_requested && remote.count > 0 {
-            records.push(super::codec::outbound_record(CompareEvent {
+            records.push(super::layout::outbound_record(CompareEvent {
                 connection_id,
                 range,
                 summary: local,
@@ -215,7 +215,7 @@ fn compare_response(
             start: range.start,
             end: min_timestamp - 1,
         };
-        records.push(super::codec::outbound_record(CompareEvent {
+        records.push(super::layout::outbound_record(CompareEvent {
             connection_id,
             range: empty_left,
             summary: RangeSummary::default(),
@@ -227,7 +227,7 @@ fn compare_response(
             start: max_timestamp + 1,
             end: range.end,
         };
-        records.push(super::codec::outbound_record(CompareEvent {
+        records.push(super::layout::outbound_record(CompareEvent {
             connection_id,
             range: empty_right,
             summary: RangeSummary::default(),
@@ -241,7 +241,7 @@ fn compare_response(
     };
     if let Some((left, right)) = local_range.split() {
         for child in [left, right] {
-            records.push(super::codec::outbound_record(CompareEvent {
+            records.push(super::layout::outbound_record(CompareEvent {
                 connection_id,
                 range: child,
                 summary: context.summary(child)?,
@@ -387,7 +387,7 @@ mod tests {
             start: root.timestamp,
             end: root.timestamp,
         };
-        let remote_compare = super::super::codec::outbound_record(CompareEvent {
+        let remote_compare = super::super::layout::outbound_record(CompareEvent {
             connection_id: CONNECTION_ID,
             range,
             summary: RangeSummary::default(),
@@ -407,7 +407,7 @@ mod tests {
             .events
             .iter()
             .map(|record| {
-                have_id::codec::decode(&record.canonical_bytes)
+                have_id::layout::decode(&record.canonical_bytes)
                     .expect("have id response")
                     .id
             })

@@ -136,12 +136,12 @@ where
 mod tests {
     use crate::core::network_queues::{self, InboundNetworkRow, NetworkSource};
     use crate::protocol::event_modules::connection::{
-        connection_request, connection_response, schema, transit, types,
+        connection_request, connection_response, rows, transit, types,
     };
     use crate::protocol::event_modules::identity::{endpoint, invite};
     use crate::protocol::Protocol;
     use crate::workers::pipeline_helpers::event_pipeline as pipeline;
-    use crate::workers::schema as worker_schema;
+    use crate::workers::queue_rows as worker_rows;
 
     use super::*;
 
@@ -167,10 +167,10 @@ mod tests {
             connection_secret: [5; 32],
         };
         let mut rows = endpoint::projector::local_endpoint(local);
-        rows.push(schema::connection_row(connection_id, remote.endpoint));
-        rows.push(schema::connection_event_row(
+        rows.push(rows::connection_row(connection_id, remote.endpoint));
+        rows.push(rows::connection_event_row(
             connection_id,
-            connection_response::codec::encode(&connection),
+            connection_response::layout::encode(&connection),
         ));
         store
             .insert_table_rows(rows)
@@ -206,7 +206,7 @@ mod tests {
             0,
             "transit_in consumes accepted network rows"
         );
-        let queued = worker_schema::claim_canonical_in(&store, 1).expect("claim canonical in");
+        let queued = worker_rows::claim_canonical_in(&store, 1).expect("claim canonical in");
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].canonical_bytes, inner);
         assert!(
@@ -228,12 +228,12 @@ mod tests {
             invite::commands::create(alice, "127.0.0.1:41000".parse().expect("invite addr"));
         let invite_link = invite_output.value.clone();
         pipeline::run(&store, &protocol, invite_output).expect("admit invite secret");
-        let stale = invite::codec::record_from_bytes(invite::codec::encode(
+        let stale = invite::layout::record_from_bytes(invite::layout::encode(
             &invite::types::InviteSecretEvent::new([99; 32]),
         ))
         .expect("stale canonical record");
         store
-            .insert_table_rows(vec![worker_schema::canonical_in_row(stale, None)])
+            .insert_table_rows(vec![worker_rows::canonical_in_row(stale, None)])
             .expect("insert stale canonical row");
         let request = connection_request::commands::create(
             bob,
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(report.canonical_rows, 1);
         assert_eq!(
             store
-                .table_row_count(worker_schema::CANONICAL_IN)
+                .table_row_count(worker_rows::CANONICAL_IN)
                 .expect("count canonical queue"),
             2,
             "transit_in adds recovered bytes to canonical.in without directly admitting them"
@@ -278,13 +278,13 @@ mod tests {
         assert_eq!(admitted.inserted_events, 2);
         assert_eq!(
             store
-                .table_row(schema::PENDING_CONNECTION_RESPONSES, &request_id)
+                .table_row(rows::PENDING_CONNECTION_RESPONSES, &request_id)
                 .expect("pending response row"),
             Some("127.0.0.1:41001".as_bytes().to_vec())
         );
         assert_eq!(
             store
-                .table_row_count(worker_schema::CANONICAL_IN)
+                .table_row_count(worker_rows::CANONICAL_IN)
                 .expect("count canonical queue"),
             0,
             "admission, not transit_in, consumes canonical queue rows"

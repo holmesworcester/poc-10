@@ -27,10 +27,10 @@ use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput,
 
 use super::super::{key_wrap, local_key_secret};
 use super::types::{LocalHistoryNodeSecret, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH};
-use super::{codec, commands, schema};
+use super::{commands, layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let node = codec::decode(&event.record.canonical_bytes)?;
+    let node = layout::decode(&event.record.canonical_bytes)?;
     commands::validate_event_fields(&node)?;
     if event.record.workspace_id != Some(node.workspace_id) {
         return Err("local history node workspace metadata does not match event body".to_string());
@@ -57,11 +57,8 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
 
     let mut output = ProjectionOutput::rows(vec![
-        schema::local_history_node_secret_row(event.context.event_id, &node),
-        key_wrap::schema::pending_frontier_reconcile_row(
-            node.workspace_id,
-            node.removal_frontier_id,
-        ),
+        rows::local_history_node_secret_row(event.context.event_id, &node),
+        key_wrap::rows::pending_frontier_reconcile_row(node.workspace_id, node.removal_frontier_id),
     ]);
     if let Some(tombstone_node_id) = node.tombstone_node_id {
         let retired = decode_history_node(event, tombstone_node_id)?;
@@ -77,14 +74,14 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         {
             return Err("local history node cannot tombstone its own coordinate".to_string());
         }
-        output.push_table_write(schema::local_history_node_tombstone_row(
+        output.push_table_write(rows::local_history_node_tombstone_row(
             &node,
             event.context.event_id,
             tombstone_node_id,
         ));
         output.push_table_delete(TableDelete {
-            table: schema::LOCAL_HISTORY_NODE_SECRETS,
-            key: schema::local_history_node_secret_key(
+            table: rows::LOCAL_HISTORY_NODE_SECRETS,
+            key: rows::local_history_node_secret_key(
                 retired.workspace_id,
                 retired.removal_frontier_id,
                 retired.range_start,
@@ -108,7 +105,7 @@ fn validate_source(
     node: &LocalHistoryNodeSecret,
 ) -> Result<SourceKind, String> {
     let source = event.context.require_dependency(&node.source_secret_id)?;
-    if let Ok(source_node) = codec::decode(&source.canonical_bytes) {
+    if let Ok(source_node) = layout::decode(&source.canonical_bytes) {
         if source_node.workspace_id != node.workspace_id
             || source_node.removal_frontier_id != node.removal_frontier_id
         {
@@ -116,7 +113,7 @@ fn validate_source(
         }
         return Ok(SourceKind::HistoryNode(source_node));
     }
-    if let Ok(source_key) = local_key_secret::codec::decode(&source.canonical_bytes) {
+    if let Ok(source_key) = local_key_secret::layout::decode(&source.canonical_bytes) {
         if source_key.workspace_id != node.workspace_id
             || source_key.removal_frontier_id != node.removal_frontier_id
         {
@@ -210,7 +207,7 @@ fn decode_history_node(
     node_id: [u8; 32],
 ) -> Result<LocalHistoryNodeSecret, String> {
     let record = event.context.require_dependency(&node_id)?;
-    codec::decode(&record.canonical_bytes)
+    layout::decode(&record.canonical_bytes)
         .map_err(|_| "local history node tombstone dependency is not a history node".to_string())
 }
 
@@ -329,9 +326,9 @@ mod tests {
         assert_eq!(output.legacy_rows().len(), 2);
         assert_eq!(
             output.legacy_rows()[0].table,
-            schema::LOCAL_HISTORY_NODE_SECRETS
+            rows::LOCAL_HISTORY_NODE_SECRETS
         );
-        let row = schema::decode_local_history_node_secret_row(
+        let row = rows::decode_local_history_node_secret_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -348,7 +345,7 @@ mod tests {
         let key_id = event_id(&key_record.canonical_bytes);
         let minute_record = time_split_record(key_id, [7; 32], 0, u64::MAX, 0, 1_700_000, 1, None);
         let minute_id = event_id(&minute_record.canonical_bytes);
-        let minute = codec::decode(&minute_record.canonical_bytes).expect("minute");
+        let minute = layout::decode(&minute_record.canonical_bytes).expect("minute");
         let leaf_id_in_minute = [9; 32];
         let leaf_record = trie_split_record(
             minute_id,
@@ -369,7 +366,7 @@ mod tests {
         let output = project(&event).expect("project leaf");
 
         assert_eq!(output.legacy_rows().len(), 2);
-        let row = schema::decode_local_history_node_secret_row(
+        let row = rows::decode_local_history_node_secret_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -412,7 +409,7 @@ mod tests {
         let key_id = event_id(&key_record.canonical_bytes);
         let minute_record = time_split_record(key_id, [7; 32], 0, u64::MAX, 0, 1_700_000, 1, None);
         let minute_id = event_id(&minute_record.canonical_bytes);
-        let minute = codec::decode(&minute_record.canonical_bytes).expect("minute");
+        let minute = layout::decode(&minute_record.canonical_bytes).expect("minute");
         let leaf_record = trie_split_record(
             minute_id,
             minute.node_secret,

@@ -8,11 +8,11 @@
 use crate::protocol::event_modules::identity::{endpoint_shared, signed};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, schema};
+use super::{layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let content = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let content = layout::decode(&envelope.payload)?;
     if event.record.workspace_id != Some(content.workspace_id) {
         return Err("content workspace metadata does not match event body".to_string());
     }
@@ -20,12 +20,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let signer = event
         .context
         .require_dependency(&envelope.signer_endpoint_shared_id)?;
-    let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
+    let signer_envelope = signed::layout::decode(&signer.canonical_bytes)
         .map_err(|_| "content signer dependency is not a signed endpoint_shared".to_string())?;
-    if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    if signer_envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err("content signer dependency is not a signed endpoint_shared".to_string());
     }
-    let signer_endpoint_shared = endpoint_shared::codec::decode(&signer_envelope.payload)
+    let signer_endpoint_shared = endpoint_shared::layout::decode(&signer_envelope.payload)
         .map_err(|_| "content signer dependency is not a signed endpoint_shared".to_string())?;
     if signer_endpoint_shared.workspace_id != content.workspace_id {
         return Err("content signer endpoint_shared workspace does not match content".to_string());
@@ -34,7 +34,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("content signer public key does not match endpoint_shared".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![schema::content_event_row(
+    Ok(ProjectionOutput::rows(vec![rows::content_event_row(
         event.context.event_id,
         &content,
     )]))
@@ -58,16 +58,16 @@ mod tests {
         let signer_public_key = signing_public_key_for(&signer_private_key);
         let signer = endpoint_shared_record(workspace_id, signer_public_key);
         let signer_id = event_id(&signer.canonical_bytes);
-        let payload = codec::encode(&ContentEvent {
+        let payload = layout::encode(&ContentEvent {
             workspace_id,
             timestamp: 5,
             payload: vec![1, 2, 3],
         });
-        let envelope = codec::sign(signer_id, &signer_private_key, payload);
-        let bytes = codec::encode_signed(&envelope);
+        let envelope = layout::sign(signer_id, &signer_private_key, payload);
+        let bytes = layout::encode_signed(&envelope);
         let id = event_id(&bytes);
         (
-            codec::signed_record_from_bytes(bytes).expect("record"),
+            layout::signed_record_from_bytes(bytes).expect("record"),
             id,
             signer_id,
             signer,
@@ -75,12 +75,12 @@ mod tests {
     }
 
     fn signing_public_key_for(private_key: &[u8; 32]) -> [u8; 32] {
-        codec::sign([0; 32], private_key, vec![codec::TYPE_CONTENT]).signer_public_key
+        layout::sign([0; 32], private_key, vec![layout::TYPE_CONTENT]).signer_public_key
     }
 
     fn endpoint_shared_record(workspace_id: [u8; 32], signing_public_key: [u8; 32]) -> Record {
         let payload =
-            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+            endpoint_shared::layout::encode(&endpoint_shared::types::EndpointSharedEvent {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id: [8; 32],
@@ -127,8 +127,8 @@ mod tests {
 
         assert_eq!(output.legacy_labels().len(), 0);
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::CONTENT_EVENTS);
-        let row = schema::decode_content_event_row(
+        assert_eq!(output.legacy_rows()[0].table, rows::CONTENT_EVENTS);
+        let row = rows::decode_content_event_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -176,7 +176,7 @@ mod tests {
         let (record, event_id, signer_id, _) = event([7; 32]);
         let signer = endpoint_shared_record(
             [8; 32],
-            codec::decode_signed(&record.canonical_bytes)
+            layout::decode_signed(&record.canonical_bytes)
                 .expect("decode signed content")
                 .signer_public_key,
         );
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn raw_content_bytes_are_not_admissible_protocol_events() {
-        let raw = codec::encode(&ContentEvent {
+        let raw = layout::encode(&ContentEvent {
             workspace_id: [7; 32],
             timestamp: 5,
             payload: vec![1, 2, 3],

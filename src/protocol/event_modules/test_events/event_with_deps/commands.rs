@@ -8,7 +8,7 @@ use crate::protocol::event_modules::sync::compare::types::TimestampRange;
 use crate::protocol::event_modules::types::{EventId, EventIndexEntry, EventRecord};
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::{EventWithDeps, StagedEventWithDeps, MAX_DEPS, PAYLOAD_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,9 +67,9 @@ pub fn build_records(
             dependencies,
             payload: payload(idx),
         };
-        let bytes = codec::encode(&event);
+        let bytes = layout::encode(&event);
         event_ids.push(crate::protocol::event_modules::types::event_id(&bytes));
-        records.push(codec::record_from_bytes(bytes)?);
+        records.push(layout::record_from_bytes(bytes)?);
     }
 
     Ok(records)
@@ -156,7 +156,7 @@ pub fn recent_root(
         dependencies,
         payload: payload(timestamp as usize),
     };
-    let record = codec::record_from_bytes(codec::encode(&event))?;
+    let record = layout::record_from_bytes(layout::encode(&event))?;
     Ok(CommandOutput::with_events(
         RecentRootReport {
             generated_events: 1,
@@ -183,7 +183,7 @@ pub fn recent_roots_with_shared_dependency(
             dependencies: vec![dependency],
             payload: payload(start_timestamp as usize + idx),
         };
-        records.push(codec::record_from_bytes(codec::encode(&event))?);
+        records.push(layout::record_from_bytes(layout::encode(&event))?);
     }
     Ok(CommandOutput::with_events(
         RecentRootsReport {
@@ -207,11 +207,11 @@ pub fn stage(
         .into_iter()
         .enumerate()
         .map(|(index, record)| {
-            let bytes = codec::encode_staged(&StagedEventWithDeps {
+            let bytes = layout::encode_staged(&StagedEventWithDeps {
                 index: index as u64,
                 inner_bytes: record.canonical_bytes,
             });
-            codec::staged_record_from_bytes(bytes)
+            layout::staged_record_from_bytes(bytes)
         })
         .collect::<Result<Vec<_>, _>>()?;
 

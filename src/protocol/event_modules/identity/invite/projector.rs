@@ -7,11 +7,11 @@
 use crate::core::store::TableRow;
 use crate::protocol::event_modules::worker::ProjectionOutput;
 
-use super::codec;
-use super::schema;
+use super::layout;
+use super::rows;
 
 pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
-    let event = codec::decode(bytes)?;
+    let event = layout::decode(bytes)?;
     Ok(ProjectionOutput::rows(invite_secret(
         event.bootstrap_hash,
         event.bootstrap_secret,
@@ -27,9 +27,9 @@ pub fn invite_secret(
     invite_event_id: Option<[u8; 32]>,
 ) -> Vec<TableRow> {
     vec![TableRow {
-        table: schema::INVITE_SECRETS,
+        table: rows::INVITE_SECRETS,
         key: bootstrap_hash.to_vec(),
-        value: schema::encode_invite_secret_row(private_key, workspace_id, invite_event_id),
+        value: rows::encode_invite_secret_row(private_key, workspace_id, invite_event_id),
     }]
 }
 
@@ -41,15 +41,15 @@ mod tests {
     #[test]
     fn project_writes_secret_by_bootstrap_hash_as_local_authority_row() {
         let event = InviteSecretEvent::new([7; 32]);
-        let output = project(&codec::encode(&event)).expect("project invite secret");
+        let output = project(&layout::encode(&event)).expect("project invite secret");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::INVITE_SECRETS);
+        assert_eq!(output.legacy_rows()[0].table, rows::INVITE_SECRETS);
         assert_eq!(output.legacy_rows()[0].key, event.bootstrap_hash);
         assert_eq!(
-            schema::decode_invite_secret_row(&output.legacy_rows()[0].value)
+            rows::decode_invite_secret_row(&output.legacy_rows()[0].value)
                 .expect("decode invite secret row"),
-            schema::InviteSecretRow {
+            rows::InviteSecretRow {
                 bootstrap_secret: event.bootstrap_secret,
                 workspace_id: None,
                 invite_event_id: None,
@@ -67,7 +67,7 @@ mod tests {
             invite_event_id: None,
         };
 
-        let err = project(&codec::encode(&event)).expect_err("mismatched hash must fail");
+        let err = project(&layout::encode(&event)).expect_err("mismatched hash must fail");
 
         assert_eq!(err, "invite secret hash does not match secret");
     }

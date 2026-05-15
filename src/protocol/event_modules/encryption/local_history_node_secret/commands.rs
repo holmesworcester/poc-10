@@ -37,7 +37,7 @@ use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::CommandOutput;
 use crate::protocol::wire::Writer;
 
-use super::codec;
+use super::layout;
 use super::queries;
 use super::types::{
     bit_at, first_diverging_bit, mask_prefix_to_depth, sibling_prefix_at_depth, AncestorSource,
@@ -136,8 +136,8 @@ pub fn import_wrapped_node_secret(
         node_secret: input.node_secret,
     };
     validate_event_fields(&event)?;
-    let bytes = codec::encode(&event);
-    let record = codec::record_from_bytes(bytes)?;
+    let bytes = layout::encode(&event);
+    let record = layout::record_from_bytes(bytes)?;
     let value = LocalHistoryNodeSecretOutput {
         local_history_node_secret_id: event_id(&record.canonical_bytes),
         event,
@@ -176,8 +176,8 @@ pub fn derive_time_split(
         tombstone_node_id: input.tombstone_node_id,
         node_secret,
     };
-    let bytes = codec::encode(&event);
-    let record = codec::record_from_bytes(bytes)?;
+    let bytes = layout::encode(&event);
+    let record = layout::record_from_bytes(bytes)?;
     let value = LocalHistoryNodeSecretOutput {
         local_history_node_secret_id: event_id(&record.canonical_bytes),
         event,
@@ -254,8 +254,8 @@ pub fn derive_event_leaf_from_root(
         tombstone_node_id: None,
         node_secret: leaf_secret,
     };
-    let bytes = codec::encode(&event);
-    let record = codec::record_from_bytes(bytes)?;
+    let bytes = layout::encode(&event);
+    let record = layout::record_from_bytes(bytes)?;
     let value = LocalHistoryNodeSecretOutput {
         local_history_node_secret_id: event_id(&record.canonical_bytes),
         event,
@@ -337,8 +337,8 @@ pub fn derive_leaf_from_ancestor(
         tombstone_node_id: None,
         node_secret: leaf_secret,
     };
-    let leaf_bytes = codec::encode(&leaf_event);
-    let leaf_record = codec::record_from_bytes(leaf_bytes)?;
+    let leaf_bytes = layout::encode(&leaf_event);
+    let leaf_record = layout::record_from_bytes(leaf_bytes)?;
     let leaf_id = event_id(&leaf_record.canonical_bytes);
     records.push(leaf_record);
 
@@ -439,8 +439,8 @@ fn descend_to_trie_position(
                     tombstone_node_id: None,
                     node_secret: child_secret,
                 };
-                let bytes = codec::encode(&event);
-                let record = codec::record_from_bytes(bytes)?;
+                let bytes = layout::encode(&event);
+                let record = layout::record_from_bytes(bytes)?;
                 let child_id = event_id(&record.canonical_bytes);
                 records.push(record);
                 current_id = child_id;
@@ -544,8 +544,8 @@ pub fn derive_trie_split(
         tombstone_node_id: input.tombstone_node_id,
         node_secret,
     };
-    let bytes = codec::encode(&event);
-    let record = codec::record_from_bytes(bytes)?;
+    let bytes = layout::encode(&event);
+    let record = layout::record_from_bytes(bytes)?;
     let value = LocalHistoryNodeSecretOutput {
         local_history_node_secret_id: event_id(&record.canonical_bytes),
         event,
@@ -674,7 +674,7 @@ pub fn retire_leaf_from_ancestor(
             depth,
             descend_prefix,
         );
-        let descend_record = codec::record_from_bytes(codec::encode(&descend_event))?;
+        let descend_record = layout::record_from_bytes(layout::encode(&descend_event))?;
         let descend_id = event_id(&descend_record.canonical_bytes);
         records.push(descend_record);
         wipe_path.push(RetireWipeEntry {
@@ -697,7 +697,7 @@ pub fn retire_leaf_from_ancestor(
             depth,
             sibling_prefix,
         );
-        let sibling_record = codec::record_from_bytes(codec::encode(&sibling_event))?;
+        let sibling_record = layout::record_from_bytes(layout::encode(&sibling_event))?;
         records.push(sibling_record);
 
         current_secret = descend_event.node_secret;
@@ -786,7 +786,7 @@ fn emit_time_walk_for_retire(
             descend_start,
             half,
         );
-        let descend_record = codec::record_from_bytes(codec::encode(&descend_event))?;
+        let descend_record = layout::record_from_bytes(layout::encode(&descend_event))?;
         let descend_id = event_id(&descend_record.canonical_bytes);
         records.push(descend_record);
         wipe_path.push(RetireWipeEntry {
@@ -811,7 +811,7 @@ fn emit_time_walk_for_retire(
                 sibling_start,
                 half,
             );
-            let sibling_record = codec::record_from_bytes(codec::encode(&sibling_event))?;
+            let sibling_record = layout::record_from_bytes(layout::encode(&sibling_event))?;
             records.push(sibling_record);
         }
 
@@ -1012,7 +1012,7 @@ pub fn chop_time_tree_from_ancestor(
                 current_start,
                 half,
             );
-            let left_record = codec::record_from_bytes(codec::encode(&left_event))?;
+            let left_record = layout::record_from_bytes(layout::encode(&left_event))?;
             let left_id = event_id(&left_record.canonical_bytes);
             records.push(left_record);
             output.wipe_path.push(RetireWipeEntry {
@@ -1035,7 +1035,7 @@ pub fn chop_time_tree_from_ancestor(
                 mid,
                 half,
             );
-            let right_record = codec::record_from_bytes(codec::encode(&right_event))?;
+            let right_record = layout::record_from_bytes(layout::encode(&right_event))?;
             let right_id = event_id(&right_record.canonical_bytes);
             records.push(right_record);
             output.wipe_path.push(RetireWipeEntry {
@@ -1064,7 +1064,7 @@ pub fn chop_time_tree_from_ancestor(
                 mid,
                 half,
             );
-            let right_record = codec::record_from_bytes(codec::encode(&right_event))?;
+            let right_record = layout::record_from_bytes(layout::encode(&right_event))?;
             records.push(right_record);
             output.right_side_siblings_emitted += 1;
 
@@ -1079,7 +1079,7 @@ pub fn chop_time_tree_from_ancestor(
                 current_start,
                 half,
             );
-            let left_record = codec::record_from_bytes(codec::encode(&left_event))?;
+            let left_record = layout::record_from_bytes(layout::encode(&left_event))?;
             let left_id = event_id(&left_record.canonical_bytes);
             records.push(left_record);
             output.wipe_path.push(RetireWipeEntry {
@@ -1143,9 +1143,9 @@ pub(super) fn validate_bit_depth(bit_depth: u16, range_width: u64) -> Result<(),
     Ok(())
 }
 
-/// Sanity guard for a fully-built `LocalHistoryNodeSecret`. The codec is
+/// Sanity guard for a fully-built `LocalHistoryNodeSecret`. The layout is
 /// intentionally lenient on decode; this helper is shared between
-/// authoring (the codec's `encode`-time callers below) and the receive
+/// authoring (the layout's `encode`-time callers below) and the receive
 /// projector so a malformed peer event is rejected at projection time too.
 pub(super) fn validate_event_fields(event: &LocalHistoryNodeSecret) -> Result<(), String> {
     if event.workspace_id.iter().all(|byte| *byte == 0) {
@@ -1203,7 +1203,7 @@ pub fn load_time_tree_parent(
     let node_bytes = event_queries::event_bytes(store, &source_secret_id)
         .map_err(|err| format!("load source event: {err}"))?
         .ok_or_else(|| "history node source event is missing".to_string())?;
-    let node = codec::decode(&node_bytes)
+    let node = layout::decode(&node_bytes)
         .map_err(|_| "history node source event is not key material".to_string())?;
     let row = queries::get(
         store,

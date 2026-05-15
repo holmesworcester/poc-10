@@ -18,12 +18,12 @@ use crate::core::daemon::{StepContext, Worker};
 use crate::core::network_queues::{self, NetworkTarget, OutboundNetworkRow};
 use crate::core::store::Store;
 use crate::core::tcp;
-use crate::protocol::event_modules::connection::{schema, transit, types};
+use crate::protocol::event_modules::connection::{rows, transit, types};
 use crate::protocol::event_modules::identity::endpoint;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::queries as event_queries;
 use crate::protocol::event_modules::sync::SyncIndex;
-use crate::workers::schema as worker_schema;
+use crate::workers::queue_rows as worker_rows;
 use crate::workers::DaemonWorkerContext;
 
 /// Opaque bytes prepared for one route after draining protocol out rows.
@@ -61,7 +61,7 @@ struct TransportRoute {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TransitOutItem {
-    key: worker_schema::TransitOutKey,
+    key: worker_rows::TransitOutKey,
     event_bytes: Vec<u8>,
 }
 
@@ -215,7 +215,7 @@ pub(crate) fn send_frames(
 
 fn connection_event_bytes(store: &Store, event_id: [u8; 32]) -> Result<Vec<u8>, String> {
     store
-        .table_row(schema::CONNECTION_EVENTS, &event_id)
+        .table_row(rows::CONNECTION_EVENTS, &event_id)
         .map_err(|err| format!("load connection event: {err}"))?
         .ok_or_else(|| "unknown connection event".to_string())
 }
@@ -225,7 +225,7 @@ fn remote_endpoint(
     connection_id: types::ConnectionId,
 ) -> Result<EndpointId, String> {
     let bytes = store
-        .table_row(schema::CONNECTIONS, &connection_id)
+        .table_row(rows::CONNECTIONS, &connection_id)
         .map_err(|err| format!("load connection: {err}"))?
         .ok_or_else(|| "unknown connection".to_string())?;
     endpoint_id_from_bytes(&bytes)
@@ -296,7 +296,7 @@ pub(crate) fn drain_and_wrap_transit_out_for_connection(
     let out = transit_out_items_for_connection(store, connection_id)?;
     if !out.stale_keys.is_empty() {
         store
-            .delete_table_rows(worker_schema::TRANSIT_OUT, out.stale_keys)
+            .delete_table_rows(worker_rows::TRANSIT_OUT, out.stale_keys)
             .map_err(|err| format!("delete stale out rows: {err}"))?;
     }
     let items = out.items;
@@ -306,7 +306,7 @@ pub(crate) fn drain_and_wrap_transit_out_for_connection(
     let remote = remote_endpoint(store, connection_id)?;
     let connection_event = connection_event_bytes(store, connection_id)?;
     let connection =
-        crate::protocol::event_modules::connection::connection_response::codec::decode(
+        crate::protocol::event_modules::connection::connection_response::layout::decode(
             &connection_event,
         )
         .map_err(|_| "connection transit dependency is not a connection event".to_string())?;
@@ -387,7 +387,7 @@ fn mark_transit_out_sent(store: &Store, sent_transit_out: Vec<Vec<u8>>) -> Resul
     // network rows. A crash before this point may resend duplicate protocol
     // events, which is acceptable because event ids and out keys dedupe.
     store
-        .delete_table_rows(worker_schema::TRANSIT_OUT, sent_transit_out)
+        .delete_table_rows(worker_rows::TRANSIT_OUT, sent_transit_out)
         .map(|_| ())
         .map_err(|err| format!("delete sent out rows: {err}"))
 }
@@ -398,7 +398,7 @@ fn local_endpoint(store: &Store) -> Result<endpoint::types::EndpointKeypair, Str
 
 fn routes(store: &Store) -> Result<Vec<TransportRoute>, String> {
     let rows = store
-        .table_rows(schema::TRANSPORT_TARGETS)
+        .table_rows(rows::TRANSPORT_TARGETS)
         .map_err(|err| format!("load transport targets: {err}"))?;
     rows.into_iter()
         .map(|(key, value)| {
@@ -422,16 +422,16 @@ fn transit_out_items_for_connection(
     // Transit out rows are id-only. Durable data resolves from the common event
     // store; connection-scoped protocol events resolve from the in-memory
     // connection byte cache populated by their projectors.
-    let prefix = worker_schema::transit_out_prefix(connection_id);
+    let prefix = worker_rows::transit_out_prefix(connection_id);
     let rows = store
-        .table_rows_with_key_prefix(worker_schema::TRANSIT_OUT, &prefix, 4096)
+        .table_rows_with_key_prefix(worker_rows::TRANSIT_OUT, &prefix, 4096)
         .map_err(|err| format!("load out: {err}"))?;
     let mut drain = TransitOutDrain {
         items: Vec::with_capacity(rows.len()),
         stale_keys: Vec::new(),
     };
     for (key, _) in rows {
-        let transit_out_key = worker_schema::decode_transit_out_key(&key)?;
+        let transit_out_key = worker_rows::decode_transit_out_key(&key)?;
         let Some(event_bytes) = resolve_transit_out_event_bytes(store, &transit_out_key.event_id)?
         else {
             drain.stale_keys.push(key);
@@ -455,7 +455,7 @@ fn resolve_transit_out_event_bytes(
         return Ok(Some(bytes));
     }
     store
-        .table_row(schema::CONNECTION_SCOPED_EVENTS, event_id)
+        .table_row(rows::CONNECTION_SCOPED_EVENTS, event_id)
         .map_err(|err| format!("load connection-scoped out event: {err}"))
 }
 
@@ -477,8 +477,8 @@ mod tests {
             .expect("test socket addr");
         let mut rows = endpoint::projector::local_endpoint(local);
         rows.extend([
-            schema::transport_target_row(connection_id, addr),
-            worker_schema::transit_out_row(connection_id, missing_event_id),
+            rows::transport_target_row(connection_id, addr),
+            worker_rows::transit_out_row(connection_id, missing_event_id),
         ]);
         store
             .insert_table_rows(rows)
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(output, RouteSyncReport::default());
         assert_eq!(
             store
-                .table_row_count(worker_schema::TRANSIT_OUT)
+                .table_row_count(worker_rows::TRANSIT_OUT)
                 .expect("count out rows"),
             0
         );

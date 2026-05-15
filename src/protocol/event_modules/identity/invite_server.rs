@@ -5,8 +5,8 @@
 //! travels only in the out-of-band invite link. Accepting it creates an
 //! endpoint-shared event with the invite-server endpoint role.
 
-pub mod codec;
 pub mod commands;
+pub mod layout;
 pub mod projector;
-pub mod schema;
+pub mod rows;
 pub mod types;

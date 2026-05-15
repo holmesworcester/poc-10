@@ -5,7 +5,7 @@
 //! projection enforces the shared-event auth rule: signers must be endpoint
 //! memberships in the workspace.
 
-pub mod cli;
+pub mod command_line;
 pub mod content_event;
 pub mod file;
 pub mod file_deletion;
@@ -21,21 +21,21 @@ use crate::protocol::event_modules::worker::{AdmitDecision, EventWithContext, Pr
 pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionOutput>, String> {
     let bytes = &event.record.canonical_bytes;
     match bytes.first().copied() {
-        Some(content_event::codec::TYPE_SIGNED_CONTENT) => {
+        Some(content_event::layout::TYPE_SIGNED_CONTENT) => {
             Ok(Some(content_event::projector::project(event)?))
         }
-        Some(message::codec::TYPE_SIGNED_MESSAGE) => Ok(Some(message::projector::project(event)?)),
-        Some(reaction::codec::TYPE_SIGNED_REACTION) => {
+        Some(message::layout::TYPE_SIGNED_MESSAGE) => Ok(Some(message::projector::project(event)?)),
+        Some(reaction::layout::TYPE_SIGNED_REACTION) => {
             Ok(Some(reaction::projector::project(event)?))
         }
-        Some(message_deletion::codec::TYPE_SIGNED_MESSAGE_DELETION) => {
+        Some(message_deletion::layout::TYPE_SIGNED_MESSAGE_DELETION) => {
             Ok(Some(message_deletion::projector::project(event)?))
         }
-        Some(file::codec::TYPE_SIGNED_FILE) => Ok(Some(file::projector::project(event)?)),
-        Some(file_slice::codec::TYPE_SIGNED_FILE_SLICE) => {
+        Some(file::layout::TYPE_SIGNED_FILE) => Ok(Some(file::projector::project(event)?)),
+        Some(file_slice::layout::TYPE_SIGNED_FILE_SLICE) => {
             Ok(Some(file_slice::projector::project(event)?))
         }
-        Some(file_deletion::codec::TYPE_SIGNED_FILE_DELETION) => {
+        Some(file_deletion::layout::TYPE_SIGNED_FILE_DELETION) => {
             Ok(Some(file_deletion::projector::project(event)?))
         }
         _ => Ok(None),
@@ -43,7 +43,7 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
 }
 
 /// Receive-side admission gate for content events. Dispatches by tag to the
-/// leaf module's schema-owned `admit_check_received`, which decides whether
+/// leaf module's rows-owned `admit_check_received`, which decides whether
 /// to admit, drop silently, or drop with a tombstone-row write. Schema is
 /// the right home for the gate because it already owns the storage helpers
 /// (tombstone existence checks, tombstone row construction) the gate
@@ -51,15 +51,15 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionO
 pub fn admit_check_received(store: &Store, record: &EventRecord) -> Result<AdmitDecision, String> {
     let bytes = &record.canonical_bytes;
     match bytes.first().copied() {
-        Some(message::codec::TYPE_SIGNED_MESSAGE) => {
-            message::schema::admit_check_received(store, bytes)
+        Some(message::layout::TYPE_SIGNED_MESSAGE) => {
+            message::rows::admit_check_received(store, bytes)
         }
-        Some(reaction::codec::TYPE_SIGNED_REACTION) => {
-            reaction::schema::admit_check_received(store, bytes)
+        Some(reaction::layout::TYPE_SIGNED_REACTION) => {
+            reaction::rows::admit_check_received(store, bytes)
         }
-        Some(file::codec::TYPE_SIGNED_FILE) => file::schema::admit_check_received(store, bytes),
-        Some(file_slice::codec::TYPE_SIGNED_FILE_SLICE) => {
-            file_slice::schema::admit_check_received(store, bytes)
+        Some(file::layout::TYPE_SIGNED_FILE) => file::rows::admit_check_received(store, bytes),
+        Some(file_slice::layout::TYPE_SIGNED_FILE_SLICE) => {
+            file_slice::rows::admit_check_received(store, bytes)
         }
         _ => Ok(AdmitDecision::Admit),
     }
@@ -70,20 +70,20 @@ pub fn admit_check_received(store: &Store, record: &EventRecord) -> Result<Admit
 pub fn is_content_tag(tag: u8) -> bool {
     matches!(
         tag,
-        content_event::codec::TYPE_CONTENT
-            | content_event::codec::TYPE_SIGNED_CONTENT
-            | message::codec::TYPE_MESSAGE
-            | message::codec::TYPE_SIGNED_MESSAGE
-            | reaction::codec::TYPE_REACTION
-            | reaction::codec::TYPE_SIGNED_REACTION
-            | message_deletion::codec::TYPE_MESSAGE_DELETION
-            | message_deletion::codec::TYPE_SIGNED_MESSAGE_DELETION
-            | file::codec::TYPE_FILE
-            | file::codec::TYPE_SIGNED_FILE
-            | file_slice::codec::TYPE_FILE_SLICE
-            | file_slice::codec::TYPE_SIGNED_FILE_SLICE
-            | file_deletion::codec::TYPE_FILE_DELETION
-            | file_deletion::codec::TYPE_SIGNED_FILE_DELETION
+        content_event::layout::TYPE_CONTENT
+            | content_event::layout::TYPE_SIGNED_CONTENT
+            | message::layout::TYPE_MESSAGE
+            | message::layout::TYPE_SIGNED_MESSAGE
+            | reaction::layout::TYPE_REACTION
+            | reaction::layout::TYPE_SIGNED_REACTION
+            | message_deletion::layout::TYPE_MESSAGE_DELETION
+            | message_deletion::layout::TYPE_SIGNED_MESSAGE_DELETION
+            | file::layout::TYPE_FILE
+            | file::layout::TYPE_SIGNED_FILE
+            | file_slice::layout::TYPE_FILE_SLICE
+            | file_slice::layout::TYPE_SIGNED_FILE_SLICE
+            | file_deletion::layout::TYPE_FILE_DELETION
+            | file_deletion::layout::TYPE_SIGNED_FILE_DELETION
     )
 }
 
@@ -95,29 +95,31 @@ pub fn event_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         .first()
         .ok_or_else(|| "empty content event bytes".to_string())?;
     match *tag {
-        content_event::codec::TYPE_CONTENT => Err("content must be signed".to_string()),
-        content_event::codec::TYPE_SIGNED_CONTENT => {
-            content_event::codec::signed_record_from_bytes(bytes)
+        content_event::layout::TYPE_CONTENT => Err("content must be signed".to_string()),
+        content_event::layout::TYPE_SIGNED_CONTENT => {
+            content_event::layout::signed_record_from_bytes(bytes)
         }
-        message::codec::TYPE_MESSAGE => Err("message must be signed".to_string()),
-        message::codec::TYPE_SIGNED_MESSAGE => message::codec::signed_record_from_bytes(bytes),
-        reaction::codec::TYPE_REACTION => Err("reaction must be signed".to_string()),
-        reaction::codec::TYPE_SIGNED_REACTION => reaction::codec::signed_record_from_bytes(bytes),
-        message_deletion::codec::TYPE_MESSAGE_DELETION => {
+        message::layout::TYPE_MESSAGE => Err("message must be signed".to_string()),
+        message::layout::TYPE_SIGNED_MESSAGE => message::layout::signed_record_from_bytes(bytes),
+        reaction::layout::TYPE_REACTION => Err("reaction must be signed".to_string()),
+        reaction::layout::TYPE_SIGNED_REACTION => reaction::layout::signed_record_from_bytes(bytes),
+        message_deletion::layout::TYPE_MESSAGE_DELETION => {
             Err("message deletion must be signed".to_string())
         }
-        message_deletion::codec::TYPE_SIGNED_MESSAGE_DELETION => {
-            message_deletion::codec::signed_record_from_bytes(bytes)
+        message_deletion::layout::TYPE_SIGNED_MESSAGE_DELETION => {
+            message_deletion::layout::signed_record_from_bytes(bytes)
         }
-        file::codec::TYPE_FILE => Err("file must be signed".to_string()),
-        file::codec::TYPE_SIGNED_FILE => file::codec::signed_record_from_bytes(bytes),
-        file_slice::codec::TYPE_FILE_SLICE => Err("file slice must be signed".to_string()),
-        file_slice::codec::TYPE_SIGNED_FILE_SLICE => {
-            file_slice::codec::signed_record_from_bytes(bytes)
+        file::layout::TYPE_FILE => Err("file must be signed".to_string()),
+        file::layout::TYPE_SIGNED_FILE => file::layout::signed_record_from_bytes(bytes),
+        file_slice::layout::TYPE_FILE_SLICE => Err("file slice must be signed".to_string()),
+        file_slice::layout::TYPE_SIGNED_FILE_SLICE => {
+            file_slice::layout::signed_record_from_bytes(bytes)
         }
-        file_deletion::codec::TYPE_FILE_DELETION => Err("file deletion must be signed".to_string()),
-        file_deletion::codec::TYPE_SIGNED_FILE_DELETION => {
-            file_deletion::codec::signed_record_from_bytes(bytes)
+        file_deletion::layout::TYPE_FILE_DELETION => {
+            Err("file deletion must be signed".to_string())
+        }
+        file_deletion::layout::TYPE_SIGNED_FILE_DELETION => {
+            file_deletion::layout::signed_record_from_bytes(bytes)
         }
         other => Err(format!("unknown content event type {other}")),
     }

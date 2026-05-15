@@ -9,7 +9,7 @@ use crate::core::crypto::Ed25519PrivateKey;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::MessageDeletionEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,14 +35,14 @@ pub fn delete(input: DeleteMessage) -> Result<CommandOutput<DeleteMessageOutput>
         target_message_id: input.target_message_id,
         author_user_id: input.author_user_id,
     };
-    let payload = codec::encode(&event);
-    let envelope = codec::sign(
+    let payload = layout::encode(&event);
+    let envelope = layout::sign(
         input.signer_endpoint_shared_id,
         &input.signer_private_key,
         payload,
     );
-    let bytes = codec::encode_signed(&envelope);
-    let record = codec::signed_record_from_bytes(bytes)?;
+    let bytes = layout::encode_signed(&envelope);
+    let record = layout::signed_record_from_bytes(bytes)?;
     let deletion_id = crate::protocol::event_modules::types::event_id(&record.canonical_bytes);
     Ok(CommandOutput::with_events(
         DeleteMessageOutput {

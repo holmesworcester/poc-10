@@ -6,7 +6,7 @@
 //! the named author user is also a workspace member who signed off the
 //! endpoint chain. The text itself is opaque; storage is keyed by workspace.
 
-use crate::protocol::event_modules::content::message_deletion::schema::{
+use crate::protocol::event_modules::content::message_deletion::rows::{
     purge_instruction_row, PurgeKind,
 };
 use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author;
@@ -17,11 +17,11 @@ use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
 use super::types::unix_minute_for;
-use super::{codec, commands, schema};
+use super::{commands, layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let message = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let message = layout::decode(&envelope.payload)?;
     if event.record.workspace_id != Some(message.workspace_id) {
         return Err("message workspace metadata does not match event body".to_string());
     }
@@ -39,11 +39,11 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
             .unwrap_or(false)
     });
     if is_deleted_by_author {
-        let key = schema::message_key(message.workspace_id, event.context.event_id);
-        let sealed_key = schema::message_key(message.workspace_id, event.context.event_id);
+        let key = rows::message_key(message.workspace_id, event.context.event_id);
+        let sealed_key = rows::message_key(message.workspace_id, event.context.event_id);
         let output = ProjectionOutput::from_parts(
             vec![
-                schema::message_tombstone_row(
+                rows::message_tombstone_row(
                     message.workspace_id,
                     event.context.event_id,
                     message.author_user_id,
@@ -57,11 +57,11 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
             ],
             vec![
                 TableDelete {
-                    table: schema::MESSAGES,
+                    table: rows::MESSAGES,
                     key,
                 },
                 TableDelete {
-                    table: schema::SEALED_MESSAGES,
+                    table: rows::SEALED_MESSAGES,
                     key: sealed_key,
                 },
             ],
@@ -73,12 +73,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let signer = event
         .context
         .require_dependency(&envelope.signer_endpoint_shared_id)?;
-    let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
+    let signer_envelope = signed::layout::decode(&signer.canonical_bytes)
         .map_err(|_| "message signer dependency is not a signed endpoint_shared".to_string())?;
-    if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    if signer_envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err("message signer dependency is not a signed endpoint_shared".to_string());
     }
-    let signer_endpoint_shared = endpoint_shared::codec::decode(&signer_envelope.payload)
+    let signer_endpoint_shared = endpoint_shared::layout::decode(&signer_envelope.payload)
         .map_err(|_| "message signer dependency is not a signed endpoint_shared".to_string())?;
     if signer_endpoint_shared.workspace_id != message.workspace_id {
         return Err("message signer endpoint_shared workspace does not match message".to_string());
@@ -88,12 +88,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
 
     let author = event.context.require_dependency(&message.author_user_id)?;
-    let author_envelope = signed::codec::decode(&author.canonical_bytes)
+    let author_envelope = signed::layout::decode(&author.canonical_bytes)
         .map_err(|_| "message author dependency is not a signed user".to_string())?;
-    if author_envelope.inner_type != user::codec::TYPE_USER {
+    if author_envelope.inner_type != user::layout::TYPE_USER {
         return Err("message author dependency is not a signed user".to_string());
     }
-    let author_user = user::codec::decode(&author_envelope.payload)
+    let author_user = user::layout::decode(&author_envelope.payload)
         .map_err(|_| "message author dependency is not a signed user".to_string())?;
     if author_user.workspace_id != message.workspace_id {
         return Err("message author workspace does not match message".to_string());
@@ -112,7 +112,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let leaf_record = event
         .context
         .require_dependency(&message.local_history_node_secret_id)?;
-    let leaf = leaf_history_node::codec::decode(&leaf_record.canonical_bytes)
+    let leaf = leaf_history_node::layout::decode(&leaf_record.canonical_bytes)
         .map_err(|_| "message leaf dependency is not a local_history_node_secret".to_string())?;
     if leaf.workspace_id != message.workspace_id
         || leaf.removal_frontier_id != message.removal_frontier_id
@@ -158,7 +158,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         ));
     }
 
-    Ok(ProjectionOutput::rows(vec![schema::sealed_message_row(
+    Ok(ProjectionOutput::rows(vec![rows::sealed_message_row(
         event.context.event_id,
         envelope.signer_endpoint_shared_id,
         &message,
@@ -186,12 +186,12 @@ fn resolve_setting_ttl(
     message_workspace_id: EventId,
     disappearing_setting_id: EventId,
 ) -> Result<u32, String> {
-    let envelope = disappearing_messages_setting::codec::decode_signed(&dependency.canonical_bytes)
+    let envelope = disappearing_messages_setting::layout::decode_signed(&dependency.canonical_bytes)
         .map_err(|_| {
             "message disappearing_setting_id dependency is not a signed disappearing_messages_setting event".to_string()
         })?;
     let setting =
-        disappearing_messages_setting::codec::decode(&envelope.payload).map_err(|_| {
+        disappearing_messages_setting::layout::decode(&envelope.payload).map_err(|_| {
             "message disappearing_setting_id dependency is not a disappearing_messages_setting"
                 .to_string()
         })?;
@@ -236,7 +236,7 @@ mod tests {
     }
 
     fn signing_public_key_for(private_key: &[u8; 32]) -> [u8; 32] {
-        codec::sign([0; 32], private_key, vec![codec::TYPE_MESSAGE]).signer_public_key
+        layout::sign([0; 32], private_key, vec![layout::TYPE_MESSAGE]).signer_public_key
     }
 
     fn endpoint_shared_record(
@@ -245,7 +245,7 @@ mod tests {
         signing_public_key: [u8; 32],
     ) -> Record {
         let payload =
-            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+            endpoint_shared::layout::encode(&endpoint_shared::types::EndpointSharedEvent {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id: user_id,
@@ -262,7 +262,7 @@ mod tests {
     }
 
     fn user_record(workspace_id: [u8; 32]) -> Record {
-        let payload = user::codec::encode(&user::types::UserEvent {
+        let payload = user::layout::encode(&user::types::UserEvent {
             created_at_ms: 3,
             workspace_id,
             public_key: [22; 32],
@@ -293,10 +293,10 @@ mod tests {
             expires_at_or_before_minute: 0,
             previous_setting_id: None,
         };
-        let payload = setting::codec::encode(&inner);
-        let envelope = setting::codec::sign(admin_event_id, &signer_private_key, payload);
-        let bytes = setting::codec::encode_signed(&envelope);
-        setting::codec::signed_record_from_bytes(bytes).expect("setting record")
+        let payload = setting::layout::encode(&inner);
+        let envelope = setting::layout::sign(admin_event_id, &signer_private_key, payload);
+        let bytes = setting::layout::encode_signed(&envelope);
+        setting::layout::signed_record_from_bytes(bytes).expect("setting record")
     }
 
     fn build(
@@ -434,8 +434,8 @@ mod tests {
 
         let output = project(&event).expect("project message");
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::SEALED_MESSAGES);
-        let row = schema::decode_sealed_message_row(
+        assert_eq!(output.legacy_rows()[0].table, rows::SEALED_MESSAGES);
+        let row = rows::decode_sealed_message_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -543,10 +543,10 @@ mod tests {
 
         let output = project(&event).expect("project deleted message");
         assert_eq!(output.legacy_rows().len(), 2);
-        assert_eq!(output.legacy_rows()[0].table, schema::MESSAGE_TOMBSTONES);
+        assert_eq!(output.legacy_rows()[0].table, rows::MESSAGE_TOMBSTONES);
         assert_eq!(
             output.legacy_rows()[1].table,
-            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+            crate::protocol::event_modules::content::message_deletion::rows::PURGE_INSTRUCTIONS
         );
         // For self-deletes the label is already on the event (set by the
         // deletion projector); we don't double-write it.
@@ -554,8 +554,8 @@ mod tests {
         // Two deletes: read-model (MESSAGES) + ciphertext (SEALED_MESSAGES).
         assert_eq!(output.legacy_deletes().len(), 2);
         let tables: Vec<_> = output.legacy_deletes().iter().map(|d| d.table).collect();
-        assert!(tables.contains(&schema::MESSAGES));
-        assert!(tables.contains(&schema::SEALED_MESSAGES));
+        assert!(tables.contains(&rows::MESSAGES));
+        assert!(tables.contains(&rows::SEALED_MESSAGES));
     }
 
     #[test]
@@ -584,7 +584,7 @@ mod tests {
         let output = project(&event).expect("deleted message can project without deps");
 
         assert_eq!(output.legacy_rows().len(), 2);
-        assert_eq!(output.legacy_rows()[0].table, schema::MESSAGE_TOMBSTONES);
+        assert_eq!(output.legacy_rows()[0].table, rows::MESSAGE_TOMBSTONES);
         assert_eq!(output.legacy_deletes().len(), 2);
     }
 
@@ -672,7 +672,7 @@ mod tests {
 
         let output = project(&event).expect("project before-expiry message");
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::SEALED_MESSAGES);
+        assert_eq!(output.legacy_rows()[0].table, rows::SEALED_MESSAGES);
         assert!(output.legacy_deletes().is_empty());
         assert!(output.legacy_labels().is_empty());
     }
@@ -728,7 +728,7 @@ mod tests {
 
         let output = project(&event).expect("project never-expire message");
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::SEALED_MESSAGES);
+        assert_eq!(output.legacy_rows()[0].table, rows::SEALED_MESSAGES);
         assert!(output.legacy_deletes().is_empty());
         assert!(output.legacy_labels().is_empty());
     }
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn raw_message_bytes_are_not_admissible() {
-        let payload = codec::encode(&MessageEvent {
+        let payload = layout::encode(&MessageEvent {
             workspace_id: [7; 32],
             created_at_ms: 5,
             author_user_id: [2; 32],

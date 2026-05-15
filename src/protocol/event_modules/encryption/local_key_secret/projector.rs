@@ -8,10 +8,10 @@
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
 use super::super::{key_wrap, removal_frontier};
-use super::{codec, schema};
+use super::{layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let local = codec::decode(&event.record.canonical_bytes)?;
+    let local = layout::decode(&event.record.canonical_bytes)?;
     if event.record.workspace_id != Some(local.workspace_id) {
         return Err("local key secret workspace metadata does not match event body".to_string());
     }
@@ -19,17 +19,17 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         .context
         .require_dependency(&local.removal_frontier_id)?;
     let frontier_envelope =
-        removal_frontier::codec::decode_signed(&frontier_record.canonical_bytes)
+        removal_frontier::layout::decode_signed(&frontier_record.canonical_bytes)
             .map_err(|_| "local key secret dependency is not a removal frontier".to_string())?;
-    let frontier = removal_frontier::codec::decode(&frontier_envelope.payload)
+    let frontier = removal_frontier::layout::decode(&frontier_envelope.payload)
         .map_err(|_| "local key secret dependency is not a removal frontier".to_string())?;
     if frontier.workspace_id != local.workspace_id {
         return Err("local key secret removal frontier workspace does not match event".to_string());
     }
 
     Ok(ProjectionOutput::rows(vec![
-        schema::local_key_secret_row(event.context.event_id, &local),
-        key_wrap::schema::pending_frontier_reconcile_row(
+        rows::local_key_secret_row(event.context.event_id, &local),
+        key_wrap::rows::pending_frontier_reconcile_row(
             local.workspace_id,
             local.removal_frontier_id,
         ),
@@ -99,8 +99,8 @@ mod tests {
         let output = project(&event).expect("project local secret");
 
         assert_eq!(output.legacy_rows().len(), 2);
-        assert_eq!(output.legacy_rows()[0].table, schema::LOCAL_KEY_SECRETS);
-        let row = schema::decode_local_key_secret_row(
+        assert_eq!(output.legacy_rows()[0].table, rows::LOCAL_KEY_SECRETS);
+        let row = rows::decode_local_key_secret_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )

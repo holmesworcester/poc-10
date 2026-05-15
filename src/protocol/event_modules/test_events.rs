@@ -12,7 +12,7 @@ use crate::protocol::event_modules::worker::{EventWithContext, ProjectionDecisio
 pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionDecision>, String> {
     let bytes = &event.record.canonical_bytes;
     match bytes.first().copied() {
-        Some(event_with_deps::codec::TYPE_EVENT_WITH_DEPS) => {
+        Some(event_with_deps::layout::TYPE_EVENT_WITH_DEPS) => {
             let missing = event
                 .context
                 .missing_dependencies_from(&event.record.dependencies);
@@ -21,7 +21,7 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionD
             }
             Ok(Some(event_with_deps::projector::project(bytes)?.into()))
         }
-        Some(event_with_deps::codec::TYPE_STAGED_EVENT_WITH_DEPS) => {
+        Some(event_with_deps::layout::TYPE_STAGED_EVENT_WITH_DEPS) => {
             Ok(Some(event_with_deps::projector::project(bytes)?.into()))
         }
         _ => Ok(None),
@@ -33,8 +33,8 @@ pub fn project_record(event: &EventWithContext<'_>) -> Result<Option<ProjectionD
 pub fn is_test_event_tag(tag: u8) -> bool {
     matches!(
         tag,
-        event_with_deps::codec::TYPE_EVENT_WITH_DEPS
-            | event_with_deps::codec::TYPE_STAGED_EVENT_WITH_DEPS
+        event_with_deps::layout::TYPE_EVENT_WITH_DEPS
+            | event_with_deps::layout::TYPE_STAGED_EVENT_WITH_DEPS
     )
 }
 
@@ -44,11 +44,11 @@ pub fn event_from_bytes(bytes: Vec<u8>) -> Result<EventRecord, String> {
         .first()
         .ok_or_else(|| "empty test event bytes".to_string())?;
     match *tag {
-        event_with_deps::codec::TYPE_EVENT_WITH_DEPS => {
-            event_with_deps::codec::record_from_bytes(bytes)
+        event_with_deps::layout::TYPE_EVENT_WITH_DEPS => {
+            event_with_deps::layout::record_from_bytes(bytes)
         }
-        event_with_deps::codec::TYPE_STAGED_EVENT_WITH_DEPS => {
-            event_with_deps::codec::staged_record_from_bytes(bytes)
+        event_with_deps::layout::TYPE_STAGED_EVENT_WITH_DEPS => {
+            event_with_deps::layout::staged_record_from_bytes(bytes)
         }
         other => Err(format!("unknown test event type {other}")),
     }

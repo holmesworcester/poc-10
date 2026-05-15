@@ -14,7 +14,7 @@ pub mod content;
 pub mod encryption;
 pub mod identity;
 pub mod queries;
-pub mod schema;
+pub mod rows;
 pub mod sync;
 pub mod test_events;
 pub mod types;

@@ -9,7 +9,7 @@
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{
+use super::rows::{
     self, decode_active_setting_row, CHOP_FLOOR_VALUE_BYTES, SETTINGS, WORKSPACE_CHOP_FLOOR,
 };
 use super::types::ActiveSettingRow;
@@ -50,7 +50,7 @@ pub fn get_last_chopped_floor(
     workspace_id: EventId,
     removal_frontier_id: EventId,
 ) -> Result<Option<u64>, String> {
-    let key = schema::chop_floor_key(workspace_id, removal_frontier_id);
+    let key = rows::chop_floor_key(workspace_id, removal_frontier_id);
     let Some(value) = store
         .table_row(WORKSPACE_CHOP_FLOOR, &key)
         .map_err(|err| format!("load workspace chop floor: {err}"))?

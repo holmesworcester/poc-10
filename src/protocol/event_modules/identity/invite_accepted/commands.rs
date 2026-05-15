@@ -19,9 +19,9 @@ use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::CommandOutput;
 use std::net::SocketAddr;
 
-use super::{codec, types::InviteAcceptedEvent};
+use super::{layout, types::InviteAcceptedEvent};
 
-/// Sanity guard: every named id is non-zero. The codec is intentionally
+/// Sanity guard: every named id is non-zero. The layout is intentionally
 /// lenient on decode; this helper is shared between the authoring path
 /// and the receive projector so a malformed peer event is rejected at
 /// projection time too.
@@ -67,9 +67,9 @@ pub fn accept(input: AcceptInvite) -> Result<CommandOutput<AcceptInviteOutput>, 
         input.invite_event_id,
         input.addr,
     );
-    let secret_bytes = invite::codec::encode(&secret);
+    let secret_bytes = invite::layout::encode(&secret);
     let invite_secret_event_id = event_id(&secret_bytes);
-    let secret_record = invite::codec::record_from_bytes(secret_bytes)?;
+    let secret_record = invite::layout::record_from_bytes(secret_bytes)?;
 
     let accepted = InviteAcceptedEvent {
         workspace_id: input.workspace_id,
@@ -78,9 +78,9 @@ pub fn accept(input: AcceptInvite) -> Result<CommandOutput<AcceptInviteOutput>, 
         bootstrap_hash: secret.bootstrap_hash,
         accepted_endpoint_id: input.accepted_endpoint_id,
     };
-    let accepted_bytes = codec::encode(&accepted);
+    let accepted_bytes = layout::encode(&accepted);
     let invite_accepted_event_id = event_id(&accepted_bytes);
-    let accepted_record = codec::record_from_bytes(accepted_bytes)?;
+    let accepted_record = layout::record_from_bytes(accepted_bytes)?;
 
     Ok(CommandOutput::with_events(
         AcceptInviteOutput {
@@ -132,14 +132,14 @@ mod tests {
             vec![output.events[0].event_id()]
         );
 
-        let secret = invite::codec::decode(&output.events[0].record().canonical_bytes)
+        let secret = invite::layout::decode(&output.events[0].record().canonical_bytes)
             .expect("decode secret");
         assert_eq!(secret.workspace_id, Some([1; 32]));
         assert_eq!(secret.invite_event_id, Some([2; 32]));
         assert_eq!(secret.addr, Some("127.0.0.1:41000".parse().expect("addr")));
 
         let accepted =
-            codec::decode(&output.events[1].record().canonical_bytes).expect("decode accepted");
+            layout::decode(&output.events[1].record().canonical_bytes).expect("decode accepted");
         assert_eq!(accepted.invite_secret_event_id, output.events[0].event_id());
         assert_eq!(accepted.bootstrap_hash, output.value.bootstrap_hash);
         assert_eq!(accepted.accepted_endpoint_id, [5; 32]);

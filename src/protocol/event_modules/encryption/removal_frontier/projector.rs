@@ -9,11 +9,11 @@
 use crate::protocol::event_modules::identity::{admin, endpoint_shared, signed};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, commands, schema};
+use super::{commands, layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let frontier = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let frontier = layout::decode(&envelope.payload)?;
     commands::validate_event_fields(&frontier)?;
     if event.record.workspace_id != Some(frontier.workspace_id) {
         return Err("removal frontier workspace metadata does not match event body".to_string());
@@ -43,7 +43,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("removal frontier signer user is not the authority admin".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![schema::removal_frontier_row(
+    Ok(ProjectionOutput::rows(vec![rows::removal_frontier_row(
         event.context.event_id,
         &frontier,
     )?]))
@@ -67,15 +67,15 @@ fn decode_signer_endpoint_shared(
     endpoint_shared_id: [u8; 32],
 ) -> Result<endpoint_shared::types::EndpointSharedEvent, String> {
     let record = event.context.require_dependency(&endpoint_shared_id)?;
-    let envelope = signed::codec::decode(&record.canonical_bytes).map_err(|_| {
+    let envelope = signed::layout::decode(&record.canonical_bytes).map_err(|_| {
         "removal frontier signer dependency is not a signed endpoint_shared".to_string()
     })?;
-    if envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    if envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err(
             "removal frontier signer dependency is not a signed endpoint_shared".to_string(),
         );
     }
-    endpoint_shared::codec::decode(&envelope.payload).map_err(|_| {
+    endpoint_shared::layout::decode(&envelope.payload).map_err(|_| {
         "removal frontier signer dependency is not a signed endpoint_shared".to_string()
     })
 }
@@ -85,12 +85,12 @@ fn decode_authority_admin(
     authority_admin_id: [u8; 32],
 ) -> Result<admin::types::AdminEvent, String> {
     let record = event.context.require_dependency(&authority_admin_id)?;
-    let envelope = signed::codec::decode(&record.canonical_bytes)
+    let envelope = signed::layout::decode(&record.canonical_bytes)
         .map_err(|_| "removal frontier authority dependency is not a signed admin".to_string())?;
-    if envelope.inner_type != admin::codec::TYPE_ADMIN {
+    if envelope.inner_type != admin::layout::TYPE_ADMIN {
         return Err("removal frontier authority dependency is not a signed admin".to_string());
     }
-    admin::codec::decode(&envelope.payload)
+    admin::layout::decode(&envelope.payload)
         .map_err(|_| "removal frontier authority dependency is not a signed admin".to_string())
 }
 
@@ -120,7 +120,7 @@ mod tests {
         signing_public_key: [u8; 32],
     ) -> Record {
         let payload =
-            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+            endpoint_shared::layout::encode(&endpoint_shared::types::EndpointSharedEvent {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id,
@@ -139,7 +139,7 @@ mod tests {
     }
 
     fn admin_record(workspace_id: [u8; 32], user_event_id: [u8; 32]) -> Record {
-        let payload = admin::codec::encode(&admin::types::AdminEvent {
+        let payload = admin::layout::encode(&admin::types::AdminEvent {
             created_at_ms: 3,
             workspace_id,
             public_key: [44; 32],
@@ -229,8 +229,8 @@ mod tests {
         let output = project(&event).expect("project frontier");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::REMOVAL_FRONTIERS);
-        let row = schema::decode_removal_frontier_row(
+        assert_eq!(output.legacy_rows()[0].table, rows::REMOVAL_FRONTIERS);
+        let row = rows::decode_removal_frontier_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -280,7 +280,7 @@ mod tests {
 
         let output = project(&event).expect("project frontier");
 
-        let row = schema::decode_removal_frontier_row(
+        let row = rows::decode_removal_frontier_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )

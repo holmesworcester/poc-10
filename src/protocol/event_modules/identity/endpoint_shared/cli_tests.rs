@@ -116,12 +116,12 @@ fn admits_received_device_invite_then_signed_endpoint_shared_join() {
     .expect("drain ready");
 
     let endpoint_id = crypto::ed25519_public_key(&endpoint_private_key);
-    let membership_key = schema::endpoint_membership_key(endpoint_id, workspace_id);
+    let membership_key = rows::endpoint_membership_key(endpoint_id, workspace_id);
     let membership_value = store
-        .table_row(schema::ENDPOINT_MEMBERSHIPS, &membership_key)
+        .table_row(rows::ENDPOINT_MEMBERSHIPS, &membership_key)
         .expect("load membership")
         .expect("membership row");
-    let membership = schema::decode_endpoint_membership_row(&membership_key, &membership_value)
+    let membership = rows::decode_endpoint_membership_row(&membership_key, &membership_value)
         .expect("decode membership");
     assert_eq!(membership.endpoint_id, endpoint_id);
     assert_eq!(membership.workspace_id, workspace_id);

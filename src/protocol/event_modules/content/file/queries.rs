@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{
+use super::rows::{
     decode_sealed_file_row, file_by_file_id_prefix, file_key, FILES, FILES_BY_FILE_ID,
 };
 use super::types::SealedFileRow;

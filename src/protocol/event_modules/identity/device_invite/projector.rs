@@ -16,7 +16,7 @@ use crate::protocol::event_modules::identity::{
 use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, schema};
+use super::{layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let _ = event;
@@ -27,14 +27,14 @@ pub fn project_signed(
     envelope: &signed::types::SignedEnvelope,
     event: &EventWithContext<'_>,
 ) -> Result<ProjectionOutput, String> {
-    if envelope.inner_type != codec::TYPE_DEVICE_INVITE {
+    if envelope.inner_type != layout::TYPE_DEVICE_INVITE {
         return Err("expected signed device_invite".to_string());
     }
-    let device_invite = codec::decode(&envelope.payload)?;
+    let device_invite = layout::decode(&envelope.payload)?;
     validate_workspace(&device_invite, event)?;
     validate_authority(envelope, &device_invite, event)?;
 
-    Ok(ProjectionOutput::rows(vec![schema::device_invite_row(
+    Ok(ProjectionOutput::rows(vec![rows::device_invite_row(
         event.context.event_id,
         &device_invite,
     )?]))
@@ -47,7 +47,7 @@ fn validate_workspace(
     let workspace = event
         .context
         .require_dependency(&device_invite.workspace_id)?;
-    workspace::codec::decode(&workspace.canonical_bytes)
+    workspace::layout::decode(&workspace.canonical_bytes)
         .map_err(|_| "device_invite workspace dependency is not a workspace".to_string())?;
     Ok(())
 }
@@ -58,13 +58,13 @@ fn validate_authority(
     event: &EventWithContext<'_>,
 ) -> Result<(), String> {
     let signer = require_dependency(event, &envelope.signer_event_id, "signer")?;
-    let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
+    let signer_envelope = signed::layout::decode(&signer.canonical_bytes)
         .map_err(|_| "device_invite signer must be user or endpoint_shared".to_string())?;
     match signer_envelope.inner_type {
-        user::codec::TYPE_USER => {
+        user::layout::TYPE_USER => {
             validate_user_authority(envelope, &signer_envelope, device_invite, event)
         }
-        endpoint_shared::codec::TYPE_ENDPOINT_SHARED => {
+        endpoint_shared::layout::TYPE_ENDPOINT_SHARED => {
             validate_endpoint_shared_authority(envelope, &signer_envelope, device_invite)
         }
         _ => Err("device_invite signer must be user or endpoint_shared".to_string()),
@@ -80,7 +80,7 @@ fn validate_user_authority(
     if envelope.signer_event_id != device_invite.user_authority_event_id {
         return Err("user-signed device_invite authority must match signer user".to_string());
     }
-    let signed_user = user::codec::decode(&user_envelope.payload)
+    let signed_user = user::layout::decode(&user_envelope.payload)
         .map_err(|_| "device_invite user signer payload is invalid".to_string())?;
     if envelope.signer_public_key != signed_user.public_key {
         return Err("device_invite signer public key does not match user".to_string());
@@ -93,12 +93,12 @@ fn validate_user_authority(
         return Err("device_invite user_invite dependency does not match signed user".to_string());
     }
     let user_invite_record = require_dependency(event, &user_invite_event_id, "user_invite")?;
-    let user_invite_envelope = signed::codec::decode(&user_invite_record.canonical_bytes)
+    let user_invite_envelope = signed::layout::decode(&user_invite_record.canonical_bytes)
         .map_err(|_| "device_invite user_invite dependency is not a user_invite".to_string())?;
-    if user_invite_envelope.inner_type != user_invite::codec::TYPE_USER_INVITE {
+    if user_invite_envelope.inner_type != user_invite::layout::TYPE_USER_INVITE {
         return Err("device_invite user_invite dependency is not a user_invite".to_string());
     }
-    let signed_user_invite = user_invite::codec::decode(&user_invite_envelope.payload)?;
+    let signed_user_invite = user_invite::layout::decode(&user_invite_envelope.payload)?;
     if user_envelope.signer_public_key != signed_user_invite.public_key {
         return Err("device_invite user signer key does not match user_invite".to_string());
     }
@@ -119,7 +119,7 @@ fn validate_endpoint_shared_authority(
                 .to_string(),
         );
     }
-    let signer = endpoint_shared::codec::decode(&signer_envelope.payload)
+    let signer = endpoint_shared::layout::decode(&signer_envelope.payload)
         .map_err(|_| "device_invite endpoint_shared signer payload is invalid".to_string())?;
     if envelope.signer_public_key != signer.signing_public_key {
         return Err(
@@ -188,14 +188,14 @@ mod tests {
     }
 
     fn workspace_record(private_key: &[u8; 32]) -> ([u8; 32], EventRecord) {
-        let bytes = workspace::codec::encode(&workspace::types::WorkspaceEvent {
+        let bytes = workspace::layout::encode(&workspace::types::WorkspaceEvent {
             created_at_ms: 1,
             public_key: public_key(private_key),
             name: "Workspace".to_string(),
         })
         .expect("encode workspace");
         let id = event_id(&bytes);
-        let record = workspace::codec::record_from_bytes(bytes).expect("workspace record");
+        let record = workspace::layout::record_from_bytes(bytes).expect("workspace record");
         (id, record)
     }
 
@@ -278,7 +278,7 @@ mod tests {
         )
         .expect("create device_invite");
         let record = output.events[0].record().clone();
-        let envelope = signed::codec::decode(&record.canonical_bytes).expect("signed envelope");
+        let envelope = signed::layout::decode(&record.canonical_bytes).expect("signed envelope");
         (output.value.device_invite_id, record, envelope)
     }
 
@@ -332,12 +332,12 @@ mod tests {
 
         assert_eq!(output.legacy_labels().len(), 0);
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::DEVICE_INVITES);
+        assert_eq!(output.legacy_rows()[0].table, rows::DEVICE_INVITES);
         assert_eq!(
             output.legacy_rows()[0].key,
-            schema::device_invite_key(workspace_id, device_invite_id)
+            rows::device_invite_key(workspace_id, device_invite_id)
         );
-        let decoded = schema::decode_device_invite_row(
+        let decoded = rows::decode_device_invite_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -361,7 +361,7 @@ mod tests {
             public_key: public_key(&DEVICE_INVITE_PRIVATE),
         };
         let record =
-            codec::record_from_bytes(codec::encode(&raw)).expect("unsigned device_invite record");
+            layout::record_from_bytes(layout::encode(&raw)).expect("unsigned device_invite record");
         let event = context_for(
             &record,
             event_id(&record.canonical_bytes),
@@ -451,7 +451,7 @@ mod tests {
         );
 
         let output = project_signed(&envelope, &event).expect("project device invite");
-        let decoded = schema::decode_device_invite_row(
+        let decoded = rows::decode_device_invite_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )

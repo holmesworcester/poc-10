@@ -2,7 +2,7 @@ use crate::core::commands::{self as command_runner, CliOutput};
 use crate::protocol::commands::Context;
 use crate::protocol::event_modules::identity::endpoint;
 
-use super::{commands, schema};
+use super::{commands, rows};
 
 #[test]
 fn invite_cli_creates_local_endpoint_and_local_invite_secret() {
@@ -15,8 +15,8 @@ fn invite_cli_creates_local_endpoint_and_local_invite_secret() {
         "127.0.0.1:43123".to_string(),
     ];
 
-    let output =
-        command_runner::run(&super::cli::commands(), &mut context, &args).expect("run invite CLI");
+    let output = command_runner::run(&super::command_line::commands(), &mut context, &args)
+        .expect("run invite CLI");
 
     let CliOutput { lines } = output;
     assert_eq!(lines.len(), 1);
@@ -30,18 +30,18 @@ fn invite_cli_creates_local_endpoint_and_local_invite_secret() {
 
     let endpoint_row = context
         .store
-        .table_row(endpoint::schema::LOCAL_ENDPOINT, b"local")
+        .table_row(endpoint::rows::LOCAL_ENDPOINT, b"local")
         .expect("read local endpoint")
         .expect("local endpoint row");
     let endpoint_secret_row = context
         .store
-        .table_row(endpoint::schema::LOCAL_ENDPOINT_SECRET, b"local")
+        .table_row(endpoint::rows::LOCAL_ENDPOINT_SECRET, b"local")
         .expect("read local endpoint secret")
         .expect("local endpoint secret row");
     let invite_secret_row = context
         .store
         .table_row(
-            schema::INVITE_SECRETS,
+            rows::INVITE_SECRETS,
             &commands::secret_hash(&invite.bootstrap_secret),
         )
         .expect("read invite secret")
@@ -50,7 +50,7 @@ fn invite_cli_creates_local_endpoint_and_local_invite_secret() {
     assert_eq!(endpoint_row, invite.endpoint);
     assert_eq!(endpoint_secret_row.len(), 32);
     assert_eq!(
-        schema::decode_invite_secret_row(&invite_secret_row)
+        rows::decode_invite_secret_row(&invite_secret_row)
             .expect("decode invite secret row")
             .bootstrap_secret,
         invite.bootstrap_secret

@@ -10,7 +10,7 @@
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{
+use super::rows::{
     decode_message_row, decode_message_tombstone_row, decode_sealed_message_row, message_key,
     MessageTombstoneRow, SealedMessageRow, MESSAGES, MESSAGE_TOMBSTONES, SEALED_MESSAGES,
 };

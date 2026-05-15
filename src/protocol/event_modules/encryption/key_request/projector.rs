@@ -10,11 +10,11 @@ use crate::protocol::event_modules::identity::{endpoint_shared, signed};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
 use super::super::{recipient_key, removal_frontier};
-use super::{codec, commands, schema};
+use super::{commands, layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let request = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let request = layout::decode(&envelope.payload)?;
     commands::validate_event_ids(&request)?;
     if event.record.workspace_id != Some(request.workspace_id) {
         return Err("key request workspace metadata does not match event body".to_string());
@@ -54,13 +54,11 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("key request recipient key is not owned by requester".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![
-        schema::pending_key_request_row(
-            event.context.event_id,
-            envelope.signer_endpoint_shared_id,
-            &request,
-        ),
-    ]))
+    Ok(ProjectionOutput::rows(vec![rows::pending_key_request_row(
+        event.context.event_id,
+        envelope.signer_endpoint_shared_id,
+        &request,
+    )]))
 }
 
 fn decode_endpoint_shared(
@@ -69,14 +67,14 @@ fn decode_endpoint_shared(
     role: &str,
 ) -> Result<endpoint_shared::types::EndpointSharedEvent, String> {
     let record = event.context.require_dependency(&endpoint_shared_id)?;
-    let envelope = signed::codec::decode(&record.canonical_bytes)
+    let envelope = signed::layout::decode(&record.canonical_bytes)
         .map_err(|_| format!("key request {role} dependency is not a signed endpoint_shared"))?;
-    if envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    if envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err(format!(
             "key request {role} dependency is not a signed endpoint_shared"
         ));
     }
-    endpoint_shared::codec::decode(&envelope.payload)
+    endpoint_shared::layout::decode(&envelope.payload)
         .map_err(|_| format!("key request {role} dependency is not a signed endpoint_shared"))
 }
 
@@ -85,9 +83,9 @@ fn decode_removal_frontier(
     removal_frontier_id: [u8; 32],
 ) -> Result<removal_frontier::types::RemovalFrontierEvent, String> {
     let record = event.context.require_dependency(&removal_frontier_id)?;
-    let envelope = removal_frontier::codec::decode_signed(&record.canonical_bytes)
+    let envelope = removal_frontier::layout::decode_signed(&record.canonical_bytes)
         .map_err(|_| "key request dependency is not a removal frontier".to_string())?;
-    removal_frontier::codec::decode(&envelope.payload)
+    removal_frontier::layout::decode(&envelope.payload)
         .map_err(|_| "key request dependency is not a removal frontier".to_string())
 }
 
@@ -96,9 +94,9 @@ fn decode_recipient_key(
     recipient_key_id: [u8; 32],
 ) -> Result<recipient_key::types::RecipientKeyEvent, String> {
     let record = event.context.require_dependency(&recipient_key_id)?;
-    let envelope = recipient_key::codec::decode_signed(&record.canonical_bytes)
+    let envelope = recipient_key::layout::decode_signed(&record.canonical_bytes)
         .map_err(|_| "key request dependency is not a recipient key".to_string())?;
-    recipient_key::codec::decode(&envelope.payload)
+    recipient_key::layout::decode(&envelope.payload)
         .map_err(|_| "key request dependency is not a recipient key".to_string())
 }
 
@@ -123,7 +121,7 @@ mod tests {
         endpoint_id: EventId,
     ) -> Record {
         let payload =
-            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+            endpoint_shared::layout::encode(&endpoint_shared::types::EndpointSharedEvent {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id: [3; 32],
@@ -287,8 +285,8 @@ mod tests {
         let output = project(&event).expect("project");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::PENDING_KEY_REQUESTS);
-        let row = schema::decode_pending_key_request_row(
+        assert_eq!(output.legacy_rows()[0].table, rows::PENDING_KEY_REQUESTS);
+        let row = rows::decode_pending_key_request_row(
             output.legacy_rows()[0].key.clone(),
             &output.legacy_rows()[0].value,
         )

@@ -12,8 +12,8 @@
 //! that message as its parent is also retired so the file's per-event leaf
 //! is purged alongside the message's leaf.
 
-pub mod cli;
-pub mod codec;
+pub mod command_line;
 pub mod commands;
+pub mod layout;
 pub mod projector;
 pub mod types;

@@ -10,7 +10,7 @@ use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::CommandOutput;
 
 use super::super::workspace::types::WorkspaceId;
-use super::codec;
+use super::layout;
 use super::types::{AdminEvent, AdminPublicKey, UserId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +62,7 @@ pub fn create_bootstrap(
     let signed = signed::commands::sign_payload(
         input.workspace_id,
         &input.signer_private_key,
-        codec::encode(&event),
+        layout::encode(&event),
     )?;
     Ok(CommandOutput::with_proposed_events(
         AdminCommandOutput {
@@ -89,7 +89,7 @@ pub fn sign_grant(
         return Err("signed admin grant signer must be the authority admin".to_string());
     }
     let event = admin_event_from_grant(input.grant);
-    let payload = codec::encode(&event);
+    let payload = layout::encode(&event);
     let inner_admin_id = event_id(&payload);
     let signed =
         signed::commands::sign_payload(input.signer_event_id, &input.signer_private_key, payload)?;
@@ -144,12 +144,12 @@ mod tests {
         assert_eq!(proposed.record().dependencies, vec![[1; 32]]);
         assert_eq!(proposed.record().scope, EventScope::Shared);
 
-        let envelope = signed::codec::decode(&proposed.record().canonical_bytes)
+        let envelope = signed::layout::decode(&proposed.record().canonical_bytes)
             .expect("decode signed bootstrap admin");
         assert_eq!(envelope.signer_event_id, [1; 32]);
         assert_eq!(envelope.signer_public_key, signer_public_key);
-        assert_eq!(envelope.inner_type, codec::TYPE_ADMIN);
-        let event = codec::decode(&envelope.payload).expect("decode admin");
+        assert_eq!(envelope.inner_type, layout::TYPE_ADMIN);
+        let event = layout::decode(&envelope.payload).expect("decode admin");
         assert_eq!(event.created_at_ms, 70);
         assert_eq!(event.workspace_id, [1; 32]);
         assert_eq!(event.public_key, signer_public_key);
@@ -210,12 +210,12 @@ mod tests {
         assert_eq!(output.value.signed_event_id, output.events[0].event_id());
 
         let envelope =
-            signed::codec::decode(&record.canonical_bytes).expect("decode signed envelope");
+            signed::layout::decode(&record.canonical_bytes).expect("decode signed envelope");
         assert_eq!(envelope.signer_event_id, [9; 32]);
-        assert_eq!(envelope.inner_type, codec::TYPE_ADMIN);
+        assert_eq!(envelope.inner_type, layout::TYPE_ADMIN);
         assert_eq!(output.value.inner_admin_id, event_id(&envelope.payload));
         assert_eq!(
-            signed::codec::record_from_bytes(record.canonical_bytes.clone())
+            signed::layout::record_from_bytes(record.canonical_bytes.clone())
                 .expect("signed record")
                 .dependencies,
             vec![[9; 32], [1; 32], [5; 32]]

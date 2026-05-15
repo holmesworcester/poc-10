@@ -8,7 +8,7 @@ use crate::protocol::event_modules::identity::signed;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::{codec, types::UserInviteEvent};
+use super::{layout, types::UserInviteEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateUserInvite {
@@ -38,7 +38,7 @@ pub fn create(input: CreateUserInvite) -> Result<CommandOutput<CreateUserInviteO
     let signed = signed::commands::sign_payload(
         input.signer_event_id,
         &input.signer_private_key,
-        codec::encode(&event),
+        layout::encode(&event),
     )?;
     let user_invite_id = signed.events[0].event_id();
     Ok(CommandOutput::with_proposed_events(
@@ -138,12 +138,12 @@ mod tests {
         );
         assert_eq!(proposed.record().dependencies, vec![workspace_id]);
 
-        let envelope = signed::codec::decode(&proposed.record().canonical_bytes)
+        let envelope = signed::layout::decode(&proposed.record().canonical_bytes)
             .expect("decode signed envelope");
         assert_eq!(envelope.signer_event_id, workspace_id);
-        assert_eq!(envelope.inner_type, codec::TYPE_USER_INVITE);
+        assert_eq!(envelope.inner_type, layout::TYPE_USER_INVITE);
 
-        let decoded = codec::decode(&envelope.payload).expect("decode user_invite payload");
+        let decoded = layout::decode(&envelope.payload).expect("decode user_invite payload");
         assert_eq!(decoded.created_at_ms, 11);
         assert_eq!(decoded.public_key, invite_public_key);
         assert_eq!(decoded.workspace_id, workspace_id);

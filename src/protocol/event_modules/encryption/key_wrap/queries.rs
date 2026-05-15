@@ -10,7 +10,7 @@
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{
+use super::rows::{
     decode_key_wrap_row, decode_pending_key_unwrap_row, decode_pending_wrap_reconcile_row,
     KEY_WRAPS, PENDING_KEY_UNWRAPS, PENDING_WRAP_RECONCILE,
 };

@@ -6,9 +6,9 @@
 //! Projection only queues bounded worker work; the encryption worker owns
 //! deciding whether local key material can answer the request.
 
-pub mod codec;
 pub mod commands;
+pub mod layout;
 pub mod projector;
 pub mod queries;
-pub mod schema;
+pub mod rows;
 pub mod types;

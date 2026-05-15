@@ -34,15 +34,15 @@ use crate::protocol::event_modules::connection::{
 };
 use crate::protocol::event_modules::identity::endpoint::types::{EndpointId, EndpointKeypair};
 use crate::protocol::event_modules::identity::{self, endpoint, invite};
-use crate::protocol::event_modules::schema as event_schema;
+use crate::protocol::event_modules::rows as event_schema;
 use crate::protocol::event_modules::sync;
 use crate::protocol::event_modules::types::{EventId, ReceiveMetadata};
 use crate::protocol::event_modules::worker::{ProjectionOutput, ReceivedRecord};
-use crate::workers::schema as worker_schema;
+use crate::workers::queue_rows as worker_rows;
 use std::net::SocketAddr;
 
-use super::super::schema as connection_schema;
-use super::codec::{self, TransitEnvelopeRef};
+use super::super::rows as connection_schema;
+use super::layout::{self, TransitEnvelopeRef};
 use super::types::{BOOTSTRAP_PURPOSE, CONNECTION_PURPOSE};
 
 /// Provenance established by projecting one inbound transit transport event.
@@ -183,12 +183,12 @@ pub(crate) fn record_from_transit_canonical_in(
 ) -> Result<ReceivedRecord, String> {
     match provenance.event_type() {
         TransitEventType::Bootstrap => {
-            if !connection_request::codec::is_request(&bytes) {
+            if !connection_request::layout::is_request(&bytes) {
                 return Err(
                     "endpoint bootstrap transit only carries connection requests".to_string(),
                 );
             }
-            let record = connection_request::codec::received_record_from_bytes(bytes)?;
+            let record = connection_request::layout::received_record_from_bytes(bytes)?;
             return Ok(ReceivedRecord::with_receive(
                 record,
                 ReceiveMetadata::bootstrap_invite(
@@ -200,13 +200,13 @@ pub(crate) fn record_from_transit_canonical_in(
             ));
         }
         TransitEventType::ConnectionHandshake { request_id } => {
-            if !connection_response::codec::is_response(&bytes) {
+            if !connection_response::layout::is_response(&bytes) {
                 return Err(
                     "connection handshake response only carries connection events".to_string(),
                 );
             }
             let record =
-                connection_response::codec::received_record_from_bytes(store, bytes, request_id)?;
+                connection_response::layout::received_record_from_bytes(store, bytes, request_id)?;
             return Ok(ReceivedRecord::with_receive(
                 record,
                 ReceiveMetadata::endpoint_receive(
@@ -218,11 +218,11 @@ pub(crate) fn record_from_transit_canonical_in(
             ));
         }
         TransitEventType::Connection { connection_id } => {
-            if connection_request::codec::is_request(&bytes) {
+            if connection_request::layout::is_request(&bytes) {
                 return Err("connection transit cannot carry connection requests".to_string());
             }
-            if connection_response::codec::is_response(&bytes) {
-                let record = connection_response::codec::record_from_bytes(bytes)?;
+            if connection_response::layout::is_response(&bytes) {
+                let record = connection_response::layout::record_from_bytes(bytes)?;
                 return Ok(ReceivedRecord::with_receive(
                     record,
                     ReceiveMetadata::endpoint_receive(
@@ -255,11 +255,11 @@ pub(crate) fn record_from_transit_canonical_in(
     if let Some(workspace_id) = invite_workspace(store, connection_id)? {
         allowed_workspaces.push(workspace_id);
     }
-    allowed_workspaces.extend(identity::invite_accepted::schema::accepted_workspace_ids(
+    allowed_workspaces.extend(identity::invite_accepted::rows::accepted_workspace_ids(
         store,
         provenance.local_endpoint(),
     )?);
-    allowed_workspaces.extend(identity::endpoint_shared::schema::mutual_workspace_ids(
+    allowed_workspaces.extend(identity::endpoint_shared::rows::mutual_workspace_ids(
         store,
         provenance.local_endpoint(),
         provenance.sender_endpoint(),
@@ -304,7 +304,7 @@ pub fn project_network_in(
             remember_route,
             transit.event_type,
         );
-        rows.push(worker_schema::transit_canonical_in_row(inner, provenance));
+        rows.push(worker_rows::transit_canonical_in_row(inner, provenance));
     }
     Ok(ProjectionOutput::rows(rows))
 }
@@ -325,7 +325,7 @@ fn unwrap(
 ) -> Result<UnwrappedTransit, String> {
     // The caller supplies remote endpoint lookup for established connections.
     // That keeps storage access outside the cryptographic transform.
-    match codec::decode_ref(bytes)? {
+    match layout::decode_ref(bytes)? {
         TransitEnvelopeRef::Bootstrap {
             sender_endpoint,
             recipient_endpoint,
@@ -339,7 +339,7 @@ fn unwrap(
                 &local.secret,
                 &sender_endpoint,
                 BOOTSTRAP_PURPOSE,
-                &codec::associated_data_bootstrap(&sender_endpoint, &recipient_endpoint, &nonce),
+                &layout::associated_data_bootstrap(&sender_endpoint, &recipient_endpoint, &nonce),
                 &nonce,
                 ciphertext,
             )?;
@@ -362,7 +362,7 @@ fn unwrap(
                     "connection handshake response addressed to a different endpoint".to_string(),
                 );
             }
-            let associated_data = codec::associated_data_connection_handshake_response(
+            let associated_data = layout::associated_data_connection_handshake_response(
                 &request_id,
                 &sender_endpoint,
                 &recipient_endpoint,
@@ -415,10 +415,10 @@ fn unwrap(
             }
             let connection_event = connection_event(store, connection_id)?;
             let connection =
-                connection_response::codec::decode(&connection_event).map_err(|_| {
+                connection_response::layout::decode(&connection_event).map_err(|_| {
                     "connection transit dependency is not a connection event".to_string()
                 })?;
-            let associated_data = codec::associated_data_connection(
+            let associated_data = layout::associated_data_connection(
                 &connection_id,
                 &sender_endpoint,
                 &recipient_endpoint,
@@ -432,7 +432,7 @@ fn unwrap(
             let plaintext =
                 crypto::xchacha20poly1305_decrypt(&key, &associated_data, &nonce, ciphertext)?;
             Ok(UnwrappedTransit {
-                inners: codec::decode_inner_events(&plaintext)?,
+                inners: layout::decode_inner_events(&plaintext)?,
                 event_type: TransitEventType::Connection { connection_id },
                 sender_endpoint,
             })
@@ -457,17 +457,17 @@ fn handshake_response_dependencies(
     else {
         return Ok(None);
     };
-    let request = connection_request::codec::decode(&request_bytes)?;
+    let request = connection_request::layout::decode(&request_bytes)?;
     let invite_secret_bytes = event_schema::event_bytes(store, &request.invite_secret_event_id)
         .map_err(|err| format!("load invite secret event: {err}"))?
         .ok_or_else(|| "missing invite secret event".to_string())?;
-    let invite_secret = invite::codec::decode(&invite_secret_bytes)
+    let invite_secret = invite::layout::decode(&invite_secret_bytes)
         .map_err(|_| "connection dependency is not an invite secret".to_string())?;
     let initiator_bytes =
         event_schema::event_bytes(store, &request.initiator_ephemeral_secret_event_id)
             .map_err(|err| format!("load connection ephemeral event: {err}"))?
             .ok_or_else(|| "missing connection ephemeral event".to_string())?;
-    let initiator_ephemeral = connection_ephemeral_secret::codec::decode(&initiator_bytes)
+    let initiator_ephemeral = connection_ephemeral_secret::layout::decode(&initiator_bytes)
         .map_err(|_| "connection dependency is not an ephemeral secret".to_string())?;
     Ok(Some((request, invite_secret, initiator_ephemeral)))
 }
@@ -519,7 +519,7 @@ mod tests {
     use crate::protocol::event_modules::connection::transit;
     use crate::protocol::event_modules::identity::endpoint;
     use crate::protocol::Protocol;
-    use crate::workers::schema as worker_schema;
+    use crate::workers::queue_rows as worker_rows;
 
     use super::*;
 
@@ -546,11 +546,11 @@ mod tests {
         let output = project_network_in(&store, &inbound, true).expect("project frame");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, worker_schema::CANONICAL_IN);
+        assert_eq!(output.legacy_rows()[0].table, worker_rows::CANONICAL_IN);
         store
             .insert_table_rows(output.legacy_rows())
             .expect("insert canonical rows");
-        let queued = worker_schema::claim_canonical_in(&store, 1).expect("claim canonical");
+        let queued = worker_rows::claim_canonical_in(&store, 1).expect("claim canonical");
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].canonical_bytes, inner);
         let provenance = queued[0].provenance.expect("provenance");

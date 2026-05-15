@@ -8,28 +8,28 @@
 use crate::protocol::event_modules::connection;
 use crate::protocol::event_modules::types::{ConnectionScope, EventScope};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
-use crate::workers::schema as worker_schema;
+use crate::workers::queue_rows as worker_rows;
 
-use super::codec;
+use super::layout;
 
 pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let bytes = &envelope.record.canonical_bytes;
-    let compare = codec::decode(bytes)?;
+    let compare = layout::decode(bytes)?;
     match envelope.record.scope {
         EventScope::Connection(ConnectionScope::Outgoing { connection_id }) => {
             ensure_connection(compare.connection_id, connection_id)?;
             Ok(ProjectionOutput::rows(vec![
-                connection::schema::connection_scoped_event_row(
+                connection::rows::connection_scoped_event_row(
                     envelope.context.event_id,
                     bytes.to_vec(),
                 ),
-                worker_schema::transit_out_row(connection_id, envelope.context.event_id),
+                worker_rows::transit_out_row(connection_id, envelope.context.event_id),
             ]))
         }
         EventScope::Connection(ConnectionScope::Incoming { connection_id }) => {
             ensure_connection(compare.connection_id, connection_id)?;
             Ok(ProjectionOutput::rows(vec![
-                worker_schema::sync_in_event_row(
+                worker_rows::sync_in_event_row(
                     connection_id,
                     envelope.context.event_id,
                     bytes.to_vec(),
@@ -53,7 +53,7 @@ mod tests {
     use crate::protocol::event_modules::connection;
     use crate::protocol::event_modules::types::{event_id, EventRecord};
     use crate::protocol::event_modules::worker::EventContext;
-    use crate::workers::schema as worker_schema;
+    use crate::workers::queue_rows as worker_rows;
 
     use super::super::types::{CompareEvent, RangeSummary, TimestampRange};
     use super::*;
@@ -82,31 +82,31 @@ mod tests {
 
     #[test]
     fn outgoing_compare_projects_cached_event_and_transit_out_rows() {
-        let record = codec::outbound_record(compare_event()).expect("record");
+        let record = layout::outbound_record(compare_event()).expect("record");
         let output = project(&context_for(&record)).expect("project outgoing");
 
         assert_eq!(output.legacy_rows().len(), 2);
         assert_eq!(
             output.legacy_rows()[0].table,
-            connection::schema::CONNECTION_SCOPED_EVENTS
+            connection::rows::CONNECTION_SCOPED_EVENTS
         );
-        assert_eq!(output.legacy_rows()[1].table, worker_schema::TRANSIT_OUT);
+        assert_eq!(output.legacy_rows()[1].table, worker_rows::TRANSIT_OUT);
     }
 
     #[test]
     fn incoming_compare_projects_inbound_sync_work_row() {
-        let bytes = codec::encode(&compare_event());
-        let record = codec::inbound_record_from_wire(bytes).expect("record");
+        let bytes = layout::encode(&compare_event());
+        let record = layout::inbound_record_from_wire(bytes).expect("record");
         let output = project(&context_for(&record)).expect("project incoming");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, worker_schema::SYNC_IN_EVENTS);
+        assert_eq!(output.legacy_rows()[0].table, worker_rows::SYNC_IN_EVENTS);
         assert_eq!(output.legacy_rows()[0].value, record.canonical_bytes);
     }
 
     #[test]
     fn compare_rejects_connection_scope_mismatch() {
-        let mut record = codec::outbound_record(compare_event()).expect("record");
+        let mut record = layout::outbound_record(compare_event()).expect("record");
         record.scope = EventScope::Connection(ConnectionScope::Outgoing {
             connection_id: [9; 32],
         });

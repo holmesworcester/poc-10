@@ -2,7 +2,7 @@
 
 use crate::core::store::Store;
 
-use super::schema::{decode_workspace_row, WORKSPACES};
+use super::rows::{decode_workspace_row, WORKSPACES};
 use super::types::WorkspaceRow;
 
 pub fn list_all(store: &Store) -> Result<Vec<WorkspaceRow>, String> {

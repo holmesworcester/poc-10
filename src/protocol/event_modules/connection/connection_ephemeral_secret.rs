@@ -4,6 +4,6 @@
 //! private half stays local and is a normal durable dependency until TTL purge
 //! removes it after the handshake/connection lifetime.
 
-pub mod codec;
 pub mod commands;
+pub mod layout;
 pub mod types;

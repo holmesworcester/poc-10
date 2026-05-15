@@ -7,7 +7,7 @@ use crate::protocol::event_modules::identity::signed;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::EndpointSharedEvent;
 
 pub trait EndpointMembershipRead {
@@ -53,7 +53,7 @@ pub fn share_endpoint(
         return Err("endpoint is already joined to workspace".to_string());
     }
 
-    let payload = codec::encode(&EndpointSharedEvent {
+    let payload = layout::encode(&EndpointSharedEvent {
         created_at_ms: input.created_at_ms,
         workspace_id: input.workspace_id,
         user_authority_event_id: input.user_authority_event_id,
@@ -158,7 +158,7 @@ mod tests {
         );
 
         let envelope =
-            signed::codec::decode(&proposed.record().canonical_bytes).expect("signed envelope");
+            signed::layout::decode(&proposed.record().canonical_bytes).expect("signed envelope");
         assert_eq!(
             envelope.signer_event_id,
             device_invite.value.device_invite_id
@@ -167,9 +167,9 @@ mod tests {
             envelope.signer_public_key,
             crypto::ed25519_public_key(&private_key)
         );
-        assert_eq!(envelope.inner_type, codec::TYPE_ENDPOINT_SHARED);
+        assert_eq!(envelope.inner_type, layout::TYPE_ENDPOINT_SHARED);
 
-        let inner = codec::decode(&envelope.payload).expect("endpoint shared payload");
+        let inner = layout::decode(&envelope.payload).expect("endpoint shared payload");
         assert_eq!(inner.workspace_id, [1; 32]);
         assert_eq!(inner.user_authority_event_id, [2; 32]);
         assert_eq!(inner.endpoint_id, [3; 32]);

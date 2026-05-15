@@ -18,9 +18,9 @@
 //! `invite_secret` owns secret material. `invite_accepted` owns the scoped
 //! provenance row tying that secret to the endpoint, workspace, and invite id.
 
-pub mod codec;
 pub mod commands;
+pub mod layout;
 pub mod projector;
 pub mod queries;
-pub mod schema;
+pub mod rows;
 pub mod types;

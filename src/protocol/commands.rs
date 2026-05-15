@@ -71,7 +71,7 @@ impl EventRegistry for Context {
         store: &Store,
         bytes: Vec<u8>,
         receive: Option<ReceiveMetadata>,
-        provenance: Option<crate::workers::schema::TransitProvenance>,
+        provenance: Option<crate::workers::queue_rows::TransitProvenance>,
     ) -> Result<ReceivedRecord, String> {
         self.protocol
             .record_from_canonical_in(store, bytes, receive, provenance)
@@ -106,21 +106,21 @@ impl DaemonWorkerContext for Context {
 
 pub fn commands() -> Vec<CliCommand<Context>> {
     let mut out = Vec::new();
-    out.extend(event_modules::identity::admin::cli::commands());
-    out.extend(event_modules::identity::user::cli::commands());
-    out.extend(event_modules::identity::endpoint_shared::cli::commands());
-    out.extend(event_modules::identity::cli::commands());
-    out.extend(event_modules::connection::cli::commands());
-    out.extend(event_modules::content::content_event::cli::commands());
-    out.extend(event_modules::content::message::cli::commands());
-    out.extend(event_modules::content::reaction::cli::commands());
-    out.extend(event_modules::content::message_deletion::cli::commands());
-    out.extend(event_modules::content::file::cli::commands());
-    out.extend(event_modules::content::file_deletion::cli::commands());
-    out.extend(event_modules::content::cli::commands());
-    out.extend(event_modules::encryption::cli::commands());
-    out.extend(event_modules::sync::cli::commands());
-    out.extend(event_modules::test_events::event_with_deps::cli::commands());
+    out.extend(event_modules::identity::admin::command_line::commands());
+    out.extend(event_modules::identity::user::command_line::commands());
+    out.extend(event_modules::identity::endpoint_shared::command_line::commands());
+    out.extend(event_modules::identity::command_line::commands());
+    out.extend(event_modules::connection::command_line::commands());
+    out.extend(event_modules::content::content_event::command_line::commands());
+    out.extend(event_modules::content::message::command_line::commands());
+    out.extend(event_modules::content::reaction::command_line::commands());
+    out.extend(event_modules::content::message_deletion::command_line::commands());
+    out.extend(event_modules::content::file::command_line::commands());
+    out.extend(event_modules::content::file_deletion::command_line::commands());
+    out.extend(event_modules::content::command_line::commands());
+    out.extend(event_modules::encryption::command_line::commands());
+    out.extend(event_modules::sync::command_line::commands());
+    out.extend(event_modules::test_events::event_with_deps::command_line::commands());
     out.extend([
         clock_command(),
         count_command("count", COUNT_USAGE),

@@ -7,7 +7,7 @@
 
 use crate::core::store::Store;
 
-use super::schema::NEGENTROPY_PENDING_PURGES;
+use super::rows::NEGENTROPY_PENDING_PURGES;
 
 /// Total number of rows currently queued. Tests assert this drops to 0
 /// after a daemon tick to prove the drainer ran.

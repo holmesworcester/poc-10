@@ -13,7 +13,7 @@ use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
 use super::super::{signed, user, workspace};
-use super::{codec, schema};
+use super::{layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let _ = event;
@@ -24,10 +24,10 @@ pub fn project_signed(
     envelope: &signed::types::SignedEnvelope,
     event: &EventWithContext<'_>,
 ) -> Result<ProjectionOutput, String> {
-    if envelope.inner_type != codec::TYPE_ADMIN {
+    if envelope.inner_type != layout::TYPE_ADMIN {
         return Err("expected signed admin".to_string());
     }
-    let admin = codec::decode(&envelope.payload)?;
+    let admin = layout::decode(&envelope.payload)?;
     validate_signed_authority(envelope, &admin, event)?;
     validate_user_binding(&admin, event)?;
     project_admin(event.context.event_id, &admin)
@@ -37,7 +37,7 @@ fn project_admin(
     admin_id: EventId,
     admin: &super::types::AdminEvent,
 ) -> Result<ProjectionOutput, String> {
-    Ok(ProjectionOutput::rows(vec![schema::admin_row(
+    Ok(ProjectionOutput::rows(vec![rows::admin_row(
         admin.workspace_id,
         admin_id,
         admin.created_at_ms,
@@ -53,7 +53,7 @@ fn validate_signed_authority(
     event: &EventWithContext<'_>,
 ) -> Result<(), String> {
     let workspace_record = require_dependency(event, &admin.workspace_id, "workspace")?;
-    let workspace = workspace::codec::decode(&workspace_record.canonical_bytes)
+    let workspace = workspace::layout::decode(&workspace_record.canonical_bytes)
         .map_err(|_| "admin workspace dependency must be a workspace event".to_string())?;
 
     if admin.authority_event_id == admin.workspace_id {
@@ -92,7 +92,7 @@ fn validate_user_binding(
 ) -> Result<(), String> {
     let user_record = require_dependency(event, &admin.user_event_id, "user")?;
     if admin.user_event_id == admin.workspace_id {
-        let workspace = workspace::codec::decode(&user_record.canonical_bytes)
+        let workspace = workspace::layout::decode(&user_record.canonical_bytes)
             .map_err(|_| "root admin user dependency must be the workspace event".to_string())?;
         if workspace.public_key == admin.public_key {
             return Ok(());
@@ -122,24 +122,24 @@ fn require_dependency<'a>(
 
 fn decode_admin_record(record: &EventRecord) -> Result<super::types::AdminEvent, String> {
     match record.canonical_bytes.first().copied() {
-        Some(codec::TYPE_ADMIN) => codec::decode(&record.canonical_bytes),
-        Some(signed::codec::TYPE_SIGNED) => {
-            let envelope = signed::codec::decode(&record.canonical_bytes)?;
-            if envelope.inner_type != codec::TYPE_ADMIN {
+        Some(layout::TYPE_ADMIN) => layout::decode(&record.canonical_bytes),
+        Some(signed::layout::TYPE_SIGNED) => {
+            let envelope = signed::layout::decode(&record.canonical_bytes)?;
+            if envelope.inner_type != layout::TYPE_ADMIN {
                 return Err("expected signed admin".to_string());
             }
-            codec::decode(&envelope.payload)
+            layout::decode(&envelope.payload)
         }
         _ => Err("expected admin".to_string()),
     }
 }
 
 fn decode_user_record(record: &EventRecord) -> Result<user::types::UserEvent, String> {
-    let envelope = signed::codec::decode(&record.canonical_bytes)?;
-    if envelope.inner_type != user::codec::TYPE_USER {
+    let envelope = signed::layout::decode(&record.canonical_bytes)?;
+    if envelope.inner_type != user::layout::TYPE_USER {
         return Err("expected signed user".to_string());
     }
-    user::codec::decode(&envelope.payload)
+    user::layout::decode(&envelope.payload)
 }
 
 #[cfg(test)]
@@ -161,19 +161,19 @@ mod tests {
     }
 
     fn make_workspace_record(public_key: [u8; 32]) -> ([u8; 32], Record) {
-        let bytes = workspace::codec::encode(&workspace::types::WorkspaceEvent {
+        let bytes = workspace::layout::encode(&workspace::types::WorkspaceEvent {
             created_at_ms: 10,
             public_key,
             name: "Root".to_string(),
         })
         .expect("encode workspace");
         let id = event_id(&bytes);
-        let record = workspace::codec::record_from_bytes(bytes).expect("workspace record");
+        let record = workspace::layout::record_from_bytes(bytes).expect("workspace record");
         (id, record)
     }
 
     fn admin_record(event: AdminEvent) -> Record {
-        codec::record_from_bytes(codec::encode(&event)).expect("admin record")
+        layout::record_from_bytes(layout::encode(&event)).expect("admin record")
     }
 
     fn signed_user_record(workspace_id: EventId, public_key: [u8; 32]) -> (EventId, Record) {
@@ -186,7 +186,7 @@ mod tests {
         let output = signed::commands::sign_payload(
             [90; 32],
             &[91; 32],
-            user::codec::encode(&user).expect("encode user"),
+            user::layout::encode(&user).expect("encode user"),
         )
         .expect("sign user");
         let record = output.events[0].record().clone();
@@ -201,11 +201,11 @@ mod tests {
         let output = signed::commands::sign_payload(
             signer_event_id,
             &signer_private_key,
-            codec::encode(&admin),
+            layout::encode(&admin),
         )
         .expect("sign admin");
         let record = output.events[0].record().clone();
-        let envelope = signed::codec::decode(&record.canonical_bytes).expect("signed admin");
+        let envelope = signed::layout::decode(&record.canonical_bytes).expect("signed admin");
         (record, envelope)
     }
 
@@ -333,13 +333,13 @@ mod tests {
 
         assert_eq!(output.legacy_labels().len(), 0);
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::ADMINS);
+        assert_eq!(output.legacy_rows()[0].table, rows::ADMINS);
         assert_eq!(
             output.legacy_rows()[0].key,
-            schema::admin_key(&workspace_id, &event_id(&record.canonical_bytes))
+            rows::admin_key(&workspace_id, &event_id(&record.canonical_bytes))
         );
         let row =
-            schema::decode_admin_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
+            rows::decode_admin_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
                 .expect("row");
         assert_eq!(row.workspace_id, workspace_id);
         assert_eq!(row.admin_id, event_id(&record.canonical_bytes));
@@ -518,7 +518,7 @@ mod tests {
         .expect("project signed non-root admin");
 
         let row =
-            schema::decode_admin_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
+            rows::decode_admin_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
                 .expect("row");
         assert_eq!(row.public_key, [11; 32]);
         assert_eq!(row.user_event_id, user_id);
@@ -686,7 +686,7 @@ mod tests {
         .expect("project signed admin");
 
         let row =
-            schema::decode_admin_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
+            rows::decode_admin_row(&output.legacy_rows()[0].key, &output.legacy_rows()[0].value)
                 .expect("row");
         assert_eq!(row.admin_id, event_id(&record.canonical_bytes));
         assert_eq!(row.authority_event_id, authority_id);

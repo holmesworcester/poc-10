@@ -11,12 +11,12 @@ use crate::protocol::event_modules::worker::CommandOutput;
 use crate::protocol::wire::Writer;
 
 use super::super::{local_history_node_secret, local_key_secret};
-use super::codec;
+use super::layout;
 use super::types::{KeyWrapEvent, WrappedSecretKind};
 
 const DETERMINISTIC_CREATED_AT_MS: u64 = 0;
 
-/// Sanity guard: every named id in a key-wrap event is non-zero. The codec
+/// Sanity guard: every named id in a key-wrap event is non-zero. The layout
 /// is intentionally lenient on decode; this helper is shared between the
 /// authoring path (called via `validate_id` on each input) and the receive
 /// projector so a malformed peer event is rejected at projection time too.
@@ -126,8 +126,8 @@ pub fn create(input: CreateKeyWrap) -> Result<CommandOutput<KeyWrapOutput>, Stri
     let ciphertext = crypto::x25519_xchacha20poly1305_encrypt(
         &sender_wrap_secret,
         &input.recipient_key,
-        codec::KEY_WRAP_PURPOSE,
-        &codec::associated_data(&event, input.signer_endpoint_shared_id),
+        layout::KEY_WRAP_PURPOSE,
+        &layout::associated_data(&event, input.signer_endpoint_shared_id),
         &event.nonce,
         &input.key_secret,
     )?;
@@ -135,14 +135,14 @@ pub fn create(input: CreateKeyWrap) -> Result<CommandOutput<KeyWrapOutput>, Stri
         .try_into()
         .map_err(|_| "key wrap ciphertext length mismatch".to_string())?;
 
-    let payload = codec::encode(&event);
-    let envelope = codec::sign(
+    let payload = layout::encode(&event);
+    let envelope = layout::sign(
         input.signer_endpoint_shared_id,
         &input.signer_private_key,
         payload,
     );
-    let bytes = codec::encode_signed(&envelope);
-    let record = codec::signed_record_from_bytes(bytes)?;
+    let bytes = layout::encode_signed(&envelope);
+    let record = layout::signed_record_from_bytes(bytes)?;
     let value = KeyWrapOutput {
         key_wrap_id: event_id(&record.canonical_bytes),
         workspace_id: event.workspace_id,

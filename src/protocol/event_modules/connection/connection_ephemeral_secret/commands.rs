@@ -4,7 +4,7 @@ use crate::core::crypto;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::EphemeralSecretEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub fn create(input: CreateEphemeral) -> Result<CommandOutput<EphemeralSecretEve
     };
     Ok(CommandOutput::with_events(
         event,
-        vec![codec::record_from_bytes(codec::encode(&event))?],
+        vec![layout::record_from_bytes(layout::encode(&event))?],
     ))
 }
 

@@ -8,7 +8,7 @@ use crate::core::store::Store;
 use crate::protocol::event_modules::identity::endpoint::types::EndpointId;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{decode_invite_accepted_row, INVITES_ACCEPTED};
+use super::rows::{decode_invite_accepted_row, INVITES_ACCEPTED};
 
 pub fn invite_accepted_count(store: &Store) -> Result<usize, String> {
     store

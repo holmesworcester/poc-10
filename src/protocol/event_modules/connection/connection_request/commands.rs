@@ -35,7 +35,7 @@ use crate::protocol::event_modules::worker::CommandOutput;
 use crate::protocol::wire::Writer;
 
 use super::super::types;
-use super::codec;
+use super::layout;
 use super::types::RequestEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,9 +70,9 @@ pub fn create(
     } else {
         invite::types::InviteSecretEvent::new_with_addr(invite.bootstrap_secret, invite.addr)
     };
-    let invite_secret_bytes = invite::codec::encode(&invite_secret);
+    let invite_secret_bytes = invite::layout::encode(&invite_secret);
     let invite_secret_event_id = types::event_id(&invite_secret_bytes);
-    let invite_secret_record = invite::codec::record_from_bytes(invite_secret_bytes)?;
+    let invite_secret_record = invite::layout::record_from_bytes(invite_secret_bytes)?;
     let ephemeral = connection_ephemeral_secret::commands::create(
         connection_ephemeral_secret::commands::CreateEphemeral {
             owner_endpoint: local.endpoint,
@@ -95,9 +95,9 @@ pub fn create(
         },
         &invite_secret,
     )?;
-    let inner = codec::encode(&event);
+    let inner = layout::encode(&event);
     let request_id = types::event_id(&inner);
-    let record = codec::record_from_bytes(inner.clone())?;
+    let record = layout::record_from_bytes(inner.clone())?;
     let mut events = vec![invite_secret_record];
     events.extend(
         ephemeral
@@ -122,7 +122,7 @@ pub fn create(
 /// admission sees the endpoint material before the request uses it.
 ///
 /// `from_listen_addr` is the local steady-state listener advertised inside the
-/// request body. Callers read it from `connection::schema::local_listen_addr`
+/// request body. Callers read it from `connection::rows::local_listen_addr`
 /// before invoking this command; passing `None` keeps the request asymmetric
 /// and still bootstraps correctly when no daemon is running.
 pub fn create_with_local(
@@ -243,9 +243,9 @@ mod tests {
         let invite_secret_event_id = output.events[0].event_id();
         let ephemeral_event_id = output.events[1].event_id();
         let request =
-            codec::decode(&output.events[2].record().canonical_bytes).expect("decode request");
+            layout::decode(&output.events[2].record().canonical_bytes).expect("decode request");
         let invite_secret =
-            invite::codec::decode(&output.events[0].record().canonical_bytes).expect("invite");
+            invite::layout::decode(&output.events[0].record().canonical_bytes).expect("invite");
         assert_eq!(invite_secret.addr, Some(addr));
         assert_eq!(output.value.addr, addr);
         assert_eq!(request.invite_secret_event_id, invite_secret_event_id);
@@ -271,7 +271,7 @@ mod tests {
 
         let output = create(connector, &invite_link, Some(local_listen)).expect("create request");
         let request =
-            codec::decode(&output.events[2].record().canonical_bytes).expect("decode request");
+            layout::decode(&output.events[2].record().canonical_bytes).expect("decode request");
 
         assert_eq!(request.from_listen_addr, Some(local_listen));
     }

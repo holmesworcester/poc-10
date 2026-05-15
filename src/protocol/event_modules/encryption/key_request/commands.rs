@@ -10,7 +10,7 @@ use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::KeyRequestEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +53,8 @@ pub fn request(input: RequestKeys) -> Result<CommandOutput<KeyRequestOutput>, St
         removal_frontier_id: input.removal_frontier_id,
         recipient_key_id: input.recipient_key_id,
     };
-    let payload = codec::encode(&event);
-    let envelope = codec::sign(
+    let payload = layout::encode(&event);
+    let envelope = layout::sign(
         input.requester_endpoint_shared_id,
         &input.requester_private_key,
         payload,
@@ -62,8 +62,8 @@ pub fn request(input: RequestKeys) -> Result<CommandOutput<KeyRequestOutput>, St
     if envelope.signer_public_key != crypto::ed25519_public_key(&input.requester_private_key) {
         return Err("key request signer public key mismatch".to_string());
     }
-    let bytes = codec::encode_signed(&envelope);
-    let record = codec::signed_record_from_bytes(bytes)?;
+    let bytes = layout::encode_signed(&envelope);
+    let record = layout::signed_record_from_bytes(bytes)?;
     let value = KeyRequestOutput {
         key_request_id: event_id(&record.canonical_bytes),
         workspace_id: event.workspace_id,

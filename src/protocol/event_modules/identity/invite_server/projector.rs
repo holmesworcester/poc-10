@@ -8,29 +8,29 @@ use crate::protocol::event_modules::identity::{admin, endpoint_shared, signed, w
 use crate::protocol::event_modules::types::EventRecord;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, schema};
+use super::{layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = signed::codec::decode(&event.record.canonical_bytes)?;
-    if envelope.inner_type != codec::TYPE_INVITE_SERVER {
+    let envelope = signed::layout::decode(&event.record.canonical_bytes)?;
+    if envelope.inner_type != layout::TYPE_INVITE_SERVER {
         return Err("expected signed invite_server".to_string());
     }
-    let invite_server = codec::decode(&envelope.payload)?;
+    let invite_server = layout::decode(&envelope.payload)?;
     let signer = event
         .context
         .require_dependency(&envelope.signer_event_id)?;
 
     match signer.canonical_bytes.first().copied() {
-        Some(workspace::codec::TYPE_WORKSPACE) => {
+        Some(workspace::layout::TYPE_WORKSPACE) => {
             validate_workspace_signed_invite(&envelope, &invite_server, signer)?;
         }
-        Some(signed::codec::TYPE_SIGNED) => {
+        Some(signed::layout::TYPE_SIGNED) => {
             validate_admin_signed_invite(&envelope, &invite_server, signer, event)?;
         }
         _ => return Err("invite_server signer must be workspace or endpoint_shared".to_string()),
     }
 
-    Ok(ProjectionOutput::rows(vec![schema::invite_server_row(
+    Ok(ProjectionOutput::rows(vec![rows::invite_server_row(
         event.context.event_id,
         &invite_server,
     )]))
@@ -41,7 +41,7 @@ fn validate_workspace_signed_invite(
     invite_server: &super::types::InviteServerEvent,
     signer: &EventRecord,
 ) -> Result<(), String> {
-    let signer_workspace = workspace::codec::decode(&signer.canonical_bytes)
+    let signer_workspace = workspace::layout::decode(&signer.canonical_bytes)
         .map_err(|_| "invite_server signer must be workspace or endpoint_shared".to_string())?;
     if envelope.signer_event_id != invite_server.workspace_id
         || invite_server.authority_event_id != invite_server.workspace_id
@@ -97,22 +97,22 @@ fn validate_admin_signed_invite(
 fn decode_endpoint_shared_record(
     record: &EventRecord,
 ) -> Result<endpoint_shared::types::EndpointSharedEvent, String> {
-    let envelope = signed::codec::decode(&record.canonical_bytes)?;
-    if envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    let envelope = signed::layout::decode(&record.canonical_bytes)?;
+    if envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err("expected signed endpoint_shared".to_string());
     }
-    endpoint_shared::codec::decode(&envelope.payload)
+    endpoint_shared::layout::decode(&envelope.payload)
 }
 
 fn decode_admin_record(record: &EventRecord) -> Result<admin::types::AdminEvent, String> {
     match record.canonical_bytes.first().copied() {
-        Some(admin::codec::TYPE_ADMIN) => admin::codec::decode(&record.canonical_bytes),
-        Some(signed::codec::TYPE_SIGNED) => {
-            let envelope = signed::codec::decode(&record.canonical_bytes)?;
-            if envelope.inner_type != admin::codec::TYPE_ADMIN {
+        Some(admin::layout::TYPE_ADMIN) => admin::layout::decode(&record.canonical_bytes),
+        Some(signed::layout::TYPE_SIGNED) => {
+            let envelope = signed::layout::decode(&record.canonical_bytes)?;
+            if envelope.inner_type != admin::layout::TYPE_ADMIN {
                 return Err("expected signed admin".to_string());
             }
-            admin::codec::decode(&envelope.payload)
+            admin::layout::decode(&envelope.payload)
         }
         _ => Err("expected admin".to_string()),
     }
@@ -144,11 +144,11 @@ mod tests {
             public_key: signer_public_key(&WORKSPACE_PRIVATE),
             name: "Workspace".to_string(),
         };
-        let bytes = workspace::codec::encode(&workspace).expect("encode workspace");
+        let bytes = workspace::layout::encode(&workspace).expect("encode workspace");
         let workspace_id = event_id(&bytes);
         (
             workspace_id,
-            workspace::codec::record_from_bytes(bytes).expect("workspace record"),
+            workspace::layout::record_from_bytes(bytes).expect("workspace record"),
         )
     }
 
@@ -160,7 +160,7 @@ mod tests {
         let output = signed::commands::sign_payload(
             signer_event_id,
             signer_private_key,
-            codec::encode(&invite_server),
+            layout::encode(&invite_server),
         )
         .expect("sign invite_server");
         output.events[0].record().clone()
@@ -209,13 +209,13 @@ mod tests {
 
         assert!(output.legacy_labels().is_empty());
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::INVITE_SERVERS);
+        assert_eq!(output.legacy_rows()[0].table, rows::INVITE_SERVERS);
         assert_eq!(
             output.legacy_rows()[0].key,
-            schema::invite_server_key(&workspace_id, &event_id(&record.canonical_bytes))
+            rows::invite_server_key(&workspace_id, &event_id(&record.canonical_bytes))
         );
         assert_eq!(
-            schema::decode_invite_server_row(
+            rows::decode_invite_server_row(
                 &output.legacy_rows()[0].key,
                 &output.legacy_rows()[0].value
             )

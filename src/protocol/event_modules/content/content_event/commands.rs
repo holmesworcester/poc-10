@@ -9,7 +9,7 @@ use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::ContentEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,13 +31,13 @@ pub fn generate(
     for offset in 0..num_events {
         let timestamp = start_timestamp + offset as u64;
         let payload = payload(timestamp, event_size);
-        let bytes = codec::encode(&ContentEvent {
+        let bytes = layout::encode(&ContentEvent {
             workspace_id,
             timestamp,
             payload,
         });
-        let signed = codec::sign(signer_endpoint_shared_id, &signer_private_key, bytes);
-        let record = codec::signed_record_from_bytes(codec::encode_signed(&signed))?;
+        let signed = layout::sign(signer_endpoint_shared_id, &signer_private_key, bytes);
+        let record = layout::signed_record_from_bytes(layout::encode_signed(&signed))?;
         records.push(record);
     }
 

@@ -9,7 +9,7 @@ use crate::core::crypto;
 use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::{KeySecret, LocalKeySecret};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,8 +42,8 @@ pub fn from_key_secret(
         removal_frontier_id,
         key_secret,
     };
-    let bytes = codec::encode(&event);
-    let record = codec::record_from_bytes(bytes)?;
+    let bytes = layout::encode(&event);
+    let record = layout::record_from_bytes(bytes)?;
     let value = LocalKeySecretOutput {
         local_key_secret_id: event_id(&record.canonical_bytes),
         event,

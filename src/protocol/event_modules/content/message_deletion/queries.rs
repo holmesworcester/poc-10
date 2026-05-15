@@ -10,7 +10,7 @@
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{
+use super::rows::{
     decode_purge_instruction, decode_purge_retire_coords, purge_instruction_key, PurgeInstruction,
     PurgeRetireCoords, PURGE_INSTRUCTIONS, PURGE_RETIRE_COORDS,
 };

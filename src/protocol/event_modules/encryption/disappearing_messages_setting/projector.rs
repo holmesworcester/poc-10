@@ -12,7 +12,7 @@
 //!       - A signed admin event for the same workspace, for all ongoing
 //!         settings. The admin's `public_key` must match the envelope
 //!         signer key.
-//!   * `effective_at_minute == created_at_ms / 60_000` (codec already
+//!   * `effective_at_minute == created_at_ms / 60_000` (layout already
 //!     enforces this on decode).
 //!   * Monotonic floor (`expires_at_or_before_minute`): if the event names
 //!     a `previous_setting_id`, that dependency must decode as a signed
@@ -30,11 +30,11 @@ use crate::protocol::event_modules::types::{EventId, EventRecord};
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
 use super::types::DisappearingMessagesSettingEvent;
-use super::{codec, commands, schema};
+use super::{commands, layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let setting = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let setting = layout::decode(&envelope.payload)?;
     commands::validate_event_fields(&setting)?;
     if event.record.workspace_id != Some(setting.workspace_id) {
         return Err(
@@ -49,7 +49,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     validate_authority(event, &envelope, &setting)?;
     validate_monotonic_floor(event, &setting)?;
 
-    Ok(ProjectionOutput::rows(vec![schema::setting_row(
+    Ok(ProjectionOutput::rows(vec![rows::setting_row(
         setting.workspace_id,
         event.context.event_id,
         setting.ttl_minutes,
@@ -75,7 +75,7 @@ fn validate_authority(
             );
         }
         let workspace_record = event.context.require_dependency(&setting.workspace_id)?;
-        let workspace = workspace::codec::decode(&workspace_record.canonical_bytes).map_err(|_| {
+        let workspace = workspace::layout::decode(&workspace_record.canonical_bytes).map_err(|_| {
             "disappearing_messages_setting workspace authority dependency is not a workspace event"
                 .to_string()
         })?;
@@ -123,11 +123,11 @@ fn decode_previous_setting(
     dependency: &EventRecord,
     expected_workspace_id: EventId,
 ) -> Result<DisappearingMessagesSettingEvent, String> {
-    let envelope = codec::decode_signed(&dependency.canonical_bytes).map_err(|_| {
+    let envelope = layout::decode_signed(&dependency.canonical_bytes).map_err(|_| {
         "disappearing_messages_setting previous_setting_id dependency is not a signed setting"
             .to_string()
     })?;
-    let previous = codec::decode(&envelope.payload).map_err(|_| {
+    let previous = layout::decode(&envelope.payload).map_err(|_| {
         "disappearing_messages_setting previous_setting_id dependency is not a setting".to_string()
     })?;
     if previous.workspace_id != expected_workspace_id {
@@ -146,16 +146,16 @@ fn decode_admin_dependency(
     let dependency = event
         .context
         .require_dependency(&authority_admin_event_id)?;
-    let envelope = signed::codec::decode(&dependency.canonical_bytes).map_err(|_| {
+    let envelope = signed::layout::decode(&dependency.canonical_bytes).map_err(|_| {
         "disappearing_messages_setting authority admin dependency is not a signed event".to_string()
     })?;
-    if envelope.inner_type != admin::codec::TYPE_ADMIN {
+    if envelope.inner_type != admin::layout::TYPE_ADMIN {
         return Err(
             "disappearing_messages_setting authority admin dependency is not a signed admin event"
                 .to_string(),
         );
     }
-    admin::codec::decode(&envelope.payload).map_err(|_| {
+    admin::layout::decode(&envelope.payload).map_err(|_| {
         "disappearing_messages_setting authority admin dependency is not a valid admin event"
             .to_string()
     })
@@ -170,7 +170,7 @@ mod tests {
     use crate::protocol::event_modules::worker::{DependencyContext, EventContext};
     use crate::workers::pipeline_helpers::event_pipeline::EventWithContext;
 
-    use super::super::codec;
+    use super::super::layout;
     use super::super::types::DisappearingMessagesSettingEvent;
     use super::*;
 
@@ -184,13 +184,13 @@ mod tests {
             authority_event_id: workspace_id,
             user_event_id: workspace_id,
         };
-        let payload = admin::codec::encode(&admin_event);
+        let payload = admin::layout::encode(&admin_event);
         let signed_envelope =
             signed::commands::sign_payload(workspace_id, &[7; ED25519_PRIVATE_KEY_BYTES], payload)
                 .expect("sign admin payload")
                 .value;
-        let bytes = signed::codec::encode(&signed_envelope);
-        signed::codec::record_from_bytes(bytes).expect("admin record")
+        let bytes = signed::layout::encode(&signed_envelope);
+        signed::layout::record_from_bytes(bytes).expect("admin record")
     }
 
     fn build_setting_record(
@@ -211,10 +211,10 @@ mod tests {
             expires_at_or_before_minute,
             previous_setting_id,
         };
-        let payload = codec::encode(&inner);
-        let envelope = codec::sign(admin_event_id, &signer_private_key, payload);
-        let bytes = codec::encode_signed(&envelope);
-        codec::signed_record_from_bytes(bytes).expect("setting record")
+        let payload = layout::encode(&inner);
+        let envelope = layout::sign(admin_event_id, &signer_private_key, payload);
+        let bytes = layout::encode_signed(&envelope);
+        layout::signed_record_from_bytes(bytes).expect("setting record")
     }
 
     fn projector_input(
@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(output.legacy_deletes().len(), 0);
         assert_eq!(output.legacy_labels().len(), 0);
-        let decoded = super::super::schema::decode_active_setting_row(
+        let decoded = super::super::rows::decode_active_setting_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -380,8 +380,8 @@ mod tests {
             expires_at_or_before_minute: 99,
             previous_setting_id: Some([42; 32]),
         };
-        let bytes = codec::encode(&inner);
-        let decoded = codec::decode(&bytes).expect("decode");
+        let bytes = layout::encode(&inner);
+        let decoded = layout::decode(&bytes).expect("decode");
         assert_eq!(decoded.expires_at_or_before_minute, 99);
         assert_eq!(decoded.previous_setting_id, Some([42; 32]));
     }
@@ -430,7 +430,7 @@ mod tests {
         };
         let output = project(&event).expect("equal floor must admit");
         assert_eq!(output.legacy_rows().len(), 1);
-        let decoded = super::super::schema::decode_active_setting_row(
+        let decoded = super::super::rows::decode_active_setting_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -459,7 +459,7 @@ mod tests {
         };
         let output = project(&event).expect("higher floor must admit");
         assert_eq!(output.legacy_rows().len(), 1);
-        let decoded = super::super::schema::decode_active_setting_row(
+        let decoded = super::super::rows::decode_active_setting_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )

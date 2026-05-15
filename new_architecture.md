@@ -44,10 +44,10 @@ The migration succeeds when:
 - Intent handlers own bounded stateful work and handler checkpoint state.
 - Projectors return only needs, offers, and intents.
 - Intent handlers return only facts and intents.
-- No event module, handler, command, schema, or wire codec reaches around core
+- No event module, handler, command, schema, or wire layout reaches around core
   to call another stage directly.
 - There is no `mod.rs` anywhere in the repository.
-- There is no per-module `schema.rs`, `codec.rs`, or `cli.rs` where logic can
+- There is no per-module `rows.rs`, `layout.rs`, or `cli.rs` where logic can
   hide.
 - Schema declarations exist in exactly three visible places:
   `core/schema.p8sql`, `event_modules/schema.p8sql`, and
@@ -209,8 +209,8 @@ Avoid broad names:
 
 ```text
 mod.rs
-schema.rs
-codec.rs
+rows.rs
+layout.rs
 cli.rs
 utils.rs
 helpers.rs
@@ -356,7 +356,7 @@ queue so crash recovery and idempotence stay visible.
 
 ### Wire And Codec Style
 
-`poc-10` should avoid per-module handwritten `codec.rs` files.
+`poc-10` should avoid per-module handwritten `layout.rs` files.
 
 Use one shared fixed-layout wire system in `core/wire.rs` with field
 primitives:

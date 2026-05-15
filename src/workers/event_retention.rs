@@ -3,7 +3,7 @@
 //! Retention is an operational concern, not event syntax. This module owns the
 //! concrete act of removing locally retained canonical event bytes and their
 //! generic event-store indexes after a domain worker has proved those bytes are
-//! no longer needed for local service. It relies on protocol schema helpers only
+//! no longer needed for local service. It relies on protocol rows helpers only
 //! for table names and row-key encoding; it does not define protocol-visible
 //! deletion facts, decide domain deletion policy, or synthesize replacement
 //! events.
@@ -15,8 +15,8 @@
 //! real event before scheduling retention cleanup here.
 
 use crate::core::store::Store;
-use crate::protocol::event_modules::schema;
-use crate::protocol::event_modules::sync::schema as negentropy_purges;
+use crate::protocol::event_modules::rows;
+use crate::protocol::event_modules::sync::rows as negentropy_purges;
 use crate::protocol::event_modules::types::{EventId, EventStatus};
 
 /// Remove one event's locally retained bytes and generic event-store indexes.
@@ -38,43 +38,43 @@ pub(crate) fn purge_event_storage_in_tx(
     store: &Store,
     event_id: &EventId,
 ) -> rusqlite::Result<bool> {
-    let Some(value) = store.table_row(schema::EVENTS, event_id)? else {
+    let Some(value) = store.table_row(rows::EVENTS, event_id)? else {
         return Ok(false);
     };
-    let event = schema::decode_stored_event_index(&value)?;
+    let event = rows::decode_stored_event_index(&value)?;
     let was_shared = event.scope.is_shared();
     let workspace_id = event.workspace_id;
 
     let mut deleted_any = false;
     if event.status == EventStatus::Ready {
         deleted_any |= store.delete_table_rows_in_tx(
-            schema::READY_EVENTS,
-            vec![schema::ready_key(event.timestamp, event_id)],
+            rows::READY_EVENTS,
+            vec![rows::ready_key(event.timestamp, event_id)],
         )? > 0;
     }
     if event.scope.is_shared() {
         deleted_any |= store.delete_table_rows_in_tx(
-            schema::TIMESTAMP_EVENTS,
-            vec![schema::timestamp_key(event.timestamp, event_id)],
+            rows::TIMESTAMP_EVENTS,
+            vec![rows::timestamp_key(event.timestamp, event_id)],
         )? > 0;
     }
 
     let missing_edges = store.table_rows_with_key_prefix(
-        schema::MISSING_DEPS_BY_BLOCKED_EVENT,
+        rows::MISSING_DEPS_BY_BLOCKED_EVENT,
         event_id,
-        schema::MAX_DEPENDENCY_ROWS_PER_EVENT,
+        rows::MAX_DEPENDENCY_ROWS_PER_EVENT,
     )?;
     let mut reverse_keys = Vec::with_capacity(missing_edges.len());
     let mut forward_keys = Vec::with_capacity(missing_edges.len());
     for (key, _) in missing_edges {
-        let (blocked_event_id, missing_dep_id) = schema::split_edge_key(&key)?;
+        let (blocked_event_id, missing_dep_id) = rows::split_edge_key(&key)?;
         reverse_keys.push(key);
-        forward_keys.push(schema::edge_key(&missing_dep_id, &blocked_event_id));
+        forward_keys.push(rows::edge_key(&missing_dep_id, &blocked_event_id));
     }
     deleted_any |=
-        store.delete_table_rows_in_tx(schema::MISSING_DEPS_BY_BLOCKED_EVENT, reverse_keys)? > 0;
+        store.delete_table_rows_in_tx(rows::MISSING_DEPS_BY_BLOCKED_EVENT, reverse_keys)? > 0;
     deleted_any |=
-        store.delete_table_rows_in_tx(schema::BLOCKED_EVENTS_BY_MISSING_DEP, forward_keys)? > 0;
+        store.delete_table_rows_in_tx(rows::BLOCKED_EVENTS_BY_MISSING_DEP, forward_keys)? > 0;
 
     // The event being purged is no longer a dependent that can be woken or
     // projected. Remove its outgoing retained dependency edges. Keep incoming
@@ -82,23 +82,21 @@ pub(crate) fn purge_event_storage_in_tx(
     // may still need to wake retained direct dependents after the canonical
     // bytes are gone.
     let direct_edges = store.table_rows_with_key_prefix(
-        schema::DEPS_BY_DEPENDENT,
+        rows::DEPS_BY_DEPENDENT,
         event_id,
-        schema::MAX_DEPENDENCY_ROWS_PER_EVENT,
+        rows::MAX_DEPENDENCY_ROWS_PER_EVENT,
     )?;
     let mut direct_reverse_keys = Vec::with_capacity(direct_edges.len());
     let mut direct_forward_keys = Vec::with_capacity(direct_edges.len());
     for (key, _) in direct_edges {
-        let (dependent_id, dependency_id) = schema::split_edge_key(&key)?;
+        let (dependent_id, dependency_id) = rows::split_edge_key(&key)?;
         direct_reverse_keys.push(key);
-        direct_forward_keys.push(schema::edge_key(&dependency_id, &dependent_id));
+        direct_forward_keys.push(rows::edge_key(&dependency_id, &dependent_id));
     }
-    deleted_any |=
-        store.delete_table_rows_in_tx(schema::DEPS_BY_DEPENDENT, direct_reverse_keys)? > 0;
-    deleted_any |=
-        store.delete_table_rows_in_tx(schema::DEPENDENTS_BY_DEP, direct_forward_keys)? > 0;
+    deleted_any |= store.delete_table_rows_in_tx(rows::DEPS_BY_DEPENDENT, direct_reverse_keys)? > 0;
+    deleted_any |= store.delete_table_rows_in_tx(rows::DEPENDENTS_BY_DEP, direct_forward_keys)? > 0;
 
-    deleted_any |= store.delete_table_rows_in_tx(schema::EVENTS, vec![event_id.to_vec()])? > 0;
+    deleted_any |= store.delete_table_rows_in_tx(rows::EVENTS, vec![event_id.to_vec()])? > 0;
 
     // Negentropy bookkeeping: only shared events are admitted to the
     // workspace-scoped sync index, so non-shared / workspace-less purges
@@ -122,9 +120,9 @@ pub(crate) fn purge_event_storage_in_tx(
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::event_modules::schema::{self as event_schema, EventLabel};
+    use crate::protocol::event_modules::rows::{self as event_schema, EventLabel};
     use crate::protocol::event_modules::sync::queries as negentropy_purge_queries;
-    use crate::protocol::event_modules::sync::schema as negentropy_purges;
+    use crate::protocol::event_modules::sync::rows as negentropy_purges;
     use crate::protocol::event_modules::types::{event_id, EventRecord, EventScope};
     use crate::protocol::Protocol;
     use crate::workers::event_lifecycle;
@@ -224,7 +222,7 @@ mod tests {
         assert!(purged);
 
         // Verify by raw row scan since drain/clear are owned by the sync
-        // worker; the schema row constructor is the same shape it would
+        // worker; the rows row constructor is the same shape it would
         // produce.
         let queued = store
             .table_rows_with_key_prefix(negentropy_purges::NEGENTROPY_PENDING_PURGES, &[], 16)

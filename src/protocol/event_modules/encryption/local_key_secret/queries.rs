@@ -3,13 +3,13 @@
 //! Scope: per-workspace prefix scans and exact-key lookups for the
 //! encryption worker and CLI summaries. Mutations to `LOCAL_KEY_SECRETS`
 //! only happen in the projector when a new secret is admitted; the
-//! per-frontier uniqueness invariant is enforced by the schema row
+//! per-frontier uniqueness invariant is enforced by the rows row
 //! shape, not by these queries.
 
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{decode_local_key_secret_row, local_key_secret_key, LOCAL_KEY_SECRETS};
+use super::rows::{decode_local_key_secret_row, local_key_secret_key, LOCAL_KEY_SECRETS};
 use super::types::LocalKeySecretRow;
 
 pub fn get(

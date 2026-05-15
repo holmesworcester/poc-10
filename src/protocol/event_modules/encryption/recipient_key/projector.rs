@@ -27,17 +27,17 @@
 //! suppressed.
 
 use crate::protocol::event_modules::identity::{endpoint_shared, signed};
-use crate::protocol::event_modules::schema::EventLabel;
+use crate::protocol::event_modules::rows::EventLabel;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
 use super::super::key_wrap;
 use super::types::{is_superseded_label, superseded_label, NO_PREVIOUS_RECIPIENT_KEY};
-use super::{codec, commands, schema};
+use super::{commands, layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let recipient_key = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let recipient_key = layout::decode(&envelope.payload)?;
     commands::validate_event_ids(&recipient_key)?;
     if event.record.workspace_id != Some(recipient_key.workspace_id) {
         return Err("recipient key workspace metadata does not match event body".to_string());
@@ -55,14 +55,14 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let signer = event
         .context
         .require_dependency(&envelope.signer_endpoint_shared_id)?;
-    let signer_envelope = signed::codec::decode(&signer.canonical_bytes).map_err(|_| {
+    let signer_envelope = signed::layout::decode(&signer.canonical_bytes).map_err(|_| {
         "recipient key signer dependency is not a signed endpoint_shared".to_string()
     })?;
-    if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    if signer_envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err("recipient key signer dependency is not a signed endpoint_shared".to_string());
     }
-    let signer_endpoint_shared =
-        endpoint_shared::codec::decode(&signer_envelope.payload).map_err(|_| {
+    let signer_endpoint_shared = endpoint_shared::layout::decode(&signer_envelope.payload)
+        .map_err(|_| {
             "recipient key signer dependency is not a signed endpoint_shared".to_string()
         })?;
     if signer_endpoint_shared.workspace_id != recipient_key.workspace_id {
@@ -93,8 +93,8 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         ProjectionOutput::rows(Vec::new())
     } else {
         ProjectionOutput::rows(vec![
-            schema::recipient_key_row(event.context.event_id, &recipient_key)?,
-            key_wrap::schema::pending_recipient_key_reconcile_row(
+            rows::recipient_key_row(event.context.event_id, &recipient_key)?,
+            key_wrap::rows::pending_recipient_key_reconcile_row(
                 recipient_key.workspace_id,
                 event.context.event_id,
             ),
@@ -109,8 +109,8 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
             recipient_key.workspace_id,
         )?;
         output.push_table_delete(TableDelete {
-            table: schema::RECIPIENT_KEYS,
-            key: schema::recipient_key_key(
+            table: rows::RECIPIENT_KEYS,
+            key: rows::recipient_key_key(
                 recipient_key.workspace_id,
                 recipient_key.previous_recipient_key_id,
             ),
@@ -145,11 +145,11 @@ fn validate_predecessor(
         .context
         .require_dependency(previous_recipient_key_id)?;
     let predecessor_envelope =
-        codec::decode_signed(&predecessor.canonical_bytes).map_err(|_| {
+        layout::decode_signed(&predecessor.canonical_bytes).map_err(|_| {
             "recipient key supersession previous dependency is not a signed recipient_key"
                 .to_string()
         })?;
-    let predecessor_event = codec::decode(&predecessor_envelope.payload).map_err(|_| {
+    let predecessor_event = layout::decode(&predecessor_envelope.payload).map_err(|_| {
         "recipient key supersession previous dependency is not a signed recipient_key".to_string()
     })?;
     if predecessor_event.workspace_id != expected_workspace_id {
@@ -182,7 +182,7 @@ mod tests {
     type Record = crate::protocol::event_modules::types::EventRecord;
 
     fn signing_public_key_for(private_key: &[u8; 32]) -> [u8; 32] {
-        codec::sign([0; 32], private_key, vec![codec::TYPE_RECIPIENT_KEY]).signer_public_key
+        layout::sign([0; 32], private_key, vec![layout::TYPE_RECIPIENT_KEY]).signer_public_key
     }
 
     fn endpoint_shared_record(workspace_id: [u8; 32], signing_public_key: [u8; 32]) -> Record {
@@ -199,7 +199,7 @@ mod tests {
         endpoint_role: crate::protocol::event_modules::identity::endpoint::types::EndpointRole,
     ) -> Record {
         let payload =
-            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+            endpoint_shared::layout::encode(&endpoint_shared::types::EndpointSharedEvent {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id: [3; 32],
@@ -269,8 +269,8 @@ mod tests {
         let output = project(&event).expect("project recipient key");
 
         assert_eq!(output.legacy_rows().len(), 2);
-        assert_eq!(output.legacy_rows()[0].table, schema::RECIPIENT_KEYS);
-        let row = schema::decode_recipient_key_row(
+        assert_eq!(output.legacy_rows()[0].table, rows::RECIPIENT_KEYS);
+        let row = rows::decode_recipient_key_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -394,10 +394,10 @@ mod tests {
             1,
             "supersession must emit one TableDelete for the predecessor row"
         );
-        assert_eq!(output.legacy_deletes()[0].table, schema::RECIPIENT_KEYS);
+        assert_eq!(output.legacy_deletes()[0].table, rows::RECIPIENT_KEYS);
         assert_eq!(
             output.legacy_deletes()[0].key,
-            schema::recipient_key_key([1; 32], predecessor_id),
+            rows::recipient_key_key([1; 32], predecessor_id),
             "the deleted row key must be the predecessor's"
         );
         assert_eq!(

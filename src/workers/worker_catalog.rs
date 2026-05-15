@@ -126,7 +126,7 @@ mod tests {
             _store: &Store,
             _bytes: Vec<u8>,
             _receive: Option<crate::protocol::event_modules::types::ReceiveMetadata>,
-            _provenance: Option<crate::workers::schema::TransitProvenance>,
+            _provenance: Option<crate::workers::queue_rows::TransitProvenance>,
         ) -> Result<crate::workers::pipeline_helpers::event_pipeline::ReceivedRecord, String>
         {
             Err("not implemented".to_string())

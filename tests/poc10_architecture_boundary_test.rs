@@ -87,7 +87,7 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         "## Poc-10 Success Criteria",
         "Every non-ignored `poc-8` test passes in `poc-10`",
         "There is no `mod.rs` anywhere in the repository.",
-        "There is no per-module `schema.rs`, `codec.rs`, or `cli.rs`",
+        "There is no per-module `rows.rs`, `layout.rs`, or `cli.rs`",
         "src/core/schema.p8sql",
         "src/event_modules/schema.p8sql",
         "src/handlers/schema.p8sql",
@@ -260,7 +260,6 @@ fn poc10_target_has_no_mod_rs_files() {
 }
 
 #[test]
-#[ignore = "poc-10 target guardrail: enable after schemas and wire layouts move to target files"]
 fn poc10_target_has_no_per_module_schema_codec_or_cli_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let forbidden = ["schema.rs", "codec.rs", "cli.rs"];

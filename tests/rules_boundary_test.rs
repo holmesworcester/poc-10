@@ -91,13 +91,14 @@ fn worker_implementation_files(root: &Path) -> Vec<std::path::PathBuf> {
         "event_retention.rs",
         "pipeline_helpers.rs",
         "post_admission_purge.rs",
+        "queue_rows.rs",
         "worker_catalog.rs",
     ];
     rust_files(&root.join("src/workers"))
         .into_iter()
         .filter(|path| {
             path.file_name()
-                .is_none_or(|name| name != "mod.rs" && name != "schema.rs")
+                .is_none_or(|name| name != "mod.rs" && name != "queue_rows.rs")
         })
         .filter(|path| {
             path.file_name()
@@ -190,7 +191,7 @@ fn event_modules_are_directories() {
     let root_shared = [
         "event_from_bytes.rs",
         "modules.rs",
-        "schema.rs",
+        "rows.rs",
         "queries.rs",
         "types.rs",
     ];
@@ -369,10 +370,10 @@ fn domain_roots_contain_only_children_and_shared_domain_files() {
         "cli_tests.rs",
         "commands.rs",
         "worker.rs",
-        "schema.rs",
+        "rows.rs",
         "queries.rs",
         "types.rs",
-        "cli.rs",
+        "command_line.rs",
     ];
     let mut offenders = Vec::new();
     for domain in std::fs::read_dir(&root).expect("read event modules") {
@@ -447,7 +448,7 @@ fn leaf_mod_rs_files_are_declarations_only() {
 
     assert!(
         offenders.is_empty(),
-        "leaf event-module mod.rs files are only concern declarations; move adapters/helpers to schema.rs, commands.rs, worker.rs, or cli.rs:\n{}",
+        "leaf event-module mod.rs files are only concern declarations; move adapters/helpers to rows.rs, commands.rs, worker.rs, or cli.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -504,7 +505,7 @@ fn event_module_mod_rs_files_do_not_orchestrate_commands_or_work() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "mod.rs files are plumbing: declarations, schema aggregation, and shallow codec/projector dispatch only:\n{}",
+        "mod.rs files are plumbing: declarations, schema aggregation, and shallow layout/projector dispatch only:\n{}",
         violations.join("\n")
     );
 }
@@ -577,7 +578,7 @@ fn scoped_cli_files_do_not_own_transport_or_cross_cli_operations() {
 #[test]
 fn sync_cli_is_deprecated() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = source_text(&root.join("src/protocol/event_modules/sync/cli.rs"));
+    let text = source_text(&root.join("src/protocol/event_modules/sync/command_line.rs"));
     let forbidden = [
         "CliArgs",
         "CliOutput",
@@ -609,7 +610,7 @@ fn domain_root_cli_requires_cross_child_scope() {
     let mut offenders = Vec::new();
     for domain in std::fs::read_dir(&root).expect("read event modules") {
         let path = domain.expect("dir entry").path();
-        if !path.is_dir() || !path.join("cli.rs").exists() {
+        if !path.is_dir() || !path.join("command_line.rs").exists() {
             continue;
         }
         let child_modules = std::fs::read_dir(&path)
@@ -635,14 +636,15 @@ fn event_module_files_use_only_standard_concern_names() {
     let event_root = root.join("src/protocol/event_modules");
     let allowed = [
         "cli.rs",
+        "command_line.rs",
         "cli_tests.rs",
-        "codec.rs",
+        "layout.rs",
         "commands.rs",
         "crypto.rs",
         "projector.rs",
         "queries.rs",
         "registry_meta.rs",
-        "schema.rs",
+        "rows.rs",
         "types.rs",
         "worker.rs",
     ];
@@ -699,7 +701,7 @@ fn child_event_module_directories_have_canonical_shape() {
                     child.strip_prefix(&root).unwrap().display()
                 ));
             }
-            for required in ["types.rs", "codec.rs"] {
+            for required in ["types.rs", "layout.rs"] {
                 if !child.join(required).exists() {
                     offenders.push(format!(
                         "{}/{}",
@@ -787,7 +789,7 @@ fn workers_folder_has_standard_catalog_shape() {
         "event_projection.rs",
         "dependency_unblock.rs",
         "transit_out.rs",
-        "schema.rs",
+        "queue_rows.rs",
         "sync.rs",
     ];
     let missing = required
@@ -879,13 +881,13 @@ fn codec_files_do_not_define_public_types() {
     let event_root = root.join("src/protocol/event_modules");
     let files = rust_files(&event_root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "codec.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "layout.rs"))
         .collect::<Vec<_>>();
     let forbidden = ["pub struct ", "pub enum ", "pub type "];
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "event module semantic types belong in types.rs; codec.rs is encode/decode only:\n{}",
+        "event module semantic types belong in types.rs; layout.rs is encode/decode only:\n{}",
         violations.join("\n")
     );
 }
@@ -897,7 +899,7 @@ fn codec_files_use_shared_binary_helpers_and_finish_reads() {
     let mut violations = Vec::new();
     for path in rust_files(&event_root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "codec.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "layout.rs"))
     {
         let text = source_text(&path);
         let relative = path.strip_prefix(root).unwrap().display();
@@ -921,7 +923,7 @@ fn codec_files_use_shared_binary_helpers_and_finish_reads() {
 
     assert!(
         violations.is_empty(),
-        "codec.rs should use shared fixed-field binary helpers and reject trailing bytes:\n{}",
+        "layout.rs should use shared fixed-field binary helpers and reject trailing bytes:\n{}",
         violations.join("\n")
     );
 }
@@ -930,19 +932,19 @@ fn codec_files_use_shared_binary_helpers_and_finish_reads() {
 fn codec_modules_have_type_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/event_modules");
     let mut offenders = Vec::new();
-    for codec in rust_files(&root)
+    for layout in rust_files(&root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "codec.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "layout.rs"))
     {
-        let types = codec.with_file_name("types.rs");
+        let types = layout.with_file_name("types.rs");
         if !types.exists() {
-            offenders.push(codec.strip_prefix(&root).unwrap().display().to_string());
+            offenders.push(layout.strip_prefix(&root).unwrap().display().to_string());
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "modules with codec.rs must define semantic shapes in sibling types.rs:\n{}",
+        "modules with layout.rs must define semantic shapes in sibling types.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -979,7 +981,7 @@ fn types_files_do_not_depend_on_storage_workers_or_module_adapters() {
 #[test]
 fn connection_schema_does_not_own_store_queries() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source = source_text(&root.join("src/protocol/event_modules/connection/schema.rs"));
+    let source = source_text(&root.join("src/protocol/event_modules/connection/rows.rs"));
     let text = production_text_before_unit_tests(&source);
     let forbidden = ["Store", "table_row(", "table_rows", "table_row_count"];
     let violations = forbidden
@@ -988,7 +990,7 @@ fn connection_schema_does_not_own_store_queries() {
         .collect::<Vec<_>>();
     assert!(
         violations.is_empty(),
-        "connection/schema.rs owns table names and row builders; connection state reads belong in connection/queries.rs:\n{}",
+        "connection/rows.rs owns table names and row builders; connection state reads belong in connection/queries.rs:\n{}",
         violations.join("\n")
     );
 }
@@ -1422,7 +1424,7 @@ fn core_store_is_row_only_not_protocol_fact_storage() {
     for needle in forbidden {
         assert!(
             !text.contains(needle),
-            "core/store.rs must be a generic row store; protocol fact storage belongs in protocol/event_modules/schema.rs: contains {needle}"
+            "core/store.rs must be a generic row store; protocol fact storage belongs in protocol/event_modules/rows.rs: contains {needle}"
         );
     }
     assert!(
@@ -1463,7 +1465,7 @@ fn core_store_applies_only_declared_schemas() {
 #[test]
 fn protocol_event_schema_owns_common_fact_indexes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = source_text(&root.join("src/protocol/event_modules/schema.rs"));
+    let text = source_text(&root.join("src/protocol/event_modules/rows.rs"));
     for required in [
         "pub const SCHEMAS",
         "pub const EVENTS",
@@ -1479,7 +1481,7 @@ fn protocol_event_schema_owns_common_fact_indexes() {
     ] {
         assert!(
             text.contains(required),
-            "protocol/event_modules/schema.rs should own common protocol fact/index storage: missing {required}"
+            "protocol/event_modules/rows.rs should own common protocol fact/index storage: missing {required}"
         );
     }
 }
@@ -1487,7 +1489,7 @@ fn protocol_event_schema_owns_common_fact_indexes() {
 #[test]
 fn event_store_lifecycle_is_worker_owned_not_schema_owned() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let protocol_schema = source_text(&root.join("src/protocol/event_modules/schema.rs"));
+    let protocol_schema = source_text(&root.join("src/protocol/event_modules/rows.rs"));
     for forbidden in [
         "pub fn insert_event(",
         "pub fn set_event_status(",
@@ -1496,7 +1498,7 @@ fn event_store_lifecycle_is_worker_owned_not_schema_owned() {
     ] {
         assert!(
             !protocol_schema.contains(forbidden),
-            "protocol/event_modules/schema.rs should define rows and keys only; event lifecycle belongs in workers/event_lifecycle.rs"
+            "protocol/event_modules/rows.rs should define rows and keys only; event lifecycle belongs in workers/event_lifecycle.rs"
         );
     }
 
@@ -1517,10 +1519,10 @@ fn event_store_lifecycle_is_worker_owned_not_schema_owned() {
 #[test]
 fn local_retention_purge_is_worker_owned_not_schema_owned() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let protocol_schema = source_text(&root.join("src/protocol/event_modules/schema.rs"));
+    let protocol_schema = source_text(&root.join("src/protocol/event_modules/rows.rs"));
     assert!(
         !protocol_schema.contains("purge_event"),
-        "protocol/event_modules/schema.rs declares event-store rows and codecs; local retention purge belongs in workers"
+        "protocol/event_modules/rows.rs declares event-store rows and codecs; local retention purge belongs in workers"
     );
 
     let event_retention = source_text(&root.join("src/workers/event_retention.rs"));
@@ -1640,7 +1642,7 @@ fn sync_canonical_bytes_do_not_encode_inbound_or_outbound_direction() {
 #[test]
 fn transit_out_is_id_only_and_transit_batches_inner_events() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let schema = source_text(&root.join("src/workers/schema.rs"));
+    let schema = source_text(&root.join("src/workers/queue_rows.rs"));
     assert!(
         schema.contains("pub fn transit_out_row(")
             && schema.contains("Schema::memory_row_table(\"transit.out.v1\", TRANSIT_OUT)")
@@ -1651,7 +1653,7 @@ fn transit_out_is_id_only_and_transit_batches_inner_events() {
     let transit_commands =
         source_text(&root.join("src/protocol/event_modules/connection/transit/commands.rs"));
     let transit_codec =
-        source_text(&root.join("src/protocol/event_modules/connection/transit/codec.rs"));
+        source_text(&root.join("src/protocol/event_modules/connection/transit/layout.rs"));
     assert!(
         transit_commands.contains("pub fn create_connection_batch")
             && !transit_commands.contains("pub fn create_connection(")
@@ -1668,7 +1670,7 @@ fn network_admission_does_not_reconstruct_connection_request_dependencies() {
         source_text(&root.join("src/protocol/event_modules/connection/transit/projector.rs"));
     let registry = source_text(&root.join("src/protocol/event_modules.rs"));
     let request_codec = source_text(
-        &root.join("src/protocol/event_modules/connection/connection_request/codec.rs"),
+        &root.join("src/protocol/event_modules/connection/connection_request/layout.rs"),
     );
     assert!(
         !transit_projector.contains("INVITE_SECRETS")
@@ -1693,7 +1695,7 @@ fn connection_routes_are_projected_from_receive_metadata() {
         "transport targets are receive-derived connection rows, not a separate event module"
     );
 
-    let schema = source_text(&connection_root.join("schema.rs"));
+    let schema = source_text(&connection_root.join("rows.rs"));
     let request_projector = source_text(&connection_root.join("connection_request/projector.rs"));
     let response_projector = source_text(&connection_root.join("connection_response/projector.rs"));
     assert!(
@@ -1986,7 +1988,7 @@ fn event_module_types_do_not_store_encoded_event_artifacts() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "types.rs should define semantic shapes; canonical bytes live at codec/boundary layers:\n{}",
+        "types.rs should define semantic shapes; canonical bytes live at layout/boundary layers:\n{}",
         violations.join("\n")
     );
 }
@@ -1997,7 +1999,7 @@ fn table_names_are_declared_in_schema_files() {
     let event_root = root.join("src/protocol/event_modules");
     let mut violations = Vec::new();
     for path in rust_files(&event_root) {
-        if path.file_name().is_some_and(|name| name == "schema.rs") {
+        if path.file_name().is_some_and(|name| name == "rows.rs") {
             continue;
         }
         let text = source_text(&path);
@@ -2007,7 +2009,7 @@ fn table_names_are_declared_in_schema_files() {
     }
     assert!(
         violations.is_empty(),
-        "module table names belong in schema.rs as typed TableName declarations, with projectors/queries using those declarations:\n{}",
+        "module table names belong in rows.rs as typed TableName declarations, with projectors/queries using those declarations:\n{}",
         violations.join("\n")
     );
 }
@@ -2040,7 +2042,7 @@ fn schema_files_are_not_empty_placeholders() {
     let mut violations = Vec::new();
     for path in rust_files(&event_root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "schema.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "rows.rs"))
     {
         let text = source_text(&path);
         if !text.contains("TableName::new(") || !text.contains("pub const SCHEMAS") {
@@ -2049,7 +2051,7 @@ fn schema_files_are_not_empty_placeholders() {
     }
     assert!(
         violations.is_empty(),
-        "omit schema.rs when a module owns no tables; schema files must declare real table names and schemas:\n{}",
+        "omit rows.rs when a module owns no tables; schema files must declare real table names and schemas:\n{}",
         violations.join("\n")
     );
 }
@@ -2059,8 +2061,8 @@ fn new_poc8_modules_document_responsibility_boundaries() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = vec![
         root.join("src/core/logical_clock.rs"),
-        root.join("src/protocol/event_modules/content/cli.rs"),
-        root.join("src/protocol/event_modules/identity/cli.rs"),
+        root.join("src/protocol/event_modules/content/command_line.rs"),
+        root.join("src/protocol/event_modules/identity/command_line.rs"),
         root.join("src/workers/connection.rs"),
         root.join("src/workers/transit_out.rs"),
         root.join("src/workers/pipeline_helpers.rs"),
@@ -2219,7 +2221,7 @@ fn event_records_are_constructed_only_by_codecs() {
     let src_root = root.join("src");
     let mut violations = Vec::new();
     for path in rust_files(&src_root) {
-        let is_codec = path.file_name().is_some_and(|name| name == "codec.rs");
+        let is_codec = path.file_name().is_some_and(|name| name == "layout.rs");
         if is_codec {
             continue;
         }
@@ -2233,7 +2235,7 @@ fn event_records_are_constructed_only_by_codecs() {
     }
     assert!(
         violations.is_empty(),
-        "EventRecord literals belong in codec constructors so metadata matches canonical bytes:\n{}",
+        "EventRecord literals belong in layout constructors so metadata matches canonical bytes:\n{}",
         violations.join("\n")
     );
 }
@@ -2304,7 +2306,7 @@ fn legacy_pipeline_projection_output_wraps_core_output_and_adapts_table_parts() 
     assert!(
         impl_body.contains("AtomicIntent::PutRow(row).into_intent()")
             && impl_body.contains("AtomicIntent::DeleteRow(delete).into_intent()")
-            && impl_body.contains("schema::event_label_rows(labels)")
+            && impl_body.contains("rows::event_label_rows(labels)")
             && impl_body.contains("projection_parts(rows, deletes, labels)"),
         "legacy ProjectionOutput adapters must convert rows, deletes, and labels into core atomic intents"
     );
@@ -2579,7 +2581,7 @@ fn cli_rs_no_business_logic() {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         let relative = path.strip_prefix(root).unwrap().display().to_string();
-        // Crypto belongs in commands.rs (signing) or codec.rs (envelope
+        // Crypto belongs in commands.rs (signing) or layout.rs (envelope
         // packing). cli.rs must not import core::crypto.
         for needle in ["use crate::core::crypto", "crate::core::crypto::"] {
             if production.contains(needle) {
@@ -2628,7 +2630,7 @@ fn cli_rs_no_business_logic() {
 
 #[test]
 fn codec_rs_no_semantic_validation() {
-    // codec.rs files encode/decode wire bytes. The only validation allowed
+    // layout.rs files encode/decode wire bytes. The only validation allowed
     // is `validate_signed_payload`, which checks the envelope's leading
     // type tag and metadata structure - not semantic invariants. Semantic
     // validation (checking parsed event content against rules) belongs in
@@ -2638,7 +2640,7 @@ fn codec_rs_no_semantic_validation() {
     let mut offenders = Vec::new();
     for path in rust_files(&event_root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "codec.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "layout.rs"))
     {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
@@ -2661,7 +2663,7 @@ fn codec_rs_no_semantic_validation() {
             // Reject all `validate_*` except the whitelisted envelope tag check.
             if name.starts_with("validate_") && name != "validate_signed_payload" {
                 offenders.push(format!(
-                    "{relative}: `fn {name}` is a validation helper (only validate_signed_payload allowed in codec.rs)"
+                    "{relative}: `fn {name}` is a validation helper (only validate_signed_payload allowed in layout.rs)"
                 ));
             }
             // Reject any fn that looks like semantic validation: takes a
@@ -2694,7 +2696,7 @@ fn codec_rs_no_semantic_validation() {
 
     assert!(
         offenders.is_empty(),
-        "codec.rs is encode/decode only; semantic validation goes to projector.rs or commands.rs:\n{}",
+        "layout.rs is encode/decode only; semantic validation goes to projector.rs or commands.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -2739,25 +2741,25 @@ fn queries_rs_is_read_only() {
     );
 }
 
-// Returns (admit_gate_whitelist, store_helper_whitelist) for schema.rs
+// Returns (admit_gate_whitelist, store_helper_whitelist) for rows.rs
 // boundary lints. Kept here so both lints share one source of truth.
 fn schema_rs_boundary_whitelists() -> (&'static [&'static str], &'static [&'static str]) {
     const ADMIT_GATE: &[&str] = &[
-        "src/protocol/event_modules/content/message/schema.rs",
-        "src/protocol/event_modules/content/reaction/schema.rs",
-        "src/protocol/event_modules/content/file/schema.rs",
-        "src/protocol/event_modules/content/file_slice/schema.rs",
+        "src/protocol/event_modules/content/message/rows.rs",
+        "src/protocol/event_modules/content/reaction/rows.rs",
+        "src/protocol/event_modules/content/file/rows.rs",
+        "src/protocol/event_modules/content/file_slice/rows.rs",
     ];
     // The protocol-wide root schema deliberately re-exports query helpers
     // so admit-gates inside event_modules can call them without crossing
     // the `queries::` boundary.
-    const STORE_HELPER: &[&str] = &["src/protocol/event_modules/schema.rs"];
+    const STORE_HELPER: &[&str] = &["src/protocol/event_modules/rows.rs"];
     (ADMIT_GATE, STORE_HELPER)
 }
 
 #[test]
 fn schema_rs_no_store_queries_or_mutations() {
-    // schema.rs files declare table names, row builders, and decode helpers
+    // rows.rs files declare table names, row builders, and decode helpers
     // for their own rows. Read queries against Store belong in queries.rs;
     // mutations belong in workers/projectors. See schema_rs_boundary_whitelists
     // for the documented exceptions.
@@ -2768,7 +2770,7 @@ fn schema_rs_no_store_queries_or_mutations() {
     let mut offenders = Vec::new();
     for path in rust_files(&event_root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "schema.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "rows.rs"))
     {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
@@ -2816,7 +2818,7 @@ fn schema_rs_no_store_queries_or_mutations() {
 
     assert!(
         offenders.is_empty(),
-        "schema.rs files declare tables and row helpers; queries belong in queries.rs and mutations belong in workers:\n{}",
+        "rows.rs files declare tables and row helpers; queries belong in queries.rs and mutations belong in workers:\n{}",
         offenders.join("\n")
     );
 }
@@ -2839,7 +2841,7 @@ fn schema_rs_no_validation_functions() {
     let mut offenders = Vec::new();
     for path in rust_files(&event_root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "schema.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "rows.rs"))
     {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
@@ -2875,7 +2877,7 @@ fn schema_rs_no_validation_functions() {
 
     assert!(
         offenders.is_empty(),
-        "schema.rs holds row helpers, not validation logic; only the documented admit-gate exception (admit_check_received in content/{{message,reaction,file,file_slice}}) is allowed:\n{}",
+        "rows.rs holds row helpers, not validation logic; only the documented admit-gate exception (admit_check_received in content/{{message,reaction,file,file_slice}}) is allowed:\n{}",
         offenders.join("\n")
     );
 }
@@ -2890,12 +2892,12 @@ fn file_inventory_for_event_modules() {
     let canonical = [
         "mod.rs",
         "types.rs",
-        "codec.rs",
+        "layout.rs",
         "commands.rs",
         "projector.rs",
-        "schema.rs",
+        "rows.rs",
         "queries.rs",
-        "cli.rs",
+        "command_line.rs",
         "cli_tests.rs",
     ];
     let mut offenders = Vec::new();
@@ -2935,7 +2937,7 @@ fn file_inventory_for_event_modules() {
 
     assert!(
         offenders.is_empty(),
-        "child event-module directories may contain only canonical filenames (mod/types/codec/commands/projector/schema/queries/cli/cli_tests); split new concerns into one of these roles rather than adding new filenames:\n{}",
+        "child event-module directories may contain only canonical filenames (types/layout/commands/projector/rows/queries/command_line/cli_tests); split new concerns into one of these roles rather than adding new filenames:\n{}",
         offenders.join("\n")
     );
 }

@@ -7,7 +7,7 @@
 //! - the local logical clock, which feeds the cover-horizon floor
 //!   `now_minute - COVER_HORIZON_MINUTES`;
 //! - the per-workspace `last_chopped_floor` row this worker writes
-//!   (`disappearing_messages_setting::schema::WORKSPACE_CHOP_FLOOR`).
+//!   (`disappearing_messages_setting::rows::WORKSPACE_CHOP_FLOOR`).
 //!
 //! Step: for each workspace + removal_frontier known on the local peer,
 //! compute `effective_floor = max(setting_floor, horizon_floor)`. If
@@ -49,7 +49,7 @@ use crate::core::logical_clock;
 use crate::core::store::Store;
 use crate::protocol::event_modules::content::message::types::UNIX_MINUTE_MS;
 use crate::protocol::event_modules::encryption::disappearing_messages_setting::queries as setting_queries;
-use crate::protocol::event_modules::encryption::disappearing_messages_setting::schema as setting_schema;
+use crate::protocol::event_modules::encryption::disappearing_messages_setting::rows as setting_schema;
 use crate::protocol::event_modules::encryption::disappearing_messages_setting::types::COVER_HORIZON_MINUTES;
 use crate::protocol::event_modules::encryption::removal_frontier::queries as frontier_queries;
 use crate::protocol::event_modules::identity::workspace::queries as workspace_queries;
@@ -236,11 +236,11 @@ mod tests {
     use crate::core::crypto::{self as core_crypto, Ed25519PrivateKey};
     use crate::core::store::Store;
     use crate::protocol::event_modules::encryption::disappearing_messages_setting::queries as setting_queries;
-    use crate::protocol::event_modules::encryption::disappearing_messages_setting::schema as setting_schema;
+    use crate::protocol::event_modules::encryption::disappearing_messages_setting::rows as setting_schema;
     use crate::protocol::event_modules::encryption::local_history_node_secret;
     use crate::protocol::event_modules::encryption::local_key_secret;
     use crate::protocol::event_modules::encryption::removal_frontier;
-    use crate::protocol::event_modules::identity::workspace::schema as workspace_schema;
+    use crate::protocol::event_modules::identity::workspace::rows as workspace_schema;
     use crate::protocol::event_modules::types::{event_id, EventId, EventStatus};
     use crate::protocol::Protocol;
     use crate::workers::event_lifecycle;
@@ -259,16 +259,16 @@ mod tests {
         signer_private_key: &Ed25519PrivateKey,
     ) -> crate::protocol::event_modules::types::EventRecord {
         let payload =
-            removal_frontier::codec::encode(&removal_frontier::types::RemovalFrontierEvent {
+            removal_frontier::layout::encode(&removal_frontier::types::RemovalFrontierEvent {
                 workspace_id: WORKSPACE,
                 created_at_ms: 1,
                 authority_admin_id: ADMIN_ID,
                 removal_event_ids: Vec::new(),
             })
             .expect("encode frontier");
-        let envelope = removal_frontier::codec::sign([8; 32], signer_private_key, payload);
-        let bytes = removal_frontier::codec::encode_signed(&envelope);
-        removal_frontier::codec::signed_record_from_bytes(bytes).expect("signed record")
+        let envelope = removal_frontier::layout::sign([8; 32], signer_private_key, payload);
+        let bytes = removal_frontier::layout::encode_signed(&envelope);
+        removal_frontier::layout::signed_record_from_bytes(bytes).expect("signed record")
     }
 
     fn seed_local_key_secret(store: &Store) -> EventId {
@@ -286,7 +286,7 @@ mod tests {
                 event_lifecycle::insert_event(store, &frontier_record, EventStatus::Applied)?;
                 event_lifecycle::insert_event(store, &record, EventStatus::Applied)?;
                 store.insert_table_rows_in_tx(vec![
-                    local_key_secret::schema::local_key_secret_row(
+                    local_key_secret::rows::local_key_secret_row(
                         local_key_secret_id,
                         &output.value.event,
                     ),
@@ -294,12 +294,12 @@ mod tests {
                 Ok(())
             })
             .expect("seed local key secret");
-        // The dispatcher enumerates `removal_frontier::schema` rows, which
+        // The dispatcher enumerates `removal_frontier::rows` rows, which
         // get written by the projector for shared frontier events. The seed
         // helper inserts the frontier record but not its projection row, so
         // do that explicitly.
         store
-            .insert_table_rows(vec![removal_frontier::schema::removal_frontier_row(
+            .insert_table_rows(vec![removal_frontier::rows::removal_frontier_row(
                 frontier_id,
                 &removal_frontier::types::RemovalFrontierEvent {
                     workspace_id: WORKSPACE,
@@ -313,7 +313,7 @@ mod tests {
         frontier_id
     }
 
-    /// Insert a workspace projection row (without going through the codec /
+    /// Insert a workspace projection row (without going through the layout /
     /// projector) so the dispatcher's `workspace_queries::list_all` finds it.
     fn seed_workspace_row(store: &Store) {
         let row =
@@ -323,7 +323,7 @@ mod tests {
             .expect("insert workspace row");
     }
 
-    /// Insert an admin-signed setting row directly into the schema. We
+    /// Insert an admin-signed setting row directly into the rows. We
     /// don't go through `commands::set` here because that path requires
     /// admitting a real signed event with a chain of admin events; for
     /// the dispatcher's contract the only thing that matters is that

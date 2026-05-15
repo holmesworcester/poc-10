@@ -19,7 +19,7 @@ use crate::protocol::event_modules::worker::{
     AdmitDecision, EventRegistry, EventWithContext, ProjectionDecision, ReceivedRecord,
 };
 use crate::workers::pipeline_helpers::event_pipeline::is_wait_for_dependency_error;
-use crate::workers::schema::TransitProvenance;
+use crate::workers::queue_rows::TransitProvenance;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modules;
@@ -152,39 +152,39 @@ pub fn canonical_in(
     }
 }
 
-/// Aggregate every event-module schema. Storage ownership stays explicit so
+/// Aggregate every event-module rows. Storage ownership stays explicit so
 /// adding a new module-owned table is one line here plus the actual
-/// declaration in that module's `schema.rs`.
+/// declaration in that module's `rows.rs`.
 pub fn schemas() -> Vec<crate::core::store::Schema> {
-    use crate::protocol::event_modules::schema;
+    use crate::protocol::event_modules::rows;
     let mut out = Vec::new();
-    out.extend_from_slice(schema::SCHEMAS);
-    out.extend_from_slice(identity::admin::schema::SCHEMAS);
-    out.extend_from_slice(identity::device_invite::schema::SCHEMAS);
-    out.extend_from_slice(identity::endpoint::schema::SCHEMAS);
-    out.extend_from_slice(identity::endpoint_shared::schema::SCHEMAS);
-    out.extend_from_slice(identity::invite::schema::SCHEMAS);
-    out.extend_from_slice(identity::invite_accepted::schema::SCHEMAS);
-    out.extend_from_slice(identity::invite_server::schema::SCHEMAS);
-    out.extend_from_slice(identity::user::schema::SCHEMAS);
-    out.extend_from_slice(identity::user_invite::schema::SCHEMAS);
-    out.extend_from_slice(identity::workspace::schema::SCHEMAS);
-    out.extend_from_slice(content::content_event::schema::SCHEMAS);
-    out.extend_from_slice(content::message::schema::SCHEMAS);
-    out.extend_from_slice(content::message_deletion::schema::SCHEMAS);
-    out.extend_from_slice(content::reaction::schema::SCHEMAS);
-    out.extend_from_slice(content::file::schema::SCHEMAS);
-    out.extend_from_slice(content::file_slice::schema::SCHEMAS);
-    out.extend_from_slice(encryption::disappearing_messages_setting::schema::SCHEMAS);
-    out.extend_from_slice(encryption::key_request::schema::SCHEMAS);
-    out.extend_from_slice(encryption::key_wrap::schema::SCHEMAS);
-    out.extend_from_slice(encryption::local_history_node_secret::schema::SCHEMAS);
-    out.extend_from_slice(encryption::local_key_secret::schema::SCHEMAS);
-    out.extend_from_slice(encryption::local_recipient_key::schema::SCHEMAS);
-    out.extend_from_slice(encryption::recipient_key::schema::SCHEMAS);
-    out.extend_from_slice(encryption::removal_frontier::schema::SCHEMAS);
-    out.extend_from_slice(connection::schema::SCHEMAS);
-    out.extend_from_slice(sync::schema::SCHEMAS);
-    out.extend_from_slice(test_events::event_with_deps::schema::SCHEMAS);
+    out.extend_from_slice(rows::SCHEMAS);
+    out.extend_from_slice(identity::admin::rows::SCHEMAS);
+    out.extend_from_slice(identity::device_invite::rows::SCHEMAS);
+    out.extend_from_slice(identity::endpoint::rows::SCHEMAS);
+    out.extend_from_slice(identity::endpoint_shared::rows::SCHEMAS);
+    out.extend_from_slice(identity::invite::rows::SCHEMAS);
+    out.extend_from_slice(identity::invite_accepted::rows::SCHEMAS);
+    out.extend_from_slice(identity::invite_server::rows::SCHEMAS);
+    out.extend_from_slice(identity::user::rows::SCHEMAS);
+    out.extend_from_slice(identity::user_invite::rows::SCHEMAS);
+    out.extend_from_slice(identity::workspace::rows::SCHEMAS);
+    out.extend_from_slice(content::content_event::rows::SCHEMAS);
+    out.extend_from_slice(content::message::rows::SCHEMAS);
+    out.extend_from_slice(content::message_deletion::rows::SCHEMAS);
+    out.extend_from_slice(content::reaction::rows::SCHEMAS);
+    out.extend_from_slice(content::file::rows::SCHEMAS);
+    out.extend_from_slice(content::file_slice::rows::SCHEMAS);
+    out.extend_from_slice(encryption::disappearing_messages_setting::rows::SCHEMAS);
+    out.extend_from_slice(encryption::key_request::rows::SCHEMAS);
+    out.extend_from_slice(encryption::key_wrap::rows::SCHEMAS);
+    out.extend_from_slice(encryption::local_history_node_secret::rows::SCHEMAS);
+    out.extend_from_slice(encryption::local_key_secret::rows::SCHEMAS);
+    out.extend_from_slice(encryption::local_recipient_key::rows::SCHEMAS);
+    out.extend_from_slice(encryption::recipient_key::rows::SCHEMAS);
+    out.extend_from_slice(encryption::removal_frontier::rows::SCHEMAS);
+    out.extend_from_slice(connection::rows::SCHEMAS);
+    out.extend_from_slice(sync::rows::SCHEMAS);
+    out.extend_from_slice(test_events::event_with_deps::rows::SCHEMAS);
     out
 }

@@ -50,7 +50,7 @@ use crate::workers::event_retention;
 use crate::workers::pipeline_helpers::event_pipeline::EventRegistry;
 use crate::workers::DaemonWorkerContext;
 
-use message_deletion::schema::{
+use message_deletion::rows::{
     self as message_deletion_schema, purge_instruction_key, purge_instruction_row,
     purge_retire_coords_row, PurgeInstruction, PurgeKind, PurgeRetireCoords,
 };
@@ -255,8 +255,8 @@ fn process_message(
         });
     };
     report.scanned_events += 1;
-    let envelope = message::codec::decode_signed(&bytes)?;
-    let event = message::codec::decode(&envelope.payload)?;
+    let envelope = message::layout::decode_signed(&bytes)?;
+    let event = message::layout::decode(&envelope.payload)?;
     if event.workspace_id != workspace_id {
         return Ok(InstructionOutcome {
             needs_retire: false,
@@ -287,7 +287,7 @@ fn process_message(
         .map_err(|err| format!("stamp message retire coords: {err}"))?;
 
     let inserted = store
-        .insert_table_rows_in_tx(vec![message::schema::message_tombstone_row(
+        .insert_table_rows_in_tx(vec![message::rows::message_tombstone_row(
             event.workspace_id,
             message_id,
             event.author_user_id,
@@ -298,8 +298,8 @@ fn process_message(
 
     report.message_rows_deleted += store
         .delete_table_rows_in_tx(
-            message::schema::MESSAGES,
-            vec![message::schema::message_key(event.workspace_id, message_id)],
+            message::rows::MESSAGES,
+            vec![message::rows::message_key(event.workspace_id, message_id)],
         )
         .map_err(|err| format!("delete message row: {err}"))?;
     if event_retention::purge_event_storage_in_tx(store, &message_id)
@@ -335,12 +335,12 @@ fn process_reaction(
         });
     };
     report.scanned_events += 1;
-    let envelope = reaction::codec::decode_signed(&bytes)?;
-    let event = reaction::codec::decode(&envelope.payload)?;
+    let envelope = reaction::layout::decode_signed(&bytes)?;
+    let event = reaction::layout::decode(&envelope.payload)?;
     report.reaction_rows_deleted += store
         .delete_table_rows_in_tx(
-            reaction::schema::REACTIONS,
-            vec![reaction::schema::reaction_key(
+            reaction::rows::REACTIONS,
+            vec![reaction::rows::reaction_key(
                 event.workspace_id,
                 reaction_id,
             )],
@@ -385,8 +385,8 @@ fn process_file(
         });
     };
     report.scanned_events += 1;
-    let envelope = file::codec::decode_signed(&bytes)?;
-    let event = file::codec::decode(&envelope.payload)?;
+    let envelope = file::layout::decode_signed(&bytes)?;
+    let event = file::layout::decode(&envelope.payload)?;
     if event.workspace_id != workspace_id {
         return Ok(InstructionOutcome {
             needs_retire: false,
@@ -411,19 +411,19 @@ fn process_file(
         .replace_table_rows_in_tx(vec![purge_retire_coords_row(&coords)])
         .map_err(|err| format!("stamp file retire coords: {err}"))?;
 
-    let primary_key = file::schema::file_key(event.workspace_id, file_event_id);
+    let primary_key = file::rows::file_key(event.workspace_id, file_event_id);
     let by_message_key =
-        file::schema::file_by_message_key(event.workspace_id, event.message_id, file_event_id);
+        file::rows::file_by_message_key(event.workspace_id, event.message_id, file_event_id);
     let by_file_id_key =
-        file::schema::file_by_file_id_key(event.workspace_id, event.file_id, file_event_id);
+        file::rows::file_by_file_id_key(event.workspace_id, event.file_id, file_event_id);
     report.file_rows_deleted += store
-        .delete_table_rows_in_tx(file::schema::FILES, vec![primary_key])
+        .delete_table_rows_in_tx(file::rows::FILES, vec![primary_key])
         .map_err(|err| format!("delete file row: {err}"))?;
     let _ = store
-        .delete_table_rows_in_tx(file::schema::FILES_BY_MESSAGE, vec![by_message_key])
+        .delete_table_rows_in_tx(file::rows::FILES_BY_MESSAGE, vec![by_message_key])
         .map_err(|err| format!("delete files_by_message row: {err}"))?;
     let _ = store
-        .delete_table_rows_in_tx(file::schema::FILES_BY_FILE_ID, vec![by_file_id_key])
+        .delete_table_rows_in_tx(file::rows::FILES_BY_FILE_ID, vec![by_file_id_key])
         .map_err(|err| format!("delete files_by_file_id row: {err}"))?;
 
     // Cascade every slice projection row for this file_id. Slice canonical
@@ -431,8 +431,8 @@ fn process_file(
     // purged in their own dispatch branch.
     let slice_rows = store
         .table_rows_with_key_prefix(
-            file_slice::schema::FILE_SLICES,
-            &file_slice::schema::file_slice_prefix(event.workspace_id, event.file_id),
+            file_slice::rows::FILE_SLICES,
+            &file_slice::rows::file_slice_prefix(event.workspace_id, event.file_id),
             usize::MAX,
         )
         .map_err(|err| format!("load file slice rows: {err}"))?;
@@ -440,7 +440,7 @@ fn process_file(
         let mut cascade_rows = Vec::with_capacity(slice_rows.len());
         let slice_keys: Vec<Vec<u8>> = slice_rows.iter().map(|(key, _)| key.clone()).collect();
         for (key, value) in slice_rows {
-            let row = file_slice::schema::decode_file_slice_row(&key, &value)?;
+            let row = file_slice::rows::decode_file_slice_row(&key, &value)?;
             cascade_rows.push(purge_instruction_row(
                 event.workspace_id,
                 row.slice_event_id,
@@ -448,7 +448,7 @@ fn process_file(
             ));
         }
         report.file_slice_rows_deleted += store
-            .delete_table_rows_in_tx(file_slice::schema::FILE_SLICES, slice_keys)
+            .delete_table_rows_in_tx(file_slice::rows::FILE_SLICES, slice_keys)
             .map_err(|err| format!("delete file slice rows: {err}"))?;
         store
             .insert_table_rows_in_tx(cascade_rows)
@@ -483,12 +483,12 @@ fn process_file_slice(
         });
     };
     report.scanned_events += 1;
-    let envelope = file_slice::codec::decode_signed(&bytes)?;
-    let (slice, _file_event_id) = file_slice::codec::decode(&envelope.payload)?;
+    let envelope = file_slice::layout::decode_signed(&bytes)?;
+    let (slice, _file_event_id) = file_slice::layout::decode(&envelope.payload)?;
     let slot_key =
-        file_slice::schema::file_slice_key(slice.workspace_id, slice.file_id, slice.slice_number);
+        file_slice::rows::file_slice_key(slice.workspace_id, slice.file_id, slice.slice_number);
     report.file_slice_rows_deleted += store
-        .delete_table_rows_in_tx(file_slice::schema::FILE_SLICES, vec![slot_key])
+        .delete_table_rows_in_tx(file_slice::rows::FILE_SLICES, vec![slot_key])
         .map_err(|err| format!("delete file slice row: {err}"))?;
     if event_retention::purge_event_storage_in_tx(store, &slice_event_id)
         .map_err(|err| format!("purge file slice event: {err}"))?
@@ -577,8 +577,8 @@ fn cascade_files_for_message(
 ) -> Result<(), String> {
     let by_message_rows = store
         .table_rows_with_key_prefix(
-            file::schema::FILES_BY_MESSAGE,
-            &file::schema::file_by_message_prefix(workspace_id, message_id),
+            file::rows::FILES_BY_MESSAGE,
+            &file::rows::file_by_message_prefix(workspace_id, message_id),
             usize::MAX,
         )
         .map_err(|err| format!("load files_by_message for cascade: {err}"))?;
@@ -615,7 +615,7 @@ fn _unused_keep_imports_alive() -> Option<&'static str> {
 mod tests {
     use crate::protocol::event_modules::content::message::types::MessagePlaintext;
     use crate::protocol::event_modules::content::reaction::types::ReactionPlaintext;
-    use crate::protocol::event_modules::schema::{self as event_schema, EventLabel};
+    use crate::protocol::event_modules::rows::{self as event_schema, EventLabel};
     use crate::protocol::event_modules::types::{event_id, EventStatus};
     use crate::protocol::Protocol;
     use crate::workers::event_lifecycle;
@@ -693,15 +693,15 @@ mod tests {
             .expect("insert reaction event");
         // Seal the sealed-reaction projection row so the cascade scan
         // finds the reaction by its target_message_id.
-        let reaction_inner = reaction::codec::decode(
-            &reaction::codec::decode_signed(&reaction_record.canonical_bytes)
+        let reaction_inner = reaction::layout::decode(
+            &reaction::layout::decode_signed(&reaction_record.canonical_bytes)
                 .expect("decode signed reaction")
                 .payload,
         )
         .expect("decode reaction");
         store
             .insert_table_rows(vec![
-                message::schema::message_row(
+                message::rows::message_row(
                     message_id,
                     SIGNER,
                     &MessagePlaintext {
@@ -714,7 +714,7 @@ mod tests {
                     },
                 )
                 .expect("message row"),
-                reaction::schema::reaction_row(
+                reaction::rows::reaction_row(
                     reaction_id,
                     SIGNER,
                     &ReactionPlaintext {
@@ -728,7 +728,7 @@ mod tests {
                     },
                 )
                 .expect("reaction row"),
-                reaction::schema::sealed_reaction_row(reaction_id, SIGNER, &reaction_inner)
+                reaction::rows::sealed_reaction_row(reaction_id, SIGNER, &reaction_inner)
                     .expect("sealed reaction row"),
             ])
             .expect("insert read rows");
@@ -844,7 +844,7 @@ mod tests {
         // NO message read-model row — already deleted in the lost tick.
         // Pre-existing tombstone row from the lost tick.
         store
-            .insert_table_rows(vec![message::schema::message_tombstone_row(
+            .insert_table_rows(vec![message::rows::message_tombstone_row(
                 WORKSPACE,
                 message_id,
                 AUTHOR,
@@ -866,14 +866,14 @@ mod tests {
             .expect("insert stamped coords");
 
         let tombstones_before = store
-            .table_row_count(message::schema::MESSAGE_TOMBSTONES)
+            .table_row_count(message::rows::MESSAGE_TOMBSTONES)
             .expect("tombstone count before");
 
         let protocol = Protocol::new();
         run(&store, &protocol, Work::Drain { limit: 10 }).expect("re-drain after crash");
 
         let tombstones_after = store
-            .table_row_count(message::schema::MESSAGE_TOMBSTONES)
+            .table_row_count(message::rows::MESSAGE_TOMBSTONES)
             .expect("tombstone count after");
         assert_eq!(
             tombstones_before, tombstones_after,

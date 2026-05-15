@@ -20,7 +20,7 @@ use crate::protocol::event_modules::encryption::local_key_secret;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::wire::Writer;
 
-use super::schema::{
+use super::rows::{
     self, decode_local_history_node_secret_row, decode_local_history_node_tombstone_row,
     local_history_node_secret_key, LOCAL_HISTORY_NODE_SECRETS, LOCAL_HISTORY_NODE_TOMBSTONES,
 };
@@ -348,9 +348,9 @@ pub fn cover_summary(store: &Store, workspace_id: EventId) -> Result<Vec<u8>, St
     let mut out = Writer::with_capacity(
         b"topo cover summary v4".len()
             + 4
-            + rows.len() * schema::COVER_SUMMARY_ROW_LEN
+            + rows.len() * rows::COVER_SUMMARY_ROW_LEN
             + 4
-            + tombstones.len() * schema::COVER_SUMMARY_TOMBSTONE_LEN,
+            + tombstones.len() * rows::COVER_SUMMARY_TOMBSTONE_LEN,
     );
     out.raw(b"topo cover summary v4");
     let len = u32::try_from(rows.len()).unwrap_or(u32::MAX);

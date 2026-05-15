@@ -6,19 +6,19 @@
 //! author here; the file projector and the purge worker authorize row cleanup
 //! against the retained label when the target bytes are available.
 
-use crate::protocol::event_modules::content::message_deletion::schema::{
+use crate::protocol::event_modules::content::message_deletion::rows::{
     purge_instruction_row, PurgeKind,
 };
 use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
-use crate::protocol::event_modules::schema::EventLabel;
+use crate::protocol::event_modules::rows::EventLabel;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::codec;
+use super::layout;
 use super::types::deletion_label;
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let deletion = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let deletion = layout::decode(&envelope.payload)?;
     if event.record.workspace_id != Some(deletion.workspace_id) {
         return Err("file deletion workspace metadata does not match event body".to_string());
     }
@@ -26,14 +26,14 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let signer = event
         .context
         .require_dependency(&envelope.signer_endpoint_shared_id)?;
-    let signer_envelope = signed::codec::decode(&signer.canonical_bytes).map_err(|_| {
+    let signer_envelope = signed::layout::decode(&signer.canonical_bytes).map_err(|_| {
         "file deletion signer dependency is not a signed endpoint_shared".to_string()
     })?;
-    if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    if signer_envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err("file deletion signer dependency is not a signed endpoint_shared".to_string());
     }
-    let signer_endpoint_shared =
-        endpoint_shared::codec::decode(&signer_envelope.payload).map_err(|_| {
+    let signer_endpoint_shared = endpoint_shared::layout::decode(&signer_envelope.payload)
+        .map_err(|_| {
             "file deletion signer dependency is not a signed endpoint_shared".to_string()
         })?;
     if signer_endpoint_shared.workspace_id != deletion.workspace_id {
@@ -51,12 +51,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
 
     let author = event.context.require_dependency(&deletion.author_user_id)?;
-    let author_envelope = signed::codec::decode(&author.canonical_bytes)
+    let author_envelope = signed::layout::decode(&author.canonical_bytes)
         .map_err(|_| "file deletion author dependency is not a signed user".to_string())?;
-    if author_envelope.inner_type != user::codec::TYPE_USER {
+    if author_envelope.inner_type != user::layout::TYPE_USER {
         return Err("file deletion author dependency is not a signed user".to_string());
     }
-    let author_user = user::codec::decode(&author_envelope.payload)
+    let author_user = user::layout::decode(&author_envelope.payload)
         .map_err(|_| "file deletion author dependency is not a signed user".to_string())?;
     if author_user.workspace_id != deletion.workspace_id {
         return Err("file deletion author workspace does not match deletion".to_string());
@@ -89,7 +89,7 @@ mod tests {
     type Record = crate::protocol::event_modules::types::EventRecord;
 
     fn signing_public_key_for(private_key: &[u8; 32]) -> [u8; 32] {
-        codec::sign([0; 32], private_key, vec![codec::TYPE_FILE_DELETION]).signer_public_key
+        layout::sign([0; 32], private_key, vec![layout::TYPE_FILE_DELETION]).signer_public_key
     }
 
     fn endpoint_shared_record(
@@ -98,7 +98,7 @@ mod tests {
         signing_public_key: [u8; 32],
     ) -> Record {
         let payload =
-            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+            endpoint_shared::layout::encode(&endpoint_shared::types::EndpointSharedEvent {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id: user_id,
@@ -115,7 +115,7 @@ mod tests {
     }
 
     fn user_record(workspace_id: [u8; 32]) -> Record {
-        let payload = user::codec::encode(&user::types::UserEvent {
+        let payload = user::layout::encode(&user::types::UserEvent {
             created_at_ms: 3,
             workspace_id,
             public_key: [22; 32],
@@ -134,16 +134,16 @@ mod tests {
         signer_id: [u8; 32],
         signer_private_key: &[u8; 32],
     ) -> (Record, [u8; 32]) {
-        let payload = codec::encode(&FileDeletionEvent {
+        let payload = layout::encode(&FileDeletionEvent {
             workspace_id,
             created_at_ms: 7,
             target_file_event_id,
             author_user_id,
         });
-        let envelope = codec::sign(signer_id, signer_private_key, payload);
-        let bytes = codec::encode_signed(&envelope);
+        let envelope = layout::sign(signer_id, signer_private_key, payload);
+        let bytes = layout::encode_signed(&envelope);
         let id = event_id(&bytes);
-        (codec::signed_record_from_bytes(bytes).expect("record"), id)
+        (layout::signed_record_from_bytes(bytes).expect("record"), id)
     }
 
     #[test]
@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(
             output.legacy_rows()[0].table,
-            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+            crate::protocol::event_modules::content::message_deletion::rows::PURGE_INSTRUCTIONS
         );
         let mut expected_key = workspace_id.to_vec();
         expected_key.extend_from_slice(&target_id);
@@ -255,22 +255,22 @@ mod tests {
 
     #[test]
     fn record_has_three_dependencies_signer_workspace_author_only() {
-        let payload = codec::encode(&FileDeletionEvent {
+        let payload = layout::encode(&FileDeletionEvent {
             workspace_id: [7; 32],
             created_at_ms: 5,
             target_file_event_id: [10; 32],
             author_user_id: [11; 32],
         });
-        let envelope = codec::sign([12; 32], &[13; 32], payload);
-        let bytes = codec::encode_signed(&envelope);
-        let record = codec::signed_record_from_bytes(bytes).expect("record");
+        let envelope = layout::sign([12; 32], &[13; 32], payload);
+        let bytes = layout::encode_signed(&envelope);
+        let record = layout::signed_record_from_bytes(bytes).expect("record");
         assert_eq!(record.dependencies, vec![[12; 32], [7; 32], [11; 32]]);
         assert_eq!(record.scope, EventScope::Shared);
     }
 
     #[test]
     fn raw_deletion_bytes_are_not_admissible() {
-        let payload = codec::encode(&FileDeletionEvent {
+        let payload = layout::encode(&FileDeletionEvent {
             workspace_id: [7; 32],
             created_at_ms: 5,
             target_file_event_id: [2; 32],

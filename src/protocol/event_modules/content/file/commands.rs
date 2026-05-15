@@ -16,14 +16,14 @@ use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::{
     FileDescriptorCiphertext, FileDescriptorPlaintext, FileEvent, FileRow, SealedFileRow,
     FILE_DESCRIPTOR_CIPHERTEXT_BYTES, MAX_FILE_BYTES,
 };
 
 /// Sanity guard: non-zero ids, size cap, and consistent slice arithmetic.
-/// The codec is intentionally lenient on decode; this helper is shared
+/// The layout is intentionally lenient on decode; this helper is shared
 /// between the authoring path and the receive projector so a malformed
 /// peer event is rejected at projection time too.
 pub(super) fn validate_event_fields(event: &FileEvent) -> Result<(), String> {
@@ -131,19 +131,19 @@ pub fn create(input: CreateFile) -> Result<CommandOutput<CreateFileOutput>, Stri
         filename: input.filename.clone(),
         mime_type: input.mime_type.clone(),
     };
-    let aad = codec::descriptor_associated_data(&event, input.signer_endpoint_shared_id);
+    let aad = layout::descriptor_associated_data(&event, input.signer_endpoint_shared_id);
     let ciphertext: FileDescriptorCiphertext =
-        codec::seal_descriptor_slot(&input.key_secret, &event.nonce, &aad, &plaintext)?;
+        layout::seal_descriptor_slot(&input.key_secret, &event.nonce, &aad, &plaintext)?;
     event.ciphertext = ciphertext;
 
-    let payload = codec::encode(&event)?;
-    let envelope = codec::sign(
+    let payload = layout::encode(&event)?;
+    let envelope = layout::sign(
         input.signer_endpoint_shared_id,
         &input.signer_private_key,
         payload,
     );
-    let bytes = codec::encode_signed(&envelope);
-    let record = codec::signed_record_from_bytes(bytes)?;
+    let bytes = layout::encode_signed(&envelope);
+    let record = layout::signed_record_from_bytes(bytes)?;
     let file_event_id = crate::protocol::event_modules::types::event_id(&record.canonical_bytes);
     Ok(CommandOutput::with_events(
         CreateFileOutput {
@@ -229,9 +229,9 @@ pub fn open_sealed_file_row(
         nonce: sealed.nonce,
         ciphertext: sealed.ciphertext,
     };
-    let aad = codec::descriptor_associated_data(&event, sealed.signer_endpoint_shared_id);
+    let aad = layout::descriptor_associated_data(&event, sealed.signer_endpoint_shared_id);
     let plaintext =
-        codec::open_descriptor_slot(&secret_bytes, &sealed.nonce, &aad, &sealed.ciphertext)
+        layout::open_descriptor_slot(&secret_bytes, &sealed.nonce, &aad, &sealed.ciphertext)
             .map_err(|err| format!("decode file descriptor: {err}"))?;
     Ok(Some(FileRow {
         workspace_id: sealed.workspace_id,
@@ -319,12 +319,12 @@ mod tests {
     fn descriptor_round_trips_filename_and_mime_via_open_with_correct_key_and_aad() {
         let input = make();
         let output = create(input.clone()).expect("create");
-        let envelope = codec::decode_signed(&output.events[0].record().canonical_bytes)
+        let envelope = layout::decode_signed(&output.events[0].record().canonical_bytes)
             .expect("decode signed");
-        let event = codec::decode(&envelope.payload).expect("decode event");
-        let aad = codec::descriptor_associated_data(&event, input.signer_endpoint_shared_id);
+        let event = layout::decode(&envelope.payload).expect("decode event");
+        let aad = layout::descriptor_associated_data(&event, input.signer_endpoint_shared_id);
         let plaintext =
-            codec::open_descriptor_slot(&input.key_secret, &event.nonce, &aad, &event.ciphertext)
+            layout::open_descriptor_slot(&input.key_secret, &event.nonce, &aad, &event.ciphertext)
                 .expect("open slot");
         assert_eq!(plaintext.filename, "secret-name.bin");
         assert_eq!(plaintext.mime_type, "application/x-secret");

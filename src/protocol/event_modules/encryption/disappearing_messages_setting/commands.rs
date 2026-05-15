@@ -17,12 +17,12 @@ use crate::protocol::event_modules::identity::{admin, endpoint, endpoint_shared}
 use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
 
-use super::codec;
+use super::layout;
 use super::queries as setting_queries;
 use super::types::DisappearingMessagesSettingEvent;
 
 /// Sanity guard: `effective_at_minute` must equal `created_at_ms / 60_000`.
-/// The codec is intentionally lenient on decode; this helper is shared
+/// The layout is intentionally lenient on decode; this helper is shared
 /// between the authoring path and the receive projector so a malformed
 /// peer event is rejected at projection time too.
 pub(super) fn validate_event_fields(
@@ -74,15 +74,15 @@ pub fn set(
         previous_setting_id: input.previous_setting_id,
     };
     validate_event_fields(&inner)?;
-    let payload = codec::encode(&inner);
+    let payload = layout::encode(&inner);
     let inner_setting_id = event_id(&payload);
-    let envelope = codec::sign(
+    let envelope = layout::sign(
         input.authority_admin_event_id,
         &input.signer_private_key,
         payload,
     );
-    let bytes = codec::encode_signed(&envelope);
-    let record = codec::signed_record_from_bytes(bytes)?;
+    let bytes = layout::encode_signed(&envelope);
+    let record = layout::signed_record_from_bytes(bytes)?;
     let setting_event_id = event_id(&record.canonical_bytes);
     let proposed = ProposedEvent::new(record);
     Ok(CommandOutput::with_proposed_events(
@@ -371,12 +371,12 @@ fn require_local_membership(
 ) -> Result<endpoint_shared::types::EndpointMembershipRow, String> {
     let local = endpoint::commands::local_keypair(store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let key = endpoint_shared::schema::endpoint_membership_key(local.endpoint, workspace_id);
+    let key = endpoint_shared::rows::endpoint_membership_key(local.endpoint, workspace_id);
     let value = store
-        .table_row(endpoint_shared::schema::ENDPOINT_MEMBERSHIPS, &key)
+        .table_row(endpoint_shared::rows::ENDPOINT_MEMBERSHIPS, &key)
         .map_err(|err| format!("load endpoint membership: {err}"))?
         .ok_or_else(|| "local endpoint is not joined to workspace".to_string())?;
-    let row = endpoint_shared::schema::decode_endpoint_membership_row(&key, &value)?;
+    let row = endpoint_shared::rows::decode_endpoint_membership_row(&key, &value)?;
     if row.signing_public_key != local.signing_public_key {
         return Err("local endpoint signing key does not match workspace membership".to_string());
     }
@@ -389,10 +389,10 @@ fn admin_for_user(
     user_id: EventId,
 ) -> Result<Option<EventId>, String> {
     for (key, value) in store
-        .table_rows_with_key_prefix(admin::schema::ADMINS, &workspace_id, usize::MAX)
+        .table_rows_with_key_prefix(admin::rows::ADMINS, &workspace_id, usize::MAX)
         .map_err(|err| format!("load admins: {err}"))?
     {
-        let row = admin::schema::decode_admin_row(&key, &value)?;
+        let row = admin::rows::decode_admin_row(&key, &value)?;
         if row.user_event_id == user_id {
             return Ok(Some(row.admin_id));
         }

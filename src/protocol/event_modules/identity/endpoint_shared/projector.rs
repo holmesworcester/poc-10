@@ -15,13 +15,13 @@ use crate::protocol::event_modules::identity::{
 };
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, schema};
+use super::{layout, rows};
 
 pub fn project_signed(
     envelope: &signed::types::SignedEnvelope,
     event: &EventWithContext<'_>,
 ) -> Result<ProjectionOutput, String> {
-    let endpoint_shared = codec::decode(&envelope.payload)?;
+    let endpoint_shared = layout::decode(&envelope.payload)?;
     if endpoint_shared.endpoint_id.iter().all(|byte| *byte == 0) {
         return Err("endpoint_shared endpoint_id cannot be empty".to_string());
     }
@@ -35,13 +35,13 @@ pub fn project_signed(
     let signer = event
         .context
         .require_dependency(&envelope.signer_event_id)?;
-    let invite_envelope = signed::codec::decode(&signer.canonical_bytes)
+    let invite_envelope = signed::layout::decode(&signer.canonical_bytes)
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
     let expected_role = match invite_envelope.inner_type {
-        device_invite::codec::TYPE_DEVICE_INVITE => {
+        device_invite::layout::TYPE_DEVICE_INVITE => {
             validate_device_invite_authority(envelope, &invite_envelope, &endpoint_shared)?
         }
-        invite_server::codec::TYPE_INVITE_SERVER => {
+        invite_server::layout::TYPE_INVITE_SERVER => {
             validate_invite_server_authority(envelope, &invite_envelope, &endpoint_shared)?
         }
         _ => return Err("endpoint_shared dependency is not a signed endpoint invite".to_string()),
@@ -50,7 +50,7 @@ pub fn project_signed(
         return Err("endpoint_shared role does not match invite authority".to_string());
     }
 
-    Ok(ProjectionOutput::rows(schema::endpoint_shared_rows(
+    Ok(ProjectionOutput::rows(rows::endpoint_shared_rows(
         event.context.event_id,
         envelope.signer_event_id,
         &endpoint_shared,
@@ -62,7 +62,7 @@ fn validate_device_invite_authority(
     invite_envelope: &signed::types::SignedEnvelope,
     endpoint_shared: &super::types::EndpointSharedEvent,
 ) -> Result<EndpointRole, String> {
-    let invite = device_invite::codec::decode(&invite_envelope.payload)
+    let invite = device_invite::layout::decode(&invite_envelope.payload)
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
     if invite.public_key != envelope.signer_public_key {
         return Err("endpoint_shared signer public key does not match device_invite".to_string());
@@ -81,7 +81,7 @@ fn validate_invite_server_authority(
     invite_envelope: &signed::types::SignedEnvelope,
     endpoint_shared: &super::types::EndpointSharedEvent,
 ) -> Result<EndpointRole, String> {
-    let invite = invite_server::codec::decode(&invite_envelope.payload)
+    let invite = invite_server::layout::decode(&invite_envelope.payload)
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
     if invite.public_key != envelope.signer_public_key {
         return Err("endpoint_shared signer public key does not match invite_server".to_string());
@@ -172,7 +172,7 @@ mod tests {
         )
         .expect("share endpoint");
         let record = output.events[0].record().clone();
-        let envelope = signed::codec::decode(&record.canonical_bytes).expect("signed envelope");
+        let envelope = signed::layout::decode(&record.canonical_bytes).expect("signed envelope");
         (output.value.endpoint_shared_id, record, envelope)
     }
 
@@ -209,15 +209,15 @@ mod tests {
 
         assert_eq!(output.legacy_labels().len(), 0);
         assert_eq!(output.legacy_rows().len(), 2);
-        assert_eq!(output.legacy_rows()[0].table, schema::ENDPOINT_SHARED);
+        assert_eq!(output.legacy_rows()[0].table, rows::ENDPOINT_SHARED);
         assert_eq!(
             output.legacy_rows()[0].key,
-            schema::endpoint_shared_key([1; 32], endpoint_shared_id)
+            rows::endpoint_shared_key([1; 32], endpoint_shared_id)
         );
-        assert_eq!(output.legacy_rows()[1].table, schema::ENDPOINT_MEMBERSHIPS);
+        assert_eq!(output.legacy_rows()[1].table, rows::ENDPOINT_MEMBERSHIPS);
         assert_eq!(
             output.legacy_rows()[1].key,
-            schema::endpoint_membership_key([3; 32], [1; 32])
+            rows::endpoint_membership_key([3; 32], [1; 32])
         );
     }
 
@@ -292,7 +292,7 @@ mod tests {
             public_key: public_key(&[7; 32]),
         };
         let raw_record =
-            device_invite::codec::record_from_bytes(device_invite::codec::encode(&raw_invite))
+            device_invite::layout::record_from_bytes(device_invite::layout::encode(&raw_invite))
                 .expect("raw invite record");
         let device_invite_id = event_id(&raw_record.canonical_bytes);
         let (endpoint_shared_id, record, envelope) =
@@ -336,7 +336,7 @@ mod tests {
         )
         .expect("share invite-server endpoint");
         let record = output.events[0].record().clone();
-        let envelope = signed::codec::decode(&record.canonical_bytes).expect("signed envelope");
+        let envelope = signed::layout::decode(&record.canonical_bytes).expect("signed envelope");
         let event = signed_context(
             output.value.endpoint_shared_id,
             &record,
@@ -345,7 +345,7 @@ mod tests {
         );
 
         let output = project_signed(&envelope, &event).expect("project invite-server endpoint");
-        let row = schema::decode_endpoint_shared_row(
+        let row = rows::decode_endpoint_shared_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -374,7 +374,7 @@ mod tests {
         )
         .expect("share endpoint");
         let record = output.events[0].record().clone();
-        let envelope = signed::codec::decode(&record.canonical_bytes).expect("signed envelope");
+        let envelope = signed::layout::decode(&record.canonical_bytes).expect("signed envelope");
         let event = signed_context(
             output.value.endpoint_shared_id,
             &record,
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn rejects_non_endpoint_shared_payload() {
         let (device_invite_id, invite_record) = device_invite_record([7; 32], [1; 32], [2; 32]);
-        let payload = device_invite::codec::encode(&device_invite::types::DeviceInviteEvent {
+        let payload = device_invite::layout::encode(&device_invite::types::DeviceInviteEvent {
             created_at_ms: 30,
             workspace_id: [1; 32],
             user_authority_event_id: [2; 32],
@@ -401,7 +401,7 @@ mod tests {
         let signed = signed::commands::sign_payload(device_invite_id, &[7; 32], payload)
             .expect("sign payload");
         let record = signed.events[0].record().clone();
-        let envelope = signed::codec::decode(&record.canonical_bytes).expect("signed envelope");
+        let envelope = signed::layout::decode(&record.canonical_bytes).expect("signed envelope");
         let event = signed_context(
             event_id(&record.canonical_bytes),
             &record,

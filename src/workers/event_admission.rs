@@ -70,7 +70,7 @@ mod tests {
     use crate::protocol::event_modules::queries as event_queries;
     use crate::protocol::event_modules::types::event_id;
     use crate::protocol::Protocol;
-    use crate::workers::schema as worker_schema;
+    use crate::workers::queue_rows as worker_rows;
 
     use super::*;
 
@@ -90,9 +90,9 @@ mod tests {
         connection_id: types::ConnectionId,
     ) {
         store
-            .insert_table_rows(vec![worker_schema::transit_canonical_in_row(
+            .insert_table_rows(vec![worker_rows::transit_canonical_in_row(
                 inner,
-                worker_schema::TransitProvenance::connection(
+                worker_rows::TransitProvenance::connection(
                     "127.0.0.1:41001".parse().expect("origin"),
                     local_endpoint,
                     sender_endpoint,
@@ -110,9 +110,9 @@ mod tests {
         sender_endpoint: endpoint::types::EndpointId,
     ) {
         store
-            .insert_table_rows(vec![worker_schema::transit_canonical_in_row(
+            .insert_table_rows(vec![worker_rows::transit_canonical_in_row(
                 inner,
-                worker_schema::TransitProvenance::bootstrap(
+                worker_rows::TransitProvenance::bootstrap(
                     "127.0.0.1:41001".parse().expect("origin"),
                     local_endpoint,
                     sender_endpoint,
@@ -138,7 +138,7 @@ mod tests {
             device_name: "test".to_string(),
         };
         store
-            .insert_table_rows(vec![endpoint_shared::schema::endpoint_membership_row(
+            .insert_table_rows(vec![endpoint_shared::rows::endpoint_membership_row(
                 endpoint_shared_id,
                 [45; 32],
                 &event,
@@ -183,7 +183,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .table_row_count(worker_schema::CANONICAL_IN)
+                .table_row_count(worker_rows::CANONICAL_IN)
                 .expect("canonical queue count"),
             0,
             "rejected inner bytes must not poison canonical admission"
@@ -286,7 +286,7 @@ mod tests {
         let other_workspace_id = [8; 32];
         let store = store();
         store
-            .insert_table_rows(vec![connection::schema::connection_invite_workspace_row(
+            .insert_table_rows(vec![connection::rows::connection_invite_workspace_row(
                 connection_id,
                 invite_workspace_id,
             )])

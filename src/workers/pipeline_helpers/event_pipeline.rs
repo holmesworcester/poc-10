@@ -28,7 +28,7 @@
 //!
 //! Future maintainers should be suspicious of changes that make this file more
 //! knowledgeable. Domain-specific branching here is usually a sign that an event
-//! module is missing a codec, projector, command, query, table, or domain worker.
+//! module is missing a layout, projector, command, query, table, or domain worker.
 //! The important invariant is not that this file stays tiny; it is that it stays
 //! mechanical enough to audit.
 //!
@@ -66,7 +66,7 @@
 //! Inputs: command outputs, decoded records, received records, transit input,
 //! and selected compatibility drain work supplied by CLI/test call sites.
 //! State: durable event rows, ready/blocker indexes, retained direct dependency
-//! edges, generic labels, and worker queue rows declared in `workers::schema`.
+//! edges, generic labels, and worker queue rows declared in `workers::queue_rows`.
 //! Step: admit local canonical records directly, drain queued canonical transit
 //! records, project ready durable events, or run bounded compatibility drains
 //! according to the supplied work item.
@@ -90,10 +90,10 @@ use crate::protocol::event_modules::types::{
     event_id, EventId, EventIndexEntry, EventRecord, EventStatus, ReceiveMetadata,
 };
 
-use crate::protocol::event_modules::schema;
+use crate::protocol::event_modules::rows;
 use crate::workers::dependency_unblock;
 use crate::workers::event_lifecycle;
-use crate::workers::schema as worker_schema;
+use crate::workers::queue_rows as worker_rows;
 
 /// Default upper bound for one ready-event drain.
 ///
@@ -180,22 +180,22 @@ impl ProjectionOutput {
         projection_table_deletes(deletes)
     }
 
-    pub fn labels(labels: Vec<schema::EventLabel>) -> Self {
+    pub fn labels(labels: Vec<rows::EventLabel>) -> Self {
         projection_event_labels(labels)
     }
 
-    pub fn rows_and_labels(rows: Vec<TableRow>, labels: Vec<schema::EventLabel>) -> Self {
+    pub fn rows_and_labels(rows: Vec<TableRow>, labels: Vec<rows::EventLabel>) -> Self {
         projection_table_writes_and_event_labels(rows, labels)
     }
 
-    pub fn deletes_and_labels(deletes: Vec<TableDelete>, labels: Vec<schema::EventLabel>) -> Self {
+    pub fn deletes_and_labels(deletes: Vec<TableDelete>, labels: Vec<rows::EventLabel>) -> Self {
         projection_table_deletes_and_event_labels(deletes, labels)
     }
 
     pub fn from_parts(
         rows: Vec<TableRow>,
         deletes: Vec<TableDelete>,
-        labels: Vec<schema::EventLabel>,
+        labels: Vec<rows::EventLabel>,
     ) -> Self {
         projection_parts(rows, deletes, labels)
     }
@@ -210,8 +210,8 @@ impl ProjectionOutput {
             std::mem::take(&mut self.output).intent(AtomicIntent::DeleteRow(delete).into_intent());
     }
 
-    pub fn push_event_label(&mut self, label: schema::EventLabel) {
-        for row in schema::event_label_rows(vec![label]) {
+    pub fn push_event_label(&mut self, label: rows::EventLabel) {
+        for row in rows::event_label_rows(vec![label]) {
             self.push_table_write(row);
         }
     }
@@ -230,7 +230,7 @@ impl ProjectionOutput {
         self.legacy_parts().1
     }
 
-    pub fn legacy_labels(&self) -> Vec<schema::EventLabel> {
+    pub fn legacy_labels(&self) -> Vec<rows::EventLabel> {
         self.legacy_parts().2
     }
 
@@ -242,7 +242,7 @@ impl ProjectionOutput {
         self.output
     }
 
-    fn legacy_parts(&self) -> (Vec<TableRow>, Vec<TableDelete>, Vec<schema::EventLabel>) {
+    fn legacy_parts(&self) -> (Vec<TableRow>, Vec<TableDelete>, Vec<rows::EventLabel>) {
         let allowed_tables = projection_allowed_tables();
         let mut rows = Vec::new();
         let mut deletes = Vec::new();
@@ -251,7 +251,7 @@ impl ProjectionOutput {
             match AtomicIntent::from_intent(intent, &allowed_tables)
                 .expect("legacy projection output must carry atomic row intents")
             {
-                AtomicIntent::PutRow(row) if row.table == schema::EVENT_LABELS => {
+                AtomicIntent::PutRow(row) if row.table == rows::EVENT_LABELS => {
                     labels.push(decode_event_label_row(&row));
                 }
                 AtomicIntent::PutRow(row) => rows.push(row),
@@ -276,20 +276,20 @@ pub(crate) fn projection_table_deletes(deletes: Vec<TableDelete>) -> ProjectionO
     projection_parts(Vec::new(), deletes, Vec::new())
 }
 
-pub(crate) fn projection_event_labels(labels: Vec<schema::EventLabel>) -> ProjectionOutput {
+pub(crate) fn projection_event_labels(labels: Vec<rows::EventLabel>) -> ProjectionOutput {
     projection_parts(Vec::new(), Vec::new(), labels)
 }
 
 pub(crate) fn projection_table_writes_and_event_labels(
     rows: Vec<TableRow>,
-    labels: Vec<schema::EventLabel>,
+    labels: Vec<rows::EventLabel>,
 ) -> ProjectionOutput {
     projection_parts(rows, Vec::new(), labels)
 }
 
 pub(crate) fn projection_table_deletes_and_event_labels(
     deletes: Vec<TableDelete>,
-    labels: Vec<schema::EventLabel>,
+    labels: Vec<rows::EventLabel>,
 ) -> ProjectionOutput {
     projection_parts(Vec::new(), deletes, labels)
 }
@@ -297,12 +297,12 @@ pub(crate) fn projection_table_deletes_and_event_labels(
 pub(crate) fn projection_parts(
     rows: Vec<TableRow>,
     deletes: Vec<TableDelete>,
-    labels: Vec<schema::EventLabel>,
+    labels: Vec<rows::EventLabel>,
 ) -> ProjectionOutput {
     let mut output = CoreProjectionOutput::new();
     for row in rows
         .into_iter()
-        .chain(schema::event_label_rows(labels).into_iter())
+        .chain(rows::event_label_rows(labels).into_iter())
     {
         output = output.intent(AtomicIntent::PutRow(row).into_intent());
     }
@@ -489,7 +489,7 @@ pub enum AdmitDecision {
 /// Protocol registry used by the common worker.
 ///
 /// This trait is the only place where the generic admission/apply loop touches
-/// concrete event modules. `event_from_bytes` chooses the module codec.
+/// concrete event modules. `event_from_bytes` chooses the module layout.
 /// `project_record` chooses the module projector and receives the
 /// `EventWithContext` already loaded by this worker. Keeping those decisions
 /// behind the registry lets this worker enforce common mechanics without
@@ -500,7 +500,7 @@ pub trait EventRegistry {
     /// Receive-side admission gate.
     ///
     /// Called by the common pipeline for every received record after the
-    /// codec has decoded canonical bytes into an `EventRecord` but before
+    /// layout has decoded canonical bytes into an `EventRecord` but before
     /// the record has been stored or projected. The gate returns `Admit`
     /// for the normal path; `Drop` to silently discard; or
     /// `WriteRowsAndDrop(rows)` to record the drop with a row write
@@ -540,7 +540,7 @@ pub trait EventRegistry {
         _store: &Store,
         bytes: Vec<u8>,
         receive: Option<ReceiveMetadata>,
-        provenance: Option<worker_schema::TransitProvenance>,
+        provenance: Option<worker_rows::TransitProvenance>,
     ) -> Result<ReceivedRecord, String> {
         // The default path is for command-created rows and already-classified
         // local rows. Protocols with envelope boundaries override this method
@@ -710,7 +710,7 @@ pub(crate) fn enqueue_proposed_events(
 ) -> Result<usize, String> {
     let rows = events
         .into_iter()
-        .map(|event| worker_schema::canonical_in_row(event.record, event.receive))
+        .map(|event| worker_rows::canonical_in_row(event.record, event.receive))
         .collect();
     store
         .insert_table_rows(rows)
@@ -725,7 +725,7 @@ pub(crate) fn drain_canonical_in<R>(
 where
     R: EventRegistry,
 {
-    let input = worker_schema::claim_canonical_in(store, limit)
+    let input = worker_rows::claim_canonical_in(store, limit)
         .map_err(|err| format!("claim canonical in: {err}"))?;
     let mut total = AdmitReport::default();
     for canonical in input {
@@ -758,14 +758,14 @@ where
                     store.insert_table_rows_in_tx(rows)?;
                 }
             }
-            store.delete_table_rows_in_tx(worker_schema::CANONICAL_IN, vec![key.clone()])?;
+            store.delete_table_rows_in_tx(worker_rows::CANONICAL_IN, vec![key.clone()])?;
             Ok(report)
         });
         match result {
             Ok(report) => merge_admit_report(&mut total, report),
             Err(err) => {
                 store
-                    .delete_table_rows(worker_schema::CANONICAL_IN, vec![key])
+                    .delete_table_rows(worker_rows::CANONICAL_IN, vec![key])
                     .map_err(|delete_err| {
                         format!(
                             "drain canonical in: {err}; failed to consume rejected event: {delete_err}"
@@ -797,7 +797,7 @@ where
             let changes = registry
                 .project_network_in(store, &inbound)
                 .map_err(module_error)?;
-            let canonical_rows = count_atomic_puts(&changes, worker_schema::CANONICAL_IN)?;
+            let canonical_rows = count_atomic_puts(&changes, worker_rows::CANONICAL_IN)?;
             write_projection_output_in_tx(store, changes)?;
             network_queues::delete_inbound_in_tx(store, std::slice::from_ref(&inbound))?;
             Ok(canonical_rows)
@@ -849,7 +849,7 @@ pub(crate) fn drain_recently_valid_events(
 ) -> Result<ApplyReadyReport, String> {
     store
         .write_transaction(|store| {
-            let events = worker_schema::claim_recently_valid_events(store, limit)?;
+            let events = worker_rows::claim_recently_valid_events(store, limit)?;
             let keys = events
                 .iter()
                 .map(|event| event.key.clone())
@@ -858,7 +858,7 @@ pub(crate) fn drain_recently_valid_events(
             for event in events {
                 total.unblocked_events += unblock_dependents(store, &event.event_id)?;
             }
-            store.delete_table_rows_in_tx(worker_schema::RECENTLY_VALID_EVENTS, keys)?;
+            store.delete_table_rows_in_tx(worker_rows::RECENTLY_VALID_EVENTS, keys)?;
             Ok(total)
         })
         .map_err(|err| format!("drain recently valid events: {err}"))
@@ -874,7 +874,7 @@ where
 {
     store
         .write_transaction(|store| {
-            let pending = worker_schema::claim_pending_reprojections(store, limit)?;
+            let pending = worker_rows::claim_pending_reprojections(store, limit)?;
             let keys = pending
                 .iter()
                 .map(|event| event.key.clone())
@@ -888,7 +888,7 @@ where
                 total.blocked_events += report.blocked_events;
                 total.blocked_edges += report.blocked_edges;
             }
-            store.delete_table_rows_in_tx(worker_schema::PENDING_REPROJECTIONS, keys)?;
+            store.delete_table_rows_in_tx(worker_rows::PENDING_REPROJECTIONS, keys)?;
             Ok(total)
         })
         .map_err(|err| format!("drain pending reprojections: {err}"))
@@ -926,7 +926,7 @@ fn drain_recently_valid_until_empty(
     let mut total = ApplyReadyReport::default();
     let limit = batch_size.max(1);
     while store
-        .table_row_count(worker_schema::RECENTLY_VALID_EVENTS)
+        .table_row_count(worker_rows::RECENTLY_VALID_EVENTS)
         .map_err(|err| format!("count recently valid events: {err}"))?
         > 0
     {
@@ -1213,10 +1213,9 @@ fn project_ready_event_tx(
     if event_lifecycle::event_status(store, event_id)? != Some(EventStatus::Ready) {
         return Ok(report);
     }
-    let bytes =
-        schema::event_bytes(store, event_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let bytes = rows::event_bytes(store, event_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let record = modules.event_from_bytes(bytes).map_err(module_error)?;
-    let receive = worker_schema::event_receive_context(store, event_id)?;
+    let receive = worker_rows::event_receive_context(store, event_id)?;
     let decision = project_event_with_context_in_tx(store, modules, event_id, &record, receive)?;
     apply_projection_decision_in_tx(store, event_id, &record, receive, decision, &mut report)?;
     Ok(report)
@@ -1257,7 +1256,7 @@ fn apply_projection_decision_in_tx(
                 write_projection_output_in_tx(store, changes)?;
                 write_applied_event_outputs_in_tx(store, event_id, record)?;
                 if receive.is_some() {
-                    worker_schema::delete_event_receive_context_in_tx(store, event_id)?;
+                    worker_rows::delete_event_receive_context_in_tx(store, event_id)?;
                 }
                 report.applied_events += 1;
             }
@@ -1276,9 +1275,9 @@ fn apply_projection_decision_in_tx(
                 EventStatus::Blocked,
             )? {
                 if let Some(receive) = receive {
-                    store.insert_table_rows_in_tx(vec![
-                        worker_schema::event_receive_context_row(*event_id, receive),
-                    ])?;
+                    store.insert_table_rows_in_tx(vec![worker_rows::event_receive_context_row(
+                        *event_id, receive,
+                    )])?;
                 }
                 report.blocked_events += 1;
                 report.blocked_edges += write_blockers(store, event_id, &dependencies)?;
@@ -1302,7 +1301,7 @@ fn reproject_label_woken_event_tx(
         // pass. Reprojecting here would race the lifecycle claim path.
         return Ok(report);
     }
-    let Some(bytes) = schema::event_bytes(store, event_id)? else {
+    let Some(bytes) = rows::event_bytes(store, event_id)? else {
         return Ok(report);
     };
     let record = modules.event_from_bytes(bytes).map_err(module_error)?;
@@ -1335,7 +1334,7 @@ fn reproject_label_woken_event_tx(
                         event_lifecycle::delete_missing_deps_by_blocked_event(store, event_id)?;
                         write_projection_output_in_tx(store, changes)?;
                         write_applied_event_outputs_in_tx(store, event_id, &record)?;
-                        worker_schema::delete_event_receive_context_in_tx(store, event_id)?;
+                        worker_rows::delete_event_receive_context_in_tx(store, event_id)?;
                         report.applied_events += 1;
                         report.reprojected_events += 1;
                     }
@@ -1353,9 +1352,9 @@ fn write_applied_event_outputs_in_tx(
     event_id: &EventId,
     record: &EventRecord,
 ) -> rusqlite::Result<()> {
-    let mut rows = vec![worker_schema::recently_valid_event_row(*event_id)];
+    let mut rows = vec![worker_rows::recently_valid_event_row(*event_id)];
     if record.scope.is_shared() {
-        rows.push(worker_schema::applied_shared_event_row(EventIndexEntry {
+        rows.push(worker_rows::applied_shared_event_row(EventIndexEntry {
             event_id: *event_id,
             timestamp: record.timestamp,
             workspace_id: record.workspace_id,
@@ -1400,9 +1399,9 @@ fn load_event_context_in_tx(
     let mut dependencies = Vec::with_capacity(record.dependencies.len());
     for dependency in unique_dependencies(&record.dependencies) {
         if event_lifecycle::event_is_applied(store, &dependency)? {
-            if let Some(bytes) = schema::event_bytes(store, &dependency)? {
+            if let Some(bytes) = rows::event_bytes(store, &dependency)? {
                 let record = modules.event_from_bytes(bytes).map_err(module_error)?;
-                let labels = schema::event_labels(store, &dependency).map_err(module_error)?;
+                let labels = rows::event_labels(store, &dependency).map_err(module_error)?;
                 dependencies.push(DependencyContext {
                     event_id: dependency,
                     record,
@@ -1417,7 +1416,7 @@ fn load_event_context_in_tx(
     Ok(EventContext {
         event_id: *event_id,
         dependencies,
-        labels: schema::event_labels(store, event_id).map_err(module_error)?,
+        labels: rows::event_labels(store, event_id).map_err(module_error)?,
         receive,
         now_unix_minute,
     })
@@ -1469,7 +1468,7 @@ fn count_atomic_puts(changes: &ProjectionOutput, table: TableName) -> rusqlite::
 }
 
 fn event_label_id_from_row(row: &TableRow) -> rusqlite::Result<Option<EventId>> {
-    if row.table != schema::EVENT_LABELS {
+    if row.table != rows::EVENT_LABELS {
         return Ok(None);
     }
     if row.key.len() < 32 {
@@ -1482,10 +1481,10 @@ fn event_label_id_from_row(row: &TableRow) -> rusqlite::Result<Option<EventId>> 
     Ok(Some(event_id))
 }
 
-fn decode_event_label_row(row: &TableRow) -> schema::EventLabel {
+fn decode_event_label_row(row: &TableRow) -> rows::EventLabel {
     let mut event_id = [0u8; 32];
     event_id.copy_from_slice(&row.key[..32]);
-    schema::EventLabel {
+    rows::EventLabel {
         event_id,
         label: row.value.clone(),
     }
@@ -1494,9 +1493,9 @@ fn decode_event_label_row(row: &TableRow) -> schema::EventLabel {
 fn projection_allowed_tables() -> Vec<TableName> {
     crate::protocol::event_modules::schemas()
         .into_iter()
-        .chain(worker_schema::SCHEMAS.iter().copied())
+        .chain(worker_rows::SCHEMAS.iter().copied())
         .chain(network_queues::SCHEMAS.iter().copied())
-        .filter_map(|schema| match schema.definition {
+        .filter_map(|rows| match rows.definition {
             SchemaDefinition::RowTable(table) => Some(table),
             SchemaDefinition::Sql(_) => None,
         })
@@ -1504,9 +1503,9 @@ fn projection_allowed_tables() -> Vec<TableName> {
 }
 
 fn enqueue_label_reprojections_in_tx(store: &Store, event_id: &EventId) -> rusqlite::Result<usize> {
-    let mut rows = vec![worker_schema::pending_reprojection_row(*event_id)];
+    let mut rows = vec![worker_rows::pending_reprojection_row(*event_id)];
     for dependent in event_lifecycle::direct_dependents(store, event_id)? {
-        rows.push(worker_schema::pending_reprojection_row(dependent));
+        rows.push(worker_rows::pending_reprojection_row(dependent));
     }
     store.insert_table_rows_in_tx(rows)
 }

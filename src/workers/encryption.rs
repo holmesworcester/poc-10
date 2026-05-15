@@ -71,10 +71,10 @@ use crate::core::logical_clock;
 use crate::core::store::Store;
 use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
 use crate::protocol::event_modules::queries as event_queries;
-use crate::protocol::event_modules::schema as event_schema;
+use crate::protocol::event_modules::rows as event_schema;
 use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::{self, EventRegistry};
-use crate::workers::{dependency_unblock, schema as worker_schema};
+use crate::workers::{dependency_unblock, queue_rows as worker_rows};
 use crate::workers::{event_lifecycle, event_retention};
 
 use crate::protocol::event_modules::encryption::{
@@ -417,8 +417,8 @@ fn derive_key_secrets<R: EventRegistry>(
         let plaintext = match crypto::x25519_xchacha20poly1305_decrypt(
             &local_recipient.recipient_secret,
             &row.sender_wrap_public_key,
-            key_wrap::codec::KEY_WRAP_PURPOSE,
-            &key_wrap::codec::associated_data(&key_wrap_event, row.signer_endpoint_shared_id),
+            key_wrap::layout::KEY_WRAP_PURPOSE,
+            &key_wrap::layout::associated_data(&key_wrap_event, row.signer_endpoint_shared_id),
             &row.nonce,
             &row.ciphertext,
         ) {
@@ -479,7 +479,7 @@ fn derive_key_secrets<R: EventRegistry>(
     }
     if !consumed_pending.is_empty() {
         store
-            .delete_table_rows(key_wrap::schema::PENDING_KEY_UNWRAPS, consumed_pending)
+            .delete_table_rows(key_wrap::rows::PENDING_KEY_UNWRAPS, consumed_pending)
             .map_err(|err| format!("delete pending key unwraps: {err}"))?;
     }
     Ok(report)
@@ -528,12 +528,12 @@ fn import_wrapped_history_node(
             .then_some(row.wrapped_tombstone_node_id),
         node_secret,
     };
-    let bytes = local_history_node_secret::codec::encode(&node);
-    let record = local_history_node_secret::codec::record_from_bytes(bytes)?;
+    let bytes = local_history_node_secret::layout::encode(&node);
+    let record = local_history_node_secret::layout::record_from_bytes(bytes)?;
     if event_id(&record.canonical_bytes) != row.wrapped_secret_id {
         return Err("history-node key wrap does not reconstruct wrapped secret id".to_string());
     }
-    let table_row = local_history_node_secret::schema::local_history_node_secret_row(
+    let table_row = local_history_node_secret::rows::local_history_node_secret_row(
         row.wrapped_secret_id,
         &node,
     );
@@ -546,7 +546,7 @@ fn import_wrapped_history_node(
             )?;
             tx.insert_table_rows_in_tx(vec![table_row.clone()])?;
             if inserted_event {
-                tx.insert_table_rows_in_tx(vec![worker_schema::recently_valid_event_row(
+                tx.insert_table_rows_in_tx(vec![worker_rows::recently_valid_event_row(
                     row.wrapped_secret_id,
                 )])?;
             }
@@ -591,7 +591,7 @@ fn drain_key_requests<R: EventRegistry>(
     }
     if !consumed.is_empty() {
         let deleted = store
-            .delete_table_rows(key_request::schema::PENDING_KEY_REQUESTS, consumed)
+            .delete_table_rows(key_request::rows::PENDING_KEY_REQUESTS, consumed)
             .map_err(|err| format!("delete pending key requests: {err}"))?;
         report.deleted_requests = deleted;
     }
@@ -692,7 +692,7 @@ fn drain_wrap_reconcile<R: EventRegistry>(
     }
     if !consumed.is_empty() {
         let deleted = store
-            .delete_table_rows(key_wrap::schema::PENDING_WRAP_RECONCILE, consumed)
+            .delete_table_rows(key_wrap::rows::PENDING_WRAP_RECONCILE, consumed)
             .map_err(|err| format!("delete pending wrap reconcile rows: {err}"))?;
         report.deleted_reconcile_rows = deleted;
     }
@@ -770,7 +770,7 @@ fn ensure_root_wrap<R: EventRegistry>(
     signer_private_key: crypto::Ed25519PrivateKey,
     root: &local_key_secret::types::LocalKeySecretRow,
 ) -> Result<MaterializeWrapsReport, String> {
-    let key = key_wrap::schema::frontier_root_key_wrap_key(
+    let key = key_wrap::rows::frontier_root_key_wrap_key(
         root.workspace_id,
         root.removal_frontier_id,
         recipient.recipient_key_id,
@@ -808,7 +808,7 @@ fn ensure_history_node_wrap<R: EventRegistry>(
     signer_private_key: crypto::Ed25519PrivateKey,
     node: &local_history_node_secret::types::LocalHistoryNodeSecretRow,
 ) -> Result<MaterializeWrapsReport, String> {
-    let key = key_wrap::schema::history_node_key_wrap_key(
+    let key = key_wrap::rows::history_node_key_wrap_key(
         node.workspace_id,
         node.removal_frontier_id,
         recipient.recipient_key_id,
@@ -872,9 +872,9 @@ fn local_endpoint_owns_frontier(
     else {
         return Ok(false);
     };
-    let envelope = removal_frontier::codec::decode_signed(&bytes)
+    let envelope = removal_frontier::layout::decode_signed(&bytes)
         .map_err(|_| "frontier owner event is not a signed removal frontier".to_string())?;
-    let frontier = removal_frontier::codec::decode(&envelope.payload)
+    let frontier = removal_frontier::layout::decode(&envelope.payload)
         .map_err(|_| "frontier owner event is not a removal frontier".to_string())?;
     Ok(frontier.workspace_id == workspace_id
         && envelope.signer_endpoint_shared_id == endpoint_shared_id)
@@ -947,14 +947,14 @@ fn local_endpoint_membership(
     let Some(local) = endpoint::commands::local_keypair(store)? else {
         return Ok(None);
     };
-    let key = endpoint_shared::schema::endpoint_membership_key(local.endpoint, workspace_id);
+    let key = endpoint_shared::rows::endpoint_membership_key(local.endpoint, workspace_id);
     let Some(value) = store
-        .table_row(endpoint_shared::schema::ENDPOINT_MEMBERSHIPS, &key)
+        .table_row(endpoint_shared::rows::ENDPOINT_MEMBERSHIPS, &key)
         .map_err(|err| format!("load endpoint membership: {err}"))?
     else {
         return Ok(None);
     };
-    let membership = endpoint_shared::schema::decode_endpoint_membership_row(&key, &value)?;
+    let membership = endpoint_shared::rows::decode_endpoint_membership_row(&key, &value)?;
     if membership.signing_public_key != local.signing_public_key {
         return Ok(None);
     }
@@ -1378,7 +1378,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
     // Doing this in one transaction guarantees the forward-secrecy
     // invariant: at no point on disk do we have BOTH the descend-path
     // rows AND a missing leaf row that an attacker could exploit.
-    let leaf_secret_key = local_history_node_secret::schema::local_history_node_secret_key(
+    let leaf_secret_key = local_history_node_secret::rows::local_history_node_secret_key(
         workspace_id,
         removal_frontier_id,
         unix_minute,
@@ -1399,7 +1399,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
             )?;
             // Leaf row.
             let _ = store.delete_table_rows_in_tx(
-                local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
+                local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRETS,
                 vec![leaf_secret_key.clone()],
             )?;
             if event_retention::purge_event_storage_in_tx(store, &leaf_id)? {
@@ -1410,7 +1410,7 @@ fn retire_deleted_event_leaf<R: EventRegistry>(
             // the retired coord in tombstone rows. The leaf covers exactly
             // `(unix_minute, 1)` on the time axis.
             let inserted = store.insert_table_rows_in_tx(vec![
-                local_history_node_secret::schema::local_history_node_tombstone_row_by_id(
+                local_history_node_secret::rows::local_history_node_tombstone_row_by_id(
                     workspace_id,
                     removal_frontier_id,
                     leaf_id,
@@ -1665,7 +1665,7 @@ fn gc_subsumed_tombstones(
             .filter(|row| row.removal_frontier_id == removal_frontier_id)
             .filter(|row| row.range_start.saturating_add(row.range_width) <= floor_minute)
             .map(|row| {
-                local_history_node_secret::schema::local_history_node_tombstone_key(
+                local_history_node_secret::rows::local_history_node_tombstone_key(
                     row.workspace_id,
                     row.removal_frontier_id,
                     row.tombstone_node_id,
@@ -1681,7 +1681,7 @@ fn gc_subsumed_tombstones(
         .into_iter()
         .filter(|row| row.authored_minute < floor_minute)
         .map(|row| {
-            crate::protocol::event_modules::content::message::schema::message_key(
+            crate::protocol::event_modules::content::message::rows::message_key(
                 row.workspace_id,
                 row.message_id,
             )
@@ -1690,9 +1690,8 @@ fn gc_subsumed_tombstones(
     if leaf_keys_to_delete.is_empty() && message_keys_to_delete.is_empty() {
         return Ok(SubsumedTombstones::default());
     }
-    let leaf_table = local_history_node_secret::schema::LOCAL_HISTORY_NODE_TOMBSTONES;
-    let message_table =
-        crate::protocol::event_modules::content::message::schema::MESSAGE_TOMBSTONES;
+    let leaf_table = local_history_node_secret::rows::LOCAL_HISTORY_NODE_TOMBSTONES;
+    let message_table = crate::protocol::event_modules::content::message::rows::MESSAGE_TOMBSTONES;
     let (leaf_deleted, message_deleted) = store
         .write_transaction(move |tx_store| {
             let mut leaf_deleted = 0usize;
@@ -1742,15 +1741,15 @@ where
     for target in targets {
         if target.is_frontier_root {
             let key =
-                local_key_secret::schema::local_key_secret_key(workspace_id, removal_frontier_id);
+                local_key_secret::rows::local_key_secret_key(workspace_id, removal_frontier_id);
             if tx_store
-                .delete_table_rows_in_tx(local_key_secret::schema::LOCAL_KEY_SECRETS, vec![key])?
+                .delete_table_rows_in_tx(local_key_secret::rows::LOCAL_KEY_SECRETS, vec![key])?
                 > 0
             {
                 counts.wiped += 1;
             }
         } else {
-            let key = local_history_node_secret::schema::local_history_node_secret_key(
+            let key = local_history_node_secret::rows::local_history_node_secret_key(
                 workspace_id,
                 removal_frontier_id,
                 target.range_start,
@@ -1759,7 +1758,7 @@ where
                 target.event_id_prefix,
             );
             if tx_store.delete_table_rows_in_tx(
-                local_history_node_secret::schema::LOCAL_HISTORY_NODE_SECRETS,
+                local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRETS,
                 vec![key],
             )? > 0
             {
@@ -1770,7 +1769,7 @@ where
             counts.purged += 1;
         }
         let inserted = tx_store.insert_table_rows_in_tx(vec![
-            local_history_node_secret::schema::local_history_node_tombstone_row_by_id(
+            local_history_node_secret::rows::local_history_node_tombstone_row_by_id(
                 workspace_id,
                 removal_frontier_id,
                 target.event_id,
@@ -1809,12 +1808,12 @@ fn drain_pending_message_leaves<R: EventRegistry>(
         };
         let (workspace_id, removal_frontier_id, created_at_ms, leaf_id, event_id_in_minute) =
             match bytes.first().copied() {
-                Some(message::codec::TYPE_SIGNED_MESSAGE) => {
-                    let envelope = match message::codec::decode_signed(&bytes) {
+                Some(message::layout::TYPE_SIGNED_MESSAGE) => {
+                    let envelope = match message::layout::decode_signed(&bytes) {
                         Ok(envelope) => envelope,
                         Err(_) => continue,
                     };
-                    let event = match message::codec::decode(&envelope.payload) {
+                    let event = match message::layout::decode(&envelope.payload) {
                         Ok(event) => event,
                         Err(_) => continue,
                     };
@@ -1827,12 +1826,12 @@ fn drain_pending_message_leaves<R: EventRegistry>(
                         coord,
                     )
                 }
-                Some(reaction::codec::TYPE_SIGNED_REACTION) => {
-                    let envelope = match reaction::codec::decode_signed(&bytes) {
+                Some(reaction::layout::TYPE_SIGNED_REACTION) => {
+                    let envelope = match reaction::layout::decode_signed(&bytes) {
                         Ok(envelope) => envelope,
                         Err(_) => continue,
                     };
-                    let event = match reaction::codec::decode(&envelope.payload) {
+                    let event = match reaction::layout::decode(&envelope.payload) {
                         Ok(event) => event,
                         Err(_) => continue,
                     };
@@ -1845,12 +1844,12 @@ fn drain_pending_message_leaves<R: EventRegistry>(
                         coord,
                     )
                 }
-                Some(file::codec::TYPE_SIGNED_FILE) => {
-                    let envelope = match file::codec::decode_signed(&bytes) {
+                Some(file::layout::TYPE_SIGNED_FILE) => {
+                    let envelope = match file::layout::decode_signed(&bytes) {
                         Ok(envelope) => envelope,
                         Err(_) => continue,
                     };
-                    let event = match file::codec::decode(&envelope.payload) {
+                    let event = match file::layout::decode(&envelope.payload) {
                         Ok(event) => event,
                         Err(_) => continue,
                     };
@@ -1941,11 +1940,11 @@ fn recipient_key_row(
     workspace_id: EventId,
     recipient_key_id: EventId,
 ) -> Result<Option<recipient_key::types::RecipientKeyRow>, String> {
-    let key = recipient_key::schema::recipient_key_key(workspace_id, recipient_key_id);
+    let key = recipient_key::rows::recipient_key_key(workspace_id, recipient_key_id);
     store
-        .table_row(recipient_key::schema::RECIPIENT_KEYS, &key)
+        .table_row(recipient_key::rows::RECIPIENT_KEYS, &key)
         .map_err(|err| format!("load recipient key: {err}"))?
-        .map(|value| recipient_key::schema::decode_recipient_key_row(&key, &value))
+        .map(|value| recipient_key::rows::decode_recipient_key_row(&key, &value))
         .transpose()
 }
 
@@ -1955,12 +1954,12 @@ fn local_membership(
 ) -> Result<endpoint_shared::types::EndpointMembershipRow, String> {
     let local = endpoint::commands::local_keypair(store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let key = endpoint_shared::schema::endpoint_membership_key(local.endpoint, workspace_id);
+    let key = endpoint_shared::rows::endpoint_membership_key(local.endpoint, workspace_id);
     let value = store
-        .table_row(endpoint_shared::schema::ENDPOINT_MEMBERSHIPS, &key)
+        .table_row(endpoint_shared::rows::ENDPOINT_MEMBERSHIPS, &key)
         .map_err(|err| format!("load endpoint membership: {err}"))?
         .ok_or_else(|| "local endpoint is not joined to workspace".to_string())?;
-    endpoint_shared::schema::decode_endpoint_membership_row(&key, &value)
+    endpoint_shared::rows::decode_endpoint_membership_row(&key, &value)
 }
 
 fn active_local_recipient_keys(
@@ -2014,7 +2013,7 @@ fn purge_retired_recipient_material(
     let local_recipient_keys: Vec<Vec<u8>> = retired
         .iter()
         .map(|key| {
-            local_recipient_key::schema::local_recipient_key_key(
+            local_recipient_key::rows::local_recipient_key_key(
                 workspace_id,
                 key.local_recipient_key_id,
             )
@@ -2023,7 +2022,7 @@ fn purge_retired_recipient_material(
     let key_wrap_row_keys: Vec<Vec<u8>> = wraps_to_purge
         .iter()
         .map(|wrap| {
-            key_wrap::schema::key_wrap_key(
+            key_wrap::rows::key_wrap_key(
                 wrap.workspace_id,
                 wrap.removal_frontier_id,
                 wrap.recipient_key_id,
@@ -2045,12 +2044,12 @@ fn purge_retired_recipient_material(
     store
         .write_transaction(move |store| {
             store.delete_table_rows_in_tx(
-                local_recipient_key::schema::LOCAL_RECIPIENT_KEYS,
+                local_recipient_key::rows::LOCAL_RECIPIENT_KEYS,
                 local_recipient_keys,
             )?;
-            store.delete_table_rows_in_tx(key_wrap::schema::KEY_WRAPS, key_wrap_row_keys)?;
+            store.delete_table_rows_in_tx(key_wrap::rows::KEY_WRAPS, key_wrap_row_keys)?;
             store.delete_table_rows_in_tx(
-                key_wrap::schema::PENDING_KEY_UNWRAPS,
+                key_wrap::rows::PENDING_KEY_UNWRAPS,
                 pending_key_unwrap_row_keys,
             )?;
             for event_id in &event_ids_to_purge {
@@ -2112,7 +2111,7 @@ mod tests {
         signer_endpoint_shared_id: EventId,
     ) -> crate::protocol::event_modules::types::EventRecord {
         let payload =
-            removal_frontier::codec::encode(&removal_frontier::types::RemovalFrontierEvent {
+            removal_frontier::layout::encode(&removal_frontier::types::RemovalFrontierEvent {
                 workspace_id: WORKSPACE,
                 created_at_ms: 1,
                 authority_admin_id: [9; 32],
@@ -2120,9 +2119,9 @@ mod tests {
             })
             .expect("encode frontier");
         let envelope =
-            removal_frontier::codec::sign(signer_endpoint_shared_id, signer_private_key, payload);
-        let bytes = removal_frontier::codec::encode_signed(&envelope);
-        removal_frontier::codec::signed_record_from_bytes(bytes).expect("signed record")
+            removal_frontier::layout::sign(signer_endpoint_shared_id, signer_private_key, payload);
+        let bytes = removal_frontier::layout::encode_signed(&envelope);
+        removal_frontier::layout::signed_record_from_bytes(bytes).expect("signed record")
     }
 
     fn seed_local_key_secret(store: &Store) -> (EventId, EventId) {
@@ -2158,7 +2157,7 @@ mod tests {
                 event_lifecycle::insert_event(store, &frontier_record, EventStatus::Applied)?;
                 event_lifecycle::insert_event(store, &record, EventStatus::Applied)?;
                 store.insert_table_rows_in_tx(vec![
-                    local_key_secret::schema::local_key_secret_row(
+                    local_key_secret::rows::local_key_secret_row(
                         local_key_secret_id,
                         &output.value.event,
                     ),
@@ -2187,7 +2186,7 @@ mod tests {
             endpoint_role: endpoint::types::EndpointRole::Device,
             device_name: device_name.to_string(),
         };
-        let payload = endpoint_shared::codec::encode(&event).expect("endpoint shared payload");
+        let payload = endpoint_shared::layout::encode(&event).expect("endpoint shared payload");
         let signed = signed::commands::sign_payload([6; 32], &[5; 32], payload)
             .expect("sign endpoint shared");
         let record = signed.events[0].record().clone();
@@ -2205,7 +2204,7 @@ mod tests {
         let (endpoint_shared_id, endpoint_shared_record, endpoint_shared_event) =
             endpoint_shared_record_for_local(&local, WORKSPACE, device_name);
         let endpoint_rows = endpoint::projector::local_endpoint(local.clone());
-        let endpoint_shared_rows = endpoint_shared::schema::endpoint_shared_rows(
+        let endpoint_shared_rows = endpoint_shared::rows::endpoint_shared_rows(
             endpoint_shared_id,
             [4; 32],
             &endpoint_shared_event,
@@ -2235,7 +2234,7 @@ mod tests {
         .expect("workspace command");
         let record = output.events[0].record().clone();
         store
-            .insert_table_rows(vec![crate::protocol::event_modules::schema::event_row(
+            .insert_table_rows(vec![crate::protocol::event_modules::rows::event_row(
                 &WORKSPACE,
                 &record,
                 EventStatus::Applied,
@@ -2263,9 +2262,9 @@ mod tests {
         let record = output.events[0].record().clone();
         let id = output.value.recipient_key_id;
         let envelope =
-            recipient_key::codec::decode_signed(&record.canonical_bytes).expect("recipient env");
-        let event = recipient_key::codec::decode(&envelope.payload).expect("recipient event");
-        let row = recipient_key::schema::recipient_key_row(id, &event).expect("recipient row");
+            recipient_key::layout::decode_signed(&record.canonical_bytes).expect("recipient env");
+        let event = recipient_key::layout::decode(&envelope.payload).expect("recipient event");
+        let row = recipient_key::rows::recipient_key_row(id, &event).expect("recipient row");
         store
             .write_transaction(|tx| {
                 event_lifecycle::insert_event(tx, &record, EventStatus::Applied)?;
@@ -2293,7 +2292,7 @@ mod tests {
             recipient_key_id,
         };
         store
-            .insert_table_rows(vec![key_request::schema::pending_key_request_row(
+            .insert_table_rows(vec![key_request::rows::pending_key_request_row(
                 request_id,
                 requester_endpoint_shared_id,
                 &event,
@@ -2328,10 +2327,10 @@ mod tests {
             .expect("recipient key");
         let recipient_record = recipient_output.events[0].record().clone();
         let recipient_envelope =
-            recipient_key::codec::decode_signed(&recipient_record.canonical_bytes)
+            recipient_key::layout::decode_signed(&recipient_record.canonical_bytes)
                 .expect("recipient envelope");
         let recipient_event =
-            recipient_key::codec::decode(&recipient_envelope.payload).expect("recipient event");
+            recipient_key::layout::decode(&recipient_envelope.payload).expect("recipient event");
 
         let sender_local_secret =
             local_key_secret::commands::from_key_secret(WORKSPACE, frontier_id, KEY_SECRET)
@@ -2358,27 +2357,27 @@ mod tests {
         .expect("key wrap");
         let key_wrap_record = key_wrap_output.events[0].record().clone();
         let key_wrap_id = key_wrap_output.value.key_wrap_id;
-        let key_wrap_envelope = key_wrap::codec::decode_signed(&key_wrap_record.canonical_bytes)
+        let key_wrap_envelope = key_wrap::layout::decode_signed(&key_wrap_record.canonical_bytes)
             .expect("key wrap envelope");
         let key_wrap_event =
-            key_wrap::codec::decode(&key_wrap_envelope.payload).expect("key wrap event");
-        let local_recipient_row = local_recipient_key::schema::local_recipient_key_row(
+            key_wrap::layout::decode(&key_wrap_envelope.payload).expect("key wrap event");
+        let local_recipient_row = local_recipient_key::rows::local_recipient_key_row(
             local_recipient_id,
             &local_recipient_event,
         );
-        let recipient_row = recipient_key::schema::recipient_key_row(
+        let recipient_row = recipient_key::rows::recipient_key_row(
             recipient_output.value.recipient_key_id,
             &recipient_event,
         )
         .expect("recipient row");
-        let key_wrap_row = key_wrap::schema::key_wrap_row(
+        let key_wrap_row = key_wrap::rows::key_wrap_row(
             key_wrap_id,
             key_wrap_envelope.signer_endpoint_shared_id,
             key_wrap_envelope.signer_public_key,
             &key_wrap_event,
         );
         let pending_key_unwrap_row =
-            key_wrap::schema::pending_key_unwrap_row(key_wrap_id, &key_wrap_event);
+            key_wrap::rows::pending_key_unwrap_row(key_wrap_id, &key_wrap_event);
 
         store
             .write_transaction(|store| {
@@ -2457,7 +2456,7 @@ mod tests {
         let requester_recipient_record = requester_recipient.events[0].record().clone();
         let (requester_endpoint_shared_id, requester_endpoint_record, requester_endpoint_event) =
             endpoint_shared_record_for_local(&requester_local, WORKSPACE, "requester");
-        let requester_endpoint_rows = endpoint_shared::schema::endpoint_shared_rows(
+        let requester_endpoint_rows = endpoint_shared::rows::endpoint_shared_rows(
             requester_endpoint_shared_id,
             [44; 32],
             &requester_endpoint_event,
@@ -2531,23 +2530,23 @@ mod tests {
             .expect("frontier bytes")
             .expect("frontier bytes");
         let frontier_record =
-            removal_frontier::codec::signed_record_from_bytes(frontier_bytes).expect("frontier");
+            removal_frontier::layout::signed_record_from_bytes(frontier_bytes).expect("frontier");
         let wrap_bytes = event_queries::event_bytes(&responder_store, &wraps[0].key_wrap_id)
             .expect("wrap bytes")
             .expect("wrap bytes");
-        let wrap_record = key_wrap::codec::signed_record_from_bytes(wrap_bytes).expect("wrap rec");
+        let wrap_record = key_wrap::layout::signed_record_from_bytes(wrap_bytes).expect("wrap rec");
         let wrap_envelope =
-            key_wrap::codec::decode_signed(&wrap_record.canonical_bytes).expect("wrap env");
-        let wrap_event = key_wrap::codec::decode(&wrap_envelope.payload).expect("wrap event");
+            key_wrap::layout::decode_signed(&wrap_record.canonical_bytes).expect("wrap env");
+        let wrap_event = key_wrap::layout::decode(&wrap_envelope.payload).expect("wrap event");
         let recipient_envelope =
-            recipient_key::codec::decode_signed(&recipient_record.canonical_bytes)
+            recipient_key::layout::decode_signed(&recipient_record.canonical_bytes)
                 .expect("recipient envelope");
         let recipient_event =
-            recipient_key::codec::decode(&recipient_envelope.payload).expect("recipient event");
+            recipient_key::layout::decode(&recipient_envelope.payload).expect("recipient event");
         let recipient_row =
-            recipient_key::schema::recipient_key_row(recipient_key_id, &recipient_event)
+            recipient_key::rows::recipient_key_row(recipient_key_id, &recipient_event)
                 .expect("recipient row");
-        let local_recipient_row = local_recipient_key::schema::local_recipient_key_row(
+        let local_recipient_row = local_recipient_key::rows::local_recipient_key_row(
             requester_recipient.events[0].event_id(),
             &requester_recipient_event,
         );
@@ -2564,13 +2563,13 @@ mod tests {
                 tx.insert_table_rows_in_tx(vec![
                     recipient_row,
                     local_recipient_row,
-                    key_wrap::schema::key_wrap_row(
+                    key_wrap::rows::key_wrap_row(
                         wraps[0].key_wrap_id,
                         wrap_envelope.signer_endpoint_shared_id,
                         wrap_envelope.signer_public_key,
                         &wrap_event,
                     ),
-                    key_wrap::schema::pending_key_unwrap_row(wraps[0].key_wrap_id, &wrap_event),
+                    key_wrap::rows::pending_key_unwrap_row(wraps[0].key_wrap_id, &wrap_event),
                 ])?;
                 Ok(())
             })
@@ -2661,7 +2660,7 @@ mod tests {
         let requester_recipient_record = requester_recipient.events[0].record().clone();
         let (requester_endpoint_shared_id, requester_endpoint_record, requester_endpoint_event) =
             endpoint_shared_record_for_local(&requester_local, WORKSPACE, "requester");
-        let requester_endpoint_rows = endpoint_shared::schema::endpoint_shared_rows(
+        let requester_endpoint_rows = endpoint_shared::rows::endpoint_shared_rows(
             requester_endpoint_shared_id,
             [45; 32],
             &requester_endpoint_event,
@@ -2723,16 +2722,16 @@ mod tests {
             .expect("frontier bytes")
             .expect("frontier bytes");
         let frontier_record =
-            removal_frontier::codec::signed_record_from_bytes(frontier_bytes).expect("frontier");
+            removal_frontier::layout::signed_record_from_bytes(frontier_bytes).expect("frontier");
         let recipient_envelope =
-            recipient_key::codec::decode_signed(&recipient_record.canonical_bytes)
+            recipient_key::layout::decode_signed(&recipient_record.canonical_bytes)
                 .expect("recipient envelope");
         let recipient_event =
-            recipient_key::codec::decode(&recipient_envelope.payload).expect("recipient event");
+            recipient_key::layout::decode(&recipient_envelope.payload).expect("recipient event");
         let recipient_row =
-            recipient_key::schema::recipient_key_row(recipient_key_id, &recipient_event)
+            recipient_key::rows::recipient_key_row(recipient_key_id, &recipient_event)
                 .expect("recipient row");
-        let local_recipient_row = local_recipient_key::schema::local_recipient_key_row(
+        let local_recipient_row = local_recipient_key::rows::local_recipient_key_row(
             requester_recipient.events[0].event_id(),
             &requester_recipient_event,
         );
@@ -2751,21 +2750,21 @@ mod tests {
                         event_queries::event_bytes(&responder_store, &wrap.key_wrap_id)?
                             .expect("wrap bytes");
                     let wrap_record =
-                        key_wrap::codec::signed_record_from_bytes(wrap_bytes).expect("wrap rec");
+                        key_wrap::layout::signed_record_from_bytes(wrap_bytes).expect("wrap rec");
                     let wrap_envelope =
-                        key_wrap::codec::decode_signed(&wrap_record.canonical_bytes)
+                        key_wrap::layout::decode_signed(&wrap_record.canonical_bytes)
                             .expect("wrap env");
                     let wrap_event =
-                        key_wrap::codec::decode(&wrap_envelope.payload).expect("wrap event");
+                        key_wrap::layout::decode(&wrap_envelope.payload).expect("wrap event");
                     event_lifecycle::insert_event(tx, &wrap_record, EventStatus::Applied)?;
                     tx.insert_table_rows_in_tx(vec![
-                        key_wrap::schema::key_wrap_row(
+                        key_wrap::rows::key_wrap_row(
                             wrap.key_wrap_id,
                             wrap_envelope.signer_endpoint_shared_id,
                             wrap_envelope.signer_public_key,
                             &wrap_event,
                         ),
-                        key_wrap::schema::pending_key_unwrap_row(wrap.key_wrap_id, &wrap_event),
+                        key_wrap::rows::pending_key_unwrap_row(wrap.key_wrap_id, &wrap_event),
                     ])?;
                 }
                 Ok(())
@@ -3130,9 +3129,7 @@ mod tests {
         // log N + 1) (one tombstone per wiped descend-path row + leaf),
         // so cover_summary length stays bounded too.
         use local_history_node_secret::queries::cover_summary;
-        use local_history_node_secret::schema::{
-            COVER_SUMMARY_ROW_LEN, COVER_SUMMARY_TOMBSTONE_LEN,
-        };
+        use local_history_node_secret::rows::{COVER_SUMMARY_ROW_LEN, COVER_SUMMARY_TOMBSTONE_LEN};
         let store = Protocol::open_memory_store().expect("store");
         let protocol = Protocol::new();
         let (frontier_id, _) = seed_local_key_secret(&store);

@@ -9,16 +9,16 @@
 use crate::protocol::event_modules::identity::invite;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
 
-use super::{codec, commands, schema, types::InviteAcceptedEvent};
+use super::{commands, layout, rows, types::InviteAcceptedEvent};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let accepted = codec::decode(&event.record.canonical_bytes)?;
+    let accepted = layout::decode(&event.record.canonical_bytes)?;
     commands::validate_event_ids(&accepted)?;
     if event.record.workspace_id != Some(accepted.workspace_id) {
         return Err("invite_accepted workspace metadata does not match event body".to_string());
     }
     validate_invite_secret(event, &accepted)?;
-    Ok(ProjectionOutput::rows(vec![schema::invite_accepted_row(
+    Ok(ProjectionOutput::rows(vec![rows::invite_accepted_row(
         event.context.event_id,
         &accepted,
     )]))
@@ -31,7 +31,7 @@ fn validate_invite_secret(
     let secret_record = event
         .context
         .require_dependency(&accepted.invite_secret_event_id)?;
-    let secret = invite::codec::decode(&secret_record.canonical_bytes)
+    let secret = invite::layout::decode(&secret_record.canonical_bytes)
         .map_err(|_| "invite_accepted dependency is not an invite_secret event".to_string())?;
     if secret.bootstrap_hash != accepted.bootstrap_hash {
         return Err("invite_accepted bootstrap hash does not match invite_secret".to_string());
@@ -62,11 +62,11 @@ mod tests {
     ) -> Record {
         let secret =
             invite::types::InviteSecretEvent::scoped(secret, workspace_id, invite_event_id);
-        invite::codec::record_from_bytes(invite::codec::encode(&secret)).expect("secret record")
+        invite::layout::record_from_bytes(invite::layout::encode(&secret)).expect("secret record")
     }
 
     fn accepted_record(event: &InviteAcceptedEvent) -> Record {
-        codec::record_from_bytes(codec::encode(event)).expect("accepted record")
+        layout::record_from_bytes(layout::encode(event)).expect("accepted record")
     }
 
     fn event_with_context<'a>(
@@ -111,9 +111,9 @@ mod tests {
         let output = project(&event).expect("project acceptance");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::INVITES_ACCEPTED);
+        assert_eq!(output.legacy_rows()[0].table, rows::INVITES_ACCEPTED);
         assert_eq!(
-            schema::decode_invite_accepted_row(
+            rows::decode_invite_accepted_row(
                 &output.legacy_rows()[0].key,
                 &output.legacy_rows()[0].value
             )

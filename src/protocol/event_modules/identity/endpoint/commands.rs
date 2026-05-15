@@ -9,7 +9,7 @@
 use crate::core::crypto;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::{EndpointId, EndpointKeypair};
 
 pub trait LocalEndpointRead {
@@ -30,10 +30,10 @@ pub fn create_local_keypair() -> CommandOutput<EndpointKeypair> {
         signing_public_key,
         signing_secret,
     };
-    let bytes = codec::encode(&event);
+    let bytes = layout::encode(&event);
     CommandOutput::with_events(
         event,
-        vec![codec::record_from_bytes(bytes).expect("encoded local endpoint is valid")],
+        vec![layout::record_from_bytes(bytes).expect("encoded local endpoint is valid")],
     )
 }
 
@@ -133,7 +133,7 @@ mod tests {
         assert!(!record.scope.is_shared());
         assert!(record.dependencies.is_empty());
 
-        let decoded = codec::decode(&record.canonical_bytes).expect("decode local endpoint");
+        let decoded = layout::decode(&record.canonical_bytes).expect("decode local endpoint");
         assert_eq!(decoded, output.value);
     }
 

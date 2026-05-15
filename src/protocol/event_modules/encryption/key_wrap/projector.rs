@@ -11,11 +11,11 @@ use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput}
 
 use super::super::{recipient_key, removal_frontier};
 use super::types::WrappedSecretKind;
-use super::{codec, commands, schema};
+use super::{commands, layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let key_wrap = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let key_wrap = layout::decode(&envelope.payload)?;
     commands::validate_event_ids(&key_wrap)?;
     if event.record.workspace_id != Some(key_wrap.workspace_id) {
         return Err("key wrap workspace metadata does not match event body".to_string());
@@ -42,15 +42,15 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
 
     let mut rows = Vec::with_capacity(3);
     if key_wrap.wrapped_secret_kind == WrappedSecretKind::FrontierRoot {
-        rows.push(schema::key_secret_commitment_row(&key_wrap));
+        rows.push(rows::key_secret_commitment_row(&key_wrap));
     }
-    rows.push(schema::key_wrap_row(
+    rows.push(rows::key_wrap_row(
         event.context.event_id,
         envelope.signer_endpoint_shared_id,
         envelope.signer_public_key,
         &key_wrap,
     ));
-    rows.push(schema::pending_key_unwrap_row(
+    rows.push(rows::pending_key_unwrap_row(
         event.context.event_id,
         &key_wrap,
     ));
@@ -66,8 +66,8 @@ pub(crate) fn decode_signed_key_wrap_event(
     ),
     String,
 > {
-    let envelope = codec::decode_signed(&record.canonical_bytes)?;
-    let key_wrap = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&record.canonical_bytes)?;
+    let key_wrap = layout::decode(&envelope.payload)?;
     commands::validate_event_ids(&key_wrap)?;
     Ok((envelope, key_wrap))
 }
@@ -77,12 +77,12 @@ fn decode_signer_endpoint_shared(
     endpoint_shared_id: [u8; 32],
 ) -> Result<endpoint_shared::types::EndpointSharedEvent, String> {
     let record = event.context.require_dependency(&endpoint_shared_id)?;
-    let envelope = signed::codec::decode(&record.canonical_bytes)
+    let envelope = signed::layout::decode(&record.canonical_bytes)
         .map_err(|_| "key wrap signer dependency is not a signed endpoint_shared".to_string())?;
-    if envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    if envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err("key wrap signer dependency is not a signed endpoint_shared".to_string());
     }
-    endpoint_shared::codec::decode(&envelope.payload)
+    endpoint_shared::layout::decode(&envelope.payload)
         .map_err(|_| "key wrap signer dependency is not a signed endpoint_shared".to_string())
 }
 
@@ -91,9 +91,9 @@ fn decode_removal_frontier(
     removal_frontier_id: [u8; 32],
 ) -> Result<removal_frontier::types::RemovalFrontierEvent, String> {
     let record = event.context.require_dependency(&removal_frontier_id)?;
-    let envelope = removal_frontier::codec::decode_signed(&record.canonical_bytes)
+    let envelope = removal_frontier::layout::decode_signed(&record.canonical_bytes)
         .map_err(|_| "key wrap dependency is not a removal frontier".to_string())?;
-    removal_frontier::codec::decode(&envelope.payload)
+    removal_frontier::layout::decode(&envelope.payload)
         .map_err(|_| "key wrap dependency is not a removal frontier".to_string())
 }
 
@@ -102,9 +102,9 @@ fn decode_recipient_key(
     recipient_key_id: [u8; 32],
 ) -> Result<recipient_key::types::RecipientKeyEvent, String> {
     let record = event.context.require_dependency(&recipient_key_id)?;
-    let envelope = recipient_key::codec::decode_signed(&record.canonical_bytes)
+    let envelope = recipient_key::layout::decode_signed(&record.canonical_bytes)
         .map_err(|_| "key wrap dependency is not a recipient key".to_string())?;
-    recipient_key::codec::decode(&envelope.payload)
+    recipient_key::layout::decode(&envelope.payload)
         .map_err(|_| "key wrap dependency is not a recipient key".to_string())
 }
 
@@ -130,7 +130,7 @@ mod tests {
 
     fn endpoint_shared_record(workspace_id: [u8; 32], signing_public_key: [u8; 32]) -> Record {
         let payload =
-            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+            endpoint_shared::layout::encode(&endpoint_shared::types::EndpointSharedEvent {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id: [3; 32],
@@ -192,8 +192,8 @@ mod tests {
         recipient_id: [u8; 32],
         recipient_record: &Record,
     ) -> Record {
-        let recipient = recipient_key::codec::decode(
-            &recipient_key::codec::decode_signed(&recipient_record.canonical_bytes)
+        let recipient = recipient_key::layout::decode(
+            &recipient_key::layout::decode_signed(&recipient_record.canonical_bytes)
                 .expect("signed recipient")
                 .payload,
         )
@@ -290,22 +290,17 @@ mod tests {
         let output = project(&event).expect("project key wrap");
 
         assert_eq!(output.legacy_rows().len(), 3);
-        assert_eq!(
-            output.legacy_rows()[0].table,
-            schema::KEY_SECRET_COMMITMENTS
-        );
-        assert_eq!(output.legacy_rows()[1].table, schema::KEY_WRAPS);
-        assert_eq!(output.legacy_rows()[2].table, schema::PENDING_KEY_UNWRAPS);
-        let row = schema::decode_key_wrap_row(
-            &output.legacy_rows()[1].key,
-            &output.legacy_rows()[1].value,
-        )
-        .expect("decode row");
+        assert_eq!(output.legacy_rows()[0].table, rows::KEY_SECRET_COMMITMENTS);
+        assert_eq!(output.legacy_rows()[1].table, rows::KEY_WRAPS);
+        assert_eq!(output.legacy_rows()[2].table, rows::PENDING_KEY_UNWRAPS);
+        let row =
+            rows::decode_key_wrap_row(&output.legacy_rows()[1].key, &output.legacy_rows()[1].value)
+                .expect("decode row");
         assert_eq!(row.workspace_id, [1; 32]);
         assert_eq!(row.key_wrap_id, event.context.event_id);
         assert_eq!(row.removal_frontier_id, frontier_id);
         assert_eq!(row.recipient_key_id, recipient_id);
-        let pending = schema::decode_pending_key_unwrap_row(
+        let pending = rows::decode_pending_key_unwrap_row(
             output.legacy_rows()[2].key.clone(),
             &output.legacy_rows()[2].value,
         )

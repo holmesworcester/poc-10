@@ -22,9 +22,9 @@
 //! implement TTL enforcement (the `disappearing_minute_expiry` worker
 //! does that purely by reading already-stamped `expires_at_minute`).
 
-pub mod codec;
 pub mod commands;
+pub mod layout;
 pub mod projector;
 pub mod queries;
-pub mod schema;
+pub mod rows;
 pub mod types;

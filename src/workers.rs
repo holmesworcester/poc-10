@@ -10,7 +10,7 @@ pub mod event_projection;
 pub mod event_retention;
 pub mod pipeline_helpers;
 mod post_admission_purge;
-pub mod schema;
+pub mod queue_rows;
 pub mod sync;
 pub mod transit_in;
 pub mod transit_out;

@@ -6,16 +6,16 @@
 
 use crate::core::store::Store;
 
-use super::schema;
+use super::rows;
 
 pub fn connection_count(store: &Store) -> Result<usize, String> {
     store
-        .table_row_count(schema::CONNECTIONS)
+        .table_row_count(rows::CONNECTIONS)
         .map_err(|err| format!("count connections: {err}"))
 }
 
 pub fn connection_event_count(store: &Store) -> Result<usize, String> {
     store
-        .table_row_count(schema::CONNECTION_EVENTS)
+        .table_row_count(rows::CONNECTION_EVENTS)
         .map_err(|err| format!("count connection events: {err}"))
 }

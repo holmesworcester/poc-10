@@ -8,7 +8,7 @@ use crate::core::crypto;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::LocalRecipientKey;
 
 pub fn create(workspace_id: EventId) -> Result<CommandOutput<LocalRecipientKey>, String> {
@@ -21,10 +21,10 @@ pub fn create(workspace_id: EventId) -> Result<CommandOutput<LocalRecipientKey>,
         recipient_key: crypto::x25519_public_key(&recipient_secret),
         recipient_secret,
     };
-    let bytes = codec::encode(&event);
+    let bytes = layout::encode(&event);
     Ok(CommandOutput::with_events(
         event.clone(),
-        vec![codec::record_from_bytes(bytes).expect("encoded local recipient key is valid")],
+        vec![layout::record_from_bytes(bytes).expect("encoded local recipient key is valid")],
     ))
 }
 
@@ -44,7 +44,7 @@ mod tests {
         assert!(!record.scope.is_shared());
         assert_eq!(record.workspace_id, Some([1; 32]));
 
-        let decoded = codec::decode(&record.canonical_bytes).expect("decode");
+        let decoded = layout::decode(&record.canonical_bytes).expect("decode");
         assert_eq!(decoded, output.value);
         assert_eq!(
             crypto::x25519_public_key(&decoded.recipient_secret),

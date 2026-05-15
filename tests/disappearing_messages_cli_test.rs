@@ -1370,7 +1370,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_rejected_clean
 // The gate-specific behavior (drop-at-admit when no cover) is verified by
 // the unit-level `admit_drops_message_with_no_covering_ancestor` and
 // `admit_recovers_after_frontier_root_is_seeded` tests in
-// `message/schema.rs`. Those tests assert the EVENTS row is absent and
+// `message/rows.rs`. Those tests assert the EVENTS row is absent and
 // no tombstone is written on the drop, and that the same bytes admit
 // after F appears.
 //

@@ -7,16 +7,16 @@
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventRecord;
 
-use super::codec;
-use super::schema;
+use super::layout;
+use super::rows;
 
 pub fn staged_records(store: &Store) -> Result<Vec<EventRecord>, String> {
     let rows = store
-        .table_rows(schema::STAGED_EVENTS_WITH_DEPS)
+        .table_rows(rows::STAGED_EVENTS_WITH_DEPS)
         .map_err(|err| format!("load staged event_with_deps: {err}"))?;
     let mut records = Vec::with_capacity(rows.len());
     for (_, bytes) in rows {
-        records.push(codec::record_from_bytes(bytes)?);
+        records.push(layout::record_from_bytes(bytes)?);
     }
     Ok(records)
 }

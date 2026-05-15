@@ -27,7 +27,7 @@ use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 use crate::protocol::wire::Writer;
 
-use super::codec;
+use super::layout;
 use super::types::ResponseEvent;
 
 const HANDSHAKE_PURPOSE: &[u8] = b"topo-connection-handshake-v1";
@@ -99,9 +99,9 @@ pub(crate) fn create_for_request(
         handshake_hash: material.handshake_hash,
         connection_secret: material.connection_secret,
     };
-    let response_bytes = codec::encode(&event);
+    let response_bytes = layout::encode(&event);
     let connection_id = types::event_id(&response_bytes);
-    let response_record = codec::record_from_bytes(response_bytes.clone())?;
+    let response_record = layout::record_from_bytes(response_bytes.clone())?;
     let response_frame = transit::commands::create_connection_handshake_response(
         input.local.endpoint,
         input.request.from_endpoint,
@@ -270,7 +270,7 @@ fn validate_decrypted_response(
     material: &HandshakeMaterial,
     plaintext: &[u8],
 ) -> Result<(), String> {
-    let response = codec::decode(plaintext)?;
+    let response = layout::decode(plaintext)?;
     if response.request_id != request_id {
         return Err("connection response answers another request".to_string());
     }

@@ -4,11 +4,11 @@
 //! allowed to act as an administrator. The workspace-root bootstrap grant is
 //! direct; ongoing grants are signed by the authority admin key.
 
-pub mod cli;
-pub mod codec;
+pub mod command_line;
 pub mod commands;
+pub mod layout;
 pub mod projector;
-pub mod schema;
+pub mod rows;
 pub mod types;
 
 #[cfg(test)]

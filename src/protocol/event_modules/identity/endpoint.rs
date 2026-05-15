@@ -1,5 +1,5 @@
-pub mod codec;
 pub mod commands;
+pub mod layout;
 pub mod projector;
-pub mod schema;
+pub mod rows;
 pub mod types;

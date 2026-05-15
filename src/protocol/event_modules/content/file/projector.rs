@@ -14,20 +14,20 @@ use crate::protocol::event_modules::content::file_deletion::types::{
     deletion_label as file_deletion_label, deletion_label_author as file_deletion_label_author,
 };
 use crate::protocol::event_modules::content::message;
-use crate::protocol::event_modules::content::message_deletion::schema::{
+use crate::protocol::event_modules::content::message_deletion::rows::{
     purge_instruction_row, PurgeKind,
 };
 use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author as message_deletion_label_author;
 use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
 use crate::protocol::event_modules::leaf_history_node;
-use crate::protocol::event_modules::schema::EventLabel;
+use crate::protocol::event_modules::rows::EventLabel;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
-use super::{codec, commands, schema};
+use super::{commands, layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let file = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let file = layout::decode(&envelope.payload)?;
     commands::validate_event_fields(&file)?;
     if event.record.workspace_id != Some(file.workspace_id) {
         return Err("file workspace metadata does not match event body".to_string());
@@ -49,9 +49,9 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
 
     let parent = event.context.require_dependency(&file.message_id)?;
-    let parent_envelope = message::codec::decode_signed(&parent.canonical_bytes)
+    let parent_envelope = message::layout::decode_signed(&parent.canonical_bytes)
         .map_err(|_| "file parent dependency is not a signed message".to_string())?;
-    let parent_message = message::codec::decode(&parent_envelope.payload)
+    let parent_message = message::layout::decode(&parent_envelope.payload)
         .map_err(|_| "file parent dependency is not a signed message".to_string())?;
     if parent_message.workspace_id != file.workspace_id {
         return Err("file parent message workspace does not match file".to_string());
@@ -79,12 +79,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let signer = event
         .context
         .require_dependency(&envelope.signer_endpoint_shared_id)?;
-    let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
+    let signer_envelope = signed::layout::decode(&signer.canonical_bytes)
         .map_err(|_| "file signer dependency is not a signed endpoint_shared".to_string())?;
-    if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    if signer_envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err("file signer dependency is not a signed endpoint_shared".to_string());
     }
-    let signer_endpoint_shared = endpoint_shared::codec::decode(&signer_envelope.payload)
+    let signer_endpoint_shared = endpoint_shared::layout::decode(&signer_envelope.payload)
         .map_err(|_| "file signer dependency is not a signed endpoint_shared".to_string())?;
     if signer_endpoint_shared.workspace_id != file.workspace_id {
         return Err("file signer endpoint_shared workspace does not match file".to_string());
@@ -97,12 +97,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
 
     let author = event.context.require_dependency(&file.author_user_id)?;
-    let author_envelope = signed::codec::decode(&author.canonical_bytes)
+    let author_envelope = signed::layout::decode(&author.canonical_bytes)
         .map_err(|_| "file author dependency is not a signed user".to_string())?;
-    if author_envelope.inner_type != user::codec::TYPE_USER {
+    if author_envelope.inner_type != user::layout::TYPE_USER {
         return Err("file author dependency is not a signed user".to_string());
     }
-    let author_user = user::codec::decode(&author_envelope.payload)
+    let author_user = user::layout::decode(&author_envelope.payload)
         .map_err(|_| "file author dependency is not a signed user".to_string())?;
     if author_user.workspace_id != file.workspace_id {
         return Err("file author workspace does not match file".to_string());
@@ -115,7 +115,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let leaf_record = event
         .context
         .require_dependency(&file.local_history_node_secret_id)?;
-    let leaf = leaf_history_node::codec::decode(&leaf_record.canonical_bytes)
+    let leaf = leaf_history_node::layout::decode(&leaf_record.canonical_bytes)
         .map_err(|_| "file leaf dependency is not a local_history_node_secret".to_string())?;
     if leaf.workspace_id != file.workspace_id
         || leaf.removal_frontier_id != file.removal_frontier_id
@@ -134,7 +134,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         );
     }
 
-    Ok(ProjectionOutput::rows(schema::file_rows(
+    Ok(ProjectionOutput::rows(rows::file_rows(
         event.context.event_id,
         envelope.signer_endpoint_shared_id,
         &file,
@@ -156,16 +156,16 @@ fn file_purge_output(
         )],
         vec![
             TableDelete {
-                table: schema::FILES,
-                key: schema::file_key(workspace_id, file_event_id),
+                table: rows::FILES,
+                key: rows::file_key(workspace_id, file_event_id),
             },
             TableDelete {
-                table: schema::FILES_BY_MESSAGE,
-                key: schema::file_by_message_key(workspace_id, message_id, file_event_id),
+                table: rows::FILES_BY_MESSAGE,
+                key: rows::file_by_message_key(workspace_id, message_id, file_event_id),
             },
             TableDelete {
-                table: schema::FILES_BY_FILE_ID,
-                key: schema::file_by_file_id_key(workspace_id, file_id, file_event_id),
+                table: rows::FILES_BY_FILE_ID,
+                key: rows::file_by_file_id_key(workspace_id, file_id, file_event_id),
             },
         ],
         vec![EventLabel {
@@ -214,7 +214,7 @@ mod tests {
     }
 
     fn signing_public_key_for(private_key: &[u8; 32]) -> [u8; 32] {
-        codec::sign([0; 32], private_key, vec![codec::TYPE_FILE]).signer_public_key
+        layout::sign([0; 32], private_key, vec![layout::TYPE_FILE]).signer_public_key
     }
 
     fn endpoint_shared_record(
@@ -223,7 +223,7 @@ mod tests {
         signing_public_key: [u8; 32],
     ) -> Record {
         let payload =
-            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+            endpoint_shared::layout::encode(&endpoint_shared::types::EndpointSharedEvent {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id: user_id,
@@ -240,7 +240,7 @@ mod tests {
     }
 
     fn user_record(workspace_id: [u8; 32]) -> Record {
-        let payload = user::codec::encode(&user::types::UserEvent {
+        let payload = user::layout::encode(&user::types::UserEvent {
             created_at_ms: 3,
             workspace_id,
             public_key: [22; 32],
@@ -258,7 +258,7 @@ mod tests {
         frontier_id: [u8; 32],
         local_history_node_secret_id: [u8; 32],
     ) -> Record {
-        let payload = message::codec::encode(&message::types::MessageEvent {
+        let payload = message::layout::encode(&message::types::MessageEvent {
             workspace_id,
             created_at_ms: 1,
             author_user_id,
@@ -269,9 +269,9 @@ mod tests {
             nonce: [32; XCHACHA20_POLY1305_NONCE_BYTES],
             ciphertext: [33; message::types::MESSAGE_CIPHERTEXT_BYTES],
         });
-        let envelope = message::codec::sign([42; 32], &[43; 32], payload);
-        let bytes = message::codec::encode_signed(&envelope);
-        message::codec::signed_record_from_bytes(bytes).expect("record")
+        let envelope = message::layout::sign([42; 32], &[43; 32], payload);
+        let bytes = message::layout::encode_signed(&envelope);
+        message::layout::signed_record_from_bytes(bytes).expect("record")
     }
 
     fn build_descriptor(filename: &str, mime: &str) -> BuiltDescriptor {
@@ -336,8 +336,8 @@ mod tests {
             nonce: NONCE,
             ciphertext: [0; FILE_DESCRIPTOR_CIPHERTEXT_BYTES],
         };
-        let aad = codec::descriptor_associated_data(&event, signer_id);
-        event.ciphertext = codec::seal_descriptor_slot(
+        let aad = layout::descriptor_associated_data(&event, signer_id);
+        event.ciphertext = layout::seal_descriptor_slot(
             &leaf_node_secret,
             &event.nonce,
             &aad,
@@ -347,11 +347,11 @@ mod tests {
             },
         )
         .expect("seal descriptor");
-        let payload = codec::encode(&event).expect("encode file");
-        let envelope = codec::sign(signer_id, &signer_private_key, payload);
-        let bytes = codec::encode_signed(&envelope);
+        let payload = layout::encode(&event).expect("encode file");
+        let envelope = layout::sign(signer_id, &signer_private_key, payload);
+        let bytes = layout::encode_signed(&envelope);
         let id = event_id(&bytes);
-        let record = codec::signed_record_from_bytes(bytes).expect("record");
+        let record = layout::signed_record_from_bytes(bytes).expect("record");
         BuiltDescriptor {
             record,
             file_event_id: id,
@@ -408,10 +408,10 @@ mod tests {
         let event = context_for(&built);
         let output = project(&event).expect("project file");
         assert_eq!(output.legacy_rows().len(), 3);
-        assert_eq!(output.legacy_rows()[0].table, schema::FILES);
-        assert_eq!(output.legacy_rows()[1].table, schema::FILES_BY_MESSAGE);
-        assert_eq!(output.legacy_rows()[2].table, schema::FILES_BY_FILE_ID);
-        let row = schema::decode_sealed_file_row(
+        assert_eq!(output.legacy_rows()[0].table, rows::FILES);
+        assert_eq!(output.legacy_rows()[1].table, rows::FILES_BY_MESSAGE);
+        assert_eq!(output.legacy_rows()[2].table, rows::FILES_BY_FILE_ID);
+        let row = rows::decode_sealed_file_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -429,7 +429,7 @@ mod tests {
             .windows("image/jpeg".len())
             .any(|w| w == b"image/jpeg"));
         // Smoke-test the AEAD round trip with the file's own leaf node secret.
-        let aad = codec::descriptor_associated_data(
+        let aad = layout::descriptor_associated_data(
             &FileEvent {
                 workspace_id: row.workspace_id,
                 created_at_ms: row.created_at_ms,
@@ -447,9 +447,13 @@ mod tests {
             },
             row.signer_endpoint_shared_id,
         );
-        let plaintext =
-            codec::open_descriptor_slot(&built.leaf_node_secret, &row.nonce, &aad, &row.ciphertext)
-                .expect("open descriptor");
+        let plaintext = layout::open_descriptor_slot(
+            &built.leaf_node_secret,
+            &row.nonce,
+            &aad,
+            &row.ciphertext,
+        )
+        .expect("open descriptor");
         assert_eq!(plaintext.filename, "photo.jpg");
         assert_eq!(plaintext.mime_type, "image/jpeg");
     }
@@ -469,7 +473,7 @@ mod tests {
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(
             output.legacy_rows()[0].table,
-            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+            crate::protocol::event_modules::content::message_deletion::rows::PURGE_INSTRUCTIONS
         );
         assert_eq!(output.legacy_deletes().len(), 3);
         let delete_tables: Vec<_> = output
@@ -477,9 +481,9 @@ mod tests {
             .iter()
             .map(|delete| delete.table)
             .collect();
-        assert!(delete_tables.contains(&schema::FILES));
-        assert!(delete_tables.contains(&schema::FILES_BY_MESSAGE));
-        assert!(delete_tables.contains(&schema::FILES_BY_FILE_ID));
+        assert!(delete_tables.contains(&rows::FILES));
+        assert!(delete_tables.contains(&rows::FILES_BY_MESSAGE));
+        assert!(delete_tables.contains(&rows::FILES_BY_FILE_ID));
         assert_eq!(output.legacy_labels().len(), 1);
         assert_eq!(output.legacy_labels()[0].event_id, built.file_event_id);
     }
@@ -506,7 +510,7 @@ mod tests {
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(
             output.legacy_rows()[0].table,
-            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+            crate::protocol::event_modules::content::message_deletion::rows::PURGE_INSTRUCTIONS
         );
         assert_eq!(output.legacy_deletes().len(), 3);
         assert_eq!(output.legacy_labels().len(), 1);
@@ -521,14 +525,14 @@ mod tests {
         built.parent_id = event_id(&other_parent.canonical_bytes);
         built.parent_record = other_parent;
 
-        let envelope = codec::decode_signed(&built.record.canonical_bytes).expect("decode signed");
-        let mut file = codec::decode(&envelope.payload).expect("decode file");
+        let envelope = layout::decode_signed(&built.record.canonical_bytes).expect("decode signed");
+        let mut file = layout::decode(&envelope.payload).expect("decode file");
         file.message_id = built.parent_id;
-        let payload = codec::encode(&file).expect("re-encode");
-        let resigned = codec::sign(built.signer_id, &[9; 32], payload);
-        let bytes = codec::encode_signed(&resigned);
+        let payload = layout::encode(&file).expect("re-encode");
+        let resigned = layout::sign(built.signer_id, &[9; 32], payload);
+        let bytes = layout::encode_signed(&resigned);
         built.file_event_id = crate::protocol::event_modules::types::event_id(&bytes);
-        built.record = codec::signed_record_from_bytes(bytes).expect("record");
+        built.record = layout::signed_record_from_bytes(bytes).expect("record");
 
         let event = context_for(&built);
         assert_eq!(
@@ -561,14 +565,14 @@ mod tests {
         let other_leaf_id = other_leaf.value.local_history_node_secret_id;
         let other_leaf_record = other_leaf.events[0].record().clone();
 
-        let envelope = codec::decode_signed(&built.record.canonical_bytes).expect("decode signed");
-        let mut file = codec::decode(&envelope.payload).expect("decode file");
+        let envelope = layout::decode_signed(&built.record.canonical_bytes).expect("decode signed");
+        let mut file = layout::decode(&envelope.payload).expect("decode file");
         file.local_history_node_secret_id = other_leaf_id;
-        let payload = codec::encode(&file).expect("re-encode");
-        let resigned = codec::sign(built.signer_id, &[9; 32], payload);
-        let bytes = codec::encode_signed(&resigned);
+        let payload = layout::encode(&file).expect("re-encode");
+        let resigned = layout::sign(built.signer_id, &[9; 32], payload);
+        let bytes = layout::encode_signed(&resigned);
         let new_id = crate::protocol::event_modules::types::event_id(&bytes);
-        let new_record = codec::signed_record_from_bytes(bytes).expect("record");
+        let new_record = layout::signed_record_from_bytes(bytes).expect("record");
         let mut tampered = built;
         tampered.file_event_id = new_id;
         tampered.record = new_record;
@@ -631,7 +635,7 @@ mod tests {
     #[test]
     fn raw_file_bytes_are_not_admissible() {
         let built = build_descriptor("a.bin", "application/octet-stream");
-        let envelope = codec::decode_signed(&built.record.canonical_bytes).expect("decode signed");
+        let envelope = layout::decode_signed(&built.record.canonical_bytes).expect("decode signed");
         assert_eq!(
             crate::protocol::event_modules::event_from_bytes(envelope.payload)
                 .expect_err("raw file must fail"),

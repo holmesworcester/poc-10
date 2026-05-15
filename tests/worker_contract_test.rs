@@ -3,14 +3,14 @@ use std::cell::Cell;
 use topo::core::store::Store;
 use topo::protocol::event_modules::content::content_event;
 use topo::protocol::event_modules::identity::{endpoint, endpoint_shared, workspace};
-use topo::protocol::event_modules::schema::{self as event_schema, EventLabel};
+use topo::protocol::event_modules::rows::{self as event_schema, EventLabel};
 use topo::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
 use topo::protocol::event_modules::worker::{
     self, CommandOutput, EventRegistry, EventWithContext, ProjectionDecision, ProjectionOutput,
 };
 use topo::protocol::event_modules::Modules;
 use topo::protocol::Protocol;
-use topo::workers::schema as worker_schema;
+use topo::workers::queue_rows as worker_rows;
 use topo::workers::{dependency_unblock, event_admission, event_projection, sync};
 
 #[test]
@@ -75,14 +75,14 @@ fn command_admission_processes_local_batch_without_per_event_hook_ticks() {
     assert_eq!(registry.hook_calls.get(), 1);
     assert_eq!(
         store
-            .table_row_count(worker_schema::CANONICAL_IN)
+            .table_row_count(worker_rows::CANONICAL_IN)
             .expect("count canonical in"),
         0,
         "local command batches should not enqueue themselves through canonical.in"
     );
     assert_eq!(
         store
-            .table_row_count(worker_schema::RECENTLY_VALID_EVENTS)
+            .table_row_count(worker_rows::RECENTLY_VALID_EVENTS)
             .expect("count recently valid"),
         0,
         "local command batches should consume their recently-valid unblock inputs"
@@ -107,7 +107,7 @@ fn install_local_content_signer(store: &Store) -> (EventId, EventId, [u8; 32]) {
         device_name: "worker".to_string(),
     };
     store
-        .insert_table_rows(vec![endpoint_shared::schema::endpoint_membership_row(
+        .insert_table_rows(vec![endpoint_shared::rows::endpoint_membership_row(
             endpoint_shared_id,
             device_invite_id,
             &event,
@@ -204,7 +204,7 @@ fn new_dependency_label_reprojects_already_applied_direct_dependents() {
     assert!(registry.child_saw_dependency_label.get());
     assert_eq!(
         store
-            .table_row_count(worker_schema::PENDING_REPROJECTIONS)
+            .table_row_count(worker_rows::PENDING_REPROJECTIONS)
             .expect("count reprojections"),
         0
     );
@@ -273,7 +273,7 @@ fn event_pipeline_workers_claim_and_consume_explicit_queues() {
 
     let child = registry.record_for(child_bytes).unwrap();
     store
-        .insert_table_rows(vec![worker_schema::canonical_in_row(child, None)])
+        .insert_table_rows(vec![worker_rows::canonical_in_row(child, None)])
         .expect("enqueue child canonical in");
     let child_admission =
         event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
@@ -281,7 +281,7 @@ fn event_pipeline_workers_claim_and_consume_explicit_queues() {
     assert_eq!(child_admission.blocked_events, 1);
     assert_eq!(
         store
-            .table_row_count(worker_schema::CANONICAL_IN)
+            .table_row_count(worker_rows::CANONICAL_IN)
             .expect("count canonical in"),
         0,
         "admission consumes claimed canonical in rows"
@@ -289,7 +289,7 @@ fn event_pipeline_workers_claim_and_consume_explicit_queues() {
 
     let dep = registry.record_for(dep_bytes).unwrap();
     store
-        .insert_table_rows(vec![worker_schema::canonical_in_row(dep, None)])
+        .insert_table_rows(vec![worker_rows::canonical_in_row(dep, None)])
         .expect("enqueue dep canonical in");
     let dep_admission =
         event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
@@ -297,7 +297,7 @@ fn event_pipeline_workers_claim_and_consume_explicit_queues() {
     assert_eq!(dep_admission.applied_events, 1);
     assert_eq!(
         store
-            .table_row_count(worker_schema::RECENTLY_VALID_EVENTS)
+            .table_row_count(worker_rows::RECENTLY_VALID_EVENTS)
             .expect("count recently valid"),
         1,
         "projection writes recently-valid unblock input"
@@ -308,7 +308,7 @@ fn event_pipeline_workers_claim_and_consume_explicit_queues() {
     assert_eq!(unblock.unblocked_events, 1);
     assert_eq!(
         store
-            .table_row_count(worker_schema::RECENTLY_VALID_EVENTS)
+            .table_row_count(worker_rows::RECENTLY_VALID_EVENTS)
             .expect("count recently valid after unblock"),
         0,
         "dependency unblock consumes recently-valid rows"
@@ -341,14 +341,14 @@ fn canonical_in_rejects_are_consumed_and_do_not_poison_later_work() {
 
     let bad = registry.record_for(bad_bytes).unwrap();
     store
-        .insert_table_rows(vec![worker_schema::canonical_in_row(bad, None)])
+        .insert_table_rows(vec![worker_rows::canonical_in_row(bad, None)])
         .expect("enqueue rejected canonical in");
     let err = event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
         .expect_err("bad event should reject");
     assert!(err.contains("intentional projection reject"), "{err}");
     assert_eq!(
         store
-            .table_row_count(worker_schema::CANONICAL_IN)
+            .table_row_count(worker_rows::CANONICAL_IN)
             .expect("count canonical in after reject"),
         0,
         "rejected canonical in rows must be consumed"
@@ -356,7 +356,7 @@ fn canonical_in_rejects_are_consumed_and_do_not_poison_later_work() {
 
     let good = registry.record_for(good_bytes).unwrap();
     store
-        .insert_table_rows(vec![worker_schema::canonical_in_row(good, None)])
+        .insert_table_rows(vec![worker_rows::canonical_in_row(good, None)])
         .expect("enqueue good canonical in");
     let report = event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
         .expect("good event should not be blocked by rejected input");
@@ -385,7 +385,7 @@ fn sync_worker_consumes_applied_shared_event_queue() {
     // initial disappearing_messages_setting event.
     assert_eq!(
         store
-            .table_row_count(worker_schema::APPLIED_SHARED_EVENTS)
+            .table_row_count(worker_rows::APPLIED_SHARED_EVENTS)
             .expect("count sync index queue"),
         2
     );
@@ -399,7 +399,7 @@ fn sync_worker_consumes_applied_shared_event_queue() {
     assert_eq!(report.indexed_events, 2);
     assert_eq!(
         store
-            .table_row_count(worker_schema::APPLIED_SHARED_EVENTS)
+            .table_row_count(worker_rows::APPLIED_SHARED_EVENTS)
             .expect("count sync index queue after drain"),
         0
     );
@@ -605,7 +605,7 @@ fn event_admission_drain_calls_post_admission_hook_when_events_admit() {
 
     let proposed = registry.record_for(event_bytes).unwrap();
     store
-        .insert_table_rows(vec![worker_schema::canonical_in_row(proposed, None)])
+        .insert_table_rows(vec![worker_rows::canonical_in_row(proposed, None)])
         .expect("enqueue canonical in");
 
     let report = event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })

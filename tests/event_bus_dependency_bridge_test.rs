@@ -7,12 +7,10 @@ use topo::core::handler_dispatch::{HandlerContext, RowIntentHandler};
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::store::Store;
-use topo::protocol::event_modules::test_events::event_with_deps::{
-    codec, projector, schema, types,
-};
+use topo::protocol::event_modules::test_events::event_with_deps::{layout, projector, rows, types};
 
 fn event_fact(event: types::EventWithDeps) -> Fact {
-    let bytes = codec::encode(&event);
+    let bytes = layout::encode(&event);
     Fact::new(FactScope::Global, event.timestamp, bytes)
 }
 
@@ -28,7 +26,7 @@ fn staged_event(index: u64, inner_bytes: Vec<u8>) -> Fact {
     Fact::new(
         FactScope::Local,
         0,
-        codec::encode_staged(&types::StagedEventWithDeps { index, inner_bytes }),
+        layout::encode_staged(&types::StagedEventWithDeps { index, inner_bytes }),
     )
 }
 
@@ -114,7 +112,7 @@ fn event_with_deps_bridge_never_exposes_failed_dependency_context() {
 
 #[test]
 fn staged_event_bridge_writes_row_through_atomic_row_intent_handler() {
-    let store = Store::open_memory_with_schemas(schema::SCHEMAS).expect("open staged event schema");
+    let store = Store::open_memory_with_schemas(rows::SCHEMAS).expect("open staged event schema");
     let inner = event_with_deps(42, vec![[1; 32], [2; 32]], 7);
     let staged = staged_event(17, inner.bytes.clone());
     let mut bus = EventBus::new();
@@ -126,7 +124,7 @@ fn staged_event_bridge_writes_row_through_atomic_row_intent_handler() {
     assert_eq!(projected.projections, 1);
     assert_eq!(projected.intents, 1);
 
-    let handler = RowIntentHandler::new(&store, &[schema::STAGED_EVENTS_WITH_DEPS]);
+    let handler = RowIntentHandler::new(&store, &[rows::STAGED_EVENTS_WITH_DEPS]);
     let applied = bus
         .dispatch_intents(&handler, &HandlerContext::new(), 10)
         .expect("apply staged row intent");
@@ -135,7 +133,7 @@ fn staged_event_bridge_writes_row_through_atomic_row_intent_handler() {
     assert!(bus.intents().is_empty());
     assert_eq!(
         store
-            .table_rows(schema::STAGED_EVENTS_WITH_DEPS)
+            .table_rows(rows::STAGED_EVENTS_WITH_DEPS)
             .expect("staged rows"),
         vec![(17u64.to_be_bytes().to_vec(), inner.bytes)]
     );

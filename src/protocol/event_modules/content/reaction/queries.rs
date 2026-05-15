@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{
+use super::rows::{
     decode_reaction_row, decode_sealed_reaction_row, SealedReactionRow, REACTIONS, SEALED_REACTIONS,
 };
 use super::types::ReactionRow;

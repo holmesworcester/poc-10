@@ -11,7 +11,7 @@ use crate::protocol::event_modules::identity::signed;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
 
-use super::codec;
+use super::layout;
 use super::types::{DeviceInviteEvent, DeviceInviteKeypair};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,10 +58,10 @@ pub fn create_with_private_key(
     let signed = signed::commands::sign_payload(
         input.signer_event_id,
         &input.signer_private_key,
-        codec::encode(&event),
+        layout::encode(&event),
     )?;
-    let bytes = signed::codec::encode(&signed.value);
-    let proposed = ProposedEvent::new(codec::record_from_signed_bytes(bytes)?);
+    let bytes = signed::layout::encode(&signed.value);
+    let proposed = ProposedEvent::new(layout::record_from_signed_bytes(bytes)?);
     let device_invite_id = proposed.event_id();
 
     Ok(CommandOutput::with_proposed_events(
@@ -128,16 +128,16 @@ mod tests {
             vec![[2; 32], [1; 32], [4; 32]]
         );
 
-        let envelope = signed::codec::decode(&proposed.record().canonical_bytes)
+        let envelope = signed::layout::decode(&proposed.record().canonical_bytes)
             .expect("decode signed device invite");
         assert_eq!(envelope.signer_event_id, [2; 32]);
         assert_eq!(
             envelope.signer_public_key,
             crypto::ed25519_public_key(&[8; crypto::ED25519_PRIVATE_KEY_BYTES])
         );
-        assert_eq!(envelope.inner_type, codec::TYPE_DEVICE_INVITE);
+        assert_eq!(envelope.inner_type, layout::TYPE_DEVICE_INVITE);
 
-        let decoded = codec::decode(&envelope.payload).expect("decode device invite");
+        let decoded = layout::decode(&envelope.payload).expect("decode device invite");
         assert_eq!(decoded.created_at_ms, 55);
         assert_eq!(decoded.workspace_id, [1; 32]);
         assert_eq!(decoded.user_authority_event_id, [2; 32]);
@@ -164,7 +164,7 @@ mod tests {
             output.events[0].record().dependencies,
             vec![[6; 32], [1; 32], [2; 32]]
         );
-        let envelope = signed::codec::decode(&output.events[0].record().canonical_bytes)
+        let envelope = signed::layout::decode(&output.events[0].record().canonical_bytes)
             .expect("decode signed device invite");
         assert_eq!(envelope.signer_event_id, [6; 32]);
         assert_eq!(
@@ -172,7 +172,7 @@ mod tests {
             crypto::ed25519_public_key(&signer_private_key)
         );
         assert_eq!(
-            codec::decode(&envelope.payload)
+            layout::decode(&envelope.payload)
                 .expect("payload")
                 .user_invite_event_id,
             None

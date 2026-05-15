@@ -13,7 +13,7 @@ use crate::core::crypto::{
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::{BuildSlice, FileSliceEvent, FILE_SLICE_DATA_BYTES};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,14 +47,14 @@ pub fn create(input: CreateFileSlice) -> Result<CommandOutput<CreateFileSliceOut
         plaintext_len: input.plaintext_len,
         proof: input.proof,
     };
-    let payload = codec::encode(&event, &input.file_event_id)?;
-    let envelope = codec::sign(
+    let payload = layout::encode(&event, &input.file_event_id)?;
+    let envelope = layout::sign(
         input.signer_endpoint_shared_id,
         &input.signer_private_key,
         payload,
     );
-    let bytes_signed = codec::encode_signed(&envelope);
-    let record = codec::signed_record_from_bytes(bytes_signed)?;
+    let bytes_signed = layout::encode_signed(&envelope);
+    let record = layout::signed_record_from_bytes(bytes_signed)?;
     let slice_event_id = crate::protocol::event_modules::types::event_id(&record.canonical_bytes);
     Ok(CommandOutput::with_events(
         CreateFileSliceOutput {
@@ -89,7 +89,7 @@ pub struct SliceFromCiphertext<'a> {
 pub fn slice_from_ciphertext(
     input: SliceFromCiphertext<'_>,
 ) -> Result<CommandOutput<CreateFileSliceOutput>, String> {
-    let event = codec::build_slice(BuildSlice {
+    let event = layout::build_slice(BuildSlice {
         workspace_id: input.workspace_id,
         created_at_ms: input.created_at_ms,
         file_id: input.file_id,
@@ -179,7 +179,7 @@ pub fn seal_file_blob(
         let start = (slice_number as usize) * slice_bytes as usize;
         let end = ((slice_number + 1) as usize * slice_bytes as usize).min(plaintext.len());
         plaintext_lengths.push((end - start) as u32);
-        let chunk = codec::seal_slice(
+        let chunk = layout::seal_slice(
             leaf_node_secret,
             workspace_id,
             file_id,

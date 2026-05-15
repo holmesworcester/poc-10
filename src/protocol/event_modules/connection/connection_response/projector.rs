@@ -35,20 +35,20 @@ use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput}
 
 use super::super::connection_ephemeral_secret;
 use super::super::connection_request;
-use super::super::schema as projection;
-use super::codec;
+use super::super::rows as projection;
 use super::commands;
+use super::layout;
 use crate::protocol::event_modules::types::ReceiveAuthorization;
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
     let bytes = event.record.canonical_bytes.clone();
     let receive = event.context.receive;
-    let response = codec::decode(&bytes)?;
+    let response = layout::decode(&bytes)?;
     let connection_id = event.context.event_id;
     // Request bytes are dependency context supplied by the common worker. If
     // the request is absent or failed projection, this response cannot project.
     let request = event.context.require_dependency(&response.request_id)?;
-    let request = connection_request::codec::decode(&request.canonical_bytes)
+    let request = connection_request::layout::decode(&request.canonical_bytes)
         .map_err(|_| "connection response references a non-request event".to_string())?;
     if request.from_endpoint != response.to_endpoint {
         return Err("connection response references another endpoint's request".to_string());
@@ -74,7 +74,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let invite_secret = event
         .context
         .require_dependency(&response.invite_secret_event_id)?;
-    let invite_secret = crate::protocol::event_modules::identity::invite::codec::decode(
+    let invite_secret = crate::protocol::event_modules::identity::invite::layout::decode(
         &invite_secret.canonical_bytes,
     )
     .map_err(|_| "connection response dependency is not an invite secret".to_string())?;
@@ -105,7 +105,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         let initiator = event
             .context
             .require_dependency(&response.initiator_ephemeral_secret_event_id)?;
-        let initiator = connection_ephemeral_secret::codec::decode(&initiator.canonical_bytes)
+        let initiator = connection_ephemeral_secret::layout::decode(&initiator.canonical_bytes)
             .map_err(|_| "connection response dependency is not an ephemeral secret".to_string())?;
         let material = commands::initiator_material(
             response.request_id,
@@ -143,7 +143,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         let responder = event
             .context
             .require_dependency(&response.responder_ephemeral_secret_event_id)?;
-        let responder = connection_ephemeral_secret::codec::decode(&responder.canonical_bytes)
+        let responder = connection_ephemeral_secret::layout::decode(&responder.canonical_bytes)
             .map_err(|_| "connection response dependency is not an ephemeral secret".to_string())?;
         if responder.owner_endpoint != response.from_endpoint {
             return Err(
@@ -180,13 +180,13 @@ mod tests {
     use crate::core::crypto;
     use crate::protocol::event_modules::connection::connection_ephemeral_secret;
     use crate::protocol::event_modules::connection::connection_response::types::ResponseEvent;
-    use crate::protocol::event_modules::connection::{connection_request, schema};
+    use crate::protocol::event_modules::connection::{connection_request, rows};
     use crate::protocol::event_modules::identity::invite;
     use crate::protocol::event_modules::types::event_id;
     use crate::protocol::event_modules::types::ReceiveMetadata;
     use crate::protocol::event_modules::worker::{DependencyContext, EventContext};
 
-    use super::codec;
+    use super::layout;
     use super::*;
 
     type Record = crate::protocol::event_modules::types::EventRecord;
@@ -208,8 +208,9 @@ mod tests {
         let responder_static = [4; 32];
         let responder_endpoint = crypto::x25519_public_key(&responder_static);
         let invite_secret = invite::types::InviteSecretEvent::new([7; 32]);
-        let invite_record = invite::codec::record_from_bytes(invite::codec::encode(&invite_secret))
-            .expect("invite record");
+        let invite_record =
+            invite::layout::record_from_bytes(invite::layout::encode(&invite_secret))
+                .expect("invite record");
         let invite_id = event_id(&invite_record.canonical_bytes);
         let initiator_ephemeral = connection_ephemeral_secret::types::EphemeralSecretEvent {
             owner_endpoint: [1; 32],
@@ -217,8 +218,8 @@ mod tests {
             ephemeral_public_key: crypto::x25519_public_key(&[8; 32]),
             created_at_ms: 0,
         };
-        let initiator_ephemeral_record = connection_ephemeral_secret::codec::record_from_bytes(
-            connection_ephemeral_secret::codec::encode(&initiator_ephemeral),
+        let initiator_ephemeral_record = connection_ephemeral_secret::layout::record_from_bytes(
+            connection_ephemeral_secret::layout::encode(&initiator_ephemeral),
         )
         .expect("initiator ephemeral record");
         let initiator_ephemeral_id = event_id(&initiator_ephemeral_record.canonical_bytes);
@@ -238,8 +239,8 @@ mod tests {
             &invite_secret,
         )
         .expect("sign with invite");
-        let request_record = connection_request::codec::record_from_bytes(
-            connection_request::codec::encode(&request),
+        let request_record = connection_request::layout::record_from_bytes(
+            connection_request::layout::encode(&request),
         )
         .expect("request record");
         let request_id = event_id(&request_record.canonical_bytes);
@@ -249,8 +250,8 @@ mod tests {
             ephemeral_public_key: crypto::x25519_public_key(&[9; 32]),
             created_at_ms: 0,
         };
-        let responder_ephemeral_record = connection_ephemeral_secret::codec::record_from_bytes(
-            connection_ephemeral_secret::codec::encode(&responder_ephemeral),
+        let responder_ephemeral_record = connection_ephemeral_secret::layout::record_from_bytes(
+            connection_ephemeral_secret::layout::encode(&responder_ephemeral),
         )
         .expect("responder ephemeral record");
         let responder_ephemeral_id = event_id(&responder_ephemeral_record.canonical_bytes);
@@ -274,7 +275,7 @@ mod tests {
             connection_secret: material.connection_secret,
         };
         let response_record =
-            codec::record_from_bytes(codec::encode(&response)).expect("response record");
+            layout::record_from_bytes(layout::encode(&response)).expect("response record");
         Fixture {
             request_id,
             request_record,
@@ -322,13 +323,13 @@ mod tests {
         })
         .expect("project response");
 
-        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows()[0].table, rows::CONNECTION_EVENTS);
         assert_eq!(output.legacy_rows()[0].key, connection_id);
-        assert_eq!(output.legacy_rows()[1].table, schema::REQUEST_CONNECTIONS);
-        assert_eq!(output.legacy_rows()[2].table, schema::CONNECTIONS);
+        assert_eq!(output.legacy_rows()[1].table, rows::REQUEST_CONNECTIONS);
+        assert_eq!(output.legacy_rows()[2].table, rows::CONNECTIONS);
         assert_eq!(output.legacy_rows()[2].key, connection_id);
         assert_eq!(output.legacy_rows()[2].value, [1; 32]);
-        assert_eq!(output.legacy_rows()[3].table, schema::TRANSPORT_TARGETS);
+        assert_eq!(output.legacy_rows()[3].table, rows::TRANSPORT_TARGETS);
     }
 
     #[test]
@@ -370,10 +371,10 @@ mod tests {
         })
         .expect("project response");
 
-        assert_eq!(output.legacy_rows()[0].table, schema::CONNECTION_EVENTS);
-        assert_eq!(output.legacy_rows()[2].table, schema::CONNECTIONS);
+        assert_eq!(output.legacy_rows()[0].table, rows::CONNECTION_EVENTS);
+        assert_eq!(output.legacy_rows()[2].table, rows::CONNECTIONS);
         assert_eq!(output.legacy_rows()[2].value, fixture.responder_endpoint);
-        assert_eq!(output.legacy_rows()[3].table, schema::TRANSPORT_TARGETS);
+        assert_eq!(output.legacy_rows()[3].table, rows::TRANSPORT_TARGETS);
         assert_eq!(
             output.legacy_rows()[3].value,
             origin.to_string().into_bytes()

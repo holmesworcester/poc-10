@@ -90,8 +90,8 @@ fn identity_cli_workspace_invite_and_link_create_scoped_real_invite_events() {
     );
 
     let store = Protocol::open_store(&db).expect("open store");
-    assert_eq!(row_count(&store, user_invite::schema::USER_INVITES), 2);
-    assert_eq!(row_count(&store, device_invite::schema::DEVICE_INVITES), 2);
+    assert_eq!(row_count(&store, user_invite::rows::USER_INVITES), 2);
+    assert_eq!(row_count(&store, device_invite::rows::DEVICE_INVITES), 2);
 }
 
 #[test]
@@ -268,19 +268,16 @@ fn bootstrap_two_users_and_two_endpoints_replay_without_daemon() {
     assert_eq!(statuses.rejected, 0);
     assert_eq!(statuses.blocked_edges, 0);
 
-    assert_eq!(row_count(&receiver, admin::schema::ADMINS), 1);
-    assert_eq!(row_count(&receiver, user_invite::schema::USER_INVITES), 2);
-    assert_eq!(row_count(&receiver, user::schema::USERS), 2);
+    assert_eq!(row_count(&receiver, admin::rows::ADMINS), 1);
+    assert_eq!(row_count(&receiver, user_invite::rows::USER_INVITES), 2);
+    assert_eq!(row_count(&receiver, user::rows::USERS), 2);
+    assert_eq!(row_count(&receiver, device_invite::rows::DEVICE_INVITES), 3);
     assert_eq!(
-        row_count(&receiver, device_invite::schema::DEVICE_INVITES),
+        row_count(&receiver, endpoint_shared::rows::ENDPOINT_SHARED),
         3
     );
     assert_eq!(
-        row_count(&receiver, endpoint_shared::schema::ENDPOINT_SHARED),
-        3
-    );
-    assert_eq!(
-        row_count(&receiver, endpoint_shared::schema::ENDPOINT_MEMBERSHIPS),
+        row_count(&receiver, endpoint_shared::rows::ENDPOINT_MEMBERSHIPS),
         3
     );
 
@@ -467,7 +464,7 @@ fn unsigned_device_invite_bytes_are_not_admissible_protocol_events() {
         public_key: crypto::ed25519_public_key(&[4; 32]),
     };
 
-    let err = crate::protocol::event_modules::event_from_bytes(device_invite::codec::encode(&raw))
+    let err = crate::protocol::event_modules::event_from_bytes(device_invite::layout::encode(&raw))
         .expect_err("unsigned device_invite must not decode as a protocol event");
 
     assert_eq!(err, "device_invite must be signed");
@@ -669,15 +666,12 @@ fn admin_user_endpoint_authorizes_invites_per_workspace_without_cross_authorizin
         "{err}"
     );
 
-    assert_eq!(row_count(&store, admin::schema::ADMINS), 4);
-    assert_eq!(row_count(&store, user_invite::schema::USER_INVITES), 4);
-    assert_eq!(row_count(&store, user::schema::USERS), 4);
+    assert_eq!(row_count(&store, admin::rows::ADMINS), 4);
+    assert_eq!(row_count(&store, user_invite::rows::USER_INVITES), 4);
+    assert_eq!(row_count(&store, user::rows::USERS), 4);
+    assert_eq!(row_count(&store, endpoint_shared::rows::ENDPOINT_SHARED), 2);
     assert_eq!(
-        row_count(&store, endpoint_shared::schema::ENDPOINT_SHARED),
-        2
-    );
-    assert_eq!(
-        row_count(&store, endpoint_shared::schema::ENDPOINT_MEMBERSHIPS),
+        row_count(&store, endpoint_shared::rows::ENDPOINT_MEMBERSHIPS),
         2
     );
 }
@@ -961,12 +955,12 @@ fn assert_admin(
     admin_id: EventId,
     public_key: [u8; 32],
 ) {
-    let key = admin::schema::admin_key(&workspace_id, &admin_id);
+    let key = admin::rows::admin_key(&workspace_id, &admin_id);
     let value = store
-        .table_row(admin::schema::ADMINS, &key)
+        .table_row(admin::rows::ADMINS, &key)
         .expect("read admin row")
         .expect("admin row");
-    let row = admin::schema::decode_admin_row(&key, &value).expect("decode admin");
+    let row = admin::rows::decode_admin_row(&key, &value).expect("decode admin");
     assert_eq!(row.workspace_id, workspace_id);
     assert_eq!(row.admin_id, admin_id);
     assert_eq!(row.authority_event_id, workspace_id);
@@ -980,12 +974,12 @@ fn assert_user(
     user_id: EventId,
     username: &str,
 ) {
-    let key = user::schema::user_key(&workspace_id, &user_id);
+    let key = user::rows::user_key(&workspace_id, &user_id);
     let value = store
-        .table_row(user::schema::USERS, &key)
+        .table_row(user::rows::USERS, &key)
         .expect("read user row")
         .expect("user row");
-    let row = user::schema::decode_user_row(&key, &value).expect("decode user");
+    let row = user::rows::decode_user_row(&key, &value).expect("decode user");
     assert_eq!(row.workspace_id, workspace_id);
     assert_eq!(row.user_id, user_id);
     assert_eq!(row.username, username);
@@ -997,13 +991,13 @@ fn assert_membership(
     endpoint_id: [u8; 32],
     user_id: EventId,
 ) {
-    let key = endpoint_shared::schema::endpoint_membership_key(endpoint_id, workspace_id);
+    let key = endpoint_shared::rows::endpoint_membership_key(endpoint_id, workspace_id);
     let value = store
-        .table_row(endpoint_shared::schema::ENDPOINT_MEMBERSHIPS, &key)
+        .table_row(endpoint_shared::rows::ENDPOINT_MEMBERSHIPS, &key)
         .expect("read endpoint membership")
         .expect("endpoint membership");
     let row =
-        endpoint_shared::schema::decode_endpoint_membership_row(&key, &value).expect("decode row");
+        endpoint_shared::rows::decode_endpoint_membership_row(&key, &value).expect("decode row");
     assert_eq!(row.endpoint_id, endpoint_id);
     assert_eq!(row.workspace_id, workspace_id);
     assert_eq!(row.user_authority_event_id, user_id);

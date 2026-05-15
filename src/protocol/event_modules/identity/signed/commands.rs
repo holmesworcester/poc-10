@@ -4,7 +4,7 @@ use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::SignedEnvelope;
 
 pub fn sign_payload(
@@ -24,8 +24,8 @@ pub fn sign_payload(
         payload,
         signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    event.signature = crypto::ed25519_sign(private_key, &codec::signing_bytes(&event));
-    let bytes = codec::encode(&event);
-    let record = codec::record_from_bytes(bytes)?;
+    event.signature = crypto::ed25519_sign(private_key, &layout::signing_bytes(&event));
+    let bytes = layout::encode(&event);
+    let record = layout::record_from_bytes(bytes)?;
     Ok(CommandOutput::with_events(event, vec![record]))
 }

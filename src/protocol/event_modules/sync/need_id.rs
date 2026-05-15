@@ -1,3 +1,3 @@
-pub mod codec;
+pub mod layout;
 pub mod projector;
 pub mod types;

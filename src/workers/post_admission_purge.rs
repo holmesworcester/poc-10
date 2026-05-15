@@ -5,7 +5,7 @@ use std::cell::Cell;
 use crate::core::store::Store;
 use crate::protocol::event_modules::content::message_deletion;
 
-use super::{content_purge, pipeline_helpers, schema};
+use super::{content_purge, pipeline_helpers, queue_rows};
 
 thread_local! {
     /// Re-entrancy guard for the content-purge post-admission hook.
@@ -71,7 +71,7 @@ where
 {
     let limit = pipeline_helpers::event_pipeline::DEFAULT_READY_BATCH;
     while store
-        .table_row_count(schema::PENDING_REPROJECTIONS)
+        .table_row_count(queue_rows::PENDING_REPROJECTIONS)
         .map_err(|err| format!("count pending reprojections: {err}"))?
         > 0
     {

@@ -11,11 +11,11 @@ use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::{CommandOutput, ProposedEvent};
 
-use super::codec;
+use super::layout;
 use super::queries;
 use super::types::{RemovalFrontierEvent, MAX_REMOVAL_FRONTIER_REFS};
 
-/// Sanity guard: non-zero ids and sorted/unique refs. The codec is
+/// Sanity guard: non-zero ids and sorted/unique refs. The layout is
 /// intentionally lenient on decode; this helper is shared between the
 /// authoring path and the receive projector so a malformed peer event is
 /// rejected at projection time too.
@@ -124,14 +124,14 @@ fn proposed_frontier_event(
         authority_admin_id: input.authority_admin_id,
         removal_event_ids,
     };
-    let payload = codec::encode(&event)?;
-    let envelope = codec::sign(
+    let payload = layout::encode(&event)?;
+    let envelope = layout::sign(
         input.signer_endpoint_shared_id,
         &input.signer_private_key,
         payload,
     );
-    let bytes = codec::encode_signed(&envelope);
-    let record = codec::signed_record_from_bytes(bytes)?;
+    let bytes = layout::encode_signed(&envelope);
+    let record = layout::signed_record_from_bytes(bytes)?;
     Ok(ProposedEvent::new(record))
 }
 
@@ -186,8 +186,8 @@ mod tests {
     }
 
     fn decode_frontier(event: &ProposedEvent) -> RemovalFrontierEvent {
-        let envelope = codec::decode_signed(&event.record().canonical_bytes).expect("envelope");
-        codec::decode(&envelope.payload).expect("frontier")
+        let envelope = layout::decode_signed(&event.record().canonical_bytes).expect("envelope");
+        layout::decode(&envelope.payload).expect("frontier")
     }
 
     #[test]

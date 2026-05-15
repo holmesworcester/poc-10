@@ -8,11 +8,11 @@ use crate::core::crypto::{Ed25519PrivateKey, X25519PublicKey};
 use crate::protocol::event_modules::types::{event_id, EventId};
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::types::{RecipientKeyEvent, NO_PREVIOUS_RECIPIENT_KEY};
 
 /// Sanity guard: every named id in a recipient key event is non-zero. The
-/// codec is intentionally lenient on decode; this helper is shared between
+/// layout is intentionally lenient on decode; this helper is shared between
 /// the authoring path and the receive projector so a malformed peer event
 /// is rejected at projection time too.
 pub(super) fn validate_event_ids(event: &RecipientKeyEvent) -> Result<(), String> {
@@ -66,7 +66,7 @@ pub fn publish(
     validate_id("recipient_key", &input.recipient_key)?;
     if input.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
         // A non-zero predecessor must be a real event id (not all-zero
-        // fields surfaced as a typo). The codec lets the value through
+        // fields surfaced as a typo). The layout lets the value through
         // unchanged; the projector validates the predecessor's
         // workspace + endpoint match this event.
     }
@@ -78,10 +78,10 @@ pub fn publish(
         recipient_key: input.recipient_key,
         previous_recipient_key_id: input.previous_recipient_key_id,
     };
-    let payload = codec::encode(&event);
-    let envelope = codec::sign(input.endpoint_shared_id, &input.signer_private_key, payload);
-    let bytes = codec::encode_signed(&envelope);
-    let record = codec::signed_record_from_bytes(bytes)?;
+    let payload = layout::encode(&event);
+    let envelope = layout::sign(input.endpoint_shared_id, &input.signer_private_key, payload);
+    let bytes = layout::encode_signed(&envelope);
+    let record = layout::signed_record_from_bytes(bytes)?;
     let value = PublishRecipientKeyOutput {
         recipient_key_id: event_id(&record.canonical_bytes),
         workspace_id: event.workspace_id,

@@ -7,16 +7,14 @@
 
 use crate::protocol::event_modules::worker::ProjectionOutput;
 
-use super::{codec, schema};
+use super::{layout, rows};
 
 pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
-    let event = codec::decode(bytes)?;
-    Ok(ProjectionOutput::rows(vec![
-        schema::local_recipient_key_row(
-            crate::protocol::event_modules::types::event_id(bytes),
-            &event,
-        ),
-    ]))
+    let event = layout::decode(bytes)?;
+    Ok(ProjectionOutput::rows(vec![rows::local_recipient_key_row(
+        crate::protocol::event_modules::types::event_id(bytes),
+        &event,
+    )]))
 }
 
 #[cfg(test)]
@@ -27,18 +25,18 @@ mod tests {
     #[test]
     fn project_writes_private_material_by_workspace_and_event_id() {
         let event = commands::create([1; 32]).expect("create").value;
-        let bytes = codec::encode(&event);
+        let bytes = layout::encode(&event);
         let event_id = crate::protocol::event_modules::types::event_id(&bytes);
         let output = project(&bytes).expect("project local recipient key");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::LOCAL_RECIPIENT_KEYS);
+        assert_eq!(output.legacy_rows()[0].table, rows::LOCAL_RECIPIENT_KEYS);
         assert_eq!(
             output.legacy_rows()[0].key,
-            schema::local_recipient_key_key(event.workspace_id, event_id)
+            rows::local_recipient_key_key(event.workspace_id, event_id)
         );
         assert_eq!(
-            schema::decode_local_recipient_key_row(
+            rows::decode_local_recipient_key_row(
                 &output.legacy_rows()[0].key,
                 &output.legacy_rows()[0].value
             )
@@ -56,7 +54,7 @@ mod tests {
     fn project_rejects_mismatched_key_material() {
         let good = commands::create([1; 32]).expect("create good").value;
         let bad = commands::create([1; 32]).expect("create bad").value;
-        let bytes = codec::encode(&super::super::types::LocalRecipientKey {
+        let bytes = layout::encode(&super::super::types::LocalRecipientKey {
             workspace_id: good.workspace_id,
             recipient_key: good.recipient_key,
             recipient_secret: bad.recipient_secret,

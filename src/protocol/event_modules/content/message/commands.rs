@@ -13,11 +13,11 @@ use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 use crate::protocol::event_modules::worker::CommandOutput;
 
-use super::codec;
+use super::layout;
 use super::queries as message_queries;
 use super::types::{MessageEvent, EXPIRES_NEVER, UNIX_MINUTE_MS};
 
-pub(crate) use super::cli::{
+pub(crate) use super::command_line::{
     derive_message_leaf, hex_id, list_for_display, parse_hex_id, resolve_selector,
     visible_reaction_rows,
 };
@@ -60,7 +60,7 @@ pub fn send(input: SendMessage) -> Result<CommandOutput<SendMessageOutput>, Stri
         return Err("message text must not be empty".to_string());
     }
     validate_expires_at_minute(input.created_at_ms, input.expires_at_minute)?;
-    let plaintext = codec::encode_text_slot(&input.text)?;
+    let plaintext = layout::encode_text_slot(&input.text)?;
     let mut event = MessageEvent {
         workspace_id: input.workspace_id,
         created_at_ms: input.created_at_ms,
@@ -74,7 +74,7 @@ pub fn send(input: SendMessage) -> Result<CommandOutput<SendMessageOutput>, Stri
     };
     let ciphertext = crypto::xchacha20poly1305_encrypt(
         &input.leaf_node_secret,
-        &codec::associated_data(&event, input.signer_endpoint_shared_id),
+        &layout::associated_data(&event, input.signer_endpoint_shared_id),
         &event.nonce,
         &plaintext,
     )?;
@@ -82,14 +82,14 @@ pub fn send(input: SendMessage) -> Result<CommandOutput<SendMessageOutput>, Stri
         .try_into()
         .map_err(|_| "message ciphertext length mismatch".to_string())?;
 
-    let payload = codec::encode(&event);
-    let envelope = codec::sign(
+    let payload = layout::encode(&event);
+    let envelope = layout::sign(
         input.signer_endpoint_shared_id,
         &input.signer_private_key,
         payload,
     );
-    let bytes = codec::encode_signed(&envelope);
-    let record = codec::signed_record_from_bytes(bytes)?;
+    let bytes = layout::encode_signed(&envelope);
+    let record = layout::signed_record_from_bytes(bytes)?;
     let value = SendMessageOutput {
         message_id: crate::protocol::event_modules::types::event_id(&record.canonical_bytes),
         workspace_id: event.workspace_id,
@@ -143,12 +143,12 @@ pub fn require_local_membership(
     use crate::protocol::event_modules::identity::{endpoint, endpoint_shared};
     let local = endpoint::commands::local_keypair(store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let key = endpoint_shared::schema::endpoint_membership_key(local.endpoint, workspace_id);
+    let key = endpoint_shared::rows::endpoint_membership_key(local.endpoint, workspace_id);
     let value = store
-        .table_row(endpoint_shared::schema::ENDPOINT_MEMBERSHIPS, &key)
+        .table_row(endpoint_shared::rows::ENDPOINT_MEMBERSHIPS, &key)
         .map_err(|err| format!("load endpoint membership: {err}"))?
         .ok_or_else(|| "local endpoint is not joined to workspace".to_string())?;
-    let row = endpoint_shared::schema::decode_endpoint_membership_row(&key, &value)?;
+    let row = endpoint_shared::rows::decode_endpoint_membership_row(&key, &value)?;
     if row.signing_public_key != local.signing_public_key {
         return Err("local endpoint signing key does not match workspace membership".to_string());
     }
@@ -293,7 +293,7 @@ pub fn is_deleted_by_author(
     author_user_id: &EventId,
 ) -> Result<bool, String> {
     use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author;
-    let labels = crate::protocol::event_modules::schema::event_labels(store, message_id)
+    let labels = crate::protocol::event_modules::rows::event_labels(store, message_id)
         .map_err(|err| format!("load deletion labels: {err}"))?;
     Ok(labels.iter().any(|label| {
         deletion_label_author(label)
@@ -310,7 +310,7 @@ pub fn is_deleted_by_author(
 /// after a matching leaf is found (which would indicate corruption).
 pub fn open_sealed_message_row(
     store: &Store,
-    row: super::schema::SealedMessageRow,
+    row: super::rows::SealedMessageRow,
 ) -> Result<Option<super::types::MessageRow>, String> {
     use crate::protocol::event_modules::encryption::local_history_node_secret;
     let unix_minute = super::types::unix_minute_for(row.created_at_ms);
@@ -348,12 +348,12 @@ pub fn open_sealed_message_row(
     };
     let plaintext = crypto::xchacha20poly1305_decrypt(
         &leaf.node_secret,
-        &codec::associated_data(&event, row.signer_endpoint_shared_id),
+        &layout::associated_data(&event, row.signer_endpoint_shared_id),
         &event.nonce,
         &event.ciphertext,
     )
     .map_err(|err| format!("decrypt sealed message: {err}"))?;
-    let text = codec::decode_text_slot(&plaintext)?;
+    let text = layout::decode_text_slot(&plaintext)?;
     Ok(Some(super::types::MessageRow {
         workspace_id: row.workspace_id,
         message_id: row.message_id,
@@ -395,17 +395,17 @@ mod tests {
             vec![[3; 32], [1; 32], [2; 32], [4; 32], [5; 32]]
         );
 
-        let envelope = codec::decode_signed(&record.canonical_bytes).expect("signed");
-        let event = codec::decode(&envelope.payload).expect("event");
+        let envelope = layout::decode_signed(&record.canonical_bytes).expect("signed");
+        let event = layout::decode(&envelope.payload).expect("event");
         let plaintext = crypto::xchacha20poly1305_decrypt(
             &[6; 32],
-            &codec::associated_data(&event, [3; 32]),
+            &layout::associated_data(&event, [3; 32]),
             &event.nonce,
             &event.ciphertext,
         )
         .expect("decrypt");
         assert_eq!(
-            codec::decode_text_slot(&plaintext).expect("decode text"),
+            layout::decode_text_slot(&plaintext).expect("decode text"),
             "private message"
         );
     }
@@ -436,12 +436,12 @@ mod tests {
         let second = send(input).expect("second send");
         // Both produce structurally valid records with the same leaf id and
         // same metadata.
-        let first_envelope = codec::decode_signed(&first.events[0].record().canonical_bytes)
+        let first_envelope = layout::decode_signed(&first.events[0].record().canonical_bytes)
             .expect("first envelope");
-        let first_event = codec::decode(&first_envelope.payload).expect("first event");
-        let second_envelope = codec::decode_signed(&second.events[0].record().canonical_bytes)
+        let first_event = layout::decode(&first_envelope.payload).expect("first event");
+        let second_envelope = layout::decode_signed(&second.events[0].record().canonical_bytes)
             .expect("second envelope");
-        let second_event = codec::decode(&second_envelope.payload).expect("second event");
+        let second_event = layout::decode(&second_envelope.payload).expect("second event");
         assert_eq!(
             first_event.local_history_node_secret_id,
             second_event.local_history_node_secret_id

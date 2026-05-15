@@ -9,7 +9,7 @@
 use crate::core::store::Store;
 use crate::protocol::event_modules::types::EventId;
 
-use super::schema::{decode_file_slice_row, file_slice_prefix, FILE_SLICES};
+use super::rows::{decode_file_slice_row, file_slice_prefix, FILE_SLICES};
 use super::types::FileSliceRow;
 
 pub fn list_for_file(

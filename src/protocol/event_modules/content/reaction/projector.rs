@@ -6,7 +6,7 @@
 //! preserves the poc-7 reaction summary rule without an extra index.
 
 use crate::protocol::event_modules::content::message;
-use crate::protocol::event_modules::content::message_deletion::schema::{
+use crate::protocol::event_modules::content::message_deletion::rows::{
     purge_instruction_row, PurgeKind,
 };
 use crate::protocol::event_modules::content::message_deletion::types::deletion_label_author;
@@ -14,11 +14,11 @@ use crate::protocol::event_modules::identity::{endpoint_shared, signed, user};
 use crate::protocol::event_modules::leaf_history_node;
 use crate::protocol::event_modules::worker::{EventWithContext, ProjectionOutput, TableDelete};
 
-use super::{codec, commands, schema};
+use super::{commands, layout, rows};
 
 pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
-    let envelope = codec::decode_signed(&event.record.canonical_bytes)?;
-    let reaction = codec::decode(&envelope.payload)?;
+    let envelope = layout::decode_signed(&event.record.canonical_bytes)?;
+    let reaction = layout::decode(&envelope.payload)?;
     commands::validate_event_ids(&reaction)?;
     if event.record.workspace_id != Some(reaction.workspace_id) {
         return Err("reaction workspace metadata does not match event body".to_string());
@@ -27,9 +27,9 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let target = event
         .context
         .require_dependency(&reaction.target_message_id)?;
-    let target_envelope = message::codec::decode_signed(&target.canonical_bytes)
+    let target_envelope = message::layout::decode_signed(&target.canonical_bytes)
         .map_err(|_| "reaction target dependency is not a signed message".to_string())?;
-    let target_message = message::codec::decode(&target_envelope.payload)
+    let target_message = message::layout::decode(&target_envelope.payload)
         .map_err(|_| "reaction target dependency is not a signed message".to_string())?;
     if target_message.workspace_id != reaction.workspace_id {
         return Err("reaction target message workspace does not match reaction".to_string());
@@ -45,7 +45,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                 .unwrap_or(false)
         });
     if target_deleted_by_author {
-        let key = schema::reaction_key(reaction.workspace_id, event.context.event_id);
+        let key = rows::reaction_key(reaction.workspace_id, event.context.event_id);
         return Ok(ProjectionOutput::from_parts(
             vec![purge_instruction_row(
                 reaction.workspace_id,
@@ -54,11 +54,11 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
             )],
             vec![
                 TableDelete {
-                    table: schema::REACTIONS,
+                    table: rows::REACTIONS,
                     key: key.clone(),
                 },
                 TableDelete {
-                    table: schema::SEALED_REACTIONS,
+                    table: rows::SEALED_REACTIONS,
                     key,
                 },
             ],
@@ -69,12 +69,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let signer = event
         .context
         .require_dependency(&envelope.signer_endpoint_shared_id)?;
-    let signer_envelope = signed::codec::decode(&signer.canonical_bytes)
+    let signer_envelope = signed::layout::decode(&signer.canonical_bytes)
         .map_err(|_| "reaction signer dependency is not a signed endpoint_shared".to_string())?;
-    if signer_envelope.inner_type != endpoint_shared::codec::TYPE_ENDPOINT_SHARED {
+    if signer_envelope.inner_type != endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return Err("reaction signer dependency is not a signed endpoint_shared".to_string());
     }
-    let signer_endpoint_shared = endpoint_shared::codec::decode(&signer_envelope.payload)
+    let signer_endpoint_shared = endpoint_shared::layout::decode(&signer_envelope.payload)
         .map_err(|_| "reaction signer dependency is not a signed endpoint_shared".to_string())?;
     if signer_endpoint_shared.workspace_id != reaction.workspace_id {
         return Err(
@@ -89,12 +89,12 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
 
     let author = event.context.require_dependency(&reaction.author_user_id)?;
-    let author_envelope = signed::codec::decode(&author.canonical_bytes)
+    let author_envelope = signed::layout::decode(&author.canonical_bytes)
         .map_err(|_| "reaction author dependency is not a signed user".to_string())?;
-    if author_envelope.inner_type != user::codec::TYPE_USER {
+    if author_envelope.inner_type != user::layout::TYPE_USER {
         return Err("reaction author dependency is not a signed user".to_string());
     }
-    let author_user = user::codec::decode(&author_envelope.payload)
+    let author_user = user::layout::decode(&author_envelope.payload)
         .map_err(|_| "reaction author dependency is not a signed user".to_string())?;
     if author_user.workspace_id != reaction.workspace_id {
         return Err("reaction author workspace does not match reaction".to_string());
@@ -108,7 +108,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     let leaf_record = event
         .context
         .require_dependency(&reaction.local_history_node_secret_id)?;
-    let leaf = leaf_history_node::codec::decode(&leaf_record.canonical_bytes)
+    let leaf = leaf_history_node::layout::decode(&leaf_record.canonical_bytes)
         .map_err(|_| "reaction leaf dependency is not a local_history_node_secret".to_string())?;
     if leaf.workspace_id != reaction.workspace_id
         || leaf.removal_frontier_id != reaction.removal_frontier_id
@@ -128,7 +128,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         );
     }
 
-    Ok(ProjectionOutput::rows(vec![schema::sealed_reaction_row(
+    Ok(ProjectionOutput::rows(vec![rows::sealed_reaction_row(
         event.context.event_id,
         envelope.signer_endpoint_shared_id,
         &reaction,
@@ -163,7 +163,7 @@ mod tests {
     }
 
     fn signing_public_key_for(private_key: &[u8; 32]) -> [u8; 32] {
-        codec::sign([0; 32], private_key, vec![codec::TYPE_REACTION]).signer_public_key
+        layout::sign([0; 32], private_key, vec![layout::TYPE_REACTION]).signer_public_key
     }
 
     fn endpoint_shared_record(
@@ -172,7 +172,7 @@ mod tests {
         signing_public_key: [u8; 32],
     ) -> Record {
         let payload =
-            endpoint_shared::codec::encode(&endpoint_shared::types::EndpointSharedEvent {
+            endpoint_shared::layout::encode(&endpoint_shared::types::EndpointSharedEvent {
                 created_at_ms: 4,
                 workspace_id,
                 user_authority_event_id: user_id,
@@ -189,7 +189,7 @@ mod tests {
     }
 
     fn user_record(workspace_id: [u8; 32]) -> Record {
-        let payload = user::codec::encode(&user::types::UserEvent {
+        let payload = user::layout::encode(&user::types::UserEvent {
             created_at_ms: 3,
             workspace_id,
             public_key: [22; 32],
@@ -202,7 +202,7 @@ mod tests {
     }
 
     fn target_message_record(workspace_id: [u8; 32], author_user_id: [u8; 32]) -> Record {
-        let payload = message::codec::encode(&message::types::MessageEvent {
+        let payload = message::layout::encode(&message::types::MessageEvent {
             workspace_id,
             created_at_ms: 1,
             author_user_id,
@@ -213,9 +213,9 @@ mod tests {
             nonce: [32; crate::core::crypto::XCHACHA20_POLY1305_NONCE_BYTES],
             ciphertext: [33; message::types::MESSAGE_CIPHERTEXT_BYTES],
         });
-        let envelope = message::codec::sign([42; 32], &[43; 32], payload);
-        let bytes = message::codec::encode_signed(&envelope);
-        message::codec::signed_record_from_bytes(bytes).expect("record")
+        let envelope = message::layout::sign([42; 32], &[43; 32], payload);
+        let bytes = message::layout::encode_signed(&envelope);
+        message::layout::signed_record_from_bytes(bytes).expect("record")
     }
 
     fn build_reaction(
@@ -365,8 +365,8 @@ mod tests {
         let output = project(&event).expect("project reaction");
 
         assert_eq!(output.legacy_rows().len(), 1);
-        assert_eq!(output.legacy_rows()[0].table, schema::SEALED_REACTIONS);
-        let row = schema::decode_sealed_reaction_row(
+        assert_eq!(output.legacy_rows()[0].table, rows::SEALED_REACTIONS);
+        let row = rows::decode_sealed_reaction_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
         )
@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(
             output.legacy_rows()[0].table,
-            crate::protocol::event_modules::content::message_deletion::schema::PURGE_INSTRUCTIONS
+            crate::protocol::event_modules::content::message_deletion::rows::PURGE_INSTRUCTIONS
         );
         assert_eq!(output.legacy_deletes().len(), 2);
         let delete_tables: Vec<_> = output
@@ -433,8 +433,8 @@ mod tests {
             .iter()
             .map(|delete| delete.table)
             .collect();
-        assert!(delete_tables.contains(&schema::REACTIONS));
-        assert!(delete_tables.contains(&schema::SEALED_REACTIONS));
+        assert!(delete_tables.contains(&rows::REACTIONS));
+        assert!(delete_tables.contains(&rows::SEALED_REACTIONS));
     }
 
     #[test]
@@ -486,10 +486,10 @@ mod tests {
             nonce: [16; crate::core::crypto::XCHACHA20_POLY1305_NONCE_BYTES],
             ciphertext: [17; super::super::types::REACTION_CIPHERTEXT_BYTES],
         };
-        let payload = codec::encode(&event);
-        let envelope = codec::sign([12; 32], &[13; 32], payload);
-        let bytes = codec::encode_signed(&envelope);
-        let record = codec::signed_record_from_bytes(bytes).expect("record");
+        let payload = layout::encode(&event);
+        let envelope = layout::sign([12; 32], &[13; 32], payload);
+        let bytes = layout::encode_signed(&envelope);
+        let record = layout::signed_record_from_bytes(bytes).expect("record");
         assert_eq!(
             record.dependencies,
             vec![[12; 32], [7; 32], [11; 32], [10; 32], [14; 32], [15; 32]]
@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn raw_reaction_bytes_are_not_admissible() {
-        let payload = codec::encode(&ReactionEvent {
+        let payload = layout::encode(&ReactionEvent {
             workspace_id: [7; 32],
             created_at_ms: 5,
             target_message_id: [2; 32],
