@@ -96,6 +96,32 @@ Recent target work:
   - the encryption split-by-fact-family refactor lives on branch
     `worktree-agent-a6a75815fab2702dd` but conflicts with the wire-primitive
     cleanup; rebase or redo it after the current wire-vocabulary base settles
+  - a rebased version of the same split (which re-applies the wire-primitive
+    vocab to the moved files) lives on branch
+    `worktree-agent-aff55400c74703f53`; it stays parked until the event
+    modules listed below stop touching `src/event_modules/encryption/`
+- Second parallel target-architecture wave
+  - `src/event_modules/content_event/` ports the simplest content fact family
+    out of the legacy tree (Tier 0, no encryption/transport deps), with a
+    `tests/poc10_content_event_projector_test.rs` round-trip
+  - `src/event_modules/content_reaction/` ports the legacy reaction fact
+    shape with a fixed-slot sealed body and a target row table
+  - `src/event_modules/identity_admin/`,
+    `src/event_modules/identity_invite_accepted/`, and
+    `src/event_modules/identity_invite_server/` port the next-tier identity
+    fact families using the `identity_user`/`identity_endpoint` template
+  - `src/event_modules/connection_request/` and
+    `src/event_modules/connection_response/` port the connection bootstrap
+    fact bodies (signed-envelope wrapping and dependency context stay deferred
+    to a later wave)
+  - `src/event_modules/sync_compare/`, `src/event_modules/sync_have_id/`, and
+    `src/event_modules/sync_need_id/` port the three negentropy wire types as
+    target facts so transit handlers can later route them without legacy code
+  - `examples/poc10_demo.rs` now drives `send_message` from a real
+    `CommandContext` and admits the produced fact through the bus so the
+    resulting `sealed_message_rows` row carries the command output
+  - `src/event_modules/connection_request/addr.rs` keeps `std::net` out of
+    `connection_request/layout.rs` so the intent-cleanliness guardrail passes
 
 Important caveats from the latest read-only audit:
 
