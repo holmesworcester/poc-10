@@ -187,7 +187,11 @@ fn wrap_material(
                     "history source coordinate does not match materialize intent".to_string(),
                 );
             }
-            Ok(history_material(source_fact.id, source))
+            Ok(history_material(
+                source_fact.id,
+                source_fact.timestamp,
+                source,
+            ))
         }
     }
 }
@@ -208,10 +212,14 @@ fn root_material(source_id: [u8; 32], source: LocalKeySecretFact) -> WrapMateria
     }
 }
 
-fn history_material(source_id: [u8; 32], source: LocalHistoryNodeSecretFact) -> WrapMaterial {
+fn history_material(
+    source_id: [u8; 32],
+    source_created_at_ms: u64,
+    source: LocalHistoryNodeSecretFact,
+) -> WrapMaterial {
     WrapMaterial {
         signer_endpoint_id: source.owner_endpoint_id,
-        created_at_ms: 0,
+        created_at_ms: source_created_at_ms,
         secret: source.node_secret,
         wrapped_secret_kind: WrappedSecretKind::HistoryNode,
         wrapped_secret_id: source_id,

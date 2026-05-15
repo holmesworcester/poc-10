@@ -97,6 +97,8 @@ Implemented target slices:
   core store primitives while leaving only deferred intents in the queue.
 - Target `SendOnConnection` is retry-safe while packaging remains incomplete: it
   validates sendability but returns an error rather than consuming work.
+- Generated deterministic key wraps use source fact time for retained
+  history-node wraps instead of a zero placeholder.
 
 Current hard gaps:
 
@@ -124,9 +126,9 @@ Current hard gaps:
 - Implement retired recipient-material cleanup. Supersession currently emits
   target architecture work, but the durable handler that purges obsolete local
   recipient material still needs to land.
-- Replace generated wrap timestamp placeholdering. Deterministic generated wraps
-  should still be idempotent, but their `created_at_ms` should come from the
-  source frontier or explicit request coordinate, not a zero placeholder.
+- Decide whether explicit key-request time needs separate provenance on
+  generated wraps. The implementation now uses source fact time without adding
+  request entropy to the deterministic anti-amplification key.
 - Complete the purge split. `PurgeEventHandler` currently handles exact retained
   fact purge; cascade discovery, secret retirement, and sync-index purge/update
   still need bounded handlers before legacy `content_purge` can disappear. The

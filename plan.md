@@ -38,6 +38,10 @@ Recent target work:
   - target send-on-connection no longer consumes work without live transit packaging
   - `drain_applying_atomic_rows` applies atomic row intents during projection
     and leaves only deferred intents queued
+- Current key-wrap timestamp slice
+  - generated retained-history-node wraps use the source fact timestamp instead
+    of a zero placeholder
+  - deterministic anti-amplification keys are unchanged
 
 Important caveats from the latest read-only audit:
 
@@ -73,6 +77,9 @@ Important caveats from the latest read-only audit:
   local secret, wrap source/frontier, and secret coverage matching.
 - Target key healing has real deterministic wrap/unwrap tests, but hostile key
   request validation and retired recipient-material cleanup remain incomplete.
+- Generated wraps now carry source fact time for both root and retained history
+  sources. The remaining design question is whether explicit key-request time
+  should also be represented as provenance without entering the idempotence key.
 - Target dep-aware sync currently proves a small relevant-key sketch, not full
   dependency/key closure over production negentropy ranges.
 - Many production event types are still legacy-only: identity admin/user/device
@@ -89,32 +96,29 @@ Next hard slices, in order:
    Incoming signed envelopes containing key-wrap payloads must validate the
    envelope, signer authority, recipient key, frontier/source context, and then
    emit key-wrap rows, secret coverage offers, and unwrap intents.
-3. Replace generated wrap `created_at_ms = 0`.
-   Generated deterministic/idempotent wraps should use the source frontier time
-   or explicit key request time while keeping the same anti-amplification key.
-4. Finish handler/core execution semantics before wiring live paths.
+3. Finish handler/core execution semantics before wiring live paths.
    The target exact-input and atomic-drain primitives exist. Next, migrate the
    remaining target tests and live paths off RowIntentHandler compatibility, and
    keep successful deferred handlers limited to durable progress.
-5. Finish purge split.
+4. Finish purge split.
    Keep `PurgeEventHandler` as exact retained fact purge, then add bounded
    handlers for cascade discovery, secret retirement, and sync-index purge or
    update. Do not restore broad projection-row cleanup inside purge, and do not
    keep a generic fact-delete escape hatch if retention-specific outputs are
    clearer.
-6. Move dep-aware sync to context needs/offers for keys.
+5. Move dep-aware sync to context needs/offers for keys.
    Sync should send relevant out-of-range key wraps or retained key nodes for
    encrypted facts in the requested range. Add a performance test for a message
    whose content dependency is outside the range by about one day.
-7. Convert connection, transit, and sync workers into intent handlers.
+6. Convert connection, transit, and sync workers into intent handlers.
    Preserve the split: connection chooses routes and emits transit-wrap intents,
    transit wraps/unwraps opaque frames, network send only sends bytes, and sync
    only decides ids.
-8. Define the command contract.
+7. Define the command contract.
    Commands should be pure fact constructors over a standard command context and
    narrow lookups. Identity should own local signing capability creation and
    authorization rather than letting arbitrary commands hide those reads.
-9. Remove compatibility.
+8. Remove compatibility.
    Delete old worker queues, label/blocking tables, receive side channels, and
    compatibility adapters only after target behavior has unchanged or
    harness-only-adjusted poc-8 coverage.

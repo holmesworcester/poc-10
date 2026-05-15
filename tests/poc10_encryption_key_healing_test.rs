@@ -397,6 +397,50 @@ fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
 }
 
 #[test]
+fn generated_history_node_wrap_uses_source_fact_time() {
+    let workspace = [24; 32];
+    let responder = [25; 32];
+    let frontier = removal_frontier_fact(workspace, responder, 10);
+    let recipient_secret = [26; 32];
+    let recipient_public = crypto::x25519_public_key(&recipient_secret);
+    let recipient =
+        recipient_key_fact_with_public(workspace, [27; 32], recipient_public, [0; 32], 80);
+    let signer = local_signer_secret_fact(workspace, [0x76; 32]);
+    let retained = history_node_fact(workspace, frontier.id, 51, 1, 8, byte_prefix(0xaa));
+    let intent = decode_materialize_key_wraps_intent(
+        &topo::event_modules::encryption::intent::materialize_key_wraps_intent(
+            recipient.id,
+            retained.id,
+            signer.id,
+            encryption_context::WrapSourceSelector {
+                workspace_id: workspace,
+                frontier_id: frontier.id,
+                owner_endpoint_id: [0x76; 32],
+                frontier_created_at_ms: 10,
+                kind: WrapSourceKind::HistoryNode {
+                    range_start: 51,
+                    range_width: 1,
+                    bit_depth: 8,
+                    event_id_prefix: byte_prefix(0xaa),
+                },
+            },
+        ),
+    )
+    .expect("decode materialize intent");
+
+    let signed_wrap = encryption_create::materialize_signed_key_wrap_fact(
+        &intent, &recipient, &retained, &signer,
+    )
+    .expect("materialize history wrap");
+    let envelope =
+        signed_fact::layout::decode_signed_fact(&signed_wrap.bytes).expect("decode signed wrap");
+    let wrap = encryption_layout::decode_key_wrap(&envelope.payload).expect("decode key wrap");
+
+    assert_eq!(wrap.created_at_ms, retained.timestamp);
+    assert_ne!(wrap.created_at_ms, 0);
+}
+
+#[test]
 fn supersession_wakes_old_recipient_key_and_purges_material_instead_of_wrapping() {
     let workspace = [30; 32];
     let endpoint = [31; 32];
@@ -945,7 +989,7 @@ fn history_node_fact(
 ) -> Fact {
     Fact::new(
         FactScope::Local,
-        0,
+        91_000,
         encryption_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
             workspace_id,
             frontier_id,
