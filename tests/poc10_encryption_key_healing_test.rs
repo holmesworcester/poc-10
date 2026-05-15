@@ -3,7 +3,7 @@ use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
-use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use topo::core::projection::{MatchedContext, ProjectionContext, ProjectionOutput, Projector};
 use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::event_modules::encryption::context::{
@@ -1422,4 +1422,410 @@ fn byte_prefix(value: u8) -> [u8; 32] {
     let mut prefix = [0; 32];
     prefix[0] = value;
     prefix
+}
+
+// ── Hostile-input regression tests ──────────────────────────────────────────
+
+#[test]
+fn signed_key_wrap_rejects_recipient_workspace_mismatch() {
+    // The recipient payload encodes a different workspace_id than the wrap.
+    // We inject it directly into ProjectionContext to bypass the scope gate,
+    // so the projector's payload-level workspace check fires.
+    let wrap_workspace = [60; 32];
+    let wrong_workspace = [61; 32];
+    let signer_id = [62; 32];
+    let signer_private_key = [63; 32];
+
+    let frontier = removal_frontier_fact(wrap_workspace, signer_id, 9);
+    // Recipient payload claims wrong_workspace.
+    let tampered_recipient_bytes = encryption_layout::encode_recipient_key(&RecipientKeyFact {
+        workspace_id: wrong_workspace,
+        endpoint_id: signer_id,
+        recipient_key: [0x55; 32],
+        previous_recipient_key_id: NO_PREVIOUS_RECIPIENT_KEY,
+        created_at_ms: 9,
+    })
+    .expect("encode tampered recipient");
+    let tampered_recipient = Fact::new(workspace_scope(wrap_workspace), 9, tampered_recipient_bytes);
+
+    let payload = encryption_layout::encode_key_wrap(&key_wrap_fact(
+        wrap_workspace,
+        signer_id,
+        frontier.id,
+        tampered_recipient.id,
+    ))
+    .expect("encode key wrap");
+    let bytes =
+        signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+            .expect("sign key wrap");
+    let signed_wrap = Fact::new(workspace_scope(wrap_workspace), 10, bytes);
+    let signer_public_key = topo::core::crypto::ed25519_public_key(&signer_private_key);
+    let signer_fact_bytes = message_layout::encode_signer_pubkey(&SignerPubkeyFact {
+        signer_id,
+        public_key: signer_public_key,
+    })
+    .expect("encode signer");
+    let signer_fact = Fact::new(workspace_scope(wrap_workspace), 0, signer_fact_bytes);
+
+    // Build the matched context directly, bypassing the bus scope gate.
+    let scope = workspace_scope(wrap_workspace);
+    let signer_need = message_context::signer_need(signed_wrap.id, scope.clone(), signer_id);
+    let signer_offer = message_context::signer_offer(signer_fact.id, scope.clone(), signer_id);
+    let recipient_need = encryption_context::recipient_key_need(
+        signed_wrap.id,
+        scope.clone(),
+        tampered_recipient.id,
+    );
+    let recipient_offer = encryption_context::recipient_key_offer(
+        tampered_recipient.id,
+        scope.clone(),
+        tampered_recipient.id,
+    );
+    let frontier_need =
+        encryption_context::frontier_need(signed_wrap.id, scope.clone(), frontier.id);
+    let frontier_offer = encryption_context::frontier_offer(frontier.id, scope.clone(), frontier.id);
+
+    let ctx = ProjectionContext::from_matches(vec![
+        MatchedContext {
+            need: signer_need,
+            offer: signer_offer,
+            payload: signer_fact,
+        },
+        MatchedContext {
+            need: recipient_need,
+            offer: recipient_offer,
+            payload: tampered_recipient,
+        },
+        MatchedContext {
+            need: frontier_need,
+            offer: frontier_offer,
+            payload: frontier,
+        },
+    ]);
+
+    let err = encryption_project::EncryptionProjector::new()
+        .project(&signed_wrap, &ctx)
+        .expect_err("recipient workspace mismatch must fail");
+
+    assert!(
+        err.contains("key wrap recipient key workspace does not match event"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn signed_key_wrap_rejects_frontier_workspace_mismatch() {
+    // The frontier payload encodes a different workspace_id than the wrap.
+    // Injected directly into ProjectionContext to bypass the scope gate.
+    let wrap_workspace = [64; 32];
+    let wrong_workspace = [65; 32];
+    let signer_id = [66; 32];
+    let signer_private_key = [67; 32];
+
+    let recipient = recipient_key_fact(wrap_workspace, signer_id, NO_PREVIOUS_RECIPIENT_KEY, 9);
+    // Frontier payload claims wrong_workspace, but owner is signer_id (so
+    // the frontier ownership check passes).
+    let tampered_frontier_bytes = encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
+        workspace_id: wrong_workspace,
+        owner_endpoint_id: signer_id,
+        created_at_ms: 9,
+    })
+    .expect("encode tampered frontier");
+    let tampered_frontier =
+        Fact::new(workspace_scope(wrap_workspace), 9, tampered_frontier_bytes);
+
+    let payload = encryption_layout::encode_key_wrap(&key_wrap_fact(
+        wrap_workspace,
+        signer_id,
+        tampered_frontier.id,
+        recipient.id,
+    ))
+    .expect("encode key wrap");
+    let bytes =
+        signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+            .expect("sign key wrap");
+    let signed_wrap = Fact::new(workspace_scope(wrap_workspace), 10, bytes);
+    let signer_public_key = topo::core::crypto::ed25519_public_key(&signer_private_key);
+    let signer_fact_bytes = message_layout::encode_signer_pubkey(&SignerPubkeyFact {
+        signer_id,
+        public_key: signer_public_key,
+    })
+    .expect("encode signer");
+    let signer_fact = Fact::new(workspace_scope(wrap_workspace), 0, signer_fact_bytes);
+
+    let scope = workspace_scope(wrap_workspace);
+    let signer_need = message_context::signer_need(signed_wrap.id, scope.clone(), signer_id);
+    let signer_offer = message_context::signer_offer(signer_fact.id, scope.clone(), signer_id);
+    let recipient_need =
+        encryption_context::recipient_key_need(signed_wrap.id, scope.clone(), recipient.id);
+    let recipient_offer =
+        encryption_context::recipient_key_offer(recipient.id, scope.clone(), recipient.id);
+    let frontier_need = encryption_context::frontier_need(
+        signed_wrap.id,
+        scope.clone(),
+        tampered_frontier.id,
+    );
+    let frontier_offer = encryption_context::frontier_offer(
+        tampered_frontier.id,
+        scope.clone(),
+        tampered_frontier.id,
+    );
+
+    let ctx = ProjectionContext::from_matches(vec![
+        MatchedContext {
+            need: signer_need,
+            offer: signer_offer,
+            payload: signer_fact,
+        },
+        MatchedContext {
+            need: recipient_need,
+            offer: recipient_offer,
+            payload: recipient,
+        },
+        MatchedContext {
+            need: frontier_need,
+            offer: frontier_offer,
+            payload: tampered_frontier,
+        },
+    ]);
+
+    let err = encryption_project::EncryptionProjector::new()
+        .project(&signed_wrap, &ctx)
+        .expect_err("frontier workspace mismatch must fail");
+
+    assert!(
+        err.contains("key wrap removal frontier workspace does not match event"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn local_recipient_key_rejects_workspace_mismatch_with_recipient() {
+    // The canonical recipient payload encodes a different workspace_id than
+    // the local recipient key's workspace_id.  Inject context directly to
+    // bypass the scope gate and exercise the payload-level check.
+    let local_workspace = [80; 32];
+    let wrong_workspace = [81; 32];
+    let endpoint = [82; 32];
+    let recipient_secret = [83; 32];
+    let recipient_public = topo::core::crypto::x25519_public_key(&recipient_secret);
+
+    // Tampered canonical recipient: payload workspace = wrong_workspace.
+    let tampered_recipient_bytes = encryption_layout::encode_recipient_key(&RecipientKeyFact {
+        workspace_id: wrong_workspace,
+        endpoint_id: endpoint,
+        recipient_key: recipient_public,
+        previous_recipient_key_id: NO_PREVIOUS_RECIPIENT_KEY,
+        created_at_ms: 10,
+    })
+    .expect("encode tampered recipient");
+    let tampered_recipient =
+        Fact::new(workspace_scope(local_workspace), 10, tampered_recipient_bytes);
+
+    // Local fact references tampered_recipient.id, workspace = local_workspace.
+    let local = local_recipient_key_fact(
+        local_workspace,
+        tampered_recipient.id,
+        recipient_public,
+        recipient_secret,
+    );
+
+    let scope = workspace_scope(local_workspace);
+    let recipient_need =
+        encryption_context::recipient_key_need(local.id, scope.clone(), tampered_recipient.id);
+    let recipient_offer = encryption_context::recipient_key_offer(
+        tampered_recipient.id,
+        scope.clone(),
+        tampered_recipient.id,
+    );
+
+    let ctx = ProjectionContext::from_matches(vec![MatchedContext {
+        need: recipient_need,
+        offer: recipient_offer,
+        payload: tampered_recipient,
+    }]);
+
+    let err = encryption_project::EncryptionProjector::new()
+        .project(&local, &ctx)
+        .expect_err("workspace mismatch must fail");
+
+    assert!(
+        err.contains("local recipient key workspace does not match recipient"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn local_recipient_key_rejects_public_key_mismatch_with_recipient() {
+    // The local recipient key's public key differs from the canonical
+    // recipient key's public key.
+    let workspace = [84; 32];
+    let endpoint = [85; 32];
+    let canonical_public = topo::core::crypto::x25519_public_key(&[86; 32]);
+    let local_public = topo::core::crypto::x25519_public_key(&[87; 32]); // different!
+    let local_secret = [87; 32];
+
+    let recipient = recipient_key_fact_with_public(
+        workspace,
+        endpoint,
+        canonical_public,
+        NO_PREVIOUS_RECIPIENT_KEY,
+        10,
+    );
+    let local = local_recipient_key_fact(workspace, recipient.id, local_public, local_secret);
+
+    let projector = encryption_project::EncryptionProjector::new();
+    let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
+    let superseded_matcher = ExactSelectorMatcher::new(recipient_superseded_role());
+    let local_recipient_matcher =
+        ExactSelectorMatcher::new(encryption_context::local_recipient_key_role());
+    let matchers = [
+        &recipient_matcher as &dyn ContextMatcher,
+        &superseded_matcher as &dyn ContextMatcher,
+        &local_recipient_matcher as &dyn ContextMatcher,
+    ];
+    let mut bus = EventBus::new();
+
+    bus.submit_fact(recipient);
+    bus.submit_fact(local);
+    let err = bus
+        .drain(&projector, &matchers, 10)
+        .expect_err("public key mismatch must fail");
+
+    assert!(
+        err.contains("local recipient key public key does not match recipient"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn key_request_rejects_recipient_workspace_mismatch() {
+    // recipient payload encodes a different workspace than the key request's.
+    // Inject context directly to bypass the scope gate.
+    let request_workspace = [88; 32];
+    let wrong_workspace = [89; 32];
+    let requester = [90; 32];
+    let responder = [91; 32];
+
+    let frontier = removal_frontier_fact(request_workspace, responder, 10);
+    // Tampered recipient: payload workspace = wrong_workspace.
+    let tampered_recipient_bytes = encryption_layout::encode_recipient_key(&RecipientKeyFact {
+        workspace_id: wrong_workspace,
+        endpoint_id: requester,
+        recipient_key: [0x55; 32],
+        previous_recipient_key_id: [92; 32],
+        created_at_ms: 50,
+    })
+    .expect("encode tampered recipient");
+    let tampered_recipient =
+        Fact::new(workspace_scope(request_workspace), 50, tampered_recipient_bytes);
+
+    let request = key_request_fact(
+        request_workspace,
+        requester,
+        responder,
+        frontier.id,
+        tampered_recipient.id,
+        90,
+    );
+
+    let scope = workspace_scope(request_workspace);
+    let recipient_need =
+        encryption_context::recipient_key_need(request.id, scope.clone(), tampered_recipient.id);
+    let recipient_offer = encryption_context::recipient_key_offer(
+        tampered_recipient.id,
+        scope.clone(),
+        tampered_recipient.id,
+    );
+    let frontier_need =
+        encryption_context::frontier_need(request.id, scope.clone(), frontier.id);
+    let frontier_offer =
+        encryption_context::frontier_offer(frontier.id, scope.clone(), frontier.id);
+
+    let ctx = ProjectionContext::from_matches(vec![
+        MatchedContext {
+            need: recipient_need,
+            offer: recipient_offer,
+            payload: tampered_recipient,
+        },
+        MatchedContext {
+            need: frontier_need,
+            offer: frontier_offer,
+            payload: frontier,
+        },
+    ]);
+
+    let err = encryption_project::EncryptionProjector::new()
+        .project(&request, &ctx)
+        .expect_err("recipient workspace mismatch must fail");
+
+    assert!(
+        err.contains("key request recipient workspace mismatch"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn key_request_rejects_frontier_workspace_mismatch() {
+    // frontier payload encodes a different workspace than the key request's.
+    // Inject context directly to bypass the scope gate.
+    let request_workspace = [93; 32];
+    let wrong_workspace = [94; 32];
+    let requester = [95; 32];
+    let responder = [96; 32];
+
+    let recipient = recipient_key_fact(request_workspace, requester, [97; 32], 50);
+    // Tampered frontier: payload workspace = wrong_workspace.
+    let tampered_frontier_bytes = encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
+        workspace_id: wrong_workspace,
+        owner_endpoint_id: responder,
+        created_at_ms: 10,
+    })
+    .expect("encode tampered frontier");
+    let tampered_frontier =
+        Fact::new(workspace_scope(request_workspace), 10, tampered_frontier_bytes);
+
+    let request = key_request_fact(
+        request_workspace,
+        requester,
+        responder,
+        tampered_frontier.id,
+        recipient.id,
+        90,
+    );
+
+    let scope = workspace_scope(request_workspace);
+    let recipient_need =
+        encryption_context::recipient_key_need(request.id, scope.clone(), recipient.id);
+    let recipient_offer =
+        encryption_context::recipient_key_offer(recipient.id, scope.clone(), recipient.id);
+    let frontier_need =
+        encryption_context::frontier_need(request.id, scope.clone(), tampered_frontier.id);
+    let frontier_offer = encryption_context::frontier_offer(
+        tampered_frontier.id,
+        scope.clone(),
+        tampered_frontier.id,
+    );
+
+    let ctx = ProjectionContext::from_matches(vec![
+        MatchedContext {
+            need: recipient_need,
+            offer: recipient_offer,
+            payload: recipient,
+        },
+        MatchedContext {
+            need: frontier_need,
+            offer: frontier_offer,
+            payload: tampered_frontier,
+        },
+    ]);
+
+    let err = encryption_project::EncryptionProjector::new()
+        .project(&request, &ctx)
+        .expect_err("frontier workspace mismatch must fail");
+
+    assert!(
+        err.contains("key request frontier workspace mismatch"),
+        "unexpected error: {err}"
+    );
 }
