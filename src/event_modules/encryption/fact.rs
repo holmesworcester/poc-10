@@ -65,6 +65,7 @@ pub struct LocalKeySecretFact {
 pub struct LocalHistoryNodeSecretFact {
     pub workspace_id: WorkspaceId,
     pub frontier_id: FrontierId,
+    pub owner_endpoint_id: EndpointId,
     pub source_secret_id: FactId,
     pub range_start: u64,
     pub range_width: u64,
@@ -88,6 +89,7 @@ pub struct KeyRequestFact {
 pub struct KeyWrapFact {
     pub workspace_id: WorkspaceId,
     pub created_at_ms: u64,
+    pub signer_endpoint_id: EndpointId,
     pub frontier_id: FrontierId,
     pub wrapped_secret_kind: WrappedSecretKind,
     pub wrapped_secret_id: FactId,

@@ -394,6 +394,7 @@ fn history_node_fact(
         encryption_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
             workspace_id,
             frontier_id,
+            owner_endpoint_id: [0x76; 32],
             source_secret_id: [0x77; 32],
             range_start,
             range_width,

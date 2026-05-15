@@ -404,6 +404,12 @@ done: full cargo test passes after the source-fact, secret-material, and handler
 done: target sync range roots now name explicit message event ids, exact dependency ids, and exact key-wrap ids
 done: target sync key context is key-wrap availability, not an abstract key offer
 done: target sync chooses a ready root deterministically instead of letting one missing key block another sendable root
+done: target MaterializeKeyWraps handler loads exact recipient/source facts from HandlerContext instead of scanning or constructing context
+done: target encryption create helper owns deterministic key-wrap crypto and fact construction for root and retained history-node sources
+done: target key-wrap facts bind signer_endpoint_id into the fixed layout and associated data so signing authority is explicit at the fact layer
+done: handler guardrails stay green by keeping materialize_key_wraps.rs declaration-only and placing driver code under a narrow handler submodule
+done: focused materialize_key_wraps handler tests prove deterministic output and retryable missing-source behavior
+done: full cargo test passes after real target key-wrap materialization and handler guardrail reshaping
 ```
 
 The next event-pipeline step is to replace the simplified message row proof
@@ -413,13 +419,15 @@ node secrets. `purge_event` remains a deferred retention intent, but its handler
 should not exist until it preserves the existing broad purge/retire/cascade
 behavior.
 
-The next encryption handler step no longer needs a broad store scan contract:
-deferred handlers can receive exact fact payload context from the event bus when
-the dispatch path opts into it, and materialize intents now carry the exact
-source fact id. `MaterializeKeyWraps` should still wait until the target shared
-fact signer/envelope contract is explicit enough to reproduce poc-8 associated
-data. A handler that emits unsigned or placeholder key-wrap facts without
-source secret material remains intentionally rejected as cruft.
+The materialize-key-wrap handler now has the intended shape: it accepts one
+idempotent deferred intent, loads the exact recipient key fact and exact source
+secret fact from `HandlerContext`, and delegates key-wrap construction to
+`event_modules/encryption/create.rs`. The handler does not define fact wire
+bytes, choose crypto fields, scan for sources, or synthesize unsigned placeholder
+facts. The remaining parity step is the shared signed fact envelope contract:
+the target fact already carries `signer_endpoint_id` in the fixed layout and
+associated data, but the common envelope/signature authority model still needs
+to replace the poc-8 signed-event wrapper before this is full production parity.
 
 ### Wave 4: Encryption Slice
 

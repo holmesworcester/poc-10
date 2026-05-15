@@ -4,4 +4,5 @@
 //! effects. Projection-owned row materialization stays under event modules.
 
 pub mod connection;
+pub mod materialize_key_wraps;
 pub mod transit;

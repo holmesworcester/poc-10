@@ -16,6 +16,7 @@ fn root_fact() -> KeyWrapFact {
     KeyWrapFact {
         workspace_id: id(1),
         created_at_ms: 0,
+        signer_endpoint_id: id(20),
         frontier_id: id(2),
         wrapped_secret_kind: WrappedSecretKind::FrontierRoot,
         wrapped_secret_id: id(3),
@@ -38,6 +39,7 @@ fn history_fact() -> KeyWrapFact {
     KeyWrapFact {
         workspace_id: id(11),
         created_at_ms: 0,
+        signer_endpoint_id: id(20),
         frontier_id: id(12),
         wrapped_secret_kind: WrappedSecretKind::HistoryNode,
         wrapped_secret_id: id(13),

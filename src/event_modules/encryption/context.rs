@@ -1,10 +1,17 @@
 //! Context selectors and matchers for key wrap materialization.
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
-use crate::core::facts::{FactId, FactScope};
+use crate::core::facts::{FactId, FactScope, ScopeKind};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
 
 use super::fact::{FrontierId, RecipientKeyId, WorkspaceId};
+
+pub fn workspace_scope(workspace_id: WorkspaceId) -> FactScope {
+    FactScope::Scoped {
+        kind: ScopeKind::new("workspace").expect("valid workspace scope"),
+        id: workspace_id,
+    }
+}
 
 pub fn recipient_key_role() -> Role {
     Role::new("recipient_key").expect("valid recipient key role")

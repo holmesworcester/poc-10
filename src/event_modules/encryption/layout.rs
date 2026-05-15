@@ -21,11 +21,12 @@ pub const RECIPIENT_KEY_BYTES: usize = 1 + 32 + 32 + 32 + 32 + 8;
 pub const REMOVAL_FRONTIER_BYTES: usize = 1 + 32 + 32 + 8;
 pub const LOCAL_KEY_SECRET_BYTES: usize = 1 + 32 + 32 + 32 + 8 + 32;
 pub const LOCAL_HISTORY_NODE_SECRET_BYTES: usize =
-    1 + 32 + 32 + 32 + 8 + 8 + 2 + 32 + 32 + XCHACHA20_POLY1305_KEY_BYTES;
+    1 + 32 + 32 + 32 + 32 + 8 + 8 + 2 + 32 + 32 + XCHACHA20_POLY1305_KEY_BYTES;
 pub const KEY_REQUEST_BYTES: usize = 1 + 32 + 32 + 32 + 32 + 32 + 8;
 pub const KEY_WRAP_BYTES: usize = 1
     + 32
     + 8
+    + 32
     + 32
     + 1
     + 32
@@ -123,6 +124,9 @@ pub fn encode_local_history_node_secret(
     if fact.source_secret_id.iter().all(|byte| *byte == 0) {
         return Err("local history node source_secret_id cannot be empty".to_string());
     }
+    if fact.owner_endpoint_id.iter().all(|byte| *byte == 0) {
+        return Err("local history node owner_endpoint_id cannot be empty".to_string());
+    }
     if fact.node_secret.iter().all(|byte| *byte == 0) {
         return Err("local history node secret material cannot be empty".to_string());
     }
@@ -130,13 +134,14 @@ pub fn encode_local_history_node_secret(
     wire::put_u8(TYPE_LOCAL_HISTORY_NODE_SECRET, &mut out[0..1]).map_err(wire_err)?;
     out[1..33].copy_from_slice(&fact.workspace_id);
     out[33..65].copy_from_slice(&fact.frontier_id);
-    out[65..97].copy_from_slice(&fact.source_secret_id);
-    wire::put_u64be(fact.range_start, &mut out[97..105]).map_err(wire_err)?;
-    wire::put_u64be(fact.range_width, &mut out[105..113]).map_err(wire_err)?;
-    out[113..115].copy_from_slice(&fact.bit_depth.to_be_bytes());
-    out[115..147].copy_from_slice(&fact.event_id_prefix);
-    out[147..179].copy_from_slice(&fact.tombstone_node_id);
-    out[179..211].copy_from_slice(&fact.node_secret);
+    out[65..97].copy_from_slice(&fact.owner_endpoint_id);
+    out[97..129].copy_from_slice(&fact.source_secret_id);
+    wire::put_u64be(fact.range_start, &mut out[129..137]).map_err(wire_err)?;
+    wire::put_u64be(fact.range_width, &mut out[137..145]).map_err(wire_err)?;
+    out[145..147].copy_from_slice(&fact.bit_depth.to_be_bytes());
+    out[147..179].copy_from_slice(&fact.event_id_prefix);
+    out[179..211].copy_from_slice(&fact.tombstone_node_id);
+    out[211..243].copy_from_slice(&fact.node_secret);
     Ok(out)
 }
 
@@ -152,13 +157,14 @@ pub fn decode_local_history_node_secret(
     let fact = LocalHistoryNodeSecretFact {
         workspace_id: bytes[1..33].try_into().unwrap(),
         frontier_id: bytes[33..65].try_into().unwrap(),
-        source_secret_id: bytes[65..97].try_into().unwrap(),
-        range_start: wire::take_u64be(&bytes[97..105]).map_err(wire_err)?,
-        range_width: wire::take_u64be(&bytes[105..113]).map_err(wire_err)?,
-        bit_depth: u16::from_be_bytes(bytes[113..115].try_into().unwrap()),
-        event_id_prefix: bytes[115..147].try_into().unwrap(),
-        tombstone_node_id: bytes[147..179].try_into().unwrap(),
-        node_secret: bytes[179..211].try_into().unwrap(),
+        owner_endpoint_id: bytes[65..97].try_into().unwrap(),
+        source_secret_id: bytes[97..129].try_into().unwrap(),
+        range_start: wire::take_u64be(&bytes[129..137]).map_err(wire_err)?,
+        range_width: wire::take_u64be(&bytes[137..145]).map_err(wire_err)?,
+        bit_depth: u16::from_be_bytes(bytes[145..147].try_into().unwrap()),
+        event_id_prefix: bytes[147..179].try_into().unwrap(),
+        tombstone_node_id: bytes[179..211].try_into().unwrap(),
+        node_secret: bytes[211..243].try_into().unwrap(),
     };
     encode_local_history_node_secret(&fact)?;
     Ok(fact)
@@ -195,19 +201,20 @@ pub fn encode_key_wrap(fact: &KeyWrapFact) -> Result<Vec<u8>, String> {
     wire::put_u8(TYPE_KEY_WRAP, &mut out[0..1]).map_err(wire_err)?;
     out[1..33].copy_from_slice(&fact.workspace_id);
     wire::put_u64be(fact.created_at_ms, &mut out[33..41]).map_err(wire_err)?;
-    out[41..73].copy_from_slice(&fact.frontier_id);
-    out[73] = fact.wrapped_secret_kind.as_u8();
-    out[74..106].copy_from_slice(&fact.wrapped_secret_id);
-    out[106..138].copy_from_slice(&fact.wrapped_source_secret_id);
-    out[138..170].copy_from_slice(&fact.wrapped_tombstone_node_id);
-    wire::put_u64be(fact.range_start, &mut out[170..178]).map_err(wire_err)?;
-    wire::put_u64be(fact.range_width, &mut out[178..186]).map_err(wire_err)?;
-    out[186..188].copy_from_slice(&fact.bit_depth.to_be_bytes());
-    out[188..220].copy_from_slice(&fact.event_id_prefix);
-    out[220..252].copy_from_slice(&fact.recipient_key_id);
-    out[252..284].copy_from_slice(&fact.sender_wrap_public_key);
-    out[284..308].copy_from_slice(&fact.nonce);
-    out[308..356].copy_from_slice(&fact.ciphertext);
+    out[41..73].copy_from_slice(&fact.signer_endpoint_id);
+    out[73..105].copy_from_slice(&fact.frontier_id);
+    out[105] = fact.wrapped_secret_kind.as_u8();
+    out[106..138].copy_from_slice(&fact.wrapped_secret_id);
+    out[138..170].copy_from_slice(&fact.wrapped_source_secret_id);
+    out[170..202].copy_from_slice(&fact.wrapped_tombstone_node_id);
+    wire::put_u64be(fact.range_start, &mut out[202..210]).map_err(wire_err)?;
+    wire::put_u64be(fact.range_width, &mut out[210..218]).map_err(wire_err)?;
+    out[218..220].copy_from_slice(&fact.bit_depth.to_be_bytes());
+    out[220..252].copy_from_slice(&fact.event_id_prefix);
+    out[252..284].copy_from_slice(&fact.recipient_key_id);
+    out[284..316].copy_from_slice(&fact.sender_wrap_public_key);
+    out[316..340].copy_from_slice(&fact.nonce);
+    out[340..388].copy_from_slice(&fact.ciphertext);
     Ok(out)
 }
 
@@ -217,19 +224,20 @@ pub fn decode_key_wrap(bytes: &[u8]) -> Result<KeyWrapFact, String> {
     let fact = KeyWrapFact {
         workspace_id: bytes[1..33].try_into().unwrap(),
         created_at_ms: wire::take_u64be(&bytes[33..41]).map_err(wire_err)?,
-        frontier_id: bytes[41..73].try_into().unwrap(),
-        wrapped_secret_kind: WrappedSecretKind::from_u8(bytes[73])?,
-        wrapped_secret_id: bytes[74..106].try_into().unwrap(),
-        wrapped_source_secret_id: bytes[106..138].try_into().unwrap(),
-        wrapped_tombstone_node_id: bytes[138..170].try_into().unwrap(),
-        range_start: wire::take_u64be(&bytes[170..178]).map_err(wire_err)?,
-        range_width: wire::take_u64be(&bytes[178..186]).map_err(wire_err)?,
-        bit_depth: u16::from_be_bytes(bytes[186..188].try_into().unwrap()),
-        event_id_prefix: bytes[188..220].try_into().unwrap(),
-        recipient_key_id: bytes[220..252].try_into().unwrap(),
-        sender_wrap_public_key: bytes[252..284].try_into().unwrap(),
-        nonce: bytes[284..308].try_into().unwrap(),
-        ciphertext: bytes[308..356].try_into().unwrap(),
+        signer_endpoint_id: bytes[41..73].try_into().unwrap(),
+        frontier_id: bytes[73..105].try_into().unwrap(),
+        wrapped_secret_kind: WrappedSecretKind::from_u8(bytes[105])?,
+        wrapped_secret_id: bytes[106..138].try_into().unwrap(),
+        wrapped_source_secret_id: bytes[138..170].try_into().unwrap(),
+        wrapped_tombstone_node_id: bytes[170..202].try_into().unwrap(),
+        range_start: wire::take_u64be(&bytes[202..210]).map_err(wire_err)?,
+        range_width: wire::take_u64be(&bytes[210..218]).map_err(wire_err)?,
+        bit_depth: u16::from_be_bytes(bytes[218..220].try_into().unwrap()),
+        event_id_prefix: bytes[220..252].try_into().unwrap(),
+        recipient_key_id: bytes[252..284].try_into().unwrap(),
+        sender_wrap_public_key: bytes[284..316].try_into().unwrap(),
+        nonce: bytes[316..340].try_into().unwrap(),
+        ciphertext: bytes[340..388].try_into().unwrap(),
     };
     validate_key_wrap(&fact)?;
     Ok(fact)
@@ -313,6 +321,7 @@ pub fn history_node_key_wrap_coordinate_key(
 pub fn validate_key_wrap(fact: &KeyWrapFact) -> Result<(), String> {
     for (name, id) in [
         ("key wrap workspace_id", &fact.workspace_id),
+        ("key wrap signer_endpoint_id", &fact.signer_endpoint_id),
         ("key wrap frontier_id", &fact.frontier_id),
         ("key wrap wrapped_secret_id", &fact.wrapped_secret_id),
         ("key wrap recipient_key_id", &fact.recipient_key_id),
