@@ -214,3 +214,121 @@ fn target_row_layouts_do_not_emit_context_or_intents() {
         offenders.join("\n")
     );
 }
+
+#[test]
+fn target_event_modules_do_not_use_legacy_file_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files(&root.join("src/event_modules")) {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if matches!(
+            file_name,
+            "mod.rs" | "schema.rs" | "codec.rs" | "cli.rs" | "commands.rs" | "queries.rs"
+        ) {
+            offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "target event modules should use fact/layout/project/context/intent/rows/read files, not legacy names:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_event_modules_do_not_import_legacy_protocol_or_workers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files(&root.join("src/event_modules")) {
+        let text = source_text(&path);
+        for forbidden in [
+            "crate::protocol",
+            "crate::workers",
+            "topo::protocol",
+            "topo::workers",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "target event modules must not call into retained poc-8 protocol/workers:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_intent_files_only_encode_intent_payloads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files_named(&root.join("src/event_modules"), "intent.rs") {
+        let text = source_text(&path);
+        for forbidden in [
+            "Store",
+            "TableRow",
+            "TableName",
+            "AtomicIntent",
+            "ProjectionOutput",
+            "Projector",
+            "ContextNeed",
+            "ContextOffer",
+            "insert_table_rows",
+            "delete_table_rows",
+            "network_queues",
+            "std::net",
+            "tcp::",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "intent files should only define deferred intent keys/payloads:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_projectors_do_not_define_intent_payloads_or_handler_logic() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files_named(&root.join("src/event_modules"), "project.rs") {
+        let text = source_text(&path);
+        for forbidden in [
+            "IntentKind::new",
+            "impl IntentHandler",
+            "HandlerOutput",
+            "HandlerContext",
+            "std::thread",
+            "spawn(",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "projectors should compose event-module helpers, not define payload decoding or handler logic:\n{}",
+        offenders.join("\n")
+    );
+}

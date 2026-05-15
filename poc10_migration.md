@@ -373,6 +373,14 @@ done: projection-owned message row put/delete stays inside sealed_message projec
 done: unchanged poc-8 e2e suites pass without scenario edits: black_box_sync, cascade, cli_surface, content, daemon_lifecycle, disappearing_messages, encryption, generate, invite_accept, leaf_coord, negentropy_purge_sync, sync_storage_boundary, view
 done: ignored poc-8 e2e case cli_three_long_running_daemons_converge_messages_among_late_joiner passes when run explicitly
 done: ignored poc-8 e2e case cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_50k passes when run explicitly
+done: target encryption key-healing slice models recipient-key-triggered proactive wrap needs as context matches
+done: duplicate target key requests converge on one deterministic materialize_key_wraps intent without request entropy
+done: post-deletion target key request wraps retained history-node sources without requiring or recreating the frontier root
+done: rotated target recipient keys only match frontier sources at or after the new key timestamp
+done: recipient supersession wakes the predecessor and emits purge_retired_recipient_material instead of future wrap intents
+done: target encryption history-node offers reuse secret_coverage to wake/open sealed messages
+done: sync compare unit coverage pins out-of-range dependency closure before in-range roots
+done: active target guardrails prevent legacy file names, legacy protocol/worker imports, intent dumping, and handler logic in projectors
 ```
 
 The next event-pipeline step is to replace the simplified message row proof

@@ -255,7 +255,7 @@ fn compare_response(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashSet, VecDeque};
+    use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
     use crate::protocol::event_modules::types::EventIndexEntry;
 
@@ -268,13 +268,27 @@ mod tests {
     struct SetContext {
         entries: Vec<EventIndexEntry>,
         ids: HashSet<EventId>,
+        deps: HashMap<EventId, Vec<EventId>>,
     }
 
     impl SetContext {
         fn new(mut entries: Vec<EventIndexEntry>) -> Self {
             entries.sort_by_key(|entry| (entry.timestamp, entry.event_id));
             let ids = entries.iter().map(|entry| entry.event_id).collect();
-            Self { entries, ids }
+            Self {
+                entries,
+                ids,
+                deps: HashMap::new(),
+            }
+        }
+
+        fn with_deps(
+            entries: Vec<EventIndexEntry>,
+            deps: impl IntoIterator<Item = (EventId, Vec<EventId>)>,
+        ) -> Self {
+            let mut context = Self::new(entries);
+            context.deps = deps.into_iter().collect();
+            context
         }
 
         fn entries_in_range(&self, range: TimestampRange) -> Vec<EventIndexEntry> {
@@ -314,9 +328,34 @@ mod tests {
 
         fn dependency_closure_entries(
             &self,
-            _roots: &[EventIndexEntry],
+            roots: &[EventIndexEntry],
         ) -> Result<Vec<EventIndexEntry>, String> {
-            Ok(Vec::new())
+            let mut seen = roots
+                .iter()
+                .map(|entry| entry.event_id)
+                .collect::<HashSet<_>>();
+            let mut stack = roots
+                .iter()
+                .flat_map(|entry| self.deps.get(&entry.event_id).cloned().unwrap_or_default())
+                .collect::<Vec<_>>();
+            let mut out = BTreeSet::<(u64, EventId)>::new();
+            while let Some(dep) = stack.pop() {
+                if !seen.insert(dep) {
+                    continue;
+                }
+                if let Some(entry) = self.entries.iter().find(|entry| entry.event_id == dep) {
+                    out.insert((entry.timestamp, entry.event_id));
+                }
+                stack.extend(self.deps.get(&dep).cloned().unwrap_or_default());
+            }
+            Ok(out
+                .into_iter()
+                .map(|(timestamp, event_id)| EventIndexEntry {
+                    event_id,
+                    timestamp,
+                    workspace_id: Some(WORKSPACE_ID),
+                })
+                .collect())
         }
 
         fn fresh_have_entries(
@@ -326,6 +365,58 @@ mod tests {
         ) -> Result<Vec<EventIndexEntry>, String> {
             Ok(entries)
         }
+    }
+
+    #[test]
+    fn leaf_have_response_includes_out_of_range_dependencies_before_roots() {
+        let dep = EventIndexEntry {
+            event_id: test_id(b"previous-day-dep", 1),
+            timestamp: 86_400_000,
+            workspace_id: Some(WORKSPACE_ID),
+        };
+        let root = EventIndexEntry {
+            event_id: test_id(b"today-root", 1),
+            timestamp: 172_800_000,
+            workspace_id: Some(WORKSPACE_ID),
+        };
+        let context = SetContext::with_deps(
+            vec![dep.clone(), root.clone()],
+            [(root.event_id, vec![dep.event_id])],
+        );
+        let range = TimestampRange {
+            start: root.timestamp,
+            end: root.timestamp,
+        };
+        let remote_compare = super::super::codec::outbound_record(CompareEvent {
+            connection_id: CONNECTION_ID,
+            range,
+            summary: RangeSummary::default(),
+            response_requested: false,
+        })
+        .expect("compare");
+
+        let report = handle_inbound_event(
+            &context,
+            CONNECTION_ID,
+            CONNECTION_ID,
+            &remote_compare.canonical_bytes,
+        )
+        .expect("handle compare");
+
+        let have_ids = report
+            .events
+            .iter()
+            .map(|record| {
+                have_id::codec::decode(&record.canonical_bytes)
+                    .expect("have id response")
+                    .id
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            have_ids,
+            vec![dep.event_id, root.event_id],
+            "dep-aware sync must advertise out-of-range deps before the in-range root"
+        );
     }
 
     #[derive(Clone, Copy)]
