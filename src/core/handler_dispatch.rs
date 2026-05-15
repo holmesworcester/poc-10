@@ -1,7 +1,8 @@
 //! Intent handler contract.
 
 use crate::core::facts::Fact;
-use crate::core::intents::Intent;
+use crate::core::intents::{AtomicIntent, Intent};
+use crate::core::store::{Store, TableName};
 
 #[derive(Debug, Default)]
 pub struct HandlerContext;
@@ -32,11 +33,47 @@ pub trait IntentHandler {
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String>;
 }
 
+pub struct RowIntentHandler<'a> {
+    store: &'a Store,
+    allowed_tables: &'a [TableName],
+}
+
+impl<'a> RowIntentHandler<'a> {
+    pub fn new(store: &'a Store, allowed_tables: &'a [TableName]) -> Self {
+        Self {
+            store,
+            allowed_tables,
+        }
+    }
+}
+
+impl IntentHandler for RowIntentHandler<'_> {
+    fn handle(&self, intent: &Intent, _context: &HandlerContext) -> Result<HandlerOutput, String> {
+        match AtomicIntent::from_intent(intent, self.allowed_tables)? {
+            AtomicIntent::PutRow(row) => {
+                self.store
+                    .insert_table_rows(vec![row])
+                    .map_err(|err| format!("apply put_row intent: {err}"))?;
+            }
+            AtomicIntent::DeleteRow(delete) => {
+                self.store
+                    .delete_table_rows(delete.table, vec![delete.key])
+                    .map_err(|err| format!("apply delete_row intent: {err}"))?;
+            }
+        }
+        Ok(HandlerOutput::new())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::event_bus::EventBus;
     use crate::core::facts::FactScope;
-    use crate::core::intents::{IntentExecution, IntentKind};
+    use crate::core::intents::{IntentExecution, IntentKind, TableDelete};
+    use crate::core::store::{Schema, TableRow};
+
+    const TEST_TABLE: TableName = TableName::new("handler.rows");
 
     #[test]
     fn handler_output_feeds_facts_and_intents_back_to_core() {
@@ -51,5 +88,86 @@ mod tests {
 
         assert_eq!(output.facts.len(), 1);
         assert_eq!(output.intents.len(), 1);
+    }
+
+    #[test]
+    fn row_intent_handler_applies_put_and_delete_through_registered_tables() {
+        let store = Store::open_memory_with_schemas(&[Schema::durable_row_table(
+            "handler.rows.v1",
+            TEST_TABLE,
+        )])
+        .expect("open store");
+        let handler = RowIntentHandler::new(&store, &[TEST_TABLE]);
+        let mut bus = EventBus::new();
+
+        bus.submit_intent(
+            AtomicIntent::PutRow(TableRow {
+                table: TEST_TABLE,
+                key: b"row".to_vec(),
+                value: b"value".to_vec(),
+            })
+            .into_intent(),
+        )
+        .expect("submit put");
+        let put = bus
+            .dispatch_intents(&handler, &HandlerContext, 10)
+            .expect("dispatch put");
+        assert_eq!(put.handled, 1);
+        assert_eq!(
+            store.table_rows(TEST_TABLE).expect("rows"),
+            vec![(b"row".to_vec(), b"value".to_vec())]
+        );
+
+        bus.submit_intent(
+            TableDelete {
+                table: TEST_TABLE,
+                key: b"row".to_vec(),
+            }
+            .into_intent(),
+        )
+        .expect("submit delete");
+        let delete = bus
+            .dispatch_intents(&handler, &HandlerContext, 10)
+            .expect("dispatch delete");
+        assert_eq!(delete.handled, 1);
+        assert!(store.table_rows(TEST_TABLE).expect("rows").is_empty());
+    }
+
+    #[test]
+    fn row_intent_handler_error_leaves_intent_queued() {
+        let store = Store::open_memory_with_schemas(&[Schema::durable_row_table(
+            "handler.rows.v1",
+            TEST_TABLE,
+        )])
+        .expect("open store");
+        store
+            .insert_table_rows(vec![TableRow {
+                table: TEST_TABLE,
+                key: b"row".to_vec(),
+                value: b"old".to_vec(),
+            }])
+            .expect("seed row");
+        let handler = RowIntentHandler::new(&store, &[TEST_TABLE]);
+        let mut bus = EventBus::new();
+
+        bus.submit_intent(
+            AtomicIntent::PutRow(TableRow {
+                table: TEST_TABLE,
+                key: b"row".to_vec(),
+                value: b"new".to_vec(),
+            })
+            .into_intent(),
+        )
+        .expect("submit conflicting put");
+        let err = bus
+            .dispatch_intents(&handler, &HandlerContext, 10)
+            .expect_err("conflicting put fails");
+
+        assert!(err.contains("apply put_row intent"), "{err}");
+        assert_eq!(bus.intents().len(), 1);
+        assert_eq!(
+            store.table_rows(TEST_TABLE).expect("rows"),
+            vec![(b"row".to_vec(), b"old".to_vec())]
+        );
     }
 }
