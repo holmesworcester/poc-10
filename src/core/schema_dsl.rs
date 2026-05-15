@@ -662,6 +662,7 @@ mod tests {
                 "content_event_rows",
                 "admin_rows",
                 "reaction_rows",
+                "content_message_rows",
                 "connection_request_rows",
                 "connection_response_rows",
                 "invite_accepted_rows",
