@@ -2,6 +2,7 @@
 
 use crate::core::facts::FactId;
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::wire::{FixedLayout, U16be, U64be};
 
 use super::context::{WrapSourceKind, WrapSourceSelector};
 use super::fact::{RecipientKeyId, WorkspaceId};
@@ -149,9 +150,9 @@ fn materialize_key(input: &MaterializeKeyWrapsIntent) -> Vec<u8> {
             event_id_prefix,
         } => {
             key.push(2);
-            key.extend_from_slice(&range_start.to_be_bytes());
-            key.extend_from_slice(&range_width.to_be_bytes());
-            key.extend_from_slice(&bit_depth.to_be_bytes());
+            key.extend_from_slice(&encode_u64(range_start));
+            key.extend_from_slice(&encode_u64(range_width));
+            key.extend_from_slice(&encode_u16(bit_depth));
             key.extend_from_slice(&event_id_prefix);
         }
     }
@@ -188,9 +189,9 @@ fn encode_materialize_payload(input: &MaterializeKeyWrapsIntent) -> Vec<u8> {
             event_id_prefix,
         } => {
             out.push(2);
-            out.extend_from_slice(&range_start.to_be_bytes());
-            out.extend_from_slice(&range_width.to_be_bytes());
-            out.extend_from_slice(&bit_depth.to_be_bytes());
+            out.extend_from_slice(&encode_u64(range_start));
+            out.extend_from_slice(&encode_u64(range_width));
+            out.extend_from_slice(&encode_u16(bit_depth));
             out.extend_from_slice(&event_id_prefix);
         }
     }
@@ -214,9 +215,9 @@ fn decode_materialize_payload(payload: &[u8]) -> Result<MaterializeKeyWrapsInten
             WrapSourceKind::FrontierRoot
         }
         2 => {
-            let range_start = u64::from_be_bytes(payload[162..170].try_into().unwrap());
-            let range_width = u64::from_be_bytes(payload[170..178].try_into().unwrap());
-            let bit_depth = u16::from_be_bytes(payload[178..180].try_into().unwrap());
+            let range_start = decode_u64(&payload[162..170])?;
+            let range_width = decode_u64(&payload[170..178])?;
+            let bit_depth = decode_u16(&payload[178..180])?;
             if bit_depth > 256 || range_width == 0 || !range_width.is_power_of_two() {
                 return Err("invalid materialize_key_wraps history range".to_string());
             }
@@ -324,4 +325,28 @@ fn decode_retired_recipient_payload(payload: &[u8]) -> Result<(RecipientKeyId, F
         payload[1..33].try_into().unwrap(),
         payload[33..65].try_into().unwrap(),
     ))
+}
+
+fn encode_u64(value: u64) -> [u8; 8] {
+    let mut buf = [0; 8];
+    U64be(value).encode(&mut buf).expect("u64 fixed layout");
+    buf
+}
+
+fn encode_u16(value: u16) -> [u8; 2] {
+    let mut buf = [0; 2];
+    U16be(value).encode(&mut buf).expect("u16 fixed layout");
+    buf
+}
+
+fn decode_u64(bytes: &[u8]) -> Result<u64, String> {
+    U64be::decode(bytes)
+        .map(|value| value.0)
+        .map_err(|err| format!("invalid u64 field: {err:?}"))
+}
+
+fn decode_u16(bytes: &[u8]) -> Result<u16, String> {
+    U16be::decode(bytes)
+        .map(|value| value.0)
+        .map_err(|err| format!("invalid u16 field: {err:?}"))
 }
