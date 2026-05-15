@@ -134,9 +134,23 @@ Recent target work:
     `rules_boundary_test::src_has_no_stale_doc_references` guardrail passes;
     remaining target projectors should follow the same qualitative
     cross-reference style instead of citing commit ids
-  - other lanes in this wave (content_file/file_slice, identity invite
-    triplet, identity_endpoint_shared, the first real `receive_transit`
-    handler driver) are still in flight on their worktree branches
+  - `src/event_modules/content_file/` and
+    `src/event_modules/content_file_slice/` port the public file descriptor
+    plus per-slice envelope; sealed metadata and the Bao proof slot stay
+    deferred
+  - `src/event_modules/identity_endpoint_shared/` ports the peer-visible
+    endpoint identity fact with public-shape validation only; signed-envelope
+    unwrap and membership cross-checks stay deferred
+  - `src/event_modules/identity_invite/`,
+    `src/event_modules/identity_user_invite/`, and
+    `src/event_modules/identity_device_invite/` port the invite triplet;
+    legacy `SendBootstrapRequest` intent emission stays deferred to the
+    transport wave
+  - `src/handlers/receive_transit/` lands the first real transit-receive
+    handler driver: it decodes `TransitSmallV1`/`TransitLargeV1` frames
+    through the target wire layouts, validates the outer envelope, and
+    queues the intent on inner-AEAD-open until connection-secret context is
+    plumbed
 
 Important caveats from the latest read-only audit:
 
