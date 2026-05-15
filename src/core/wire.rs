@@ -1,5 +1,10 @@
 //! Fixed-layout wire primitives.
 
+use crate::core::crypto::{
+    ED25519_PUBLIC_KEY_BYTES, ED25519_SIGNATURE_BYTES, HASH_BYTES, XCHACHA20_POLY1305_KEY_BYTES,
+    XCHACHA20_POLY1305_NONCE_BYTES,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireError {
     WrongLength { expected: usize, actual: usize },
@@ -37,6 +42,12 @@ impl<const N: usize> FixedLayout for FixedBytes<N> {
 
 pub type Tag<const N: usize> = FixedBytes<N>;
 pub type Padding<const N: usize> = FixedBytes<N>;
+pub type Id32 = FixedBytes<32>;
+pub type Hash32 = FixedBytes<HASH_BYTES>;
+pub type PublicKey32 = FixedBytes<ED25519_PUBLIC_KEY_BYTES>;
+pub type SymmetricKey32 = FixedBytes<XCHACHA20_POLY1305_KEY_BYTES>;
+pub type Signature64 = FixedBytes<ED25519_SIGNATURE_BYTES>;
+pub type Nonce24 = FixedBytes<XCHACHA20_POLY1305_NONCE_BYTES>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct U8(pub u8);
@@ -201,6 +212,8 @@ pub struct FixedSlot<const N: usize> {
     len: usize,
     bytes: [u8; N],
 }
+
+pub type Ciphertext<const N: usize> = FixedSlot<N>;
 
 impl<const N: usize> FixedSlot<N> {
     pub const DATA_LEN: usize = N;

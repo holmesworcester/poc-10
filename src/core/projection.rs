@@ -1,6 +1,8 @@
 //! Projector contract for fact plus context to needs, offers, and intents.
 
-use crate::core::context::{ContextNeed, ContextOffer, ContextSet};
+use crate::core::context::{
+    diff_context_sets, ContextNeed, ContextOffer, ContextSet, ContextSetDelta,
+};
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::Intent;
 
@@ -64,11 +66,35 @@ pub trait Projector {
         -> Result<ProjectionOutput, String>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionRun {
+    pub context: ContextSet,
+    pub context_delta: ContextSetDelta,
+    pub intents: Vec<Intent>,
+}
+
+pub fn run_projection(
+    projector: &impl Projector,
+    fact: &Fact,
+    previous_context: &ContextSet,
+    offers: Vec<ContextOffer>,
+) -> Result<ProjectionRun, String> {
+    let output = projector.project(fact, &ProjectionContext::new(offers))?;
+    let context = output.context_set();
+    let context_delta = diff_context_sets(previous_context, &context);
+    Ok(ProjectionRun {
+        context,
+        context_delta,
+        intents: output.intents,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::context::{Role, Selector};
     use crate::core::facts::FactScope;
+    use crate::core::intents::{IntentExecution, IntentKind};
 
     #[test]
     fn projection_output_keeps_context_and_work_separate() {
@@ -110,5 +136,89 @@ mod tests {
             .need(need.clone());
 
         assert_eq!(output.context_set().needs, vec![need]);
+    }
+
+    #[test]
+    fn projection_run_diffs_standing_context_without_self_waking() {
+        let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
+        let role = Role::new("exact").unwrap();
+        let selector = Selector::from_bytes([9; 32]);
+        let projector = NeedUntilOffer {
+            role,
+            selector,
+            intent_kind: IntentKind::new("followup").unwrap(),
+        };
+
+        let first = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect("first projection");
+        assert_eq!(first.context_delta.added_needs.len(), 1);
+        assert_eq!(first.context_delta.removed_needs.len(), 0);
+
+        let second = run_projection(&projector, &fact, &first.context, Vec::new())
+            .expect("second projection");
+        assert!(second.context_delta.is_empty());
+        assert_eq!(second.context, first.context);
+        assert!(second.intents.is_empty());
+    }
+
+    #[test]
+    fn projection_run_replaces_need_with_intent_when_context_appears() {
+        let fact = Fact::new(FactScope::Global, 1, b"recoverable".to_vec());
+        let role = Role::new("exact").unwrap();
+        let selector = Selector::from_bytes([9; 32]);
+        let projector = NeedUntilOffer {
+            role: role.clone(),
+            selector: selector.clone(),
+            intent_kind: IntentKind::new("followup").unwrap(),
+        };
+        let previous = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect("previous projection")
+            .context;
+        let offer = ContextOffer {
+            owner: [2; 32],
+            role,
+            scope: FactScope::Global,
+            selector,
+            payload_ref: [3; 32],
+        };
+
+        let next = run_projection(&projector, &fact, &previous, vec![offer])
+            .expect("projection with context");
+
+        assert!(next.context.needs.is_empty());
+        assert_eq!(next.context_delta.removed_needs, previous.needs);
+        assert_eq!(next.context_delta.added_needs.len(), 0);
+        assert_eq!(next.intents.len(), 1);
+        assert_eq!(next.intents[0].kind.as_str(), "followup");
+    }
+
+    struct NeedUntilOffer {
+        role: Role,
+        selector: Selector,
+        intent_kind: IntentKind,
+    }
+
+    impl Projector for NeedUntilOffer {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if context.offers().is_empty() {
+                Ok(ProjectionOutput::new().need(ContextNeed {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: self.selector.clone(),
+                }))
+            } else {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    self.intent_kind.clone(),
+                    IntentExecution::Atomic,
+                    fact.id,
+                    context.payload_refs().next().unwrap_or(fact.id),
+                )))
+            }
+        }
     }
 }

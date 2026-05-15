@@ -18,9 +18,10 @@
 //! parameters, and table names are accepted only from `TableName` after a
 //! conservative identifier check.
 
+use crate::core::schema_dsl::{self, ColumnType, TableDeclaration};
 use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
@@ -140,6 +141,15 @@ impl Store {
         Self::from_connection(conn, schemas)
     }
 
+    /// Open a disk store and apply row-table declarations parsed from p8sql sources.
+    pub fn open_disk_with_schema_sources(
+        path: impl AsRef<Path>,
+        sources: &[&str],
+    ) -> rusqlite::Result<Self> {
+        let conn = SqliteConnection::open(path)?;
+        Self::from_connection_with_schema_sources(conn, sources)
+    }
+
     /// Open an in-memory store without creating any protocol tables.
     pub fn open_memory() -> rusqlite::Result<Self> {
         Self::open_memory_with_schemas(&[])
@@ -151,10 +161,34 @@ impl Store {
         Self::from_connection(conn, schemas)
     }
 
+    /// Open an in-memory store and apply row-table declarations parsed from p8sql sources.
+    pub fn open_memory_with_schema_sources(sources: &[&str]) -> rusqlite::Result<Self> {
+        let conn = SqliteConnection::open_in_memory()?;
+        Self::from_connection_with_schema_sources(conn, sources)
+    }
+
     fn from_connection(conn: SqliteConnection, schemas: &[Schema]) -> rusqlite::Result<Self> {
+        let store = Self::from_connection_parts(conn, table_storage_map(schemas)?)?;
+        store.apply_schemas(schemas)?;
+        Ok(store)
+    }
+
+    fn from_connection_with_schema_sources(
+        conn: SqliteConnection,
+        sources: &[&str],
+    ) -> rusqlite::Result<Self> {
+        let table_names = row_table_names_from_schema_sources(sources)?;
+        let store = Self::from_connection_parts(conn, HashMap::new())?;
+        store.apply_schema_source_tables(&table_names)?;
+        Ok(store)
+    }
+
+    fn from_connection_parts(
+        conn: SqliteConnection,
+        table_storage: HashMap<TableName, StorageClass>,
+    ) -> rusqlite::Result<Self> {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
-        let table_storage = table_storage_map(schemas)?;
         let memory_tables = table_storage
             .iter()
             .filter_map(|(table, storage)| {
@@ -166,7 +200,6 @@ impl Store {
             table_storage,
             memory_tables: RefCell::new(memory_tables),
         };
-        store.apply_schemas(schemas)?;
         Ok(store)
     }
 
@@ -475,6 +508,13 @@ impl Store {
         Ok(())
     }
 
+    fn apply_schema_source_tables(&self, table_names: &[String]) -> rusqlite::Result<()> {
+        for table_name in table_names {
+            self.apply_schema_source_row_table(table_name)?;
+        }
+        Ok(())
+    }
+
     fn apply_schema(&self, schema: &Schema) -> rusqlite::Result<()> {
         match schema.definition {
             SchemaDefinition::RowTable(table) => self.apply_row_table_schema(schema.storage, table),
@@ -498,6 +538,20 @@ impl Store {
                 row_value BLOB NOT NULL
             );"
         ))
+    }
+
+    fn apply_schema_source_row_table(&self, table_name: &str) -> rusqlite::Result<()> {
+        let quoted = quoted_table_name_str(table_name)?;
+        let existing = sqlite_table_columns(&self.conn, &quoted)?;
+        if existing.is_empty() {
+            return self.conn.execute_batch(&format!(
+                "CREATE TABLE {quoted} (
+                    row_key BLOB PRIMARY KEY NOT NULL,
+                    row_value BLOB NOT NULL
+                );"
+            ));
+        }
+        validate_sqlite_row_table(table_name, &existing)
     }
 
     fn storage_for(&self, table: TableName) -> StorageClass {
@@ -596,6 +650,88 @@ impl Store {
     }
 }
 
+fn row_table_names_from_schema_sources(sources: &[&str]) -> rusqlite::Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (source_index, source) in sources.iter().enumerate() {
+        let document = schema_dsl::parse_schema(source).map_err(|err| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "schema source {}: {err}",
+                source_index + 1
+            ))
+        })?;
+        for table in document.tables {
+            validate_row_table_declaration(&table)?;
+            if !seen.insert(table.name.clone()) {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "duplicate schema table {}",
+                    table.name
+                )));
+            }
+            out.push(table.name);
+        }
+    }
+    Ok(out)
+}
+
+fn validate_row_table_declaration(table: &TableDeclaration) -> rusqlite::Result<()> {
+    let valid_columns = table.columns.len() == 2
+        && table.columns[0].name == "key"
+        && table.columns[0].ty == (ColumnType::Bytes { len: None })
+        && table.columns[1].name == "value"
+        && table.columns[1].ty == (ColumnType::Bytes { len: None });
+    let valid_row_key = table.row_key.columns.len() == 1 && table.row_key.columns[0] == "key";
+    if valid_columns && valid_row_key && table.indexes.is_empty() {
+        return Ok(());
+    }
+    Err(rusqlite::Error::InvalidParameterName(format!(
+        "schema table {} must use row-store shape: `key bytes`, `value bytes`, row_key `(key)`, and no indexes",
+        table.name
+    )))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqliteColumn {
+    name: String,
+    ty: String,
+    not_null: bool,
+    primary_key_position: i64,
+}
+
+fn sqlite_table_columns(
+    conn: &SqliteConnection,
+    quoted_table_name: &str,
+) -> rusqlite::Result<Vec<SqliteColumn>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({quoted_table_name})"))?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SqliteColumn {
+            name: row.get(1)?,
+            ty: row.get(2)?,
+            not_null: row.get::<_, i64>(3)? != 0,
+            primary_key_position: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn validate_sqlite_row_table(table_name: &str, columns: &[SqliteColumn]) -> rusqlite::Result<()> {
+    let valid = columns.len() == 2
+        && columns[0].name == "row_key"
+        && columns[0].ty.eq_ignore_ascii_case("BLOB")
+        && columns[0].not_null
+        && columns[0].primary_key_position == 1
+        && columns[1].name == "row_value"
+        && columns[1].ty.eq_ignore_ascii_case("BLOB")
+        && columns[1].not_null
+        && columns[1].primary_key_position == 0;
+    if valid {
+        return Ok(());
+    }
+    Err(rusqlite::Error::InvalidParameterName(format!(
+        "existing table {table_name} does not match store row-table shape"
+    )))
+}
+
 fn table_storage_map(schemas: &[Schema]) -> rusqlite::Result<HashMap<TableName, StorageClass>> {
     let mut out = HashMap::new();
     for schema in schemas {
@@ -660,9 +796,12 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Quote a trusted static table name after rejecting unsafe identifier bytes.
+/// Quote a declared table name after rejecting unsafe identifier bytes.
 fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
-    let name = table.as_str();
+    quoted_table_name_str(table.as_str())
+}
+
+fn quoted_table_name_str(name: &str) -> rusqlite::Result<String> {
     if !name
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
