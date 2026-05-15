@@ -15,12 +15,21 @@
 //! module first makes the semantics crisp enough to persist without carrying
 //! forward the old lifecycle vocabulary.
 
-use crate::core::context::{ContextNeed, ContextOffer, ContextSet, ContextSetDelta};
-use crate::core::facts::{Fact, FactId};
-use crate::core::intents::Intent;
+use crate::core::context::{
+    ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
+};
+use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
+use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::core::matchers::{match_context_delta, ContextMatcher};
 use crate::core::projection::{run_projection, Projector};
+use crate::core::store::{Store, TableName, TableRow};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+pub const FACTS: TableName = TableName::new("facts");
+pub const NEEDS: TableName = TableName::new("needs");
+pub const OFFERS: TableName = TableName::new("offers");
+pub const PENDING_PROJECTION: TableName = TableName::new("pending_projection");
+pub const INTENTS: TableName = TableName::new("intents");
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DrainReport {
@@ -42,6 +51,76 @@ pub struct EventBus {
 impl EventBus {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn load(store: &Store) -> Result<Self, String> {
+        let mut bus = Self::new();
+        for (key, value) in store
+            .table_rows(FACTS)
+            .map_err(|err| format!("load facts: {err}"))?
+        {
+            let fact = decode_fact_row(&key, &value)?;
+            bus.facts.insert(fact.id, fact);
+        }
+        for (_, value) in store
+            .table_rows(NEEDS)
+            .map_err(|err| format!("load needs: {err}"))?
+        {
+            let need = decode_need(&value)?;
+            bus.context_by_owner
+                .entry(need.owner)
+                .or_default()
+                .needs
+                .push(need);
+        }
+        for (_, value) in store
+            .table_rows(OFFERS)
+            .map_err(|err| format!("load offers: {err}"))?
+        {
+            let offer = decode_offer(&value)?;
+            bus.context_by_owner
+                .entry(offer.owner)
+                .or_default()
+                .offers
+                .push(offer);
+        }
+        for context in bus.context_by_owner.values_mut() {
+            *context = std::mem::take(context).normalized();
+        }
+        for (key, _) in store
+            .table_rows(PENDING_PROJECTION)
+            .map_err(|err| format!("load pending projection: {err}"))?
+        {
+            let owner = decode_fact_id(&key)?;
+            if !bus.facts.contains_key(&owner) {
+                return Err(format!(
+                    "pending projection references unknown fact {owner:?}"
+                ));
+            }
+            if bus.pending_owners.insert(owner) {
+                bus.pending_projection.push_back(owner);
+            }
+        }
+        for (_, value) in store
+            .table_rows(INTENTS)
+            .map_err(|err| format!("load intents: {err}"))?
+        {
+            bus.intents.push(decode_intent(&value)?);
+        }
+        Ok(bus)
+    }
+
+    pub fn save(&self, store: &Store) -> Result<(), String> {
+        store
+            .write_transaction(|tx| {
+                replace_table_rows(tx, FACTS, self.fact_rows())?;
+                replace_table_rows(tx, NEEDS, self.need_rows())?;
+                replace_table_rows(tx, OFFERS, self.offer_rows())?;
+                replace_table_rows(tx, PENDING_PROJECTION, self.pending_rows())?;
+                replace_table_rows(tx, INTENTS, self.intent_rows())?;
+                Ok(())
+            })
+            .map_err(|err| format!("save event bus: {err}"))
     }
 
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
@@ -180,6 +259,370 @@ impl EventBus {
             .flat_map(|context| context.offers.iter().cloned())
             .collect()
     }
+
+    fn fact_rows(&self) -> Vec<TableRow> {
+        self.facts
+            .values()
+            .map(|fact| TableRow {
+                table: FACTS,
+                key: fact.id.to_vec(),
+                value: encode_fact(fact),
+            })
+            .collect()
+    }
+
+    fn need_rows(&self) -> Vec<TableRow> {
+        self.context_by_owner
+            .values()
+            .flat_map(|context| context.needs.iter())
+            .map(|need| {
+                let value = encode_need(need);
+                TableRow {
+                    table: NEEDS,
+                    key: context_row_key(need.owner, &value),
+                    value,
+                }
+            })
+            .collect()
+    }
+
+    fn offer_rows(&self) -> Vec<TableRow> {
+        self.context_by_owner
+            .values()
+            .flat_map(|context| context.offers.iter())
+            .map(|offer| {
+                let value = encode_offer(offer);
+                TableRow {
+                    table: OFFERS,
+                    key: context_row_key(offer.owner, &value),
+                    value,
+                }
+            })
+            .collect()
+    }
+
+    fn pending_rows(&self) -> Vec<TableRow> {
+        self.pending_projection
+            .iter()
+            .map(|owner| TableRow {
+                table: PENDING_PROJECTION,
+                key: owner.to_vec(),
+                value: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn intent_rows(&self) -> Vec<TableRow> {
+        self.intents
+            .iter()
+            .map(|intent| {
+                let value = encode_intent(intent);
+                TableRow {
+                    table: INTENTS,
+                    key: intent_row_key(intent),
+                    value,
+                }
+            })
+            .collect()
+    }
+}
+
+fn replace_table_rows(
+    store: &Store,
+    table: TableName,
+    rows: Vec<TableRow>,
+) -> rusqlite::Result<()> {
+    let keys = store
+        .table_rows(table)?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    store.delete_table_rows_in_tx(table, keys)?;
+    store.insert_table_rows_in_tx(rows)?;
+    Ok(())
+}
+
+fn context_row_key(owner: FactId, value: &[u8]) -> Vec<u8> {
+    let mut key = owner.to_vec();
+    key.extend_from_slice(blake3::hash(value).as_bytes());
+    key
+}
+
+fn intent_row_key(intent: &Intent) -> Vec<u8> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(intent.kind.as_str().as_bytes());
+    hash.update(&[0]);
+    hash.update(&intent.key);
+    hash.finalize().as_bytes().to_vec()
+}
+
+fn encode_fact(fact: &Fact) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_u8(&mut out, 1);
+    put_u64(&mut out, fact.timestamp);
+    encode_scope(&mut out, &fact.scope);
+    put_bytes_u32(&mut out, &fact.bytes);
+    out
+}
+
+fn decode_fact_row(key: &[u8], value: &[u8]) -> Result<Fact, String> {
+    let id = decode_fact_id(key)?;
+    let mut reader = Reader::new(value);
+    reader.expect_u8(1)?;
+    let timestamp = reader.take_u64()?;
+    let scope = decode_scope(&mut reader)?;
+    let bytes = reader.take_bytes_u32()?.to_vec();
+    reader.finish()?;
+    if fact_id(&bytes) != id {
+        return Err("fact row key does not match fact bytes".to_string());
+    }
+    Ok(Fact {
+        id,
+        scope,
+        timestamp,
+        bytes,
+    })
+}
+
+fn encode_need(need: &ContextNeed) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_u8(&mut out, 1);
+    put_id(&mut out, &need.owner);
+    put_string_u16(&mut out, need.role.as_str());
+    encode_scope(&mut out, &need.scope);
+    put_bytes_u32(&mut out, need.selector.as_bytes());
+    out
+}
+
+fn decode_need(value: &[u8]) -> Result<ContextNeed, String> {
+    let mut reader = Reader::new(value);
+    reader.expect_u8(1)?;
+    let owner = reader.take_id()?;
+    let role = Role::new(reader.take_string_u16()?)?;
+    let scope = decode_scope(&mut reader)?;
+    let selector = Selector::from_bytes(reader.take_bytes_u32()?.to_vec());
+    reader.finish()?;
+    Ok(ContextNeed {
+        owner,
+        role,
+        scope,
+        selector,
+    })
+}
+
+fn encode_offer(offer: &ContextOffer) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_u8(&mut out, 1);
+    put_id(&mut out, &offer.owner);
+    put_string_u16(&mut out, offer.role.as_str());
+    encode_scope(&mut out, &offer.scope);
+    put_bytes_u32(&mut out, offer.selector.as_bytes());
+    put_id(&mut out, &offer.payload_ref);
+    out
+}
+
+fn decode_offer(value: &[u8]) -> Result<ContextOffer, String> {
+    let mut reader = Reader::new(value);
+    reader.expect_u8(1)?;
+    let owner = reader.take_id()?;
+    let role = Role::new(reader.take_string_u16()?)?;
+    let scope = decode_scope(&mut reader)?;
+    let selector = Selector::from_bytes(reader.take_bytes_u32()?.to_vec());
+    let payload_ref = reader.take_id()?;
+    reader.finish()?;
+    Ok(ContextOffer {
+        owner,
+        role,
+        scope,
+        selector,
+        payload_ref,
+    })
+}
+
+fn encode_intent(intent: &Intent) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_u8(&mut out, 1);
+    put_string_u16(&mut out, intent.kind.as_str());
+    put_u8(
+        &mut out,
+        match intent.execution {
+            IntentExecution::Atomic => 0,
+            IntentExecution::Deferred => 1,
+        },
+    );
+    put_bytes_u32(&mut out, &intent.key);
+    put_bytes_u32(&mut out, &intent.payload);
+    out
+}
+
+fn decode_intent(value: &[u8]) -> Result<Intent, String> {
+    let mut reader = Reader::new(value);
+    reader.expect_u8(1)?;
+    let kind = IntentKind::new(reader.take_string_u16()?)?;
+    let execution = match reader.take_u8()? {
+        0 => IntentExecution::Atomic,
+        1 => IntentExecution::Deferred,
+        other => return Err(format!("invalid intent execution tag {other}")),
+    };
+    let key = reader.take_bytes_u32()?.to_vec();
+    let payload = reader.take_bytes_u32()?.to_vec();
+    reader.finish()?;
+    Ok(Intent::new(kind, execution, key, payload))
+}
+
+fn encode_scope(out: &mut Vec<u8>, scope: &FactScope) {
+    match scope {
+        FactScope::Global => put_u8(out, 0),
+        FactScope::Local => put_u8(out, 1),
+        FactScope::Scoped { kind, id } => {
+            put_u8(out, 2);
+            put_string_u16(out, kind.as_str());
+            put_id(out, id);
+        }
+    }
+}
+
+fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {
+    match reader.take_u8()? {
+        0 => Ok(FactScope::Global),
+        1 => Ok(FactScope::Local),
+        2 => {
+            let kind = ScopeKind::new(reader.take_string_u16()?)?;
+            let id = reader.take_id()?;
+            Ok(FactScope::Scoped { kind, id })
+        }
+        other => Err(format!("invalid fact scope tag {other}")),
+    }
+}
+
+fn decode_fact_id(bytes: &[u8]) -> Result<FactId, String> {
+    bytes
+        .try_into()
+        .map_err(|_| format!("expected 32-byte fact id, got {}", bytes.len()))
+}
+
+fn put_u8(out: &mut Vec<u8>, value: u8) {
+    out.push(value);
+}
+
+fn put_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn put_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn put_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn put_id(out: &mut Vec<u8>, id: &FactId) {
+    out.extend_from_slice(id);
+}
+
+fn put_string_u16(out: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    let len = u16::try_from(bytes.len()).expect("core vocabulary string length fits u16");
+    put_u16(out, len);
+    out.extend_from_slice(bytes);
+}
+
+fn put_bytes_u32(out: &mut Vec<u8>, bytes: &[u8]) {
+    let len = u32::try_from(bytes.len()).expect("core event bus bytes length fits u32");
+    put_u32(out, len);
+    out.extend_from_slice(bytes);
+}
+
+struct Reader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn expect_u8(&mut self, expected: u8) -> Result<(), String> {
+        let actual = self.take_u8()?;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("expected byte {expected}, got {actual}"))
+        }
+    }
+
+    fn take_u8(&mut self) -> Result<u8, String> {
+        let bytes = self.take_exact(1)?;
+        Ok(bytes[0])
+    }
+
+    fn take_u16(&mut self) -> Result<u16, String> {
+        let bytes = self.take_exact(2)?;
+        Ok(u16::from_be_bytes(
+            bytes.try_into().expect("length checked"),
+        ))
+    }
+
+    fn take_u32(&mut self) -> Result<u32, String> {
+        let bytes = self.take_exact(4)?;
+        Ok(u32::from_be_bytes(
+            bytes.try_into().expect("length checked"),
+        ))
+    }
+
+    fn take_u64(&mut self) -> Result<u64, String> {
+        let bytes = self.take_exact(8)?;
+        Ok(u64::from_be_bytes(
+            bytes.try_into().expect("length checked"),
+        ))
+    }
+
+    fn take_id(&mut self) -> Result<FactId, String> {
+        let bytes = self.take_exact(32)?;
+        Ok(bytes.try_into().expect("length checked"))
+    }
+
+    fn take_string_u16(&mut self) -> Result<String, String> {
+        let len = self.take_u16()? as usize;
+        let bytes = self.take_exact(len)?;
+        std::str::from_utf8(bytes)
+            .map(str::to_string)
+            .map_err(|err| format!("invalid utf-8 string: {err}"))
+    }
+
+    fn take_bytes_u32(&mut self) -> Result<&'a [u8], String> {
+        let len = self.take_u32()? as usize;
+        self.take_exact(len)
+    }
+
+    fn take_exact(&mut self, len: usize) -> Result<&'a [u8], String> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or_else(|| "event bus row length overflow".to_string())?;
+        if end > self.bytes.len() {
+            return Err(format!(
+                "event bus row ended early at {}, needed {} bytes",
+                self.offset, len
+            ));
+        }
+        let out = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(out)
+    }
+
+    fn finish(self) -> Result<(), String> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(format!(
+                "event bus row has {} trailing bytes",
+                self.bytes.len() - self.offset
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +633,7 @@ mod tests {
     use crate::core::intents::{IntentExecution, IntentKind};
     use crate::core::matchers::ExactSelectorMatcher;
     use crate::core::projection::{ProjectionContext, ProjectionOutput};
+    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
     use std::cell::Cell;
 
     #[test]
@@ -292,6 +736,65 @@ mod tests {
         assert_eq!(report.context_matches, 1);
         assert_eq!(report.wakes, 1);
         assert_eq!(bus.intents().len(), 1);
+    }
+
+    #[test]
+    fn durable_event_bus_preserves_pending_projection_across_restart() {
+        let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE])
+            .expect("open core schema store");
+        let role = Role::new("exact").unwrap();
+        let matcher = ExactSelectorMatcher::new(role.clone());
+        let projector = NeedOfferProjector::new(role, Selector::from_bytes([8; 32]));
+        let need = Fact::new(FactScope::Global, 1, b"need".to_vec());
+        let offer = Fact::new(FactScope::Global, 2, b"offer".to_vec());
+        let mut bus = EventBus::new();
+
+        bus.submit_fact(need.clone());
+        bus.drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("initial need drain");
+        bus.submit_fact(offer);
+        bus.save(&store).expect("save before offer drain");
+
+        let mut restarted = EventBus::load(&store).expect("load bus");
+        assert_eq!(restarted.pending_len(), 1);
+        let report = restarted
+            .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("restart drain");
+        restarted.save(&store).expect("save drained bus");
+
+        assert_eq!(report.projections, 2);
+        assert_eq!(report.wakes, 1);
+        assert!(restarted.context(&need.id).is_none());
+        assert_eq!(restarted.intents().len(), 1);
+        let loaded = EventBus::load(&store).expect("reload drained bus");
+        assert_eq!(loaded.pending_len(), 0);
+        assert_eq!(loaded.intents().len(), 1);
+    }
+
+    #[test]
+    fn durable_event_bus_round_trips_context_without_standing_need_amplification() {
+        let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE])
+            .expect("open core schema store");
+        let role = Role::new("exact").unwrap();
+        let matcher = ExactSelectorMatcher::new(role.clone());
+        let projector = NeedOfferProjector::new(role, Selector::from_bytes([8; 32]));
+        let need = Fact::new(FactScope::Global, 1, b"need".to_vec());
+        let mut bus = EventBus::new();
+
+        bus.submit_fact(need.clone());
+        bus.drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("need drain");
+        bus.save(&store).expect("save bus");
+
+        let mut loaded = EventBus::load(&store).expect("load bus");
+        assert_eq!(loaded.context(&need.id).unwrap().needs.len(), 1);
+        let report = loaded
+            .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("loaded drain");
+
+        assert_eq!(report.projections, 0);
+        assert_eq!(report.wakes, 0);
+        assert!(loaded.intents().is_empty());
     }
 
     struct NeedOfferProjector {
