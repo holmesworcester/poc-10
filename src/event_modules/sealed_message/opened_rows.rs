@@ -1,4 +1,4 @@
-//! Opened content row layout for handler materialization proofs.
+//! Projection row layout for opened sealed-message content.
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};

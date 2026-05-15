@@ -1,11 +1,13 @@
 //! Poc-10 sealed-message projector.
 
 use crate::core::facts::Fact;
+use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use super::context;
-use super::intent::{self, OpenMessageIntent, PurgeEventIntent};
+use super::intent::{self, PurgeEventIntent};
 use super::layout;
+use super::opened_rows::{opened_message_row, OpenedContentRow, OPENED_CONTENT_ROWS};
 
 #[derive(Debug, Clone, Default)]
 pub struct SealedMessageProjector;
@@ -59,22 +61,28 @@ fn project_message(fact: &Fact, context: &ProjectionContext) -> Result<Projectio
         .any(|offer| offer.role == deletion_need.role && offer.selector == deletion_need.selector);
 
     if has_deletion {
-        return Ok(
-            ProjectionOutput::new().intent(intent::purge_event_intent(PurgeEventIntent {
+        return Ok(ProjectionOutput::new()
+            .intent(
+                AtomicIntent::DeleteRow(TableDelete {
+                    table: OPENED_CONTENT_ROWS,
+                    key: fact.id.to_vec(),
+                })
+                .into_intent(),
+            )
+            .intent(intent::purge_event_intent(PurgeEventIntent {
                 workspace_id: message.workspace_id,
                 message_id: fact.id,
-            })),
-        );
+            })));
     }
 
     if has_signer && has_secret {
         return Ok(ProjectionOutput::new().need(deletion_need).intent(
-            intent::open_message_intent(OpenMessageIntent {
-                workspace_id: message.workspace_id,
+            AtomicIntent::PutRow(opened_message_row(OpenedContentRow {
                 message_id: fact.id,
                 minute: message.minute,
                 leaf_id: message.leaf_id,
-            }),
+            }))
+            .into_intent(),
         ));
     }
 

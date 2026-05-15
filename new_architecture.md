@@ -1328,6 +1328,13 @@ Offer(
 
 The `SecretCoverageMatcher` wakes content facts when coverage appears.
 
+Opening a message means deriving or loading the local history leaf secret,
+checking that it is the leaf named by the sealed message row, and AEAD-opening
+the sealed payload with the message associated data. In poc-8 this is read-side
+work over `content.sealed_messages`; poc-10 may keep that read helper or
+materialize `content.messages` during projection when the required secret is
+already projection context. In either case, opening is not a deferred handler.
+
 Projectors may decrypt/open content if the required key material is present in
 context. This keeps plaintext read-model writes with the owning content
 projector. If a crypto operation needs broad search, private state not present
@@ -1592,7 +1599,9 @@ Need(secret_coverage coord)
 Offer(secret_coverage range)
 ```
 
-Projectors may decrypt/open content when matching key context is present.
+Projectors may decrypt/open content when matching key context is present, or
+leave opening as a read-side helper over sealed rows. Do not route that through
+a handler unless it becomes a genuinely stateful, bounded effect.
 
 Key request, key wrap, local key secret, and local history node projectors emit
 coverage offers and deferred intents rather than worker queues.

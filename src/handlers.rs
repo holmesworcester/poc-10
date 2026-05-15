@@ -1,3 +1,4 @@
-pub mod open_message;
-pub mod opened_content_rows;
-pub mod purge_event;
+//! Deferred intent handlers.
+//!
+//! Concrete handlers should appear here only when they own bounded stateful
+//! effects. Projection-owned row materialization stays under event modules.

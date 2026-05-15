@@ -1,9 +1,13 @@
 use topo::core::event_bus::EventBus;
 use topo::core::facts::Fact;
+use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::event_modules::sealed_message::context::{self, workspace_scope, SecretCoverageMatcher};
 use topo::event_modules::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact,
+};
+use topo::event_modules::sealed_message::opened_rows::{
+    decode_opened_message_row, OPENED_CONTENT_ROWS,
 };
 use topo::event_modules::sealed_message::{layout, project};
 
@@ -55,7 +59,19 @@ fn sealed_message_keeps_all_context_needs_until_it_can_open() {
     assert_eq!(opened.intents, 1);
     assert_eq!(bus.context(&message.id).unwrap().needs.len(), 1);
     assert_eq!(bus.intents().len(), 1);
-    assert_eq!(bus.intents()[0].kind.as_str(), "open_message");
+    assert_eq!(bus.intents()[0].kind.as_str(), "put_row");
+    let opened_row = match AtomicIntent::from_intent(&bus.intents()[0], &[OPENED_CONTENT_ROWS])
+        .expect("opened row intent")
+    {
+        AtomicIntent::PutRow(row) => row,
+        AtomicIntent::DeleteRow(_) => panic!("opened projection should put a row"),
+    };
+    assert_eq!(
+        decode_opened_message_row(&opened_row.key, &opened_row.value)
+            .expect("decode opened row")
+            .leaf_id,
+        leaf
+    );
 
     let deletion = deletion_fact(workspace, message.id);
     bus.submit_fact(deletion);
@@ -63,10 +79,11 @@ fn sealed_message_keeps_all_context_needs_until_it_can_open() {
         .drain(&projector, &matchers, 10)
         .expect("deletion wakes opened message");
     assert_eq!(purged.wakes, 1);
-    assert_eq!(purged.intents, 1);
+    assert_eq!(purged.intents, 2);
     assert!(bus.context(&message.id).is_none());
-    assert_eq!(bus.intents().len(), 2);
-    assert_eq!(bus.intents()[1].kind.as_str(), "purge_event");
+    assert_eq!(bus.intents().len(), 3);
+    assert_eq!(bus.intents()[1].kind.as_str(), "delete_row");
+    assert_eq!(bus.intents()[2].kind.as_str(), "purge_event");
 
     let secret_leaf = secret_node_fact(workspace, frontier, 42, 42, 32, leaf);
     bus.submit_fact(secret_leaf);
@@ -74,7 +91,7 @@ fn sealed_message_keeps_all_context_needs_until_it_can_open() {
         .drain(&projector, &matchers, 10)
         .expect("extra secret offer does not reopen");
     assert_eq!(duplicate.intents, 0);
-    assert_eq!(bus.intents().len(), 2);
+    assert_eq!(bus.intents().len(), 3);
 }
 
 #[test]
@@ -104,9 +121,10 @@ fn deletion_update_purges_message_before_keys_arrive() {
         .expect("deletion purges without keys");
 
     assert_eq!(purged.wakes, 1);
-    assert_eq!(purged.intents, 1);
+    assert_eq!(purged.intents, 2);
     assert!(bus.context(&message.id).is_none());
-    assert_eq!(bus.intents()[0].kind.as_str(), "purge_event");
+    assert_eq!(bus.intents()[0].kind.as_str(), "delete_row");
+    assert_eq!(bus.intents()[1].kind.as_str(), "purge_event");
 
     bus.submit_fact(signer_fact(workspace, signer));
     bus.submit_fact(secret_node_fact(workspace, frontier, 0, 99, 0, [0; 32]));
@@ -114,7 +132,7 @@ fn deletion_update_purges_message_before_keys_arrive() {
         .drain(&projector, &matchers, 10)
         .expect("later keys do not reopen purged message");
     assert_eq!(later_context.intents, 0);
-    assert_eq!(bus.intents().len(), 1);
+    assert_eq!(bus.intents().len(), 2);
 }
 
 fn message_fact(

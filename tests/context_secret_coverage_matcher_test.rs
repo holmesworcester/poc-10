@@ -1,9 +1,10 @@
 use topo::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactId, FactScope, ScopeKind};
-use topo::core::intents::{Intent, IntentExecution, IntentKind};
+use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatch, ContextMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use topo::core::store::{TableName, TableRow};
 
 #[test]
 fn secret_coverage_matcher_handles_root_internal_leaf_ranges() {
@@ -64,7 +65,7 @@ fn secret_coverage_offer_wakes_message_without_event_dependency() {
     assert_eq!(opened.intents, 1);
     assert!(bus.context(&message.id).is_none());
     assert_eq!(bus.intents().len(), 1);
-    assert_eq!(bus.intents()[0].kind.as_str(), "open_message");
+    assert_eq!(bus.intents()[0].kind.as_str(), "put_row");
 }
 
 struct SecretCoverageMatcher {
@@ -161,12 +162,14 @@ impl Projector for SecretProjection {
                         coord,
                     )))
                 } else {
-                    Ok(ProjectionOutput::new().intent(Intent::new(
-                        IntentKind::new("open_message").unwrap(),
-                        IntentExecution::Deferred,
-                        fact.id,
-                        coord.to_be_bytes(),
-                    )))
+                    Ok(ProjectionOutput::new().intent(
+                        AtomicIntent::PutRow(TableRow {
+                            table: TableName::new("secret_projection_rows"),
+                            key: fact.id.to_vec(),
+                            value: coord.to_be_bytes().to_vec(),
+                        })
+                        .into_intent(),
+                    ))
                 }
             }
             Some(2) => {
