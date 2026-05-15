@@ -7,6 +7,7 @@ pub mod content_file_slice;
 pub mod content_message;
 pub mod content_message_deletion;
 pub mod content_reaction;
+pub mod disappearing_messages_setting;
 pub mod encryption;
 pub mod identity_admin;
 pub mod identity_device_invite;
