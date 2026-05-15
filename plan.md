@@ -55,6 +55,24 @@ Recent target work:
   - `PurgeRetiredRecipientMaterialHandler` declares the exact local fact input,
     revalidates it through the encryption event module, and purges only that
     obsolete local private material
+- Current signed key-wrap projector slice
+  - signed key-wrap projection now rejects wraps whose envelope signer does not
+    own the named removal frontier
+  - hostile-input regression tests pin workspace and key mismatches for signed
+    key-wrap, local recipient material, and key-request projection
+- Current target architecture demo
+  - `examples/poc10_demo.rs` admits a workspace plus a sealed message through
+    the target `EventBus`, projects them with the target projectors, and
+    materialises target rows in a target-schema `Store` without invoking
+    `src/protocol` or `src/workers`
+- Current wire vocabulary hygiene
+  - `src/event_modules/encryption/intent.rs` and
+    `src/event_modules/encryption/layout.rs` encode and decode integer fields
+    through `core/wire.rs` `FixedLayout` primitives instead of hand-rolled
+    `to_be_bytes`/`from_be_bytes` calls
+  - `src/handlers/*/intent.rs` are deliberately kept off `core/wire` imports by
+    the intent cleanliness guardrail, so this hygiene only applies inside
+    event-module layout and intent files
 
 Important caveats from the latest read-only audit:
 
