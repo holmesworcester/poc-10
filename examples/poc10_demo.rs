@@ -8,6 +8,8 @@
 
 use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
+use topo::core::handler_dispatch::{HandlerContext, RowIntentHandler};
+use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
@@ -23,7 +25,8 @@ use topo::event_modules::sealed_message::fact::{
     SealedMessageFact, SecretNodeFact, SignerPubkeyFact, NONCE_BYTES,
 };
 use topo::event_modules::sealed_message::rows::{
-    decode_message_row, decode_sealed_message_row, MESSAGE_ROWS, SEALED_MESSAGE_ROWS,
+    decode_message_row, decode_sealed_message_row, message_row, MessageRow, MESSAGE_ROWS,
+    SEALED_MESSAGE_ROWS,
 };
 use topo::event_modules::sealed_message::{layout as message_layout, project as message_project};
 
@@ -171,10 +174,27 @@ fn main() -> Result<(), String> {
         .expect("encode secret internal"),
     );
 
+    // A leaf-depth node covers exactly this message's (frontier, minute, leaf_id) triple.
+    // prefix_bytes=32 means the full 32-byte leaf_id must match, satisfying has_secret.
+    let secret_leaf = Fact::new(
+        workspace_scope(workspace_id),
+        minute,
+        message_layout::encode_secret_node(&SecretNodeFact {
+            workspace_id,
+            frontier_id,
+            start_minute: minute,
+            end_minute: minute,
+            prefix_bytes: 32,
+            leaf_prefix: leaf_id,
+        })
+        .expect("encode secret leaf"),
+    );
+
     bus.submit_fact(signer_fact);
     bus.submit_fact(message_fact.clone());
     bus.submit_fact(secret_root);
     bus.submit_fact(secret_internal);
+    bus.submit_fact(secret_leaf);
 
     let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let deletion_matcher = ExactSelectorMatcher::new(message_context::deletion_role());
@@ -195,44 +215,101 @@ fn main() -> Result<(), String> {
         drain.projections, drain.intents, drain.wakes
     );
 
-    let sealed_rows = store
-        .table_rows(SEALED_MESSAGE_ROWS)
-        .map_err(|err| format!("read sealed rows: {err:?}"))?;
-    println!("  sealed_message_rows: {}", sealed_rows.len());
-    for (key, value) in &sealed_rows {
-        let row = decode_sealed_message_row(key, value)
-            .map_err(|err| format!("decode sealed row: {err}"))?;
-        println!(
-            "    -> message_id={} minute={} ciphertext={:?}",
-            hex(&row.message_id),
-            row.minute,
-            String::from_utf8_lossy(&row.ciphertext)
-        );
+    {
+        let sealed_rows_peek = store
+            .table_rows(SEALED_MESSAGE_ROWS)
+            .map_err(|err| format!("read sealed rows: {err:?}"))?;
+        println!("  sealed_message_rows: {}", sealed_rows_peek.len());
+        for (key, value) in &sealed_rows_peek {
+            let row = decode_sealed_message_row(key, value)
+                .map_err(|err| format!("decode sealed row: {err}"))?;
+            println!(
+                "    -> message_id={} minute={} ciphertext={:?}",
+                hex(&row.message_id),
+                row.minute,
+                String::from_utf8_lossy(&row.ciphertext)
+            );
+        }
     }
 
-    let message_rows = store
+    // -----------------------------------------------------------------------
+    // Step 3: open the sealed message into message_rows.
+    //
+    // The SealedMessageProjector never emits a message_row PutRow intent
+    // directly. In the production path the `unwrap_key_wrap` worker receives
+    // a MaterializeKeyWraps intent, performs actual Curve25519 ECDH + XChaCha20
+    // decryption using the local recipient's private key, and then emits the
+    // MessageRow. The projector only handles the structural context (signer,
+    // secret-coverage, deletion); it does not hold the private key material
+    // needed to produce plaintext.
+    //
+    // With all three context pieces satisfied (signer + leaf-depth secret
+    // coverage + no deletion), the message reaches the "has_signer && has_secret"
+    // branch and the projector emits only a deletion_need. The actual
+    // MESSAGE_ROWS put must come from the decryption handler.
+    //
+    // To keep this demo end-to-end without real crypto we synthesise the
+    // MessageRow from the sealed_message_row we just read, mirroring exactly
+    // what the decryption worker would write after a successful AEAD open.
+    header(3, "open sealed message into message_rows");
+    let sealed_rows = store
+        .table_rows(SEALED_MESSAGE_ROWS)
+        .map_err(|err| format!("read sealed rows for open: {err:?}"))?;
+    println!("  sealed_message_rows available: {}", sealed_rows.len());
+    for (key, value) in &sealed_rows {
+        let sealed = decode_sealed_message_row(key, value)
+            .map_err(|err| format!("decode sealed row: {err}"))?;
+        // Synthesise the MessageRow that the decryption worker would produce.
+        // In production this step requires ECDH + XChaCha20-Poly1305 to verify
+        // the ciphertext; here we trust the test fixture and emit the row
+        // directly as the worker would via submit_intent + dispatch_intents.
+        let opened = message_row(MessageRow {
+            workspace_id: sealed.workspace_id,
+            message_id: sealed.message_id,
+            created_at_ms: sealed.created_at_ms,
+            author_user_id: sealed.author_user_id,
+            signer_id: sealed.signer_id,
+            minute: sealed.minute,
+            leaf_id: sealed.leaf_id,
+        });
+        bus.submit_intent(AtomicIntent::PutRow(opened).into_intent())
+            .map_err(|err| format!("submit message row intent: {err}"))?;
+    }
+    let row_handler = RowIntentHandler::new(&store, &[MESSAGE_ROWS]);
+    let open_report = bus
+        .dispatch_intents(&row_handler, &HandlerContext::new(), 32)
+        .map_err(|err| format!("dispatch message row intents: {err}"))?;
+    println!(
+        "  dispatch: handled={}",
+        open_report.handled
+    );
+
+    let message_rows_read = store
         .table_rows(MESSAGE_ROWS)
         .map_err(|err| format!("read message rows: {err:?}"))?;
-    println!("  message_rows (opened): {}", message_rows.len());
-    for (key, value) in &message_rows {
+    println!("  message_rows (opened): {}", message_rows_read.len());
+    for (key, value) in &message_rows_read {
         let row =
             decode_message_row(key, value).map_err(|err| format!("decode message row: {err}"))?;
         println!(
-            "    -> message_id={} leaf_id={} minute={}",
+            "    -> message_id={} leaf_id={} minute={} author={}",
             hex(&row.message_id),
             hex(&row.leaf_id),
-            row.minute
+            row.minute,
+            hex(&row.author_user_id),
         );
     }
 
     println!(
-        "\nresult: target EventBus admitted {} fact types, target projectors emitted atomic",
-        4
+        "\nresult: target EventBus admitted 6 fact types (workspace + signer + message +",
     );
-    println!("row intents, target store materialised the workspace row and the sealed message");
-    println!("row carrying the original ciphertext. Opening into message_rows requires a leaf-");
-    println!("depth secret coverage offer; this demo only seeds an internal-node offer to keep");
-    println!("the trace short. No legacy code path was used.");
+    println!("secret-root + secret-internal + secret-leaf), target projectors emitted atomic");
+    println!("row intents for sealed_message_rows. The leaf-depth SecretNodeFact (prefix_bytes=32)");
+    println!("satisfies has_secret in the projector, reducing the standing needs to deletion only.");
+    println!("MESSAGE_ROWS materialises when the decryption worker calls submit_intent with a");
+    println!("PutRow(message_row(...)) after AEAD-opening the ciphertext; the demo synthesises");
+    println!("this intent directly (no private-key material available) and dispatches it via");
+    println!("RowIntentHandler. No legacy code path was used.");
     Ok(())
 }
 
