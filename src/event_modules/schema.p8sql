@@ -149,3 +149,9 @@ table message_deletion_rows {
   column value bytes;
   row_key (key);
 }
+
+table file_deletion_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}

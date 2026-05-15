@@ -672,6 +672,7 @@ mod tests {
                 "sync_have_id_rows",
                 "sync_need_id_rows",
                 "message_deletion_rows",
+                "file_deletion_rows",
             ]
         );
         assert_eq!(
