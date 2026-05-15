@@ -251,6 +251,7 @@ fn secret_coverage_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Con
     let offer_selector = decode_secret_offer_selector(&offer.selector)?;
     if need.workspace_id != offer_selector.workspace_id
         || need.frontier_id != offer_selector.frontier_id
+        || offer_selector.start_minute > offer_selector.end_minute
         || need.minute < offer_selector.start_minute
         || need.minute > offer_selector.end_minute
         || !prefix_matches(
@@ -307,6 +308,17 @@ mod tests {
         leaf[0] = 0b1010_1111;
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, leaf);
         let offer = secret_offer([4; 32], scope, workspace, frontier, 40, 50, 1, prefix);
+
+        assert!(secret_coverage_match(&need, &offer).is_none());
+    }
+
+    #[test]
+    fn secret_coverage_rejects_inverted_offer_range() {
+        let workspace = [1; 32];
+        let frontier = [2; 32];
+        let scope = workspace_scope(workspace);
+        let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, [9; 32]);
+        let offer = secret_offer([4; 32], scope, workspace, frontier, 50, 40, 0, [0; 32]);
 
         assert!(secret_coverage_match(&need, &offer).is_none());
     }

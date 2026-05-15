@@ -40,6 +40,7 @@ impl Projector for SealedMessageProjector {
 fn project_message(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
     let message = layout::decode_sealed_message(&fact.bytes)?;
     let scope = context::workspace_scope(message.workspace_id);
+    require_fact_scope(fact, &scope)?;
     let signer_need = context::signer_need(fact.id, scope.clone(), message.signer_id);
     let deletion_need = context::deletion_need(fact.id, scope.clone(), fact.id);
     let secret_need = context::secret_need(
@@ -134,9 +135,11 @@ fn project_signer_pubkey(fact: &Fact) -> Result<ProjectionOutput, String> {
 
 fn project_secret_node(fact: &Fact) -> Result<ProjectionOutput, String> {
     let node = layout::decode_secret_node(&fact.bytes)?;
+    let scope = context::workspace_scope(node.workspace_id);
+    require_fact_scope(fact, &scope)?;
     Ok(ProjectionOutput::new().offer(context::secret_offer(
         fact.id,
-        fact.scope.clone(),
+        scope,
         node.workspace_id,
         node.frontier_id,
         node.start_minute,
@@ -148,9 +151,15 @@ fn project_secret_node(fact: &Fact) -> Result<ProjectionOutput, String> {
 
 fn project_message_deletion(fact: &Fact) -> Result<ProjectionOutput, String> {
     let deletion = layout::decode_message_deletion(&fact.bytes)?;
-    Ok(ProjectionOutput::new().offer(context::deletion_offer(
-        fact.id,
-        fact.scope.clone(),
-        deletion.target_id,
-    )))
+    let scope = context::workspace_scope(deletion.workspace_id);
+    require_fact_scope(fact, &scope)?;
+    Ok(ProjectionOutput::new().offer(context::deletion_offer(fact.id, scope, deletion.target_id)))
+}
+
+fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {
+    if &fact.scope == expected {
+        Ok(())
+    } else {
+        Err("sealed-message fact scope does not match body workspace".to_string())
+    }
 }

@@ -370,10 +370,9 @@ done: target-tree deletion update context purges messages before keys arrive
 done: opened messages retain only deletion update context so later deletes wake row cleanup and retention purge intent
 done: intent handlers declare accepted intent kinds so mixed queues do not route follow-up intents to the wrong handler
 done: projection-owned message row put/delete stays inside sealed_message projection rather than handler code
-done: unchanged poc-8 e2e scenario cli_send_then_messages_lists_authored_messages passes
-done: unchanged poc-8 e2e scenario workspace_invite_accept_builds_identity_graph_over_two_cli_processes passes
-done: unchanged poc-8 e2e scenario cli_key_wrap_derives_access_for_proactive_recipients passes
-done: unchanged poc-8 e2e scenario two_player_sync_does_not_leak_alice_private_workspace_to_bob passes
+done: unchanged poc-8 e2e suites pass without scenario edits: black_box_sync, cascade, cli_surface, content, daemon_lifecycle, disappearing_messages, encryption, generate, invite_accept, leaf_coord, negentropy_purge_sync, sync_storage_boundary, view
+done: ignored poc-8 e2e case cli_three_long_running_daemons_converge_messages_among_late_joiner passes when run explicitly
+done: ignored poc-8 e2e case cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_50k passes when run explicitly
 ```
 
 The next event-pipeline step is to replace the simplified message row proof

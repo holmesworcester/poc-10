@@ -20,6 +20,13 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn rust_files_named(root: &Path, name: &str) -> Vec<PathBuf> {
+    rust_files(root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|file_name| file_name == name))
+        .collect()
+}
+
 #[test]
 fn sealed_message_intents_do_not_encode_projection_work() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -105,5 +112,105 @@ fn purge_event_handler_must_be_real_retention_work_when_it_exists() {
             || text.contains("RetireSecret")
             || text.contains("SyncIndexPurge"),
         "PurgeEvent handler must preserve real retention/cascade/retire behavior"
+    );
+}
+
+#[test]
+fn target_projectors_stay_pure_context_to_intents() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files_named(&root.join("src/event_modules"), "project.rs") {
+        let text = source_text(&path);
+        for forbidden in [
+            "Store",
+            "table_rows",
+            "insert_table_rows",
+            "delete_table_rows",
+            "write_transaction",
+            "Protocol::",
+            "workers::",
+            "network_queues",
+            "std::net",
+            "std::process",
+            "Command::new",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "target projectors must stay pure fact+context -> needs/offers/intents:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_context_matchers_do_not_emit_work_or_rows() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files_named(&root.join("src/event_modules"), "context.rs") {
+        let text = source_text(&path);
+        for forbidden in [
+            "Intent",
+            "AtomicIntent",
+            "ProjectionOutput",
+            "Projector",
+            "TableRow",
+            "Store",
+            "insert_table_rows",
+            "delete_table_rows",
+            "write_transaction",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "context matchers should only define needs/offers/selectors and matching:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_row_layouts_do_not_emit_context_or_intents() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files_named(&root.join("src/event_modules"), "rows.rs") {
+        let text = source_text(&path);
+        for forbidden in [
+            "ContextNeed",
+            "ContextOffer",
+            "ContextMatcher",
+            "ProjectionOutput",
+            "Projector",
+            "Intent",
+            "AtomicIntent",
+            "TableDelete",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "row layout files should only encode/decode projection rows:\n{}",
+        offenders.join("\n")
     );
 }

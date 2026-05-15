@@ -2,6 +2,7 @@ use topo::core::event_bus::EventBus;
 use topo::core::facts::Fact;
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::projection::{ProjectionContext, Projector};
 use topo::event_modules::sealed_message::context::{self, workspace_scope, SecretCoverageMatcher};
 use topo::event_modules::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact,
@@ -149,6 +150,49 @@ fn deletion_update_purges_message_before_keys_arrive() {
         .expect("later keys do not reopen purged message");
     assert_eq!(later_context.intents, 0);
     assert_eq!(bus.intents().len(), 3);
+}
+
+#[test]
+fn sealed_message_projector_rejects_body_scope_mismatches() {
+    let workspace = [31; 32];
+    let other_workspace = [32; 32];
+    let signer = [33; 32];
+    let frontier = [34; 32];
+    let message = message_fact(workspace, signer, frontier, 42, [35; 32]);
+    let projector = project::SealedMessageProjector::new();
+    let context = ProjectionContext::new(Vec::new());
+
+    let bad_message = Fact::new(
+        workspace_scope(other_workspace),
+        message.timestamp,
+        message.bytes.clone(),
+    );
+    let err = projector
+        .project(&bad_message, &context)
+        .expect_err("message scope mismatch rejects");
+    assert!(err.contains("scope does not match body workspace"), "{err}");
+
+    let secret = secret_node_fact(workspace, frontier, 0, 99, 0, [0; 32]);
+    let bad_secret = Fact::new(
+        workspace_scope(other_workspace),
+        secret.timestamp,
+        secret.bytes.clone(),
+    );
+    let err = projector
+        .project(&bad_secret, &context)
+        .expect_err("secret scope mismatch rejects");
+    assert!(err.contains("scope does not match body workspace"), "{err}");
+
+    let deletion = deletion_fact(workspace, message.id);
+    let bad_deletion = Fact::new(
+        workspace_scope(other_workspace),
+        deletion.timestamp,
+        deletion.bytes.clone(),
+    );
+    let err = projector
+        .project(&bad_deletion, &context)
+        .expect_err("deletion scope mismatch rejects");
+    assert!(err.contains("scope does not match body workspace"), "{err}");
 }
 
 fn message_fact(
