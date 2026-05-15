@@ -654,6 +654,7 @@ mod tests {
                 "workspace_rows",
                 "recipient_key_rows",
                 "key_wrap_rows",
+                "user_rows",
             ]
         );
         assert_eq!(
