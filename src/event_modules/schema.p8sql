@@ -78,3 +78,9 @@ table content_event_rows {
   column value bytes;
   row_key (key);
 }
+
+table invite_accepted_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}

@@ -1,6 +1,7 @@
 pub mod content_event;
 pub mod encryption;
 pub mod identity_endpoint;
+pub mod identity_invite_accepted;
 pub mod identity_user;
 pub mod identity_workspace;
 pub mod sealed_message;
