@@ -34,10 +34,9 @@ pub fn project_signed(
     validate_workspace(&device_invite, event)?;
     validate_authority(envelope, &device_invite, event)?;
 
-    Ok(ProjectionOutput::table_writes(vec![rows::device_invite_row(
-        event.context.event_id,
-        &device_invite,
-    )?]))
+    Ok(ProjectionOutput::table_writes(vec![
+        rows::device_invite_row(event.context.event_id, &device_invite)?,
+    ]))
 }
 
 fn validate_workspace(

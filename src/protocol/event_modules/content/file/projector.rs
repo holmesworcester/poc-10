@@ -485,7 +485,10 @@ mod tests {
         assert!(delete_tables.contains(&rows::FILES_BY_MESSAGE));
         assert!(delete_tables.contains(&rows::FILES_BY_FILE_ID));
         assert_eq!(output.legacy_context_updates().len(), 1);
-        assert_eq!(output.legacy_context_updates()[0].event_id, built.file_event_id);
+        assert_eq!(
+            output.legacy_context_updates()[0].event_id,
+            built.file_event_id
+        );
     }
 
     #[test]
@@ -514,7 +517,10 @@ mod tests {
         );
         assert_eq!(output.legacy_deletes().len(), 3);
         assert_eq!(output.legacy_context_updates().len(), 1);
-        assert_eq!(output.legacy_context_updates()[0].event_id, built.file_event_id);
+        assert_eq!(
+            output.legacy_context_updates()[0].event_id,
+            built.file_event_id
+        );
     }
 
     #[test]

@@ -43,10 +43,9 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("removal frontier signer user is not the authority admin".to_string());
     }
 
-    Ok(ProjectionOutput::table_writes(vec![rows::removal_frontier_row(
-        event.context.event_id,
-        &frontier,
-    )?]))
+    Ok(ProjectionOutput::table_writes(vec![
+        rows::removal_frontier_row(event.context.event_id, &frontier)?,
+    ]))
 }
 
 fn validate_frontier_refs(

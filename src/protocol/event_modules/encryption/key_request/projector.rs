@@ -54,11 +54,13 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("key request recipient key is not owned by requester".to_string());
     }
 
-    Ok(ProjectionOutput::table_writes(vec![rows::pending_key_request_row(
-        event.context.event_id,
-        envelope.signer_endpoint_shared_id,
-        &request,
-    )]))
+    Ok(ProjectionOutput::table_writes(vec![
+        rows::pending_key_request_row(
+            event.context.event_id,
+            envelope.signer_endpoint_shared_id,
+            &request,
+        ),
+    ]))
 }
 
 fn decode_endpoint_shared(

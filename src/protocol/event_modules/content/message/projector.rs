@@ -158,11 +158,13 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         ));
     }
 
-    Ok(ProjectionOutput::table_writes(vec![rows::sealed_message_row(
-        event.context.event_id,
-        envelope.signer_endpoint_shared_id,
-        &message,
-    )?]))
+    Ok(ProjectionOutput::table_writes(vec![
+        rows::sealed_message_row(
+            event.context.event_id,
+            envelope.signer_endpoint_shared_id,
+            &message,
+        )?,
+    ]))
 }
 
 /// Look up the disappearing-messages policy referenced by a message and

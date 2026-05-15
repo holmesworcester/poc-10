@@ -128,11 +128,13 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         );
     }
 
-    Ok(ProjectionOutput::table_writes(vec![rows::sealed_reaction_row(
-        event.context.event_id,
-        envelope.signer_endpoint_shared_id,
-        &reaction,
-    )?]))
+    Ok(ProjectionOutput::table_writes(vec![
+        rows::sealed_reaction_row(
+            event.context.event_id,
+            envelope.signer_endpoint_shared_id,
+            &reaction,
+        )?,
+    ]))
 }
 
 #[cfg(test)]

@@ -18,10 +18,9 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("invite_accepted workspace metadata does not match event body".to_string());
     }
     validate_invite_secret(event, &accepted)?;
-    Ok(ProjectionOutput::table_writes(vec![rows::invite_accepted_row(
-        event.context.event_id,
-        &accepted,
-    )]))
+    Ok(ProjectionOutput::table_writes(vec![
+        rows::invite_accepted_row(event.context.event_id, &accepted),
+    ]))
 }
 
 fn validate_invite_secret(

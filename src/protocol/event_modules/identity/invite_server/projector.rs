@@ -30,10 +30,9 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         _ => return Err("invite_server signer must be workspace or endpoint_shared".to_string()),
     }
 
-    Ok(ProjectionOutput::table_writes(vec![rows::invite_server_row(
-        event.context.event_id,
-        &invite_server,
-    )]))
+    Ok(ProjectionOutput::table_writes(vec![
+        rows::invite_server_row(event.context.event_id, &invite_server),
+    ]))
 }
 
 fn validate_workspace_signed_invite(

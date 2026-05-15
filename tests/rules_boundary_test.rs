@@ -547,7 +547,10 @@ fn scoped_cli_files_do_not_own_transport_or_cross_cli_operations() {
     let event_root = root.join("src/protocol/event_modules");
     let files = rust_files(&event_root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "command_line.rs"))
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "command_line.rs")
+        })
         .collect::<Vec<_>>();
     let forbidden = [
         "crate::core::tcp",
@@ -2579,10 +2582,10 @@ fn command_line_rs_no_business_logic() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
     let mut offenders = Vec::new();
-    for path in rust_files(&event_root)
-        .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "command_line.rs"))
-    {
+    for path in rust_files(&event_root).into_iter().filter(|path| {
+        path.file_name()
+            .is_some_and(|name| name == "command_line.rs")
+    }) {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         let relative = path.strip_prefix(root).unwrap().display().to_string();

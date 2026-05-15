@@ -34,10 +34,9 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("content signer public key does not match endpoint_shared".to_string());
     }
 
-    Ok(ProjectionOutput::table_writes(vec![rows::content_event_row(
-        event.context.event_id,
-        &content,
-    )]))
+    Ok(ProjectionOutput::table_writes(vec![
+        rows::content_event_row(event.context.event_id, &content),
+    ]))
 }
 
 #[cfg(test)]

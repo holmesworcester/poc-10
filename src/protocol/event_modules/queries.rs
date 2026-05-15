@@ -12,8 +12,8 @@ use crate::protocol::event_modules::types::{
 };
 
 use super::rows::{
-    self, decode_stored_event_index, read_event, BLOCKED_EVENTS_BY_MISSING_DEP, EVENTS,
-    CONTEXT_UPDATES,
+    self, decode_stored_event_index, read_event, BLOCKED_EVENTS_BY_MISSING_DEP, CONTEXT_UPDATES,
+    EVENTS,
 };
 
 const MAX_CONTEXT_UPDATES_PER_EVENT: usize = 4096;
