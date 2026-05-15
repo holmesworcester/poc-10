@@ -360,13 +360,16 @@ done: deterministic intents dedupe by kind/key and conflict on changed payload
 done: bounded handler dispatch feeds returned facts/intents back through EventBus
 done: registered row handler applies atomic put_row/delete_row intents
 done: event_with_deps bridge proves out-of-order exact dependency healing
+done: event_with_deps owns a poc-10 projector surface beside its legacy row projector
 done: secret_coverage matcher proves range offers can wake point needs
+done: target-tree identity_workspace projector materializes a workspace row through AtomicIntent::PutRow
 ```
 
-The next event-pipeline step is to move one real projector path from
-`ProjectionOutput::rows` into `AtomicIntent::PutRow`, then run it through
-`RowIntentHandler`. Do this first with a test-event or tiny identity/content
-path before migrating purge, encryption, or sync handlers.
+The next event-pipeline step is to repeat the target-tree projector pattern for
+one context-bearing module: a sealed content event that waits on signer plus
+secret coverage, or a deletion event that offers an update and emits a purge
+intent. Keep the legacy protocol tree intact until the target-tree path can
+replace it without row, label, blocker, or worker-queue holdovers.
 
 ### Wave 4: Encryption Slice
 

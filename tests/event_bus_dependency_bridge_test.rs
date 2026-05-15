@@ -1,15 +1,15 @@
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
-use topo::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactId, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, RowIntentHandler};
-use topo::core::intents::{AtomicIntent, Intent, IntentExecution, IntentKind};
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
-use topo::core::store::{Store, TableRow};
-use topo::protocol::event_modules::test_events::event_with_deps::{codec, schema, types};
+use topo::core::store::Store;
+use topo::protocol::event_modules::test_events::event_with_deps::{
+    codec, projector, schema, types,
+};
 
 fn event_fact(event: types::EventWithDeps) -> Fact {
     let bytes = codec::encode(&event);
@@ -34,8 +34,8 @@ fn staged_event(index: u64, inner_bytes: Vec<u8>) -> Fact {
 
 #[test]
 fn event_with_deps_bridge_resolves_out_of_order_dependencies_by_context() {
-    let projector = EventWithDepsBridge::new();
-    let matcher = ExactSelectorMatcher::new(projector.role.clone());
+    let projector = projector::Poc10EventWithDepsProjector::new();
+    let matcher = ExactSelectorMatcher::new(projector::event_context_role());
     let dep = event_with_deps(1, Vec::new(), 1);
     let child = event_with_deps(2, vec![dep.id], 2);
     let grandchild = event_with_deps(3, vec![child.id], 3);
@@ -59,27 +59,26 @@ fn event_with_deps_bridge_resolves_out_of_order_dependencies_by_context() {
 
     assert_eq!(resolved.projections, 3);
     assert_eq!(resolved.wakes, 2);
-    assert_eq!(resolved.intents, 3);
-    assert_eq!(projector.materialized.get(), 3);
+    assert_eq!(resolved.intents, 0);
     for fact in [&dep, &child, &grandchild] {
         let context = bus.context(&fact.id).expect("standing offer context");
         assert!(context.needs.is_empty());
         assert_eq!(context.offers.len(), 1);
         assert_eq!(context.offers[0].payload_ref, fact.id);
     }
-    assert_eq!(bus.intents().len(), 3);
+    assert!(bus.intents().is_empty());
     assert!(!bus.submit_fact(dep));
     let duplicate = bus
         .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
         .expect("duplicate drain");
     assert_eq!(duplicate.projections, 0);
-    assert_eq!(bus.intents().len(), 3);
+    assert!(bus.intents().is_empty());
 }
 
 #[test]
 fn event_with_deps_bridge_never_exposes_failed_dependency_context() {
-    let projector = EventWithDepsBridge::new();
-    let matcher = ExactSelectorMatcher::new(projector.role.clone());
+    let projector = RejectingEventWithDepsProjector::new();
+    let matcher = ExactSelectorMatcher::new(projector::event_context_role());
     let dep = event_with_deps(1, Vec::new(), 1);
     let child = event_with_deps(2, vec![dep.id], 2);
     projector.reject(dep.id);
@@ -122,7 +121,7 @@ fn staged_event_bridge_writes_row_through_atomic_row_intent_handler() {
 
     bus.submit_fact(staged);
     let projected = bus
-        .drain(&StagedEventBridge, &[], 10)
+        .drain(&projector::Poc10EventWithDepsProjector::new(), &[], 10)
         .expect("project staged event");
     assert_eq!(projected.projections, 1);
     assert_eq!(projected.intents, 1);
@@ -142,16 +141,14 @@ fn staged_event_bridge_writes_row_through_atomic_row_intent_handler() {
     );
 }
 
-struct EventWithDepsBridge {
-    role: Role,
+struct RejectingEventWithDepsProjector {
     rejected: std::cell::RefCell<BTreeSet<FactId>>,
     materialized: Cell<usize>,
 }
 
-impl EventWithDepsBridge {
+impl RejectingEventWithDepsProjector {
     fn new() -> Self {
         Self {
-            role: Role::new("event").unwrap(),
             rejected: std::cell::RefCell::new(BTreeSet::new()),
             materialized: Cell::new(0),
         }
@@ -166,27 +163,7 @@ impl EventWithDepsBridge {
     }
 }
 
-struct StagedEventBridge;
-
-impl Projector for StagedEventBridge {
-    fn project(
-        &self,
-        fact: &Fact,
-        _context: &ProjectionContext,
-    ) -> Result<ProjectionOutput, String> {
-        let staged = codec::decode_staged(&fact.bytes)?;
-        Ok(ProjectionOutput::new().intent(
-            AtomicIntent::PutRow(TableRow {
-                table: schema::STAGED_EVENTS_WITH_DEPS,
-                key: staged.index.to_be_bytes().to_vec(),
-                value: staged.inner_bytes,
-            })
-            .into_intent(),
-        ))
-    }
-}
-
-impl Projector for EventWithDepsBridge {
+impl Projector for RejectingEventWithDepsProjector {
     fn project(
         &self,
         fact: &Fact,
@@ -196,37 +173,10 @@ impl Projector for EventWithDepsBridge {
             return Err("event_with_deps bridge rejected dependency".to_string());
         }
 
-        let record = codec::record_from_bytes(fact.bytes.clone())?;
-        let available = context.payload_refs().collect::<BTreeSet<_>>();
-        let mut output = ProjectionOutput::new();
-        for dependency in record.dependencies {
-            if !available.contains(&dependency) {
-                output = output.need(ContextNeed {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: Selector::from_bytes(dependency),
-                });
-            }
+        let output = projector::Poc10EventWithDepsProjector::new().project(fact, context)?;
+        if output.needs.is_empty() && !output.offers.is_empty() {
+            self.materialized.set(self.materialized.get() + 1);
         }
-        if !output.needs.is_empty() {
-            return Ok(output);
-        }
-
-        self.materialized.set(self.materialized.get() + 1);
-        Ok(output
-            .offer(ContextOffer {
-                owner: fact.id,
-                role: self.role.clone(),
-                scope: fact.scope.clone(),
-                selector: Selector::from_bytes(fact.id),
-                payload_ref: fact.id,
-            })
-            .intent(Intent::new(
-                IntentKind::new("materialize_event").unwrap(),
-                IntentExecution::Atomic,
-                fact.id,
-                fact.bytes.clone(),
-            )))
+        Ok(output)
     }
 }
