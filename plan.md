@@ -122,6 +122,21 @@ Recent target work:
     resulting `sealed_message_rows` row carries the command output
   - `src/event_modules/connection_request/addr.rs` keeps `std::net` out of
     `connection_request/layout.rs` so the intent-cleanliness guardrail passes
+- Third parallel target-architecture wave (partial; rest in flight)
+  - `src/event_modules/content_message/` ports the public-shape content layer
+    for messages (separate from the encrypted-payload `sealed_message` module
+    that already exists)
+  - `src/event_modules/content_message_deletion/` and
+    `src/event_modules/content_file_deletion/` port the public author-scoped
+    deletion fact shapes; the projector emits a deletion row, no encryption
+  - dropped a stale commit-hash reference from
+    `src/event_modules/identity_admin/project.rs` so the
+    `rules_boundary_test::src_has_no_stale_doc_references` guardrail passes;
+    remaining target projectors should follow the same qualitative
+    cross-reference style instead of citing commit ids
+  - other lanes in this wave (content_file/file_slice, identity invite
+    triplet, identity_endpoint_shared, the first real `receive_transit`
+    handler driver) are still in flight on their worktree branches
 
 Important caveats from the latest read-only audit:
 
