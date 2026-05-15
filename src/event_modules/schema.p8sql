@@ -108,6 +108,12 @@ table content_message_rows {
   row_key (key);
 }
 
+table connection_ephemeral_secret_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
 table connection_request_rows {
   column key bytes;
   column value bytes;
