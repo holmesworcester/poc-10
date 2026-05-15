@@ -12,13 +12,11 @@
 //! key recover the original text exactly.
 
 use crate::commands::context::{CommandContext, CommandOutput, WorkspaceId};
-use crate::core::crypto::{
-    self, XCHACHA20_POLY1305_TAG_BYTES, XChaCha20Poly1305Nonce,
-};
+use crate::core::crypto::{self, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_TAG_BYTES};
 use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::wire;
 use crate::event_modules::sealed_message::fact::{
-    CIPHERTEXT_BYTES, NONCE_BYTES, SealedMessageFact, UNIX_MINUTE_MS,
+    SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
 };
 use crate::event_modules::sealed_message::layout;
 use crate::event_modules::signed_fact::create as signed_fact_create;
@@ -147,8 +145,7 @@ pub fn pad_plaintext(text: &[u8]) -> Result<Vec<u8>, String> {
     }
     let mut buf = vec![0u8; PLAINTEXT_SLOT_BYTES];
     let len = u32::try_from(text.len()).expect("text length fits u32");
-    wire::put_u32be(len, &mut buf[..TEXT_LENGTH_PREFIX_BYTES])
-        .map_err(|err| format!("{err:?}"))?;
+    wire::put_u32be(len, &mut buf[..TEXT_LENGTH_PREFIX_BYTES]).map_err(|err| format!("{err:?}"))?;
     buf[TEXT_LENGTH_PREFIX_BYTES..TEXT_LENGTH_PREFIX_BYTES + text.len()].copy_from_slice(text);
     Ok(buf)
 }

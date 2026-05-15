@@ -6,9 +6,7 @@
 //! the size class; per-batch sizing is hidden inside the ciphertext.
 
 use crate::core::crypto::{XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES};
-use crate::core::wire::{
-    fixed_tag, Ciphertext, FixedLayout, Id32, Nonce24, Tag, U8, WireError,
-};
+use crate::core::wire::{fixed_tag, Ciphertext, FixedLayout, Id32, Nonce24, Tag, WireError, U8};
 
 /// Public tag prefix shared by both transit frame variants.
 pub const TRANSIT_FRAME_TAG: Tag<4> = fixed_tag(b"TRNS");
@@ -102,9 +100,8 @@ impl FixedLayout for TransitSmallV1 {
     fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         let (sender, receiver, connection, nonce) =
             decode_header(bytes, Self::LEN, TRANSIT_FRAME_SIZE_CLASS_SMALL)?;
-        let ciphertext = Ciphertext::<TRANSIT_SMALL_CIPHERTEXT_BYTES>::decode(
-            &bytes[CIPHERTEXT_OFFSET..],
-        )?;
+        let ciphertext =
+            Ciphertext::<TRANSIT_SMALL_CIPHERTEXT_BYTES>::decode(&bytes[CIPHERTEXT_OFFSET..])?;
         Ok(Self {
             sender_endpoint_id: sender,
             receiver_endpoint_id: receiver,
@@ -134,9 +131,8 @@ impl FixedLayout for TransitLargeV1 {
     fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         let (sender, receiver, connection, nonce) =
             decode_header(bytes, Self::LEN, TRANSIT_FRAME_SIZE_CLASS_LARGE)?;
-        let ciphertext = Ciphertext::<TRANSIT_LARGE_CIPHERTEXT_BYTES>::decode(
-            &bytes[CIPHERTEXT_OFFSET..],
-        )?;
+        let ciphertext =
+            Ciphertext::<TRANSIT_LARGE_CIPHERTEXT_BYTES>::decode(&bytes[CIPHERTEXT_OFFSET..])?;
         Ok(Self {
             sender_endpoint_id: sender,
             receiver_endpoint_id: receiver,

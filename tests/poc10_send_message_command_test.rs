@@ -12,7 +12,7 @@ use topo::commands::context::{
     CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
     WorkspaceId,
 };
-use topo::commands::send_message::{recover_text, send_message, associated_data};
+use topo::commands::send_message::{associated_data, recover_text, send_message};
 use topo::core::crypto;
 use topo::event_modules::encryption::fact::LocalKeySecretFact;
 use topo::event_modules::sealed_message::layout::decode_sealed_message;
@@ -102,15 +102,14 @@ fn seeded_vault(workspace_id: WorkspaceId) -> TestVault {
 
 #[test]
 fn send_message_happy_path_emits_one_sealed_message_fact() {
-    let store =
-        topo::core::store::Store::open_memory().expect("open memory store");
+    let store = topo::core::store::Store::open_memory().expect("open memory store");
     let workspace_id = [1u8; 32];
     let vault = seeded_vault(workspace_id);
     let clock = FixedClock::new(60_000);
     let ctx = CommandContext::new(&store, &clock, &vault);
 
-    let output = send_message(&ctx, workspace_id, "hello, target tree")
-        .expect("happy path send_message");
+    let output =
+        send_message(&ctx, workspace_id, "hello, target tree").expect("happy path send_message");
 
     assert_eq!(output.summary.workspace_id, workspace_id);
     assert_eq!(output.summary.created_at_ms, 60_000);
@@ -126,8 +125,7 @@ fn send_message_happy_path_emits_one_sealed_message_fact() {
 
 #[test]
 fn send_message_rejects_blank_or_empty_text() {
-    let store =
-        topo::core::store::Store::open_memory().expect("open memory store");
+    let store = topo::core::store::Store::open_memory().expect("open memory store");
     let workspace_id = [1u8; 32];
     let vault = seeded_vault(workspace_id);
     let clock = FixedClock::new(60_000);
@@ -142,8 +140,7 @@ fn send_message_rejects_blank_or_empty_text() {
 
 #[test]
 fn send_message_fact_round_trips_through_decode_sealed_message() {
-    let store =
-        topo::core::store::Store::open_memory().expect("open memory store");
+    let store = topo::core::store::Store::open_memory().expect("open memory store");
     let workspace_id = [42u8; 32];
     let vault = seeded_vault(workspace_id);
     let clock = FixedClock::new(120_000);
@@ -152,8 +149,7 @@ fn send_message_fact_round_trips_through_decode_sealed_message() {
     let text = "round-trip me through decode_sealed_message";
     let output = send_message(&ctx, workspace_id, text).expect("send_message");
 
-    let sealed =
-        decode_sealed_message(&output.facts[0].bytes).expect("decode sealed message fact");
+    let sealed = decode_sealed_message(&output.facts[0].bytes).expect("decode sealed message fact");
 
     // Recover the plaintext using the same workspace key the vault handed
     // to the command. The test must not be able to read the key from any

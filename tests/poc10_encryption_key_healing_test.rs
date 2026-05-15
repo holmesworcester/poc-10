@@ -1446,7 +1446,8 @@ fn signed_key_wrap_rejects_recipient_workspace_mismatch() {
         created_at_ms: 9,
     })
     .expect("encode tampered recipient");
-    let tampered_recipient = Fact::new(workspace_scope(wrap_workspace), 9, tampered_recipient_bytes);
+    let tampered_recipient =
+        Fact::new(workspace_scope(wrap_workspace), 9, tampered_recipient_bytes);
 
     let payload = encryption_layout::encode_key_wrap(&key_wrap_fact(
         wrap_workspace,
@@ -1455,9 +1456,8 @@ fn signed_key_wrap_rejects_recipient_workspace_mismatch() {
         tampered_recipient.id,
     ))
     .expect("encode key wrap");
-    let bytes =
-        signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
-            .expect("sign key wrap");
+    let bytes = signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+        .expect("sign key wrap");
     let signed_wrap = Fact::new(workspace_scope(wrap_workspace), 10, bytes);
     let signer_public_key = topo::core::crypto::ed25519_public_key(&signer_private_key);
     let signer_fact_bytes = message_layout::encode_signer_pubkey(&SignerPubkeyFact {
@@ -1483,7 +1483,8 @@ fn signed_key_wrap_rejects_recipient_workspace_mismatch() {
     );
     let frontier_need =
         encryption_context::frontier_need(signed_wrap.id, scope.clone(), frontier.id);
-    let frontier_offer = encryption_context::frontier_offer(frontier.id, scope.clone(), frontier.id);
+    let frontier_offer =
+        encryption_context::frontier_offer(frontier.id, scope.clone(), frontier.id);
 
     let ctx = ProjectionContext::from_matches(vec![
         MatchedContext {
@@ -1525,14 +1526,14 @@ fn signed_key_wrap_rejects_frontier_workspace_mismatch() {
     let recipient = recipient_key_fact(wrap_workspace, signer_id, NO_PREVIOUS_RECIPIENT_KEY, 9);
     // Frontier payload claims wrong_workspace, but owner is signer_id (so
     // the frontier ownership check passes).
-    let tampered_frontier_bytes = encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
-        workspace_id: wrong_workspace,
-        owner_endpoint_id: signer_id,
-        created_at_ms: 9,
-    })
-    .expect("encode tampered frontier");
-    let tampered_frontier =
-        Fact::new(workspace_scope(wrap_workspace), 9, tampered_frontier_bytes);
+    let tampered_frontier_bytes =
+        encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
+            workspace_id: wrong_workspace,
+            owner_endpoint_id: signer_id,
+            created_at_ms: 9,
+        })
+        .expect("encode tampered frontier");
+    let tampered_frontier = Fact::new(workspace_scope(wrap_workspace), 9, tampered_frontier_bytes);
 
     let payload = encryption_layout::encode_key_wrap(&key_wrap_fact(
         wrap_workspace,
@@ -1541,9 +1542,8 @@ fn signed_key_wrap_rejects_frontier_workspace_mismatch() {
         recipient.id,
     ))
     .expect("encode key wrap");
-    let bytes =
-        signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
-            .expect("sign key wrap");
+    let bytes = signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+        .expect("sign key wrap");
     let signed_wrap = Fact::new(workspace_scope(wrap_workspace), 10, bytes);
     let signer_public_key = topo::core::crypto::ed25519_public_key(&signer_private_key);
     let signer_fact_bytes = message_layout::encode_signer_pubkey(&SignerPubkeyFact {
@@ -1560,11 +1560,8 @@ fn signed_key_wrap_rejects_frontier_workspace_mismatch() {
         encryption_context::recipient_key_need(signed_wrap.id, scope.clone(), recipient.id);
     let recipient_offer =
         encryption_context::recipient_key_offer(recipient.id, scope.clone(), recipient.id);
-    let frontier_need = encryption_context::frontier_need(
-        signed_wrap.id,
-        scope.clone(),
-        tampered_frontier.id,
-    );
+    let frontier_need =
+        encryption_context::frontier_need(signed_wrap.id, scope.clone(), tampered_frontier.id);
     let frontier_offer = encryption_context::frontier_offer(
         tampered_frontier.id,
         scope.clone(),
@@ -1619,8 +1616,11 @@ fn local_recipient_key_rejects_workspace_mismatch_with_recipient() {
         created_at_ms: 10,
     })
     .expect("encode tampered recipient");
-    let tampered_recipient =
-        Fact::new(workspace_scope(local_workspace), 10, tampered_recipient_bytes);
+    let tampered_recipient = Fact::new(
+        workspace_scope(local_workspace),
+        10,
+        tampered_recipient_bytes,
+    );
 
     // Local fact references tampered_recipient.id, workspace = local_workspace.
     let local = local_recipient_key_fact(
@@ -1717,8 +1717,11 @@ fn key_request_rejects_recipient_workspace_mismatch() {
         created_at_ms: 50,
     })
     .expect("encode tampered recipient");
-    let tampered_recipient =
-        Fact::new(workspace_scope(request_workspace), 50, tampered_recipient_bytes);
+    let tampered_recipient = Fact::new(
+        workspace_scope(request_workspace),
+        50,
+        tampered_recipient_bytes,
+    );
 
     let request = key_request_fact(
         request_workspace,
@@ -1737,8 +1740,7 @@ fn key_request_rejects_recipient_workspace_mismatch() {
         scope.clone(),
         tampered_recipient.id,
     );
-    let frontier_need =
-        encryption_context::frontier_need(request.id, scope.clone(), frontier.id);
+    let frontier_need = encryption_context::frontier_need(request.id, scope.clone(), frontier.id);
     let frontier_offer =
         encryption_context::frontier_offer(frontier.id, scope.clone(), frontier.id);
 
@@ -1776,14 +1778,18 @@ fn key_request_rejects_frontier_workspace_mismatch() {
 
     let recipient = recipient_key_fact(request_workspace, requester, [97; 32], 50);
     // Tampered frontier: payload workspace = wrong_workspace.
-    let tampered_frontier_bytes = encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
-        workspace_id: wrong_workspace,
-        owner_endpoint_id: responder,
-        created_at_ms: 10,
-    })
-    .expect("encode tampered frontier");
-    let tampered_frontier =
-        Fact::new(workspace_scope(request_workspace), 10, tampered_frontier_bytes);
+    let tampered_frontier_bytes =
+        encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
+            workspace_id: wrong_workspace,
+            owner_endpoint_id: responder,
+            created_at_ms: 10,
+        })
+        .expect("encode tampered frontier");
+    let tampered_frontier = Fact::new(
+        workspace_scope(request_workspace),
+        10,
+        tampered_frontier_bytes,
+    );
 
     let request = key_request_fact(
         request_workspace,

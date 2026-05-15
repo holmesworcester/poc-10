@@ -72,3 +72,9 @@ table local_endpoint_signing_secret_rows {
   column value bytes;
   row_key (key);
 }
+
+table content_event_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}

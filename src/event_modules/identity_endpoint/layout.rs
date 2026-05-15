@@ -40,9 +40,7 @@ pub fn decode_fact(bytes: &[u8]) -> Result<EndpointFact, String> {
         return Err("local endpoint secret does not match endpoint".to_string());
     }
     if crypto::ed25519_public_key(&signing_secret) != signing_public_key {
-        return Err(
-            "local endpoint signing secret does not match signing public key".to_string(),
-        );
+        return Err("local endpoint signing secret does not match signing public key".to_string());
     }
     Ok(EndpointFact {
         endpoint,
