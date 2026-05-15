@@ -6,6 +6,7 @@
 pub mod connection;
 pub mod handle_sync;
 pub mod materialize_key_wraps;
+pub mod network_send;
 pub mod purge_event;
 pub mod purge_retired_recipient_material;
 pub mod receive_transit;
