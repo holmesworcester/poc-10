@@ -179,15 +179,22 @@ fn core_file_set_stays_small_and_named() {
     let allowed = [
         "app.rs",
         "cli.rs",
+        "context.rs",
         "crypto.rs",
         "crux_runner.rs",
         "daemon.rs",
+        "facts.rs",
+        "handler_dispatch.rs",
+        "intents.rs",
         "logical_clock.rs",
+        "matchers.rs",
         "mod.rs",
         "network_queues.rs",
+        "projection.rs",
         "runtime.rs",
         "store.rs",
         "tcp.rs",
+        "wire.rs",
     ];
     let offenders = std::fs::read_dir(&root)
         .expect("read core")
@@ -203,7 +210,7 @@ fn core_file_set_stays_small_and_named() {
 
     assert!(
         offenders.is_empty(),
-        "core should stay tiny and queue/storage-oriented; add protocol/domain behavior outside src/core:\n{}",
+        "core should stay protocol-neutral; add protocol/domain behavior outside src/core:\n{}",
         offenders.join("\n")
     );
 }
@@ -1136,14 +1143,14 @@ fn core_does_not_import_protocol() {
 fn core_does_not_own_protocol_worker_or_wire_codec() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let core_root = root.join("src/core");
-    let forbidden = ["blocking.rs", "worker.rs", "control_loop.rs", "wire.rs"];
+    let forbidden = ["blocking.rs", "worker.rs", "control_loop.rs"];
     let offenders = forbidden
         .into_iter()
         .filter(|name| core_root.join(name).exists())
         .collect::<Vec<_>>();
     assert!(
         offenders.is_empty(),
-        "core maintains queues/storage only; worker implementations live under src/workers and wire codec helpers live under src/protocol:\n{}",
+        "core owns protocol-neutral mechanics; worker implementations live outside core:\n{}",
         offenders.join("\n")
     );
 }

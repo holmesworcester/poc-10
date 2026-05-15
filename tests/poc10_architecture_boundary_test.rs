@@ -115,7 +115,10 @@ fn poc10_target_has_exactly_three_schema_dsl_files() {
     ];
 
     for path in expected {
-        assert!(root.join(path).exists(), "missing required schema file {path}");
+        assert!(
+            root.join(path).exists(),
+            "missing required schema file {path}"
+        );
     }
 
     let mut pending = vec![root.join("src")];
@@ -133,8 +136,7 @@ fn poc10_target_has_exactly_three_schema_dsl_files() {
     found.sort();
 
     assert_eq!(
-        found,
-        expected,
+        found, expected,
         "poc-10 target keeps every durable table visible in exactly three schema files"
     );
 }
@@ -198,4 +200,3 @@ fn poc10_target_root_manifests_are_declarations_only() {
         );
     }
 }
-

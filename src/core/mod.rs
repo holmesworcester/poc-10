@@ -8,11 +8,18 @@
 
 pub mod app;
 pub mod cli;
+pub mod context;
 pub mod crux_runner;
 pub mod crypto;
 pub mod daemon;
+pub mod facts;
+pub mod handler_dispatch;
+pub mod intents;
 pub mod logical_clock;
+pub mod matchers;
 pub mod network_queues;
+pub mod projection;
 pub mod runtime;
 pub mod store;
 pub mod tcp;
+pub mod wire;
