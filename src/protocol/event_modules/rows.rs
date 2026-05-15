@@ -155,8 +155,8 @@ pub fn event_index_entries_in_timestamp_range(
         .collect()
 }
 
-pub fn event_label_rows(labels: Vec<EventLabel>) -> Vec<TableRow> {
-    labels
+pub fn event_label_rows(updates: Vec<EventLabel>) -> Vec<TableRow> {
+    updates
         .into_iter()
         .map(|label| TableRow {
             table: EVENT_LABELS,

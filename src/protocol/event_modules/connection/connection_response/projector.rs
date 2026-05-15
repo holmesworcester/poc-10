@@ -170,7 +170,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
             rows.push(projection::transport_target_row(connection_id, addr));
         }
     }
-    Ok(ProjectionOutput::rows(rows))
+    Ok(ProjectionOutput::table_writes(rows))
 }
 
 #[cfg(test)]
@@ -303,20 +303,20 @@ mod tests {
                     DependencyContext {
                         event_id: fixture.request_id,
                         record: fixture.request_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: fixture.invite_id,
                         record: fixture.invite_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: fixture.responder_ephemeral_id,
                         record: fixture.responder_ephemeral_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -346,20 +346,20 @@ mod tests {
                     DependencyContext {
                         event_id: fixture.request_id,
                         record: fixture.request_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: fixture.invite_id,
                         record: fixture.invite_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: fixture.initiator_ephemeral_id,
                         record: fixture.initiator_ephemeral_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: Some(ReceiveMetadata::endpoint_receive(
                     origin,
                     [1; 32],
@@ -394,20 +394,20 @@ mod tests {
                         DependencyContext {
                             event_id: fixture.request_id,
                             record: fixture.request_record,
-                            labels: Vec::new(),
+                            updates: Vec::new(),
                         },
                         DependencyContext {
                             event_id: fixture.invite_id,
                             record: fixture.invite_record,
-                            labels: Vec::new(),
+                            updates: Vec::new(),
                         },
                         DependencyContext {
                             event_id: fixture.initiator_ephemeral_id,
                             record: fixture.initiator_ephemeral_record,
-                            labels: Vec::new(),
+                            updates: Vec::new(),
                         },
                     ],
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                     receive: Some(ReceiveMetadata::bootstrap_invite(
                         "127.0.0.1:9001".parse::<SocketAddr>().expect("addr"),
                         [1; 32],
@@ -435,20 +435,20 @@ mod tests {
                         DependencyContext {
                             event_id: fixture.request_id,
                             record: fixture.request_record,
-                            labels: Vec::new(),
+                            updates: Vec::new(),
                         },
                         DependencyContext {
                             event_id: fixture.invite_id,
                             record: fixture.invite_record,
-                            labels: Vec::new(),
+                            updates: Vec::new(),
                         },
                         DependencyContext {
                             event_id: fixture.initiator_ephemeral_id,
                             record: fixture.initiator_ephemeral_record,
-                            labels: Vec::new(),
+                            updates: Vec::new(),
                         },
                     ],
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                     receive: Some(ReceiveMetadata::endpoint_receive(
                         "127.0.0.1:9001".parse::<SocketAddr>().expect("addr"),
                         [1; 32],

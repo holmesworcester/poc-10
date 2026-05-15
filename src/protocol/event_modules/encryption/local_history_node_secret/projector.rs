@@ -56,7 +56,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         }
     }
 
-    let mut output = ProjectionOutput::rows(vec![
+    let mut output = ProjectionOutput::table_writes(vec![
         rows::local_history_node_secret_row(event.context.event_id, &node),
         key_wrap::rows::pending_frontier_reconcile_row(node.workspace_id, node.removal_frontier_id),
     ]);
@@ -304,10 +304,10 @@ mod tests {
                     .map(|(event_id, record)| DependencyContext {
                         event_id,
                         record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     })
                     .collect(),
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },

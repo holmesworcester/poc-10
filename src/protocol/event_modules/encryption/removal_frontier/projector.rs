@@ -43,7 +43,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("removal frontier signer user is not the authority admin".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![rows::removal_frontier_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::removal_frontier_row(
         event.context.event_id,
         &frontier,
     )?]))
@@ -186,12 +186,12 @@ mod tests {
             DependencyContext {
                 event_id: signer_id,
                 record: signer_record,
-                labels: Vec::new(),
+                updates: Vec::new(),
             },
             DependencyContext {
                 event_id: admin_id,
                 record: admin_record,
-                labels: Vec::new(),
+                updates: Vec::new(),
             },
         ];
         dependencies.extend(extra_dependencies);
@@ -200,7 +200,7 @@ mod tests {
             context: EventContext {
                 event_id: event_id(&record.canonical_bytes),
                 dependencies,
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -274,7 +274,7 @@ mod tests {
             vec![DependencyContext {
                 event_id: ref_id,
                 record: ref_record,
-                labels: Vec::new(),
+                updates: Vec::new(),
             }],
         );
 

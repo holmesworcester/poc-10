@@ -18,7 +18,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
     match envelope.record.scope {
         EventScope::Connection(ConnectionScope::Outgoing { connection_id }) => {
             ensure_connection(need.connection_id, connection_id)?;
-            Ok(ProjectionOutput::rows(vec![
+            Ok(ProjectionOutput::table_writes(vec![
                 connection::rows::connection_scoped_event_row(
                     envelope.context.event_id,
                     bytes.to_vec(),
@@ -28,7 +28,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
         }
         EventScope::Connection(ConnectionScope::Incoming { connection_id }) => {
             ensure_connection(need.connection_id, connection_id)?;
-            Ok(ProjectionOutput::rows(vec![
+            Ok(ProjectionOutput::table_writes(vec![
                 worker_rows::sync_in_event_row(
                     connection_id,
                     envelope.context.event_id,
@@ -71,7 +71,7 @@ mod tests {
             context: EventContext {
                 event_id: event_id(&record.canonical_bytes),
                 dependencies: Vec::new(),
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },

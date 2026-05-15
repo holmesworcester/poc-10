@@ -53,7 +53,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
     let descriptor_deleted_by_author = event
         .context
-        .dependency_labels(&file_event_id)
+        .dependency_updates(&file_event_id)
         .unwrap_or(&[])
         .iter()
         .any(|label| {
@@ -62,7 +62,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
                 .unwrap_or(false)
         });
     if descriptor_deleted_by_author {
-        return Ok(ProjectionOutput::from_parts(
+        return Ok(ProjectionOutput::from_atomic_parts(
             vec![purge_instruction_row(
                 slice.workspace_id,
                 event.context.event_id,
@@ -128,7 +128,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     )
     .map_err(|err| format!("file slice bao verification failed: {err}"))?;
 
-    Ok(ProjectionOutput::rows(vec![rows::file_slice_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::file_slice_row(
         event.context.event_id,
         envelope.signer_endpoint_shared_id,
         &slice,
@@ -343,15 +343,15 @@ mod tests {
                     DependencyContext {
                         event_id: built.signer_id,
                         record: built.signer_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.descriptor_id,
                         record: built.descriptor_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -399,7 +399,7 @@ mod tests {
             .iter_mut()
             .find(|dependency| dependency.event_id == built.descriptor_id)
             .expect("descriptor dependency")
-            .labels
+            .updates
             .push(
                 crate::protocol::event_modules::content::file_deletion::types::deletion_label(
                     &descriptor.author_user_id,

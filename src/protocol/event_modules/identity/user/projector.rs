@@ -35,7 +35,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("user workspace does not match user_invite workspace".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![rows::user_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::user_row(
         user.workspace_id,
         event.context.event_id,
         envelope.signer_event_id,
@@ -131,10 +131,10 @@ mod tests {
                     .map(|(event_id, record)| DependencyContext {
                         event_id,
                         record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     })
                     .collect(),
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -148,7 +148,7 @@ mod tests {
         let output = project(&context(&user_record, Some((invite_id, invite_record))))
             .expect("project user");
 
-        assert!(output.legacy_labels().is_empty());
+        assert!(output.legacy_context_updates().is_empty());
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(output.legacy_rows()[0].table, rows::USERS);
         let row =

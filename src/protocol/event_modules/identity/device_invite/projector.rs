@@ -34,7 +34,7 @@ pub fn project_signed(
     validate_workspace(&device_invite, event)?;
     validate_authority(envelope, &device_invite, event)?;
 
-    Ok(ProjectionOutput::rows(vec![rows::device_invite_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::device_invite_row(
         event.context.event_id,
         &device_invite,
     )?]))
@@ -296,10 +296,10 @@ mod tests {
                     .map(|(event_id, record)| DependencyContext {
                         event_id,
                         record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     })
                     .collect(),
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -330,7 +330,7 @@ mod tests {
 
         let output = project_signed(&envelope, &event).expect("project device invite");
 
-        assert_eq!(output.legacy_labels().len(), 0);
+        assert_eq!(output.legacy_context_updates().len(), 0);
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(output.legacy_rows()[0].table, rows::DEVICE_INVITES);
         assert_eq!(

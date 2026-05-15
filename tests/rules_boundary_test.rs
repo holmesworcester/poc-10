@@ -543,7 +543,7 @@ fn scoped_cli_files_do_not_own_transport_or_cross_cli_operations() {
     let event_root = root.join("src/protocol/event_modules");
     let files = rust_files(&event_root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "command_line.rs"))
         .collect::<Vec<_>>();
     let forbidden = [
         "crate::core::tcp",
@@ -570,7 +570,7 @@ fn scoped_cli_files_do_not_own_transport_or_cross_cli_operations() {
     let violations = file_contains_violations(root, &files, &forbidden);
     assert!(
         violations.is_empty(),
-        "scoped cli.rs files parse args, call commands/workers, and format reports; transport, send bookkeeping, and cross-cli operational helpers belong in workers:\n{}",
+        "scoped command_line.rs files parse args, call commands/workers, and format reports; transport, send bookkeeping, and cross-cli operational helpers belong in workers:\n{}",
         violations.join("\n")
     );
 }
@@ -2137,16 +2137,17 @@ fn projector_files_are_not_empty_placeholders() {
         .filter(|path| path.file_name().is_some_and(|name| name == "projector.rs"))
     {
         let text = source_text(&path);
-        if !text.contains("ProjectionOutput::rows")
-            && !text.contains("ProjectionOutput::deletes")
-            && !text.contains("ProjectionOutput::with")
+        if !text.contains("ProjectionOutput::table_writes")
+            && !text.contains("ProjectionOutput::table_deletes")
+            && !text.contains("ProjectionOutput::context_updates")
+            && !text.contains("ProjectionOutput::new")
         {
             violations.push(path.strip_prefix(root).unwrap().display().to_string());
         }
     }
     assert!(
         violations.is_empty(),
-        "omit projector.rs when a module has no row/label/delete projection; projector files must write real projection output:\n{}",
+        "omit projector.rs when a module has no need/offer/intent projection; projector files must write real projection output:\n{}",
         violations.join("\n")
     );
 }
@@ -2290,8 +2291,8 @@ fn legacy_pipeline_projection_output_wraps_core_output_and_adapts_table_parts() 
         body.contains("output: CoreProjectionOutput")
             && !body.contains("pub rows:")
             && !body.contains("pub deletes:")
-            && !body.contains("pub labels:"),
-        "legacy ProjectionOutput must wrap core ProjectionOutput without exposing public row/delete/label fields"
+            && !body.contains("pub updates:"),
+        "legacy ProjectionOutput must wrap core ProjectionOutput without exposing public row/delete/update fields"
     );
 
     let impl_start = text[start..]
@@ -2306,9 +2307,9 @@ fn legacy_pipeline_projection_output_wraps_core_output_and_adapts_table_parts() 
     assert!(
         impl_body.contains("AtomicIntent::PutRow(row).into_intent()")
             && impl_body.contains("AtomicIntent::DeleteRow(delete).into_intent()")
-            && impl_body.contains("rows::event_label_rows(labels)")
-            && impl_body.contains("projection_parts(rows, deletes, labels)"),
-        "legacy ProjectionOutput adapters must convert rows, deletes, and labels into core atomic intents"
+            && impl_body.contains("rows::event_label_rows(updates)")
+            && impl_body.contains("projection_parts(rows, deletes, updates)"),
+        "legacy ProjectionOutput adapters must convert table writes, table deletes, and context updates into core atomic intents"
     );
 }
 
@@ -2566,23 +2567,23 @@ fn src_has_no_stale_doc_references() {
 }
 
 #[test]
-fn cli_rs_no_business_logic() {
-    // event-module cli.rs files parse args, call into commands, and format
+fn command_line_rs_no_business_logic() {
+    // event-module command_line.rs files parse args, call into commands, and format
     // reports. Crypto (signing/nonces), direct store mutations, and direct
     // projector calls belong inside commands.rs/projector.rs/workers, with
-    // cli.rs as the thin user-facing adapter.
+    // command_line.rs as the thin user-facing adapter.
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_root = root.join("src/protocol/event_modules");
     let mut offenders = Vec::new();
     for path in rust_files(&event_root)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "command_line.rs"))
     {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         // Crypto belongs in commands.rs (signing) or layout.rs (envelope
-        // packing). cli.rs must not import core::crypto.
+        // packing). command_line.rs must not import core::crypto.
         for needle in ["use crate::core::crypto", "crate::core::crypto::"] {
             if production.contains(needle) {
                 offenders.push(format!(
@@ -2605,7 +2606,7 @@ fn cli_rs_no_business_logic() {
             }
         }
         // Projector logic is row-only; cli.rs surfaces results, not row
-        // construction. Imports of `*::projector` from cli.rs would let the
+        // construction. Imports of `*::projector` from command_line.rs would let the
         // CLI run projection out of band.
         for line in production.lines() {
             let trimmed = line.trim_start();
@@ -2614,7 +2615,7 @@ fn cli_rs_no_business_logic() {
             }
             if trimmed.contains("::projector::") || trimmed.contains("::projector;") {
                 offenders.push(format!(
-                    "{relative} imports `::projector` (cli.rs must not call projection directly): {}",
+                    "{relative} imports `::projector` (command_line.rs must not call projection directly): {}",
                     trimmed.trim_end()
                 ));
             }
@@ -2623,7 +2624,7 @@ fn cli_rs_no_business_logic() {
 
     assert!(
         offenders.is_empty(),
-        "event-module cli.rs files parse args and call commands/workers; crypto, store writes, and projector imports belong elsewhere:\n{}",
+        "event-module command_line.rs files parse args and call commands/workers; crypto, store writes, and projector imports belong elsewhere:\n{}",
         offenders.join("\n")
     );
 }

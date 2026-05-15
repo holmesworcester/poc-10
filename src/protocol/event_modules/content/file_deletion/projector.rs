@@ -62,7 +62,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("file deletion author workspace does not match deletion".to_string());
     }
 
-    Ok(ProjectionOutput::rows_and_labels(
+    Ok(ProjectionOutput::table_writes_and_context_updates(
         vec![purge_instruction_row(
             deletion.workspace_id,
             deletion.target_file_event_id,
@@ -173,15 +173,15 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: author_id,
                         record: author_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -201,9 +201,9 @@ mod tests {
             vec![PurgeKind::File.as_byte()]
         );
         assert!(output.legacy_deletes().is_empty());
-        assert_eq!(output.legacy_labels().len(), 1);
-        assert_eq!(output.legacy_labels()[0].event_id, target_id);
-        assert_eq!(output.legacy_labels()[0].label, deletion_label(&author_id));
+        assert_eq!(output.legacy_context_updates().len(), 1);
+        assert_eq!(output.legacy_context_updates()[0].event_id, target_id);
+        assert_eq!(output.legacy_context_updates()[0].label, deletion_label(&author_id));
     }
 
     #[test]
@@ -233,15 +233,15 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: author_id,
                         record: author_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },

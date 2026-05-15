@@ -306,7 +306,7 @@ pub fn project_network_in(
         );
         rows.push(worker_rows::transit_canonical_in_row(inner, provenance));
     }
-    Ok(ProjectionOutput::rows(rows))
+    Ok(ProjectionOutput::table_writes(rows))
 }
 
 /// Load the endpoint secret material needed to decrypt inbound transit.

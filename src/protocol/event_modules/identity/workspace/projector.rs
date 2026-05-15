@@ -12,7 +12,7 @@ use super::{layout, rows};
 pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
     let event = layout::decode(bytes)?;
     let workspace_id = event_id(bytes);
-    Ok(ProjectionOutput::rows(vec![rows::workspace_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::workspace_row(
         workspace_id,
         event.created_at_ms,
         event.public_key,
@@ -37,7 +37,7 @@ mod tests {
         let bytes = layout::encode(&event).expect("encode workspace");
         let output = project(&bytes).expect("project workspace");
 
-        assert_eq!(output.legacy_labels().len(), 0);
+        assert_eq!(output.legacy_context_updates().len(), 0);
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(output.legacy_rows()[0].table, rows::WORKSPACES);
         assert_eq!(output.legacy_rows()[0].key, event_id(&bytes));

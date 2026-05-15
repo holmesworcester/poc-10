@@ -86,13 +86,13 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     // row is suppressed.
     let already_superseded = event
         .context
-        .labels
+        .updates
         .iter()
         .any(|label| is_superseded_label(label));
     let mut output = if already_superseded {
-        ProjectionOutput::rows(Vec::new())
+        ProjectionOutput::table_writes(Vec::new())
     } else {
-        ProjectionOutput::rows(vec![
+        ProjectionOutput::table_writes(vec![
             rows::recipient_key_row(event.context.event_id, &recipient_key)?,
             key_wrap::rows::pending_recipient_key_reconcile_row(
                 recipient_key.workspace_id,
@@ -121,7 +121,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         // resurrection of the predecessor's row. The label payload names
         // the successor (this event's id) so a debugger / future query
         // can follow the chain.
-        output.push_event_label(EventLabel {
+        output.push_context_update(EventLabel {
             event_id: recipient_key.previous_recipient_key_id,
             label: superseded_label(&event.context.event_id),
         });
@@ -226,9 +226,9 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: signer_id,
                     record: signer_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -292,7 +292,7 @@ mod tests {
             context: EventContext {
                 event_id: event_id(&record.canonical_bytes),
                 dependencies: Vec::new(),
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -368,15 +368,15 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: predecessor_id,
                         record: predecessor_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -401,17 +401,17 @@ mod tests {
             "the deleted row key must be the predecessor's"
         );
         assert_eq!(
-            output.legacy_labels().len(),
+            output.legacy_context_updates().len(),
             1,
             "supersession must emit one EventLabel marking the predecessor"
         );
         assert_eq!(
-            output.legacy_labels()[0].event_id,
+            output.legacy_context_updates()[0].event_id,
             predecessor_id,
             "the label must be attached to the predecessor's event id"
         );
         assert_eq!(
-            output.legacy_labels()[0].label,
+            output.legacy_context_updates()[0].label,
             super::super::types::superseded_label(&event.context.event_id),
             "the label payload must name the successor recipient_key event"
         );
@@ -441,11 +441,11 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: signer_id,
                     record: signer_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
                 // Pre-existing supersession label means the successor
                 // already projected and labeled this id earlier.
-                labels: vec![super::super::types::superseded_label(&successor_id)],
+                updates: vec![super::super::types::superseded_label(&successor_id)],
                 receive: None,
                 now_unix_minute: None,
             },
@@ -464,7 +464,7 @@ mod tests {
             "fresh recipient_key (no previous_recipient_key_id) must not emit deletes"
         );
         assert!(
-            output.legacy_labels().is_empty(),
+            output.legacy_context_updates().is_empty(),
             "fresh recipient_key must not emit a supersession label of its own"
         );
     }
@@ -512,15 +512,15 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: other_predecessor_id,
                         record: other_predecessor,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },

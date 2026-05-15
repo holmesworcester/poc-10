@@ -33,7 +33,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     // and schedule local retention cleanup even if some ordinary projection
     // dependency is still missing.
     let authored_minute = unix_minute_for(message.created_at_ms);
-    let is_deleted_by_author = event.context.labels.iter().any(|label| {
+    let is_deleted_by_author = event.context.updates.iter().any(|label| {
         deletion_label_author(label)
             .map(|author| author == message.author_user_id)
             .unwrap_or(false)
@@ -41,7 +41,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     if is_deleted_by_author {
         let key = rows::message_key(message.workspace_id, event.context.event_id);
         let sealed_key = rows::message_key(message.workspace_id, event.context.event_id);
-        let output = ProjectionOutput::from_parts(
+        let output = ProjectionOutput::from_atomic_parts(
             vec![
                 rows::message_tombstone_row(
                     message.workspace_id,
@@ -158,7 +158,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         ));
     }
 
-    Ok(ProjectionOutput::rows(vec![rows::sealed_message_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::sealed_message_row(
         event.context.event_id,
         envelope.signer_endpoint_shared_id,
         &message,
@@ -394,25 +394,25 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: author_id,
                         record: author_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.leaf_id,
                         record: built.leaf_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.setting_id,
                         record: built.setting_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -539,7 +539,7 @@ mod tests {
 
         let built = build(workspace_id, author_id, &signer_private_key, signer_id);
         let mut event = context_for(&built, signer_id, signer_record, author_id, author_record);
-        event.context.labels.push(deletion_label(&author_id));
+        event.context.updates.push(deletion_label(&author_id));
 
         let output = project(&event).expect("project deleted message");
         assert_eq!(output.legacy_rows().len(), 2);
@@ -550,7 +550,7 @@ mod tests {
         );
         // For self-deletes the label is already on the event (set by the
         // deletion projector); we don't double-write it.
-        assert!(output.legacy_labels().is_empty());
+        assert!(output.legacy_context_updates().is_empty());
         // Two deletes: read-model (MESSAGES) + ciphertext (SEALED_MESSAGES).
         assert_eq!(output.legacy_deletes().len(), 2);
         let tables: Vec<_> = output.legacy_deletes().iter().map(|d| d.table).collect();
@@ -575,7 +575,7 @@ mod tests {
             context: EventContext {
                 event_id: built.message_id,
                 dependencies: Vec::new(),
-                labels: vec![deletion_label(&author_id)],
+                updates: vec![deletion_label(&author_id)],
                 receive: None,
                 now_unix_minute: None,
             },
@@ -674,7 +674,7 @@ mod tests {
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(output.legacy_rows()[0].table, rows::SEALED_MESSAGES);
         assert!(output.legacy_deletes().is_empty());
-        assert!(output.legacy_labels().is_empty());
+        assert!(output.legacy_context_updates().is_empty());
     }
 
     #[test]
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(output.legacy_rows()[0].table, rows::SEALED_MESSAGES);
         assert!(output.legacy_deletes().is_empty());
-        assert!(output.legacy_labels().is_empty());
+        assert!(output.legacy_context_updates().is_empty());
     }
 
     #[test]
@@ -747,7 +747,7 @@ mod tests {
 
         let built = build(workspace_id, author_id, &signer_private_key, signer_id);
         let mut event = context_for(&built, signer_id, signer_record, author_id, author_record);
-        event.context.labels.push(deletion_label(&[42; 32]));
+        event.context.updates.push(deletion_label(&[42; 32]));
 
         let output = project(&event).expect("project not-by-author label");
         assert_eq!(output.legacy_rows().len(), 1);

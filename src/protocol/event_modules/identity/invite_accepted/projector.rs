@@ -18,7 +18,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("invite_accepted workspace metadata does not match event body".to_string());
     }
     validate_invite_secret(event, &accepted)?;
-    Ok(ProjectionOutput::rows(vec![rows::invite_accepted_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::invite_accepted_row(
         event.context.event_id,
         &accepted,
     )]))
@@ -82,9 +82,9 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: dependency_id,
                     record: dependency,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },

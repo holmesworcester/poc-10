@@ -99,7 +99,7 @@ pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, Stri
         }
     }
 
-    Ok(ProjectionOutput::rows(rows))
+    Ok(ProjectionOutput::table_writes(rows))
 }
 
 #[cfg(test)]
@@ -148,15 +148,15 @@ mod tests {
                     DependencyContext {
                         event_id: invite_secret_event_id,
                         record: invite_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: ephemeral_secret_event_id,
                         record: ephemeral_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -304,9 +304,9 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: invite_secret_event_id,
                     record: invite_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: Some(ReceiveMetadata::bootstrap_invite(
                     origin, [9; 32], [1; 32], true,
                 )),
@@ -336,9 +336,9 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: invite_secret_event_id,
                     record: invite_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: Some(ReceiveMetadata::bootstrap_invite(
                     origin, [9; 32], [1; 32], true,
                 )),
@@ -375,9 +375,9 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: invite_secret_event_id,
                     record: invite_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: Some(ReceiveMetadata::bootstrap_invite(
                     origin, [9; 32], [1; 32], true,
                 )),
@@ -400,7 +400,7 @@ mod tests {
                 context: EventContext {
                     event_id: types::event_id(&record.canonical_bytes),
                     dependencies: Vec::new(),
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                     receive: Some(ReceiveMetadata::endpoint_receive(
                         "127.0.0.1:9000".parse::<SocketAddr>().expect("addr"),
                         [9; 32],
@@ -424,7 +424,7 @@ mod tests {
             context: EventContext {
                 event_id: types::event_id(&record.canonical_bytes),
                 dependencies: Vec::new(),
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: Some(ReceiveMetadata::bootstrap_invite(
                     "127.0.0.1:9000".parse::<SocketAddr>().expect("addr"),
                     [9; 32],
@@ -457,9 +457,9 @@ mod tests {
                     dependencies: vec![DependencyContext {
                         event_id: invite_secret_event_id,
                         record: wrong_invite_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     }],
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                     receive: Some(ReceiveMetadata::bootstrap_invite(
                         "127.0.0.1:9000".parse::<SocketAddr>().expect("addr"),
                         [9; 32],
@@ -490,9 +490,9 @@ mod tests {
                     dependencies: vec![DependencyContext {
                         event_id: invite_secret_event_id,
                         record: invite_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     }],
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                     receive: Some(ReceiveMetadata::bootstrap_invite(
                         "127.0.0.1:9000".parse::<SocketAddr>().expect("addr"),
                         [9; 32],
@@ -522,9 +522,9 @@ mod tests {
                     dependencies: vec![DependencyContext {
                         event_id: invite_secret_event_id,
                         record: invite_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     }],
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                     receive: Some(ReceiveMetadata::bootstrap_invite(
                         "127.0.0.1:9000".parse::<SocketAddr>().expect("addr"),
                         [9; 32],

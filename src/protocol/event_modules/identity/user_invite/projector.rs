@@ -36,7 +36,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         _ => return Err("user_invite signer must be workspace or endpoint_shared".to_string()),
     }
 
-    Ok(ProjectionOutput::rows(vec![rows::user_invite_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::user_invite_row(
         event.context.event_id,
         &user_invite,
     )]))
@@ -223,7 +223,7 @@ mod tests {
             context: EventContext {
                 event_id: event_id(&record.canonical_bytes),
                 dependencies,
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -234,7 +234,7 @@ mod tests {
         DependencyContext {
             event_id,
             record,
-            labels: Vec::new(),
+            updates: Vec::new(),
         }
     }
 
@@ -254,7 +254,7 @@ mod tests {
         ))
         .expect("project user_invite");
 
-        assert!(output.legacy_labels().is_empty());
+        assert!(output.legacy_context_updates().is_empty());
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(output.legacy_rows()[0].table, rows::USER_INVITES);
         assert_eq!(

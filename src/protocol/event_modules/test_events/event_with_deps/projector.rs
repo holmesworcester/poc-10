@@ -19,7 +19,7 @@ use super::rows;
 pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
     if bytes.first().copied() == Some(layout::TYPE_STAGED_EVENT_WITH_DEPS) {
         let event = layout::decode_staged(bytes)?;
-        return Ok(ProjectionOutput::rows(vec![TableRow {
+        return Ok(ProjectionOutput::table_writes(vec![TableRow {
             table: rows::STAGED_EVENTS_WITH_DEPS,
             key: event.index.to_be_bytes().to_vec(),
             value: event.inner_bytes,
@@ -122,7 +122,7 @@ mod tests {
         let output = project(&inner_bytes_fixture()).expect("project shared");
 
         assert!(output.legacy_rows().is_empty());
-        assert!(output.legacy_labels().is_empty());
+        assert!(output.legacy_context_updates().is_empty());
     }
 
     #[test]

@@ -977,7 +977,7 @@ impl EventRegistry for ContextRegistry {
         event: &EventWithContext<'_>,
     ) -> Result<ProjectionDecision, String> {
         if event.context.event_id == self.dep_id {
-            return Ok(ProjectionOutput::labels(vec![
+            return Ok(ProjectionOutput::context_updates(vec![
                 EventLabel {
                     event_id: self.child_id,
                     label: b"dep-applied".to_vec(),
@@ -1001,10 +1001,10 @@ impl EventRegistry for ContextRegistry {
                     .canonical_bytes,
                 self.dep_bytes
             );
-            assert!(event.context.has_label(b"dep-applied"));
+            assert!(event.context.has_update(b"dep-applied"));
             assert!(event
                 .context
-                .dependency_has_label(&self.dep_id, b"dep-self"));
+                .dependency_has_update(&self.dep_id, b"dep-self"));
             self.child_saw_context.set(true);
             return Ok(ProjectionOutput::default().into());
         }
@@ -1041,14 +1041,14 @@ impl EventRegistry for LabelWakeRegistry {
             );
             if event
                 .context
-                .dependency_has_label(&self.dep_id, b"dep-labeled")
+                .dependency_has_update(&self.dep_id, b"dep-labeled")
             {
                 self.child_saw_dependency_label.set(true);
             }
             return Ok(ProjectionOutput::default().into());
         }
         if event.context.event_id == self.labeler_id {
-            return Ok(ProjectionOutput::labels(vec![EventLabel {
+            return Ok(ProjectionOutput::context_updates(vec![EventLabel {
                 event_id: self.dep_id,
                 label: b"dep-labeled".to_vec(),
             }])
@@ -1069,16 +1069,16 @@ impl EventRegistry for BlockedLabelWakeRegistry {
         event: &EventWithContext<'_>,
     ) -> Result<ProjectionDecision, String> {
         if event.context.event_id == self.labeler_id {
-            return Ok(ProjectionOutput::labels(vec![EventLabel {
+            return Ok(ProjectionOutput::context_updates(vec![EventLabel {
                 event_id: self.target_id,
                 label: b"delete".to_vec(),
             }])
             .into());
         }
         if event.context.event_id == self.target_id {
-            if event.context.has_label(b"delete") {
+            if event.context.has_update(b"delete") {
                 self.target_purge_projected.set(true);
-                return Ok(ProjectionOutput::labels(vec![EventLabel {
+                return Ok(ProjectionOutput::context_updates(vec![EventLabel {
                     event_id: self.target_id,
                     label: b"purge-projected".to_vec(),
                 }])

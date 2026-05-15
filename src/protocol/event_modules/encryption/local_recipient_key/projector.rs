@@ -11,7 +11,7 @@ use super::{layout, rows};
 
 pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
     let event = layout::decode(bytes)?;
-    Ok(ProjectionOutput::rows(vec![rows::local_recipient_key_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::local_recipient_key_row(
         crate::protocol::event_modules::types::event_id(bytes),
         &event,
     )]))

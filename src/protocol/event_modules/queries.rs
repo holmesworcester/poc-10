@@ -100,6 +100,6 @@ pub fn event_bytes(store: &Store, event_id: &EventId) -> rusqlite::Result<Option
 pub fn event_labels(store: &Store, event_id: &EventId) -> Result<Vec<Vec<u8>>, String> {
     store
         .table_rows_with_key_prefix(EVENT_LABELS, event_id, MAX_LABELS_PER_EVENT)
-        .map_err(|err| format!("load event labels: {err}"))
+        .map_err(|err| format!("load event updates: {err}"))
         .map(|rows| rows.into_iter().map(|(_, label)| label).collect())
 }

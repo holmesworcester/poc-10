@@ -49,7 +49,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     validate_authority(event, &envelope, &setting)?;
     validate_monotonic_floor(event, &setting)?;
 
-    Ok(ProjectionOutput::rows(vec![rows::setting_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::setting_row(
         setting.workspace_id,
         event.context.event_id,
         setting.ttl_minutes,
@@ -238,9 +238,9 @@ mod tests {
             dependencies: vec![DependencyContext {
                 event_id: admin_event_id,
                 record: admin_dependency_record(workspace_id, admin_public_key),
-                labels: Vec::new(),
+                updates: Vec::new(),
             }],
-            labels: Vec::new(),
+            updates: Vec::new(),
             receive: None,
             now_unix_minute: None,
         };
@@ -273,15 +273,15 @@ mod tests {
                 DependencyContext {
                     event_id: admin_event_id,
                     record: admin_dependency_record(workspace_id, admin_public_key),
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 },
                 DependencyContext {
                     event_id: previous_id,
                     record: previous_record.clone(),
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 },
             ],
-            labels: Vec::new(),
+            updates: Vec::new(),
             receive: None,
             now_unix_minute: None,
         };
@@ -300,7 +300,7 @@ mod tests {
         let output = project(&event).expect("project authorized setting");
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(output.legacy_deletes().len(), 0);
-        assert_eq!(output.legacy_labels().len(), 0);
+        assert_eq!(output.legacy_context_updates().len(), 0);
         let decoded = super::super::rows::decode_active_setting_row(
             &output.legacy_rows()[0].key,
             &output.legacy_rows()[0].value,
@@ -343,9 +343,9 @@ mod tests {
             dependencies: vec![DependencyContext {
                 event_id: [2; 32],
                 record: admin_dependency_record([9; 32], admin_public_key),
-                labels: Vec::new(),
+                updates: Vec::new(),
             }],
-            labels: Vec::new(),
+            updates: Vec::new(),
             receive: None,
             now_unix_minute: None,
         };

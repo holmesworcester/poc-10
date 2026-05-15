@@ -54,7 +54,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("key request recipient key is not owned by requester".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![rows::pending_key_request_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::pending_key_request_row(
         event.context.event_id,
         envelope.signer_endpoint_shared_id,
         &request,
@@ -215,10 +215,10 @@ mod tests {
                     .map(|(event_id, record)| DependencyContext {
                         event_id,
                         record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     })
                     .collect(),
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },

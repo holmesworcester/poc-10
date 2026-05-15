@@ -36,7 +36,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
     let target_deleted_by_author = event
         .context
-        .dependency_labels(&reaction.target_message_id)
+        .dependency_updates(&reaction.target_message_id)
         .unwrap_or(&[])
         .iter()
         .any(|label| {
@@ -46,7 +46,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         });
     if target_deleted_by_author {
         let key = rows::reaction_key(reaction.workspace_id, event.context.event_id);
-        return Ok(ProjectionOutput::from_parts(
+        return Ok(ProjectionOutput::from_atomic_parts(
             vec![purge_instruction_row(
                 reaction.workspace_id,
                 event.context.event_id,
@@ -128,7 +128,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         );
     }
 
-    Ok(ProjectionOutput::rows(vec![rows::sealed_reaction_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::sealed_reaction_row(
         event.context.event_id,
         envelope.signer_endpoint_shared_id,
         &reaction,
@@ -304,30 +304,30 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: author_id,
                         record: author_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: target_id,
                         record: target_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.frontier_id,
                         record: built.frontier_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.leaf_id,
                         record: built.leaf_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -413,7 +413,7 @@ mod tests {
             .iter_mut()
             .find(|dependency| dependency.event_id == target_id)
             .expect("target dependency")
-            .labels
+            .updates
             .push(
                 crate::protocol::event_modules::content::message_deletion::types::deletion_label(
                     &author_id,

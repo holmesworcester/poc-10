@@ -12,7 +12,7 @@ use super::rows;
 
 pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
     let event = layout::decode(bytes)?;
-    Ok(ProjectionOutput::rows(invite_secret(
+    Ok(ProjectionOutput::table_writes(invite_secret(
         event.bootstrap_hash,
         event.bootstrap_secret,
         event.workspace_id,

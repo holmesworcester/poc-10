@@ -50,7 +50,7 @@ pub fn project_signed(
         return Err("endpoint_shared role does not match invite authority".to_string());
     }
 
-    Ok(ProjectionOutput::rows(rows::endpoint_shared_rows(
+    Ok(ProjectionOutput::table_writes(rows::endpoint_shared_rows(
         event.context.event_id,
         envelope.signer_event_id,
         &endpoint_shared,
@@ -189,9 +189,9 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: device_invite_id,
                     record: device_invite_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -207,7 +207,7 @@ mod tests {
 
         let output = project_signed(&envelope, &event).expect("project endpoint shared");
 
-        assert_eq!(output.legacy_labels().len(), 0);
+        assert_eq!(output.legacy_context_updates().len(), 0);
         assert_eq!(output.legacy_rows().len(), 2);
         assert_eq!(output.legacy_rows()[0].table, rows::ENDPOINT_SHARED);
         assert_eq!(
@@ -231,7 +231,7 @@ mod tests {
             context: EventContext {
                 event_id: endpoint_shared_id,
                 dependencies: Vec::new(),
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },

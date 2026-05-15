@@ -33,7 +33,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("file workspace metadata does not match event body".to_string());
     }
 
-    let file_deleted_by_author = event.context.labels.iter().any(|label| {
+    let file_deleted_by_author = event.context.updates.iter().any(|label| {
         file_deletion_label_author(label)
             .map(|author| author == file.author_user_id)
             .unwrap_or(false)
@@ -58,7 +58,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
     }
     let parent_deleted_by_author = event
         .context
-        .dependency_labels(&file.message_id)
+        .dependency_updates(&file.message_id)
         .unwrap_or(&[])
         .iter()
         .any(|label| {
@@ -134,7 +134,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         );
     }
 
-    Ok(ProjectionOutput::rows(rows::file_rows(
+    Ok(ProjectionOutput::table_writes(rows::file_rows(
         event.context.event_id,
         envelope.signer_endpoint_shared_id,
         &file,
@@ -148,7 +148,7 @@ fn file_purge_output(
     file_id: [u8; 32],
     author_user_id: [u8; 32],
 ) -> ProjectionOutput {
-    ProjectionOutput::from_parts(
+    ProjectionOutput::from_atomic_parts(
         vec![purge_instruction_row(
             workspace_id,
             file_event_id,
@@ -377,25 +377,25 @@ mod tests {
                     DependencyContext {
                         event_id: built.signer_id,
                         record: built.signer_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.author_id,
                         record: built.author_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.parent_id,
                         record: built.parent_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: built.leaf_id,
                         record: built.leaf_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -462,7 +462,7 @@ mod tests {
     fn self_deletion_label_suppresses_file_rows_and_emits_purge_intent() {
         let built = build_descriptor("photo.jpg", "image/jpeg");
         let mut event = context_for(&built);
-        event.context.labels.push(
+        event.context.updates.push(
             crate::protocol::event_modules::content::file_deletion::types::deletion_label(
                 &built.author_id,
             ),
@@ -484,8 +484,8 @@ mod tests {
         assert!(delete_tables.contains(&rows::FILES));
         assert!(delete_tables.contains(&rows::FILES_BY_MESSAGE));
         assert!(delete_tables.contains(&rows::FILES_BY_FILE_ID));
-        assert_eq!(output.legacy_labels().len(), 1);
-        assert_eq!(output.legacy_labels()[0].event_id, built.file_event_id);
+        assert_eq!(output.legacy_context_updates().len(), 1);
+        assert_eq!(output.legacy_context_updates()[0].event_id, built.file_event_id);
     }
 
     #[test]
@@ -498,7 +498,7 @@ mod tests {
             .iter_mut()
             .find(|dependency| dependency.event_id == built.parent_id)
             .expect("parent dependency")
-            .labels
+            .updates
             .push(
                 crate::protocol::event_modules::content::message_deletion::types::deletion_label(
                     &built.author_id,
@@ -513,8 +513,8 @@ mod tests {
             crate::protocol::event_modules::content::message_deletion::rows::PURGE_INSTRUCTIONS
         );
         assert_eq!(output.legacy_deletes().len(), 3);
-        assert_eq!(output.legacy_labels().len(), 1);
-        assert_eq!(output.legacy_labels()[0].event_id, built.file_event_id);
+        assert_eq!(output.legacy_context_updates().len(), 1);
+        assert_eq!(output.legacy_context_updates()[0].event_id, built.file_event_id);
     }
 
     #[test]
@@ -586,25 +586,25 @@ mod tests {
                     DependencyContext {
                         event_id: tampered.signer_id,
                         record: tampered.signer_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: tampered.author_id,
                         record: tampered.author_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: tampered.parent_id,
                         record: tampered.parent_record.clone(),
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: other_leaf_id,
                         record: other_leaf_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },

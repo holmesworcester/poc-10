@@ -37,7 +37,7 @@ fn project_admin(
     admin_id: EventId,
     admin: &super::types::AdminEvent,
 ) -> Result<ProjectionOutput, String> {
-    Ok(ProjectionOutput::rows(vec![rows::admin_row(
+    Ok(ProjectionOutput::table_writes(vec![rows::admin_row(
         admin.workspace_id,
         admin_id,
         admin.created_at_ms,
@@ -218,7 +218,7 @@ mod tests {
             context: EventContext {
                 event_id: event_id(&record.canonical_bytes),
                 dependencies,
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },
@@ -240,7 +240,7 @@ mod tests {
             vec![DependencyContext {
                 event_id: workspace_id,
                 record: workspace_record,
-                labels: Vec::new(),
+                updates: Vec::new(),
             }],
         ))
         .expect_err("raw admin must reject");
@@ -290,12 +290,12 @@ mod tests {
                 DependencyContext {
                     event_id: workspace_id,
                     record: workspace_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 },
                 DependencyContext {
                     event_id: authority_id,
                     record: authority,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 },
             ],
         ))
@@ -325,13 +325,13 @@ mod tests {
                 vec![DependencyContext {
                     event_id: workspace_id,
                     record: workspace_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
             ),
         )
         .expect("project signed bootstrap admin");
 
-        assert_eq!(output.legacy_labels().len(), 0);
+        assert_eq!(output.legacy_context_updates().len(), 0);
         assert_eq!(output.legacy_rows().len(), 1);
         assert_eq!(output.legacy_rows()[0].table, rows::ADMINS);
         assert_eq!(
@@ -369,7 +369,7 @@ mod tests {
                 vec![DependencyContext {
                     event_id: workspace_id,
                     record: workspace_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
             ),
         )
@@ -402,7 +402,7 @@ mod tests {
                 vec![DependencyContext {
                     event_id: workspace_id,
                     record: workspace_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
             ),
         )
@@ -446,17 +446,17 @@ mod tests {
                     DependencyContext {
                         event_id: workspace_id,
                         record: workspace_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: authority_id,
                         record: authority,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: target_user_id,
                         record: target_user_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
             ),
@@ -500,17 +500,17 @@ mod tests {
                     DependencyContext {
                         event_id: authority_id,
                         record: authority,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: workspace_id,
                         record: workspace_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: user_id,
                         record: user_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
             ),
@@ -559,17 +559,17 @@ mod tests {
                     DependencyContext {
                         event_id: authority_id,
                         record: authority,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: workspace_id,
                         record: workspace_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: user_id,
                         record: user_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
             ),
@@ -614,17 +614,17 @@ mod tests {
                     DependencyContext {
                         event_id: authority_id,
                         record: authority,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: workspace_id,
                         record: workspace_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: user_id,
                         record: user_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
             ),
@@ -668,17 +668,17 @@ mod tests {
                     DependencyContext {
                         event_id: workspace_id,
                         record: workspace_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: authority_id,
                         record: authority,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: target_user_id,
                         record: target_user_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
             ),
@@ -728,17 +728,17 @@ mod tests {
                     DependencyContext {
                         event_id: workspace_id,
                         record: workspace_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: authority_id,
                         record: authority,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: target_user_id,
                         record: target_user_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
             ),
@@ -783,17 +783,17 @@ mod tests {
                     DependencyContext {
                         event_id: workspace_id,
                         record: workspace_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: authority_id,
                         record: authority,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: target_user_id,
                         record: target_user_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
             ),

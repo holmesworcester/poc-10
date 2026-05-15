@@ -54,7 +54,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         event.context.event_id,
         &key_wrap,
     ));
-    Ok(ProjectionOutput::rows(rows))
+    Ok(ProjectionOutput::table_writes(rows))
 }
 
 pub(crate) fn decode_signed_key_wrap_event(
@@ -243,20 +243,20 @@ mod tests {
                     DependencyContext {
                         event_id: signer_id,
                         record: signer_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: frontier_id,
                         record: frontier_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                     DependencyContext {
                         event_id: recipient_id,
                         record: recipient_record,
-                        labels: Vec::new(),
+                        updates: Vec::new(),
                     },
                 ],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },

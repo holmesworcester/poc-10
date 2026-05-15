@@ -27,7 +27,7 @@ pub fn project(event: &EventWithContext<'_>) -> Result<ProjectionOutput, String>
         return Err("local key secret removal frontier workspace does not match event".to_string());
     }
 
-    Ok(ProjectionOutput::rows(vec![
+    Ok(ProjectionOutput::table_writes(vec![
         rows::local_key_secret_row(event.context.event_id, &local),
         key_wrap::rows::pending_frontier_reconcile_row(
             local.workspace_id,
@@ -77,9 +77,9 @@ mod tests {
                 dependencies: vec![DependencyContext {
                     event_id: frontier_id,
                     record: frontier_record,
-                    labels: Vec::new(),
+                    updates: Vec::new(),
                 }],
-                labels: Vec::new(),
+                updates: Vec::new(),
                 receive: None,
                 now_unix_minute: None,
             },

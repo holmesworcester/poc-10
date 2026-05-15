@@ -13,7 +13,7 @@ use super::types::EndpointKeypair;
 
 pub fn project(bytes: &[u8]) -> Result<ProjectionOutput, String> {
     let event = layout::decode(bytes)?;
-    Ok(ProjectionOutput::rows(local_endpoint(event)))
+    Ok(ProjectionOutput::table_writes(local_endpoint(event)))
 }
 
 pub fn local_endpoint(endpoint: EndpointKeypair) -> Vec<TableRow> {
