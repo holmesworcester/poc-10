@@ -1,3 +1,4 @@
+pub mod connection_ephemeral_secret;
 pub mod connection_request;
 pub mod connection_response;
 pub mod content_event;
