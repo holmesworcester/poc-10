@@ -6,6 +6,12 @@
 //!
 //! Run with: `cargo run --example poc10_demo`
 
+use topo::commands::context::{
+    CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
+    WorkspaceId,
+};
+use topo::commands::send_message::{associated_data, recover_text, send_message};
+use topo::core::crypto;
 use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, RowIntentHandler};
@@ -14,6 +20,7 @@ use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::event_modules::encryption::fact::LocalKeySecretFact;
 use topo::event_modules::identity_workspace::fact::WorkspaceFact;
 use topo::event_modules::identity_workspace::{
     layout as workspace_layout, project as workspace_project, rows as workspace_rows,
@@ -24,11 +31,13 @@ use topo::event_modules::sealed_message::context::{
 use topo::event_modules::sealed_message::fact::{
     SealedMessageFact, SecretNodeFact, SignerPubkeyFact, NONCE_BYTES,
 };
+use topo::event_modules::sealed_message::layout::decode_sealed_message;
 use topo::event_modules::sealed_message::rows::{
     decode_message_row, decode_sealed_message_row, message_row, MessageRow, MESSAGE_ROWS,
     SEALED_MESSAGE_ROWS,
 };
 use topo::event_modules::sealed_message::{layout as message_layout, project as message_project};
+use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
 
 fn header(step: usize, title: &str) {
     println!("\n=== step {step}: {title} ===");
@@ -279,10 +288,7 @@ fn main() -> Result<(), String> {
     let open_report = bus
         .dispatch_intents(&row_handler, &HandlerContext::new(), 32)
         .map_err(|err| format!("dispatch message row intents: {err}"))?;
-    println!(
-        "  dispatch: handled={}",
-        open_report.handled
-    );
+    println!("  dispatch: handled={}", open_report.handled);
 
     let message_rows_read = store
         .table_rows(MESSAGE_ROWS)
@@ -300,17 +306,128 @@ fn main() -> Result<(), String> {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Step 4: produce a fact through the commands lane (`send_message`)
+    // using a narrow CommandContext that cannot reach workers or registries.
+    // -----------------------------------------------------------------------
+    header(4, "send_message through CommandContext");
+    let cmd_workspace: WorkspaceId = [42; 32];
+    let vault = DemoVault::seeded(cmd_workspace);
+    let clock = DemoClock::starting_at(2 * 60_000);
+    let cmd_ctx = CommandContext::new(&store, &clock, &vault);
+    let output = send_message(&cmd_ctx, cmd_workspace, "via CommandContext")
+        .map_err(|err| format!("send_message: {err}"))?;
+    let fact = &output.facts[0];
+    let sealed = decode_sealed_message(&fact.bytes).map_err(|err| format!("decode: {err}"))?;
+    let recovered = {
+        let cap = vault
+            .local_encryption_capability(cmd_workspace)
+            .map_err(|err| format!("vault enc: {err}"))?;
+        let plaintext = crypto::xchacha20poly1305_decrypt(
+            &cap.fact.key_secret,
+            &associated_data(cmd_workspace, sealed.frontier_id, sealed.minute),
+            &sealed.nonce,
+            &sealed.ciphertext,
+        )
+        .map_err(|err| format!("decrypt: {err:?}"))?;
+        recover_text(&plaintext).map_err(|err| format!("recover: {err}"))?
+    };
     println!(
-        "\nresult: target EventBus admitted 6 fact types (workspace + signer + message +",
+        "  send_message produced {} fact(s), {} intent(s)",
+        output.facts.len(),
+        output.intents.len()
     );
+    println!(
+        "    -> message_fact_id={} created_at_ms={} minute={}",
+        hex(&output.summary.message_fact_id),
+        output.summary.created_at_ms,
+        sealed.minute
+    );
+    println!("    -> recovered plaintext via workspace key: {recovered:?}");
+
+    println!("\nresult: target EventBus admitted 6 fact types (workspace + signer + message +",);
     println!("secret-root + secret-internal + secret-leaf), target projectors emitted atomic");
-    println!("row intents for sealed_message_rows. The leaf-depth SecretNodeFact (prefix_bytes=32)");
-    println!("satisfies has_secret in the projector, reducing the standing needs to deletion only.");
+    println!(
+        "row intents for sealed_message_rows. The leaf-depth SecretNodeFact (prefix_bytes=32)"
+    );
+    println!(
+        "satisfies has_secret in the projector, reducing the standing needs to deletion only."
+    );
     println!("MESSAGE_ROWS materialises when the decryption worker calls submit_intent with a");
     println!("PutRow(message_row(...)) after AEAD-opening the ciphertext; the demo synthesises");
     println!("this intent directly (no private-key material available) and dispatches it via");
     println!("RowIntentHandler. No legacy code path was used.");
     Ok(())
+}
+
+struct DemoVault {
+    signing: LocalSigningCapability,
+    encryption: LocalEncryptionCapability,
+}
+
+impl DemoVault {
+    fn seeded(workspace_id: WorkspaceId) -> Self {
+        let signer_private: crypto::Ed25519PrivateKey = [7; 32];
+        let signer_public = crypto::ed25519_public_key(&signer_private);
+        let signer_id = [11; 32];
+        Self {
+            signing: LocalSigningCapability {
+                fact: LocalSignerSecretFact {
+                    workspace_id,
+                    signer_id,
+                    public_key: signer_public,
+                    private_key: signer_private,
+                },
+            },
+            encryption: LocalEncryptionCapability {
+                fact: LocalKeySecretFact {
+                    workspace_id,
+                    frontier_id: [22; 32],
+                    owner_endpoint_id: [33; 32],
+                    created_at_ms: 1,
+                    key_secret: [9; crypto::XCHACHA20_POLY1305_KEY_BYTES],
+                },
+            },
+        }
+    }
+}
+
+impl IdentityVault for DemoVault {
+    fn local_signing_capability(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<LocalSigningCapability, String> {
+        if self.signing.fact.workspace_id != workspace_id {
+            return Err("vault has no signing capability for workspace".to_string());
+        }
+        Ok(self.signing.clone())
+    }
+
+    fn local_encryption_capability(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<LocalEncryptionCapability, String> {
+        if self.encryption.fact.workspace_id != workspace_id {
+            return Err("vault has no encryption capability for workspace".to_string());
+        }
+        Ok(self.encryption.clone())
+    }
+}
+
+struct DemoClock(std::cell::Cell<u64>);
+
+impl DemoClock {
+    fn starting_at(start: u64) -> Self {
+        Self(std::cell::Cell::new(start))
+    }
+}
+
+impl CommandClock for DemoClock {
+    fn next_timestamp(&self) -> u64 {
+        let next = self.0.get();
+        self.0.set(next + 1);
+        next
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
