@@ -1,0 +1,38 @@
+# Initial poc-10 event-module projection table inventory.
+# These declarations list durable ownership without migrating behavior yet.
+
+table message_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
+table file_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
+table workspace_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
+table recipient_key_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
+table key_wrap_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
+table opened_content_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}

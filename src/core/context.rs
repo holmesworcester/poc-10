@@ -1,6 +1,7 @@
 //! Context needs and offers used to wake projection.
 
 use crate::core::facts::{FactId, FactScope};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Role(String);
@@ -75,6 +76,45 @@ impl ContextSet {
         self.offers.push(offer);
         self
     }
+
+    pub fn normalized(mut self) -> Self {
+        self.needs.sort();
+        self.needs.dedup();
+        self.offers.sort();
+        self.offers.dedup();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContextSetDelta {
+    pub added_needs: Vec<ContextNeed>,
+    pub removed_needs: Vec<ContextNeed>,
+    pub added_offers: Vec<ContextOffer>,
+    pub removed_offers: Vec<ContextOffer>,
+}
+
+impl ContextSetDelta {
+    pub fn is_empty(&self) -> bool {
+        self.added_needs.is_empty()
+            && self.removed_needs.is_empty()
+            && self.added_offers.is_empty()
+            && self.removed_offers.is_empty()
+    }
+}
+
+pub fn diff_context_sets(previous: &ContextSet, next: &ContextSet) -> ContextSetDelta {
+    let previous_needs = previous.needs.iter().cloned().collect::<BTreeSet<_>>();
+    let next_needs = next.needs.iter().cloned().collect::<BTreeSet<_>>();
+    let previous_offers = previous.offers.iter().cloned().collect::<BTreeSet<_>>();
+    let next_offers = next.offers.iter().cloned().collect::<BTreeSet<_>>();
+
+    ContextSetDelta {
+        added_needs: next_needs.difference(&previous_needs).cloned().collect(),
+        removed_needs: previous_needs.difference(&next_needs).cloned().collect(),
+        added_offers: next_offers.difference(&previous_offers).cloned().collect(),
+        removed_offers: previous_offers.difference(&next_offers).cloned().collect(),
+    }
 }
 
 #[cfg(test)]
@@ -111,5 +151,81 @@ mod tests {
 
         assert_eq!(set.needs.len(), 1);
         assert_eq!(set.offers.len(), 1);
+    }
+
+    #[test]
+    fn normalized_context_set_sorts_and_deduplicates() {
+        let id = [1; 32];
+        let role = Role::new("exact").unwrap();
+        let need = ContextNeed {
+            owner: id,
+            role,
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([2; 32]),
+        };
+
+        let set = ContextSet::new()
+            .need(need.clone())
+            .need(need.clone())
+            .normalized();
+
+        assert_eq!(set.needs, vec![need]);
+    }
+
+    #[test]
+    fn diff_context_sets_reports_only_real_replacements() {
+        let id = [1; 32];
+        let role = Role::new("exact").unwrap();
+        let stable = ContextNeed {
+            owner: id,
+            role: role.clone(),
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([2; 32]),
+        };
+        let added = ContextNeed {
+            owner: id,
+            role,
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([3; 32]),
+        };
+
+        let previous = ContextSet::new()
+            .need(stable.clone())
+            .need(stable.clone())
+            .normalized();
+        let next = ContextSet::new()
+            .need(stable)
+            .need(added.clone())
+            .normalized();
+        let delta = diff_context_sets(&previous, &next);
+
+        assert_eq!(delta.added_needs, vec![added]);
+        assert!(delta.removed_needs.is_empty());
+        assert!(delta.added_offers.is_empty());
+        assert!(delta.removed_offers.is_empty());
+    }
+
+    #[test]
+    fn identical_context_sets_have_empty_delta() {
+        let id = [1; 32];
+        let role = Role::new("exact").unwrap();
+        let selector = Selector::from_bytes([2; 32]);
+        let set = ContextSet::new()
+            .need(ContextNeed {
+                owner: id,
+                role: role.clone(),
+                scope: FactScope::Global,
+                selector: selector.clone(),
+            })
+            .offer(ContextOffer {
+                owner: id,
+                role,
+                scope: FactScope::Global,
+                selector,
+                payload_ref: id,
+            })
+            .normalized();
+
+        assert!(diff_context_sets(&set, &set).is_empty());
     }
 }

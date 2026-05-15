@@ -1,6 +1,6 @@
 //! Projector contract for fact plus context to needs, offers, and intents.
 
-use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::context::{ContextNeed, ContextOffer, ContextSet};
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::Intent;
 
@@ -49,6 +49,14 @@ impl ProjectionOutput {
         self.intents.push(intent);
         self
     }
+
+    pub fn context_set(&self) -> ContextSet {
+        ContextSet {
+            needs: self.needs.clone(),
+            offers: self.offers.clone(),
+        }
+        .normalized()
+    }
 }
 
 pub trait Projector {
@@ -85,5 +93,22 @@ mod tests {
         assert_eq!(output.needs.len(), 1);
         assert_eq!(output.offers.len(), 1);
         assert!(output.intents.is_empty());
+    }
+
+    #[test]
+    fn projection_output_exposes_normalized_replacement_context() {
+        let id = [1; 32];
+        let role = Role::new("exact").unwrap();
+        let need = ContextNeed {
+            owner: id,
+            role,
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([2; 32]),
+        };
+        let output = ProjectionOutput::new()
+            .need(need.clone())
+            .need(need.clone());
+
+        assert_eq!(output.context_set().needs, vec![need]);
     }
 }

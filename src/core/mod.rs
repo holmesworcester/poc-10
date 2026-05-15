@@ -20,6 +20,7 @@ pub mod matchers;
 pub mod network_queues;
 pub mod projection;
 pub mod runtime;
+pub mod schema_dsl;
 pub mod store;
 pub mod tcp;
 pub mod wire;

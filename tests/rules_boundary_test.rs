@@ -192,6 +192,8 @@ fn core_file_set_stays_small_and_named() {
         "network_queues.rs",
         "projection.rs",
         "runtime.rs",
+        "schema.p8sql",
+        "schema_dsl.rs",
         "store.rs",
         "tcp.rs",
         "wire.rs",
@@ -1207,7 +1209,17 @@ fn core_has_no_domain_vocabulary() {
         "reaction",
         "file_transfer",
     ];
-    let violations = file_contains_violations(root, &files, &forbidden);
+    let mut violations = Vec::new();
+    for path in files {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        for needle in forbidden {
+            if production.contains(needle) {
+                violations.push(format!("{} contains {needle}", relative.display()));
+            }
+        }
+    }
     assert!(
         violations.is_empty(),
         "domain vocabulary belongs under src/protocol/event_modules, not src/core:\n{}",

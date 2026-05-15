@@ -24,7 +24,7 @@ Current source inventory:
 29 schema.rs files
 34 codec.rs files
 18 cli.rs files
-0 schema.p8sql files
+3 schema.p8sql files
 ```
 
 The target guardrail tests in `tests/poc10_architecture_boundary_test.rs` are
@@ -33,11 +33,14 @@ split intentionally:
 ```text
 active:
   poc10_success_criteria_are_recorded_in_architecture_doc
+  poc10_core_contract_files_are_present
+  poc10_projector_output_contract_emits_only_needs_offers_and_intents
+  poc10_handler_output_contract_emits_only_facts_and_intents
+  poc10_target_has_exactly_three_schema_dsl_files
 
 ignored until migration reaches the target:
   no mod.rs files
   no per-module schema.rs/codec.rs/cli.rs files
-  exactly three schema.p8sql files
   no dumping-ground filenames
   root manifests are declarations only
 ```
@@ -224,6 +227,36 @@ active boundary tests for projector/handler output vocabulary
 no behavioral rewrite yet
 ```
 
+### Wave 2 And 3 Parallelization Matrix
+
+Coordination rule: core contract changes must be serialized through the main
+integrator. This includes `Fact`, `ContextNeed`, `ContextOffer`,
+`ContextMatcher`, `ProjectionOutput`, `Intent`, `HandlerOutput`, generated
+schema shape, and fixed wire layout primitives. Slice owners can propose
+contract changes, but they do not merge them directly. After the main integrator
+marks those contracts stable for a wave, module and handler slices can run in
+parallel as long as their write sets remain disjoint from the rows below and
+from each other.
+
+Wave 2 matrix:
+
+| Lane | Disjoint write set | Allowed tests | Blocking dependencies | Handoff point |
+| --- | --- | --- | --- | --- |
+| Schema declarations and generator | `src/core/schema.p8sql`, `src/event_modules/schema.p8sql`, `src/handlers/schema.p8sql`, `src/core/schema_dsl.rs` | `cargo test --lib core::schema_dsl`; `cargo test --test poc10_architecture_boundary_test poc10_success_criteria_are_recorded_in_architecture_doc` | Wave 1 contract names and field vocabulary are frozen by the main integrator | Three schema files parse, generated table names are stable, and the integrator publishes the schema shape for downstream slices |
+| Fixed wire primitives | `src/core/wire.rs`, new `tests/wire_layout_test.rs` | `cargo test --test wire_layout_test`; `cargo test --test sync_storage_boundary_test`; active poc-10 boundary test | Schema lane has fixed ids, field widths, and slot budgets for facts and transit records | Wrong-length, trailing-byte, fixed-width id, hash, key, signature, nonce, and encrypted-slot behavior is covered by golden tests |
+| Store/schema loading | `src/core/store.rs`, new `tests/schema_store_test.rs` | `cargo test --test schema_store_test`; `cargo test --test sync_storage_boundary_test`; active poc-10 boundary test | Schema declarations parse and the main integrator has accepted the generated storage API | Store can create declared tables from `schema.p8sql` without relying on old per-module `schema.rs` declarations |
+
+Wave 3 matrix:
+
+| Lane | Disjoint write set | Allowed tests | Blocking dependencies | Handoff point |
+| --- | --- | --- | --- | --- |
+| Event pipeline core integration | `src/core/facts.rs`, `src/core/context.rs`, `src/core/matchers.rs`, `src/core/projection.rs`, `src/core/handler_dispatch.rs`, `src/core/store.rs`, `src/workers/event_admission.rs`, `src/workers/event_projection.rs`, `src/workers/dependency_unblock.rs`, `src/workers/pipeline_helpers/event_lifecycle.rs`, `src/workers/pipeline_helpers/event_pipeline.rs` | `cargo test --test worker_contract_test`; `cargo test --test rules_boundary_test`; active poc-10 boundary test | Wave 1 contracts and Wave 2 schema/store handoffs are complete | Facts, needs, offers, pending projections, and exact-event matchers replace old ready/blocked/reprojection vocabulary for the test-event path |
+| Test-event module proof | `src/event_modules/test_events/**`, or temporary bridge files under `src/protocol/event_modules/test_events/**` until the target tree is wired | `cargo test --test worker_contract_test`; `cargo test --test rules_boundary_test` | Event pipeline core exposes stable projector inputs and `ProjectionOutput` | A minimal module proves duplicate admission, missing context, natural wakeup, and reprojection without touching old queue names |
+| Content module slice | `src/event_modules/content/{message,message_deletion,file,file_slice,file_deletion,reaction,content_event}/**` | `cargo test --test content_cli_test`; `cargo test --test disappearing_messages_cli_test`; `cargo test --test cascade_cli_test`; `cargo test --test worker_contract_test` for shared pipeline regressions | Test-event proof is green and the main integrator has frozen matcher/offer semantics | Content projectors emit only facts, needs, offers, and intents; deletion/supersession labels are represented as update/about offers |
+| Identity module slice | `src/event_modules/identity/{user,admin,workspace,endpoint,endpoint_shared,invite,invite_server,invite_accepted,user_invite,device_invite,signed}/**` | `cargo test --test invite_accept_cli_test`; `cargo test --test generate_cli_test`; `cargo test --test leaf_coord_cli_test`; `cargo test --test worker_contract_test` for shared pipeline regressions | Test-event proof is green and fact scope/canonical id behavior is frozen | Identity projectors use the shared fact/context path and do not write blocker, label, or ready-event tables |
+| Connection and sync fact slice | `src/event_modules/connection/{connection_request,connection_response,connection_ephemeral_secret,transit}/**`, `src/event_modules/sync/{need_id,have_id,compare}/**` | `cargo test --test network_queue_contract_test`; `cargo test --test black_box_sync_test`; `cargo test --test sync_storage_boundary_test`; `cargo test --test worker_contract_test` for shared pipeline regressions | Event pipeline core is stable; Wave 5 still owns transport handlers and network side effects | Projectors can produce receive/send/sync intents without invoking old transit, connection, or sync worker queues |
+| Handler skeleton slice | `src/handlers/schema.p8sql`, `src/handlers/purge_event.rs`, `src/handlers/discover_cascade.rs`, new `tests/handler_dispatch_boundary_test.rs` | `cargo test --test worker_contract_test`; `cargo test --test handler_dispatch_boundary_test` | `Intent`, `IntentKind`, `IntentExecution`, and `HandlerOutput` are frozen by the main integrator | Pipeline can record and dispatch intents through handler outputs; Wave 4 and Wave 5 fill in encryption, transit, and sync side effects |
+
 ### Wave 2: Schema And Wire
 
 Disjoint owner from core behavior.
@@ -343,4 +376,3 @@ cargo test passes
 cargo test -- --ignored passes for target guardrails
 all target guardrails are unignored or converted into active tests
 ```
-

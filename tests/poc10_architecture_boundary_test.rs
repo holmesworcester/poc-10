@@ -19,8 +19,52 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn source_files(root: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "target") {
+                    continue;
+                }
+                pending.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
 fn source_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
+}
+
+fn source_matches(root: &Path, needles: &[&str]) -> Vec<String> {
+    source_matches_in_paths(root, source_files(&root.join("src")), needles)
+}
+
+fn source_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&str]) -> Vec<String> {
+    let mut matches = Vec::new();
+    for path in paths {
+        let text = source_text(&path);
+        for (line_index, line) in text.lines().enumerate() {
+            for needle in needles {
+                if line.contains(needle) {
+                    matches.push(format!(
+                        "{}:{} contains {needle:?}",
+                        path.strip_prefix(root).unwrap().display(),
+                        line_index + 1
+                    ));
+                }
+            }
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    matches
 }
 
 fn meaningful_manifest_lines(text: &str) -> Vec<&str> {
@@ -66,6 +110,52 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
 }
 
 #[test]
+fn poc10_core_contract_files_are_present() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let required = [
+        "src/core/facts.rs",
+        "src/core/context.rs",
+        "src/core/matchers.rs",
+        "src/core/projection.rs",
+        "src/core/intents.rs",
+        "src/core/handler_dispatch.rs",
+    ];
+
+    let missing = required
+        .into_iter()
+        .filter(|path| !root.join(path).is_file())
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing.is_empty(),
+        "missing poc-10 core contract files:\n{}",
+        missing.join("\n")
+    );
+}
+
+#[test]
+fn poc10_projector_output_contract_emits_only_needs_offers_and_intents() {
+    let topo::core::projection::ProjectionOutput {
+        needs,
+        offers,
+        intents,
+    } = topo::core::projection::ProjectionOutput::default();
+
+    assert!(needs.is_empty());
+    assert!(offers.is_empty());
+    assert!(intents.is_empty());
+}
+
+#[test]
+fn poc10_handler_output_contract_emits_only_facts_and_intents() {
+    let topo::core::handler_dispatch::HandlerOutput { facts, intents } =
+        topo::core::handler_dispatch::HandlerOutput::default();
+
+    assert!(facts.is_empty());
+    assert!(intents.is_empty());
+}
+
+#[test]
 #[ignore = "poc-10 target guardrail: enable after the module tree is converted to root manifests"]
 fn poc10_target_has_no_mod_rs_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -105,7 +195,122 @@ fn poc10_target_has_no_per_module_schema_codec_or_cli_files() {
 }
 
 #[test]
-#[ignore = "poc-10 target guardrail: enable after the three schema files exist"]
+#[ignore = "poc-10 target guardrail: enable after event status, blocker, label, and receive queues are deleted"]
+fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let forbidden = [
+        "EventStatus",
+        "EventStatusCounts",
+        "event_modules.ready_events",
+        "event_modules.blocked_events_by_missing_dep",
+        "event_modules.missing_deps_by_blocked_event",
+        "event_modules.dependents_by_dep",
+        "event_modules.deps_by_dependent",
+        "event_modules.labels",
+        "event_modules.pending_reprojections",
+        "event_modules.recently_valid_events",
+        "event_modules.event_receive_context",
+        "event_modules.applied_shared_events",
+        "ready_events",
+        "blocked_events_by_missing_dep",
+        "missing_deps_by_blocked_event",
+        "dependents_by_dep",
+        "deps_by_dependent",
+        "pending_reprojections",
+        "recently_valid_events",
+        "event_receive_context",
+        "applied_shared_events",
+        "dependency_labels",
+        "event_labels",
+        "labels",
+    ];
+    let offenders = source_matches(root, &forbidden);
+
+    assert!(
+        offenders.is_empty(),
+        "poc-10 target source should use facts plus needs/offers instead of old event status, blocker, label, and receive queues:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "poc-10 target guardrail: enable after worker queues are replaced by core intents"]
+fn poc10_target_source_has_no_old_worker_queue_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let forbidden = [
+        "canonical.in",
+        "sync.in",
+        "transit.out",
+        "content.purge_instructions",
+        "encryption.pending_key_requests",
+        "encryption.pending_key_unwraps",
+        "encryption.pending_wrap_reconcile",
+        "encryption.negentropy_pending_purges",
+        "connection.pending_connection_attempts",
+        "connection.pending_connection_responses",
+        "canonical_in",
+        "transit_out",
+        "purge_instructions",
+        "pending_key_requests",
+        "pending_key_unwraps",
+        "pending_wrap_reconcile",
+        "negentropy_pending_purges",
+        "pending_connection_attempts",
+        "pending_connection_responses",
+    ];
+    let offenders = source_matches(root, &forbidden);
+
+    assert!(
+        offenders.is_empty(),
+        "poc-10 target source should route old worker queues through core intents instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "poc-10 target guardrail: enable after projector rows, deletes, and labels are emitted as needs/offers/intents"]
+fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let projector_paths = source_files(&root.join("src"))
+        .into_iter()
+        .filter(|path| {
+            path.file_name().is_some_and(|name| name == "projector.rs")
+                || path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .display()
+                    .to_string()
+                    .ends_with("src/workers/pipeline_helpers/event_pipeline.rs")
+        })
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "ProjectionOutput::rows",
+        "ProjectionOutput::labels",
+        "ProjectionOutput::rows_and_labels",
+        "ProjectionOutput::deletes",
+        "ProjectionOutput::deletes_and_labels",
+        "rows_and_labels",
+        "deletes_and_labels",
+        "pub rows:",
+        "pub deletes:",
+        "pub labels:",
+        "rows:",
+        "deletes:",
+        "labels:",
+        ".rows",
+        ".deletes",
+        ".labels",
+    ];
+    let offenders = source_matches_in_paths(root, projector_paths, &forbidden);
+
+    assert!(
+        offenders.is_empty(),
+        "poc-10 target projectors should emit only needs, offers, and intents; rows, deletes, and labels must be atomic intents or context output:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn poc10_target_has_exactly_three_schema_dsl_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let expected = [
