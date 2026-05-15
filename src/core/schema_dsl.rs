@@ -671,6 +671,7 @@ mod tests {
                 "invite_server_rows",
                 "user_invite_rows",
                 "device_invite_rows",
+                "invite_secret_rows",
                 "sync_compare_rows",
                 "sync_have_id_rows",
                 "sync_need_id_rows",
