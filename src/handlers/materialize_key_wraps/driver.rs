@@ -2,7 +2,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
 use crate::core::intents::Intent;
-use crate::event_modules::key_material::{create, intent};
+use crate::event_modules::encryption::{create, intent};
 
 #[derive(Debug, Clone, Default)]
 pub struct MaterializeKeyWrapsHandler;
