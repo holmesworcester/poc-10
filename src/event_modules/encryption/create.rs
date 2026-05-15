@@ -159,6 +159,22 @@ pub fn materialize_signed_key_wrap_fact(
     Ok(Fact::new(wrap.scope, wrap.timestamp, signed_bytes))
 }
 
+pub fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
+    let envelope = signed_fact::layout::decode_signed_fact(&bytes)?;
+    if envelope.inner_type != layout::TYPE_KEY_WRAP {
+        return Err("signed fact does not contain an encryption key wrap".to_string());
+    }
+    let wrap = layout::decode_key_wrap(&envelope.payload)?;
+    if envelope.signer_id != wrap.signer_endpoint_id {
+        return Err("key wrap signer does not match signed envelope signer".to_string());
+    }
+    Ok(Fact::new(
+        context::workspace_scope(wrap.workspace_id),
+        wrap.created_at_ms,
+        bytes,
+    ))
+}
+
 pub fn validate_retired_recipient_material(
     intent: &PurgeRetiredRecipientMaterialIntent,
     local_recipient_key_fact: &Fact,
@@ -406,4 +422,68 @@ fn associated_data(wrap: &KeyWrapFact) -> Vec<u8> {
     out.extend_from_slice(&wrap.sender_wrap_public_key);
     out.extend_from_slice(&wrap.signer_endpoint_id);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signed_key_wrap_bytes() -> (Vec<u8>, KeyWrapFact) {
+        let signer_private_key = [9; 32];
+        let signer_id = [2; 32];
+        let wrap = KeyWrapFact {
+            workspace_id: [1; 32],
+            created_at_ms: 1_700_000_321,
+            signer_endpoint_id: signer_id,
+            frontier_id: [3; 32],
+            wrapped_secret_kind: WrappedSecretKind::FrontierRoot,
+            wrapped_secret_id: [4; 32],
+            wrapped_source_secret_id: [0; 32],
+            wrapped_tombstone_node_id: [0; 32],
+            range_start: 0,
+            range_width: 0,
+            bit_depth: 0,
+            event_id_prefix: [0; 32],
+            recipient_key_id: [5; 32],
+            sender_wrap_public_key: [6; 32],
+            nonce: [7; 24],
+            ciphertext: [8; KEY_WRAP_CIPHERTEXT_BYTES],
+        };
+        let payload = layout::encode_key_wrap(&wrap).expect("encode key wrap");
+        let bytes =
+            signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+                .expect("sign key wrap");
+        (bytes, wrap)
+    }
+
+    #[test]
+    fn admit_signed_key_wrap_uses_inner_workspace_and_created_at() {
+        let (bytes, wrap) = signed_key_wrap_bytes();
+
+        let fact = admit_signed_key_wrap_fact(bytes.clone()).expect("admit signed key wrap");
+
+        assert_eq!(fact.scope, context::workspace_scope(wrap.workspace_id));
+        assert_eq!(fact.timestamp, wrap.created_at_ms);
+        assert_eq!(fact.bytes, bytes);
+    }
+
+    #[test]
+    fn admit_signed_key_wrap_rejects_other_signed_payloads() {
+        let signer_private_key = [9; 32];
+        let signer_id = [2; 32];
+        let payload = layout::encode_recipient_key(&RecipientKeyFact {
+            workspace_id: [1; 32],
+            endpoint_id: signer_id,
+            recipient_key: [3; 32],
+            previous_recipient_key_id: [0; 32],
+            created_at_ms: 1_700_000_321,
+        })
+        .expect("encode recipient key");
+        let bytes =
+            signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+                .expect("sign recipient key");
+
+        let err = admit_signed_key_wrap_fact(bytes).expect_err("recipient key is not a key wrap");
+        assert!(err.contains("key wrap"), "{err}");
+    }
 }

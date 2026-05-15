@@ -1163,16 +1163,16 @@ local receive facts
 Receive metadata should be represented as local facts about received facts.
 
 ```text
-ReceiveFact {
-    received_event_id,
-    origin,
-    local_endpoint,
-    remote_endpoint,
-    authorization,
+TransitReceivedFact {
+    received_fact_id,
+    origin_addr,
+    local_endpoint_id,
+    sender_endpoint_id,
     transit_kind,
     connection_id,
     request_id,
-    received_at,
+    frame_hash,
+    received_at_local_ms,
 }
 ```
 
@@ -1180,14 +1180,39 @@ The receive fact offers context:
 
 ```text
 Offer(
-    owner = receive_fact_id,
-    role = "receive.bootstrap_invite" | "receive.endpoint",
-    selector = received_event_id,
-    payload_ref = receive_fact_id,
+    owner = transit_received_fact_id,
+    role = "transit_received",
+    selector = received_fact_id,
+    payload_ref = transit_received_fact_id,
 )
 ```
 
 This replaces `ReceiveMetadata` queue metadata and `event_receive_context`.
+It is an ordinary local `about` fact: it is about the received shared fact,
+and its projection wakes any projector that has a matching receive-provenance
+need.
+
+`origin_addr` is observational and untrusted. It is useful for route learning,
+duplicate receive tracking, debugging, and diagnostics, but it does not prove
+protocol authority. `sender_endpoint_id` is the cryptographically proven
+transit sender recovered from frame unwrap; ordinary shared facts still validate
+through signatures, dependencies, context, and projectors. In particular,
+signed key-wrap admission must not depend on source IP or on this local receive
+fact. A key wrap is valid because its signed envelope, signer authority,
+recipient key, removal frontier, and local recipient context validate.
+
+Transport-bound facts may explicitly need receive provenance:
+
+```text
+Need(
+    owner = connection_response_fact_id,
+    role = "transit_received",
+    selector = connection_response_fact_id,
+)
+```
+
+Most shared event projectors should not emit that need. They may still be
+woken by local receive facts for read-side or diagnostic projections.
 
 Advantages:
 
@@ -1201,6 +1226,35 @@ shared fact identity stays independent of local receive state
 
 Receive facts are local operational facts. They should not sync as shared
 history, and they can be compacted by local retention policy.
+
+The target receive cycle is:
+
+```text
+receive_transit intent
+  -> transit handler authenticates/opens frame
+  -> emits inner shared fact(s)
+  -> emits local TransitReceivedFact about each inner fact
+  -> shared fact projectors validate protocol meaning
+  -> local provenance projectors update route/debug/duplicate state
+```
+
+No handler should smuggle receive provenance into projector arguments. The
+only durable interface is the local fact plus its context offer.
+
+The first concrete shared-fact admission point is signed key-wrap receive.
+Once transit unwrap recovers signed key-wrap bytes, admission parses the signed
+envelope and inner key-wrap only far enough to assign fact scope and timestamp:
+
+```text
+scope = workspace(key_wrap.workspace_id)
+timestamp = key_wrap.created_at_ms
+bytes = signed key-wrap envelope bytes
+```
+
+That admission step does not decide authority. The key-wrap projector still
+requires signer public key context, recipient key context, removal frontier
+context, and optional local recipient-key context before it writes rows, offers
+sync relevance, or emits unwrap intents.
 
 ## Transit, Connection, And Sync
 

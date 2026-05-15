@@ -29,3 +29,4 @@ pub mod sync_compare;
 pub mod sync_have_id;
 pub mod sync_need_id;
 pub mod transit;
+pub mod transit_received;

@@ -297,11 +297,19 @@ Next hard slices, in order:
 1. Put one real production admission path through target `EventBus`.
    Key-wrap receive is the best first path because it exercises signed facts,
    authority validation, context matching, secret coverage, unwrap intents, and
-   anti-amplification.
+   anti-amplification. Treat this as a target admission path for inner signed
+   facts, not as proof that transit unwrap or normal CLI routing is already
+   converted.
+   Current slice: `admit_signed_key_wrap_fact` accepts recovered signed key-wrap
+   bytes, derives only workspace scope and timestamp from the signed inner
+   payload, and leaves authority/context decisions to the key-wrap projector.
 2. Complete target receive/projection for signed key-wrap facts.
    Incoming signed envelopes containing key-wrap payloads must validate the
    envelope, signer authority, recipient key, frontier/source context, and then
    emit key-wrap rows, secret coverage offers, and unwrap intents.
+   Key-wrap admission must not depend on source IP. Source/origin metadata is a
+   local `transit_received` about fact and context offer for route/debug/local
+   projections.
 3. Finish handler/core execution semantics before wiring live paths.
    The target exact-input and atomic-drain primitives exist, and the
    RowIntentHandler compatibility bridge is gone. Next, keep successful
@@ -340,6 +348,10 @@ Rules to preserve while finishing:
   or follow-up intents through core.
 - Schemas live only in `core/`, `event_modules/`, and `handlers/`.
 - No `mod.rs`, no dumping-ground files, and no fake crypto or fake transit.
+- Transit receive provenance is local fact state, not hidden metadata:
+  `receive_transit` should emit shared inner facts plus local
+  `transit_received` facts about them; those facts project
+  `transit_received` context offers keyed by the received fact id.
 
 I want to rewrite topo with clarity on:
 
