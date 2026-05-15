@@ -1,7 +1,11 @@
 pub mod connection_request;
 pub mod connection_response;
 pub mod content_event;
+pub mod content_file;
+pub mod content_file_deletion;
+pub mod content_file_slice;
 pub mod content_message;
+pub mod content_message_deletion;
 pub mod content_reaction;
 pub mod encryption;
 pub mod identity_admin;
