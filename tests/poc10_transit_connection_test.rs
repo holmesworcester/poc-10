@@ -1,3 +1,4 @@
+use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
 use topo::core::intents::IntentKind;
@@ -141,9 +142,47 @@ fn transit_send_guard_accepts_normal_shared_facts() {
     let bytes = transit::sendable_fact_bytes(&input, &context).expect("shared facts are sendable");
 
     assert_eq!(bytes, vec![first.bytes, second.bytes]);
-    transit::TransitSendOnConnectionHandler::new()
+    let err = transit::TransitSendOnConnectionHandler::new()
         .handle(&intent, &context)
-        .expect("handler should accept normal shared facts");
+        .expect_err("send_on_connection must not consume work until packaging is live");
+    assert!(
+        err.contains("no live transit packaging handler"),
+        "handler should fail retryably instead of dropping work: {err}"
+    );
+}
+
+#[test]
+fn send_on_connection_handler_failure_keeps_intent_queued() {
+    let fact = Fact::new(
+        sync::context::workspace_scope([7; 32]),
+        1,
+        sync::layout::encode_shared_event(&sync::fact::SharedEventFact {
+            workspace_id: [7; 32],
+            event_id: [8; 32],
+        })
+        .expect("encode shared event"),
+    );
+    let intent = transit::send_on_connection_intent(transit::TransitSendOnConnection {
+        connection_id: [9; 32],
+        fact_ids: vec![fact.id],
+    });
+    let mut bus = EventBus::new();
+    bus.submit_fact(fact);
+    bus.submit_intent(intent).expect("queue send work");
+
+    let err = bus
+        .dispatch_deferred_intents_with_fact_context(
+            &transit::TransitSendOnConnectionHandler::new(),
+            10,
+        )
+        .expect_err("send handler is not live yet");
+
+    assert!(err.contains("no live transit packaging handler"), "{err}");
+    assert_eq!(bus.intents().len(), 1);
+    assert_eq!(
+        bus.intents()[0].kind.as_str(),
+        transit::TRANSIT_SEND_ON_CONNECTION
+    );
 }
 
 #[test]

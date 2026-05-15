@@ -5,6 +5,8 @@ use crate::core::intents::{AtomicIntent, Intent};
 use crate::core::store::{Store, TableName};
 use std::collections::BTreeMap;
 
+pub type HandlerFactId = FactId;
+
 #[derive(Debug, Clone, Default)]
 pub struct HandlerContext {
     facts: BTreeMap<FactId, Fact>,
@@ -45,6 +47,7 @@ impl HandlerContext {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HandlerOutput {
     pub facts: Vec<Fact>,
+    pub purged_facts: Vec<FactId>,
     pub intents: Vec<Intent>,
 }
 
@@ -58,6 +61,11 @@ impl HandlerOutput {
         self
     }
 
+    pub fn purge_fact(mut self, id: FactId) -> Self {
+        self.purged_facts.push(id);
+        self
+    }
+
     pub fn intent(mut self, intent: Intent) -> Self {
         self.intents.push(intent);
         self
@@ -67,6 +75,10 @@ impl HandlerOutput {
 pub trait IntentHandler {
     fn accepts(&self, _intent: &Intent) -> bool {
         true
+    }
+
+    fn input_fact_ids(&self, _intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        Ok(Vec::new())
     }
 
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String>;
@@ -130,6 +142,7 @@ mod tests {
         let output = HandlerOutput::new().fact(fact).intent(intent);
 
         assert_eq!(output.facts.len(), 1);
+        assert!(output.purged_facts.is_empty());
         assert_eq!(output.intents.len(), 1);
     }
 

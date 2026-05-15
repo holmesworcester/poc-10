@@ -20,7 +20,7 @@ use crate::core::context::{
 };
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
 use crate::core::handler_dispatch::{HandlerContext, IntentHandler};
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{AtomicIntent, Intent, IntentExecution, IntentKind, TableDelete};
 use crate::core::matchers::{match_context_delta, ContextMatcher};
 use crate::core::projection::{
     run_projection_with_context, MatchedContext, ProjectionContext, Projector,
@@ -203,8 +203,54 @@ impl EventBus {
         handler: &impl IntentHandler,
         limit: usize,
     ) -> Result<DispatchReport, String> {
-        let context = HandlerContext::with_facts(self.facts.values().cloned());
-        self.dispatch_deferred_intents(handler, &context, limit)
+        let mut report = DispatchReport::default();
+        while report.handled < limit {
+            let Some((intent_index, intent)) = self
+                .pop_next_intent_matching(handler, |intent| {
+                    intent.execution == IntentExecution::Deferred
+                })?
+            else {
+                break;
+            };
+            let input_ids = match handler.input_fact_ids(&intent) {
+                Ok(input_ids) => input_ids,
+                Err(err) => {
+                    self.restore_intent(intent_index, intent)?;
+                    return Err(err);
+                }
+            };
+            let context = HandlerContext::with_facts(
+                input_ids
+                    .into_iter()
+                    .filter_map(|fact_id| self.facts.get(&fact_id).cloned()),
+            );
+            let output = match handler.handle(&intent, &context) {
+                Ok(output) => output,
+                Err(err) => {
+                    self.restore_intent(intent_index, intent)?;
+                    return Err(err);
+                }
+            };
+            if let Err(err) = self.validate_intents(&output.intents) {
+                self.restore_intent(intent_index, intent)?;
+                return Err(err);
+            }
+            for purged in output.purged_facts {
+                self.purge_fact(purged);
+            }
+            for fact in output.facts {
+                if self.submit_fact(fact) {
+                    report.facts += 1;
+                }
+            }
+            for intent in output.intents {
+                if self.record_intent(intent)? {
+                    report.intents += 1;
+                }
+            }
+            report.handled += 1;
+        }
+        Ok(report)
     }
 
     fn dispatch_intents_matching(
@@ -232,6 +278,9 @@ impl EventBus {
                 self.restore_intent(intent_index, intent)?;
                 return Err(err);
             }
+            for purged in output.purged_facts {
+                self.purge_fact(purged);
+            }
             for fact in output.facts {
                 if self.submit_fact(fact) {
                     report.facts += 1;
@@ -252,6 +301,27 @@ impl EventBus {
         projector: &impl Projector,
         matchers: &[&dyn ContextMatcher],
         limit: usize,
+    ) -> Result<DrainReport, String> {
+        self.drain_inner(projector, matchers, limit, None)
+    }
+
+    pub fn drain_applying_atomic_rows(
+        &mut self,
+        projector: &impl Projector,
+        matchers: &[&dyn ContextMatcher],
+        store: &Store,
+        allowed_tables: &[TableName],
+        limit: usize,
+    ) -> Result<DrainReport, String> {
+        self.drain_inner(projector, matchers, limit, Some((store, allowed_tables)))
+    }
+
+    fn drain_inner(
+        &mut self,
+        projector: &impl Projector,
+        matchers: &[&dyn ContextMatcher],
+        limit: usize,
+        atomic_rows: Option<(&Store, &[TableName])>,
     ) -> Result<DrainReport, String> {
         let mut report = DrainReport::default();
         while report.projections < limit {
@@ -278,11 +348,21 @@ impl EventBus {
                 self.restore_pending(owner);
                 return Err(err);
             }
+            if let Some((store, allowed_tables)) = atomic_rows {
+                if let Err(err) = apply_atomic_row_intents(&run.intents, store, allowed_tables) {
+                    self.restore_pending(owner);
+                    return Err(err);
+                }
+            }
             self.replace_context(owner, run.context);
             report.projections += 1;
             report.context_matches +=
                 self.wake_context_matches(&run.context_delta, matchers, &mut report);
             for intent in run.intents {
+                if atomic_rows.is_some() && intent.execution == IntentExecution::Atomic {
+                    report.intents += 1;
+                    continue;
+                }
                 if self.record_intent(intent)? {
                     report.intents += 1;
                 }
@@ -317,6 +397,21 @@ impl EventBus {
         } else {
             self.context_by_owner.insert(owner, context);
         }
+    }
+
+    fn purge_fact(&mut self, owner: FactId) -> bool {
+        let mut changed = self.facts.remove(&owner).is_some();
+        changed |= self.context_by_owner.remove(&owner).is_some();
+        changed |= self.pending_owners.remove(&owner);
+        let before = self.pending_projection.len();
+        self.pending_projection.retain(|pending| pending != &owner);
+        changed |= self.pending_projection.len() != before;
+
+        self.context_by_owner.retain(|_, context| {
+            context.offers.retain(|offer| offer.payload_ref != owner);
+            !(context.needs.is_empty() && context.offers.is_empty())
+        });
+        changed
     }
 
     fn validate_intents(&self, intents: &[Intent]) -> Result<(), String> {
@@ -552,6 +647,36 @@ fn replace_table_rows(
     store.delete_table_rows_in_tx(table, keys)?;
     store.insert_table_rows_in_tx(rows)?;
     Ok(())
+}
+
+fn apply_atomic_row_intents(
+    intents: &[Intent],
+    store: &Store,
+    allowed_tables: &[TableName],
+) -> Result<(), String> {
+    let mut rows = Vec::new();
+    let mut deletes = Vec::<TableDelete>::new();
+    for intent in intents {
+        if intent.execution != IntentExecution::Atomic {
+            continue;
+        }
+        match AtomicIntent::from_intent(intent, allowed_tables)? {
+            AtomicIntent::PutRow(row) => rows.push(row),
+            AtomicIntent::DeleteRow(delete) => deletes.push(delete),
+        }
+    }
+    if rows.is_empty() && deletes.is_empty() {
+        return Ok(());
+    }
+    store
+        .write_transaction(|tx| {
+            tx.insert_table_rows_in_tx(rows)?;
+            for delete in deletes {
+                tx.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
+            }
+            Ok(())
+        })
+        .map_err(|err| format!("apply atomic row intents: {err}"))
 }
 
 fn context_row_key(owner: FactId, value: &[u8]) -> Vec<u8> {
@@ -1708,6 +1833,15 @@ mod tests {
     impl IntentHandler for ReadNamedFactHandler {
         fn accepts(&self, intent: &Intent) -> bool {
             intent.kind.as_str() == "read_named_fact"
+        }
+
+        fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<FactId>, String> {
+            let fact_id: FactId = intent
+                .key
+                .as_slice()
+                .try_into()
+                .map_err(|_| "read_named_fact intent key must be a fact id".to_string())?;
+            Ok(vec![fact_id])
         }
 
         fn handle(

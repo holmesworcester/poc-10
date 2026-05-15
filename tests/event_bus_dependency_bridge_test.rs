@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 
 use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactId, FactScope};
-use topo::core::handler_dispatch::{HandlerContext, RowIntentHandler};
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::store::Store;
@@ -111,7 +110,7 @@ fn event_with_deps_bridge_never_exposes_failed_dependency_context() {
 }
 
 #[test]
-fn staged_event_bridge_writes_row_through_atomic_row_intent_handler() {
+fn staged_event_bridge_writes_row_during_atomic_projection_drain() {
     let store = Store::open_memory_with_schemas(rows::SCHEMAS).expect("open staged event schema");
     let inner = event_with_deps(42, vec![[1; 32], [2; 32]], 7);
     let staged = staged_event(17, inner.bytes.clone());
@@ -119,17 +118,16 @@ fn staged_event_bridge_writes_row_through_atomic_row_intent_handler() {
 
     bus.submit_fact(staged);
     let projected = bus
-        .drain(&projector::Poc10EventWithDepsProjector::new(), &[], 10)
+        .drain_applying_atomic_rows(
+            &projector::Poc10EventWithDepsProjector::new(),
+            &[],
+            &store,
+            &[rows::STAGED_EVENTS_WITH_DEPS],
+            10,
+        )
         .expect("project staged event");
     assert_eq!(projected.projections, 1);
     assert_eq!(projected.intents, 1);
-
-    let handler = RowIntentHandler::new(&store, &[rows::STAGED_EVENTS_WITH_DEPS]);
-    let applied = bus
-        .dispatch_intents(&handler, &HandlerContext::new(), 10)
-        .expect("apply staged row intent");
-
-    assert_eq!(applied.handled, 1);
     assert!(bus.intents().is_empty());
     assert_eq!(
         store

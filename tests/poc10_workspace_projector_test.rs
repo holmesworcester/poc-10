@@ -1,6 +1,5 @@
 use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::handler_dispatch::{HandlerContext, RowIntentHandler};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::event_modules::identity_workspace::fact::WorkspaceFact;
@@ -24,17 +23,16 @@ fn workspace_projector_materializes_row_through_atomic_intent() {
 
     assert!(bus.submit_fact(fact.clone()));
     let projected = bus
-        .drain(&project::WorkspaceProjector::new(), &[], 10)
+        .drain_applying_atomic_rows(
+            &project::WorkspaceProjector::new(),
+            &[],
+            &store,
+            &[rows::WORKSPACE_ROWS],
+            10,
+        )
         .expect("project workspace");
     assert_eq!(projected.projections, 1);
     assert_eq!(projected.intents, 1);
-
-    let handler = RowIntentHandler::new(&store, &[rows::WORKSPACE_ROWS]);
-    let applied = bus
-        .dispatch_intents(&handler, &HandlerContext::new(), 10)
-        .expect("apply workspace row intent");
-
-    assert_eq!(applied.handled, 1);
     assert!(bus.intents().is_empty());
     let rows = store
         .table_rows(rows::WORKSPACE_ROWS)
@@ -50,7 +48,13 @@ fn workspace_projector_materializes_row_through_atomic_intent() {
 
     assert!(!bus.submit_fact(fact));
     let duplicate = bus
-        .drain(&project::WorkspaceProjector::new(), &[], 10)
+        .drain_applying_atomic_rows(
+            &project::WorkspaceProjector::new(),
+            &[],
+            &store,
+            &[rows::WORKSPACE_ROWS],
+            10,
+        )
         .expect("duplicate drain");
     assert_eq!(duplicate.projections, 0);
     assert!(bus.intents().is_empty());

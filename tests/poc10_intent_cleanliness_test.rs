@@ -115,7 +115,7 @@ fn handlers_do_not_own_event_module_projection_rows() {
 #[test]
 fn purge_event_handler_must_be_real_retention_work_when_it_exists() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/handlers/purge_event.rs");
+    let path = root.join("src/handlers/purge_event/driver.rs");
     if !path.exists() {
         return;
     }
@@ -135,6 +135,7 @@ fn purge_event_handler_must_be_real_retention_work_when_it_exists() {
     }
     assert!(
         text.contains("purge_event_storage_in_tx")
+            || text.contains("purge_fact")
             || text.contains("DiscoverCascade")
             || text.contains("RetireSecret")
             || text.contains("SyncIndexPurge"),

@@ -1,5 +1,135 @@
 # Topo rewrite
 
+## Current poc-10 planning checkpoint
+
+The active rewrite branch is `/home/holmes/poc-10` on `new-architecture`.
+`new_architecture.md` is the destination architecture; this file keeps the
+handoff/status notes that matter if work resumes after a context limit.
+
+As of 2026-05-15, full `cargo test` is green on the current branch state. The
+target architecture is partially implemented and protected by boundary tests,
+but it is not done: legacy `protocol/` modules and workers still coexist with
+the target `core/`, `event_modules/`, and `handlers/` layout, and two poc-10
+guardrail tests remain intentionally ignored until old projector row/label paths
+and worker queues are fully replaced.
+
+Recent target work:
+
+- `5993165 Make sealed messages purge-ready`
+  - sealed message facts/rows now carry real purge coordinates
+  - deletion is author-scoped
+  - fake plaintext materialization was removed
+  - deletion offers emit deterministic `purge_event` intents
+- `282580b Keep local capabilities off transit`
+  - local capability facts use `FactScope::Local`
+  - transit rejects local facts and private local fact tags
+- Current purge slice
+  - `HandlerOutput` can now report `purged_facts`
+  - `EventBus` applies those purges in memory and persists them through the
+    normal core save path
+  - `PurgeEventHandler` validates exact message/deletion proof and purges the
+    retained target fact without touching projection rows directly
+  - missing target/proof leaves the intent queued for retry
+  - invalid proof consumes the purge intent without purging
+  - focused purge/boundary tests and full `cargo test` pass
+- Current handler/core semantics slice
+  - deferred handlers declare exact fact ids through `IntentHandler::input_fact_ids`
+  - EventBus builds handler context from only those ids
+  - target send-on-connection no longer consumes work without live transit packaging
+  - `drain_applying_atomic_rows` applies atomic row intents during projection
+    and leaves only deferred intents queued
+
+Important caveats from the latest read-only audit:
+
+- Target modules are not the live production path yet. Most CLI/daemon behavior
+  still runs through legacy `src/protocol` modules and `src/workers`; target
+  modules are currently exercised mainly by poc-10 tests.
+- Target transit wrap/unwrap is still a boundary skeleton. Real frame crypto and
+  inbound/outbound network integration remain in legacy `transit_in` and
+  `transit_out`.
+- Target purge currently purges exact retained facts through core. It does not
+  yet replace legacy retention cascades, sync purge bookkeeping, or post-commit
+  forward-secrecy retirement.
+- Treat the current `purged_facts`/`PurgeEventHandler` slice as transitional
+  unless it is tightened into a bounded retention step. A permanent generic
+  handler escape hatch for deleting facts would undermine the model. The next
+  purge iteration should make the handler compute exact purge consequences and
+  emit `DiscoverCascade`, `RetireSecret`, and `SyncIndexPurge` follow-up
+  intents, or replace `purged_facts` with a narrower retention-specific output.
+- The target `SendOnConnection` handler is now retry-safe, but still not a live
+  packaging path. It validates sendability and returns an error so the intent
+  stays queued until transit wrapping is implemented.
+- Atomic row intents now have a target projection-drain path that applies them
+  immediately, but some isolated tests and legacy bridges still use the old
+  RowIntentHandler compatibility surface.
+- Deferred handlers now receive exact declared fact inputs in the target EventBus
+  helper. Continue pushing handlers toward exact input declarations rather than
+  broad store/query access.
+- Codec/payload parsing is reappearing in target intent files and core EventBus
+  persistence helpers. Move reusable fixed and bounded variable primitives into
+  `core/wire.rs` so intent/layout code is declarative rather than hand-rolled.
+- `src/event_modules/encryption` is already broad. Split it by fact family and
+  invariant before adding more behavior: recipient key, key request, key wrap,
+  local secret, wrap source/frontier, and secret coverage matching.
+- Target key healing has real deterministic wrap/unwrap tests, but hostile key
+  request validation and retired recipient-material cleanup remain incomplete.
+- Target dep-aware sync currently proves a small relevant-key sketch, not full
+  dependency/key closure over production negentropy ranges.
+- Many production event types are still legacy-only: identity admin/user/device
+  invite/endpoint shared, connection request/response, reactions/files/slices,
+  disappearing settings, and sync compare/have/need.
+
+Next hard slices, in order:
+
+1. Put one real production admission path through target `EventBus`.
+   Key-wrap receive is the best first path because it exercises signed facts,
+   authority validation, context matching, secret coverage, unwrap intents, and
+   anti-amplification.
+2. Complete target receive/projection for signed key-wrap facts.
+   Incoming signed envelopes containing key-wrap payloads must validate the
+   envelope, signer authority, recipient key, frontier/source context, and then
+   emit key-wrap rows, secret coverage offers, and unwrap intents.
+3. Replace generated wrap `created_at_ms = 0`.
+   Generated deterministic/idempotent wraps should use the source frontier time
+   or explicit key request time while keeping the same anti-amplification key.
+4. Finish handler/core execution semantics before wiring live paths.
+   The target exact-input and atomic-drain primitives exist. Next, migrate the
+   remaining target tests and live paths off RowIntentHandler compatibility, and
+   keep successful deferred handlers limited to durable progress.
+5. Finish purge split.
+   Keep `PurgeEventHandler` as exact retained fact purge, then add bounded
+   handlers for cascade discovery, secret retirement, and sync-index purge or
+   update. Do not restore broad projection-row cleanup inside purge, and do not
+   keep a generic fact-delete escape hatch if retention-specific outputs are
+   clearer.
+6. Move dep-aware sync to context needs/offers for keys.
+   Sync should send relevant out-of-range key wraps or retained key nodes for
+   encrypted facts in the requested range. Add a performance test for a message
+   whose content dependency is outside the range by about one day.
+7. Convert connection, transit, and sync workers into intent handlers.
+   Preserve the split: connection chooses routes and emits transit-wrap intents,
+   transit wraps/unwraps opaque frames, network send only sends bytes, and sync
+   only decides ids.
+8. Define the command contract.
+   Commands should be pure fact constructors over a standard command context and
+   narrow lookups. Identity should own local signing capability creation and
+   authorization rather than letting arbitrary commands hide those reads.
+9. Remove compatibility.
+   Delete old worker queues, label/blocking tables, receive side channels, and
+   compatibility adapters only after target behavior has unchanged or
+   harness-only-adjusted poc-8 coverage.
+
+Rules to preserve while finishing:
+
+- Projectors consume fact plus context and return only needs, offers, and
+  intents.
+- Intent payloads describe deterministic work only; they must not become hidden
+  projectors or protocol logic sinks.
+- Handlers perform bounded stateful effects and return facts, purged fact ids,
+  or follow-up intents through core.
+- Schemas live only in `core/`, `event_modules/`, and `handlers/`.
+- No `mod.rs`, no dumping-ground files, and no fake crypto or fake transit.
+
 I want to rewrite topo with clarity on:
 
 * interfaces

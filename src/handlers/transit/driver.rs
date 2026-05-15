@@ -1,6 +1,6 @@
 //! Transit send preparation guard.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
+use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::Intent;
 use crate::event_modules::{encryption, signed_fact};
 
@@ -22,10 +22,14 @@ impl IntentHandler for TransitSendOnConnectionHandler {
         intent.kind.as_str() == TRANSIT_SEND_ON_CONNECTION
     }
 
+    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        Ok(decode_send_on_connection(intent)?.fact_ids)
+    }
+
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
         let input = decode_send_on_connection(intent)?;
         let _ = sendable_fact_bytes(&input, context)?;
-        Ok(HandlerOutput::new())
+        Err("send_on_connection has no live transit packaging handler yet".to_string())
     }
 }
 

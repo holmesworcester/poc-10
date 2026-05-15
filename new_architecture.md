@@ -63,6 +63,103 @@ The migration succeeds when:
 The first `poc-10` milestone is not feature expansion. It is a clean structural
 switch-over with the `poc-8` test suite still green.
 
+## Current Migration Checkpoint
+
+As of 2026-05-15 on branch `new-architecture`, `cargo test` is green with the
+target architecture slices that have landed so far. This is still a migration
+state, not the final "zero cruft" state: legacy `protocol/` modules and
+workers still coexist with the target `core/`, `event_modules/`, and
+`handlers/` shape, and two poc-10 architecture guardrail tests remain ignored
+until projector rows/labels and old worker queues are fully replaced.
+
+Implemented target slices:
+
+- Core fact/context/intent/projector primitives exist and are covered by
+  boundary tests.
+- Atomic row intents are the projector-owned path for bounded read-model row
+  writes and deletes.
+- Context needs/offers replace the key blocking paths for target encrypted
+  messages, recipient keys, key wraps, and update/deletion wakeups.
+- Secret coverage matching wakes sealed content without modeling implicit keys
+  as hard event dependencies.
+- Signed key-wrap creation, key request healing, proactive recipient-key
+  wrapping, and post-deletion retained-node wrapping have target tests.
+- Local capability facts are scoped `Local` and transit refuses to send local
+  facts or private fact tags.
+- Transit/connection target intent tests cover the split between connection
+  send, transit wrapping, and opaque network send.
+- Sealed messages carry purge coordinates, deletion offers emit deterministic
+  `purge_event` intents, and `PurgeEventHandler` now purges retained target
+  facts through `HandlerOutput` rather than mutating storage behind core.
+- Deferred handlers declare exact fact inputs through the handler contract, and
+  EventBus builds handler context from those ids instead of exposing all facts.
+- The target projection drain can apply atomic row intents immediately through
+  core store primitives while leaving only deferred intents in the queue.
+- Target `SendOnConnection` is retry-safe while packaging remains incomplete: it
+  validates sendability but returns an error rather than consuming work.
+
+Current hard gaps:
+
+- The target modules are not yet the live production path. `src/event_modules/*`
+  and `src/handlers/*` are exercised by target tests, while production CLI and
+  daemon behavior still mostly dispatch through legacy `src/protocol` modules
+  and `src/workers`.
+- Target transit wrap/unwrap is not real yet. Current target tests enforce
+  capability/sendability boundaries and opaque intent naming, but real frame
+  encryption, network IO, inbound unwrap, and receive-fact admission still live
+  in legacy workers.
+- The current target `SendOnConnection` handler must not be considered live
+  behavior. It validates sendability and keeps the intent retryable, but does
+  not yet produce a transit-wrap or network-send handoff.
+- Some target tests and compatibility bridges still apply atomic rows with the
+  old RowIntentHandler path. New target paths should use projection drain with
+  atomic row application.
+- Finish the full target receive path for signed key-wrap facts. Incoming signed
+  envelopes containing key-wrap payloads must validate signature, signer
+  authority, recipient key, and frontier context before producing key-wrap rows,
+  offers, and unwrap intents.
+- Harden target key request projection. The target tests cover deterministic
+  healing and anti-amplification, but hostile requester/responder cases and
+  responder-source ownership are not fully validated yet.
+- Implement retired recipient-material cleanup. Supersession currently emits
+  target architecture work, but the durable handler that purges obsolete local
+  recipient material still needs to land.
+- Replace generated wrap timestamp placeholdering. Deterministic generated wraps
+  should still be idempotent, but their `created_at_ms` should come from the
+  source frontier or explicit request coordinate, not a zero placeholder.
+- Complete the purge split. `PurgeEventHandler` currently handles exact retained
+  fact purge; cascade discovery, secret retirement, and sync-index purge/update
+  still need bounded handlers before legacy `content_purge` can disappear. The
+  current `purged_facts` output is acceptable only as a migration checkpoint; the
+  final shape should prefer retention-specific bounded outputs/intents over a
+  generic fact-delete escape hatch.
+- Split broad target encryption code before adding more behavior. Recipient key,
+  key request, key wrap, local secret, wrap-source/frontier, and secret coverage
+  matching should be separate narrow files or modules.
+- Move reusable payload reader/writer primitives into `core/wire.rs`. Intent and
+  layout files should declare fixed or bounded fields instead of accumulating
+  hand-rolled offsets.
+- Move dep-aware sync to context needs/offers. Sync must include relevant
+  out-of-range key wraps or retained key nodes for in-range encrypted content,
+  and perf tests should prove one-day-out-of-range dependencies display fast.
+- Convert connection, transit, and sync workers into intent handlers without
+  turning intents into logic sinks. `SendOnConnection`, transit wrap/unwrap, sync
+  compare handling, and network send should communicate only through facts and
+  intents.
+- Define the command contract. Commands should be pure constructors over a
+  standard command context with narrow lookups, especially for local signing and
+  local capability material.
+- Delete legacy queues/tables/files only after their target behavior is covered
+  by unchanged or harness-only-adjusted `poc-8` tests.
+
+The next implementation priority is the hard middle, not cosmetic cleanup:
+target receive/projection for signed key wraps, deterministic wrap timestamps,
+dep-aware sync context transfer for keys, and the remaining purge handlers.
+The first production-path cut should route one real admission path through
+target `EventBus` and target projectors, with key-wrap receive as the preferred
+candidate because it exercises signed facts, context, key offers, unwrap
+intents, and anti-amplification.
+
 ## Design Principles
 
 Core owns mechanics, not protocol meaning.

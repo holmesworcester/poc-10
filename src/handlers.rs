@@ -5,5 +5,6 @@
 
 pub mod connection;
 pub mod materialize_key_wraps;
+pub mod purge_event;
 pub mod transit;
 pub mod unwrap_key_wrap;

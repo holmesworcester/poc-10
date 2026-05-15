@@ -31,9 +31,14 @@ fn handler_dispatch_output_boundary_is_facts_and_followup_intents_only() {
         .handle(&input, &HandlerContext::new())
         .expect("handler output");
 
-    let HandlerOutput { facts, intents } = output;
+    let HandlerOutput {
+        facts,
+        purged_facts,
+        intents,
+    } = output;
 
     assert_eq!(facts.len(), 1);
+    assert!(purged_facts.is_empty());
     assert_eq!(facts[0].scope, FactScope::Local);
     assert_eq!(facts[0].timestamp, 42);
     assert_eq!(facts[0].bytes, b"handler-produced-fact");

@@ -1,6 +1,6 @@
 //! Driver for accepted key-wrap recovery.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
+use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::Intent;
 use crate::event_modules::encryption::{create, intent};
 
@@ -16,6 +16,15 @@ impl UnwrapKeyWrapHandler {
 impl IntentHandler for UnwrapKeyWrapHandler {
     fn accepts(&self, intent: &Intent) -> bool {
         intent.kind.as_str() == intent::UNWRAP_KEY_WRAP
+    }
+
+    fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        let input = intent::decode_unwrap_key_wrap_intent(raw_intent)?;
+        Ok(vec![
+            input.key_wrap_id,
+            input.local_recipient_key_id,
+            input.recipient_key_id,
+        ])
     }
 
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {

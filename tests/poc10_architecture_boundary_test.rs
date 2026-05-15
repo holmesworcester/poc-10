@@ -147,11 +147,15 @@ fn poc10_projector_output_contract_emits_only_needs_offers_and_intents() {
 }
 
 #[test]
-fn poc10_handler_output_contract_emits_only_facts_and_intents() {
-    let topo::core::handler_dispatch::HandlerOutput { facts, intents } =
-        topo::core::handler_dispatch::HandlerOutput::default();
+fn poc10_handler_output_contract_emits_only_facts_purges_and_intents() {
+    let topo::core::handler_dispatch::HandlerOutput {
+        facts,
+        purged_facts,
+        intents,
+    } = topo::core::handler_dispatch::HandlerOutput::default();
 
     assert!(facts.is_empty());
+    assert!(purged_facts.is_empty());
     assert!(intents.is_empty());
 }
 

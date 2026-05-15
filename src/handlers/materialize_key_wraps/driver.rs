@@ -1,6 +1,6 @@
 //! Driver for deterministic target key-wrap materialization.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
+use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::Intent;
 use crate::event_modules::encryption::{create, intent};
 
@@ -16,6 +16,15 @@ impl MaterializeKeyWrapsHandler {
 impl IntentHandler for MaterializeKeyWrapsHandler {
     fn accepts(&self, intent: &Intent) -> bool {
         intent.kind.as_str() == intent::MATERIALIZE_KEY_WRAPS
+    }
+
+    fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        let input = intent::decode_materialize_key_wraps_intent(raw_intent)?;
+        Ok(vec![
+            input.recipient_key_id,
+            input.source_fact_id,
+            input.signer_secret_fact_id,
+        ])
     }
 
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
