@@ -9,6 +9,7 @@ pub mod content_message_deletion;
 pub mod content_reaction;
 pub mod encryption;
 pub mod identity_admin;
+pub mod identity_device_invite;
 pub mod identity_endpoint;
 pub mod identity_endpoint_shared;
 pub mod identity_invite_accepted;

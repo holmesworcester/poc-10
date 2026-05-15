@@ -670,6 +670,7 @@ mod tests {
                 "invite_accepted_rows",
                 "invite_server_rows",
                 "user_invite_rows",
+                "device_invite_rows",
                 "sync_compare_rows",
                 "sync_have_id_rows",
                 "sync_need_id_rows",

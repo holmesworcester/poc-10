@@ -138,6 +138,12 @@ table user_invite_rows {
   row_key (key);
 }
 
+table device_invite_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
 table sync_compare_rows {
   column key bytes;
   column value bytes;
