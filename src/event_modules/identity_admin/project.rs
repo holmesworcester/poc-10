@@ -14,8 +14,8 @@
 //!
 //! Those checks rely on the not-yet-ported signed envelope verification and
 //! dependency lookup plumbing. The poc-10 projection plane does not yet expose
-//! signed-envelope-verified dependencies (cf. the identity_user gap noted in
-//! commit 70c1f14), so the target projector currently performs only payload
+//! signed-envelope-verified dependencies (cf. the same gap in the target
+//! identity_user projector), so the target projector currently performs only payload
 //! decoding and basic structural validation. The cross-fact authority and
 //! signer/key bindings will be tightened once signed_fact verification and
 //! dependency context are wired into the projector trait.
