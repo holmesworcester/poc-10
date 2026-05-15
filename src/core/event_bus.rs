@@ -19,6 +19,7 @@ use crate::core::context::{
     ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
 };
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
+use crate::core::handler_dispatch::{HandlerContext, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::core::matchers::{match_context_delta, ContextMatcher};
 use crate::core::projection::{run_projection, Projector};
@@ -36,6 +37,13 @@ pub struct DrainReport {
     pub projections: usize,
     pub context_matches: usize,
     pub wakes: usize,
+    pub intents: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DispatchReport {
+    pub handled: usize,
+    pub facts: usize,
     pub intents: usize,
 }
 
@@ -157,6 +165,41 @@ impl EventBus {
         self.record_intent(intent)
     }
 
+    pub fn dispatch_intents(
+        &mut self,
+        handler: &impl IntentHandler,
+        context: &HandlerContext,
+        limit: usize,
+    ) -> Result<DispatchReport, String> {
+        let mut report = DispatchReport::default();
+        while report.handled < limit && !self.intents.is_empty() {
+            let intent = self.pop_intent_front()?;
+            let output = match handler.handle(&intent, context) {
+                Ok(output) => output,
+                Err(err) => {
+                    self.restore_intent_front(intent)?;
+                    return Err(err);
+                }
+            };
+            if let Err(err) = self.validate_intents(&output.intents) {
+                self.restore_intent_front(intent)?;
+                return Err(err);
+            }
+            for fact in output.facts {
+                if self.submit_fact(fact) {
+                    report.facts += 1;
+                }
+            }
+            for intent in output.intents {
+                if self.record_intent(intent)? {
+                    report.intents += 1;
+                }
+            }
+            report.handled += 1;
+        }
+        Ok(report)
+    }
+
     pub fn drain(
         &mut self,
         projector: &impl Projector,
@@ -267,6 +310,31 @@ impl EventBus {
         self.intent_keys.insert(key, self.intents.len());
         self.intents.push(intent);
         Ok(true)
+    }
+
+    fn pop_intent_front(&mut self) -> Result<Intent, String> {
+        let intent = self.intents.remove(0);
+        self.rebuild_intent_keys()?;
+        Ok(intent)
+    }
+
+    fn restore_intent_front(&mut self, intent: Intent) -> Result<(), String> {
+        self.intents.insert(0, intent);
+        self.rebuild_intent_keys()
+    }
+
+    fn rebuild_intent_keys(&mut self) -> Result<(), String> {
+        self.intent_keys.clear();
+        for (index, intent) in self.intents.iter().enumerate() {
+            let key = intent_row_key(intent);
+            if self.intent_keys.insert(key, index).is_some() {
+                return Err(format!(
+                    "duplicate intent idempotence key for {}",
+                    intent.kind.as_str()
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn wake_context_matches(
@@ -695,6 +763,7 @@ mod tests {
     use super::*;
     use crate::core::context::{Role, Selector};
     use crate::core::facts::FactScope;
+    use crate::core::handler_dispatch::HandlerOutput;
     use crate::core::intents::{IntentExecution, IntentKind};
     use crate::core::matchers::ExactSelectorMatcher;
     use crate::core::projection::{ProjectionContext, ProjectionOutput};
@@ -840,6 +909,97 @@ mod tests {
         assert_eq!(bus.pending_len(), 0);
         assert!(bus.context(&owner.id).is_none());
         assert_eq!(bus.intents().len(), 1);
+    }
+
+    #[test]
+    fn dispatch_handler_output_feeds_back_into_projection_cycle() {
+        let mut bus = EventBus::new();
+        bus.submit_intent(Intent::new(
+            IntentKind::new("trigger_handler").unwrap(),
+            IntentExecution::Deferred,
+            b"trigger",
+            b"payload",
+        ))
+        .expect("submit trigger intent");
+
+        let report = bus
+            .dispatch_intents(&FactAndIntentHandler, &HandlerContext, 1)
+            .expect("dispatch handler");
+
+        assert_eq!(report.handled, 1);
+        assert_eq!(report.facts, 1);
+        assert_eq!(report.intents, 1);
+        assert_eq!(bus.pending_len(), 1);
+        assert_eq!(bus.intents().len(), 1);
+
+        let drain = bus
+            .drain(&HandlerFactProjector, &[], 10)
+            .expect("project handler fact");
+        assert_eq!(drain.projections, 1);
+        assert_eq!(drain.intents, 1);
+        assert_eq!(bus.pending_len(), 0);
+        assert_eq!(bus.intents().len(), 2);
+    }
+
+    #[test]
+    fn failed_handler_keeps_intent_available_for_retry() {
+        let mut bus = EventBus::new();
+        let handler = FailOnceHandler {
+            fail: Cell::new(true),
+        };
+        bus.submit_intent(Intent::new(
+            IntentKind::new("retryable_handler").unwrap(),
+            IntentExecution::Deferred,
+            b"retry",
+            b"payload",
+        ))
+        .expect("submit retry intent");
+
+        let err = bus
+            .dispatch_intents(&handler, &HandlerContext, 10)
+            .expect_err("handler fails once");
+        assert!(err.contains("handler unavailable"), "{err}");
+        assert_eq!(bus.intents().len(), 1);
+
+        let report = bus
+            .dispatch_intents(&handler, &HandlerContext, 10)
+            .expect("handler retry succeeds");
+        assert_eq!(report.handled, 1);
+        assert!(bus.intents().is_empty());
+    }
+
+    #[test]
+    fn conflicting_handler_intent_does_not_submit_facts() {
+        let mut bus = EventBus::new();
+        let fact = Fact::new(FactScope::Global, 9, b"conflict-fact".to_vec());
+        bus.submit_intent(Intent::new(
+            IntentKind::new("trigger_conflict").unwrap(),
+            IntentExecution::Deferred,
+            b"trigger",
+            b"payload",
+        ))
+        .expect("submit trigger");
+        bus.submit_intent(Intent::new(
+            IntentKind::new("followup_conflict").unwrap(),
+            IntentExecution::Deferred,
+            b"same",
+            b"old",
+        ))
+        .expect("submit existing followup");
+
+        let err = bus
+            .dispatch_intents(
+                &ConflictingIntentHandler { fact: fact.clone() },
+                &HandlerContext,
+                10,
+            )
+            .expect_err("handler output conflicts");
+
+        assert!(err.contains("intent idempotence key conflict"), "{err}");
+        assert_eq!(bus.intents().len(), 2);
+        assert_eq!(bus.intents()[0].kind.as_str(), "trigger_conflict");
+        assert!(!bus.has_fact(&fact.id));
+        assert_eq!(bus.pending_len(), 0);
     }
 
     #[test]
@@ -1201,6 +1361,87 @@ mod tests {
             } else {
                 Ok(output)
             }
+        }
+    }
+
+    struct FactAndIntentHandler;
+
+    impl IntentHandler for FactAndIntentHandler {
+        fn handle(
+            &self,
+            intent: &Intent,
+            _context: &HandlerContext,
+        ) -> Result<HandlerOutput, String> {
+            Ok(HandlerOutput::new()
+                .fact(Fact::new(
+                    FactScope::Global,
+                    44,
+                    b"handler-produced-fact".to_vec(),
+                ))
+                .intent(Intent::new(
+                    IntentKind::new("handler_followup").unwrap(),
+                    IntentExecution::Deferred,
+                    intent.key.clone(),
+                    b"followup",
+                )))
+        }
+    }
+
+    struct HandlerFactProjector;
+
+    impl Projector for HandlerFactProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.bytes == b"handler-produced-fact" {
+                return Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("projected_handler_fact").unwrap(),
+                    IntentExecution::Atomic,
+                    fact.id,
+                    b"materialized",
+                )));
+            }
+            Ok(ProjectionOutput::new())
+        }
+    }
+
+    struct FailOnceHandler {
+        fail: Cell<bool>,
+    }
+
+    impl IntentHandler for FailOnceHandler {
+        fn handle(
+            &self,
+            _intent: &Intent,
+            _context: &HandlerContext,
+        ) -> Result<HandlerOutput, String> {
+            if self.fail.replace(false) {
+                return Err("handler unavailable".to_string());
+            }
+            Ok(HandlerOutput::new())
+        }
+    }
+
+    struct ConflictingIntentHandler {
+        fact: Fact,
+    }
+
+    impl IntentHandler for ConflictingIntentHandler {
+        fn handle(
+            &self,
+            _intent: &Intent,
+            _context: &HandlerContext,
+        ) -> Result<HandlerOutput, String> {
+            Ok(HandlerOutput::new()
+                .fact(self.fact.clone())
+                .intent(Intent::new(
+                    IntentKind::new("followup_conflict").unwrap(),
+                    IntentExecution::Deferred,
+                    b"same",
+                    b"new",
+                )))
         }
     }
 
