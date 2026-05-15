@@ -5,15 +5,18 @@ use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, Projector};
 use topo::event_modules::sealed_message::context::{self, workspace_scope, SecretCoverageMatcher};
 use topo::event_modules::sealed_message::fact::{
-    MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact,
+    MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact, NONCE_BYTES,
 };
 use topo::event_modules::sealed_message::rows::{
-    decode_message_row, decode_sealed_message_row, MESSAGE_ROWS, SEALED_MESSAGE_ROWS,
+    decode_message_tombstone_row, decode_sealed_message_row, message_key, MESSAGE_ROWS,
+    MESSAGE_TOMBSTONE_ROWS, SEALED_MESSAGE_ROWS,
 };
 use topo::event_modules::sealed_message::{layout, project};
 
+const DEFAULT_AUTHOR: [u8; 32] = [6; 32];
+
 #[test]
-fn sealed_message_keeps_all_context_needs_until_it_can_open() {
+fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
     let workspace = [7; 32];
     let signer = [8; 32];
     let frontier = [9; 32];
@@ -57,6 +60,7 @@ fn sealed_message_keeps_all_context_needs_until_it_can_open() {
         AtomicIntent::PutRow(row) => row,
         AtomicIntent::DeleteRow(_) => panic!("sealed projection should put a row"),
     };
+    assert_eq!(sealed_row.key, message_key(workspace, message.id));
     assert_eq!(
         decode_sealed_message_row(&sealed_row.key, &sealed_row.value)
             .expect("decode sealed row")
@@ -66,37 +70,37 @@ fn sealed_message_keeps_all_context_needs_until_it_can_open() {
 
     bus.submit_fact(secret_root);
     bus.submit_fact(secret_internal);
-    let opened = bus
+    let covered = bus
         .drain(&projector, &matchers, 10)
         .expect("secret coverage wakes message");
 
-    assert!(opened.wakes >= 1);
-    assert_eq!(opened.intents, 1);
+    assert!(covered.wakes >= 1);
+    assert_eq!(covered.intents, 0);
     assert_eq!(bus.context(&message.id).unwrap().needs.len(), 1);
-    assert_eq!(bus.intents().len(), 2);
-    assert_eq!(bus.intents()[1].kind.as_str(), "put_row");
-    let opened_row = match AtomicIntent::from_intent(&bus.intents()[1], &[MESSAGE_ROWS])
-        .expect("message row intent")
-    {
-        AtomicIntent::PutRow(row) => row,
-        AtomicIntent::DeleteRow(_) => panic!("opened projection should put a row"),
-    };
-    assert_eq!(
-        decode_message_row(&opened_row.key, &opened_row.value)
-            .expect("decode message row")
-            .leaf_id,
-        leaf
-    );
+    assert_eq!(bus.intents().len(), 1);
 
     let deletion = deletion_fact(workspace, message.id);
     bus.submit_fact(deletion);
     let purged = bus
         .drain(&projector, &matchers, 10)
-        .expect("deletion wakes opened message");
+        .expect("deletion wakes covered message");
     assert_eq!(purged.wakes, 1);
-    assert_eq!(purged.intents, 3);
+    assert_eq!(purged.intents, 4);
     assert!(bus.context(&message.id).is_none());
     assert_eq!(bus.intents().len(), 5);
+    assert_eq!(bus.intents()[1].kind.as_str(), "put_row");
+    let tombstone = match AtomicIntent::from_intent(&bus.intents()[1], &[MESSAGE_TOMBSTONE_ROWS])
+        .expect("tombstone row intent")
+    {
+        AtomicIntent::PutRow(row) => row,
+        AtomicIntent::DeleteRow(_) => panic!("deletion projection should put a tombstone"),
+    };
+    assert_eq!(
+        decode_message_tombstone_row(&tombstone.key, &tombstone.value)
+            .expect("decode tombstone")
+            .authored_minute,
+        42
+    );
     assert_eq!(bus.intents()[2].kind.as_str(), "delete_row");
     assert_eq!(bus.intents()[3].kind.as_str(), "delete_row");
     assert_eq!(bus.intents()[4].kind.as_str(), "purge_event");
@@ -137,11 +141,12 @@ fn deletion_update_purges_message_before_keys_arrive() {
         .expect("deletion purges without keys");
 
     assert_eq!(purged.wakes, 1);
-    assert_eq!(purged.intents, 3);
+    assert_eq!(purged.intents, 4);
     assert!(bus.context(&message.id).is_none());
-    assert_eq!(bus.intents()[0].kind.as_str(), "delete_row");
+    assert_eq!(bus.intents()[0].kind.as_str(), "put_row");
     assert_eq!(bus.intents()[1].kind.as_str(), "delete_row");
-    assert_eq!(bus.intents()[2].kind.as_str(), "purge_event");
+    assert_eq!(bus.intents()[2].kind.as_str(), "delete_row");
+    assert_eq!(bus.intents()[3].kind.as_str(), "purge_event");
 
     bus.submit_fact(signer_fact(workspace, signer));
     bus.submit_fact(secret_node_fact(workspace, frontier, 0, 99, 0, [0; 32]));
@@ -149,7 +154,80 @@ fn deletion_update_purges_message_before_keys_arrive() {
         .drain(&projector, &matchers, 10)
         .expect("later keys do not reopen purged message");
     assert_eq!(later_context.intents, 0);
-    assert_eq!(bus.intents().len(), 3);
+    assert_eq!(bus.intents().len(), 4);
+}
+
+#[test]
+fn non_author_deletion_does_not_purge_or_wake_message() {
+    let workspace = [21; 32];
+    let signer = [22; 32];
+    let frontier = [23; 32];
+    let leaf = [24; 32];
+    let message = message_fact(workspace, signer, frontier, 42, leaf);
+    let wrong_deletion = deletion_fact_by_author(workspace, message.id, [25; 32]);
+    let signer_matcher = ExactSelectorMatcher::new(context::signer_role());
+    let deletion_matcher = ExactSelectorMatcher::new(context::deletion_role());
+    let secret_matcher = SecretCoverageMatcher::new();
+    let matchers = [
+        &signer_matcher as &dyn ContextMatcher,
+        &deletion_matcher as &dyn ContextMatcher,
+        &secret_matcher as &dyn ContextMatcher,
+    ];
+    let projector = project::SealedMessageProjector::new();
+    let mut bus = EventBus::new();
+
+    bus.submit_fact(message.clone());
+    bus.drain(&projector, &matchers, 10).expect("message waits");
+    bus.submit_fact(wrong_deletion);
+    let ignored = bus
+        .drain(&projector, &matchers, 10)
+        .expect("non-author deletion projects as unrelated offer");
+
+    assert_eq!(ignored.wakes, 0);
+    assert_eq!(ignored.intents, 0);
+    assert_eq!(bus.context(&message.id).unwrap().needs.len(), 3);
+
+    bus.submit_fact(signer_fact(workspace, signer));
+    bus.submit_fact(secret_node_fact(workspace, frontier, 0, 99, 0, [0; 32]));
+    bus.drain(&projector, &matchers, 10)
+        .expect("valid context still projects sealed row");
+
+    assert_eq!(bus.context(&message.id).unwrap().needs.len(), 1);
+    assert_eq!(bus.intents().len(), 1);
+    assert_eq!(bus.intents()[0].kind.as_str(), "put_row");
+}
+
+#[test]
+fn deletion_before_message_purges_when_target_later_arrives() {
+    let workspace = [26; 32];
+    let signer = [27; 32];
+    let frontier = [28; 32];
+    let message = message_fact(workspace, signer, frontier, 42, [29; 32]);
+    let deletion = deletion_fact(workspace, message.id);
+    let signer_matcher = ExactSelectorMatcher::new(context::signer_role());
+    let deletion_matcher = ExactSelectorMatcher::new(context::deletion_role());
+    let secret_matcher = SecretCoverageMatcher::new();
+    let matchers = [
+        &signer_matcher as &dyn ContextMatcher,
+        &deletion_matcher as &dyn ContextMatcher,
+        &secret_matcher as &dyn ContextMatcher,
+    ];
+    let projector = project::SealedMessageProjector::new();
+    let mut bus = EventBus::new();
+
+    bus.submit_fact(deletion);
+    bus.drain(&projector, &matchers, 10)
+        .expect("deletion offer stands");
+    bus.submit_fact(message.clone());
+    let purged = bus
+        .drain(&projector, &matchers, 10)
+        .expect("message sees prior deletion");
+
+    assert!(purged.wakes >= 1);
+    assert_eq!(purged.intents, 4);
+    assert!(bus.context(&message.id).is_none());
+    assert_eq!(bus.intents()[0].kind.as_str(), "put_row");
+    assert_eq!(bus.intents()[3].kind.as_str(), "purge_event");
 }
 
 #[test]
@@ -196,7 +274,7 @@ fn sealed_message_projector_rejects_body_scope_mismatches() {
 }
 
 #[test]
-fn sealed_message_projector_revalidates_secret_context_before_opening() {
+fn sealed_message_projector_revalidates_secret_context_before_clearing_need() {
     let workspace = [41; 32];
     let signer = [42; 32];
     let frontier = [43; 32];
@@ -233,7 +311,7 @@ fn sealed_message_projector_revalidates_secret_context_before_opening() {
             .intents
             .iter()
             .all(|intent| AtomicIntent::from_intent(intent, &[MESSAGE_ROWS]).is_err()),
-        "wrong secret coverage must not open the message row"
+        "wrong secret coverage must not materialize a plaintext row"
     );
 }
 
@@ -249,10 +327,16 @@ fn message_fact(
         minute,
         layout::encode_sealed_message(&SealedMessageFact {
             workspace_id,
+            created_at_ms: minute * 60_000,
+            author_user_id: DEFAULT_AUTHOR,
             signer_id,
             frontier_id,
+            local_history_node_secret_id: [10; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [11; 32],
             minute,
             leaf_id,
+            nonce: [12; NONCE_BYTES],
             ciphertext: b"sealed".to_vec(),
         })
         .expect("encode sealed message"),
@@ -272,12 +356,21 @@ fn signer_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
 }
 
 fn deletion_fact(workspace_id: [u8; 32], target_id: [u8; 32]) -> Fact {
+    deletion_fact_by_author(workspace_id, target_id, DEFAULT_AUTHOR)
+}
+
+fn deletion_fact_by_author(
+    workspace_id: [u8; 32],
+    target_id: [u8; 32],
+    author_user_id: [u8; 32],
+) -> Fact {
     Fact::new(
         workspace_scope(workspace_id),
         2,
         layout::encode_message_deletion(&MessageDeletionFact {
             workspace_id,
             target_id,
+            author_user_id,
         })
         .expect("encode deletion"),
     )

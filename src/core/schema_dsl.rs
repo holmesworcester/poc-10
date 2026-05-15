@@ -649,6 +649,7 @@ mod tests {
             vec![
                 "message_rows",
                 "sealed_message_rows",
+                "message_tombstone_rows",
                 "file_rows",
                 "workspace_rows",
                 "recipient_key_rows",

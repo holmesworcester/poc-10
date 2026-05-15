@@ -5,6 +5,7 @@ use crate::core::wire::{FixedLayout, FixedSlot};
 
 use super::fact::{
     MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact, CIPHERTEXT_BYTES,
+    NONCE_BYTES,
 };
 
 pub const TYPE_SEALED_MESSAGE: u8 = 140;
@@ -12,22 +13,29 @@ pub const TYPE_SIGNER_PUBKEY: u8 = 141;
 pub const TYPE_SECRET_NODE: u8 = 142;
 pub const TYPE_MESSAGE_DELETION: u8 = 143;
 
-pub const SEALED_MESSAGE_BYTES: usize = 1 + 32 + 32 + 32 + 8 + 32 + 4 + CIPHERTEXT_BYTES;
+pub const SEALED_MESSAGE_BYTES: usize =
+    1 + 32 + 8 + 32 + 32 + 32 + 32 + 8 + 32 + 8 + 32 + NONCE_BYTES + 4 + CIPHERTEXT_BYTES;
 pub const SIGNER_PUBKEY_BYTES: usize = 1 + 32 + 32;
 pub const SECRET_NODE_BYTES: usize = 1 + 32 + 32 + 8 + 8 + 1 + 32;
-pub const MESSAGE_DELETION_BYTES: usize = 1 + 32 + 32;
+pub const MESSAGE_DELETION_BYTES: usize = 1 + 32 + 32 + 32;
 
 pub fn encode_sealed_message(fact: &SealedMessageFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; SEALED_MESSAGE_BYTES];
     wire::put_u8(TYPE_SEALED_MESSAGE, &mut out[0..1]).map_err(wire_err)?;
     out[1..33].copy_from_slice(&fact.workspace_id);
-    out[33..65].copy_from_slice(&fact.signer_id);
-    out[65..97].copy_from_slice(&fact.frontier_id);
-    wire::put_u64be(fact.minute, &mut out[97..105]).map_err(wire_err)?;
-    out[105..137].copy_from_slice(&fact.leaf_id);
+    wire::put_u64be(fact.created_at_ms, &mut out[33..41]).map_err(wire_err)?;
+    out[41..73].copy_from_slice(&fact.author_user_id);
+    out[73..105].copy_from_slice(&fact.signer_id);
+    out[105..137].copy_from_slice(&fact.frontier_id);
+    out[137..169].copy_from_slice(&fact.local_history_node_secret_id);
+    wire::put_u64be(fact.expires_at_minute, &mut out[169..177]).map_err(wire_err)?;
+    out[177..209].copy_from_slice(&fact.disappearing_setting_id);
+    wire::put_u64be(fact.minute, &mut out[209..217]).map_err(wire_err)?;
+    out[217..249].copy_from_slice(&fact.leaf_id);
+    out[249..273].copy_from_slice(&fact.nonce);
     FixedSlot::<CIPHERTEXT_BYTES>::new(&fact.ciphertext)
         .map_err(wire_err)?
-        .encode(&mut out[137..])
+        .encode(&mut out[273..])
         .map_err(wire_err)?;
     Ok(out)
 }
@@ -37,11 +45,17 @@ pub fn decode_sealed_message(bytes: &[u8]) -> Result<SealedMessageFact, String> 
     expect_tag(bytes, TYPE_SEALED_MESSAGE, "sealed message")?;
     Ok(SealedMessageFact {
         workspace_id: bytes[1..33].try_into().unwrap(),
-        signer_id: bytes[33..65].try_into().unwrap(),
-        frontier_id: bytes[65..97].try_into().unwrap(),
-        minute: wire::take_u64be(&bytes[97..105]).map_err(wire_err)?,
-        leaf_id: bytes[105..137].try_into().unwrap(),
-        ciphertext: FixedSlot::<CIPHERTEXT_BYTES>::decode(&bytes[137..])
+        created_at_ms: wire::take_u64be(&bytes[33..41]).map_err(wire_err)?,
+        author_user_id: bytes[41..73].try_into().unwrap(),
+        signer_id: bytes[73..105].try_into().unwrap(),
+        frontier_id: bytes[105..137].try_into().unwrap(),
+        local_history_node_secret_id: bytes[137..169].try_into().unwrap(),
+        expires_at_minute: wire::take_u64be(&bytes[169..177]).map_err(wire_err)?,
+        disappearing_setting_id: bytes[177..209].try_into().unwrap(),
+        minute: wire::take_u64be(&bytes[209..217]).map_err(wire_err)?,
+        leaf_id: bytes[217..249].try_into().unwrap(),
+        nonce: bytes[249..273].try_into().unwrap(),
+        ciphertext: FixedSlot::<CIPHERTEXT_BYTES>::decode(&bytes[273..])
             .map_err(wire_err)?
             .bytes()
             .to_vec(),
@@ -70,6 +84,7 @@ pub fn encode_message_deletion(fact: &MessageDeletionFact) -> Result<Vec<u8>, St
     wire::put_u8(TYPE_MESSAGE_DELETION, &mut out[0..1]).map_err(wire_err)?;
     out[1..33].copy_from_slice(&fact.workspace_id);
     out[33..65].copy_from_slice(&fact.target_id);
+    out[65..97].copy_from_slice(&fact.author_user_id);
     Ok(out)
 }
 
@@ -79,6 +94,7 @@ pub fn decode_message_deletion(bytes: &[u8]) -> Result<MessageDeletionFact, Stri
     Ok(MessageDeletionFact {
         workspace_id: bytes[1..33].try_into().unwrap(),
         target_id: bytes[33..65].try_into().unwrap(),
+        author_user_id: bytes[65..97].try_into().unwrap(),
     })
 }
 
@@ -137,10 +153,16 @@ mod tests {
     fn sealed_message_roundtrips_fixed_width() {
         let fact = SealedMessageFact {
             workspace_id: [1; 32],
-            signer_id: [2; 32],
-            frontier_id: [3; 32],
+            created_at_ms: 42_000,
+            author_user_id: [2; 32],
+            signer_id: [3; 32],
+            frontier_id: [4; 32],
+            local_history_node_secret_id: [5; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [6; 32],
             minute: 42,
-            leaf_id: [4; 32],
+            leaf_id: [7; 32],
+            nonce: [8; NONCE_BYTES],
             ciphertext: b"sealed".to_vec(),
         };
         let encoded = encode_sealed_message(&fact).expect("encode");

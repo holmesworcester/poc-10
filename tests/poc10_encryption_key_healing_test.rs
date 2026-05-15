@@ -27,9 +27,9 @@ use topo::event_modules::sealed_message::context::{
     self as message_context, workspace_scope, SecretCoverageMatcher,
 };
 use topo::event_modules::sealed_message::fact::{
-    SealedMessageFact, SignerPubkeyFact, CIPHERTEXT_BYTES,
+    SealedMessageFact, SignerPubkeyFact, CIPHERTEXT_BYTES, NONCE_BYTES,
 };
-use topo::event_modules::sealed_message::rows::{MESSAGE_ROWS, SEALED_MESSAGE_ROWS};
+use topo::event_modules::sealed_message::rows::{message_key, MESSAGE_ROWS, SEALED_MESSAGE_ROWS};
 use topo::event_modules::sealed_message::{layout as message_layout, project as message_project};
 use topo::event_modules::signed_fact::{self, fact::LocalSignerSecretFact};
 use topo::event_modules::sync::context as sync_context;
@@ -436,7 +436,7 @@ fn supersession_wakes_old_recipient_key_and_purges_material_instead_of_wrapping(
 }
 
 #[test]
-fn encryption_history_node_offer_wakes_and_opens_sealed_message() {
+fn encryption_history_node_offer_wakes_and_clears_sealed_message_secret_need() {
     let workspace = [40; 32];
     let signer = [41; 32];
     let frontier = [42; 32];
@@ -459,7 +459,7 @@ fn encryption_history_node_offer_wakes_and_opens_sealed_message() {
     bus.submit_fact(signer);
     bus.submit_fact(history_node);
     bus.drain(&projector, &matchers, 100)
-        .expect("history node opens message");
+        .expect("history node covers message");
 
     let rows = bus
         .intents()
@@ -470,7 +470,17 @@ fn encryption_history_node_offer_wakes_and_opens_sealed_message() {
         .collect::<Vec<_>>();
     assert!(rows
         .iter()
-        .any(|intent| matches!(intent, AtomicIntent::PutRow(row) if row.table == MESSAGE_ROWS && row.key == message.id)));
+        .any(|intent| matches!(intent, AtomicIntent::PutRow(row) if row.table == SEALED_MESSAGE_ROWS && row.key == message_key(workspace, message.id))));
+    assert!(!rows
+        .iter()
+        .any(|intent| matches!(intent, AtomicIntent::PutRow(row) if row.table == MESSAGE_ROWS)));
+    let context = bus
+        .context(&message.id)
+        .expect("message keeps deletion context");
+    assert!(!context
+        .needs
+        .iter()
+        .any(|need| need.role == message_context::secret_role()));
 }
 
 #[test]
@@ -591,7 +601,7 @@ fn signed_key_wrap_waits_for_context_then_offers_sync_key_and_row() {
 }
 
 #[test]
-fn local_recipient_key_wakes_signed_wrap_unwrap_and_opens_sealed_message() {
+fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
     let workspace = [70; 32];
     let signer_id = [71; 32];
     let signer_private_key = [72; 32];
@@ -680,8 +690,10 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_opens_sealed_message() {
         .iter()
         .any(|need| need.role == message_context::secret_role()));
     assert!(
-        !message_rows(&bus).iter().any(|row| row.key == message.id),
-        "sealed message must stay closed before local unwrap"
+        !message_rows(&bus)
+            .iter()
+            .any(|row| row.key == message_key(workspace, message.id)),
+        "sealed message must not materialize plaintext before local unwrap"
     );
 
     bus.submit_fact(local_recipient.clone());
@@ -707,9 +719,18 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_opens_sealed_message() {
     bus.drain(&projector, &matchers, 100)
         .expect("unwrapped root offers normal secret coverage");
 
+    let message_context_after = bus
+        .context(&message.id)
+        .expect("covered message keeps deletion context");
+    assert!(!message_context_after
+        .needs
+        .iter()
+        .any(|need| need.role == message_context::secret_role()));
     assert!(
-        message_rows(&bus).iter().any(|row| row.key == message.id),
-        "normal secret coverage from the unwrapped local root should open the message"
+        !message_rows(&bus)
+            .iter()
+            .any(|row| row.key == message_key(workspace, message.id)),
+        "secret coverage alone must not fake a plaintext row"
     );
 }
 
@@ -1027,10 +1048,16 @@ fn sealed_message_fact(
         minute,
         message_layout::encode_sealed_message(&SealedMessageFact {
             workspace_id,
+            created_at_ms: minute * 60_000,
+            author_user_id: [0xa1; 32],
             signer_id,
             frontier_id,
+            local_history_node_secret_id: [0xa2; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [0xa3; 32],
             minute,
             leaf_id,
+            nonce: [0xa4; NONCE_BYTES],
             ciphertext: vec![0x99; CIPHERTEXT_BYTES.min(4)],
         })
         .expect("encode message"),

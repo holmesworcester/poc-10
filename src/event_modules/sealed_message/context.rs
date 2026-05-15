@@ -44,23 +44,40 @@ pub fn signer_offer(owner: FactId, scope: FactScope, signer_id: SignerId) -> Con
     }
 }
 
-pub fn deletion_need(owner: FactId, scope: FactScope, target_id: FactId) -> ContextNeed {
+pub fn deletion_need(
+    owner: FactId,
+    scope: FactScope,
+    target_id: FactId,
+    author_user_id: FactId,
+) -> ContextNeed {
     ContextNeed {
         owner,
         role: deletion_role(),
         scope,
-        selector: Selector::from_bytes(target_id),
+        selector: deletion_selector(target_id, author_user_id),
     }
 }
 
-pub fn deletion_offer(owner: FactId, scope: FactScope, target_id: FactId) -> ContextOffer {
+pub fn deletion_offer(
+    owner: FactId,
+    scope: FactScope,
+    target_id: FactId,
+    author_user_id: FactId,
+) -> ContextOffer {
     ContextOffer {
         owner,
         role: deletion_role(),
         scope,
-        selector: Selector::from_bytes(target_id),
+        selector: deletion_selector(target_id, author_user_id),
         payload_ref: owner,
     }
+}
+
+pub fn deletion_selector(target_id: FactId, author_user_id: FactId) -> Selector {
+    let mut bytes = Vec::with_capacity(64);
+    bytes.extend_from_slice(&target_id);
+    bytes.extend_from_slice(&author_user_id);
+    Selector::from_bytes(bytes)
 }
 
 pub fn secret_need(

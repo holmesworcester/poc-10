@@ -13,6 +13,12 @@ table sealed_message_rows {
   row_key (key);
 }
 
+table message_tombstone_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
 table file_rows {
   column key bytes;
   column value bytes;
