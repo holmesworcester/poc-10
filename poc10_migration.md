@@ -363,13 +363,16 @@ done: event_with_deps bridge proves out-of-order exact dependency healing
 done: event_with_deps owns a poc-10 projector surface beside its legacy row projector
 done: secret_coverage matcher proves range offers can wake point needs
 done: target-tree identity_workspace projector materializes a workspace row through AtomicIntent::PutRow
+done: target-tree sealed_message projector keeps signer and secret needs standing until both context offers are present
+done: overlapping secret coverage offers emit one deterministic open_message intent without key amplification
+done: target-tree deletion update context purges messages before keys arrive
+done: opened messages retain only deletion update context so later deletes can wake purge
 ```
 
-The next event-pipeline step is to repeat the target-tree projector pattern for
-one context-bearing module: a sealed content event that waits on signer plus
-secret coverage, or a deletion event that offers an update and emits a purge
-intent. Keep the legacy protocol tree intact until the target-tree path can
-replace it without row, label, blocker, or worker-queue holdovers.
+The next event-pipeline step is to put handlers behind the new deferred intents:
+`open_message` should become a handler-owned decrypt/materialize operation and
+`purge_event` should drive the existing physical purge/retire behavior through
+an idempotent handler contract.
 
 ### Wave 4: Encryption Slice
 
