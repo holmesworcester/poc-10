@@ -679,6 +679,7 @@ mod tests {
                 "message_deletion_rows",
                 "file_deletion_rows",
                 "removal_frontier_rows",
+                "local_history_node_secret_rows",
             ]
         );
         assert_eq!(
