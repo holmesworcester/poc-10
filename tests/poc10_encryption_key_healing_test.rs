@@ -4,7 +4,8 @@ use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::event_modules::encryption::context::{
-    frontier_role, recipient_key_role, recipient_superseded_role, WrapSourceKind, WrapSourceMatcher,
+    self as encryption_context, frontier_role, recipient_key_role, recipient_superseded_role,
+    WrapSourceKind, WrapSourceMatcher,
 };
 use topo::event_modules::encryption::fact::{
     KeyRequestFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, RecipientKeyFact,
@@ -262,6 +263,40 @@ fn encryption_history_node_offer_wakes_and_opens_sealed_message() {
     assert!(rows
         .iter()
         .any(|intent| matches!(intent, AtomicIntent::PutRow(row) if row.table == MESSAGE_ROWS && row.key == message.id)));
+}
+
+#[test]
+fn recipient_key_projector_revalidates_wrap_source_context_before_wrapping() {
+    let workspace = [50; 32];
+    let endpoint = [51; 32];
+    let rotated = recipient_key_fact(workspace, endpoint, [52; 32], 50);
+    let stale_source = encryption_context::frontier_root_wrap_source_offer(
+        [53; 32],
+        workspace_scope(workspace),
+        workspace,
+        [54; 32],
+        20,
+    );
+    let projector = encryption_project::EncryptionProjector::new();
+
+    let output = projector
+        .project(&rotated, &ProjectionContext::new(vec![stale_source]))
+        .expect("project with mismatched wrap context");
+
+    assert!(
+        output
+            .needs
+            .iter()
+            .any(|need| need.role == encryption_context::wrap_source_role()),
+        "stale wrap source must leave proactive wrap need standing"
+    );
+    assert!(
+        output
+            .intents
+            .iter()
+            .all(|intent| decode_materialize_key_wraps_intent(intent).is_err()),
+        "stale wrap source must not emit a wrap intent"
+    );
 }
 
 struct CombinedProjector;

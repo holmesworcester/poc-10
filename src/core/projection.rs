@@ -9,19 +9,48 @@ use crate::core::intents::Intent;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionContext {
     offers: Vec<ContextOffer>,
+    matched: Vec<MatchedContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedContext {
+    pub need: ContextNeed,
+    pub offer: ContextOffer,
+    pub payload: Fact,
 }
 
 impl ProjectionContext {
     pub fn new(offers: Vec<ContextOffer>) -> Self {
-        Self { offers }
+        Self {
+            offers,
+            matched: Vec::new(),
+        }
+    }
+
+    pub fn from_matches(matched: Vec<MatchedContext>) -> Self {
+        let mut offers = matched
+            .iter()
+            .map(|matched| matched.offer.clone())
+            .collect::<Vec<_>>();
+        offers.sort();
+        offers.dedup();
+        Self { offers, matched }
     }
 
     pub fn offers(&self) -> &[ContextOffer] {
         &self.offers
     }
 
+    pub fn matched_context(&self) -> &[MatchedContext] {
+        &self.matched
+    }
+
     pub fn payload_refs(&self) -> impl Iterator<Item = FactId> + '_ {
         self.offers.iter().map(|offer| offer.payload_ref)
+    }
+
+    pub fn payload_facts(&self) -> impl Iterator<Item = &Fact> + '_ {
+        self.matched.iter().map(|matched| &matched.payload)
     }
 }
 
@@ -79,7 +108,21 @@ pub fn run_projection(
     previous_context: &ContextSet,
     offers: Vec<ContextOffer>,
 ) -> Result<ProjectionRun, String> {
-    let output = projector.project(fact, &ProjectionContext::new(offers))?;
+    run_projection_with_context(
+        projector,
+        fact,
+        previous_context,
+        ProjectionContext::new(offers),
+    )
+}
+
+pub fn run_projection_with_context(
+    projector: &impl Projector,
+    fact: &Fact,
+    previous_context: &ContextSet,
+    context: ProjectionContext,
+) -> Result<ProjectionRun, String> {
+    let output = projector.project(fact, &context)?;
     let context = output.context_set();
     let context_delta = diff_context_sets(previous_context, &context);
     Ok(ProjectionRun {

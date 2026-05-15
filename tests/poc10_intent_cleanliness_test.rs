@@ -27,6 +27,33 @@ fn rust_files_named(root: &Path, name: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+fn meaningful_source_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("//")
+                && !line.starts_with("//!")
+                && !line.starts_with("///")
+                && !line.starts_with('#')
+        })
+        .collect()
+}
+
+fn immediate_rust_children(root: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(root)
+        .expect("read dir")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect()
+}
+
+fn production_text_before_unit_tests(text: &str) -> &str {
+    text.find("#[cfg(test)]")
+        .map(|index| &text[..index])
+        .unwrap_or(text)
+}
+
 #[test]
 fn sealed_message_intents_do_not_encode_projection_work() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -329,6 +356,254 @@ fn target_projectors_do_not_define_intent_payloads_or_handler_logic() {
     assert!(
         offenders.is_empty(),
         "projectors should compose event-module helpers, not define payload decoding or handler logic:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_manifests_are_declarations_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut manifests = vec![
+        root.join("src/event_modules.rs"),
+        root.join("src/handlers.rs"),
+    ];
+    manifests.extend(immediate_rust_children(&root.join("src/event_modules")));
+
+    let mut offenders = Vec::new();
+    for path in manifests {
+        let text = source_text(&path);
+        for line in meaningful_source_lines(&text) {
+            if !(line.starts_with("pub mod ")
+                || line.starts_with("mod ")
+                || line.starts_with("pub use "))
+            {
+                offenders.push(format!(
+                    "{} contains non-declaration line: {line}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "target root/module manifests must not accumulate behavior:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_schema_dsl_files_are_declarative_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema_files = [
+        root.join("src/core/schema.p8sql"),
+        root.join("src/event_modules/schema.p8sql"),
+        root.join("src/handlers/schema.p8sql"),
+    ];
+    let mut offenders = Vec::new();
+
+    for path in schema_files {
+        let text = source_text(&path);
+        for line in meaningful_source_lines(&text) {
+            if !(line.starts_with("table ")
+                || line.starts_with("column ")
+                || line.starts_with("row_key ")
+                || line.starts_with("index ")
+                || line.starts_with("unique index ")
+                || line == "}")
+            {
+                offenders.push(format!(
+                    "{} contains non-schema statement: {line}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "poc-10 schema DSL files should declare tables only, not behavior:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_schema_dsl_parser_stays_protocol_neutral() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("src/core/schema_dsl.rs");
+    let text = source_text(&path);
+    let production = production_text_before_unit_tests(&text);
+    let mut offenders = Vec::new();
+
+    for forbidden in [
+        "crate::event_modules",
+        "crate::protocol",
+        "crate::workers",
+        "TableRow",
+        "Intent",
+        "ProjectionOutput",
+        "ContextNeed",
+        "ContextOffer",
+        "workspace",
+        "sealed_message",
+        "recipient_key",
+        "connection",
+        "sync_index",
+    ] {
+        if production.contains(forbidden) {
+            offenders.push(format!(
+                "{} contains {forbidden:?}",
+                path.strip_prefix(root).unwrap().display()
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "schema_dsl.rs should parse declarations, not become protocol or row-codegen behavior:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_layout_files_do_not_own_projection_intents_handlers_or_cli() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files_named(&root.join("src/event_modules"), "layout.rs") {
+        let text = source_text(&path);
+        for forbidden in [
+            "TableRow",
+            "TableName",
+            "AtomicIntent",
+            "Intent",
+            "IntentKind",
+            "IntentExecution",
+            "ProjectionOutput",
+            "Projector",
+            "ContextNeed",
+            "ContextOffer",
+            "ContextMatcher",
+            "IntentHandler",
+            "HandlerOutput",
+            "HandlerContext",
+            "Store",
+            "network_queues",
+            "std::net",
+            "CliArgs",
+            "CliOutput",
+            "CliCommand",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "layout.rs files should own fixed fact bytes only, not projection, intent, handler, or CLI work:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_projectors_do_not_define_row_tables_or_row_shapes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files_named(&root.join("src/event_modules"), "project.rs") {
+        let text = source_text(&path);
+        for forbidden in ["TableRow", "TableName", "TableName::new", "_ROWS:"] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "project.rs should emit row intents through row helpers, not define row tables or shapes:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_cli_equivalents_do_not_exist_or_parse_user_commands() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files(&root.join("src/event_modules"))
+        .into_iter()
+        .chain(rust_files(&root.join("src/handlers")))
+    {
+        let text = source_text(&path);
+        for forbidden in [
+            "CliArgs",
+            "CliOutput",
+            "CliCommand",
+            "std::env",
+            "std::process",
+            "Command::new",
+            "println!",
+            "eprintln!",
+            "usage:",
+            "help:",
+            "parse::<",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "target event modules and handlers must not grow CLI-equivalent parsing or formatting:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_handlers_do_not_own_projection_rows_or_projector_context() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let handler_root = root.join("src/handlers");
+    if !handler_root.exists() {
+        return;
+    }
+
+    let mut offenders = Vec::new();
+    for path in rust_files(&handler_root) {
+        let text = source_text(&path);
+        for forbidden in [
+            "::rows",
+            "TableRow",
+            "TableName",
+            "AtomicIntent",
+            "ProjectionOutput",
+            "Projector",
+            "ContextNeed",
+            "ContextOffer",
+            "ContextMatcher",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "handlers should do deferred effects/checkpoints, not projection row or context work:\n{}",
         offenders.join("\n")
     );
 }

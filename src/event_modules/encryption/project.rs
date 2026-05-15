@@ -71,6 +71,12 @@ fn project_recipient_key(
         } else {
             recipient.created_at_ms
         };
+    let wrap_need = context::proactive_wrap_source_need(
+        fact.id,
+        scope.clone(),
+        recipient.workspace_id,
+        min_frontier_created_at_ms,
+    );
     let mut output = ProjectionOutput::new()
         .offer(context::recipient_key_offer(
             fact.id,
@@ -78,12 +84,7 @@ fn project_recipient_key(
             fact.id,
         ))
         .need(superseded_need)
-        .need(context::proactive_wrap_source_need(
-            fact.id,
-            scope.clone(),
-            recipient.workspace_id,
-            min_frontier_created_at_ms,
-        ));
+        .need(wrap_need.clone());
 
     if recipient.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
         output = output.offer(context::recipient_superseded_offer(
@@ -93,7 +94,7 @@ fn project_recipient_key(
         ));
     }
 
-    for source in matching_wrap_sources(projection_context.offers()) {
+    for source in matching_wrap_sources(projection_context.offers(), &wrap_need) {
         output = output.intent(materialize_key_wraps_intent(fact.id, source));
     }
     Ok(output)
@@ -180,10 +181,10 @@ fn project_key_request(
     let mut output = ProjectionOutput::new()
         .need(recipient_need)
         .need(frontier_need)
-        .need(source_need);
+        .need(source_need.clone());
 
     if has_recipient && has_frontier {
-        for source in matching_wrap_sources(projection_context.offers()) {
+        for source in matching_wrap_sources(projection_context.offers(), &source_need) {
             output = output.intent(materialize_key_wraps_intent(
                 request.recipient_key_id,
                 source,
@@ -193,11 +194,13 @@ fn project_key_request(
     Ok(output)
 }
 
-fn matching_wrap_sources(offers: &[ContextOffer]) -> Vec<WrapSourceSelector> {
+fn matching_wrap_sources(
+    offers: &[ContextOffer],
+    need: &crate::core::context::ContextNeed,
+) -> Vec<WrapSourceSelector> {
     offers
         .iter()
-        .filter(|offer| offer.role == context::wrap_source_role())
-        .filter_map(|offer| context::decode_wrap_source_selector(&offer.selector))
+        .filter_map(|offer| context::wrap_source_offer_matches_need(need, offer))
         .collect()
 }
 

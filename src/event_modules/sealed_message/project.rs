@@ -58,7 +58,7 @@ fn project_message(fact: &Fact, context: &ProjectionContext) -> Result<Projectio
     let has_secret = context
         .offers()
         .iter()
-        .any(|offer| offer.role == secret_need.role);
+        .any(|offer| context::secret_offer_matches_need(&secret_need, offer));
     let has_deletion = context
         .offers()
         .iter()

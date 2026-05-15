@@ -381,6 +381,13 @@ done: recipient supersession wakes the predecessor and emits purge_retired_recip
 done: target encryption history-node offers reuse secret_coverage to wake/open sealed messages
 done: sync compare unit coverage pins out-of-range dependency closure before in-range roots
 done: active target guardrails prevent legacy file names, legacy protocol/worker imports, intent dumping, and handler logic in projectors
+done: projection context exposes exact matched need/offer/payload facts, not broad sibling offers with the same payload owner
+done: core dispatch can drain atomic and deferred intents separately
+done: target projectors revalidate secret and wrap context before opening messages or emitting wraps
+done: identity_workspace row layout moved out of project.rs into rows.rs so projectors do not define row tables or row shapes
+done: active target guardrails now cover manifests, schema DSL files, layout files, project row definitions, handler context ownership, and CLI-equivalent parsing/printing
+done: poc10 sync context proof shows a timestamp range request can pull out-of-range event deps and out-of-range key offers before sending encrypted roots
+done: poc10 transit/connection interface proof keeps connection drain, transit wrapping, connection send, and send acknowledgement as distinct intent steps
 ```
 
 The next event-pipeline step is to replace the simplified message row proof
@@ -389,6 +396,12 @@ output, and opening is deterministic read/projection work using local history
 node secrets. `purge_event` remains a deferred retention intent, but its handler
 should not exist until it preserves the existing broad purge/retire/cascade
 behavior.
+
+The next encryption handler step needs one missing core contract before it can
+be real: a deferred handler must be able to read the matched local source
+secret and recipient key payloads, or receive those exact payload facts through
+an explicit handler context. A handler that emits placeholder key-wrap facts
+without source secret material is intentionally rejected as cruft.
 
 ### Wave 4: Encryption Slice
 

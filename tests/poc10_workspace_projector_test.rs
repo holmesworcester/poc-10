@@ -4,7 +4,7 @@ use topo::core::handler_dispatch::{HandlerContext, RowIntentHandler};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::event_modules::identity_workspace::fact::WorkspaceFact;
-use topo::event_modules::identity_workspace::{layout, project};
+use topo::event_modules::identity_workspace::{layout, project, rows};
 
 #[test]
 fn workspace_projector_materializes_row_through_atomic_intent() {
@@ -29,7 +29,7 @@ fn workspace_projector_materializes_row_through_atomic_intent() {
     assert_eq!(projected.projections, 1);
     assert_eq!(projected.intents, 1);
 
-    let handler = RowIntentHandler::new(&store, &[project::WORKSPACE_ROWS]);
+    let handler = RowIntentHandler::new(&store, &[rows::WORKSPACE_ROWS]);
     let applied = bus
         .dispatch_intents(&handler, &HandlerContext, 10)
         .expect("apply workspace row intent");
@@ -37,12 +37,12 @@ fn workspace_projector_materializes_row_through_atomic_intent() {
     assert_eq!(applied.handled, 1);
     assert!(bus.intents().is_empty());
     let rows = store
-        .table_rows(project::WORKSPACE_ROWS)
+        .table_rows(rows::WORKSPACE_ROWS)
         .expect("workspace rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, fact.id);
     assert_eq!(
-        layout::decode_row(fact.id, &rows[0].1)
+        rows::decode_workspace_row(&rows[0].0, &rows[0].1)
             .expect("decode row")
             .name,
         "Research"

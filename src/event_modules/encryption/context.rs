@@ -350,6 +350,14 @@ impl ContextMatcher for WrapSourceMatcher {
     }
 }
 
+pub fn wrap_source_offer_matches_need(
+    need: &ContextNeed,
+    offer: &ContextOffer,
+) -> Option<WrapSourceSelector> {
+    wrap_source_match(need, offer)?;
+    decode_wrap_source_selector(&offer.selector)
+}
+
 fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> Option<ContextMatch> {
     if need.role != offer.role || need.scope != offer.scope {
         return None;

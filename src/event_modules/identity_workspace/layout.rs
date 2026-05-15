@@ -3,7 +3,7 @@
 use crate::core::wire;
 use crate::core::wire::FixedSlot;
 
-use super::fact::{WorkspaceFact, WorkspacePublicKey, WorkspaceRow, WORKSPACE_NAME_BYTES};
+use super::fact::{WorkspaceFact, WorkspacePublicKey, WORKSPACE_NAME_BYTES};
 
 pub const TYPE_WORKSPACE: u8 = 131;
 pub const FACT_BYTES: usize = 1 + ROW_VALUE_BYTES;
@@ -25,20 +25,14 @@ pub fn decode_fact(bytes: &[u8]) -> Result<WorkspaceFact, String> {
     decode_value_fields(&bytes[1..])
 }
 
-pub fn encode_row_value(fact: &WorkspaceFact) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_value(fact: &WorkspaceFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; ROW_VALUE_BYTES];
     encode_value_fields(fact, &mut out)?;
     Ok(out)
 }
 
-pub fn decode_row(workspace_id: [u8; 32], value: &[u8]) -> Result<WorkspaceRow, String> {
-    let fact = decode_value_fields(value)?;
-    Ok(WorkspaceRow {
-        workspace_id,
-        created_at_ms: fact.created_at_ms,
-        public_key: fact.public_key,
-        name: fact.name,
-    })
+pub(crate) fn decode_value(value: &[u8]) -> Result<WorkspaceFact, String> {
+    decode_value_fields(value)
 }
 
 fn encode_value_fields(fact: &WorkspaceFact, out: &mut [u8]) -> Result<(), String> {
@@ -105,11 +99,10 @@ mod tests {
 
     #[test]
     fn workspace_row_value_reuses_fact_payload_layout() {
-        let value = encode_row_value(&fact()).expect("row value");
-        let decoded = decode_row([1; 32], &value).expect("decode row");
+        let value = encode_value(&fact()).expect("row value");
+        let decoded = decode_value(&value).expect("decode row");
 
         assert_eq!(value.len(), ROW_VALUE_BYTES);
-        assert_eq!(decoded.workspace_id, [1; 32]);
         assert_eq!(decoded.created_at_ms, 42);
         assert_eq!(decoded.name, "Engineering");
     }

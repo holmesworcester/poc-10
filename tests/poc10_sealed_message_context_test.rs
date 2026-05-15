@@ -195,6 +195,48 @@ fn sealed_message_projector_rejects_body_scope_mismatches() {
     assert!(err.contains("scope does not match body workspace"), "{err}");
 }
 
+#[test]
+fn sealed_message_projector_revalidates_secret_context_before_opening() {
+    let workspace = [41; 32];
+    let signer = [42; 32];
+    let frontier = [43; 32];
+    let message = message_fact(workspace, signer, frontier, 42, [44; 32]);
+    let signer_offer = context::signer_offer([45; 32], workspace_scope(workspace), signer);
+    let wrong_secret_offer = context::secret_offer(
+        [46; 32],
+        workspace_scope(workspace),
+        workspace,
+        [47; 32],
+        0,
+        99,
+        0,
+        [0; 32],
+    );
+    let projector = project::SealedMessageProjector::new();
+
+    let output = projector
+        .project(
+            &message,
+            &ProjectionContext::new(vec![signer_offer, wrong_secret_offer]),
+        )
+        .expect("project with mismatched context");
+
+    assert!(
+        output
+            .needs
+            .iter()
+            .any(|need| need.role == context::secret_role()),
+        "wrong secret coverage must leave the secret need standing"
+    );
+    assert!(
+        output
+            .intents
+            .iter()
+            .all(|intent| AtomicIntent::from_intent(intent, &[MESSAGE_ROWS]).is_err()),
+        "wrong secret coverage must not open the message row"
+    );
+}
+
 fn message_fact(
     workspace_id: [u8; 32],
     signer_id: [u8; 32],

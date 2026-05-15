@@ -242,6 +242,10 @@ impl ContextMatcher for SecretCoverageMatcher {
     }
 }
 
+pub fn secret_offer_matches_need(need: &ContextNeed, offer: &ContextOffer) -> bool {
+    secret_coverage_match(need, offer).is_some()
+}
+
 fn secret_coverage_match(need: &ContextNeed, offer: &ContextOffer) -> Option<ContextMatch> {
     if need.role != offer.role || need.scope != offer.scope {
         return None;

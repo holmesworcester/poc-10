@@ -22,7 +22,9 @@ use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
 use crate::core::handler_dispatch::{HandlerContext, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::core::matchers::{match_context_delta, ContextMatcher};
-use crate::core::projection::{run_projection, Projector};
+use crate::core::projection::{
+    run_projection_with_context, MatchedContext, ProjectionContext, Projector,
+};
 use crate::core::store::{Store, TableName, TableRow};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -171,9 +173,43 @@ impl EventBus {
         context: &HandlerContext,
         limit: usize,
     ) -> Result<DispatchReport, String> {
+        self.dispatch_intents_matching(handler, context, limit, |_| true)
+    }
+
+    pub fn dispatch_atomic_intents(
+        &mut self,
+        handler: &impl IntentHandler,
+        context: &HandlerContext,
+        limit: usize,
+    ) -> Result<DispatchReport, String> {
+        self.dispatch_intents_matching(handler, context, limit, |intent| {
+            intent.execution == IntentExecution::Atomic
+        })
+    }
+
+    pub fn dispatch_deferred_intents(
+        &mut self,
+        handler: &impl IntentHandler,
+        context: &HandlerContext,
+        limit: usize,
+    ) -> Result<DispatchReport, String> {
+        self.dispatch_intents_matching(handler, context, limit, |intent| {
+            intent.execution == IntentExecution::Deferred
+        })
+    }
+
+    fn dispatch_intents_matching(
+        &mut self,
+        handler: &impl IntentHandler,
+        context: &HandlerContext,
+        limit: usize,
+        accepts_execution: impl Fn(&Intent) -> bool,
+    ) -> Result<DispatchReport, String> {
         let mut report = DispatchReport::default();
         while report.handled < limit {
-            let Some((intent_index, intent)) = self.pop_next_intent(handler)? else {
+            let Some((intent_index, intent)) =
+                self.pop_next_intent_matching(handler, &accepts_execution)?
+            else {
                 break;
             };
             let output = match handler.handle(&intent, context) {
@@ -221,8 +257,8 @@ impl EventBus {
                 .get(&owner)
                 .cloned()
                 .unwrap_or_default();
-            let offers = self.matching_offers_for_owner(&owner, matchers);
-            let run = match run_projection(projector, &fact, &previous, offers) {
+            let context = self.matching_context_for_owner(&owner, matchers)?;
+            let run = match run_projection_with_context(projector, &fact, &previous, context) {
                 Ok(run) => run,
                 Err(err) => {
                     self.restore_pending(owner);
@@ -314,14 +350,15 @@ impl EventBus {
         Ok(true)
     }
 
-    fn pop_next_intent(
+    fn pop_next_intent_matching(
         &mut self,
         handler: &impl IntentHandler,
+        accepts_execution: impl Fn(&Intent) -> bool,
     ) -> Result<Option<(usize, Intent)>, String> {
         let Some(index) = self
             .intents
             .iter()
-            .position(|intent| handler.accepts(intent))
+            .position(|intent| accepts_execution(intent) && handler.accepts(intent))
         else {
             return Ok(None);
         };
@@ -367,29 +404,49 @@ impl EventBus {
         matches.len()
     }
 
-    fn matching_offers_for_owner(
+    fn matching_context_for_owner(
         &self,
         owner: &FactId,
         matchers: &[&dyn ContextMatcher],
-    ) -> Vec<ContextOffer> {
+    ) -> Result<ProjectionContext, String> {
         let Some(context) = self.context_by_owner.get(owner) else {
-            return Vec::new();
+            return Ok(ProjectionContext::new(Vec::new()));
         };
         let offers = self.all_offers();
-        let delta = ContextSetDelta {
-            added_needs: context.needs.clone(),
-            removed_needs: Vec::new(),
-            added_offers: Vec::new(),
-            removed_offers: Vec::new(),
-        };
-        let matches = match_context_delta(&delta, &[], &offers, matchers)
-            .into_iter()
-            .map(|matched| (matched.offer_owner, matched.payload_ref))
-            .collect::<BTreeSet<_>>();
-        offers
-            .into_iter()
-            .filter(|offer| matches.contains(&(offer.owner, offer.payload_ref)))
-            .collect()
+        let mut matched = Vec::new();
+        let mut seen = BTreeSet::new();
+        for need in &context.needs {
+            for matcher in matchers
+                .iter()
+                .copied()
+                .filter(|matcher| matcher.role() == &need.role)
+            {
+                for offer in offers.iter().filter(|offer| offer.role == need.role) {
+                    let offer_matches = matcher
+                        .match_new_need(need, std::slice::from_ref(offer))
+                        .into_iter()
+                        .any(|context_match| {
+                            context_match.need_owner == need.owner
+                                && context_match.offer_owner == offer.owner
+                                && context_match.payload_ref == offer.payload_ref
+                        });
+                    if !offer_matches || !seen.insert((need.clone(), offer.clone())) {
+                        continue;
+                    }
+                    let payload = self
+                        .facts
+                        .get(&offer.payload_ref)
+                        .ok_or_else(|| "context offer payload references unknown fact".to_string())?
+                        .clone();
+                    matched.push(MatchedContext {
+                        need: need.clone(),
+                        offer: offer.clone(),
+                        payload,
+                    });
+                }
+            }
+        }
+        Ok(ProjectionContext::from_matches(matched))
     }
 
     fn all_needs(&self) -> Vec<ContextNeed> {
@@ -982,6 +1039,38 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_can_filter_atomic_and_deferred_intents() {
+        let mut bus = EventBus::new();
+        bus.submit_intent(Intent::new(
+            IntentKind::new("work").unwrap(),
+            IntentExecution::Atomic,
+            b"atomic",
+            b"payload",
+        ))
+        .expect("submit atomic");
+        bus.submit_intent(Intent::new(
+            IntentKind::new("work").unwrap(),
+            IntentExecution::Deferred,
+            b"deferred",
+            b"payload",
+        ))
+        .expect("submit deferred");
+
+        let atomic = bus
+            .dispatch_atomic_intents(&AcceptAllHandler, &HandlerContext, 10)
+            .expect("dispatch atomic");
+        assert_eq!(atomic.handled, 1);
+        assert_eq!(bus.intents().len(), 1);
+        assert_eq!(bus.intents()[0].execution, IntentExecution::Deferred);
+
+        let deferred = bus
+            .dispatch_deferred_intents(&AcceptAllHandler, &HandlerContext, 10)
+            .expect("dispatch deferred");
+        assert_eq!(deferred.handled, 1);
+        assert!(bus.intents().is_empty());
+    }
+
+    #[test]
     fn failed_handler_keeps_intent_available_for_retry() {
         let mut bus = EventBus::new();
         let handler = FailOnceHandler {
@@ -1249,6 +1338,53 @@ mod tests {
         assert_eq!(bus.intents().len(), 1);
     }
 
+    #[test]
+    fn projection_context_exposes_matched_need_offer_and_payload_fact() {
+        let role = Role::new("exact").unwrap();
+        let matcher = ExactSelectorMatcher::new(role.clone());
+        let selector = Selector::from_bytes([8; 32]);
+        let projector = MatchedPayloadProjector::new(role, selector);
+        let need = Fact::new(FactScope::Global, 1, b"need-matched-payload".to_vec());
+        let offer = Fact::new(FactScope::Global, 2, b"payload-fact".to_vec());
+        let mut bus = EventBus::new();
+
+        bus.submit_fact(need);
+        bus.drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("need waits");
+        bus.submit_fact(offer);
+        let report = bus
+            .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("offer wakes need");
+
+        assert_eq!(report.wakes, 1);
+        assert_eq!(projector.matched.get(), 1);
+        assert_eq!(bus.intents().len(), 1);
+        assert_eq!(bus.intents()[0].payload, b"payload-fact");
+    }
+
+    #[test]
+    fn projection_context_keeps_only_the_exact_matched_offer() {
+        let role = Role::new("exact").unwrap();
+        let matcher = ExactSelectorMatcher::new(role.clone());
+        let wanted = Selector::from_bytes([8; 32]);
+        let sibling = Selector::from_bytes([9; 32]);
+        let projector = SiblingOfferProjector::new(role, wanted, sibling);
+        let need = Fact::new(FactScope::Global, 1, b"need-exact-offer".to_vec());
+        let offer = Fact::new(FactScope::Global, 2, b"sibling-offers".to_vec());
+        let mut bus = EventBus::new();
+
+        bus.submit_fact(need);
+        bus.drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("need waits");
+        bus.submit_fact(offer);
+        bus.drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("offer wakes need");
+
+        assert_eq!(projector.matched.get(), 1);
+        assert_eq!(bus.intents().len(), 1);
+        assert_eq!(bus.intents()[0].payload, b"exact-offer-only");
+    }
+
     struct NeedOfferProjector {
         role: Role,
         selector: Selector,
@@ -1434,6 +1570,18 @@ mod tests {
             intent.kind.as_str() == "selected_handler"
         }
 
+        fn handle(
+            &self,
+            _intent: &Intent,
+            _context: &HandlerContext,
+        ) -> Result<HandlerOutput, String> {
+            Ok(HandlerOutput::new())
+        }
+    }
+
+    struct AcceptAllHandler;
+
+    impl IntentHandler for AcceptAllHandler {
         fn handle(
             &self,
             _intent: &Intent,
@@ -1646,6 +1794,125 @@ mod tests {
                     scope: fact.scope.clone(),
                     selector: self.update_selector.clone(),
                 }))
+        }
+    }
+
+    struct MatchedPayloadProjector {
+        role: Role,
+        selector: Selector,
+        matched: Cell<usize>,
+    }
+
+    impl MatchedPayloadProjector {
+        fn new(role: Role, selector: Selector) -> Self {
+            Self {
+                role,
+                selector,
+                matched: Cell::new(0),
+            }
+        }
+    }
+
+    impl Projector for MatchedPayloadProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.bytes == b"payload-fact" {
+                return Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: self.selector.clone(),
+                    payload_ref: fact.id,
+                }));
+            }
+            if let Some(matched) = context.matched_context().first() {
+                self.matched.set(self.matched.get() + 1);
+                if matched.need.selector != self.selector
+                    || matched.offer.selector != self.selector
+                    || matched.payload.bytes != b"payload-fact"
+                {
+                    return Err("matched context did not preserve edge details".to_string());
+                }
+                return Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("matched_payload").unwrap(),
+                    IntentExecution::Atomic,
+                    fact.id,
+                    matched.payload.bytes.clone(),
+                )));
+            }
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: fact.id,
+                role: self.role.clone(),
+                scope: fact.scope.clone(),
+                selector: self.selector.clone(),
+            }))
+        }
+    }
+
+    struct SiblingOfferProjector {
+        role: Role,
+        wanted: Selector,
+        sibling: Selector,
+        matched: Cell<usize>,
+    }
+
+    impl SiblingOfferProjector {
+        fn new(role: Role, wanted: Selector, sibling: Selector) -> Self {
+            Self {
+                role,
+                wanted,
+                sibling,
+                matched: Cell::new(0),
+            }
+        }
+    }
+
+    impl Projector for SiblingOfferProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.bytes == b"sibling-offers" {
+                return Ok(ProjectionOutput::new()
+                    .offer(ContextOffer {
+                        owner: fact.id,
+                        role: self.role.clone(),
+                        scope: fact.scope.clone(),
+                        selector: self.wanted.clone(),
+                        payload_ref: fact.id,
+                    })
+                    .offer(ContextOffer {
+                        owner: fact.id,
+                        role: self.role.clone(),
+                        scope: fact.scope.clone(),
+                        selector: self.sibling.clone(),
+                        payload_ref: fact.id,
+                    }));
+            }
+            if !context.offers().is_empty() {
+                if context.offers().len() != 1 || context.offers()[0].selector != self.wanted {
+                    return Err(
+                        "projection context included an unmatched sibling offer".to_string()
+                    );
+                }
+                self.matched.set(self.matched.get() + 1);
+                return Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("exact_matched_offer").unwrap(),
+                    IntentExecution::Atomic,
+                    fact.id,
+                    b"exact-offer-only".to_vec(),
+                )));
+            }
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: fact.id,
+                role: self.role.clone(),
+                scope: fact.scope.clone(),
+                selector: self.wanted.clone(),
+            }))
         }
     }
 }
