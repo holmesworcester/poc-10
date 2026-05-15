@@ -3,6 +3,7 @@
 use crate::core::context::ContextOffer;
 use crate::core::facts::Fact;
 use crate::core::facts::FactId;
+use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use super::context::{self, WrapSourceSelector};
@@ -15,6 +16,7 @@ use super::intent::{
     PurgeRetiredRecipientMaterialIntent,
 };
 use super::layout;
+use super::rows::{key_wrap_row, KeyWrapRow};
 use crate::event_modules::sealed_message;
 use crate::event_modules::signed_fact;
 use crate::event_modules::sync;
@@ -244,15 +246,42 @@ fn project_signed_key_wrap(
 
     let signer_need =
         sealed_message::context::signer_need(fact.id, scope.clone(), envelope.signer_id);
-    if !has_matching_signer_public_key(
+    let recipient_need = context::recipient_key_need(fact.id, scope.clone(), wrap.recipient_key_id);
+    let frontier_need = context::frontier_need(fact.id, scope.clone(), wrap.frontier_id);
+
+    let signer_ready = has_matching_signer_public_key(
         projection_context,
         &signer_need,
         &envelope.signer_public_key,
-    ) {
-        return Ok(ProjectionOutput::new().need(signer_need));
+    );
+    let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
+    let frontier_fact = matched_payload_fact(projection_context, &frontier_need);
+
+    if !signer_ready || recipient_fact.is_none() || frontier_fact.is_none() {
+        return Ok(ProjectionOutput::new()
+            .need(signer_need)
+            .need(recipient_need)
+            .need(frontier_need));
+    }
+
+    let recipient = layout::decode_recipient_key(&recipient_fact.expect("checked").bytes)?;
+    if recipient.workspace_id != wrap.workspace_id {
+        return Err("key wrap recipient key workspace does not match event".to_string());
+    }
+    let frontier = layout::decode_removal_frontier(&frontier_fact.expect("checked").bytes)?;
+    if frontier.workspace_id != wrap.workspace_id {
+        return Err("key wrap removal frontier workspace does not match event".to_string());
     }
 
     Ok(ProjectionOutput::new()
+        .intent(
+            AtomicIntent::PutRow(key_wrap_row(KeyWrapRow {
+                key_wrap_id: fact.id,
+                signer_public_key: envelope.signer_public_key,
+                wrap,
+            })?)
+            .into_intent(),
+        )
         .offer(sync::context::exact_event_offer(
             fact.id,
             scope.clone(),
@@ -318,6 +347,17 @@ fn has_exact_offer(offers: &[ContextOffer], need: &crate::core::context::Context
     offers
         .iter()
         .any(|offer| offer.role == need.role && offer.selector == need.selector)
+}
+
+fn matched_payload_fact<'a>(
+    projection_context: &'a ProjectionContext,
+    need: &crate::core::context::ContextNeed,
+) -> Option<&'a Fact> {
+    projection_context
+        .matched_context()
+        .iter()
+        .find(|matched| matched.need.role == need.role && matched.need.selector == need.selector)
+        .map(|matched| &matched.payload)
 }
 
 fn has_matching_signer_public_key(
