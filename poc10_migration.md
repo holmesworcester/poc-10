@@ -413,6 +413,10 @@ done: full cargo test passes after real target key-wrap materialization and hand
 done: target signed_fact envelope helper signs fixed-slot opaque payloads with Ed25519 over canonical envelope prefix bytes
 done: signed_fact tests cover deterministic bytes, fact-id determinism, key-wrap payload round trip, padding canonicalization, and tamper rejection
 done: signed_fact guardrail prevents the envelope helper from importing child event modules or becoming a central protocol dispatcher
+done: local signer secret facts project local_signer_secret context offers, keeping signing capability explicit and event-native
+done: MaterializeKeyWraps intents now name exact signer-secret facts in addition to recipient/source facts
+done: MaterializeKeyWraps handler now returns signed key-wrap envelope facts and queues cleanly when source or signer context is missing
+done: key-healing projection waits for local signer context before emitting wrap intents, so signing authority does not become ambient handler state
 ```
 
 The next event-pipeline step is to replace the simplified message row proof
@@ -433,10 +437,13 @@ inner type, and a fixed-slot payload. It deliberately does not dispatch to
 child event modules or decide workspace, timestamp, dependency, or authority
 semantics; those remain projector/rules responsibilities for the payload module.
 
-The remaining parity step is to give `MaterializeKeyWraps` exact local signer
-secret context. Once that fact exists, the handler can return a signed shared
-key-wrap fact by composing `encryption/create.rs` with `signed_fact/create.rs`
-without adding authority logic to the handler.
+`MaterializeKeyWraps` now also names exact local signer-secret facts. Key-healing
+projection emits a `local_signer_secret` need for each matched wrap source and
+only emits the materialize intent once a signer-secret offer is present. The
+handler composes `encryption/create.rs` with `signed_fact/create.rs` and returns
+a signed key-wrap envelope fact. It still does not choose authority or scan for
+keys. The next parity step is validating signed key-wrap payloads on receipt
+against signer public-key context and payload-module authority rules.
 
 ### Wave 4: Encryption Slice
 

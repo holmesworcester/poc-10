@@ -153,6 +153,7 @@ pub enum WrapSourceKind {
 pub struct WrapSourceSelector {
     pub workspace_id: WorkspaceId,
     pub frontier_id: FrontierId,
+    pub owner_endpoint_id: FactId,
     pub frontier_created_at_ms: u64,
     pub kind: WrapSourceKind,
 }
@@ -162,6 +163,7 @@ pub fn frontier_root_wrap_source_offer(
     scope: FactScope,
     workspace_id: WorkspaceId,
     frontier_id: FrontierId,
+    owner_endpoint_id: FactId,
     frontier_created_at_ms: u64,
 ) -> ContextOffer {
     wrap_source_offer(
@@ -170,6 +172,7 @@ pub fn frontier_root_wrap_source_offer(
         WrapSourceSelector {
             workspace_id,
             frontier_id,
+            owner_endpoint_id,
             frontier_created_at_ms,
             kind: WrapSourceKind::FrontierRoot,
         },
@@ -181,6 +184,7 @@ pub fn history_node_wrap_source_offer(
     scope: FactScope,
     workspace_id: WorkspaceId,
     frontier_id: FrontierId,
+    owner_endpoint_id: FactId,
     range_start: u64,
     range_width: u64,
     bit_depth: u16,
@@ -192,6 +196,7 @@ pub fn history_node_wrap_source_offer(
         WrapSourceSelector {
             workspace_id,
             frontier_id,
+            owner_endpoint_id,
             frontier_created_at_ms: 0,
             kind: WrapSourceKind::HistoryNode {
                 range_start,
@@ -219,30 +224,33 @@ pub fn wrap_source_offer(
 
 pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSelector> {
     let bytes = selector.as_bytes();
-    if bytes.len() != 124 || bytes[0] != 3 {
+    if bytes.len() != 156 || bytes[0] != 3 {
         return None;
     }
     let workspace_id = bytes[1..33].try_into().ok()?;
     let frontier_id = bytes[33..65].try_into().ok()?;
-    let frontier_created_at_ms = u64::from_be_bytes(bytes[65..73].try_into().ok()?);
-    match bytes[73] {
+    let owner_endpoint_id = bytes[65..97].try_into().ok()?;
+    let frontier_created_at_ms = u64::from_be_bytes(bytes[97..105].try_into().ok()?);
+    match bytes[105] {
         1 => Some(WrapSourceSelector {
             workspace_id,
             frontier_id,
+            owner_endpoint_id,
             frontier_created_at_ms,
             kind: WrapSourceKind::FrontierRoot,
         }),
         2 => {
-            let range_start = u64::from_be_bytes(bytes[74..82].try_into().ok()?);
-            let range_width = u64::from_be_bytes(bytes[82..90].try_into().ok()?);
-            let bit_depth = u16::from_be_bytes(bytes[90..92].try_into().ok()?);
-            let event_id_prefix = bytes[92..124].try_into().ok()?;
+            let range_start = u64::from_be_bytes(bytes[106..114].try_into().ok()?);
+            let range_width = u64::from_be_bytes(bytes[114..122].try_into().ok()?);
+            let bit_depth = u16::from_be_bytes(bytes[122..124].try_into().ok()?);
+            let event_id_prefix = bytes[124..156].try_into().ok()?;
             if !valid_history_coordinate(range_start, range_width, bit_depth, event_id_prefix) {
                 return None;
             }
             Some(WrapSourceSelector {
                 workspace_id,
                 frontier_id,
+                owner_endpoint_id,
                 frontier_created_at_ms,
                 kind: WrapSourceKind::HistoryNode {
                     range_start,
@@ -257,10 +265,11 @@ pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSele
 }
 
 pub fn encode_wrap_source_selector(source: &WrapSourceSelector) -> Selector {
-    let mut bytes = Vec::with_capacity(124);
+    let mut bytes = Vec::with_capacity(156);
     bytes.push(3);
     bytes.extend_from_slice(&source.workspace_id);
     bytes.extend_from_slice(&source.frontier_id);
+    bytes.extend_from_slice(&source.owner_endpoint_id);
     bytes.extend_from_slice(&source.frontier_created_at_ms.to_be_bytes());
     match source.kind {
         WrapSourceKind::FrontierRoot => {

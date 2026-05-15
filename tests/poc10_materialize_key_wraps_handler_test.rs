@@ -9,6 +9,7 @@ use topo::event_modules::encryption::fact::{
 };
 use topo::event_modules::encryption::intent;
 use topo::event_modules::encryption::layout;
+use topo::event_modules::signed_fact::{self, fact::LocalSignerSecretFact};
 use topo::handlers::materialize_key_wraps::MaterializeKeyWrapsHandler;
 
 #[test]
@@ -18,16 +19,18 @@ fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
     let frontier = [3; 32];
     let recipient = recipient_key_fact(workspace, endpoint, [4; 32]);
     let source = local_root_fact(workspace, frontier, endpoint, [5; 32]);
+    let signer = local_signer_secret_fact(workspace, endpoint);
     let source_selector = WrapSourceSelector {
         workspace_id: workspace,
         frontier_id: frontier,
+        owner_endpoint_id: endpoint,
         frontier_created_at_ms: 10,
         kind: WrapSourceKind::FrontierRoot,
     };
     let materialize =
-        intent::materialize_key_wraps_intent(recipient.id, source.id, source_selector);
+        intent::materialize_key_wraps_intent(recipient.id, source.id, signer.id, source_selector);
     let handler = MaterializeKeyWrapsHandler::new();
-    let context = HandlerContext::with_facts([recipient.clone(), source.clone()]);
+    let context = HandlerContext::with_facts([recipient.clone(), source.clone(), signer.clone()]);
 
     let first = handler
         .handle(&materialize, &context)
@@ -38,7 +41,11 @@ fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
 
     assert_eq!(first.facts.len(), 1);
     assert_eq!(first.facts, second.facts);
-    let wrap = layout::decode_key_wrap(&first.facts[0].bytes).expect("decode key wrap");
+    let envelope = signed_fact::layout::decode_signed_fact(&first.facts[0].bytes)
+        .expect("decode signed key wrap");
+    assert_eq!(envelope.signer_id, endpoint);
+    assert_eq!(envelope.inner_type, layout::TYPE_KEY_WRAP);
+    let wrap = layout::decode_key_wrap(&envelope.payload).expect("decode key wrap");
     assert_eq!(wrap.workspace_id, workspace);
     assert_eq!(wrap.signer_endpoint_id, endpoint);
     assert_eq!(wrap.frontier_id, frontier);
@@ -63,19 +70,61 @@ fn missing_source_context_leaves_materialize_intent_queued() {
     let source_selector = WrapSourceSelector {
         workspace_id: workspace,
         frontier_id: frontier,
+        owner_endpoint_id: endpoint,
         frontier_created_at_ms: 10,
         kind: WrapSourceKind::FrontierRoot,
     };
     let mut bus = EventBus::new();
     let handler = MaterializeKeyWrapsHandler::new();
-    let materialize =
-        intent::materialize_key_wraps_intent(recipient.id, missing_source_id, source_selector);
+    let signer = local_signer_secret_fact(workspace, endpoint);
+    let materialize = intent::materialize_key_wraps_intent(
+        recipient.id,
+        missing_source_id,
+        signer.id,
+        source_selector,
+    );
 
     bus.submit_fact(recipient);
+    bus.submit_fact(signer);
     bus.submit_intent(materialize).expect("submit materialize");
     let err = bus
         .dispatch_deferred_intents_with_fact_context(&handler, 10)
         .expect_err("missing source fact must fail");
+
+    assert!(err.contains("handler context missing fact"), "{err}");
+    assert_eq!(bus.intents().len(), 1);
+}
+
+#[test]
+fn missing_signer_context_leaves_materialize_intent_queued() {
+    let workspace = [21; 32];
+    let endpoint = [22; 32];
+    let frontier = [23; 32];
+    let recipient = recipient_key_fact(workspace, endpoint, [24; 32]);
+    let source = local_root_fact(workspace, frontier, endpoint, [25; 32]);
+    let missing_signer_id = [26; 32];
+    let source_selector = WrapSourceSelector {
+        workspace_id: workspace,
+        frontier_id: frontier,
+        owner_endpoint_id: endpoint,
+        frontier_created_at_ms: 10,
+        kind: WrapSourceKind::FrontierRoot,
+    };
+    let mut bus = EventBus::new();
+    let handler = MaterializeKeyWrapsHandler::new();
+    let materialize = intent::materialize_key_wraps_intent(
+        recipient.id,
+        source.id,
+        missing_signer_id,
+        source_selector,
+    );
+
+    bus.submit_fact(recipient);
+    bus.submit_fact(source);
+    bus.submit_intent(materialize).expect("submit materialize");
+    let err = bus
+        .dispatch_deferred_intents_with_fact_context(&handler, 10)
+        .expect_err("missing signer fact must fail");
 
     assert!(err.contains("handler context missing fact"), "{err}");
     assert_eq!(bus.intents().len(), 1);
@@ -113,5 +162,19 @@ fn local_root_fact(
             key_secret,
         })
         .expect("encode local root"),
+    )
+}
+
+fn local_signer_secret_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
+    let private_key = [9; 32];
+    Fact::new(
+        workspace_scope(workspace_id),
+        10,
+        signed_fact::layout::encode_local_signer_secret(&LocalSignerSecretFact {
+            signer_id,
+            public_key: topo::core::crypto::ed25519_public_key(&private_key),
+            private_key,
+        })
+        .expect("encode signer secret"),
     )
 }

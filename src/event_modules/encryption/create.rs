@@ -2,6 +2,7 @@
 
 use crate::core::crypto;
 use crate::core::facts::Fact;
+use crate::event_modules::signed_fact;
 
 use super::fact::{
     KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, RecipientKeyFact,
@@ -82,6 +83,26 @@ pub fn materialize_key_wrap_fact(
         KEY_WRAP_CREATED_AT_MS,
         layout::encode_key_wrap(&wrap)?,
     ))
+}
+
+pub fn materialize_signed_key_wrap_fact(
+    intent: &MaterializeKeyWrapsIntent,
+    recipient_fact: &Fact,
+    source_fact: &Fact,
+    signer_secret_fact: &Fact,
+) -> Result<Fact, String> {
+    let wrap = materialize_key_wrap_fact(intent, recipient_fact, source_fact)?;
+    let signer = signed_fact::layout::decode_local_signer_secret(&signer_secret_fact.bytes)?;
+    if signer_secret_fact.id != intent.signer_secret_fact_id {
+        return Err("signer secret fact id does not match materialize intent".to_string());
+    }
+    let key_wrap = layout::decode_key_wrap(&wrap.bytes)?;
+    if signer.signer_id != key_wrap.signer_endpoint_id {
+        return Err("signer secret does not match key wrap signer".to_string());
+    }
+    let signed_bytes =
+        signed_fact::create::sign_payload_bytes(signer.signer_id, &signer.private_key, wrap.bytes)?;
+    Ok(Fact::new(wrap.scope, wrap.timestamp, signed_bytes))
 }
 
 fn wrap_material(

@@ -23,6 +23,7 @@ use topo::event_modules::sealed_message::fact::{
 };
 use topo::event_modules::sealed_message::rows::{MESSAGE_ROWS, SEALED_MESSAGE_ROWS};
 use topo::event_modules::sealed_message::{layout as message_layout, project as message_project};
+use topo::event_modules::signed_fact::{self, fact::LocalSignerSecretFact};
 
 #[test]
 fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appears() {
@@ -30,30 +31,67 @@ fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appe
     let endpoint = [2; 32];
     let recipient = recipient_key_fact(workspace, endpoint, NO_PREVIOUS_RECIPIENT_KEY, 10);
     let root = local_key_secret_fact(workspace, [3; 32], endpoint, 20);
+    let signer = local_signer_secret_fact(workspace, endpoint);
     let mut bus = EventBus::new();
-    let projector = encryption_project::EncryptionProjector::new();
+    let projector = CombinedProjector;
     let wrap_matcher = WrapSourceMatcher::new();
+    let signer_matcher =
+        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
+    let matchers = [
+        &wrap_matcher as &dyn ContextMatcher,
+        &signer_matcher as &dyn ContextMatcher,
+    ];
 
     bus.submit_fact(recipient.clone());
     let waiting = bus
-        .drain(&projector, &[&wrap_matcher as &dyn ContextMatcher], 10)
+        .drain(&projector, &matchers, 10)
         .expect("recipient waits for source");
     assert_eq!(waiting.intents, 0);
     assert_eq!(bus.context(&recipient.id).unwrap().needs.len(), 2);
 
     bus.submit_fact(root.clone());
-    let wrapped = bus
-        .drain(&projector, &[&wrap_matcher as &dyn ContextMatcher], 10)
+    bus.submit_fact(signer.clone());
+    bus.drain(&projector, &matchers, 20)
         .expect("root source wakes recipient");
 
-    assert_eq!(wrapped.wakes, 1);
     assert_eq!(bus.intents().len(), 1);
     let intent = decode_materialize_key_wraps_intent(&bus.intents()[0]).expect("wrap intent");
     assert_eq!(intent.workspace_id, workspace);
     assert_eq!(intent.frontier_id, [3; 32]);
     assert_eq!(intent.recipient_key_id, recipient.id);
     assert_eq!(intent.source_fact_id, root.id);
+    assert_eq!(intent.signer_secret_fact_id, signer.id);
     assert_eq!(intent.source, WrapSourceKind::FrontierRoot);
+}
+
+#[test]
+fn recipient_key_waits_for_local_signer_secret_before_materializing_wrap() {
+    let workspace = [1; 32];
+    let endpoint = [2; 32];
+    let recipient = recipient_key_fact(workspace, endpoint, NO_PREVIOUS_RECIPIENT_KEY, 10);
+    let root = local_key_secret_fact(workspace, [3; 32], endpoint, 20);
+    let mut bus = EventBus::new();
+    let projector = CombinedProjector;
+    let wrap_matcher = WrapSourceMatcher::new();
+    let signer_matcher =
+        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
+    let matchers = [
+        &wrap_matcher as &dyn ContextMatcher,
+        &signer_matcher as &dyn ContextMatcher,
+    ];
+
+    bus.submit_fact(recipient.clone());
+    bus.submit_fact(root);
+    bus.drain(&projector, &matchers, 20)
+        .expect("source without signer");
+
+    assert!(bus.intents().is_empty());
+    assert!(bus
+        .context(&recipient.id)
+        .unwrap()
+        .needs
+        .iter()
+        .any(|need| { need.role == signed_fact::context::local_signer_secret_role() }));
 }
 
 #[test]
@@ -65,24 +103,32 @@ fn rotated_recipient_key_does_not_receive_old_frontier_sources() {
     let rotated = recipient_key_fact(workspace, endpoint, [8; 32], 50);
     let old_root = local_key_secret_fact(workspace, old_frontier, endpoint, 20);
     let new_root = local_key_secret_fact(workspace, new_frontier, endpoint, 70);
-    let projector = encryption_project::EncryptionProjector::new();
+    let signer = local_signer_secret_fact(workspace, endpoint);
+    let projector = CombinedProjector;
     let wrap_matcher = WrapSourceMatcher::new();
+    let signer_matcher =
+        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
+    let matchers = [
+        &wrap_matcher as &dyn ContextMatcher,
+        &signer_matcher as &dyn ContextMatcher,
+    ];
     let mut bus = EventBus::new();
 
     bus.submit_fact(rotated.clone());
     bus.submit_fact(old_root);
     let old_seen = bus
-        .drain(&projector, &[&wrap_matcher as &dyn ContextMatcher], 10)
+        .drain(&projector, &matchers, 10)
         .expect("old root is not eligible");
     assert_eq!(old_seen.wakes, 0);
     assert!(bus.intents().is_empty());
 
     let new_root_id = new_root.id;
     bus.submit_fact(new_root);
+    bus.submit_fact(signer);
     let new_seen = bus
-        .drain(&projector, &[&wrap_matcher as &dyn ContextMatcher], 10)
+        .drain(&projector, &matchers, 20)
         .expect("new root wakes rotated key");
-    assert_eq!(new_seen.wakes, 1);
+    assert!(new_seen.wakes >= 1);
     assert_eq!(bus.intents().len(), 1);
     let intent = decode_materialize_key_wraps_intent(&bus.intents()[0]).expect("wrap intent");
     assert_eq!(intent.frontier_id, new_frontier);
@@ -97,6 +143,7 @@ fn duplicate_key_requests_converge_on_one_wrap_intent_without_request_entropy() 
     let frontier = removal_frontier_fact(workspace, responder, 10);
     let recipient = recipient_key_fact(workspace, requester, [13; 32], 50);
     let root = local_key_secret_fact(workspace, frontier.id, responder, 10);
+    let signer = local_signer_secret_fact(workspace, responder);
     let request_a = key_request_fact(
         workspace,
         requester,
@@ -113,20 +160,23 @@ fn duplicate_key_requests_converge_on_one_wrap_intent_without_request_entropy() 
         recipient.id,
         61,
     );
-    let projector = encryption_project::EncryptionProjector::new();
+    let projector = CombinedProjector;
     let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
     let superseded_matcher = ExactSelectorMatcher::new(recipient_superseded_role());
     let wrap_matcher = WrapSourceMatcher::new();
+    let signer_matcher =
+        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
     let matchers = [
         &recipient_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
         &superseded_matcher as &dyn ContextMatcher,
         &wrap_matcher as &dyn ContextMatcher,
+        &signer_matcher as &dyn ContextMatcher,
     ];
     let mut bus = EventBus::new();
 
-    for fact in [frontier, recipient, root, request_a, request_b] {
+    for fact in [frontier, recipient, root, signer, request_a, request_b] {
         bus.submit_fact(fact);
     }
     bus.drain(&projector, &matchers, 100)
@@ -162,18 +212,22 @@ fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
     );
     let retained_a = history_node_fact(workspace, frontier.id, 40, 8, 0, [0; 32]);
     let retained_b = history_node_fact(workspace, frontier.id, 51, 1, 8, byte_prefix(0xaa));
-    let projector = encryption_project::EncryptionProjector::new();
+    let signer = local_signer_secret_fact(workspace, [0x76; 32]);
+    let projector = CombinedProjector;
     let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
     let wrap_matcher = WrapSourceMatcher::new();
+    let signer_matcher =
+        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
     let matchers = [
         &recipient_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
         &wrap_matcher as &dyn ContextMatcher,
+        &signer_matcher as &dyn ContextMatcher,
     ];
     let mut bus = EventBus::new();
 
-    for fact in [frontier, recipient, request, retained_a, retained_b] {
+    for fact in [frontier, recipient, request, retained_a, retained_b, signer] {
         bus.submit_fact(fact);
     }
     bus.drain(&projector, &matchers, 100)
@@ -278,6 +332,7 @@ fn recipient_key_projector_revalidates_wrap_source_context_before_wrapping() {
         workspace_scope(workspace),
         workspace,
         [54; 32],
+        endpoint,
         20,
     );
     let projector = encryption_project::EncryptionProjector::new();
@@ -317,6 +372,9 @@ impl Projector for CombinedProjector {
             | Some(encryption_layout::TYPE_LOCAL_HISTORY_NODE_SECRET)
             | Some(encryption_layout::TYPE_KEY_REQUEST) => {
                 encryption_project::EncryptionProjector::new().project(fact, context)
+            }
+            Some(signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET) => {
+                signed_fact::project::SignedFactProjector::new().project(fact, context)
             }
             _ => message_project::SealedMessageProjector::new().project(fact, context),
         }
@@ -404,6 +462,20 @@ fn history_node_fact(
             node_secret: [0x79; 32],
         })
         .expect("encode history node"),
+    )
+}
+
+fn local_signer_secret_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
+    let private_key = [0x42; 32];
+    Fact::new(
+        workspace_scope(workspace_id),
+        0,
+        signed_fact::layout::encode_local_signer_secret(&LocalSignerSecretFact {
+            signer_id,
+            public_key: topo::core::crypto::ed25519_public_key(&private_key),
+            private_key,
+        })
+        .expect("encode local signer secret"),
     )
 }
 

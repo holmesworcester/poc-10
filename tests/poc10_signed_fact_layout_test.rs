@@ -1,8 +1,11 @@
 use topo::core::crypto;
 use topo::core::facts::Fact;
+use topo::core::projection::{ProjectionContext, Projector};
 use topo::event_modules::encryption::context::workspace_scope;
 use topo::event_modules::encryption::fact::{KeyWrapFact, WrappedSecretKind};
 use topo::event_modules::encryption::layout as key_wrap_layout;
+use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
+use topo::event_modules::signed_fact::project::SignedFactProjector;
 use topo::event_modules::signed_fact::{create, layout};
 
 #[test]
@@ -78,6 +81,31 @@ fn signed_fact_uses_fixed_payload_slot_with_canonical_padding() {
     .expect("signed bytes");
     encoded[layout::SIGNED_FACT_BYTES - crypto::ED25519_SIGNATURE_BYTES - 1] = 1;
     assert!(layout::decode_signed_fact(&encoded).is_err());
+}
+
+#[test]
+fn local_signer_secret_round_trips_and_offers_signing_context() {
+    let workspace = [1; 32];
+    let signer_id = [2; 32];
+    let private_key = [9; 32];
+    let public_key = crypto::ed25519_public_key(&private_key);
+    let bytes = layout::encode_local_signer_secret(&LocalSignerSecretFact {
+        signer_id,
+        public_key,
+        private_key,
+    })
+    .expect("encode signer secret");
+    let fact = Fact::new(workspace_scope(workspace), 10, bytes);
+    let decoded = layout::decode_local_signer_secret(&fact.bytes).expect("decode signer secret");
+
+    assert_eq!(decoded.signer_id, signer_id);
+    assert_eq!(decoded.public_key, public_key);
+    let output = SignedFactProjector::new()
+        .project(&fact, &ProjectionContext::new(Vec::new()))
+        .expect("project signer secret");
+    assert_eq!(output.offers.len(), 1);
+    assert_eq!(output.offers[0].owner, fact.id);
+    assert_eq!(output.offers[0].payload_ref, fact.id);
 }
 
 fn key_wrap() -> KeyWrapFact {

@@ -496,8 +496,6 @@ fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
             "encode_key_wrap",
             "SealedMessage",
             "KeyWrapFact",
-            "ProjectionOutput",
-            "Projector",
             "Intent",
             "HandlerOutput",
         ] {

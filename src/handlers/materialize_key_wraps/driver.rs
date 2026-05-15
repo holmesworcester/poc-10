@@ -22,7 +22,9 @@ impl IntentHandler for MaterializeKeyWrapsHandler {
         let input = intent::decode_materialize_key_wraps_intent(intent)?;
         let recipient = context.require_fact(&input.recipient_key_id)?;
         let source = context.require_fact(&input.source_fact_id)?;
-        let wrap = create::materialize_key_wrap_fact(&input, recipient, source)?;
+        let signer_secret = context.require_fact(&input.signer_secret_fact_id)?;
+        let wrap =
+            create::materialize_signed_key_wrap_fact(&input, recipient, source, signer_secret)?;
         Ok(HandlerOutput::new().fact(wrap))
     }
 }

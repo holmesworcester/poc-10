@@ -4,11 +4,35 @@ use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;
 use crate::core::wire::{FixedLayout, FixedSlot};
 
-use super::fact::{SignedFactEnvelope, SIGNED_FACT_PAYLOAD_BYTES};
+use super::fact::{LocalSignerSecretFact, SignedFactEnvelope, SIGNED_FACT_PAYLOAD_BYTES};
 
 pub const TYPE_SIGNED_FACT: u8 = 132;
+pub const TYPE_LOCAL_SIGNER_SECRET: u8 = 133;
 pub const SIGNED_FACT_BYTES: usize =
     1 + 32 + 32 + 1 + FixedSlot::<SIGNED_FACT_PAYLOAD_BYTES>::LEN + ED25519_SIGNATURE_BYTES;
+pub const LOCAL_SIGNER_SECRET_BYTES: usize = 1 + 32 + 32 + 32;
+
+pub fn encode_local_signer_secret(fact: &LocalSignerSecretFact) -> Result<Vec<u8>, String> {
+    validate_local_signer_secret(fact)?;
+    let mut out = vec![0; LOCAL_SIGNER_SECRET_BYTES];
+    wire::put_u8(TYPE_LOCAL_SIGNER_SECRET, &mut out[0..1]).map_err(wire_err)?;
+    out[1..33].copy_from_slice(&fact.signer_id);
+    out[33..65].copy_from_slice(&fact.public_key);
+    out[65..97].copy_from_slice(&fact.private_key);
+    Ok(out)
+}
+
+pub fn decode_local_signer_secret(bytes: &[u8]) -> Result<LocalSignerSecretFact, String> {
+    wire::expect_len(bytes, LOCAL_SIGNER_SECRET_BYTES).map_err(wire_err)?;
+    expect_tag(bytes, TYPE_LOCAL_SIGNER_SECRET, "local signer secret")?;
+    let fact = LocalSignerSecretFact {
+        signer_id: bytes[1..33].try_into().unwrap(),
+        public_key: bytes[33..65].try_into().unwrap(),
+        private_key: bytes[65..97].try_into().unwrap(),
+    };
+    validate_local_signer_secret(&fact)?;
+    Ok(fact)
+}
 
 pub fn encode_signed_fact(envelope: &SignedFactEnvelope) -> Result<Vec<u8>, String> {
     validate_payload(envelope.inner_type, &envelope.payload)?;
@@ -32,7 +56,7 @@ pub fn encode_signed_fact(envelope: &SignedFactEnvelope) -> Result<Vec<u8>, Stri
 
 pub fn decode_signed_fact(bytes: &[u8]) -> Result<SignedFactEnvelope, String> {
     wire::expect_len(bytes, SIGNED_FACT_BYTES).map_err(wire_err)?;
-    expect_tag(bytes)?;
+    expect_tag(bytes, TYPE_SIGNED_FACT, "signed fact")?;
     let payload = FixedSlot::<SIGNED_FACT_PAYLOAD_BYTES>::decode(
         &bytes[66..66 + FixedSlot::<SIGNED_FACT_PAYLOAD_BYTES>::LEN],
     )
@@ -93,12 +117,25 @@ fn validate_payload(inner_type: u8, payload: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn expect_tag(bytes: &[u8]) -> Result<(), String> {
+fn validate_local_signer_secret(fact: &LocalSignerSecretFact) -> Result<(), String> {
+    if fact.signer_id.iter().all(|byte| *byte == 0) {
+        return Err("local signer secret signer_id cannot be empty".to_string());
+    }
+    if fact.private_key.iter().all(|byte| *byte == 0) {
+        return Err("local signer secret private_key cannot be empty".to_string());
+    }
+    if crypto::ed25519_public_key(&fact.private_key) != fact.public_key {
+        return Err("local signer secret public_key does not match private_key".to_string());
+    }
+    Ok(())
+}
+
+fn expect_tag(bytes: &[u8], expected: u8, label: &str) -> Result<(), String> {
     let actual = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
-    if actual == TYPE_SIGNED_FACT {
+    if actual == expected {
         Ok(())
     } else {
-        Err("expected signed fact".to_string())
+        Err(format!("expected {label}"))
     }
 }
 

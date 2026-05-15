@@ -16,6 +16,7 @@ use super::intent::{
 };
 use super::layout;
 use crate::event_modules::sealed_message;
+use crate::event_modules::signed_fact;
 
 #[derive(Debug, Clone, Default)]
 pub struct EncryptionProjector;
@@ -95,10 +96,14 @@ fn project_recipient_key(
         ));
     }
 
-    for (source_fact_id, source) in matching_wrap_sources(projection_context.offers(), &wrap_need) {
+    output = add_signer_needs_for_matching_sources(output, projection_context.offers(), &wrap_need);
+    for (source_fact_id, signer_secret_fact_id, source) in
+        matching_wrap_sources_with_signer(projection_context.offers(), &wrap_need)
+    {
         output = output.intent(materialize_key_wraps_intent(
             fact.id,
             source_fact_id,
+            signer_secret_fact_id,
             source,
         ));
     }
@@ -122,6 +127,7 @@ fn project_local_key_secret(fact: &Fact) -> Result<ProjectionOutput, String> {
             scope.clone(),
             secret.workspace_id,
             secret.frontier_id,
+            secret.owner_endpoint_id,
             secret.created_at_ms,
         ))
         .offer(sealed_message::context::secret_offer(
@@ -156,6 +162,7 @@ fn project_local_history_node_secret(fact: &Fact) -> Result<ProjectionOutput, St
             scope.clone(),
             node.workspace_id,
             node.frontier_id,
+            node.owner_endpoint_id,
             node.range_start,
             node.range_width,
             node.bit_depth,
@@ -199,12 +206,18 @@ fn project_key_request(
         .need(source_need.clone());
 
     if has_recipient && has_frontier {
-        for (source_fact_id, source) in
-            matching_wrap_sources(projection_context.offers(), &source_need)
+        output = add_signer_needs_for_matching_sources(
+            output,
+            projection_context.offers(),
+            &source_need,
+        );
+        for (source_fact_id, signer_secret_fact_id, source) in
+            matching_wrap_sources_with_signer(projection_context.offers(), &source_need)
         {
             output = output.intent(materialize_key_wraps_intent(
                 request.recipient_key_id,
                 source_fact_id,
+                signer_secret_fact_id,
                 source,
             ));
         }
@@ -212,17 +225,56 @@ fn project_key_request(
     Ok(output)
 }
 
-fn matching_wrap_sources(
+fn matching_wrap_sources_with_signer(
     offers: &[ContextOffer],
     need: &crate::core::context::ContextNeed,
-) -> Vec<(FactId, WrapSourceSelector)> {
+) -> Vec<(FactId, FactId, WrapSourceSelector)> {
     offers
         .iter()
         .filter_map(|offer| {
-            context::wrap_source_offer_matches_need(need, offer)
-                .map(|source| (offer.payload_ref, source))
+            context::wrap_source_offer_matches_need(need, offer).and_then(|source| {
+                local_signer_secret_payload_ref(
+                    offers,
+                    need.owner,
+                    &need.scope,
+                    source.owner_endpoint_id,
+                )
+                .map(|signer_secret_fact_id| (offer.payload_ref, signer_secret_fact_id, source))
+            })
         })
         .collect()
+}
+
+fn add_signer_needs_for_matching_sources(
+    mut output: ProjectionOutput,
+    offers: &[ContextOffer],
+    need: &crate::core::context::ContextNeed,
+) -> ProjectionOutput {
+    for offer in offers {
+        let Some(source) = context::wrap_source_offer_matches_need(need, offer) else {
+            continue;
+        };
+        output = output.need(signed_fact::context::local_signer_secret_need(
+            need.owner,
+            need.scope.clone(),
+            source.owner_endpoint_id,
+        ));
+    }
+    output
+}
+
+fn local_signer_secret_payload_ref(
+    offers: &[ContextOffer],
+    owner: FactId,
+    scope: &crate::core::facts::FactScope,
+    signer_id: FactId,
+) -> Option<FactId> {
+    let need = signed_fact::context::local_signer_secret_need(owner, scope.clone(), signer_id);
+    offers
+        .iter()
+        .filter(|offer| offer.role == need.role && offer.selector == need.selector)
+        .map(|offer| offer.payload_ref)
+        .min()
 }
 
 fn has_exact_offer(offers: &[ContextOffer], need: &crate::core::context::ContextNeed) -> bool {
