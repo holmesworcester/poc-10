@@ -42,3 +42,9 @@ table key_wrap_rows {
   column value bytes;
   row_key (key);
 }
+
+table user_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
