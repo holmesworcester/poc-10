@@ -661,6 +661,7 @@ mod tests {
                 "local_endpoint_signing_secret_rows",
                 "content_event_rows",
                 "sync_compare_rows",
+                "sync_have_id_rows",
             ]
         );
         assert_eq!(
