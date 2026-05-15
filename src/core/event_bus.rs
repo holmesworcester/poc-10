@@ -46,6 +46,7 @@ pub struct EventBus {
     pending_projection: VecDeque<FactId>,
     pending_owners: BTreeSet<FactId>,
     intents: Vec<Intent>,
+    intent_keys: BTreeMap<Vec<u8>, usize>,
 }
 
 impl EventBus {
@@ -105,7 +106,7 @@ impl EventBus {
             .table_rows(INTENTS)
             .map_err(|err| format!("load intents: {err}"))?
         {
-            bus.intents.push(decode_intent(&value)?);
+            bus.submit_intent(decode_intent(&value)?)?;
         }
         Ok(bus)
     }
@@ -148,7 +149,12 @@ impl EventBus {
     }
 
     pub fn take_intents(&mut self) -> Vec<Intent> {
+        self.intent_keys.clear();
         std::mem::take(&mut self.intents)
+    }
+
+    pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
+        self.record_intent(intent)
     }
 
     pub fn drain(
@@ -178,12 +184,19 @@ impl EventBus {
                     return Err(err);
                 }
             };
+            if let Err(err) = self.validate_intents(&run.intents) {
+                self.restore_pending(owner);
+                return Err(err);
+            }
             self.replace_context(owner, run.context);
             report.projections += 1;
             report.context_matches +=
                 self.wake_context_matches(&run.context_delta, matchers, &mut report);
-            report.intents += run.intents.len();
-            self.intents.extend(run.intents);
+            for intent in run.intents {
+                if self.record_intent(intent)? {
+                    report.intents += 1;
+                }
+            }
         }
         Ok(report)
     }
@@ -214,6 +227,46 @@ impl EventBus {
         } else {
             self.context_by_owner.insert(owner, context);
         }
+    }
+
+    fn validate_intents(&self, intents: &[Intent]) -> Result<(), String> {
+        let mut proposed = BTreeMap::<Vec<u8>, &Intent>::new();
+        for intent in intents {
+            let key = intent_row_key(intent);
+            if let Some(existing_index) = self.intent_keys.get(&key) {
+                if self.intents[*existing_index] != *intent {
+                    return Err(format!(
+                        "intent idempotence key conflict for {}",
+                        intent.kind.as_str()
+                    ));
+                }
+            }
+            if let Some(existing) = proposed.insert(key, intent) {
+                if existing != intent {
+                    return Err(format!(
+                        "projection emitted conflicting intents for {}",
+                        intent.kind.as_str()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn record_intent(&mut self, intent: Intent) -> Result<bool, String> {
+        let key = intent_row_key(&intent);
+        if let Some(existing_index) = self.intent_keys.get(&key) {
+            if self.intents[*existing_index] == intent {
+                return Ok(false);
+            }
+            return Err(format!(
+                "intent idempotence key conflict for {}",
+                intent.kind.as_str()
+            ));
+        }
+        self.intent_keys.insert(key, self.intents.len());
+        self.intents.push(intent);
+        Ok(true)
     }
 
     fn wake_context_matches(
@@ -728,6 +781,68 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_intents_are_idempotent_across_repeated_wakes() {
+        let role = Role::new("exact").unwrap();
+        let matcher = ExactSelectorMatcher::new(role.clone());
+        let projector = StandingNeedIntentProjector::new(role, Selector::from_bytes([8; 32]));
+        let owner = Fact::new(FactScope::Global, 1, b"need".to_vec());
+        let offer_a = Fact::new(FactScope::Global, 2, b"offer-a".to_vec());
+        let offer_b = Fact::new(FactScope::Global, 3, b"offer-b".to_vec());
+        let mut bus = EventBus::new();
+
+        bus.submit_fact(owner);
+        let first = bus
+            .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("first drain");
+        assert_eq!(first.intents, 1);
+        assert_eq!(bus.intents().len(), 1);
+
+        bus.submit_fact(offer_a);
+        bus.submit_fact(offer_b);
+        let rewake = bus
+            .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("rewake drain");
+
+        assert_eq!(rewake.wakes, 1);
+        assert_eq!(rewake.intents, 0);
+        assert_eq!(bus.intents().len(), 1);
+        assert_eq!(bus.take_intents().len(), 1);
+        assert!(bus.intents().is_empty());
+    }
+
+    #[test]
+    fn conflicting_intent_key_restores_pending_without_replacing_context() {
+        let role = Role::new("exact").unwrap();
+        let matcher = ExactSelectorMatcher::new(role.clone());
+        let projector = StandingNeedIntentProjector::new(role, Selector::from_bytes([8; 32]));
+        let owner = Fact::new(FactScope::Global, 1, b"need".to_vec());
+        let offer = Fact::new(FactScope::Global, 2, b"offer".to_vec());
+        let mut bus = EventBus::new();
+
+        bus.submit_fact(owner.clone());
+        bus.drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("first drain");
+        assert_eq!(bus.context(&owner.id).unwrap().needs.len(), 1);
+
+        projector.payload_byte.set(2);
+        bus.submit_fact(offer);
+        let err = bus
+            .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect_err("conflicting deterministic intent");
+
+        assert!(err.contains("intent idempotence key conflict"), "{err}");
+        assert_eq!(bus.pending_len(), 1);
+        assert_eq!(bus.context(&owner.id).unwrap().needs.len(), 1);
+
+        projector.payload_byte.set(1);
+        bus.drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+            .expect("retry with original deterministic intent");
+        assert_eq!(bus.pending_len(), 0);
+        assert!(bus.context(&owner.id).is_none());
+        assert_eq!(bus.intents().len(), 1);
+    }
+
+    #[test]
     fn new_need_finds_existing_offer_and_wakes_itself() {
         let role = Role::new("exact").unwrap();
         let matcher = ExactSelectorMatcher::new(role.clone());
@@ -1034,6 +1149,58 @@ mod tests {
             }
             self.child_applied.set(self.child_applied.get() + 1);
             Ok(ProjectionOutput::new())
+        }
+    }
+
+    struct StandingNeedIntentProjector {
+        role: Role,
+        selector: Selector,
+        payload_byte: Cell<u8>,
+    }
+
+    impl StandingNeedIntentProjector {
+        fn new(role: Role, selector: Selector) -> Self {
+            Self {
+                role,
+                selector,
+                payload_byte: Cell::new(1),
+            }
+        }
+    }
+
+    impl Projector for StandingNeedIntentProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.bytes.starts_with(b"offer") {
+                return Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: self.selector.clone(),
+                    payload_ref: fact.id,
+                }));
+            }
+
+            let intent = Intent::new(
+                IntentKind::new("deterministic_work").unwrap(),
+                IntentExecution::Deferred,
+                fact.id,
+                [self.payload_byte.get()],
+            );
+            let output = ProjectionOutput::new().intent(intent);
+            if context.offers().is_empty() {
+                Ok(output.need(ContextNeed {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: self.selector.clone(),
+                }))
+            } else {
+                Ok(output)
+            }
         }
     }
 
