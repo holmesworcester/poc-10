@@ -410,6 +410,9 @@ done: target key-wrap facts bind signer_endpoint_id into the fixed layout and as
 done: handler guardrails stay green by keeping materialize_key_wraps.rs declaration-only and placing driver code under a narrow handler submodule
 done: focused materialize_key_wraps handler tests prove deterministic output and retryable missing-source behavior
 done: full cargo test passes after real target key-wrap materialization and handler guardrail reshaping
+done: target signed_fact envelope helper signs fixed-slot opaque payloads with Ed25519 over canonical envelope prefix bytes
+done: signed_fact tests cover deterministic bytes, fact-id determinism, key-wrap payload round trip, padding canonicalization, and tamper rejection
+done: signed_fact guardrail prevents the envelope helper from importing child event modules or becoming a central protocol dispatcher
 ```
 
 The next event-pipeline step is to replace the simplified message row proof
@@ -424,10 +427,16 @@ idempotent deferred intent, loads the exact recipient key fact and exact source
 secret fact from `HandlerContext`, and delegates key-wrap construction to
 `event_modules/encryption/create.rs`. The handler does not define fact wire
 bytes, choose crypto fields, scan for sources, or synthesize unsigned placeholder
-facts. The remaining parity step is the shared signed fact envelope contract:
-the target fact already carries `signer_endpoint_id` in the fixed layout and
-associated data, but the common envelope/signature authority model still needs
-to replace the poc-8 signed-event wrapper before this is full production parity.
+facts. The target `signed_fact` helper now provides the common envelope bytes
+for shared facts: it signs `TYPE_SIGNED_FACT`, signer id, signer public key,
+inner type, and a fixed-slot payload. It deliberately does not dispatch to
+child event modules or decide workspace, timestamp, dependency, or authority
+semantics; those remain projector/rules responsibilities for the payload module.
+
+The remaining parity step is to give `MaterializeKeyWraps` exact local signer
+secret context. Once that fact exists, the handler can return a signed shared
+key-wrap fact by composing `encryption/create.rs` with `signed_fact/create.rs`
+without adding authority logic to the handler.
 
 ### Wave 4: Encryption Slice
 

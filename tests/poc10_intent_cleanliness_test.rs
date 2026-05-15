@@ -476,6 +476,48 @@ fn connection_intents_treat_transit_frames_as_opaque() {
 }
 
 #[test]
+fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let signed_root = root.join("src/event_modules/signed_fact");
+    if !signed_root.exists() {
+        return;
+    }
+
+    let mut offenders = Vec::new();
+    for path in rust_files(&signed_root) {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        for forbidden in [
+            "event_modules::encryption",
+            "event_modules::sealed_message",
+            "event_modules::sync",
+            "event_modules::identity_workspace",
+            "decode_key_wrap",
+            "encode_key_wrap",
+            "SealedMessage",
+            "KeyWrapFact",
+            "ProjectionOutput",
+            "Projector",
+            "Intent",
+            "HandlerOutput",
+        ] {
+            if production.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "signed_fact must stay an envelope helper, not a central protocol dispatcher:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn core_handler_dispatch_stays_protocol_neutral() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = root.join("src/core/handler_dispatch.rs");
