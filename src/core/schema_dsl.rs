@@ -662,6 +662,7 @@ mod tests {
                 "content_event_rows",
                 "admin_rows",
                 "reaction_rows",
+                "connection_request_rows",
             ]
         );
         assert_eq!(
