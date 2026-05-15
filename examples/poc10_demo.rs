@@ -345,6 +345,71 @@ fn main() -> Result<(), String> {
     );
     println!("    -> recovered plaintext via workspace key: {recovered:?}");
 
+    // Admit the send_message fact through the bus and materialise its
+    // sealed_message_row, using a signer fact built from the vault's signing
+    // capability and a leaf-depth secret-coverage offer matching the fact's
+    // (frontier, minute, leaf_id) triple.
+    let signing_cap = vault
+        .local_signing_capability(cmd_workspace)
+        .map_err(|err| format!("vault signing: {err}"))?;
+    let cmd_signer_fact = Fact::new(
+        workspace_scope(cmd_workspace),
+        1,
+        message_layout::encode_signer_pubkey(&SignerPubkeyFact {
+            signer_id: signing_cap.fact.signer_id,
+            public_key: signing_cap.fact.public_key,
+        })
+        .expect("encode command signer"),
+    );
+    let cmd_secret_leaf = Fact::new(
+        workspace_scope(cmd_workspace),
+        sealed.minute,
+        message_layout::encode_secret_node(&SecretNodeFact {
+            workspace_id: cmd_workspace,
+            frontier_id: sealed.frontier_id,
+            start_minute: sealed.minute,
+            end_minute: sealed.minute,
+            prefix_bytes: 32,
+            leaf_prefix: sealed.leaf_id,
+        })
+        .expect("encode command secret leaf"),
+    );
+    bus.submit_fact(cmd_signer_fact);
+    bus.submit_fact(fact.clone());
+    bus.submit_fact(cmd_secret_leaf);
+    let cmd_drain = bus
+        .drain_applying_atomic_rows(
+            &DemoProjector,
+            &matchers,
+            &store,
+            &[SEALED_MESSAGE_ROWS, MESSAGE_ROWS],
+            32,
+        )
+        .map_err(|err| format!("send_message drain: {err}"))?;
+    println!(
+        "  bus drain for send_message fact: projections={} intents={}",
+        cmd_drain.projections, cmd_drain.intents
+    );
+    let cmd_rows = store
+        .table_rows(SEALED_MESSAGE_ROWS)
+        .map_err(|err| format!("read sealed rows after send_message: {err:?}"))?;
+    let cmd_row = cmd_rows
+        .iter()
+        .find_map(|(key, value)| {
+            let row = decode_sealed_message_row(key, value).ok()?;
+            if row.message_id == output.summary.message_fact_id {
+                Some(row)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "send_message sealed row not materialised".to_string())?;
+    println!(
+        "    -> sealed_message_rows now carries the send_message fact: message_id={}, minute={}",
+        hex(&cmd_row.message_id),
+        cmd_row.minute
+    );
+
     println!("\nresult: target EventBus admitted 6 fact types (workspace + signer + message +",);
     println!("secret-root + secret-internal + secret-leaf), target projectors emitted atomic");
     println!(
