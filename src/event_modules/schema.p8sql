@@ -197,3 +197,9 @@ table local_history_node_secret_rows {
   column value bytes;
   row_key (key);
 }
+
+table disappearing_messages_setting_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
