@@ -332,6 +332,9 @@ fn project_signed_key_wrap(
     if frontier.workspace_id != wrap.workspace_id {
         return Err("key wrap removal frontier workspace does not match event".to_string());
     }
+    if frontier.owner_endpoint_id != wrap.signer_endpoint_id {
+        return Err("key wrap signer does not own removal frontier".to_string());
+    }
 
     let mut output = ProjectionOutput::new()
         .intent(

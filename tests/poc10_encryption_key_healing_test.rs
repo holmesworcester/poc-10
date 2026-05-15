@@ -1028,6 +1028,50 @@ fn signed_key_wrap_rejects_envelope_signer_mismatch() {
 }
 
 #[test]
+fn signed_key_wrap_rejects_frontier_owned_by_someone_else() {
+    let workspace = [56; 32];
+    let signer_id = [57; 32];
+    let signer_private_key = [58; 32];
+    let other_owner = [59; 32];
+    let frontier = removal_frontier_fact(workspace, other_owner, 9);
+    let recipient = recipient_key_fact(workspace, signer_id, NO_PREVIOUS_RECIPIENT_KEY, 9);
+    let signed_wrap = signed_key_wrap_fact(
+        workspace,
+        signer_id,
+        signer_private_key,
+        frontier.id,
+        recipient.id,
+    );
+    let signer = signer_pubkey_fact(
+        workspace,
+        signer_id,
+        crypto::ed25519_public_key(&signer_private_key),
+    );
+    let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
+    let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
+    let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
+    let matchers = [
+        &signer_matcher as &dyn ContextMatcher,
+        &recipient_matcher as &dyn ContextMatcher,
+        &frontier_matcher as &dyn ContextMatcher,
+    ];
+    let mut bus = EventBus::new();
+
+    bus.submit_fact(signer);
+    bus.submit_fact(frontier);
+    bus.submit_fact(recipient);
+    bus.submit_fact(signed_wrap.clone());
+    let err = bus
+        .drain(&CombinedProjector, &matchers, 10)
+        .expect_err("signer must own removal frontier");
+
+    assert!(
+        err.contains("key wrap signer does not own removal frontier"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn recipient_key_projector_revalidates_wrap_source_context_before_wrapping() {
     let workspace = [50; 32];
     let endpoint = [51; 32];
