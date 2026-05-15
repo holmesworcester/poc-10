@@ -99,6 +99,9 @@ Implemented target slices:
   validates sendability but returns an error rather than consuming work.
 - Generated deterministic key wraps use source fact time for retained
   history-node wraps instead of a zero placeholder.
+- Key request projection validates requester/recipient and responder/frontier
+  authority before materializing wraps, and ignores sources not owned by the
+  named responder.
 
 Current hard gaps:
 
@@ -120,11 +123,8 @@ Current hard gaps:
   envelopes containing key-wrap payloads must validate signature, signer
   authority, recipient key, and frontier context before producing key-wrap rows,
   offers, and unwrap intents.
-- Harden target key request projection. The target tests cover deterministic
-  healing and anti-amplification, but hostile requester/responder cases and
-  responder-source ownership are not fully validated yet.
-- Implement retired recipient-material cleanup. Supersession currently emits
-  target architecture work, but the durable handler that purges obsolete local
+- Retired recipient-material cleanup is still missing. Supersession emits target
+  architecture work, but the durable handler that purges obsolete local
   recipient material still needs to land.
 - Decide whether explicit key-request time needs separate provenance on
   generated wraps. The implementation now uses source fact time without adding

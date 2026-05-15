@@ -232,14 +232,28 @@ fn project_key_request(
         request.frontier_id,
     );
 
-    let has_recipient = has_exact_offer(projection_context.offers(), &recipient_need);
-    let has_frontier = has_exact_offer(projection_context.offers(), &frontier_need);
+    let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
+    let frontier_fact = matched_payload_fact(projection_context, &frontier_need);
     let mut output = ProjectionOutput::new()
         .need(recipient_need)
         .need(frontier_need)
         .need(source_need.clone());
 
-    if has_recipient && has_frontier {
+    if let (Some(recipient_fact), Some(frontier_fact)) = (recipient_fact, frontier_fact) {
+        let recipient = layout::decode_recipient_key(&recipient_fact.bytes)?;
+        if recipient.workspace_id != request.workspace_id {
+            return Err("key request recipient workspace mismatch".to_string());
+        }
+        if recipient.endpoint_id != request.requester_endpoint_id {
+            return Err("key request recipient is not requester endpoint".to_string());
+        }
+        let frontier = layout::decode_removal_frontier(&frontier_fact.bytes)?;
+        if frontier.workspace_id != request.workspace_id {
+            return Err("key request frontier workspace mismatch".to_string());
+        }
+        if frontier.owner_endpoint_id != request.responder_endpoint_id {
+            return Err("key request frontier is not owned by responder".to_string());
+        }
         output = add_signer_needs_for_matching_sources(
             output,
             projection_context.offers(),
@@ -248,6 +262,9 @@ fn project_key_request(
         for (source_fact_id, signer_secret_fact_id, source) in
             matching_wrap_sources_with_signer(projection_context.offers(), &source_need)
         {
+            if source.owner_endpoint_id != request.responder_endpoint_id {
+                continue;
+            }
             output = output.intent(materialize_key_wraps_intent(
                 request.recipient_key_id,
                 source_fact_id,
@@ -392,12 +409,6 @@ fn local_signer_secret_payload_ref(
         .filter(|offer| offer.role == need.role && offer.selector == need.selector)
         .map(|offer| offer.payload_ref)
         .min()
-}
-
-fn has_exact_offer(offers: &[ContextOffer], need: &crate::core::context::ContextNeed) -> bool {
-    offers
-        .iter()
-        .any(|offer| offer.role == need.role && offer.selector == need.selector)
 }
 
 fn matched_payload_fact<'a>(

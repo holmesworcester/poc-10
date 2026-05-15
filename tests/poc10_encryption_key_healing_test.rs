@@ -350,7 +350,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
 fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
     let workspace = [20; 32];
     let requester = [21; 32];
-    let responder = [22; 32];
+    let responder = [0x76; 32];
     let frontier = removal_frontier_fact(workspace, responder, 10);
     let recipient = recipient_key_fact(workspace, requester, [23; 32], 80);
     let request = key_request_fact(
@@ -394,6 +394,126 @@ fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
     assert!(intents
         .iter()
         .all(|intent| matches!(intent.source, WrapSourceKind::HistoryNode { .. })));
+}
+
+#[test]
+fn key_request_rejects_recipient_that_is_not_requester() {
+    let workspace = [18; 32];
+    let requester = [19; 32];
+    let responder = [20; 32];
+    let frontier = removal_frontier_fact(workspace, responder, 10);
+    let recipient_for_someone_else = recipient_key_fact(workspace, [21; 32], [22; 32], 50);
+    let root = local_key_secret_fact(workspace, frontier.id, responder, 10);
+    let signer = local_signer_secret_fact(workspace, responder);
+    let request = key_request_fact(
+        workspace,
+        requester,
+        responder,
+        frontier.id,
+        recipient_for_someone_else.id,
+        90,
+    );
+    let projector = CombinedProjector;
+    let (recipient_matcher, frontier_matcher, wrap_matcher, signer_matcher) =
+        key_request_matchers();
+    let matchers = [
+        &recipient_matcher as &dyn ContextMatcher,
+        &frontier_matcher as &dyn ContextMatcher,
+        &wrap_matcher as &dyn ContextMatcher,
+        &signer_matcher as &dyn ContextMatcher,
+    ];
+    let mut bus = EventBus::new();
+
+    for fact in [frontier, recipient_for_someone_else, root, signer, request] {
+        bus.submit_fact(fact);
+    }
+    let err = bus
+        .drain(&projector, &matchers, 100)
+        .expect_err("recipient mismatch rejects request");
+
+    assert!(err.contains("recipient is not requester"), "{err}");
+    assert!(bus.intents().is_empty());
+}
+
+#[test]
+fn key_request_rejects_frontier_that_is_not_responder_owned() {
+    let workspace = [22; 32];
+    let requester = [23; 32];
+    let responder = [24; 32];
+    let other_owner = [25; 32];
+    let frontier = removal_frontier_fact(workspace, other_owner, 10);
+    let recipient = recipient_key_fact(workspace, requester, [26; 32], 50);
+    let root = local_key_secret_fact(workspace, frontier.id, other_owner, 10);
+    let signer = local_signer_secret_fact(workspace, other_owner);
+    let request = key_request_fact(
+        workspace,
+        requester,
+        responder,
+        frontier.id,
+        recipient.id,
+        90,
+    );
+    let projector = CombinedProjector;
+    let (recipient_matcher, frontier_matcher, wrap_matcher, signer_matcher) =
+        key_request_matchers();
+    let matchers = [
+        &recipient_matcher as &dyn ContextMatcher,
+        &frontier_matcher as &dyn ContextMatcher,
+        &wrap_matcher as &dyn ContextMatcher,
+        &signer_matcher as &dyn ContextMatcher,
+    ];
+    let mut bus = EventBus::new();
+
+    for fact in [frontier, recipient, root, signer, request] {
+        bus.submit_fact(fact);
+    }
+    let err = bus
+        .drain(&projector, &matchers, 100)
+        .expect_err("frontier mismatch rejects request");
+
+    assert!(err.contains("frontier is not owned by responder"), "{err}");
+    assert!(bus.intents().is_empty());
+}
+
+#[test]
+fn key_request_ignores_wrap_source_from_non_responder() {
+    let workspace = [27; 32];
+    let requester = [28; 32];
+    let responder = [29; 32];
+    let wrong_source_owner = [30; 32];
+    let frontier = removal_frontier_fact(workspace, responder, 10);
+    let recipient = recipient_key_fact(workspace, requester, [31; 32], 50);
+    let wrong_root = local_key_secret_fact(workspace, frontier.id, wrong_source_owner, 10);
+    let wrong_signer = local_signer_secret_fact(workspace, wrong_source_owner);
+    let request = key_request_fact(
+        workspace,
+        requester,
+        responder,
+        frontier.id,
+        recipient.id,
+        90,
+    );
+    let projector = CombinedProjector;
+    let (recipient_matcher, frontier_matcher, wrap_matcher, signer_matcher) =
+        key_request_matchers();
+    let matchers = [
+        &recipient_matcher as &dyn ContextMatcher,
+        &frontier_matcher as &dyn ContextMatcher,
+        &wrap_matcher as &dyn ContextMatcher,
+        &signer_matcher as &dyn ContextMatcher,
+    ];
+    let mut bus = EventBus::new();
+
+    for fact in [frontier, recipient, wrong_root, wrong_signer, request] {
+        bus.submit_fact(fact);
+    }
+    bus.drain(&projector, &matchers, 100)
+        .expect("wrong source owner is ignored, not wrapped");
+
+    assert!(bus
+        .intents()
+        .iter()
+        .all(|intent| decode_materialize_key_wraps_intent(intent).is_err()));
 }
 
 #[test]
@@ -1078,6 +1198,20 @@ fn key_request_fact(
             created_at_ms,
         })
         .expect("encode request"),
+    )
+}
+
+fn key_request_matchers() -> (
+    ExactSelectorMatcher,
+    ExactSelectorMatcher,
+    WrapSourceMatcher,
+    ExactSelectorMatcher,
+) {
+    (
+        ExactSelectorMatcher::new(recipient_key_role()),
+        ExactSelectorMatcher::new(frontier_role()),
+        WrapSourceMatcher::new(),
+        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role()),
     )
 }
 

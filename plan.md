@@ -42,6 +42,10 @@ Recent target work:
   - generated retained-history-node wraps use the source fact timestamp instead
     of a zero placeholder
   - deterministic anti-amplification keys are unchanged
+- Current key-request validation slice
+  - key requests reject recipient keys that do not belong to the requester
+  - key requests reject frontiers not owned by the named responder
+  - responder-mismatched local wrap sources are ignored instead of materialized
 
 Important caveats from the latest read-only audit:
 
@@ -75,8 +79,9 @@ Important caveats from the latest read-only audit:
 - `src/event_modules/encryption` is already broad. Split it by fact family and
   invariant before adding more behavior: recipient key, key request, key wrap,
   local secret, wrap source/frontier, and secret coverage matching.
-- Target key healing has real deterministic wrap/unwrap tests, but hostile key
-  request validation and retired recipient-material cleanup remain incomplete.
+- Target key healing has real deterministic wrap/unwrap tests and now covers
+  the main hostile key-request mismatches. Retired recipient-material cleanup
+  remains incomplete.
 - Generated wraps now carry source fact time for both root and retained history
   sources. The remaining design question is whether explicit key-request time
   should also be represented as provenance without entering the idempotence key.
