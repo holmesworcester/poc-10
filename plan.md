@@ -90,8 +90,11 @@ Recent target work:
     plus a target `send_message` command exercised by
     `tests/poc10_send_message_command_test.rs`
   - `examples/poc10_demo.rs` now opens the sealed message into `message_rows`
-    after admitting a leaf-depth secret-coverage offer, demonstrating the
-    full sealed→opened row path through the target architecture
+    after admitting a leaf-depth secret-coverage offer. The demo is a
+    walk-through of the row shapes, not evidence of end-to-end crypto: the
+    decryption step synthesises the opened row directly rather than running
+    real ECDH plus AEAD, because the unwrap handler does not yet hold the
+    private key material in the target tree.
 - Pending parallel slice
   - the encryption split-by-fact-family refactor lives on branch
     `worktree-agent-a6a75815fab2702dd` but conflicts with the wire-primitive
@@ -146,11 +149,33 @@ Recent target work:
     `src/event_modules/identity_device_invite/` port the invite triplet;
     legacy `SendBootstrapRequest` intent emission stays deferred to the
     transport wave
-  - `src/handlers/receive_transit/` lands the first real transit-receive
-    handler driver: it decodes `TransitSmallV1`/`TransitLargeV1` frames
-    through the target wire layouts, validates the outer envelope, and
-    queues the intent on inner-AEAD-open until connection-secret context is
-    plumbed
+  - `src/handlers/receive_transit/` lands a transit-frame envelope-decode
+    handler: it decodes `TransitSmallV1`/`TransitLargeV1` frames through the
+    target wire layouts, validates the outer envelope, and queues the intent
+    on inner-AEAD-open until connection-secret context is plumbed. This is
+    NOT real transit unwrap: it does not prove sender/receiver binding,
+    connection-secret lookup, AEAD open, replay/idempotence, or inner-fact
+    admission. Treat any plan claim that "target receive_transit is wired"
+    as wrong until the inner-open path lands.
+- Wave-5 correctness fixes (after independent review)
+  - `src/commands/send_message.rs` was discarding the signed envelope it
+    constructed and emitting the unsigned sealed-message payload as the
+    fact. The command now emits the signed envelope as the fact body, so
+    callers that admit the produced fact carry authentication on the wire.
+    Tests and the demo peel the envelope through
+    `signed_fact::layout::decode_signed_fact` before reading the inner
+    sealed message.
+  - `src/handlers/sync_index_update/driver.rs` previously returned
+    `Ok(HandlerOutput::new())` after decoding the intent, which would
+    silently consume sync index updates without ever writing the index. It
+    now returns `Err("durable sync index update is not yet wired")` after
+    payload validation so intents stay queued until Wave 6 lifts the
+    `SyncIndex` into facts.
+  - The demo's send_message step no longer admits the signed-envelope fact
+    through the bus because the signed_fact -> sealed_message dispatch is
+    not yet wired. The demo prints the envelope decode plus plaintext
+    recovery and stops short of pretending to materialise a row from a
+    signed envelope.
 
 Important caveats from the latest read-only audit:
 

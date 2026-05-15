@@ -38,6 +38,7 @@ use topo::event_modules::sealed_message::rows::{
 };
 use topo::event_modules::sealed_message::{layout as message_layout, project as message_project};
 use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
+use topo::event_modules::signed_fact::layout::decode_signed_fact;
 
 fn header(step: usize, title: &str) {
     println!("\n=== step {step}: {title} ===");
@@ -318,7 +319,10 @@ fn main() -> Result<(), String> {
     let output = send_message(&cmd_ctx, cmd_workspace, "via CommandContext")
         .map_err(|err| format!("send_message: {err}"))?;
     let fact = &output.facts[0];
-    let sealed = decode_sealed_message(&fact.bytes).map_err(|err| format!("decode: {err}"))?;
+    let envelope =
+        decode_signed_fact(&fact.bytes).map_err(|err| format!("decode envelope: {err}"))?;
+    let sealed = decode_sealed_message(&envelope.payload)
+        .map_err(|err| format!("decode inner sealed message: {err}"))?;
     let recovered = {
         let cap = vault
             .local_encryption_capability(cmd_workspace)
@@ -344,71 +348,11 @@ fn main() -> Result<(), String> {
         sealed.minute
     );
     println!("    -> recovered plaintext via workspace key: {recovered:?}");
-
-    // Admit the send_message fact through the bus and materialise its
-    // sealed_message_row, using a signer fact built from the vault's signing
-    // capability and a leaf-depth secret-coverage offer matching the fact's
-    // (frontier, minute, leaf_id) triple.
-    let signing_cap = vault
-        .local_signing_capability(cmd_workspace)
-        .map_err(|err| format!("vault signing: {err}"))?;
-    let cmd_signer_fact = Fact::new(
-        workspace_scope(cmd_workspace),
-        1,
-        message_layout::encode_signer_pubkey(&SignerPubkeyFact {
-            signer_id: signing_cap.fact.signer_id,
-            public_key: signing_cap.fact.public_key,
-        })
-        .expect("encode command signer"),
-    );
-    let cmd_secret_leaf = Fact::new(
-        workspace_scope(cmd_workspace),
-        sealed.minute,
-        message_layout::encode_secret_node(&SecretNodeFact {
-            workspace_id: cmd_workspace,
-            frontier_id: sealed.frontier_id,
-            start_minute: sealed.minute,
-            end_minute: sealed.minute,
-            prefix_bytes: 32,
-            leaf_prefix: sealed.leaf_id,
-        })
-        .expect("encode command secret leaf"),
-    );
-    bus.submit_fact(cmd_signer_fact);
-    bus.submit_fact(fact.clone());
-    bus.submit_fact(cmd_secret_leaf);
-    let cmd_drain = bus
-        .drain_applying_atomic_rows(
-            &DemoProjector,
-            &matchers,
-            &store,
-            &[SEALED_MESSAGE_ROWS, MESSAGE_ROWS],
-            32,
-        )
-        .map_err(|err| format!("send_message drain: {err}"))?;
     println!(
-        "  bus drain for send_message fact: projections={} intents={}",
-        cmd_drain.projections, cmd_drain.intents
+        "  note: signed-envelope -> sealed-message dispatch is not yet wired in the target tree."
     );
-    let cmd_rows = store
-        .table_rows(SEALED_MESSAGE_ROWS)
-        .map_err(|err| format!("read sealed rows after send_message: {err:?}"))?;
-    let cmd_row = cmd_rows
-        .iter()
-        .find_map(|(key, value)| {
-            let row = decode_sealed_message_row(key, value).ok()?;
-            if row.message_id == output.summary.message_fact_id {
-                Some(row)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| "send_message sealed row not materialised".to_string())?;
-    println!(
-        "    -> sealed_message_rows now carries the send_message fact: message_id={}, minute={}",
-        hex(&cmd_row.message_id),
-        cmd_row.minute
-    );
+    println!("  the bus admission for this fact is intentionally skipped here so the demo never");
+    println!("  appears to project an envelope through the sealed_message projector.");
 
     println!("\nresult: target EventBus admitted 6 fact types (workspace + signer + message +",);
     println!("secret-root + secret-internal + secret-leaf), target projectors emitted atomic");

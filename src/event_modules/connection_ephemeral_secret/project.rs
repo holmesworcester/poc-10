@@ -32,13 +32,10 @@ impl Projector for ConnectionEphemeralSecretProjector {
     ) -> Result<ProjectionOutput, String> {
         let secret = layout::decode_fact(&fact.bytes)?;
         if crypto::x25519_public_key(&secret.ephemeral_private_key) != secret.ephemeral_public_key {
-            return Err(
-                "connection ephemeral public key does not match private key".to_string(),
-            );
+            return Err("connection ephemeral public key does not match private key".to_string());
         }
         Ok(ProjectionOutput::new().intent(
-            AtomicIntent::PutRow(connection_ephemeral_secret_row(fact.id, &secret)?)
-                .into_intent(),
+            AtomicIntent::PutRow(connection_ephemeral_secret_row(fact.id, &secret)?).into_intent(),
         ))
     }
 }

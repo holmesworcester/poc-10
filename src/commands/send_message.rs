@@ -39,11 +39,16 @@ pub struct SendSummary {
     pub created_at_ms: u64,
 }
 
-/// Construct a sealed message fact for `text` in `workspace_id`.
+/// Construct a signed sealed-message fact for `text` in `workspace_id`.
 ///
-/// The returned `CommandOutput` carries the proposed fact and a typed
-/// summary. The command emits no deferred intents in this first cut: the
-/// projector and downstream handlers own the rest of the pipeline.
+/// The returned `CommandOutput` carries one proposed fact whose bytes are
+/// the `signed_fact` envelope around the inner sealed-message payload. The
+/// fact id is therefore the id of the signed envelope, not of the inner
+/// sealed bytes. Callers that need the inner sealed-message decode through
+/// `signed_fact::layout::decode_signed_fact` first.
+///
+/// The command emits no deferred intents in this first cut: the projector
+/// and downstream handlers own the rest of the pipeline.
 pub fn send_message(
     ctx: &CommandContext<'_>,
     workspace_id: WorkspaceId,
@@ -112,7 +117,7 @@ pub fn send_message(
     let envelope_bytes = signed_fact_create::sign_payload_bytes(
         signing.fact.signer_id,
         &signing.fact.private_key,
-        payload.clone(),
+        payload,
     )?;
     debug_assert_eq!(envelope_bytes.len(), signed_fact_layout::SIGNED_FACT_BYTES);
 
@@ -120,10 +125,11 @@ pub fn send_message(
         kind: ScopeKind::new("workspace").expect("valid workspace scope"),
         id: workspace_id,
     };
-    // The fact carries the inner sealed-message bytes so the standard
-    // `decode_sealed_message` path applies. The signed envelope is offered
-    // separately for any caller that needs to verify the signature.
-    let fact = Fact::new(scope, created_at_ms, payload);
+    // The emitted fact is the signed envelope. Callers that need the inner
+    // sealed-message bytes call `signed_fact::layout::decode_signed_fact` on
+    // `fact.bytes` and then `sealed_message::layout::decode_sealed_message`
+    // on the envelope payload.
+    let fact = Fact::new(scope, created_at_ms, envelope_bytes);
 
     Ok(CommandOutput::new(SendSummary {
         workspace_id,

@@ -16,8 +16,7 @@ use super::fact::{ConnectionEphemeralSecretFact, EndpointId};
 pub const CONNECTION_EPHEMERAL_SECRET_ROWS: TableName =
     TableName::new("connection_ephemeral_secret_rows");
 
-pub const ROW_VALUE_BYTES: usize =
-    32 + X25519_PRIVATE_KEY_BYTES + X25519_PUBLIC_KEY_BYTES + 8;
+pub const ROW_VALUE_BYTES: usize = 32 + X25519_PRIVATE_KEY_BYTES + X25519_PUBLIC_KEY_BYTES + 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectionEphemeralSecretRow {
@@ -71,8 +70,8 @@ pub fn decode_connection_ephemeral_secret_row(
     let mut ephemeral_public_key = [0; X25519_PUBLIC_KEY_BYTES];
     ephemeral_public_key.copy_from_slice(&value[cursor..cursor + X25519_PUBLIC_KEY_BYTES]);
     cursor += X25519_PUBLIC_KEY_BYTES;
-    let created_at_ms = wire::take_u64be(&value[cursor..cursor + 8])
-        .map_err(|err| format!("{err:?}"))?;
+    let created_at_ms =
+        wire::take_u64be(&value[cursor..cursor + 8]).map_err(|err| format!("{err:?}"))?;
     Ok(ConnectionEphemeralSecretRow {
         secret_id,
         owner_endpoint,

@@ -2,9 +2,10 @@
 //!
 //! The tests hand-build a `CommandContext` from a vault and a fixed clock,
 //! drive the command, and assert: (1) the happy path produces one fact and a
-//! summary, (2) blank or empty text is rejected, (3) the produced fact
-//! decodes back through `sealed_message::layout::decode_sealed_message` and
-//! the workspace key recovers the original plaintext.
+//! summary, (2) blank or empty text is rejected, (3) the produced fact is a
+//! signed envelope whose inner payload decodes through
+//! `sealed_message::layout::decode_sealed_message` and whose ciphertext
+//! decrypts back to the original plaintext under the workspace key.
 
 use std::cell::Cell;
 
@@ -17,6 +18,7 @@ use topo::core::crypto;
 use topo::event_modules::encryption::fact::LocalKeySecretFact;
 use topo::event_modules::sealed_message::layout::decode_sealed_message;
 use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
+use topo::event_modules::signed_fact::layout::decode_signed_fact;
 
 struct FixedClock(Cell<u64>);
 
@@ -116,8 +118,10 @@ fn send_message_happy_path_emits_one_sealed_message_fact() {
     assert_eq!(output.facts.len(), 1, "one fact per send_message");
     assert!(output.intents.is_empty(), "no intents in the first cut");
 
-    // The fact id is the blake3 of the encoded sealed message.
-    let sealed = decode_sealed_message(&output.facts[0].bytes).expect("decode fact bytes");
+    // The fact id is the blake3 of the signed envelope bytes. Peel the
+    // envelope to recover the inner sealed-message payload before decoding.
+    let envelope = decode_signed_fact(&output.facts[0].bytes).expect("decode signed envelope");
+    let sealed = decode_sealed_message(&envelope.payload).expect("decode inner sealed message");
     assert_eq!(sealed.workspace_id, workspace_id);
     assert_eq!(sealed.created_at_ms, 60_000);
     assert_eq!(sealed.minute, 60_000 / 60_000);
@@ -149,7 +153,8 @@ fn send_message_fact_round_trips_through_decode_sealed_message() {
     let text = "round-trip me through decode_sealed_message";
     let output = send_message(&ctx, workspace_id, text).expect("send_message");
 
-    let sealed = decode_sealed_message(&output.facts[0].bytes).expect("decode sealed message fact");
+    let envelope = decode_signed_fact(&output.facts[0].bytes).expect("decode signed envelope");
+    let sealed = decode_sealed_message(&envelope.payload).expect("decode inner sealed message");
 
     // Recover the plaintext using the same workspace key the vault handed
     // to the command. The test must not be able to read the key from any

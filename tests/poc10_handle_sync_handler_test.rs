@@ -77,7 +77,7 @@ fn handle_sync_dispatches_through_event_bus() {
 }
 
 #[test]
-fn sync_index_update_handler_decodes_and_dispatches() {
+fn sync_index_update_handler_queues_until_durable_index_lands() {
     let intent = index_intent::record_indexed_event_intent(index_intent::RecordIndexedEvent {
         event_id: [7; 32],
         timestamp_ms: 1_234_567,
@@ -86,12 +86,17 @@ fn sync_index_update_handler_decodes_and_dispatches() {
     bus.submit_intent(intent.clone()).expect("submit update");
 
     let handler = SyncIndexUpdateHandler::new();
-    let report = bus
+    let err = bus
         .dispatch_deferred_intents_with_fact_context(&handler, 10)
-        .expect("dispatch sync_index_update");
+        .expect_err("durable sync index update must stay queued for retry");
+    assert!(
+        err.contains("not yet wired"),
+        "unexpected error from sync_index_update handler: {err}"
+    );
 
-    assert_eq!(report.handled, 1);
-    assert!(bus.intents().is_empty());
+    // The handler must not consume the intent: producing an empty
+    // `HandlerOutput` on success would silently swallow the index update.
+    assert_eq!(bus.intents().len(), 1, "intent must stay queued for retry");
 
     // Direct decode round-trip catches payload-shape regressions.
     let decoded = index_intent::decode_record_indexed_event(&intent).expect("round trip");

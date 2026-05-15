@@ -10,8 +10,7 @@ use super::fact::ConnectionEphemeralSecretFact;
 
 pub const TYPE_CONNECTION_EPHEMERAL_SECRET: u8 = 43;
 
-pub const FACT_BYTES: usize =
-    1 + 32 + X25519_PRIVATE_KEY_BYTES + X25519_PUBLIC_KEY_BYTES + 8;
+pub const FACT_BYTES: usize = 1 + 32 + X25519_PRIVATE_KEY_BYTES + X25519_PUBLIC_KEY_BYTES + 8;
 
 pub fn encode_fact(fact: &ConnectionEphemeralSecretFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; FACT_BYTES];
