@@ -667,6 +667,7 @@ mod tests {
                 "invite_accepted_rows",
                 "invite_server_rows",
                 "sync_compare_rows",
+                "sync_have_id_rows",
             ]
         );
         assert_eq!(

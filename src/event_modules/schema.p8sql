@@ -119,3 +119,9 @@ table sync_compare_rows {
   column value bytes;
   row_key (key);
 }
+
+table sync_have_id_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
