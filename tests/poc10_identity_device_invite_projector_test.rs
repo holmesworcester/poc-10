@@ -92,9 +92,7 @@ fn device_invite_projector_persists_endpoint_shared_signed_without_user_invite()
     )
     .expect("project device_invite");
 
-    let stored = store
-        .table_rows(rows::DEVICE_INVITE_ROWS)
-        .expect("rows");
+    let stored = store.table_rows(rows::DEVICE_INVITE_ROWS).expect("rows");
     let row = rows::decode_device_invite_row(&stored[0].0, &stored[0].1).expect("decode row");
     assert_eq!(row.user_invite_event_id, None);
 }

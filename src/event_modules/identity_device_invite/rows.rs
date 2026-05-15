@@ -24,10 +24,7 @@ pub struct DeviceInviteRow {
     pub public_key: Ed25519PublicKey,
 }
 
-pub fn device_invite_key(
-    workspace_id: &WorkspaceId,
-    device_invite_id: &DeviceInviteId,
-) -> Vec<u8> {
+pub fn device_invite_key(workspace_id: &WorkspaceId, device_invite_id: &DeviceInviteId) -> Vec<u8> {
     let mut key = Vec::with_capacity(64);
     key.extend_from_slice(workspace_id);
     key.extend_from_slice(device_invite_id);

@@ -40,8 +40,8 @@ fn content_file_deletion_projector_materializes_row_through_atomic_intent() {
         .table_rows(rows::FILE_DELETION_ROWS)
         .expect("file deletion rows");
     assert_eq!(table.len(), 1);
-    let row = rows::decode_file_deletion_row(&table[0].0, &table[0].1)
-        .expect("decode file deletion row");
+    let row =
+        rows::decode_file_deletion_row(&table[0].0, &table[0].1).expect("decode file deletion row");
     assert_eq!(row.workspace_id, deletion.workspace_id);
     assert_eq!(row.target_file_id, deletion.target_file_id);
     assert_eq!(row.deletion_id, fact.id);

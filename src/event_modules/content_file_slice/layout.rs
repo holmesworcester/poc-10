@@ -44,7 +44,9 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileSliceFact, String> {
     }
     let ciphertext_len = wire::take_u32be(&bytes[77..81]).map_err(wire_err)? as usize;
     if bytes.len() != HEADER_BYTES + ciphertext_len {
-        return Err("content file slice fact length does not match declared ciphertext".to_string());
+        return Err(
+            "content file slice fact length does not match declared ciphertext".to_string(),
+        );
     }
     Ok(ContentFileSliceFact {
         workspace_id: bytes[1..33].try_into().unwrap(),

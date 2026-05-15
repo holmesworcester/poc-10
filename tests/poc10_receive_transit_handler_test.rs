@@ -11,8 +11,8 @@ use topo::event_modules::transit::layout::{
     TransitSmallV1, TRANSIT_LARGE_WIRE_BYTES, TRANSIT_SMALL_WIRE_BYTES,
 };
 use topo::handlers::receive_transit::{
-    receive_transit_frame_intent, ReceiveTransitFrame, ReceiveTransitHandler,
-    INNER_OPEN_NOT_WIRED, RECEIVE_TRANSIT_FRAME,
+    receive_transit_frame_intent, ReceiveTransitFrame, ReceiveTransitHandler, INNER_OPEN_NOT_WIRED,
+    RECEIVE_TRANSIT_FRAME,
 };
 
 fn small_frame_bytes() -> Vec<u8> {

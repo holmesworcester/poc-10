@@ -48,7 +48,9 @@ pub fn endpoint_shared_row(
 
 pub fn decode_endpoint_shared_row(key: &[u8], value: &[u8]) -> Result<EndpointSharedRow, String> {
     if key.len() != 64 {
-        return Err("endpoint shared row key must be workspace_id || endpoint_shared_id".to_string());
+        return Err(
+            "endpoint shared row key must be workspace_id || endpoint_shared_id".to_string(),
+        );
     }
     let mut workspace_id = [0; 32];
     let mut endpoint_shared_id = [0; 32];

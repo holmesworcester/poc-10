@@ -60,8 +60,7 @@ impl Projector for EndpointSharedProjector {
         if event.device_name.as_bytes().contains(&0) {
             return Err("endpoint device name cannot contain NUL".to_string());
         }
-        Ok(ProjectionOutput::new().intent(
-            AtomicIntent::PutRow(endpoint_shared_row(fact.id, &event)?).into_intent(),
-        ))
+        Ok(ProjectionOutput::new()
+            .intent(AtomicIntent::PutRow(endpoint_shared_row(fact.id, &event)?).into_intent()))
     }
 }

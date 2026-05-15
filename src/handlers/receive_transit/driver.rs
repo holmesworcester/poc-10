@@ -54,8 +54,10 @@ impl IntentHandler for ReceiveTransitHandler {
                         bytes.len()
                     ));
                 }
-                let _frame = <TransitSmallV1 as TransitFrameDecode>::decode(bytes)
-                    .map_err(|err| format!("receive transit: small frame decode failed: {err:?}"))?;
+                let _frame =
+                    <TransitSmallV1 as TransitFrameDecode>::decode(bytes).map_err(|err| {
+                        format!("receive transit: small frame decode failed: {err:?}")
+                    })?;
                 Err(INNER_OPEN_NOT_WIRED.to_string())
             }
             TRANSIT_FRAME_SIZE_CLASS_LARGE => {
@@ -75,9 +77,7 @@ impl IntentHandler for ReceiveTransitHandler {
                 // payload slot directly into AEAD opening.
                 Err(INNER_OPEN_NOT_WIRED.to_string())
             }
-            other => Err(format!(
-                "receive transit: unknown frame size class {other}"
-            )),
+            other => Err(format!("receive transit: unknown frame size class {other}")),
         }
     }
 }

@@ -6,4 +6,5 @@
 //! orchestration shape.
 
 pub mod context;
+pub mod create_workspace;
 pub mod send_message;

@@ -77,9 +77,7 @@ fn invite_secret_projector_persists_unscoped_link_secret() {
     )
     .expect("project invite_secret");
 
-    let stored = store
-        .table_rows(rows::INVITE_SECRET_ROWS)
-        .expect("rows");
+    let stored = store.table_rows(rows::INVITE_SECRET_ROWS).expect("rows");
     let row = rows::decode_invite_secret_row(&stored[0].0, &stored[0].1).expect("decode row");
     assert_eq!(row.workspace_id, None);
     assert_eq!(row.invite_event_id, None);

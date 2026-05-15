@@ -18,10 +18,8 @@ use crate::core::wire::FixedSlot;
 use super::fact::{EndpointRole, EndpointSharedFact, ENDPOINT_DEVICE_NAME_BYTES};
 
 pub const TYPE_ENDPOINT_SHARED: u8 = 135;
-pub const FACT_BYTES: usize =
-    1 + 8 + 32 + 32 + 32 + 32 + 1 + ENDPOINT_DEVICE_NAME_BYTES;
-pub const ROW_VALUE_BYTES: usize =
-    8 + 32 + 32 + 1 + 32 + ENDPOINT_DEVICE_NAME_BYTES;
+pub const FACT_BYTES: usize = 1 + 8 + 32 + 32 + 32 + 32 + 1 + ENDPOINT_DEVICE_NAME_BYTES;
+pub const ROW_VALUE_BYTES: usize = 8 + 32 + 32 + 1 + 32 + ENDPOINT_DEVICE_NAME_BYTES;
 
 pub fn encode_fact(fact: &EndpointSharedFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; FACT_BYTES];
