@@ -346,6 +346,28 @@ no duplicate wake amplification:
 The bridge is complete when these criteria are asserted without referencing old
 ready, blocked, dependency, label, reprojection, or recently-valid queue names.
 
+Current proof status:
+
+```text
+done: core EventBus persists facts, needs, offers, pending_projection, intents
+done: stable needs do not self-wake
+done: added offers wake matching owners once
+done: duplicate offers and duplicate facts do not amplify pending projection
+done: failed dependency projection never becomes dependency context
+done: update/about offers can reproject applied dependents
+done: update/about offers can retire waiting facts before primary context exists
+done: deterministic intents dedupe by kind/key and conflict on changed payload
+done: bounded handler dispatch feeds returned facts/intents back through EventBus
+done: registered row handler applies atomic put_row/delete_row intents
+done: event_with_deps bridge proves out-of-order exact dependency healing
+done: secret_coverage matcher proves range offers can wake point needs
+```
+
+The next event-pipeline step is to move one real projector path from
+`ProjectionOutput::rows` into `AtomicIntent::PutRow`, then run it through
+`RowIntentHandler`. Do this first with a test-event or tiny identity/content
+path before migrating purge, encryption, or sync handlers.
+
 ### Wave 4: Encryption Slice
 
 Split current encryption worker queues into projectors plus handlers.
