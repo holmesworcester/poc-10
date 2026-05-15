@@ -661,6 +661,7 @@ mod tests {
                 "local_endpoint_signing_secret_rows",
                 "content_event_rows",
                 "connection_request_rows",
+                "connection_response_rows",
             ]
         );
         assert_eq!(

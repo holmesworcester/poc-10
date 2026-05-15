@@ -84,3 +84,9 @@ table connection_request_rows {
   column value bytes;
   row_key (key);
 }
+
+table connection_response_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}

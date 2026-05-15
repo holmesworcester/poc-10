@@ -1,4 +1,5 @@
 pub mod connection_request;
+pub mod connection_response;
 pub mod content_event;
 pub mod encryption;
 pub mod identity_endpoint;

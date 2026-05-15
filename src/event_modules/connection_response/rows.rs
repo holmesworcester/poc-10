@@ -1,0 +1,83 @@
+//! Connection-response projection rows.
+//!
+//! The response fact id is the connection id, so rows are keyed by the
+//! response fact id. The value records the endpoint pair, the answered
+//! request id, the responder ephemeral public key, the public handshake hash,
+//! and the connection secret. The secret is durable here because the response
+//! fact is local-only; later TTL purge handlers retire the row when the
+//! connection ends.
+
+use crate::core::store::{TableName, TableRow};
+
+use super::fact::{ConnectionResponseFact, EndpointId, EventId};
+
+pub const CONNECTION_RESPONSE_ROWS: TableName = TableName::new("connection_response_rows");
+pub const ROW_VALUE_BYTES: usize = 32 + 32 + 32 + 32 + 32 + 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionResponseRow {
+    pub connection_id: EventId,
+    pub from_endpoint: EndpointId,
+    pub to_endpoint: EndpointId,
+    pub request_id: EventId,
+    pub responder_ephemeral_public_key: EndpointId,
+    pub handshake_hash: [u8; 32],
+    pub connection_secret: [u8; 32],
+}
+
+pub fn connection_response_key(connection_id: &EventId) -> Vec<u8> {
+    connection_id.to_vec()
+}
+
+pub fn connection_response_row(
+    connection_id: EventId,
+    fact: &ConnectionResponseFact,
+) -> Result<TableRow, String> {
+    let mut value = vec![0; ROW_VALUE_BYTES];
+    value[0..32].copy_from_slice(&fact.from_endpoint);
+    value[32..64].copy_from_slice(&fact.to_endpoint);
+    value[64..96].copy_from_slice(&fact.request_id);
+    value[96..128].copy_from_slice(&fact.responder_ephemeral_public_key);
+    value[128..160].copy_from_slice(&fact.handshake_hash);
+    value[160..192].copy_from_slice(&fact.connection_secret);
+    Ok(TableRow {
+        table: CONNECTION_RESPONSE_ROWS,
+        key: connection_response_key(&connection_id),
+        value,
+    })
+}
+
+pub fn decode_connection_response_row(
+    key: &[u8],
+    value: &[u8],
+) -> Result<ConnectionResponseRow, String> {
+    if key.len() != 32 {
+        return Err("connection response row key must be the connection id".to_string());
+    }
+    if value.len() != ROW_VALUE_BYTES {
+        return Err("connection response row value is malformed".to_string());
+    }
+    let mut connection_id = [0; 32];
+    connection_id.copy_from_slice(key);
+    let mut from_endpoint = [0; 32];
+    from_endpoint.copy_from_slice(&value[0..32]);
+    let mut to_endpoint = [0; 32];
+    to_endpoint.copy_from_slice(&value[32..64]);
+    let mut request_id = [0; 32];
+    request_id.copy_from_slice(&value[64..96]);
+    let mut responder_ephemeral_public_key = [0; 32];
+    responder_ephemeral_public_key.copy_from_slice(&value[96..128]);
+    let mut handshake_hash = [0; 32];
+    handshake_hash.copy_from_slice(&value[128..160]);
+    let mut connection_secret = [0; 32];
+    connection_secret.copy_from_slice(&value[160..192]);
+    Ok(ConnectionResponseRow {
+        connection_id,
+        from_endpoint,
+        to_endpoint,
+        request_id,
+        responder_ephemeral_public_key,
+        handshake_hash,
+        connection_secret,
+    })
+}
