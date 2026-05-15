@@ -60,15 +60,24 @@ fn project_recipient_key(
     let is_superseded = projection_context.offers().iter().any(|offer| {
         offer.role == superseded_need.role && offer.selector == superseded_need.selector
     });
+    let mut output = ProjectionOutput::new()
+        .offer(context::recipient_key_offer(
+            fact.id,
+            scope.clone(),
+            fact.id,
+        ))
+        .need(superseded_need);
+
+    if recipient.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
+        output = output.offer(context::recipient_superseded_offer(
+            fact.id,
+            scope.clone(),
+            recipient.previous_recipient_key_id,
+        ));
+    }
+
     if is_superseded {
-        return Ok(
-            ProjectionOutput::new().intent(purge_retired_recipient_material_intent(
-                PurgeRetiredRecipientMaterialIntent {
-                    workspace_id: recipient.workspace_id,
-                    recipient_key_id: fact.id,
-                },
-            )),
-        );
+        return Ok(output);
     }
 
     let min_frontier_created_at_ms =
@@ -83,22 +92,7 @@ fn project_recipient_key(
         recipient.workspace_id,
         min_frontier_created_at_ms,
     );
-    let mut output = ProjectionOutput::new()
-        .offer(context::recipient_key_offer(
-            fact.id,
-            scope.clone(),
-            fact.id,
-        ))
-        .need(superseded_need)
-        .need(wrap_need.clone());
-
-    if recipient.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
-        output = output.offer(context::recipient_superseded_offer(
-            fact.id,
-            scope,
-            recipient.previous_recipient_key_id,
-        ));
-    }
+    output = output.need(wrap_need.clone());
 
     output = add_signer_needs_for_matching_sources(output, projection_context.offers(), &wrap_need);
     for (source_fact_id, signer_secret_fact_id, source) in
@@ -205,13 +199,29 @@ fn project_local_recipient_key(
         return Err("local recipient key public key does not match recipient".to_string());
     }
 
-    Ok(
-        ProjectionOutput::new().offer(context::local_recipient_key_offer(
-            fact.id,
-            scope,
-            local.recipient_key_id,
-        )),
-    )
+    let superseded_need =
+        context::recipient_superseded_need(fact.id, scope.clone(), local.recipient_key_id);
+    let is_superseded = projection_context.offers().iter().any(|offer| {
+        offer.role == superseded_need.role && offer.selector == superseded_need.selector
+    });
+    let output = ProjectionOutput::new()
+        .need(recipient_need)
+        .need(superseded_need);
+    if is_superseded {
+        return Ok(output.intent(purge_retired_recipient_material_intent(
+            PurgeRetiredRecipientMaterialIntent {
+                workspace_id: local.workspace_id,
+                recipient_key_id: local.recipient_key_id,
+                local_recipient_key_id: fact.id,
+            },
+        )));
+    }
+
+    Ok(output.offer(context::local_recipient_key_offer(
+        fact.id,
+        scope,
+        local.recipient_key_id,
+    )))
 }
 
 fn project_key_request(

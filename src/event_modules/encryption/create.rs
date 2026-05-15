@@ -1,14 +1,16 @@
 //! Local constructors for target encryption facts.
 
 use crate::core::crypto;
-use crate::core::facts::Fact;
+use crate::core::facts::{Fact, FactScope};
 use crate::event_modules::signed_fact;
 
 use super::fact::{
     KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, LocalRecipientKeyFact,
     RecipientKeyFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
-use super::intent::{MaterializeKeyWrapsIntent, UnwrapKeyWrapIntent};
+use super::intent::{
+    MaterializeKeyWrapsIntent, PurgeRetiredRecipientMaterialIntent, UnwrapKeyWrapIntent,
+};
 use super::{context, layout};
 
 pub const KEY_WRAP_PURPOSE: &[u8] = b"topo key wrap v1";
@@ -155,6 +157,26 @@ pub fn materialize_signed_key_wrap_fact(
     let signed_bytes =
         signed_fact::create::sign_payload_bytes(signer.signer_id, &signer.private_key, wrap.bytes)?;
     Ok(Fact::new(wrap.scope, wrap.timestamp, signed_bytes))
+}
+
+pub fn validate_retired_recipient_material(
+    intent: &PurgeRetiredRecipientMaterialIntent,
+    local_recipient_key_fact: &Fact,
+) -> Result<(), String> {
+    if local_recipient_key_fact.id != intent.local_recipient_key_id {
+        return Err("local recipient key fact id does not match purge intent".to_string());
+    }
+    if local_recipient_key_fact.scope != FactScope::Local {
+        return Err("retired recipient material is not local".to_string());
+    }
+    let local = layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
+    if local.workspace_id != intent.workspace_id {
+        return Err("retired recipient material workspace mismatch".to_string());
+    }
+    if local.recipient_key_id != intent.recipient_key_id {
+        return Err("retired recipient material recipient mismatch".to_string());
+    }
+    Ok(())
 }
 
 fn wrap_material(

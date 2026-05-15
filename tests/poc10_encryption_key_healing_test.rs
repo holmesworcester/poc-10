@@ -17,7 +17,8 @@ use topo::event_modules::encryption::fact::{
 };
 use topo::event_modules::encryption::intent::{
     decode_materialize_key_wraps_intent, decode_purge_retired_recipient_material_intent,
-    decode_unwrap_key_wrap_intent,
+    decode_unwrap_key_wrap_intent, purge_retired_recipient_material_intent,
+    PurgeRetiredRecipientMaterialIntent,
 };
 use topo::event_modules::encryption::{
     create as encryption_create, layout as encryption_layout, project as encryption_project,
@@ -34,6 +35,7 @@ use topo::event_modules::sealed_message::{layout as message_layout, project as m
 use topo::event_modules::signed_fact::{self, fact::LocalSignerSecretFact};
 use topo::event_modules::sync::context as sync_context;
 use topo::handlers::materialize_key_wraps::MaterializeKeyWrapsHandler;
+use topo::handlers::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler;
 use topo::handlers::unwrap_key_wrap::UnwrapKeyWrapHandler;
 
 #[test]
@@ -564,19 +566,34 @@ fn generated_history_node_wrap_uses_source_fact_time() {
 fn supersession_wakes_old_recipient_key_and_purges_material_instead_of_wrapping() {
     let workspace = [30; 32];
     let endpoint = [31; 32];
-    let old = recipient_key_fact(workspace, endpoint, NO_PREVIOUS_RECIPIENT_KEY, 10);
+    let local_secret = [0x99; 32];
+    let old_public = crypto::x25519_public_key(&local_secret);
+    let old = recipient_key_fact_with_public(
+        workspace,
+        endpoint,
+        old_public,
+        NO_PREVIOUS_RECIPIENT_KEY,
+        10,
+    );
     let new = recipient_key_fact(workspace, endpoint, old.id, 20);
+    let local_old = local_recipient_key_fact(workspace, old.id, old_public, local_secret);
     let future_root = local_key_secret_fact(workspace, [32; 32], endpoint, 30);
     let projector = encryption_project::EncryptionProjector::new();
     let superseded_matcher = ExactSelectorMatcher::new(recipient_superseded_role());
     let wrap_matcher = WrapSourceMatcher::new();
+    let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
+    let local_recipient_matcher =
+        ExactSelectorMatcher::new(encryption_context::local_recipient_key_role());
     let matchers = [
         &superseded_matcher as &dyn ContextMatcher,
         &wrap_matcher as &dyn ContextMatcher,
+        &recipient_matcher as &dyn ContextMatcher,
+        &local_recipient_matcher as &dyn ContextMatcher,
     ];
     let mut bus = EventBus::new();
 
     bus.submit_fact(old.clone());
+    bus.submit_fact(local_old.clone());
     bus.drain(&projector, &matchers, 10).expect("old active");
     bus.submit_fact(new);
     bus.submit_fact(future_root);
@@ -586,8 +603,8 @@ fn supersession_wakes_old_recipient_key_and_purges_material_instead_of_wrapping(
     let retired = bus
         .intents()
         .iter()
-        .filter(|intent| decode_purge_retired_recipient_material_intent(intent).is_ok())
-        .count();
+        .filter_map(|intent| decode_purge_retired_recipient_material_intent(intent).ok())
+        .collect::<Vec<_>>();
     let materialized_for_old = bus
         .intents()
         .iter()
@@ -595,8 +612,53 @@ fn supersession_wakes_old_recipient_key_and_purges_material_instead_of_wrapping(
         .filter(|intent| intent.recipient_key_id == old.id)
         .count();
 
-    assert_eq!(retired, 1);
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].recipient_key_id, old.id);
+    assert_eq!(retired[0].local_recipient_key_id, local_old.id);
     assert_eq!(materialized_for_old, 0);
+
+    let purged = bus
+        .dispatch_deferred_intents_with_fact_context(
+            &PurgeRetiredRecipientMaterialHandler::new(),
+            10,
+        )
+        .expect("purge old local recipient material");
+    assert_eq!(purged.handled, 1);
+    assert!(!bus.has_fact(&local_old.id));
+}
+
+#[test]
+fn retired_recipient_material_handler_revalidates_exact_local_material() {
+    let workspace = [33; 32];
+    let recipient_key_id = [34; 32];
+    let wrong_recipient_key_id = [35; 32];
+    let wrong_local = local_recipient_key_fact(
+        workspace,
+        wrong_recipient_key_id,
+        crypto::x25519_public_key(&[0x66; 32]),
+        [0x66; 32],
+    );
+    let mut bus = EventBus::new();
+    bus.submit_fact(wrong_local.clone());
+    bus.submit_intent(purge_retired_recipient_material_intent(
+        PurgeRetiredRecipientMaterialIntent {
+            workspace_id: workspace,
+            recipient_key_id,
+            local_recipient_key_id: wrong_local.id,
+        },
+    ))
+    .expect("queue malicious retired-material purge");
+
+    let err = bus
+        .dispatch_deferred_intents_with_fact_context(
+            &PurgeRetiredRecipientMaterialHandler::new(),
+            10,
+        )
+        .expect_err("mismatched local material must not purge");
+
+    assert!(err.contains("recipient mismatch"));
+    assert!(bus.has_fact(&wrong_local.id));
+    assert_eq!(bus.intents().len(), 1);
 }
 
 #[test]

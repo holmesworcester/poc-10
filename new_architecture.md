@@ -102,6 +102,10 @@ Implemented target slices:
 - Key request projection validates requester/recipient and responder/frontier
   authority before materializing wraps, and ignores sources not owned by the
   named responder.
+- Recipient supersession now wakes local recipient-key material cleanup:
+  superseded public recipient facts keep their validation/supersession context
+  but stop requesting proactive wrap sources, while exact deferred cleanup
+  purges obsolete local recipient private material after revalidating it.
 
 Current hard gaps:
 
@@ -123,9 +127,6 @@ Current hard gaps:
   envelopes containing key-wrap payloads must validate signature, signer
   authority, recipient key, and frontier context before producing key-wrap rows,
   offers, and unwrap intents.
-- Retired recipient-material cleanup is still missing. Supersession emits target
-  architecture work, but the durable handler that purges obsolete local
-  recipient material still needs to land.
 - Decide whether explicit key-request time needs separate provenance on
   generated wraps. The implementation now uses source fact time without adding
   request entropy to the deterministic anti-amplification key.

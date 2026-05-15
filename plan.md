@@ -46,6 +46,15 @@ Recent target work:
   - key requests reject recipient keys that do not belong to the requester
   - key requests reject frontiers not owned by the named responder
   - responder-mismatched local wrap sources are ignored instead of materialized
+- Current recipient supersession cleanup slice
+  - superseded recipient public-key facts keep their validation and
+    supersession context
+  - superseded recipient keys stop requesting proactive wrap sources
+  - local recipient-key material emits an exact retired-material purge intent
+    once its recipient key is superseded
+  - `PurgeRetiredRecipientMaterialHandler` declares the exact local fact input,
+    revalidates it through the encryption event module, and purges only that
+    obsolete local private material
 
 Important caveats from the latest read-only audit:
 
@@ -80,8 +89,8 @@ Important caveats from the latest read-only audit:
   invariant before adding more behavior: recipient key, key request, key wrap,
   local secret, wrap source/frontier, and secret coverage matching.
 - Target key healing has real deterministic wrap/unwrap tests and now covers
-  the main hostile key-request mismatches. Retired recipient-material cleanup
-  remains incomplete.
+  the main hostile key-request mismatches plus exact local recipient-material
+  purge on recipient-key supersession.
 - Generated wraps now carry source fact time for both root and retained history
   sources. The remaining design question is whether explicit key-request time
   should also be represented as provenance without entering the idempotence key.
