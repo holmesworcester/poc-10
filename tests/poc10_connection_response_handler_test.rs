@@ -1,28 +1,32 @@
-//! Stub tests for the target `connection_response` handler.
+//! Behavioural tests for the target `connection_response` handler.
 //!
-//! The driver currently runs intent decode + dependency-context checks
-//! (invite/request bootstrap hash match, request addresses the local
-//! endpoint) and then returns `NOT_YET_WIRED`. The real handshake key
-//! schedule lives elsewhere until a `src/event_modules/connection_response/
-//! create.rs` lifts it off the handler boundary. These tests pin only the
-//! envelope-decode + dependency-mismatch behaviour.
+//! Synthesises a connection_request + invite_secret + local endpoint fact
+//! context, drives the handler, and verifies the emitted response fact
+//! decodes into a `ConnectionResponseFact` with the request's dependency
+//! edges copied through and a non-degenerate connection secret. A second
+//! case exercises the endpoint-mismatch rejection. A third pins the
+//! placeholder-ephemeral sentinel that keeps the handler retryable until
+//! the ephemeral secret fact lane lands.
 
 use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
 use topo::event_modules::connection_request::fact::ConnectionRequestFact;
 use topo::event_modules::connection_request::layout as request_layout;
+use topo::event_modules::connection_response::layout as response_layout;
 use topo::event_modules::identity_endpoint::fact::EndpointFact;
 use topo::event_modules::identity_endpoint::layout as endpoint_layout;
 use topo::event_modules::identity_invite::fact::InviteSecretFact;
 use topo::event_modules::identity_invite::layout as invite_layout;
-use topo::handlers::connection_response::driver::{ConnectionResponseHandler, NOT_YET_WIRED};
+use topo::handlers::connection_response::driver::{
+    ConnectionResponseHandler, DEPENDENCY_NOT_WIRED,
+};
 use topo::handlers::connection_response::intent::{
     connection_response_intent, ConnectionResponseIntent,
 };
 
 #[test]
-fn handler_decodes_intent_and_stops_at_keyschedule_stub() {
+fn handler_emits_decodable_response_fact_for_addressed_request() {
     let scenario = synthesize_scenario(SynthOpts::default());
     let handler = ConnectionResponseHandler::new();
     let context = HandlerContext::with_facts([
@@ -31,16 +35,28 @@ fn handler_decodes_intent_and_stops_at_keyschedule_stub() {
         scenario.endpoint_fact.clone(),
     ]);
 
-    let err = handler
+    let output = handler
         .handle(&scenario.intent, &context)
-        .expect_err("key schedule is not yet wired");
-    assert_eq!(err, NOT_YET_WIRED);
+        .expect("handler produces response fact");
+
+    assert_eq!(output.facts.len(), 1);
+    let response = response_layout::decode_fact(&output.facts[0].bytes).expect("decode response");
+    assert_eq!(response.request_id, scenario.request_fact.id);
+    assert_eq!(response.from_endpoint, scenario.responder_endpoint);
+    assert_eq!(response.to_endpoint, scenario.initiator_endpoint);
+    assert_eq!(
+        response.responder_ephemeral_public_key,
+        crypto::x25519_public_key(&scenario.responder_ephemeral_private_key)
+    );
+    assert_ne!(response.handshake_hash, [0u8; 32]);
+    assert_ne!(response.connection_secret, [0u8; 32]);
 }
 
 #[test]
 fn handler_rejects_request_addressed_to_a_different_endpoint() {
     let scenario = synthesize_scenario(SynthOpts {
         request_to_endpoint: Some(crypto::x25519_public_key(&[77u8; 32])),
+        ..SynthOpts::default()
     });
     let handler = ConnectionResponseHandler::new();
     let context = HandlerContext::with_facts([
@@ -58,16 +74,39 @@ fn handler_rejects_request_addressed_to_a_different_endpoint() {
     );
 }
 
+#[test]
+fn handler_stops_at_placeholder_ephemeral_sentinel_so_intent_stays_queued() {
+    let scenario = synthesize_scenario(SynthOpts {
+        zero_responder_ephemeral: true,
+        ..SynthOpts::default()
+    });
+    let handler = ConnectionResponseHandler::new();
+    let context = HandlerContext::with_facts([
+        scenario.request_fact.clone(),
+        scenario.invite_fact.clone(),
+        scenario.endpoint_fact.clone(),
+    ]);
+
+    let err = handler
+        .handle(&scenario.intent, &context)
+        .expect_err("placeholder ephemeral must keep the intent queued");
+    assert_eq!(err, DEPENDENCY_NOT_WIRED);
+}
+
 struct Scenario {
     request_fact: Fact,
     invite_fact: Fact,
     endpoint_fact: Fact,
     intent: topo::core::intents::Intent,
+    initiator_endpoint: [u8; 32],
+    responder_endpoint: [u8; 32],
+    responder_ephemeral_private_key: [u8; 32],
 }
 
 #[derive(Default)]
 struct SynthOpts {
     request_to_endpoint: Option<[u8; 32]>,
+    zero_responder_ephemeral: bool,
 }
 
 fn synthesize_scenario(opts: SynthOpts) -> Scenario {
@@ -77,7 +116,11 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
     let responder_endpoint = crypto::x25519_public_key(&responder_static);
     let initiator_ephemeral_private = [33u8; 32];
     let initiator_ephemeral_public = crypto::x25519_public_key(&initiator_ephemeral_private);
-    let responder_ephemeral_private = [44u8; 32];
+    let responder_ephemeral_private = if opts.zero_responder_ephemeral {
+        [0u8; 32]
+    } else {
+        [44u8; 32]
+    };
 
     let bootstrap_secret = [55u8; 32];
     let invite = InviteSecretFact::new(bootstrap_secret)
@@ -120,8 +163,11 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         request_layout::encode_fact(&request).expect("encode request"),
     );
 
-    let responder_ephemeral_secret_event_id =
-        *blake3::hash(&crypto::x25519_public_key(&responder_ephemeral_private)).as_bytes();
+    let responder_ephemeral_secret_event_id = if opts.zero_responder_ephemeral {
+        [0u8; 32]
+    } else {
+        *blake3::hash(&crypto::x25519_public_key(&responder_ephemeral_private)).as_bytes()
+    };
 
     let intent = connection_response_intent(ConnectionResponseIntent {
         request_id: request_fact.id,
@@ -136,5 +182,8 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         invite_fact,
         endpoint_fact,
         intent,
+        initiator_endpoint,
+        responder_endpoint,
+        responder_ephemeral_private_key: responder_ephemeral_private,
     }
 }
