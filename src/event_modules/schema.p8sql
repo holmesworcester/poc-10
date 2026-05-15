@@ -48,3 +48,27 @@ table user_rows {
   column value bytes;
   row_key (key);
 }
+
+table local_endpoint_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
+table local_endpoint_secret_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
+table local_endpoint_signing_public_key_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
+table local_endpoint_signing_secret_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
