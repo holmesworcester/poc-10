@@ -56,7 +56,9 @@ pub fn decode_fact(bytes: &[u8]) -> Result<LocalHistoryNodeSecretFact, String> {
     };
     validate(&fact)?;
     if mask_prefix_to_depth(fact.event_id_prefix, fact.bit_depth) != fact.event_id_prefix {
-        return Err("local history node secret event_id_prefix is not masked to bit_depth".to_string());
+        return Err(
+            "local history node secret event_id_prefix is not masked to bit_depth".to_string(),
+        );
     }
     Ok(fact)
 }

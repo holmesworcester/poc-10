@@ -33,7 +33,8 @@ impl Projector for LocalHistoryNodeSecretProjector {
             return Err("local history node secret fact must have FactScope::Local".to_string());
         }
         let node = layout::decode_fact(&fact.bytes)?;
-        Ok(ProjectionOutput::new()
-            .intent(AtomicIntent::PutRow(local_history_node_secret_row(fact.id, &node)?).into_intent()))
+        Ok(ProjectionOutput::new().intent(
+            AtomicIntent::PutRow(local_history_node_secret_row(fact.id, &node)?).into_intent(),
+        ))
     }
 }

@@ -14,10 +14,8 @@ use crate::core::wire::{FixedLayout, U64be, U8};
 use super::fact::{RemovalFrontierFact, MAX_REMOVAL_FACT_REFS};
 
 pub const TYPE_REMOVAL_FRONTIER: u8 = 30;
-pub const FACT_BYTES: usize =
-    1 + 32 + U64be::LEN + 32 + U8::LEN + 32 * MAX_REMOVAL_FACT_REFS;
-pub const ROW_VALUE_BYTES: usize =
-    U64be::LEN + 32 + U8::LEN + 32 * MAX_REMOVAL_FACT_REFS;
+pub const FACT_BYTES: usize = 1 + 32 + U64be::LEN + 32 + U8::LEN + 32 * MAX_REMOVAL_FACT_REFS;
+pub const ROW_VALUE_BYTES: usize = U64be::LEN + 32 + U8::LEN + 32 * MAX_REMOVAL_FACT_REFS;
 
 pub fn encode_fact(fact: &RemovalFrontierFact) -> Result<Vec<u8>, String> {
     validate(fact)?;

@@ -10,9 +10,3 @@
 
 pub mod driver;
 pub mod intent;
-
-pub use driver::ConnectionResponseHandler;
-pub use intent::{
-    connection_response_intent, decode_connection_response_intent, ConnectionResponseIntent,
-    CONNECTION_RESPONSE,
-};

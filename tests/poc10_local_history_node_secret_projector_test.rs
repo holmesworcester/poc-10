@@ -24,7 +24,11 @@ fn minute_node_fact() -> LocalHistoryNodeSecretFact {
 #[test]
 fn local_history_node_secret_projector_materializes_row_through_atomic_intent() {
     let node = minute_node_fact();
-    let fact = Fact::new(FactScope::Local, 1, layout::encode_fact(&node).expect("encode"));
+    let fact = Fact::new(
+        FactScope::Local,
+        1,
+        layout::encode_fact(&node).expect("encode"),
+    );
     let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
         .expect("open target schema");
     let mut bus = EventBus::new();
@@ -47,8 +51,8 @@ fn local_history_node_secret_projector_materializes_row_through_atomic_intent() 
         .table_rows(rows::LOCAL_HISTORY_NODE_SECRET_ROWS)
         .expect("history node rows");
     assert_eq!(stored.len(), 1);
-    let row = rows::decode_local_history_node_secret_row(&stored[0].0, &stored[0].1)
-        .expect("decode row");
+    let row =
+        rows::decode_local_history_node_secret_row(&stored[0].0, &stored[0].1).expect("decode row");
     assert_eq!(row.workspace_id, [1; 32]);
     assert_eq!(row.removal_frontier_id, [2; 32]);
     assert_eq!(row.local_history_node_secret_id, fact.id);
@@ -92,7 +96,11 @@ fn local_history_node_secret_projector_materializes_trie_leaf_row() {
         node_secret: [7; NODE_SECRET_BYTES],
         ..minute_node_fact()
     };
-    let fact = Fact::new(FactScope::Local, 1, layout::encode_fact(&leaf).expect("encode"));
+    let fact = Fact::new(
+        FactScope::Local,
+        1,
+        layout::encode_fact(&leaf).expect("encode"),
+    );
     let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
         .expect("open target schema");
     let mut bus = EventBus::new();
@@ -112,8 +120,8 @@ fn local_history_node_secret_projector_materializes_trie_leaf_row() {
     let stored = store
         .table_rows(rows::LOCAL_HISTORY_NODE_SECRET_ROWS)
         .expect("rows");
-    let row = rows::decode_local_history_node_secret_row(&stored[0].0, &stored[0].1)
-        .expect("decode row");
+    let row =
+        rows::decode_local_history_node_secret_row(&stored[0].0, &stored[0].1).expect("decode row");
     assert_eq!(row.bit_depth, TRIE_LEAF_BIT_DEPTH);
     assert_eq!(row.event_id_prefix, [9; 32]);
     assert_eq!(row.node_secret, [7; NODE_SECRET_BYTES]);

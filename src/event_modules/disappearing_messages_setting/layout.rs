@@ -31,9 +31,7 @@ pub fn encode_fact(fact: &DisappearingMessagesSettingFact) -> Result<Vec<u8>, St
     out[74..106].copy_from_slice(&fact.author_user_id);
     wire::put_u32be(fact.ttl_minutes, &mut out[106..110]).map_err(wire_err)?;
     wire::put_u64be(fact.retire_minute, &mut out[110..118]).map_err(wire_err)?;
-    let supersedes = fact
-        .supersedes_setting_id
-        .unwrap_or(NO_PREVIOUS_SETTING_ID);
+    let supersedes = fact.supersedes_setting_id.unwrap_or(NO_PREVIOUS_SETTING_ID);
     out[118..150].copy_from_slice(&supersedes);
     Ok(out)
 }

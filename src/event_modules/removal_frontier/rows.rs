@@ -43,10 +43,7 @@ pub fn removal_frontier_row(
     })
 }
 
-pub fn decode_removal_frontier_row(
-    key: &[u8],
-    value: &[u8],
-) -> Result<RemovalFrontierRow, String> {
+pub fn decode_removal_frontier_row(key: &[u8], value: &[u8]) -> Result<RemovalFrontierRow, String> {
     if key.len() != 64 {
         return Err("removal frontier row key must be workspace_id || frontier_id".to_string());
     }

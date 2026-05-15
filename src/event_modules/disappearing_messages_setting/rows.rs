@@ -54,17 +54,18 @@ pub fn setting_row(
     value.extend_from_slice(&fact.ttl_minutes.to_be_bytes());
     value.extend_from_slice(&fact.retire_minute.to_be_bytes());
     value.extend_from_slice(&fact.author_user_id);
-    value.extend_from_slice(
-        &fact
-            .supersedes_setting_id
-            .unwrap_or(NO_PREVIOUS_SETTING_ID),
-    );
+    value.extend_from_slice(&fact.supersedes_setting_id.unwrap_or(NO_PREVIOUS_SETTING_ID));
     if value.len() != ROW_VALUE_BYTES {
         return Err("disappearing setting row value has unexpected length".to_string());
     }
     Ok(TableRow {
         table: DISAPPEARING_MESSAGES_SETTING_ROWS,
-        key: setting_key(&fact.workspace_id, fact.scope_kind, &fact.scope_id, &setting_id),
+        key: setting_key(
+            &fact.workspace_id,
+            fact.scope_kind,
+            &fact.scope_id,
+            &setting_id,
+        ),
         value,
     })
 }

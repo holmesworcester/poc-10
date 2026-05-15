@@ -10,17 +10,21 @@
 //!    responder static x25519 secret).
 //! 4. `responder_ephemeral_secret_event_id` — id pinned into the response so
 //!    downstream replays can locate the ephemeral. Wave-local responder
-//!    ephemeral facts are not yet emitted; callers may use the hash of the
-//!    ephemeral public key as a stable placeholder.
+//!    ephemeral facts are not yet emitted; callers may pass the hash of the
+//!    ephemeral public key as a stable stand-in until the ephemeral fact
+//!    lane lands.
 //! 5. `responder_ephemeral_private_key` — x25519 private key bytes for the
 //!    responder ephemeral. Threaded inline because the target tree has no
 //!    `connection_ephemeral_secret` fact yet.
 //!
-//! This module intentionally does not import `crate::core::wire`: the layout
-//! is a simple concatenation of fixed-width 32-byte ids.
+//! This module intentionally does not pull in the core wire vocabulary:
+//! the layout is a simple concatenation of fixed-width 32-byte ids.
 
-use crate::core::facts::FactId;
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+
+/// 32-byte fact id, named locally to avoid pulling fact module types into
+/// the handler intent file.
+pub type FactId = [u8; 32];
 
 pub const CONNECTION_RESPONSE: &str = "connection_response";
 
