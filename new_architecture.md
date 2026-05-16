@@ -217,6 +217,20 @@ construction should stay narrow and close to the projector unless a custom
 matcher needs them; role-specific matching belongs in `matchers.rs`, with
 `src/protocol.rs` declaring the role-to-matcher binding.
 
+An event module is one fact family. A directory that defines several durable
+fact types is a bundle and should be split before review, even when the facts
+are conceptually related. This rule applies to encryption and sync equally:
+`recipient_key`, `local_recipient_key`, `key_wrap`, `sync_compare`,
+`sync_have_id`, `sync_need_id`, `sync_range_request`, `sync_encrypted_root`,
+`sync_shared_event`, and `sync_key_wrap_available` are separate fact-family
+modules. Shared helper code is allowed only when its file name states the
+specific invariant it owns, such as signer validation or range matching.
+
+`project.rs` is not a folder for sub-events. A `project/` subtree is acceptable
+only for fact-family-local helper slices named after validation steps or output
+families. If a `project/` child corresponds to a different fact tag, the module
+is bundled incorrectly and must be split.
+
 `src/lib.rs`, `src/core.rs`, `src/event_modules/registry.rs`, and
 `src/handlers/registry.rs` are manifests. They declare modules and may
 re-export narrow APIs; they should not accumulate behavior. `src/lib.rs` uses
@@ -275,6 +289,10 @@ cli.rs
 
 project.rs
   one projector entry point plus local validation glue
+
+  It must dispatch one fact family only. Do not hide multiple event types in a
+  projector folder; split them into modules and register each projector in
+  `protocol.rs`.
 
 queries.rs
   read-only projected-state lookups used by CLI/reporting and by explicitly

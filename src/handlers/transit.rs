@@ -329,8 +329,9 @@ impl IntentHandler for TransitSendOnConnectionHandler {
             facts.push(create::require_sendable_fact(fact)?.to_vec());
         }
 
-        let local_endpoint = identity_endpoint::queries::local_endpoint(context.store()?)?
-            .ok_or_else(|| "send_on_connection requires local endpoint state".to_string())?;
+        let local_endpoint =
+            identity_endpoint::local_endpoint::local_endpoint(context.store()?)?
+                .ok_or_else(|| "send_on_connection requires local endpoint state".to_string())?;
         let (sender_endpoint, receiver_endpoint) = if local_endpoint.endpoint
             == connection.from_endpoint
         {

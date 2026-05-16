@@ -120,6 +120,57 @@ fn project_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn imported_black_box_behavior_files(root: &Path) -> Vec<PathBuf> {
+    [
+        "black_box_sync_test.rs",
+        "cascade_cli_test.rs",
+        "cli_surface_test.rs",
+        "content_cli_test.rs",
+        "daemon_lifecycle_cli_test.rs",
+        "disappearing_messages_cli_test.rs",
+        "encryption_cli_test.rs",
+        "generate_cli_test.rs",
+        "invite_accept_cli_test.rs",
+        "leaf_coord_cli_test.rs",
+        "negentropy_purge_sync_test.rs",
+        "sync_storage_boundary_test.rs",
+        "view_cli_test.rs",
+    ]
+    .into_iter()
+    .map(|file| root.join("tests").join(file))
+    .collect()
+}
+
+fn ignored_test_names(path: &Path) -> Vec<String> {
+    let text = source_text(path);
+    let mut pending_ignore = false;
+    let mut ignored = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[ignore") {
+            pending_ignore = true;
+            continue;
+        }
+        if pending_ignore && trimmed.starts_with("fn ") {
+            let name = trimmed
+                .trim_start_matches("fn ")
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            ignored.push(name);
+            pending_ignore = false;
+            continue;
+        }
+        if pending_ignore && !trimmed.starts_with("#[") && !trimmed.is_empty() {
+            pending_ignore = false;
+        }
+    }
+
+    ignored
+}
+
 fn projector_test_files(root: &Path) -> Vec<PathBuf> {
     rust_files_under(&root.join("tests"))
         .into_iter()
@@ -517,6 +568,185 @@ fn cutover_behavior_tests_do_not_assert_legacy_worker_or_queue_state() {
     assert!(
         offenders.is_empty(),
         "behavior tests still poke legacy internals or old queue/status vocabulary:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn cutover_imported_black_box_tests_have_no_extra_ignores() {
+    let root = root();
+    let allowed_ignored = [
+        "black_box_sync_test.rs::cli_three_long_running_daemons_converge_messages_among_late_joiner",
+        "cascade_cli_test.rs::cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_50k",
+    ];
+
+    let mut offenders = Vec::new();
+    for path in imported_black_box_behavior_files(&root) {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("black-box test file name");
+        for test_name in ignored_test_names(&path) {
+            let full_name = format!("{file_name}::{test_name}");
+            if !allowed_ignored.contains(&full_name.as_str()) {
+                offenders.push(full_name);
+            }
+        }
+    }
+    offenders.sort();
+
+    assert!(
+        offenders.is_empty(),
+        "poc-10 imported black-box behavior tests have extra #[ignore] markers beyond the poc-8 baseline; port the behavior or explicitly revise the accepted baseline:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn cutover_encryption_is_not_a_multi_fact_bundle() {
+    let root = root();
+    let bundled_paths = [
+        "src/event_modules/encryption/fact.rs",
+        "src/event_modules/encryption/layout.rs",
+        "src/event_modules/encryption/create.rs",
+        "src/event_modules/encryption/commands.rs",
+        "src/event_modules/encryption/project.rs",
+        "src/event_modules/encryption/recipient_key.rs",
+        "src/event_modules/encryption/local_recipient_key.rs",
+        "src/event_modules/encryption/removal_frontier.rs",
+        "src/event_modules/encryption/key_request.rs",
+        "src/event_modules/encryption/local_material.rs",
+        "src/event_modules/encryption/signed_key_wrap.rs",
+    ];
+    let remaining = bundled_paths
+        .into_iter()
+        .filter(|path| root.join(path).exists())
+        .collect::<Vec<_>>();
+    assert!(
+        remaining.is_empty(),
+        "encryption is still a multi-fact event-module bundle; split recipient keys, local recipient keys, removal frontiers, local key secrets, key requests, key wraps, and retained/history-node material into fact-family modules with their own fact/layout/project/create/commands/rows files:\n{}",
+        remaining.join("\n")
+    );
+}
+
+#[test]
+fn cutover_sync_is_not_a_multi_fact_project_bundle() {
+    let root = root();
+    let sync_dir = root.join("src/event_modules/sync");
+    let project_subdir = sync_dir.join("project");
+    let fact_file = sync_dir.join("fact.rs");
+
+    let mut offenders = Vec::new();
+    if project_subdir.exists() {
+        for path in rust_files_under(&project_subdir) {
+            offenders.push(path.strip_prefix(&root).unwrap().display().to_string());
+        }
+    }
+
+    if fact_file.exists() {
+        let text = source_text(&fact_file);
+        let fact_structs = text
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("pub struct "))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .filter(|name| name.ends_with("Fact"))
+            .collect::<Vec<_>>();
+        if fact_structs.len() > 1 {
+            offenders.push(format!(
+                "src/event_modules/sync/fact.rs defines multiple fact families: {}",
+                fact_structs.join(", ")
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "sync must not be a dumping folder for range/key/support facts. Split sync_range_request, sync_encrypted_root, sync_shared_event, and sync_key_wrap_available into fact-family modules with their own fact/layout/project files; sync/project/* subtrees are not allowed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn cutover_queries_are_not_context_capability_or_cross_module_dumping_grounds() {
+    let root = root();
+    let query_files = rust_files_under(&root.join("src/event_modules"))
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "queries.rs"))
+        .collect::<Vec<_>>();
+    let forbidden = [
+        "ContextNeed",
+        "ContextOffer",
+        "ProjectionContext",
+        "Projector",
+        "Intent",
+        "Handler",
+        "Fact::new",
+        "submit_",
+        "drain_",
+        "private_key",
+        "signing_secret",
+        "local endpoint secret",
+        "local endpoint signing secret",
+        "local_signing_capability",
+        "local_encryption_capability",
+        "workspace_scope",
+        "_need(",
+        "_offer(",
+    ];
+    let mut offenders = matching_code_lines(&root, query_files.clone(), &forbidden);
+    for path in query_files {
+        let relative = path.strip_prefix(&root).unwrap().display().to_string();
+        let text = source_text(&path);
+        if relative.ends_with("queries.rs") && text.contains("crate::event_modules::{") {
+            offenders.push(format!(
+                "{relative} imports a grouped cross-module event_modules namespace"
+            ));
+        }
+        if relative.ends_with("queries.rs")
+            && text
+                .lines()
+                .filter(|line| line.trim_start().starts_with("pub fn "))
+                .count()
+                > 6
+        {
+            offenders.push(format!(
+                "{relative} has more than six public query helpers; split read models before it becomes a dumping ground"
+            ));
+        }
+    }
+    offenders.sort();
+    offenders.dedup();
+    assert!(
+        offenders.is_empty(),
+        "queries.rs files should be narrow read-only row lookups, not context/capability/cross-module dumping grounds:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn cutover_match_app_does_not_own_command_business_logic() {
+    let root = root();
+    let app = root.join("src/match_app.rs");
+    let offenders = matching_code_lines(
+        &root,
+        vec![app],
+        &[
+            "table_row(",
+            "table_rows(",
+            "runtime.facts()",
+            "purge_fact(",
+            "decode_local_key_secret",
+            "decode_local_history_node_secret",
+            "rotate_recipient(",
+            "history_source_",
+            "latest_local_recipient_key",
+            "recipient_key_is_superseded",
+            "RuntimeVault",
+        ],
+    );
+    assert!(
+        offenders.is_empty(),
+        "match_app.rs should route CLI commands through module-local command/read-model surfaces; protocol business logic is still embedded here:\n{}",
         offenders.join("\n")
     );
 }

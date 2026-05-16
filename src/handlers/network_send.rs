@@ -211,7 +211,7 @@ fn resolve_target(
             .ok_or_else(|| "network_send missing connection request fact".to_string())?,
     };
     let request = connection_request::layout::decode_fact(&request_fact.bytes)?;
-    let local_endpoint = identity_endpoint::queries::local_endpoint(context.store()?)?
+    let local_endpoint = identity_endpoint::local_endpoint::local_endpoint(context.store()?)?
         .ok_or_else(|| "network_send requires local endpoint state".to_string())?;
     let addr = if local_endpoint.endpoint == connection.from_endpoint {
         request.from_listen_addr

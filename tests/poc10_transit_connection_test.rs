@@ -11,6 +11,9 @@ use topo::event_modules::connection_response::fact::ConnectionResponseFact;
 use topo::event_modules::connection_response::layout as connection_response_layout;
 use topo::event_modules::identity_endpoint::fact::EndpointFact;
 use topo::event_modules::identity_endpoint::rows as endpoint_rows;
+use topo::event_modules::sync_shared_event::{
+    fact::SharedEventFact, layout as shared_event_layout,
+};
 use topo::event_modules::transit::frame as transit_frame;
 use topo::event_modules::{encryption, signed_fact, sync};
 use topo::handlers::{connection, network_send, transit};
@@ -98,7 +101,7 @@ fn transit_send_guard_refuses_forged_local_fact_reference() {
     let fact = Fact::new(
         FactScope::Local,
         1,
-        sync::layout::encode_shared_event(&sync::fact::SharedEventFact {
+        shared_event_layout::encode_fact(&SharedEventFact {
             workspace_id: [7; 32],
             event_id: [8; 32],
         })
@@ -158,7 +161,7 @@ fn transit_send_guard_accepts_normal_shared_facts() {
     let fact = Fact::new(
         sync::matchers::workspace_scope([7; 32]),
         1,
-        sync::layout::encode_shared_event(&sync::fact::SharedEventFact {
+        shared_event_layout::encode_fact(&SharedEventFact {
             workspace_id: [7; 32],
             event_id: [8; 32],
         })
@@ -193,7 +196,7 @@ fn send_on_connection_handler_success_emits_network_send_and_clears_intent() {
     let fact = Fact::new(
         sync::matchers::workspace_scope([7; 32]),
         1,
-        sync::layout::encode_shared_event(&sync::fact::SharedEventFact {
+        shared_event_layout::encode_fact(&SharedEventFact {
             workspace_id: [7; 32],
             event_id: [8; 32],
         })

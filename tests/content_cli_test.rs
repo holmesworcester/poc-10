@@ -41,7 +41,6 @@ fn cli_send_then_messages_lists_authored_messages() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_react_appears_in_messages_listing() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
@@ -57,7 +56,6 @@ fn cli_react_appears_in_messages_listing() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_view_renders_sidebar_messages_reactions_files() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
@@ -140,7 +138,6 @@ fn cli_view_renders_sidebar_messages_reactions_files() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_view_with_no_workspace_argument_picks_single_workspace() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
@@ -168,7 +165,6 @@ fn cli_view_with_no_workspace_argument_picks_single_workspace() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_view_requires_argument_when_multiple_workspaces() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
@@ -191,7 +187,6 @@ fn cli_view_requires_argument_when_multiple_workspaces() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_view_with_explicit_workspace_argument_renders_that_workspace() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
@@ -221,7 +216,6 @@ fn cli_view_with_explicit_workspace_argument_renders_that_workspace() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_view_collapses_consecutive_messages_from_same_author() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -266,7 +260,6 @@ fn cli_view_collapses_consecutive_messages_from_same_author() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_delete_message_removes_target_from_listing() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
@@ -289,7 +282,6 @@ fn cli_delete_message_removes_target_from_listing() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_send_file_then_save_file_round_trips_bytes_through_real_binary() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
@@ -363,7 +355,6 @@ fn cli_send_file_then_save_file_round_trips_bytes_through_real_binary() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_messages_and_reactions_sync_between_two_peers() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -396,7 +387,6 @@ fn cli_messages_and_reactions_sync_between_two_peers() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_received_deletion_hides_message_after_processes_exit() {
     let sentinel = "received-delete-visible-sentinel-3a91";
     let tmp = tempfile::tempdir().unwrap();
@@ -443,7 +433,6 @@ fn cli_received_deletion_hides_message_after_processes_exit() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_send_file_syncs_bytes_to_peer_for_save() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -533,7 +522,6 @@ fn wait_for_partial_listing(db: &str, workspace_id: &str) -> String {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_files_listing_shows_partial_progress_during_sync() {
     // Send a multi-MiB file so the descriptor lands well before all slices.
     // FILE_SLICE_DATA_BYTES is 256 KiB; 4 MiB -> 16 slices.
@@ -588,7 +576,6 @@ fn cli_files_listing_shows_partial_progress_during_sync() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_save_file_rejects_incomplete_download() {
     // Same partial setup as above; once we observe partial state, kill bob's
     // daemon so no further slices arrive, and assert save-file rejects with
@@ -666,7 +653,6 @@ fn cli_save_file_rejects_incomplete_download() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_out_of_order_slice_arrival_eventually_completes() {
     // Slice events depend on the file descriptor event id, but slice events
     // among themselves have no inter-slice dependency: sync may deliver them
@@ -729,7 +715,6 @@ fn cli_out_of_order_slice_arrival_eventually_completes() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_files_listing_shows_zero_progress_when_only_descriptor_received() {
     // Try to capture the moment bob has the file descriptor but no slices.
     // This relies on poll timing; with a 4 MiB file and a 50 ms tick, the
@@ -804,7 +789,6 @@ fn cli_files_listing_shows_zero_progress_when_only_descriptor_received() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_send_file_with_explicit_mime_round_trips_bytes() {
     let sentinel = "sentinel-fs-bytes-keep-this-unique-1234567890";
 
@@ -870,7 +854,6 @@ fn cli_send_file_with_explicit_mime_round_trips_bytes() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_delete_message_hides_attached_file_and_rejects_save() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
@@ -922,7 +905,6 @@ fn cli_delete_message_hides_attached_file_and_rejects_save() {
 }
 
 #[test]
-#[ignore = "cutover blocker: react/view/file commands remain unported to the poc-10 match runtime"]
 fn cli_delete_message_hides_attached_file_on_peer_after_sync() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");

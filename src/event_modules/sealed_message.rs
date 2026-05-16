@@ -1,3 +1,4 @@
+pub mod authoring;
 pub mod cli;
 pub mod create;
 pub mod fact;

@@ -693,6 +693,8 @@ fn target_event_module_child_files_use_narrow_slice_names() {
         if !matches!(
             file_name,
             "addr.rs"
+                | "authority.rs"
+                | "authoring.rs"
                 | "create.rs"
                 | "commands.rs"
                 | "queries.rs"
@@ -701,6 +703,8 @@ fn target_event_module_child_files_use_narrow_slice_names() {
                 | "frame.rs"
                 | "intent.rs"
                 | "layout.rs"
+                | "local_endpoint.rs"
+                | "local_membership.rs"
                 | "key_request.rs"
                 | "local_material.rs"
                 | "local_recipient_key.rs"
@@ -713,6 +717,7 @@ fn target_event_module_child_files_use_narrow_slice_names() {
                 | "recipient_key.rs"
                 | "removal_frontier.rs"
                 | "rows.rs"
+                | "runtime_counts.rs"
                 | "secret_path.rs"
                 | "signed_key_wrap.rs"
                 | "validation.rs"

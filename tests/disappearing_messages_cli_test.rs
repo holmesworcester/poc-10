@@ -22,7 +22,6 @@ use cli_harness::*;
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-message expiry/retention/key-derive flows are not ported to the poc-10 match runtime"]
 fn cli_disappearing_messages_expire_and_resist_rederive() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -85,7 +84,6 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-message expiry/retention/key-derive flows are not ported to the poc-10 match runtime"]
 fn cli_disappearing_messages_two_peer_convergence() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -185,7 +183,6 @@ fn cli_disappearing_messages_two_peer_convergence() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-message expiry/retention/key-derive flows are not ported to the poc-10 match runtime"]
 fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_old_messages() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -270,7 +267,6 @@ fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-message expiry/retention/key-derive flows are not ported to the poc-10 match runtime"]
 fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -332,7 +328,6 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-message expiry/retention/key-derive flows are not ported to the poc-10 match runtime"]
 fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotation() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -446,7 +441,6 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-message expiry/retention/key-derive flows are not ported to the poc-10 match runtime"]
 fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -577,7 +571,6 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-message expiry/retention/key-derive flows are not ported to the poc-10 match runtime"]
 fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -739,7 +732,6 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-message expiry/retention/key-derive flows are not ported to the poc-10 match runtime"]
 fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_public_admit_probe() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -886,7 +878,6 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-message expiry/retention/key-derive flows are not ported to the poc-10 match runtime"]
 fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -978,7 +969,6 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-message expiry/retention/key-derive flows are not ported to the poc-10 match runtime"]
 fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");

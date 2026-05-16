@@ -11,15 +11,13 @@ use crate::core::command_context::{
 };
 use crate::core::daemon;
 use crate::core::logical_clock;
-use crate::event_modules::{connection_request, connection_response, identity_invite_accepted};
+use crate::event_modules::connection_response;
+use crate::event_modules::sealed_message;
 use crate::event_modules::{content_event, identity_invite, identity_user, identity_workspace};
 use crate::event_modules::{encryption, identity_admin, identity_endpoint_shared};
-use crate::event_modules::{
-    identity_endpoint, local_history_node_secret, sealed_message, signed_fact,
-};
 use crate::protocol::runtime::ProtocolRuntime;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub fn run(argv: Vec<String>) -> Result<(), String> {
     let parsed = ParsedArgs::parse(argv)?;
@@ -41,7 +39,7 @@ pub fn run(argv: Vec<String>) -> Result<(), String> {
         Some("workspaces") => run_workspaces(parsed),
         Some("users") => run_users(parsed),
         Some("key-recipient") => run_key_recipient(parsed),
-        Some("key-rotate-recipient") => run_key_rotate_recipient(parsed),
+        Some("key-rotate-recipient") => run_key_recipient_rotation(parsed),
         Some("key-frontier") => run_key_frontier(parsed),
         Some("key-wrap") => run_key_wrap(parsed),
         Some("key-access") => run_key_access(parsed),
@@ -49,6 +47,7 @@ pub fn run(argv: Vec<String>) -> Result<(), String> {
         Some("chop-now") => run_chop_now(parsed),
         Some("send") => run_send(parsed),
         Some("messages") => run_messages(parsed),
+        Some("view") => run_view(parsed),
         Some("grant-admin") => run_grant_admin(parsed),
         Some("generate") => run_generate(parsed),
         Some("content-count") => run_content_count(parsed),
@@ -85,6 +84,7 @@ fn top_level_usage(reason: &str) -> String {
          match --db PATH chop-now WORKSPACE_ID_HEX FLOOR_MINUTE\n\
          match --db PATH {send_usage}\n\
          match --db PATH {messages_usage}\n\
+         match --db PATH {view_usage}\n\
          match --db PATH {grant_admin_usage}\n\
          match --db PATH {generate_usage}\n\
          match --db PATH {content_count_usage}\n\
@@ -112,6 +112,7 @@ fn top_level_usage(reason: &str) -> String {
         key_access_usage = encryption::cli::KEY_ACCESS_USAGE,
         send_usage = sealed_message::cli::SEND_USAGE,
         messages_usage = sealed_message::cli::MESSAGES_USAGE,
+        view_usage = sealed_message::cli::VIEW_USAGE,
         grant_admin_usage = identity_admin::cli::GRANT_ADMIN_USAGE,
         generate_usage = content_event::cli::GENERATE_USAGE,
         content_count_usage = content_event::cli::CONTENT_COUNT_USAGE,
@@ -212,7 +213,11 @@ fn run_accept(parsed: ParsedArgs) -> Result<(), String> {
     runtime.drain_projection_until_idle(8, 64)?;
     runtime.save()?;
     if from_listen_addr.is_some() {
-        wait_for_connection_response(&mut runtime, receipt.request_id, Duration::from_secs(10))?;
+        connection_response::commands::wait_for_request_response(
+            &mut runtime,
+            receipt.request_id,
+            Duration::from_secs(10),
+        )?;
     }
 
     for line in identity_invite::cli::accept_output(&receipt).lines {
@@ -241,7 +246,11 @@ fn run_accept_invite_server(parsed: ParsedArgs) -> Result<(), String> {
     runtime.dispatch_intents(64)?;
     runtime.drain_projection_until_idle(8, 64)?;
     runtime.save()?;
-    wait_for_connection_response(&mut runtime, receipt.request_id, Duration::from_secs(10))?;
+    connection_response::commands::wait_for_request_response(
+        &mut runtime,
+        receipt.request_id,
+        Duration::from_secs(10),
+    )?;
 
     for line in identity_invite::cli::accept_output(&receipt).lines {
         println!("{line}");
@@ -291,39 +300,17 @@ fn run_accept_link(parsed: ParsedArgs) -> Result<(), String> {
     runtime.drain_projection_until_idle(8, 64)?;
     runtime.save()?;
     if from_listen_addr.is_some() {
-        wait_for_connection_response(&mut runtime, receipt.request_id, Duration::from_secs(10))?;
+        connection_response::commands::wait_for_request_response(
+            &mut runtime,
+            receipt.request_id,
+            Duration::from_secs(10),
+        )?;
     }
 
     for line in identity_invite::cli::accept_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
-}
-
-fn wait_for_connection_response(
-    runtime: &mut ProtocolRuntime,
-    request_id: [u8; 32],
-    timeout: Duration,
-) -> Result<(), String> {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        runtime.reload_wake_loop()?;
-        runtime.drain_projection_until_idle(4, 64)?;
-        runtime.dispatch_intents(64)?;
-        runtime.drain_projection_until_idle(4, 64)?;
-        let rows = runtime
-            .store()
-            .table_rows(connection_response::rows::CONNECTION_RESPONSE_ROWS)
-            .map_err(|err| format!("load connection rows: {err}"))?;
-        for (key, value) in rows {
-            let row = connection_response::rows::decode_connection_response_row(&key, &value)?;
-            if row.request_id == request_id {
-                return Ok(());
-            }
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    Err("did not produce a connection response".to_string())
 }
 
 fn run_start(parsed: ParsedArgs) -> Result<(), String> {
@@ -416,46 +403,9 @@ fn run_count(parsed: ParsedArgs) -> Result<(), String> {
         .db
         .ok_or_else(|| top_level_usage("count requires --db PATH"))?;
     let runtime = ProtocolRuntime::open_disk(db)?;
-    let clock = SystemClock;
-    let vault = EmptyVault;
-    let workspace_rows = {
-        let ctx = runtime.command_context(&clock, &vault);
-        identity_workspace::cli::count(&ctx, CliArgs::new(&parsed.command[1..]))?
-    };
-    let events = runtime.facts().count();
-    let sync_events = runtime
-        .facts()
-        .filter(|fact| crate::protocol::runtime::is_sync_seed_fact(fact))
-        .count();
-    let applied_events = events.saturating_sub(runtime.wake_loop().pending_len());
-    let connections = runtime
-        .store()
-        .table_rows(connection_response::rows::CONNECTION_RESPONSE_ROWS)
-        .map_err(|err| format!("count connections: {err}"))?
-        .len();
-    let connection_requests = runtime
-        .store()
-        .table_rows(connection_request::rows::CONNECTION_REQUEST_ROWS)
-        .map_err(|err| format!("count connection requests: {err}"))?
-        .len();
-    let connection_events = connection_requests + connections;
-    let invite_accepted = runtime
-        .store()
-        .table_rows(identity_invite_accepted::rows::INVITE_ACCEPTED_ROWS)
-        .map_err(|err| format!("count invite accepted: {err}"))?
-        .len();
-
-    for line in identity_workspace::cli::count_output(
-        workspace_rows,
-        events,
-        sync_events,
-        applied_events,
-        connections,
-        connection_events,
-        invite_accepted,
-    )
-    .lines
-    {
+    CliArgs::new(&parsed.command[1..]).require_len(0, identity_workspace::cli::COUNT_USAGE)?;
+    let report = identity_workspace::runtime_counts::runtime_count_report(&runtime)?;
+    for line in identity_workspace::cli::count_report_output(&report).lines {
         println!("{line}");
     }
     Ok(())
@@ -500,7 +450,7 @@ fn run_key_recipient(parsed: ParsedArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn run_key_rotate_recipient(parsed: ParsedArgs) -> Result<(), String> {
+fn run_key_recipient_rotation(parsed: ParsedArgs) -> Result<(), String> {
     let db = parsed
         .db
         .ok_or_else(|| top_level_usage("key-rotate-recipient requires --db PATH"))?;
@@ -511,13 +461,13 @@ fn run_key_rotate_recipient(parsed: ParsedArgs) -> Result<(), String> {
         .ok_or_else(|| encryption::cli::KEY_ROTATE_RECIPIENT_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     drain_runtime(&mut runtime)?;
-    let previous = latest_local_recipient_key(&runtime, workspace_id)?
+    let previous = encryption::commands::recipient_key_for_rotation(&runtime, workspace_id)?
         .ok_or_else(|| "no existing local recipient key to rotate".to_string())?;
     let clock = SystemClock;
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        encryption::cli::rotate_recipient(&ctx, CliArgs::new(&parsed.command[1..]), previous)?
+        encryption::cli::key_recipient_rotation(&ctx, CliArgs::new(&parsed.command[1..]), previous)?
     };
     let receipt = runtime.submit_command_output(output)?;
     drain_runtime(&mut runtime)?;
@@ -560,28 +510,8 @@ fn run_key_wrap(parsed: ParsedArgs) -> Result<(), String> {
     let query = encryption::cli::key_wrap_args(CliArgs::new(&parsed.command[1..]))?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
-    if recipient_key_is_superseded(&runtime, query.workspace_id, query.recipient_key_id)? {
-        return Err("recipient key is missing or superseded".to_string());
-    }
-    let key = encryption::layout::frontier_root_key_wrap_coordinate_key(
-        query.workspace_id,
-        query.removal_frontier_id,
-        query.recipient_key_id,
-    );
-    let value = runtime
-        .store()
-        .table_row(encryption::rows::KEY_WRAP_ROWS, &key)
-        .map_err(|err| format!("load key wrap row: {err}"))?
-        .ok_or_else(|| "key wrap is not available yet".to_string())?;
-    let row = encryption::rows::decode_key_wrap_row(&key, &value)?;
-    for line in encryption::cli::key_wrap_output(
-        &query.workspace_id,
-        &query.removal_frontier_id,
-        &query.recipient_key_id,
-        &row.key_wrap_id,
-    )
-    .lines
-    {
+    let lookup = encryption::commands::lookup_key_wrap(&runtime, query)?;
+    for line in encryption::cli::key_wrap_lookup_output(&lookup).lines {
         println!("{line}");
     }
     Ok(())
@@ -595,19 +525,8 @@ fn run_key_access(parsed: ParsedArgs) -> Result<(), String> {
     let query = encryption::cli::key_access_args(CliArgs::new(&parsed.command[1..]))?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
-    let access = runtime.facts().any(|fact| {
-        fact.scope == crate::core::facts::FactScope::Local
-            && encryption::layout::decode_local_key_secret(&fact.bytes)
-                .map(|secret| {
-                    secret.workspace_id == query.workspace_id
-                        && secret.frontier_id == query.removal_frontier_id
-                })
-                .unwrap_or(false)
-    });
-    for line in
-        encryption::cli::key_access_output(&query.workspace_id, &query.removal_frontier_id, access)
-            .lines
-    {
+    let status = encryption::commands::key_access(&runtime, query)?;
+    for line in encryption::cli::key_access_status_output(&status).lines {
         println!("{line}");
     }
     Ok(())
@@ -636,59 +555,24 @@ fn run_key_node(parsed: ParsedArgs) -> Result<(), String> {
     } else {
         [0; 32]
     };
-    if history_source_is_tombstoned(&runtime, source_secret_id)? {
-        return Err("history node source event is missing".to_string());
-    }
-    let source = runtime
-        .facts()
-        .find(|fact| fact.id == source_secret_id)
-        .ok_or_else(|| "history node source event is missing".to_string())?;
-    let (owner_endpoint_id, source_secret) =
-        history_source_material(source, workspace_id, frontier_id)?;
-    if tombstone_node_id != [0; 32] {
-        let tombstone = runtime
-            .facts()
-            .find(|fact| fact.id == tombstone_node_id)
-            .ok_or_else(|| "history node tombstone event is missing".to_string())?;
-        encryption::layout::decode_local_history_node_secret(&tombstone.bytes)
-            .map_err(|_| "history node tombstone event is not a history node".to_string())?;
-    }
-    let mut info = Vec::with_capacity(32 + 32 + 8 + 8 + 32);
-    info.extend_from_slice(&workspace_id);
-    info.extend_from_slice(&frontier_id);
-    info.extend_from_slice(&range_start.to_be_bytes());
-    info.extend_from_slice(&range_width.to_be_bytes());
-    info.extend_from_slice(&tombstone_node_id);
-    let node_secret =
-        crate::core::crypto::blake3_keyed_hash(&source_secret, b"topo:key-node:v1", &info);
-    let node = encryption::fact::LocalHistoryNodeSecretFact {
-        workspace_id,
-        frontier_id,
-        owner_endpoint_id,
-        source_secret_id,
-        range_start,
-        range_width,
-        bit_depth: local_history_node_secret::fact::TIME_TREE_BIT_DEPTH,
-        event_id_prefix: [0; 32],
-        tombstone_node_id,
-        node_secret,
-    };
-    let fact = crate::core::facts::Fact::new(
-        crate::core::facts::FactScope::Local,
-        SystemClock.next_timestamp(),
-        encryption::layout::encode_local_history_node_secret(&node)?,
-    );
-    let node_id = fact.id;
-    runtime.submit_fact(fact);
+    let output = encryption::commands::create_history_node(
+        &runtime,
+        encryption::commands::CreateHistoryNode {
+            created_at_ms: SystemClock.next_timestamp(),
+            workspace_id,
+            removal_frontier_id: frontier_id,
+            source_secret_id,
+            range_start,
+            range_width,
+            tombstone_node_id,
+        },
+    )?;
+    let receipt = runtime.submit_command_output(output)?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
-    println!("workspace_id: {}", encode_hex(&workspace_id));
-    println!("removal_frontier_id: {}", encode_hex(&frontier_id));
-    println!("local_history_node_secret_id: {}", encode_hex(&node_id));
-    println!("source_secret_id: {}", encode_hex(&source_secret_id));
-    println!("range_start: {range_start}");
-    println!("range_width: {range_width}");
-    println!("tombstoned_node_id: {}", encode_hex(&tombstone_node_id));
+    for line in encryption::cli::history_node_output(&receipt).lines {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -705,75 +589,19 @@ fn run_chop_now(parsed: ParsedArgs) -> Result<(), String> {
     let floor_minute = parsed.command[2]
         .parse::<u64>()
         .map_err(|_| "chop-now floor minute must be a u64".to_string())?;
-    let old_recipient = latest_local_recipient_key(&runtime, workspace_id)?;
-    if let Some(previous) = old_recipient {
-        let clock = SystemClock;
-        let vault = EmptyVault;
-        let output = {
-            let ctx = runtime.command_context(&clock, &vault);
-            let args = [encode_hex(&workspace_id)];
-            encryption::cli::rotate_recipient(&ctx, CliArgs::new(&args), previous)?
-        };
-        let _ = runtime.submit_command_output(output)?;
-        drain_runtime(&mut runtime)?;
-    }
-    let local_key_secret_ids = runtime
-        .facts()
-        .filter_map(|fact| {
-            encryption::layout::decode_local_key_secret(&fact.bytes)
-                .ok()
-                .filter(|secret| secret.workspace_id == workspace_id)
-                .map(|_| fact.id)
-        })
-        .collect::<Vec<_>>();
-    for fact_id in &local_key_secret_ids {
-        runtime.purge_fact(*fact_id);
-    }
-    drain_runtime(&mut runtime)?;
+    let receipt = encryption::commands::chop_now(
+        &mut runtime,
+        encryption::commands::ChopNow {
+            workspace_id,
+            floor_minute,
+            created_at_ms: SystemClock.next_timestamp(),
+        },
+    )?;
     runtime.save()?;
-    println!("workspace_id: {}", encode_hex(&workspace_id));
-    println!("floor_minute: {floor_minute}");
-    println!("subtree_tombstones_written: {}", local_key_secret_ids.len());
-    println!("boundary_descend_tombstones_written: 0");
-    println!("right_side_siblings_materialized: 0");
-    println!("purged_event_bytes: 0");
-    println!("subsumed_message_tombstones_gcd: 0");
-    println!("subsumed_leaf_tombstones_gcd: 0");
+    for line in encryption::cli::chop_now_output(&receipt).lines {
+        println!("{line}");
+    }
     Ok(())
-}
-
-fn history_source_material(
-    fact: &crate::core::facts::Fact,
-    workspace_id: [u8; 32],
-    frontier_id: [u8; 32],
-) -> Result<([u8; 32], [u8; 32]), String> {
-    if let Ok(root) = encryption::layout::decode_local_key_secret(&fact.bytes) {
-        if root.workspace_id != workspace_id || root.frontier_id != frontier_id {
-            return Err("history node source workspace or frontier mismatch".to_string());
-        }
-        return Ok((root.owner_endpoint_id, root.key_secret));
-    }
-    let node = encryption::layout::decode_local_history_node_secret(&fact.bytes)
-        .map_err(|_| "history node source event is missing".to_string())?;
-    if node.workspace_id != workspace_id || node.frontier_id != frontier_id {
-        return Err("history node source workspace or frontier mismatch".to_string());
-    }
-    Ok((node.owner_endpoint_id, node.node_secret))
-}
-
-fn history_source_is_tombstoned(
-    runtime: &ProtocolRuntime,
-    source_secret_id: [u8; 32],
-) -> Result<bool, String> {
-    for fact in runtime.facts() {
-        let Ok(node) = encryption::layout::decode_local_history_node_secret(&fact.bytes) else {
-            continue;
-        };
-        if node.tombstone_node_id == source_secret_id {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn run_send(parsed: ParsedArgs) -> Result<(), String> {
@@ -792,7 +620,8 @@ fn run_send(parsed: ParsedArgs) -> Result<(), String> {
         .ok_or_else(|| sealed_message::cli::SEND_USAGE.to_string())?
         .clone();
     let clock = SystemClock;
-    let vault = RuntimeVault::for_workspace(&runtime, workspace_id)?;
+    let vault =
+        sealed_message::authoring::SealedMessageVault::for_workspace(&runtime, workspace_id)?;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
         sealed_message::cli::send(&ctx, CliArgs::new(&parsed.command[1..]))?
@@ -818,6 +647,25 @@ fn run_messages(parsed: ParsedArgs) -> Result<(), String> {
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
         sealed_message::cli::messages(&ctx, CliArgs::new(&parsed.command[1..]))?
+    };
+    for line in output.lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn run_view(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("view requires --db PATH"))?;
+    let mut runtime = ProtocolRuntime::open_disk(db)?;
+    drain_runtime(&mut runtime)?;
+    runtime.save()?;
+    let clock = SystemClock;
+    let vault = EmptyVault;
+    let output = {
+        let ctx = runtime.command_context(&clock, &vault);
+        sealed_message::cli::view(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     for line in output.lines {
         println!("{line}");
@@ -939,123 +787,6 @@ fn drain_runtime(runtime: &mut ProtocolRuntime) -> Result<(), String> {
     Ok(())
 }
 
-fn latest_local_recipient_key(
-    runtime: &ProtocolRuntime,
-    workspace_id: [u8; 32],
-) -> Result<Option<[u8; 32]>, String> {
-    let mut latest = None;
-    for fact in runtime.facts() {
-        let Ok(local) = encryption::layout::decode_local_recipient_key(&fact.bytes) else {
-            continue;
-        };
-        if local.workspace_id != workspace_id {
-            continue;
-        }
-        match latest {
-            None => latest = Some((fact.timestamp, local.recipient_key_id)),
-            Some((timestamp, id)) if (fact.timestamp, local.recipient_key_id) > (timestamp, id) => {
-                latest = Some((fact.timestamp, local.recipient_key_id));
-            }
-            _ => {}
-        }
-    }
-    Ok(latest.map(|(_, id)| id))
-}
-
-fn recipient_key_is_superseded(
-    runtime: &ProtocolRuntime,
-    workspace_id: [u8; 32],
-    recipient_key_id: [u8; 32],
-) -> Result<bool, String> {
-    let mut target_endpoint = None;
-    for fact in runtime.facts() {
-        if fact.id != recipient_key_id {
-            continue;
-        }
-        let recipient = encryption::layout::decode_recipient_key(&fact.bytes)?;
-        if recipient.workspace_id == workspace_id {
-            target_endpoint = Some(recipient.endpoint_id);
-        }
-    }
-    let Some(endpoint_id) = target_endpoint else {
-        return Ok(false);
-    };
-    for fact in runtime.facts() {
-        let Ok(recipient) = encryption::layout::decode_recipient_key(&fact.bytes) else {
-            continue;
-        };
-        if recipient.workspace_id == workspace_id
-            && recipient.endpoint_id == endpoint_id
-            && recipient.previous_recipient_key_id == recipient_key_id
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-struct RuntimeVault {
-    signing: LocalSigningCapability,
-    encryption: LocalEncryptionCapability,
-}
-
-impl RuntimeVault {
-    fn for_workspace(runtime: &ProtocolRuntime, workspace_id: [u8; 32]) -> Result<Self, String> {
-        let endpoint = identity_endpoint::queries::local_endpoint(runtime.store())?
-            .ok_or_else(|| "local endpoint is not initialized".to_string())?;
-        identity_endpoint_shared::queries::local_membership(runtime.store(), workspace_id)?
-            .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
-        let encryption = runtime
-            .facts()
-            .filter_map(|fact| {
-                encryption::layout::decode_local_key_secret(&fact.bytes)
-                    .ok()
-                    .filter(|secret| secret.workspace_id == workspace_id)
-            })
-            .max_by(|left, right| {
-                left.created_at_ms
-                    .cmp(&right.created_at_ms)
-                    .then_with(|| left.frontier_id.cmp(&right.frontier_id))
-            })
-            .ok_or_else(|| "no local key frontier is available for this workspace".to_string())?;
-        Ok(Self {
-            signing: LocalSigningCapability {
-                fact: signed_fact::fact::LocalSignerSecretFact {
-                    workspace_id,
-                    signer_id: endpoint.endpoint,
-                    public_key: endpoint.signing_public_key,
-                    private_key: endpoint.signing_secret,
-                },
-            },
-            encryption: LocalEncryptionCapability { fact: encryption },
-        })
-    }
-}
-
-impl IdentityVault for RuntimeVault {
-    fn local_signing_capability(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<LocalSigningCapability, String> {
-        if self.signing.fact.workspace_id == workspace_id {
-            Ok(self.signing.clone())
-        } else {
-            Err("signing capability is not for requested workspace".to_string())
-        }
-    }
-
-    fn local_encryption_capability(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<LocalEncryptionCapability, String> {
-        if self.encryption.fact.workspace_id == workspace_id {
-            Ok(self.encryption.clone())
-        } else {
-            Err("encryption capability is not for requested workspace".to_string())
-        }
-    }
-}
-
 fn decode_hex_32(value: &str, label: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 {
         return Err(format!("{label} must be 64 hex characters"));
@@ -1076,15 +807,6 @@ fn hex_nibble(byte: u8, label: &str) -> Result<u8, String> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err(format!("{label} contains a non-hex character")),
     }
-}
-
-fn encode_hex(bytes: &[u8; 32]) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

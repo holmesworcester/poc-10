@@ -12,6 +12,9 @@ use topo::event_modules::connection_response::layout as connection_response_layo
 use topo::event_modules::identity_endpoint::fact::EndpointFact;
 use topo::event_modules::identity_endpoint::rows as endpoint_rows;
 use topo::event_modules::sync;
+use topo::event_modules::sync_shared_event::{
+    fact::SharedEventFact, layout as shared_event_layout,
+};
 use topo::event_modules::transit::frame as transit_frame;
 use topo::handlers::network_send;
 use topo::handlers::transit::TransitSendOnConnectionHandler;
@@ -45,7 +48,7 @@ fn well_formed_send_intent_packs_fixed_frame_for_network_send() {
     let fact = Fact::new(
         sync::matchers::workspace_scope([7; 32]),
         1,
-        sync::layout::encode_shared_event(&sync::fact::SharedEventFact {
+        shared_event_layout::encode_fact(&SharedEventFact {
             workspace_id: [7; 32],
             event_id: [8; 32],
         })

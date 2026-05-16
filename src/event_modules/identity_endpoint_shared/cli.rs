@@ -2,7 +2,7 @@
 
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::command_context::CommandContext;
-use crate::event_modules::identity_endpoint;
+use crate::event_modules::{identity_endpoint, identity_workspace};
 
 use super::fact::EndpointRole;
 use super::queries;
@@ -11,7 +11,7 @@ pub const IDENTITY_USAGE: &str = "identity";
 pub const PEERS_USAGE: &str = "peers WORKSPACE_ID_HEX";
 
 pub fn identity(ctx: &CommandContext<'_>, _args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let endpoint = identity_endpoint::queries::local_endpoint(ctx.store())?
+    let endpoint = identity_endpoint::queries::local_endpoint_public(ctx.store())?
         .ok_or_else(|| "local endpoint has not been created".to_string())?;
     let mut lines = vec![
         format!("endpoint_id: {}", encode_hex(&endpoint.endpoint)),
@@ -20,7 +20,7 @@ pub fn identity(ctx: &CommandContext<'_>, _args: CliArgs<'_>) -> Result<CliOutpu
             encode_hex(&endpoint.signing_public_key)
         ),
     ];
-    for membership in queries::local_memberships(ctx.store())? {
+    for membership in identity_workspace::local_membership::local_memberships(ctx.store())? {
         lines.push(format!(
             "workspace: {} {} user_id={} endpoint_shared_id={} endpoint_role={}",
             encode_hex(&membership.workspace_id),

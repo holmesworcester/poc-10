@@ -45,6 +45,14 @@ pub fn rotate_recipient(
     )
 }
 
+pub fn key_recipient_rotation(
+    ctx: &CommandContext<'_>,
+    args: CliArgs<'_>,
+    previous_recipient_key_id: [u8; 32],
+) -> Result<CommandOutput<commands::CreateRecipientKeyReceipt>, String> {
+    rotate_recipient(ctx, args, previous_recipient_key_id)
+}
+
 pub fn key_recipient_output(receipt: &commands::CreateRecipientKeyReceipt) -> CliOutput {
     CliOutput::lines(vec![
         format!(
@@ -91,16 +99,9 @@ pub fn key_frontier_output(receipt: &commands::CreateKeyFrontierReceipt) -> CliO
     ])
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyWrapQuery {
-    pub workspace_id: [u8; 32],
-    pub removal_frontier_id: [u8; 32],
-    pub recipient_key_id: [u8; 32],
-}
-
-pub fn key_wrap_args(args: CliArgs<'_>) -> Result<KeyWrapQuery, String> {
+pub fn key_wrap_args(args: CliArgs<'_>) -> Result<commands::KeyWrapQuery, String> {
     args.require_len(3, KEY_WRAP_USAGE)?;
-    Ok(KeyWrapQuery {
+    Ok(commands::KeyWrapQuery {
         workspace_id: decode_hex_32(args.get(0).expect("length checked"))?,
         removal_frontier_id: decode_hex_32(args.get(1).expect("length checked"))?,
         recipient_key_id: decode_hex_32(args.get(2).expect("length checked"))?,
@@ -121,18 +122,81 @@ pub fn key_wrap_output(
     ])
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyAccessQuery {
-    pub workspace_id: [u8; 32],
-    pub removal_frontier_id: [u8; 32],
+pub fn key_wrap_lookup_output(lookup: &commands::KeyWrapLookup) -> CliOutput {
+    key_wrap_output(
+        &lookup.workspace_id,
+        &lookup.removal_frontier_id,
+        &lookup.recipient_key_id,
+        &lookup.key_wrap_id,
+    )
 }
 
-pub fn key_access_args(args: CliArgs<'_>) -> Result<KeyAccessQuery, String> {
+pub fn key_access_args(args: CliArgs<'_>) -> Result<commands::KeyAccessQuery, String> {
     args.require_len(2, KEY_ACCESS_USAGE)?;
-    Ok(KeyAccessQuery {
+    Ok(commands::KeyAccessQuery {
         workspace_id: decode_hex_32(args.get(0).expect("length checked"))?,
         removal_frontier_id: decode_hex_32(args.get(1).expect("length checked"))?,
     })
+}
+
+pub fn key_access_status_output(status: &commands::KeyAccessStatus) -> CliOutput {
+    key_access_output(
+        &status.workspace_id,
+        &status.removal_frontier_id,
+        status.access,
+    )
+}
+
+pub fn history_node_output(receipt: &commands::CreateHistoryNodeReceipt) -> CliOutput {
+    CliOutput::lines(vec![
+        format!("workspace_id: {}", encode_hex(&receipt.workspace_id)),
+        format!(
+            "removal_frontier_id: {}",
+            encode_hex(&receipt.removal_frontier_id)
+        ),
+        format!(
+            "local_history_node_secret_id: {}",
+            encode_hex(&receipt.local_history_node_secret_id)
+        ),
+        format!(
+            "source_secret_id: {}",
+            encode_hex(&receipt.source_secret_id)
+        ),
+        format!("range_start: {}", receipt.range_start),
+        format!("range_width: {}", receipt.range_width),
+        format!(
+            "tombstoned_node_id: {}",
+            encode_hex(&receipt.tombstone_node_id)
+        ),
+    ])
+}
+
+pub fn chop_now_output(receipt: &commands::ChopNowReceipt) -> CliOutput {
+    CliOutput::lines(vec![
+        format!("workspace_id: {}", encode_hex(&receipt.workspace_id)),
+        format!("floor_minute: {}", receipt.floor_minute),
+        format!(
+            "subtree_tombstones_written: {}",
+            receipt.subtree_tombstones_written
+        ),
+        format!(
+            "boundary_descend_tombstones_written: {}",
+            receipt.boundary_descend_tombstones_written
+        ),
+        format!(
+            "right_side_siblings_materialized: {}",
+            receipt.right_side_siblings_materialized
+        ),
+        format!("purged_event_bytes: {}", receipt.purged_event_bytes),
+        format!(
+            "subsumed_message_tombstones_gcd: {}",
+            receipt.subsumed_message_tombstones_gcd
+        ),
+        format!(
+            "subsumed_leaf_tombstones_gcd: {}",
+            receipt.subsumed_leaf_tombstones_gcd
+        ),
+    ])
 }
 
 pub fn key_access_output(

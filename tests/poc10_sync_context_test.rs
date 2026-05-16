@@ -15,11 +15,17 @@ use topo::event_modules::sealed_message::rows::{
     decode_sealed_message_row, message_key, SEALED_MESSAGE_ROWS,
 };
 use topo::event_modules::sealed_message::{layout as sealed_layout, matchers as sealed_context};
-use topo::event_modules::sync::fact::{
-    EncryptedRootFact, KeyWrapAvailableFact, SharedEventFact, SyncRangeRequestFact,
-};
 use topo::event_modules::sync::matchers::{self as context, RangeEventMatcher};
-use topo::event_modules::sync::{layout, project};
+use topo::event_modules::sync_encrypted_root::fact::EncryptedRootFact;
+use topo::event_modules::sync_encrypted_root::layout as encrypted_root_layout;
+use topo::event_modules::sync_key_wrap_available::fact::KeyWrapAvailableFact;
+use topo::event_modules::sync_key_wrap_available::layout as key_wrap_available_layout;
+use topo::event_modules::sync_range_request::fact::SyncRangeRequestFact;
+use topo::event_modules::sync_range_request::{
+    layout as sync_range_request_layout, project as sync_range_request_project,
+};
+use topo::event_modules::sync_shared_event::fact::SharedEventFact;
+use topo::event_modules::sync_shared_event::layout as shared_event_layout;
 use topo::handlers::transit;
 use topo::protocol::runtime::ProtocolProjector;
 
@@ -44,7 +50,7 @@ fn sync_request_sends_encrypted_message_when_out_of_range_dep_and_key_arrive() {
         &event_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
-    let projector = project::SyncContextProjector::new();
+    let projector = ProtocolProjector;
     let mut bus = WakeLoop::new();
 
     bus.submit_fact(request.clone());
@@ -104,7 +110,7 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
         &event_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
-    let projector = project::SyncContextProjector::new();
+    let projector = ProtocolProjector;
     let mut bus = WakeLoop::new();
 
     bus.submit_fact(message);
@@ -223,7 +229,7 @@ fn sync_request_does_not_send_message_before_out_of_range_key_wrap() {
         &event_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
-    let projector = project::SyncContextProjector::new();
+    let projector = ProtocolProjector;
     let mut bus = WakeLoop::new();
 
     for fact in [request.clone(), message, dep] {
@@ -280,7 +286,7 @@ fn sync_request_sends_ready_root_when_an_earlier_root_is_missing_a_key() {
         &event_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
-    let projector = project::SyncContextProjector::new();
+    let projector = ProtocolProjector;
     let mut bus = WakeLoop::new();
 
     for fact in [
@@ -339,7 +345,7 @@ fn sync_request_emits_all_complete_roots_in_deterministic_order() {
         &event_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
-    let projector = project::SyncContextProjector::new();
+    let projector = ProtocolProjector;
     let mut bus = WakeLoop::new();
 
     for fact in [
@@ -410,7 +416,7 @@ fn sync_range_matching_ignores_out_of_range_roots_and_their_context() {
         &event_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
-    let projector = project::SyncContextProjector::new();
+    let projector = ProtocolProjector;
     let mut bus = WakeLoop::new();
 
     for fact in [
@@ -468,7 +474,7 @@ fn sync_projector_revalidates_matched_range_payload() {
         payload,
     }]);
 
-    let err = project::SyncContextProjector::new()
+    let err = sync_range_request_project::SyncRangeRequestProjector::new()
         .project(&request, &projection_context)
         .expect_err("matched context must be semantically revalidated");
     assert!(
@@ -486,7 +492,7 @@ fn sync_range_request_fact(
     Fact::new(
         context::workspace_scope(workspace_id),
         start,
-        layout::encode_sync_range_request(&SyncRangeRequestFact {
+        sync_range_request_layout::encode_fact(&SyncRangeRequestFact {
             workspace_id,
             connection_id,
             start,
@@ -506,7 +512,7 @@ fn encrypted_root_fact(
     Fact::new(
         context::workspace_scope(workspace_id),
         timestamp,
-        layout::encode_encrypted_root(&EncryptedRootFact {
+        encrypted_root_layout::encode_fact(&EncryptedRootFact {
             workspace_id,
             event_id,
             dependency_id,
@@ -520,7 +526,7 @@ fn shared_event_fact(workspace_id: [u8; 32], timestamp: u64, event_id: [u8; 32])
     Fact::new(
         context::workspace_scope(workspace_id),
         timestamp,
-        layout::encode_shared_event(&SharedEventFact {
+        shared_event_layout::encode_fact(&SharedEventFact {
             workspace_id,
             event_id,
         })
@@ -532,7 +538,7 @@ fn key_wrap_available_fact(workspace_id: [u8; 32], timestamp: u64, key_wrap_id: 
     Fact::new(
         context::workspace_scope(workspace_id),
         timestamp,
-        layout::encode_key_wrap_available(&KeyWrapAvailableFact {
+        key_wrap_available_layout::encode_fact(&KeyWrapAvailableFact {
             workspace_id,
             key_wrap_id,
         })

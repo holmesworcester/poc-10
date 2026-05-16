@@ -17,16 +17,17 @@
 //! - Legacy decrypts the emoji into a plaintext `content.reactions` row;
 //!   per-message decryption secrets aren't surfaced in this slice.
 
-use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
+use crate::event_modules::content_message::authority::{self, DecodedPayload};
 use crate::event_modules::content_message::{
     layout as message_layout, matchers as message_matchers,
 };
 use crate::event_modules::identity_matchers;
 use crate::event_modules::identity_user::layout as user_layout;
+use crate::event_modules::signed_fact;
 
 use super::layout;
 use super::rows::{reaction_key, reaction_row, ReactionRow, REACTION_ROWS};
@@ -46,9 +47,12 @@ impl Projector for ContentReactionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let reaction = layout::decode_fact(&fact.bytes)?;
+        let decoded =
+            authority::decode_raw_or_signed(fact, layout::TYPE_CONTENT_REACTION, "reaction")?;
+        let reaction = layout::decode_fact(&decoded.payload)?;
         let scope = message_matchers::workspace_scope(reaction.workspace_id);
         require_fact_scope(fact, &scope)?;
+        let signer_need = authority::signer_need(fact.id, decoded.signer);
         let target_need =
             message_matchers::message_need(fact.id, scope.clone(), reaction.target_message_id);
         let author_need = identity_matchers::exact_need(
@@ -56,8 +60,30 @@ impl Projector for ContentReactionProjector {
             identity_matchers::user_role(),
             reaction.author_user_id,
         );
+        if let (Some(signer), Some(need)) = (decoded.signer, signer_need.as_ref()) {
+            if !authority::validate_signer_context(
+                context,
+                need,
+                signer,
+                reaction.workspace_id,
+                Some(reaction.author_user_id),
+                "reaction",
+            )? {
+                return Ok(output_with_needs([
+                    signer_need,
+                    Some(target_need),
+                    Some(author_need),
+                    None,
+                ]));
+            }
+        }
         let Some(target) = payload_for_need(context, &target_need, "reaction target")? else {
-            return Ok(ProjectionOutput::new().need(target_need).need(author_need));
+            return Ok(output_with_needs([
+                signer_need,
+                Some(target_need),
+                Some(author_need),
+                None,
+            ]));
         };
         validate_target_message(
             target,
@@ -65,7 +91,12 @@ impl Projector for ContentReactionProjector {
             reaction.workspace_id,
             reaction.target_message_id,
         )?;
-        let target_message = message_layout::decode_fact(&target.bytes)
+        let target_payload = maybe_signed_payload(
+            target,
+            message_layout::TYPE_CONTENT_MESSAGE,
+            "reaction target",
+        )?;
+        let target_message = message_layout::decode_fact(&target_payload.payload)
             .map_err(|_| "reaction target context is not a content message".to_string())?;
         let target_deletion_need = message_matchers::deletion_need(
             fact.id,
@@ -87,10 +118,12 @@ impl Projector for ContentReactionProjector {
                 .need(target_deletion_need));
         }
         let Some(author) = payload_for_need(context, &author_need, "reaction author")? else {
-            return Ok(ProjectionOutput::new()
-                .need(target_need)
-                .need(target_deletion_need)
-                .need(author_need));
+            return Ok(output_with_needs([
+                signer_need,
+                Some(target_need),
+                Some(target_deletion_need),
+                Some(author_need),
+            ]));
         };
         validate_author_user(author, reaction.workspace_id, reaction.author_user_id)?;
 
@@ -103,30 +136,31 @@ impl Projector for ContentReactionProjector {
             nonce: reaction.nonce,
             ciphertext: reaction.ciphertext,
         })?;
-        Ok(ProjectionOutput::new()
-            .need(target_need)
-            .need(target_deletion_need)
-            .need(author_need)
-            .intent(AtomicIntent::PutRow(row).into_intent()))
+        Ok(output_with_needs([
+            signer_need,
+            Some(target_need),
+            Some(target_deletion_need),
+            Some(author_need),
+        ])
+        .intent(AtomicIntent::PutRow(row).into_intent()))
     }
 }
 
 fn payload_for_need<'a>(
     context: &'a ProjectionContext,
-    need: &ContextNeed,
+    need: &crate::core::context::ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    let Some(matched) = context
-        .matched_context()
-        .iter()
-        .find(|matched| matched.need == *need)
-    else {
-        return Ok(None);
-    };
-    if matched.offer.payload_ref != matched.payload.id {
-        return Err(format!("{label} context offer payload mismatch"));
-    }
-    Ok(Some(&matched.payload))
+    authority::payload_for_need(context, need, label)
+}
+
+fn output_with_needs(
+    needs: impl IntoIterator<Item = Option<crate::core::context::ContextNeed>>,
+) -> ProjectionOutput {
+    needs
+        .into_iter()
+        .flatten()
+        .fold(ProjectionOutput::new(), |output, need| output.need(need))
 }
 
 fn validate_target_message(
@@ -141,7 +175,12 @@ fn validate_target_message(
     if &payload.scope != expected_scope {
         return Err("reaction target context scope does not match reaction workspace".to_string());
     }
-    let target = message_layout::decode_fact(&payload.bytes)
+    let target_payload = maybe_signed_payload(
+        payload,
+        message_layout::TYPE_CONTENT_MESSAGE,
+        "reaction target",
+    )?;
+    let target = message_layout::decode_fact(&target_payload.payload)
         .map_err(|_| "reaction target context is not a content message".to_string())?;
     if target.workspace_id != workspace_id {
         return Err("reaction target message workspace does not match reaction".to_string());
@@ -157,7 +196,8 @@ fn validate_author_user(
     if payload.id != author_user_id {
         return Err("reaction author context payload id mismatch".to_string());
     }
-    let author = user_layout::decode_fact(&payload.bytes)
+    let author_payload = maybe_signed_payload(payload, user_layout::TYPE_USER, "reaction author")?;
+    let author = user_layout::decode_fact(&author_payload.payload)
         .map_err(|_| "reaction author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("reaction author workspace does not match reaction".to_string());
@@ -184,9 +224,15 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion =
-        crate::event_modules::content_message_deletion::layout::decode_fact(&payload.bytes)
-            .map_err(|_| "target deletion context is not a content message deletion".to_string())?;
+    let deletion_payload = maybe_signed_payload(
+        payload,
+        crate::event_modules::content_message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION,
+        "target deletion",
+    )?;
+    let deletion = crate::event_modules::content_message_deletion::layout::decode_fact(
+        &deletion_payload.payload,
+    )
+    .map_err(|_| "target deletion context is not a content message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("target deletion workspace does not match reaction".to_string());
     }
@@ -197,6 +243,21 @@ fn validate_message_deletion(
         return Err("target deletion author does not match target message author".to_string());
     }
     Ok(())
+}
+
+fn maybe_signed_payload(
+    payload: &Fact,
+    expected_type: u8,
+    label: &str,
+) -> Result<DecodedPayload, String> {
+    if payload.bytes.first().copied() == Some(signed_fact::layout::TYPE_SIGNED_FACT) {
+        authority::decode_raw_or_signed(payload, expected_type, label)
+    } else {
+        Ok(DecodedPayload {
+            payload: payload.bytes.clone(),
+            signer: None,
+        })
+    }
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {

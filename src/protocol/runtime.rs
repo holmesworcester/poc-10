@@ -26,7 +26,8 @@ use crate::event_modules::{
     identity_admin, identity_device_invite, identity_endpoint, identity_endpoint_shared,
     identity_invite, identity_invite_accepted, identity_invite_server, identity_matchers,
     identity_user, identity_user_invite, identity_workspace, local_history_node_secret,
-    removal_frontier, sealed_message, signed_fact, sync, sync_compare, sync_have_id, sync_need_id,
+    removal_frontier, sealed_message, signed_fact, sync, sync_compare, sync_encrypted_root,
+    sync_have_id, sync_key_wrap_available, sync_need_id, sync_range_request, sync_shared_event,
     transit_received,
 };
 use crate::handlers::{
@@ -52,7 +53,7 @@ impl crate::core::runtime::Runtime<super::Protocol> {
             self.submit_intent(receive_transit::receive_transit_frame_intent(
                 receive_transit::ReceiveTransitFrame {
                     frame: row.bytes.clone(),
-                    origin_addr: transit_received::origin_addr::canonical_origin_addr_bytes(
+                    origin_addr: transit_received::addr::canonical_origin_addr_bytes(
                         row.source.addr(),
                     ),
                     received_at_local_ms: now_ms(),
@@ -83,7 +84,8 @@ impl crate::core::runtime::Runtime<super::Protocol> {
 
     fn seed_sync_have_ids(&mut self, limit: usize) -> Result<usize, String> {
         let mut seeded = 0usize;
-        let Some(local_endpoint) = identity_endpoint::queries::local_endpoint(self.store())? else {
+        let Some(local_endpoint) = identity_endpoint::local_endpoint::local_endpoint(self.store())?
+        else {
             return Ok(0);
         };
         let endpoint_memberships = endpoint_memberships(self.store())?;
@@ -158,10 +160,10 @@ pub(crate) fn is_sync_seed_fact(fact: &Fact) -> bool {
         sync_compare::layout::TYPE_SYNC_COMPARE
             | sync_have_id::layout::TYPE_SYNC_HAVE_ID
             | sync_need_id::layout::TYPE_SYNC_NEED_ID
-            | sync::layout::TYPE_SYNC_RANGE_REQUEST
-            | sync::layout::TYPE_SHARED_EVENT
-            | sync::layout::TYPE_ENCRYPTED_ROOT
-            | sync::layout::TYPE_KEY_WRAP_AVAILABLE
+            | sync_range_request::layout::TYPE_SYNC_RANGE_REQUEST
+            | sync_shared_event::layout::TYPE_SHARED_EVENT
+            | sync_encrypted_root::layout::TYPE_ENCRYPTED_ROOT
+            | sync_key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE
     ) {
         return false;
     }
@@ -412,11 +414,19 @@ impl Projector for ProtocolProjector {
                 disappearing_messages_setting::project::DisappearingMessagesSettingProjector::new()
                     .project(fact, context)
             }
-            sync::layout::TYPE_SYNC_RANGE_REQUEST
-            | sync::layout::TYPE_ENCRYPTED_ROOT
-            | sync::layout::TYPE_SHARED_EVENT
-            | sync::layout::TYPE_KEY_WRAP_AVAILABLE => {
-                sync::project::SyncContextProjector::new().project(fact, context)
+            sync_range_request::layout::TYPE_SYNC_RANGE_REQUEST => {
+                sync_range_request::project::SyncRangeRequestProjector::new().project(fact, context)
+            }
+            sync_encrypted_root::layout::TYPE_ENCRYPTED_ROOT => {
+                sync_encrypted_root::project::SyncEncryptedRootProjector::new()
+                    .project(fact, context)
+            }
+            sync_shared_event::layout::TYPE_SHARED_EVENT => {
+                sync_shared_event::project::SyncSharedEventProjector::new().project(fact, context)
+            }
+            sync_key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE => {
+                sync_key_wrap_available::project::SyncKeyWrapAvailableProjector::new()
+                    .project(fact, context)
             }
             sync_compare::layout::TYPE_SYNC_COMPARE => {
                 sync_compare::project::SyncCompareProjector::new().project(fact, context)

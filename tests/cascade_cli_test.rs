@@ -5,7 +5,6 @@ use std::time::Instant;
 use cli_harness::*;
 
 #[test]
-#[ignore = "cutover blocker: generate-deps/replay-deps-reverse cascade perf commands are not ported to the poc-10 match runtime"]
 fn cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_10k() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "cascade.db");

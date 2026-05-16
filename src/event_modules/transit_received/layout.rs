@@ -3,11 +3,11 @@
 use crate::core::wire;
 use crate::core::wire::{FixedLayout, FixedSlot};
 
+use super::addr::normalize_origin_addr_bytes;
 use super::fact::{
     TransitReceivedFact, ORIGIN_ADDR_BYTES, TRANSIT_KIND_BOOTSTRAP, TRANSIT_KIND_CONNECTION,
     TRANSIT_KIND_CONNECTION_HANDSHAKE,
 };
-use super::origin_addr::normalize_origin_addr_bytes;
 
 pub const TYPE_TRANSIT_RECEIVED: u8 = 164;
 

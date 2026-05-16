@@ -46,6 +46,18 @@ Reviewer instructions:
   `fact.rs`, `layout.rs`, `create.rs`, `commands.rs`, `queries.rs`,
   `matchers.rs`, `project.rs`, `rows.rs`, and module-specific small files only
   when they make the projector clearer.
+- [ ] Multi-fact bundles are split into fact-family modules. The current
+  `event_modules/encryption/` bundle is not acceptable as final shape:
+  recipient keys, local recipient keys, removal frontiers, local key secrets,
+  key requests, key wraps, and retained/history-node key material each need
+  their own event module shape with local `fact.rs`, `layout.rs`, `project.rs`,
+  and only the relevant `create.rs`/`commands.rs`/`rows.rs`.
+- [x] Sync follows the same rule. `event_modules/sync/` must not be a dumping
+  folder for range/key/support facts. Split `sync_range_request`,
+  `sync_encrypted_root`, `sync_shared_event`, and `sync_key_wrap_available`
+  into fact-family modules with their own `fact.rs`, `layout.rs`, and
+  `project.rs`; keep `sync_compare`, `sync_have_id`, and `sync_need_id` as
+  separate modules.
 - [ ] No hidden `project/` subtrees remain unless explicitly justified; split
   projector families should use clear flat names.
 - [ ] No dumping-ground files exist. `mod.rs`, broad `schema.rs`, broad
@@ -117,6 +129,11 @@ Reviewer instructions:
 
 ## Encryption And Key Healing
 
+- [ ] Encryption is split out of the current bundled `event_modules/encryption/`
+  shape. Shared crypto/key-healing helpers may remain in a clearly named helper
+  module, but no bundled `EncryptionProjector`, bundled `fact.rs`, bundled
+  `layout.rs`, bundled `create.rs`, or bundled `commands.rs` may define several
+  fact families at once.
 - [ ] Encryption projector layout is consistent and easy to review.
 - [ ] Recipient-key projection emits the recipient offer, supersession need, and
   proactive wrap intents only for non-superseded keys.
@@ -194,8 +211,19 @@ Reviewer instructions:
 - [ ] `create.rs` constructs deterministic facts from explicit params.
 - [ ] `commands.rs` owns user-facing workflow composition and may use
   `CommandContext`; automatic/reactive behavior must use intents and handlers.
-- [ ] `queries.rs` owns read-only projected-state lookups.
+- [x] `queries.rs` owns only read-only projected-state lookups for its own
+  module rows. It must not become context, capability lookup, private-key
+  access, projection policy, cross-module workflow, or display composition.
+- [x] Local private capabilities are not exposed from `queries.rs`; they live
+  behind explicit command/handler capability boundaries or context offers.
+- [x] Cross-module read models such as `view`, local workspace membership, and
+  display joins live in an explicit read-model/query module, not hidden inside
+  a leaf event module's `queries.rs`.
 - [ ] `cli.rs` only parses user input and formats output.
+- [x] Product `match_app.rs` is routing and lifecycle only. It must not contain
+  command business logic, protocol-specific row scans, key derivation, purge
+  logic, or command chaining that belongs in event-module commands/read models
+  or handlers.
 - [ ] Commands return ids/output only after submitted facts/intents are drained
   enough for read-your-writes behavior.
 - [ ] Black-box CLI tests use the real `match` binary and real daemon/runtime
@@ -267,6 +295,8 @@ Reviewer instructions:
 - [ ] `view`, `react`, file send/save/listing, disappearing-message
   expiry/retention/key-derive, leaf-coordinate, cascade perf, and negentropy
   purge/sync-status CLI surfaces remain explicit ignored cutover blockers.
+  Current `view_cli_test` status: 4/5 pass; remaining failure is missing
+  `react`/file CLI parity, not view selection/rendering for messages.
 - [ ] Sync compare response now emits response facts and a transit send intent
   from current facts, but real bounded durable range-index response state is not
   complete yet.
@@ -286,7 +316,12 @@ Reviewer instructions:
   in-range encrypted messages whose deps/key offers are out of range.
 - [ ] Purge is not fully decomposed into bounded cascade, physical byte purge,
   retained-secret retirement, and sync-index repair handlers.
-- [ ] `match_app.rs` still owns product command routing directly. End state is a
-  generic core app facade driven by protocol command registries.
+- [ ] `match_app.rs` still owns product command routing directly. Active
+  guardrail now proves it does not own protocol command business logic; end
+  state is a generic core app facade driven by protocol command registries.
+- [ ] Content projector parity review found remaining real checks to add:
+  content_event/message/file/reaction/deletion projectors must consistently
+  need signer endpoint context, validate signer workspace/key/user authority,
+  and validate leaf/setting context before row materialization.
 - [ ] Guardrails still include ignored cutover TODO tests. A normal non-ignored
   suite passing is not the same as the final review passing.

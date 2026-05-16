@@ -6,6 +6,7 @@
 
 use std::net::SocketAddr;
 use std::str;
+use std::str::FromStr;
 
 pub fn canonical_origin_addr_bytes(addr: SocketAddr) -> Vec<u8> {
     addr.to_string().into_bytes()
@@ -22,15 +23,14 @@ pub fn normalize_origin_addr_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 fn parse_origin_addr(value: &str) -> Result<SocketAddr, String> {
-    if let Ok(addr) = value.parse::<SocketAddr>() {
+    if let Ok(addr) = SocketAddr::from_str(value) {
         return Ok(addr);
     }
 
     let (host, port) = value
         .rsplit_once('_')
         .ok_or_else(|| "transit receive origin addr must include a port".to_string())?;
-    let port = port
-        .parse::<u16>()
+    let port = u16::from_str(port)
         .map_err(|_| "transit receive origin addr port is invalid".to_string())?;
     let candidate = if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]:{port}")
@@ -38,7 +38,7 @@ fn parse_origin_addr(value: &str) -> Result<SocketAddr, String> {
         format!("{host}:{port}")
     };
     candidate
-        .parse::<SocketAddr>()
+        .parse()
         .map_err(|_| "transit receive origin addr is invalid".to_string())
 }
 

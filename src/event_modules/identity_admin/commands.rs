@@ -3,9 +3,7 @@
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto::Ed25519PrivateKey;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::event_modules::{
-    identity_endpoint, identity_endpoint_shared, identity_user, signed_fact,
-};
+use crate::event_modules::{identity_endpoint, identity_user, identity_workspace, signed_fact};
 
 use super::fact::AdminFact;
 use super::{layout, rows};
@@ -27,7 +25,7 @@ pub fn grant_admin(
     input: GrantAdmin,
 ) -> Result<CommandOutput<GrantAdminReceipt>, String> {
     let membership =
-        identity_endpoint_shared::queries::local_membership(ctx.store(), input.workspace_id)?
+        identity_workspace::local_membership::local_membership(ctx.store(), input.workspace_id)?
             .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     let authority_admin_id = ctx
         .store()
@@ -44,7 +42,7 @@ pub fn grant_admin(
         .into_iter()
         .find(|user| user.user_id == input.user_id)
         .ok_or_else(|| "target user is not in this workspace".to_string())?;
-    let local_endpoint = identity_endpoint::queries::local_endpoint(ctx.store())?
+    let local_endpoint = identity_endpoint::local_endpoint::local_endpoint(ctx.store())?
         .ok_or_else(|| "local endpoint has not been created".to_string())?;
     let grant = AdminFact {
         created_at_ms: input.created_at_ms,

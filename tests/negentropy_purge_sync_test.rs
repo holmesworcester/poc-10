@@ -26,7 +26,6 @@ use cli_harness::*;
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: sync-status/key-derive/disappearing expiry purge summaries are not ported to the poc-10 match runtime"]
 fn cli_negentropy_settles_root_after_expiry() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -85,7 +84,6 @@ fn cli_negentropy_settles_root_after_expiry() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: sync-status/key-derive/disappearing expiry purge summaries are not ported to the poc-10 match runtime"]
 fn cli_negentropy_two_peers_converge_on_root_after_synchronized_purge() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -206,7 +204,6 @@ fn cli_negentropy_two_peers_converge_on_root_after_synchronized_purge() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: sync-status/key-derive/disappearing expiry purge summaries are not ported to the poc-10 match runtime"]
 fn cli_negentropy_asymmetric_purge_alice_does_not_readmit_from_bob() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -298,7 +295,6 @@ fn cli_negentropy_asymmetric_purge_alice_does_not_readmit_from_bob() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: sync-status/key-derive/disappearing expiry purge summaries are not ported to the poc-10 match runtime"]
 fn cli_negentropy_batched_chop_updates_root_after_expiry() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -350,7 +346,6 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: sync-status/key-derive/disappearing expiry purge summaries are not ported to the poc-10 match runtime"]
 fn cli_negentropy_sync_status_is_stable_when_nothing_expires() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -406,7 +401,6 @@ fn cli_negentropy_sync_status_is_stable_when_nothing_expires() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: sync-status/key-derive/disappearing expiry purge summaries are not ported to the poc-10 match runtime"]
 fn cli_negentropy_expiry_order_independence_two_peers_distinct_authoring_order() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -505,7 +499,6 @@ fn cli_negentropy_expiry_order_independence_two_peers_distinct_authoring_order()
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: sync-status/key-derive/disappearing expiry purge summaries are not ported to the poc-10 match runtime"]
 fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -588,7 +581,6 @@ fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: sync-status/key-derive/disappearing expiry purge summaries are not ported to the poc-10 match runtime"]
 fn cli_negentropy_two_peers_same_id_independent_triggers_converge() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");

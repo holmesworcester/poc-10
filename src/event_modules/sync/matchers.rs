@@ -9,7 +9,9 @@ use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
 
-use super::fact::{EventId, KeyWrapId, WorkspaceId};
+pub type WorkspaceId = FactId;
+pub type EventId = FactId;
+pub type KeyWrapId = FactId;
 
 pub fn range_event_role() -> Role {
     Role::new("sync_range_event").expect("valid range role")

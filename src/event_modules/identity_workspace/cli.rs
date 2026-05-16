@@ -185,6 +185,18 @@ pub fn count_output(
     ])
 }
 
+pub fn count_report_output(report: &super::runtime_counts::RuntimeCountReport) -> CliOutput {
+    count_output(
+        report.workspace_rows,
+        report.events,
+        report.sync_events,
+        report.applied_events,
+        report.connections,
+        report.connection_events,
+        report.invite_accepted,
+    )
+}
+
 fn decode_hex_32(value: &str, label: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 {
         return Err(format!("{label} must be 64 hex characters"));

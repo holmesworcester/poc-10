@@ -34,7 +34,6 @@ use cli_harness::*;
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-set is not ported to the poc-10 match runtime"]
 fn cli_disappearing_set_advances_floor_automatically() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -79,7 +78,6 @@ fn cli_disappearing_set_advances_floor_automatically() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-set/status are not ported to the poc-10 match runtime"]
 fn cli_disappearing_set_explicit_floor_below_previous_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -138,7 +136,6 @@ fn cli_disappearing_set_explicit_floor_below_previous_is_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-set/status are not ported to the poc-10 match runtime"]
 fn cli_disappearing_status_round_trips_known_setup() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -190,7 +187,6 @@ fn cli_disappearing_status_round_trips_known_setup() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-tighten/status expiry flow is not ported to the poc-10 match runtime"]
 fn cli_disappearing_tighten_yes_deletes_pre_floor_messages() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -268,7 +264,6 @@ fn cli_disappearing_tighten_yes_deletes_pre_floor_messages() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: disappearing-compact/status are not ported to the poc-10 match runtime"]
 fn cli_disappearing_compact_advances_floor_without_changing_ttl() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -336,7 +331,6 @@ fn cli_disappearing_compact_advances_floor_without_changing_ttl() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "cutover blocker: negentropy-drain expiry summary is not ported to the poc-10 match runtime"]
 fn cli_negentropy_drain_reports_changed_root_after_expiry() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");

@@ -21,7 +21,7 @@ use crate::core::store::Store;
 use crate::event_modules::{
     connection_request, identity_admin, identity_device_invite, identity_endpoint,
     identity_endpoint_shared, identity_invite_accepted, identity_invite_server, identity_user,
-    identity_user_invite,
+    identity_user_invite, identity_workspace,
 };
 use crate::handlers::bootstrap_send;
 
@@ -173,7 +173,7 @@ pub fn create_device_link(
         identity_endpoint::commands::local_or_create(ctx.store(), input.created_at_ms)?;
     let local = endpoint_output.receipt.endpoint;
     let membership =
-        identity_endpoint_shared::queries::local_membership(ctx.store(), input.workspace_id)?
+        identity_workspace::local_membership::local_membership(ctx.store(), input.workspace_id)?
             .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     if membership.signing_public_key != local.signing_public_key {
         return Err("local endpoint signing key does not match workspace membership".to_string());
@@ -778,7 +778,7 @@ fn local_admin_id(
     workspace_id: FactId,
     signing_public_key: [u8; 32],
 ) -> Result<LocalAdminAuthority, String> {
-    let membership = identity_endpoint_shared::queries::local_membership(store, workspace_id)?
+    let membership = identity_workspace::local_membership::local_membership(store, workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     if membership.signing_public_key != signing_public_key {
         return Err("local endpoint signing key does not match workspace membership".to_string());

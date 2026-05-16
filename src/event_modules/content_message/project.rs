@@ -4,11 +4,6 @@
 //! `content_message_rows`. The message id used in the row key is the fact id.
 //!
 //! Parity gaps (intentional, deferred to later slices):
-//!  - Legacy validates a signed envelope and workspace-membership chain for the
-//!    signer endpoint. This public-shape fact does not carry a signer id, so
-//!    endpoint binding remains with the signed/sealed content surface. The
-//!    named author user is validated through identity context before row
-//!    materialization.
 //!  - Legacy binds the message to a per-message leaf event dependency and
 //!    recomputes the deterministic leaf coordinate from canonical fields.
 //!    The target leaf module isn't surfaced here; the projector trusts the
@@ -19,13 +14,14 @@
 //!  - Legacy writes tombstone rows on self-deletion labels; the deletion
 //!    projector is a separate event module.
 
-use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::event_modules::identity_matchers;
 use crate::event_modules::identity_user::layout as user_layout;
+use crate::event_modules::signed_fact;
 
+use super::authority::{self, DecodedPayload};
 use super::layout;
 use super::matchers;
 use super::rows::{content_message_key, content_message_row, CONTENT_MESSAGE_ROWS};
@@ -45,9 +41,12 @@ impl Projector for ContentMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let message = layout::decode_fact(&fact.bytes)?;
+        let decoded =
+            authority::decode_raw_or_signed(fact, layout::TYPE_CONTENT_MESSAGE, "content message")?;
+        let message = layout::decode_fact(&decoded.payload)?;
         let scope = matchers::workspace_scope(message.workspace_id);
         require_fact_scope(fact, &scope)?;
+        let signer_need = authority::signer_need(fact.id, decoded.signer);
         let deletion_need =
             matchers::deletion_need(fact.id, scope.clone(), fact.id, message.author_user_id);
         let author_need = identity_matchers::exact_need(
@@ -55,6 +54,22 @@ impl Projector for ContentMessageProjector {
             identity_matchers::user_role(),
             message.author_user_id,
         );
+        if let (Some(signer), Some(need)) = (decoded.signer, signer_need.as_ref()) {
+            if !authority::validate_signer_context(
+                context,
+                need,
+                signer,
+                message.workspace_id,
+                Some(message.author_user_id),
+                "message",
+            )? {
+                return Ok(output_with_needs([
+                    signer_need,
+                    Some(deletion_need),
+                    Some(author_need),
+                ]));
+            }
+        }
         if let Some(deletion) = payload_for_need(context, &deletion_need, "message deletion")? {
             validate_message_deletion(
                 deletion,
@@ -71,36 +86,37 @@ impl Projector for ContentMessageProjector {
             ));
         }
         let Some(author) = payload_for_need(context, &author_need, "message author")? else {
-            return Ok(ProjectionOutput::new()
-                .need(deletion_need)
-                .need(author_need));
+            return Ok(output_with_needs([
+                signer_need,
+                Some(deletion_need),
+                Some(author_need),
+            ]));
         };
         validate_author_user(author, message.workspace_id, message.author_user_id)?;
         let row = content_message_row(fact.id, &message);
-        Ok(ProjectionOutput::new()
-            .need(deletion_need)
-            .need(author_need)
-            .offer(matchers::message_offer(fact.id, scope, fact.id))
-            .intent(AtomicIntent::PutRow(row).into_intent()))
+        Ok(
+            output_with_needs([signer_need, Some(deletion_need), Some(author_need)])
+                .offer(matchers::message_offer(fact.id, scope, fact.id))
+                .intent(AtomicIntent::PutRow(row).into_intent()),
+        )
     }
 }
 
 fn payload_for_need<'a>(
     context: &'a ProjectionContext,
-    need: &ContextNeed,
+    need: &crate::core::context::ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    let Some(matched) = context
-        .matched_context()
-        .iter()
-        .find(|matched| matched.need == *need)
-    else {
-        return Ok(None);
-    };
-    if matched.offer.payload_ref != matched.payload.id {
-        return Err(format!("{label} context offer payload mismatch"));
-    }
-    Ok(Some(&matched.payload))
+    authority::payload_for_need(context, need, label)
+}
+
+fn output_with_needs(
+    needs: impl IntoIterator<Item = Option<crate::core::context::ContextNeed>>,
+) -> ProjectionOutput {
+    needs
+        .into_iter()
+        .flatten()
+        .fold(ProjectionOutput::new(), |output, need| output.need(need))
 }
 
 fn validate_author_user(
@@ -111,7 +127,9 @@ fn validate_author_user(
     if payload.id != author_user_id {
         return Err("message author context payload id mismatch".to_string());
     }
-    let author = user_layout::decode_fact(&payload.bytes)
+    let author_payload =
+        maybe_signed_payload(payload, user_layout::TYPE_USER, "message author context")?;
+    let author = user_layout::decode_fact(&author_payload.payload)
         .map_err(|_| "message author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("message author workspace does not match message".to_string());
@@ -125,11 +143,15 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion =
-        crate::event_modules::content_message_deletion::layout::decode_fact(&payload.bytes)
-            .map_err(|_| {
-                "message deletion context is not a content message deletion".to_string()
-            })?;
+    let deletion_payload = maybe_signed_payload(
+        payload,
+        crate::event_modules::content_message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION,
+        "message deletion context",
+    )?;
+    let deletion = crate::event_modules::content_message_deletion::layout::decode_fact(
+        &deletion_payload.payload,
+    )
+    .map_err(|_| "message deletion context is not a content message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("message deletion workspace does not match message".to_string());
     }
@@ -140,6 +162,21 @@ fn validate_message_deletion(
         return Err("message deletion author does not match message author".to_string());
     }
     Ok(())
+}
+
+fn maybe_signed_payload(
+    payload: &Fact,
+    expected_type: u8,
+    label: &str,
+) -> Result<DecodedPayload, String> {
+    if payload.bytes.first().copied() == Some(signed_fact::layout::TYPE_SIGNED_FACT) {
+        authority::decode_raw_or_signed(payload, expected_type, label)
+    } else {
+        Ok(DecodedPayload {
+            payload: payload.bytes.clone(),
+            signer: None,
+        })
+    }
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {

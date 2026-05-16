@@ -5,15 +5,16 @@
 //! cleanup remains handler work; this projector only materializes authorized
 //! deletion state.
 
-use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use crate::event_modules::content_file::layout as file_layout;
+use crate::event_modules::content_message::authority::{self, DecodedPayload};
 use crate::event_modules::content_message::matchers;
 use crate::event_modules::identity_matchers;
 use crate::event_modules::identity_user::layout as user_layout;
+use crate::event_modules::signed_fact;
 use crate::event_modules::sync;
 
 use super::layout;
@@ -34,9 +35,15 @@ impl Projector for ContentFileDeletionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let deletion = layout::decode_fact(&fact.bytes)?;
+        let decoded = authority::decode_raw_or_signed(
+            fact,
+            layout::TYPE_CONTENT_FILE_DELETION,
+            "file deletion",
+        )?;
+        let deletion = layout::decode_fact(&decoded.payload)?;
         let scope = matchers::workspace_scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
+        let signer_need = authority::signer_need(fact.id, decoded.signer);
         let target_need =
             sync::matchers::exact_event_need(fact.id, scope.clone(), deletion.target_file_id);
         let author_need = identity_matchers::exact_need(
@@ -44,13 +51,37 @@ impl Projector for ContentFileDeletionProjector {
             identity_matchers::user_role(),
             deletion.author_user_id,
         );
+        if let (Some(signer), Some(need)) = (decoded.signer, signer_need.as_ref()) {
+            if !authority::validate_signer_context(
+                context,
+                need,
+                signer,
+                deletion.workspace_id,
+                Some(deletion.author_user_id),
+                "file deletion",
+            )? {
+                return Ok(output_with_needs([
+                    signer_need,
+                    Some(target_need),
+                    Some(author_need),
+                ]));
+            }
+        }
         let Some(target_fact) = payload_for_need(context, &target_need, "file deletion target")?
         else {
-            return Ok(ProjectionOutput::new().need(target_need).need(author_need));
+            return Ok(output_with_needs([
+                signer_need,
+                Some(target_need),
+                Some(author_need),
+            ]));
         };
         let Some(author_fact) = payload_for_need(context, &author_need, "file deletion author")?
         else {
-            return Ok(ProjectionOutput::new().need(target_need).need(author_need));
+            return Ok(output_with_needs([
+                signer_need,
+                Some(target_need),
+                Some(author_need),
+            ]));
         };
         validate_target_file(&deletion, target_fact, &scope)?;
         validate_author_user(&deletion, author_fact)?;
@@ -61,35 +92,34 @@ impl Projector for ContentFileDeletionProjector {
             created_at_ms: deletion.created_at_ms,
             author_user_id: deletion.author_user_id,
         })?;
-        Ok(ProjectionOutput::new()
-            .need(target_need)
-            .need(author_need)
-            .offer(matchers::deletion_offer(
-                fact.id,
-                scope,
-                deletion.target_file_id,
-                deletion.author_user_id,
-            ))
-            .intent(AtomicIntent::PutRow(row).into_intent()))
+        Ok(
+            output_with_needs([signer_need, Some(target_need), Some(author_need)])
+                .offer(matchers::deletion_offer(
+                    fact.id,
+                    scope,
+                    deletion.target_file_id,
+                    deletion.author_user_id,
+                ))
+                .intent(AtomicIntent::PutRow(row).into_intent()),
+        )
     }
 }
 
 fn payload_for_need<'a>(
     context: &'a ProjectionContext,
-    need: &ContextNeed,
+    need: &crate::core::context::ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    let Some(matched) = context
-        .matched_context()
-        .iter()
-        .find(|matched| matched.need == *need)
-    else {
-        return Ok(None);
-    };
-    if matched.offer.payload_ref != matched.payload.id {
-        return Err(format!("{label} context offer payload mismatch"));
-    }
-    Ok(Some(&matched.payload))
+    authority::payload_for_need(context, need, label)
+}
+
+fn output_with_needs(
+    needs: impl IntoIterator<Item = Option<crate::core::context::ContextNeed>>,
+) -> ProjectionOutput {
+    needs
+        .into_iter()
+        .flatten()
+        .fold(ProjectionOutput::new(), |output, need| output.need(need))
 }
 
 fn validate_target_file(
@@ -103,7 +133,12 @@ fn validate_target_file(
     if &target_fact.scope != expected_scope {
         return Err("file deletion target scope does not match deletion".to_string());
     }
-    let target = file_layout::decode_fact(&target_fact.bytes)
+    let target_payload = maybe_signed_payload(
+        target_fact,
+        file_layout::TYPE_CONTENT_FILE,
+        "file deletion target",
+    )?;
+    let target = file_layout::decode_fact(&target_payload.payload)
         .map_err(|_| "file deletion target context must be a content file".to_string())?;
     if target.workspace_id != deletion.workspace_id {
         return Err("file deletion target workspace does not match deletion".to_string());
@@ -121,12 +156,29 @@ fn validate_author_user(
     if author_fact.id != deletion.author_user_id {
         return Err("file deletion author context payload id mismatch".to_string());
     }
-    let author = user_layout::decode_fact(&author_fact.bytes)
+    let author_payload =
+        maybe_signed_payload(author_fact, user_layout::TYPE_USER, "file deletion author")?;
+    let author = user_layout::decode_fact(&author_payload.payload)
         .map_err(|_| "file deletion author context must be an identity user".to_string())?;
     if author.workspace_id != deletion.workspace_id {
         return Err("file deletion author workspace does not match deletion".to_string());
     }
     Ok(())
+}
+
+fn maybe_signed_payload(
+    payload: &Fact,
+    expected_type: u8,
+    label: &str,
+) -> Result<DecodedPayload, String> {
+    if payload.bytes.first().copied() == Some(signed_fact::layout::TYPE_SIGNED_FACT) {
+        authority::decode_raw_or_signed(payload, expected_type, label)
+    } else {
+        Ok(DecodedPayload {
+            payload: payload.bytes.clone(),
+            signer: None,
+        })
+    }
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {

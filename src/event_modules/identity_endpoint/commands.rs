@@ -10,7 +10,7 @@ use crate::core::facts::{Fact, FactScope};
 use crate::core::store::Store;
 
 use super::fact::EndpointFact;
-use super::{layout, queries};
+use super::{layout, local_endpoint};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEndpointOutput {
@@ -22,7 +22,7 @@ pub fn local_or_create(
     store: &Store,
     created_at_ms: u64,
 ) -> Result<CommandOutput<LocalEndpointOutput>, String> {
-    match queries::local_endpoint(store)? {
+    match local_endpoint::local_endpoint(store)? {
         Some(endpoint) => Ok(CommandOutput::new(LocalEndpointOutput {
             endpoint,
             created: false,

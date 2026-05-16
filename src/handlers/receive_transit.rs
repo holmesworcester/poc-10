@@ -6,7 +6,7 @@
 //! receive metadata; cryptographic material is loaded from fact context.
 
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
-use crate::event_modules::transit_received::origin_addr::normalize_origin_addr_bytes;
+use crate::event_modules::transit_received::addr::normalize_origin_addr_bytes;
 
 pub const RECEIVE_TRANSIT_FRAME: &str = "receive_transit_frame";
 
@@ -185,10 +185,11 @@ impl IntentHandler for ReceiveTransitHandler {
         let facts = match receive::bootstrap_frame_kind(&input.frame)? {
             BootstrapFrameKind::ConnectionRequest(request) => {
                 let invite_fact = context.require_fact(&request.invite_secret_event_id)?;
-                let local_endpoint = identity_endpoint::queries::local_endpoint(context.store()?)?
-                    .ok_or_else(|| {
-                        "bootstrap request receiver has no local endpoint".to_string()
-                    })?;
+                let local_endpoint =
+                    identity_endpoint::local_endpoint::local_endpoint(context.store()?)?
+                        .ok_or_else(|| {
+                            "bootstrap request receiver has no local endpoint".to_string()
+                        })?;
                 let opened = receive::open_bootstrap_request(OpenBootstrapRequest {
                     frame: &input.frame,
                     invite_fact,

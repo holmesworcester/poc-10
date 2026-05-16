@@ -4,12 +4,14 @@ use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::facts::FactId;
 use crate::core::store::Store;
-use crate::event_modules::{identity_endpoint_shared, identity_user};
+use crate::event_modules::identity_workspace;
+use crate::event_modules::{identity_endpoint, identity_endpoint_shared, identity_user};
 
 use super::{create, queries};
 
 pub const SEND_USAGE: &str = "send WORKSPACE_ID_HEX TEXT";
 pub const MESSAGES_USAGE: &str = "messages WORKSPACE_ID_HEX";
+pub const VIEW_USAGE: &str = "view [WORKSPACE_ID_HEX]";
 
 pub fn send(
     ctx: &CommandContext<'_>,
@@ -41,6 +43,104 @@ pub fn messages(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput
         lines.push(format!("{author}: {}", message.text));
     }
     Ok(CliOutput::lines(lines))
+}
+
+pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    let workspace_id = match args.values() {
+        [] => selected_workspace_id(ctx)?,
+        [value] => decode_hex_32(value)?,
+        _ => return Err(VIEW_USAGE.to_string()),
+    };
+
+    let local = identity_endpoint::queries::local_endpoint_public(ctx.store())?
+        .ok_or_else(|| "local endpoint is missing".to_string())?;
+    let local_memberships = identity_workspace::local_membership::local_memberships(ctx.store())?;
+    if !local_memberships
+        .iter()
+        .any(|membership| membership.workspace_id == workspace_id)
+    {
+        return Err("local endpoint has not joined this workspace".to_string());
+    }
+
+    let workspace = identity_workspace::queries::workspace_by_id(ctx.store(), workspace_id)?;
+    let users = identity_user::queries::users_in_workspace(ctx.store(), workspace_id)?;
+    let peers = identity_endpoint_shared::queries::peers_in_workspace(ctx.store(), workspace_id)?;
+    let messages = queries::opened_messages(ctx.store(), workspace_id)?;
+
+    let mut username_by_user = std::collections::BTreeMap::new();
+    for user in &users {
+        username_by_user.insert(user.user_id, user.username.clone());
+    }
+    let mut username_by_endpoint = std::collections::BTreeMap::new();
+    for peer in &peers {
+        if let Some(username) = username_by_user.get(&peer.user_authority_event_id) {
+            username_by_endpoint.insert(peer.endpoint_id, username.clone());
+        }
+    }
+
+    let mut lines = Vec::new();
+    lines.push("IDENTITY:".to_string());
+    lines.push(format!("  endpoint_id: {}", encode_hex(&local.endpoint)));
+    lines.push(format!(
+        "  signing_public_key: {}",
+        encode_hex(&local.signing_public_key)
+    ));
+    lines.push(String::new());
+    lines.push("WORKSPACE:".to_string());
+    lines.push(format!("  {}", workspace.name));
+    lines.push(String::new());
+    lines.push("  USERS:".to_string());
+    if peers.is_empty() {
+        lines.push("    (none)".to_string());
+    } else {
+        for peer in peers {
+            let username = username_by_user
+                .get(&peer.user_authority_event_id)
+                .cloned()
+                .unwrap_or_else(|| short_hex(&peer.user_authority_event_id));
+            let label = format!("{}/{}", username, peer.device_name);
+            if peer.endpoint_id == local.endpoint {
+                lines.push(format!("    {label} (you)"));
+            } else {
+                lines.push(format!("    {label}"));
+            }
+        }
+    }
+    lines.push(String::new());
+    lines.push(format!("  {}", "\u{2500}".repeat(40)));
+    lines.push(String::new());
+
+    if messages.is_empty() {
+        lines.push("    (no messages)".to_string());
+    } else {
+        let mut last_author = None;
+        for (index, message) in messages.iter().enumerate() {
+            if last_author != Some(message.signer_id) {
+                if index > 0 {
+                    lines.push(String::new());
+                }
+                let author = username_by_endpoint
+                    .get(&message.signer_id)
+                    .or_else(|| username_by_user.get(&message.author_user_id))
+                    .cloned()
+                    .unwrap_or_else(|| short_hex(&message.signer_id));
+                lines.push(format!("    {author} [now]"));
+                last_author = Some(message.signer_id);
+            }
+            lines.push(format!("      {}. {}", index + 1, message.text));
+        }
+    }
+
+    Ok(CliOutput::lines(lines))
+}
+
+fn selected_workspace_id(ctx: &CommandContext<'_>) -> Result<FactId, String> {
+    let memberships = identity_workspace::local_membership::local_memberships(ctx.store())?;
+    match memberships.as_slice() {
+        [] => Err("no joined workspaces; create or accept one first".to_string()),
+        [membership] => Ok(membership.workspace_id),
+        _ => Err("select a workspace: pass WORKSPACE_ID_HEX".to_string()),
+    }
 }
 
 fn author_name(

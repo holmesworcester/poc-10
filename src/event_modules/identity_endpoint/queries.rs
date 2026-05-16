@@ -1,59 +1,44 @@
-//! Read-only local endpoint lookups.
+//! Read-only local endpoint public-state lookups.
 //!
-//! Commands may create the local endpoint, but reactive handlers only need to
-//! load and validate existing local capability rows. Keeping that lookup here
-//! lets handlers stay out of user-facing `commands.rs`.
+//! Private endpoint material is not query state. Commands and handlers that
+//! need local private keys use `local_endpoint.rs`; display and selection code
+//! use this module.
 
-use crate::core::crypto;
+use crate::core::facts::FactId;
 use crate::core::store::Store;
 
-use super::fact::EndpointFact;
 use super::rows;
 
-pub fn local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalEndpointPublic {
+    pub endpoint: FactId,
+    pub signing_public_key: [u8; 32],
+}
+
+pub fn local_endpoint_public(store: &Store) -> Result<Option<LocalEndpointPublic>, String> {
     let endpoint = store
         .table_row(rows::LOCAL_ENDPOINT_ROWS, rows::LOCAL_KEY)
         .map_err(|err| format!("load local endpoint: {err}"))?;
-    let secret = store
-        .table_row(rows::LOCAL_ENDPOINT_SECRET_ROWS, rows::LOCAL_KEY)
-        .map_err(|err| format!("load local endpoint secret: {err}"))?;
     let signing_public_key = store
         .table_row(
             rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
             rows::LOCAL_KEY,
         )
         .map_err(|err| format!("load local endpoint signing public key: {err}"))?;
-    let signing_secret = store
-        .table_row(rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS, rows::LOCAL_KEY)
-        .map_err(|err| format!("load local endpoint signing secret: {err}"))?;
 
-    match (endpoint, secret, signing_public_key, signing_secret) {
-        (None, None, None, None) => Ok(None),
-        (Some(endpoint), Some(secret), Some(signing_public_key), Some(signing_secret)) => {
+    match (endpoint, signing_public_key) {
+        (None, None) => Ok(None),
+        (Some(endpoint), Some(signing_public_key)) => {
             let endpoint = id32(&endpoint, "local endpoint")?;
-            let secret = id32(&secret, "local endpoint secret")?;
             let signing_public_key =
                 id32(&signing_public_key, "local endpoint signing public key")?;
-            let signing_secret = id32(&signing_secret, "local endpoint signing secret")?;
-            if crypto::x25519_public_key(&secret) != endpoint {
-                return Err("stored endpoint does not match local endpoint secret".to_string());
-            }
-            if crypto::ed25519_public_key(&signing_secret) != signing_public_key {
-                return Err(
-                    "stored endpoint signing key does not match local signing secret".to_string(),
-                );
-            }
-            Ok(Some(EndpointFact {
+            Ok(Some(LocalEndpointPublic {
                 endpoint,
-                secret,
                 signing_public_key,
-                signing_secret,
             }))
         }
-        (None, _, _, _) => Err("local endpoint public key is missing".to_string()),
-        (_, None, _, _) => Err("local endpoint secret is missing".to_string()),
-        (_, _, None, _) => Err("local endpoint signing public key is missing".to_string()),
-        (_, _, _, None) => Err("local endpoint signing secret is missing".to_string()),
+        (None, Some(_)) => Err("local endpoint public key is missing".to_string()),
+        (Some(_), None) => Err("local endpoint signing public key is missing".to_string()),
     }
 }
 
