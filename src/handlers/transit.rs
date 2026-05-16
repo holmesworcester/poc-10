@@ -285,7 +285,7 @@ impl<'a> Reader<'a> {
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::event_modules::{
-    connection_response,
+    connection_response, identity_endpoint,
     transit::{
         create,
         frame::{self, TransitFactBundle},
@@ -328,10 +328,23 @@ impl IntentHandler for TransitSendOnConnectionHandler {
             let fact = context.require_fact(fact_id)?;
             facts.push(create::require_sendable_fact(fact)?.to_vec());
         }
+
+        let local_endpoint = identity_endpoint::queries::local_endpoint(context.store()?)?
+            .ok_or_else(|| "send_on_connection requires local endpoint state".to_string())?;
+        let (sender_endpoint, receiver_endpoint) = if local_endpoint.endpoint
+            == connection.from_endpoint
+        {
+            (connection.from_endpoint, connection.to_endpoint)
+        } else if local_endpoint.endpoint == connection.to_endpoint {
+            (connection.to_endpoint, connection.from_endpoint)
+        } else {
+            return Err("send_on_connection local endpoint is not part of connection".to_string());
+        };
+
         let frame = frame::seal_connection_send_frame(
             input.connection_id,
-            connection.from_endpoint,
-            connection.to_endpoint,
+            sender_endpoint,
+            receiver_endpoint,
             connection.connection_secret,
             &input.fact_ids,
             facts,

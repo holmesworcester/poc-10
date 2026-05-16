@@ -152,6 +152,7 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         initiator_ephemeral_secret_event_id: [99u8; 32],
         initiator_ephemeral_public_key: initiator_ephemeral_public,
         from_listen_addr: None,
+        to_listen_addr: None,
     };
     let request_fact = Fact::new(
         FactScope::Global,

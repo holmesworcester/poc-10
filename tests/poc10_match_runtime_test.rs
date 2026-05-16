@@ -7,12 +7,13 @@ use topo::core::command_context::{
 };
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
-use topo::event_modules::encryption::fact::LocalKeySecretFact;
+use topo::event_modules::encryption::{
+    fact::{LocalKeySecretFact, RemovalFrontierFact},
+    layout as encryption_layout,
+};
 use topo::event_modules::identity_workspace::{commands::create_workspace, rows as workspace_rows};
 use topo::event_modules::sealed_message::{
-    create::send_message,
-    fact::{SecretNodeFact, SignerPubkeyFact},
-    layout as sealed_layout, rows as sealed_rows,
+    create::send_message, fact::SignerPubkeyFact, layout as sealed_layout, rows as sealed_rows,
 };
 use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::runtime::ProtocolRuntime;
@@ -113,7 +114,8 @@ fn runtime_routes_signed_sealed_message_to_sealed_message_projector() {
     let signer_id = [11; 32];
     let signer_private = [7; 32];
     let signer_public = crypto::ed25519_public_key(&signer_private);
-    let frontier_id = [22; 32];
+    let frontier = removal_frontier_fact(workspace_id, [33; 32]);
+    let frontier_id = frontier.id;
     let mut runtime = ProtocolRuntime::open_memory().expect("runtime");
     let clock = FixedClock(Cell::new(60_000));
     let vault = SeededVault {
@@ -145,7 +147,13 @@ fn runtime_routes_signed_sealed_message_to_sealed_message_projector() {
         .submit_command_output(output)
         .expect("submit signed message command output");
     runtime.submit_fact(signer_pubkey_fact(workspace_id, signer_id, signer_public));
-    runtime.submit_fact(secret_node_fact(workspace_id, frontier_id));
+    runtime.submit_fact(frontier);
+    runtime.submit_fact(local_key_secret_fact(
+        workspace_id,
+        frontier_id,
+        [33; 32],
+        [9; crypto::XCHACHA20_POLY1305_KEY_BYTES],
+    ));
     let report = runtime
         .drain_projection_until_idle(8, 64)
         .expect("drain signed message projection");
@@ -168,7 +176,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
     let declared = PROTOCOL
         .handlers
         .iter()
-        .map(|handler| handler.module.to_string())
+        .map(|handler| handler.runtime_field.to_string())
         .collect::<BTreeSet<_>>();
     let dispatched = runtime_dispatch_handler_fields();
 
@@ -210,19 +218,36 @@ fn signer_pubkey_fact(workspace_id: [u8; 32], signer_id: [u8; 32], public_key: [
     )
 }
 
-fn secret_node_fact(workspace_id: [u8; 32], frontier_id: [u8; 32]) -> Fact {
+fn removal_frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32]) -> Fact {
+    let body = RemovalFrontierFact {
+        workspace_id,
+        owner_endpoint_id,
+        created_at_ms: 1,
+    };
     Fact::new(
         workspace_scope(workspace_id),
-        0,
-        sealed_layout::encode_secret_node(&SecretNodeFact {
+        1,
+        encryption_layout::encode_removal_frontier(&body).expect("encode removal frontier"),
+    )
+}
+
+fn local_key_secret_fact(
+    workspace_id: [u8; 32],
+    frontier_id: [u8; 32],
+    owner_endpoint_id: [u8; 32],
+    key_secret: [u8; crypto::XCHACHA20_POLY1305_KEY_BYTES],
+) -> Fact {
+    Fact::new(
+        FactScope::Local,
+        1,
+        encryption_layout::encode_local_key_secret(&LocalKeySecretFact {
             workspace_id,
             frontier_id,
-            start_minute: 0,
-            end_minute: 99,
-            prefix_bytes: 0,
-            leaf_prefix: [0; 32],
+            owner_endpoint_id,
+            created_at_ms: 1,
+            key_secret,
         })
-        .expect("encode secret node"),
+        .expect("encode local key secret"),
     )
 }
 

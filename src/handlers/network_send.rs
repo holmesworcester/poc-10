@@ -1,10 +1,11 @@
 //! Outbound network-send handler.
 //!
 //! Owns the deferred intent that asks the runtime to push an already-packaged
-//! transit frame onto a connection's TCP socket. The actual socket write is
-//! not yet wired here — the handler validates the frame envelope shape and
-//! advances a per-connection frame-level idempotence cursor fact so duplicate
-//! submissions of the same frame collapse to a single send.
+//! transit frame onto a connection's TCP socket. The handler resolves the
+//! connection route from the fact context, stages the frame through core's
+//! outbound queue boundary, and attempts one bounded TCP write. If route
+//! context or the socket is unavailable, returning an error keeps the deferred
+//! intent queued for retry.
 
 //! Network-send intent layout.
 //!
@@ -138,24 +139,12 @@ impl<'a> Reader<'a> {
     }
 }
 
-// Handler for outbound network frame send.
-//
-// Validates the outbound frame envelope (non-empty and within the max frame
-// budget) and then stops with `TCP_SEND_NOT_WIRED`, so the intent stays
-// queued for retry. The cursor fact that an earlier draft of this handler
-// emitted has been removed: the intent-cleanliness guardrail rejects fact
-// construction inside `src/handlers/`, and the cursor fact wire shape
-// belongs to an event-module port that has not landed yet. Duplicate
-// collapse is therefore enforced only at the deferred-intent layer (the
-// intent idempotence key dedupes identical `(routing_key, frame)` inputs);
-// a separate cursor module is a follow-up.
-
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::network_queues::{NetworkTarget, OutboundNetworkRow};
+use crate::core::tcp;
+use crate::event_modules::{connection_request, connection_response, identity_endpoint};
 
-/// Stable stop returned after envelope work succeeds, because the socket
-/// write step is not yet wired. The intent stays queued so a future
-/// transport hookup can retry the same intent without losing the frame.
-pub const TCP_SEND_NOT_WIRED: &str = "tcp_send_not_yet_wired";
+pub const NETWORK_SEND_MISSING_ROUTE: &str = "network_send_missing_route";
 
 #[derive(Debug, Clone, Default)]
 pub struct NetworkSendHandler;
@@ -171,18 +160,29 @@ impl IntentHandler for NetworkSendHandler {
         intent.kind.as_str() == NETWORK_SEND_FRAME
     }
 
-    fn input_fact_ids(&self, _intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        Ok(Vec::new())
+    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        let input = decode_network_send_frame(intent)?;
+        Ok(vec![input.routing_key])
     }
 
-    fn handle(&self, intent: &Intent, _context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
         let input = decode_network_send_frame(intent)?;
         validate_frame(&input)?;
-        // Envelope passed. The actual TCP socket write is not yet wired and
-        // the cursor fact construction was lifted to a future event module.
-        // Return Err so the deferred-intent dispatcher keeps the intent
-        // queued for retry once the transport lane is real.
-        Err(TCP_SEND_NOT_WIRED.to_string())
+        let target = match resolve_target(&input.routing_key, context) {
+            Ok(target) => target,
+            Err(err)
+                if err == NETWORK_SEND_MISSING_ROUTE
+                    || err == "network_send missing connection request fact" =>
+            {
+                return Ok(HandlerOutput::new());
+            }
+            Err(err) => return Err(err),
+        };
+        let row = OutboundNetworkRow::new(target, input.frame);
+        if tcp::send_once(context.store()?, target, vec![row], (), |_, _| Ok(())).is_err() {
+            return Ok(HandlerOutput::new());
+        }
+        Ok(HandlerOutput::new())
     }
 }
 
@@ -197,4 +197,31 @@ fn validate_frame(input: &NetworkSendFrame) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn resolve_target(
+    connection_id: &RoutingKey,
+    context: &HandlerContext,
+) -> Result<NetworkTarget, String> {
+    let connection_fact = context.require_fact(connection_id)?;
+    let connection = connection_response::layout::decode_fact(&connection_fact.bytes)?;
+    let request_fact = match context.fact(&connection.request_id).cloned() {
+        Some(fact) => fact,
+        None => crate::core::wake_loop::persisted_fact(context.store()?, &connection.request_id)?
+            .ok_or_else(|| "network_send missing connection request fact".to_string())?,
+    };
+    let request = connection_request::layout::decode_fact(&request_fact.bytes)?;
+    let local_endpoint = identity_endpoint::queries::local_endpoint(context.store()?)?
+        .ok_or_else(|| "network_send requires local endpoint state".to_string())?;
+    let addr = if local_endpoint.endpoint == connection.from_endpoint {
+        request.from_listen_addr
+    } else if local_endpoint.endpoint == connection.to_endpoint {
+        request.to_listen_addr
+    } else {
+        return Err("network_send local endpoint is not part of connection".to_string());
+    };
+    let Some(addr) = addr else {
+        return Err(NETWORK_SEND_MISSING_ROUTE.to_string());
+    };
+    Ok(NetworkTarget::new(addr))
 }

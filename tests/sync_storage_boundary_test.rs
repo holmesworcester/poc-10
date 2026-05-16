@@ -16,7 +16,11 @@ fn accept_handshake_does_not_create_durable_events() {
     let port = free_port();
     let alice_port = free_port();
     let bob_invite = invite(&bob, port);
-    assert_eq!(count(&bob), 0, "invite facts must be local-only events");
+    assert_eq!(
+        sync_event_count(&bob),
+        0,
+        "invite facts must not become syncable events"
+    );
 
     let _daemon = spawn_daemon(&bob, port);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
@@ -25,8 +29,16 @@ fn accept_handshake_does_not_create_durable_events() {
     wait_for_connection_count(&bob, 1);
     wait_for_connection_event_count(&bob, 2);
 
-    assert_eq!(count(&alice), 0, "accept must not store local sync items");
-    assert_eq!(count(&bob), 0, "connect must not store remote sync items");
+    assert_eq!(
+        sync_event_count(&alice),
+        0,
+        "accept must not store syncable bootstrap items"
+    );
+    assert_eq!(
+        sync_event_count(&bob),
+        0,
+        "connect must not store syncable bootstrap items"
+    );
     assert_eq!(connection_count(&alice), 1);
     assert_eq!(connection_count(&bob), 1);
     assert_eq!(connection_event_count(&alice), 2);
@@ -41,7 +53,7 @@ fn wrong_invite_private_key_does_not_project_receiver_connection() {
     let port = free_port();
     let alice_port = free_port();
     let bob_invite = invite(&bob, port);
-    let wrong_invite = replace_invite_private_key(&bob_invite, &"00".repeat(32));
+    let wrong_invite = replace_invite_private_key(&bob_invite, &"01".repeat(32));
 
     let _daemon = spawn_daemon(&bob, port);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
@@ -58,8 +70,8 @@ fn wrong_invite_private_key_does_not_project_receiver_connection() {
     );
     thread::sleep(Duration::from_millis(500));
 
-    assert_eq!(count(&alice), 0);
-    assert_eq!(count(&bob), 0);
+    assert_eq!(sync_event_count(&alice), 0);
+    assert_eq!(sync_event_count(&bob), 0);
     assert_eq!(connection_count(&alice), 0);
     assert_eq!(connection_count(&bob), 0);
     assert_eq!(connection_event_count(&alice), 1);
@@ -82,9 +94,9 @@ fn accept_reports_unreachable_invite_address() {
         "stderr:\n{}",
         stderr(&connected)
     );
-    assert_eq!(count(&alice), 0);
+    assert_eq!(sync_event_count(&alice), 0);
     assert_eq!(connection_count(&alice), 0);
-    assert_eq!(connection_event_count(&alice), 1);
+    assert_eq!(connection_event_count(&alice), 0);
 }
 
 struct RunningDaemon {
@@ -194,11 +206,11 @@ fn replace_invite_part(link: &str, label: &str, value: &str) -> String {
         .join("/")
 }
 
-fn count(db: &str) -> usize {
+fn sync_event_count(db: &str) -> usize {
     let out = assert_success(topo(&["--db", db, "count"]));
-    line_value(&out, "events")
+    line_value(&out, "sync_events")
         .parse()
-        .expect("parse event count")
+        .expect("parse sync event count")
 }
 
 fn connection_count(db: &str) -> usize {

@@ -1,18 +1,25 @@
 //! Tests for the target `transit_send_on_connection` handler.
 
+use topo::core::crypto;
 use topo::core::facts::Fact;
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
+use topo::core::schema_dsl::{
+    CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
+};
+use topo::core::store::Store;
 use topo::event_modules::connection_response::fact::ConnectionResponseFact;
 use topo::event_modules::connection_response::layout as connection_response_layout;
+use topo::event_modules::identity_endpoint::fact::EndpointFact;
+use topo::event_modules::identity_endpoint::rows as endpoint_rows;
 use topo::event_modules::sync;
 use topo::event_modules::transit::frame as transit_frame;
 use topo::handlers::network_send;
 use topo::handlers::transit::TransitSendOnConnectionHandler;
 use topo::handlers::transit::{send_on_connection_intent, TransitSendOnConnection};
 
-fn connection_fact() -> (Fact, ConnectionResponseFact) {
+fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionResponseFact) {
     let connection = ConnectionResponseFact {
-        from_endpoint: [10; 32],
+        from_endpoint: local_endpoint,
         to_endpoint: [11; 32],
         request_id: [12; 32],
         invite_secret_event_id: [13; 32],
@@ -32,7 +39,9 @@ fn connection_fact() -> (Fact, ConnectionResponseFact) {
 
 #[test]
 fn well_formed_send_intent_packs_fixed_frame_for_network_send() {
-    let (connection_fact, connection) = connection_fact();
+    let store = store_with_local_endpoint();
+    let local_endpoint = local_endpoint();
+    let (connection_fact, connection) = connection_fact(local_endpoint.endpoint);
     let fact = Fact::new(
         sync::matchers::workspace_scope([7; 32]),
         1,
@@ -51,7 +60,7 @@ fn well_formed_send_intent_packs_fixed_frame_for_network_send() {
     let output = handler
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact.clone(), fact.clone()]),
+            &HandlerContext::with_facts([connection_fact.clone(), fact.clone()]).with_store(&store),
         )
         .expect("transit packaging succeeds");
 
@@ -68,4 +77,28 @@ fn well_formed_send_intent_packs_fixed_frame_for_network_send() {
         opened.facts.into_iter().collect::<Vec<_>>(),
         vec![fact.bytes]
     );
+}
+
+fn store_with_local_endpoint() -> Store {
+    let store = Store::open_memory_with_schema_sources(&[
+        CORE_SCHEMA_SOURCE,
+        EVENT_MODULES_SCHEMA_SOURCE,
+        HANDLERS_SCHEMA_SOURCE,
+    ])
+    .expect("store");
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint()))
+        .expect("seed local endpoint");
+    store
+}
+
+fn local_endpoint() -> EndpointFact {
+    let secret = [23; 32];
+    let signing_secret = [24; 32];
+    EndpointFact {
+        endpoint: crypto::x25519_public_key(&secret),
+        secret,
+        signing_public_key: crypto::ed25519_public_key(&signing_secret),
+        signing_secret,
+    }
 }

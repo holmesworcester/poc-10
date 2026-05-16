@@ -17,8 +17,8 @@ use std::str::FromStr;
 
 use crate::core::store::{Schema, Store, TableName, TableRow};
 
-pub const OUTBOUND_TABLE: TableName = TableName::new("core.network.outbound");
-pub const INBOUND_TABLE: TableName = TableName::new("core.network.inbound");
+pub const OUTBOUND_TABLE: TableName = TableName::new("network_out");
+pub const INBOUND_TABLE: TableName = TableName::new("network_in");
 
 /// Store declarations for the two core-owned byte queues.
 ///

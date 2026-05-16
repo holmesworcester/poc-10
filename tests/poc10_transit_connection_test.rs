@@ -1,16 +1,24 @@
+use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
 use topo::core::intents::IntentKind;
+use topo::core::schema_dsl::{
+    CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
+};
+use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::connection_response::fact::ConnectionResponseFact;
 use topo::event_modules::connection_response::layout as connection_response_layout;
+use topo::event_modules::identity_endpoint::fact::EndpointFact;
+use topo::event_modules::identity_endpoint::rows as endpoint_rows;
 use topo::event_modules::transit::frame as transit_frame;
 use topo::event_modules::{encryption, signed_fact, sync};
 use topo::handlers::{connection, network_send, transit};
 
 fn connection_fact() -> (Fact, ConnectionResponseFact) {
+    let local_endpoint = local_endpoint();
     let connection = ConnectionResponseFact {
-        from_endpoint: [10; 32],
+        from_endpoint: local_endpoint.endpoint,
         to_endpoint: [11; 32],
         request_id: [12; 32],
         invite_secret_event_id: [13; 32],
@@ -145,6 +153,7 @@ fn transit_send_guard_refuses_forged_private_tag_reference() {
 
 #[test]
 fn transit_send_guard_accepts_normal_shared_facts() {
+    let store = store_with_local_endpoint();
     let (connection_fact, connection) = connection_fact();
     let fact = Fact::new(
         sync::matchers::workspace_scope([7; 32]),
@@ -159,7 +168,8 @@ fn transit_send_guard_accepts_normal_shared_facts() {
         connection_id: connection_fact.id,
         fact_ids: vec![fact.id],
     });
-    let context = HandlerContext::with_facts([connection_fact.clone(), fact.clone()]);
+    let context =
+        HandlerContext::with_facts([connection_fact.clone(), fact.clone()]).with_store(&store);
 
     let output = transit::TransitSendOnConnectionHandler::new()
         .handle(&intent, &context)
@@ -178,6 +188,7 @@ fn transit_send_guard_accepts_normal_shared_facts() {
 
 #[test]
 fn send_on_connection_handler_success_emits_network_send_and_clears_intent() {
+    let store = store_with_local_endpoint();
     let (connection_fact, _) = connection_fact();
     let fact = Fact::new(
         sync::matchers::workspace_scope([7; 32]),
@@ -198,8 +209,9 @@ fn send_on_connection_handler_success_emits_network_send_and_clears_intent() {
     bus.submit_intent(intent).expect("queue send work");
 
     let report = bus
-        .dispatch_deferred_intents_with_fact_context(
+        .dispatch_deferred_intents_with_fact_context_and_store(
             &transit::TransitSendOnConnectionHandler::new(),
+            &store,
             10,
         )
         .expect("dispatch transit send");
@@ -211,6 +223,30 @@ fn send_on_connection_handler_success_emits_network_send_and_clears_intent() {
         bus.intents()[0].kind.as_str(),
         network_send::NETWORK_SEND_FRAME
     );
+}
+
+fn store_with_local_endpoint() -> Store {
+    let store = Store::open_memory_with_schema_sources(&[
+        CORE_SCHEMA_SOURCE,
+        EVENT_MODULES_SCHEMA_SOURCE,
+        HANDLERS_SCHEMA_SOURCE,
+    ])
+    .expect("store");
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint()))
+        .expect("seed local endpoint");
+    store
+}
+
+fn local_endpoint() -> EndpointFact {
+    let secret = [23; 32];
+    let signing_secret = [24; 32];
+    EndpointFact {
+        endpoint: crypto::x25519_public_key(&secret),
+        secret,
+        signing_public_key: crypto::ed25519_public_key(&signing_secret),
+        signing_secret,
+    }
 }
 
 #[test]

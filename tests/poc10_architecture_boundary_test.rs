@@ -67,8 +67,31 @@ fn source_code_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&st
     let mut matches = Vec::new();
     for path in paths {
         let text = source_text(&path);
+        let mut pending_test_cfg = false;
+        let mut skip_test_module = false;
+        let mut brace_depth = 0usize;
         for (line_index, line) in text.lines().enumerate() {
+            if skip_test_module {
+                brace_depth += line.matches('{').count();
+                brace_depth = brace_depth.saturating_sub(line.matches('}').count());
+                if brace_depth == 0 {
+                    skip_test_module = false;
+                }
+                continue;
+            }
             let trimmed = line.trim_start();
+            if trimmed.starts_with("#[cfg(test)]") {
+                pending_test_cfg = true;
+                continue;
+            }
+            if pending_test_cfg && trimmed.starts_with("mod ") && line.contains('{') {
+                skip_test_module = true;
+                pending_test_cfg = false;
+                brace_depth = line.matches('{').count();
+                brace_depth = brace_depth.saturating_sub(line.matches('}').count());
+                continue;
+            }
+            pending_test_cfg = false;
             if trimmed.starts_with("//") {
                 continue;
             }

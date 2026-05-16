@@ -7,6 +7,12 @@ table message_rows {
   row_key (key);
 }
 
+table opened_message_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
 table sealed_message_rows {
   column key bytes;
   column value bytes;

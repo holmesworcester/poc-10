@@ -190,10 +190,12 @@ fn target_deferred_handler_consumes_only_after_exact_fact_context_exists() {
     bus.submit_intent(echo_fact_intent(fact.id))
         .expect("submit echo intent");
 
-    let err = bus
+    let report = bus
         .dispatch_deferred_intents_with_fact_context(&EchoFactHandler, 10)
-        .expect_err("missing fact keeps intent queued");
-    assert!(err.contains("handler context missing fact"), "{err}");
+        .expect("missing fact waits without consuming intent");
+    assert_eq!(report.handled, 0);
+    assert_eq!(report.facts, 0);
+    assert_eq!(report.intents, 0);
     assert_eq!(bus.intents().len(), 1);
 
     bus.submit_fact(fact.clone());

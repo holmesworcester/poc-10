@@ -35,6 +35,7 @@ pub trait RuntimeHandlers {
     fn dispatch(
         &self,
         wake_loop: &mut WakeLoop,
+        store: &Store,
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String>;
 }
@@ -82,6 +83,15 @@ impl<P: RuntimeProtocol> Runtime<P> {
         &self.wake_loop
     }
 
+    pub fn reload_wake_loop(&mut self) -> Result<(), String> {
+        self.wake_loop = WakeLoop::load(&self.store)?;
+        Ok(())
+    }
+
+    pub fn facts(&self) -> impl Iterator<Item = &Fact> {
+        self.wake_loop.facts()
+    }
+
     pub fn command_context<'a>(
         &'a self,
         clock: &'a dyn CommandClock,
@@ -92,6 +102,10 @@ impl<P: RuntimeProtocol> Runtime<P> {
 
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
         self.wake_loop.submit_fact(fact)
+    }
+
+    pub fn purge_fact(&mut self, fact_id: crate::core::facts::FactId) -> bool {
+        self.wake_loop.purge_fact(fact_id)
     }
 
     pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
@@ -140,10 +154,10 @@ impl<P: RuntimeProtocol> Runtime<P> {
 
     pub fn dispatch_intents(&mut self, limit_per_handler: usize) -> Result<DispatchReport, String> {
         self.handlers
-            .dispatch(&mut self.wake_loop, limit_per_handler)
+            .dispatch(&mut self.wake_loop, &self.store, limit_per_handler)
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    pub fn save(&mut self) -> Result<(), String> {
         self.wake_loop.save(&self.store)
     }
 }

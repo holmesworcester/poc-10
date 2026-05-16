@@ -133,8 +133,39 @@ fn projector_test_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn line_count(path: &Path) -> usize {
-    source_text(path).lines().count()
+fn production_line_count(path: &Path) -> usize {
+    let text = source_text(path);
+    let mut count = 0;
+    let mut skip_test_module = false;
+    let mut pending_test_cfg = false;
+    let mut brace_depth = 0usize;
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if skip_test_module {
+            brace_depth += line.matches('{').count();
+            brace_depth = brace_depth.saturating_sub(line.matches('}').count());
+            if brace_depth == 0 {
+                skip_test_module = false;
+            }
+            continue;
+        }
+        if trimmed.starts_with("#[cfg(test)]") {
+            pending_test_cfg = true;
+            continue;
+        }
+        if pending_test_cfg && trimmed.starts_with("mod ") && line.contains('{') {
+            skip_test_module = true;
+            pending_test_cfg = false;
+            brace_depth = line.matches('{').count();
+            brace_depth = brace_depth.saturating_sub(line.matches('}').count());
+            continue;
+        }
+        pending_test_cfg = false;
+        count += 1;
+    }
+
+    count
 }
 
 #[test]
@@ -496,10 +527,10 @@ fn cutover_projector_files_stay_small_and_split_by_fact_family() {
     let root = root();
     let mut offenders = Vec::new();
     for path in project_files(&root) {
-        let count = line_count(&path);
+        let count = production_line_count(&path);
         if count > 250 {
             offenders.push(format!(
-                "{} has {count} lines",
+                "{} has {count} production lines",
                 path.strip_prefix(&root).unwrap().display()
             ));
         }

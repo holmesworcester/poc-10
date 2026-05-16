@@ -57,6 +57,12 @@ pub struct WakeLoop {
     pending_owners: BTreeSet<FactId>,
     intents: Vec<Intent>,
     intent_keys: BTreeMap<Vec<u8>, usize>,
+    dirty_facts: BTreeSet<FactId>,
+    deleted_facts: BTreeSet<FactId>,
+    dirty_context_owners: BTreeSet<FactId>,
+    dirty_pending_owners: BTreeSet<FactId>,
+    dirty_intent_keys: BTreeSet<Vec<u8>>,
+    deleted_intent_keys: BTreeSet<Vec<u8>>,
 }
 
 impl WakeLoop {
@@ -118,20 +124,46 @@ impl WakeLoop {
         {
             bus.submit_intent(decode_intent(&value)?)?;
         }
+        bus.clear_dirty();
         Ok(bus)
     }
 
-    pub fn save(&self, store: &Store) -> Result<(), String> {
+    pub fn save(&mut self, store: &Store) -> Result<(), String> {
+        let fact_rows = self.dirty_fact_rows();
+        let deleted_fact_keys = self
+            .deleted_facts
+            .iter()
+            .map(|id| id.to_vec())
+            .collect::<Vec<_>>();
+        let dirty_context_owners = self
+            .dirty_context_owners
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let pending_rows = self.dirty_pending_rows();
+        let deleted_pending_keys = self
+            .dirty_pending_owners
+            .iter()
+            .filter(|owner| !self.pending_owners.contains(*owner))
+            .map(|owner| owner.to_vec())
+            .collect::<Vec<_>>();
+        let intent_rows = self.dirty_intent_rows();
+        let deleted_intent_keys = self.deleted_intent_keys.iter().cloned().collect::<Vec<_>>();
+
         store
             .write_transaction(|tx| {
-                replace_table_rows(tx, FACTS, self.fact_rows())?;
-                replace_table_rows(tx, NEEDS, self.need_rows())?;
-                replace_table_rows(tx, OFFERS, self.offer_rows())?;
-                replace_table_rows(tx, PENDING_PROJECTION, self.pending_rows())?;
-                replace_table_rows(tx, INTENTS, self.intent_rows())?;
+                tx.delete_table_rows_in_tx(FACTS, deleted_fact_keys)?;
+                tx.insert_table_rows_in_tx(fact_rows)?;
+                replace_context_owner_rows(tx, &dirty_context_owners, self)?;
+                tx.delete_table_rows_in_tx(PENDING_PROJECTION, deleted_pending_keys)?;
+                tx.insert_table_rows_in_tx(pending_rows)?;
+                tx.delete_table_rows_in_tx(INTENTS, deleted_intent_keys)?;
+                tx.insert_table_rows_in_tx(intent_rows)?;
                 Ok(())
             })
-            .map_err(|err| format!("save wake loop: {err}"))
+            .map_err(|err| format!("save wake loop: {err}"))?;
+        self.clear_dirty();
+        Ok(())
     }
 
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
@@ -139,11 +171,17 @@ impl WakeLoop {
         if self.facts.insert(id, fact).is_some() {
             return false;
         }
+        self.deleted_facts.remove(&id);
+        self.dirty_facts.insert(id);
         self.wake(id)
     }
 
     pub fn has_fact(&self, id: &FactId) -> bool {
         self.facts.contains_key(id)
+    }
+
+    pub fn facts(&self) -> impl Iterator<Item = &Fact> {
+        self.facts.values()
     }
 
     pub fn context(&self, owner: &FactId) -> Option<&ContextSet> {
@@ -159,6 +197,9 @@ impl WakeLoop {
     }
 
     pub fn take_intents(&mut self) -> Vec<Intent> {
+        for intent in &self.intents {
+            self.deleted_intent_keys.insert(intent_row_key(intent));
+        }
         self.intent_keys.clear();
         std::mem::take(&mut self.intents)
     }
@@ -203,6 +244,24 @@ impl WakeLoop {
         handler: &impl IntentHandler,
         limit: usize,
     ) -> Result<DispatchReport, String> {
+        self.dispatch_deferred_intents_with_optional_store(handler, None, limit)
+    }
+
+    pub fn dispatch_deferred_intents_with_fact_context_and_store(
+        &mut self,
+        handler: &impl IntentHandler,
+        store: &Store,
+        limit: usize,
+    ) -> Result<DispatchReport, String> {
+        self.dispatch_deferred_intents_with_optional_store(handler, Some(store), limit)
+    }
+
+    fn dispatch_deferred_intents_with_optional_store(
+        &mut self,
+        handler: &impl IntentHandler,
+        store: Option<&Store>,
+        limit: usize,
+    ) -> Result<DispatchReport, String> {
         let mut report = DispatchReport::default();
         while report.handled < limit {
             let Some((intent_index, intent)) = self
@@ -219,15 +278,23 @@ impl WakeLoop {
                     return Err(err);
                 }
             };
-            let context = HandlerContext::with_facts(
-                input_ids
-                    .into_iter()
-                    .filter_map(|fact_id| self.facts.get(&fact_id).cloned()),
-            );
+            let mut context_facts = BTreeMap::new();
+            for fact_id in input_ids {
+                if let Some(fact) = self.facts.get(&fact_id).cloned() {
+                    context_facts.insert(fact_id, fact);
+                }
+            }
+            let mut context = HandlerContext::with_facts(context_facts.into_values());
+            if let Some(store) = store {
+                context = context.with_store(store);
+            }
             let output = match handler.handle(&intent, &context) {
                 Ok(output) => output,
                 Err(err) => {
                     self.restore_intent(intent_index, intent)?;
+                    if err.starts_with("handler context missing fact ") {
+                        break;
+                    }
                     return Err(err);
                 }
             };
@@ -376,18 +443,21 @@ impl WakeLoop {
             return false;
         }
         self.pending_projection.push_back(owner);
+        self.dirty_pending_owners.insert(owner);
         true
     }
 
     fn pop_pending(&mut self) -> Option<FactId> {
         let owner = self.pending_projection.pop_front()?;
         self.pending_owners.remove(&owner);
+        self.dirty_pending_owners.insert(owner);
         Some(owner)
     }
 
     fn restore_pending(&mut self, owner: FactId) {
         if self.pending_owners.insert(owner) {
             self.pending_projection.push_front(owner);
+            self.dirty_pending_owners.insert(owner);
         }
     }
 
@@ -397,20 +467,42 @@ impl WakeLoop {
         } else {
             self.context_by_owner.insert(owner, context);
         }
+        self.dirty_context_owners.insert(owner);
     }
 
-    fn purge_fact(&mut self, owner: FactId) -> bool {
+    pub fn purge_fact(&mut self, owner: FactId) -> bool {
         let mut changed = self.facts.remove(&owner).is_some();
-        changed |= self.context_by_owner.remove(&owner).is_some();
-        changed |= self.pending_owners.remove(&owner);
+        if changed {
+            self.dirty_facts.remove(&owner);
+            self.deleted_facts.insert(owner);
+        }
+        if self.context_by_owner.remove(&owner).is_some() {
+            self.dirty_context_owners.insert(owner);
+            changed = true;
+        }
+        if self.pending_owners.remove(&owner) {
+            self.dirty_pending_owners.insert(owner);
+            changed = true;
+        }
         let before = self.pending_projection.len();
         self.pending_projection.retain(|pending| pending != &owner);
-        changed |= self.pending_projection.len() != before;
+        if self.pending_projection.len() != before {
+            self.dirty_pending_owners.insert(owner);
+            changed = true;
+        }
 
-        self.context_by_owner.retain(|_, context| {
+        let mut dirty_context_owners = Vec::new();
+        self.context_by_owner.retain(|context_owner, context| {
+            let before = context.offers.len();
             context.offers.retain(|offer| offer.payload_ref != owner);
+            if context.offers.len() != before {
+                dirty_context_owners.push(*context_owner);
+            }
             !(context.needs.is_empty() && context.offers.is_empty())
         });
+        for context_owner in dirty_context_owners {
+            self.dirty_context_owners.insert(context_owner);
+        }
         changed
     }
 
@@ -449,6 +541,8 @@ impl WakeLoop {
                 intent.kind.as_str()
             ));
         }
+        self.deleted_intent_keys.remove(&key);
+        self.dirty_intent_keys.insert(key.clone());
         self.intent_keys.insert(key, self.intents.len());
         self.intents.push(intent);
         Ok(true)
@@ -467,11 +561,13 @@ impl WakeLoop {
             return Ok(None);
         };
         let intent = self.intents.remove(index);
+        self.deleted_intent_keys.insert(intent_row_key(&intent));
         self.rebuild_intent_keys()?;
         Ok(Some((index, intent)))
     }
 
     fn restore_intent(&mut self, index: usize, intent: Intent) -> Result<(), String> {
+        self.deleted_intent_keys.remove(&intent_row_key(&intent));
         let index = index.min(self.intents.len());
         self.intents.insert(index, intent);
         self.rebuild_intent_keys()
@@ -567,50 +663,18 @@ impl WakeLoop {
             .collect()
     }
 
-    fn fact_rows(&self) -> Vec<TableRow> {
-        self.facts
-            .values()
-            .map(|fact| TableRow {
-                table: FACTS,
-                key: fact.id.to_vec(),
-                value: encode_fact(fact),
-            })
-            .collect()
-    }
-
-    fn need_rows(&self) -> Vec<TableRow> {
-        self.context_by_owner
-            .values()
-            .flat_map(|context| context.needs.iter())
-            .map(|need| {
-                let value = encode_need(need);
-                TableRow {
-                    table: NEEDS,
-                    key: context_row_key(need.owner, &value),
-                    value,
-                }
-            })
-            .collect()
-    }
-
-    fn offer_rows(&self) -> Vec<TableRow> {
-        self.context_by_owner
-            .values()
-            .flat_map(|context| context.offers.iter())
-            .map(|offer| {
-                let value = encode_offer(offer);
-                TableRow {
-                    table: OFFERS,
-                    key: context_row_key(offer.owner, &value),
-                    value,
-                }
-            })
-            .collect()
-    }
-
-    fn pending_rows(&self) -> Vec<TableRow> {
-        self.pending_projection
+    fn dirty_fact_rows(&self) -> Vec<TableRow> {
+        self.dirty_facts
             .iter()
+            .filter_map(|id| self.facts.get(id))
+            .map(fact_row)
+            .collect()
+    }
+
+    fn dirty_pending_rows(&self) -> Vec<TableRow> {
+        self.dirty_pending_owners
+            .iter()
+            .filter(|owner| self.pending_owners.contains(*owner))
             .map(|owner| TableRow {
                 table: PENDING_PROJECTION,
                 key: owner.to_vec(),
@@ -619,34 +683,93 @@ impl WakeLoop {
             .collect()
     }
 
-    fn intent_rows(&self) -> Vec<TableRow> {
+    fn dirty_intent_rows(&self) -> Vec<TableRow> {
         self.intents
             .iter()
-            .map(|intent| {
-                let value = encode_intent(intent);
-                TableRow {
-                    table: INTENTS,
-                    key: intent_row_key(intent),
-                    value,
-                }
-            })
+            .filter(|intent| self.dirty_intent_keys.contains(&intent_row_key(intent)))
+            .map(intent_row)
             .collect()
+    }
+
+    fn clear_dirty(&mut self) {
+        self.dirty_facts.clear();
+        self.deleted_facts.clear();
+        self.dirty_context_owners.clear();
+        self.dirty_pending_owners.clear();
+        self.dirty_intent_keys.clear();
+        self.deleted_intent_keys.clear();
     }
 }
 
-fn replace_table_rows(
+fn replace_context_owner_rows(
     store: &Store,
-    table: TableName,
-    rows: Vec<TableRow>,
+    owners: &[FactId],
+    wake_loop: &WakeLoop,
 ) -> rusqlite::Result<()> {
-    let keys = store
-        .table_rows(table)?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect();
-    store.delete_table_rows_in_tx(table, keys)?;
-    store.insert_table_rows_in_tx(rows)?;
+    let mut need_delete_keys = Vec::new();
+    let mut offer_delete_keys = Vec::new();
+    let mut need_rows = Vec::new();
+    let mut offer_rows = Vec::new();
+
+    for owner in owners {
+        need_delete_keys.extend(
+            store
+                .table_rows_with_key_prefix(NEEDS, owner, usize::MAX)?
+                .into_iter()
+                .map(|(key, _)| key),
+        );
+        offer_delete_keys.extend(
+            store
+                .table_rows_with_key_prefix(OFFERS, owner, usize::MAX)?
+                .into_iter()
+                .map(|(key, _)| key),
+        );
+        if let Some(context) = wake_loop.context_by_owner.get(owner) {
+            need_rows.extend(context.needs.iter().map(need_row));
+            offer_rows.extend(context.offers.iter().map(offer_row));
+        }
+    }
+
+    store.delete_table_rows_in_tx(NEEDS, need_delete_keys)?;
+    store.delete_table_rows_in_tx(OFFERS, offer_delete_keys)?;
+    store.insert_table_rows_in_tx(need_rows)?;
+    store.insert_table_rows_in_tx(offer_rows)?;
     Ok(())
+}
+
+fn fact_row(fact: &Fact) -> TableRow {
+    TableRow {
+        table: FACTS,
+        key: fact.id.to_vec(),
+        value: encode_fact(fact),
+    }
+}
+
+fn need_row(need: &ContextNeed) -> TableRow {
+    let value = encode_need(need);
+    TableRow {
+        table: NEEDS,
+        key: context_row_key(need.owner, &value),
+        value,
+    }
+}
+
+fn offer_row(offer: &ContextOffer) -> TableRow {
+    let value = encode_offer(offer);
+    TableRow {
+        table: OFFERS,
+        key: context_row_key(offer.owner, &value),
+        value,
+    }
+}
+
+fn intent_row(intent: &Intent) -> TableRow {
+    let value = encode_intent(intent);
+    TableRow {
+        table: INTENTS,
+        key: intent_row_key(intent),
+        value,
+    }
 }
 
 fn apply_atomic_row_intents(
@@ -700,6 +823,23 @@ fn encode_fact(fact: &Fact) -> Vec<u8> {
     encode_scope(&mut out, &fact.scope);
     put_bytes_u32(&mut out, &fact.bytes);
     out
+}
+
+pub fn persisted_fact(store: &Store, id: &FactId) -> Result<Option<Fact>, String> {
+    store
+        .table_row(FACTS, id)
+        .map_err(|err| format!("load fact row: {err}"))?
+        .map(|value| decode_fact_row(id, &value))
+        .transpose()
+}
+
+pub fn persisted_facts(store: &Store) -> Result<Vec<Fact>, String> {
+    store
+        .table_rows(FACTS)
+        .map_err(|err| format!("load fact rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_fact_row(&key, &value))
+        .collect()
 }
 
 fn decode_fact_row(key: &[u8], value: &[u8]) -> Result<Fact, String> {

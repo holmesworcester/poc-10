@@ -5,7 +5,10 @@
 //! handler that performs the eventual network effect.
 
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::event_modules::{connection_response, encryption, signed_fact};
+use crate::event_modules::{
+    connection_ephemeral_secret, connection_request, connection_response, encryption,
+    identity_endpoint, identity_invite, local_history_node_secret, signed_fact, transit_received,
+};
 
 use super::frame::{self, SealConnectionFrame, TransitFactBundle};
 
@@ -52,10 +55,17 @@ pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
 pub fn is_private_local_fact_tag(tag: u8) -> bool {
     matches!(
         tag,
-        signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET
+        connection_ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
+            | connection_request::layout::TYPE_CONNECTION_REQUEST
+            | connection_response::layout::TYPE_CONNECTION_RESPONSE
+            | identity_endpoint::layout::TYPE_LOCAL_ENDPOINT
+            | identity_invite::layout::TYPE_INVITE_SECRET
+            | local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
+            | signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET
             | encryption::layout::TYPE_LOCAL_KEY_SECRET
             | encryption::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
             | encryption::layout::TYPE_LOCAL_RECIPIENT_KEY
+            | transit_received::layout::TYPE_TRANSIT_RECEIVED
     )
 }
 

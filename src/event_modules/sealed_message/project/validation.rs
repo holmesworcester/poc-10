@@ -1,6 +1,7 @@
 use crate::core::context::ContextNeed;
-use crate::core::facts::{Fact, FactScope};
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projection::{MatchedContext, ProjectionContext};
+use crate::event_modules::{identity_endpoint_shared, signed_fact};
 
 use super::super::fact::{SealedMessageFact, SignerId};
 use super::super::layout;
@@ -12,20 +13,55 @@ pub(super) fn validate_signer_context(
     signer_id: SignerId,
     expected_public_key: Option<[u8; 32]>,
 ) -> Result<(), String> {
-    if payload.scope != need.scope {
-        return Err("sealed-message signer context scope does not match need".to_string());
+    if let Ok(signer) = layout::decode_signer_pubkey(&payload.bytes) {
+        if payload.scope != need.scope {
+            return Err("sealed-message signer context scope does not match need".to_string());
+        }
+        if signer.signer_id != signer_id {
+            return Err("sealed-message signer context payload does not match need".to_string());
+        }
+        if expected_public_key.is_some_and(|public_key| signer.public_key != public_key) {
+            return Err(
+                "sealed-message signer context public key does not match signed envelope"
+                    .to_string(),
+            );
+        }
+        return Ok(());
     }
-    let signer = layout::decode_signer_pubkey(&payload.bytes)
-        .map_err(|_| "sealed-message signer context must be a signer pubkey".to_string())?;
-    if signer.signer_id != signer_id {
-        return Err("sealed-message signer context payload does not match need".to_string());
+
+    let endpoint = endpoint_shared_signer(payload).ok_or_else(|| {
+        "sealed-message signer context must be a signer pubkey or endpoint_shared".to_string()
+    })?;
+    if endpoint.workspace_id != scope_workspace_id(&need.scope)? {
+        return Err("sealed-message signer endpoint workspace does not match need".to_string());
     }
-    if expected_public_key.is_some_and(|public_key| signer.public_key != public_key) {
+    if endpoint.endpoint_id != signer_id {
+        return Err("sealed-message signer endpoint id does not match need".to_string());
+    }
+    if expected_public_key.is_some_and(|public_key| endpoint.signing_public_key != public_key) {
         return Err(
             "sealed-message signer context public key does not match signed envelope".to_string(),
         );
     }
     Ok(())
+}
+
+pub(super) fn endpoint_shared_signer(
+    payload: &Fact,
+) -> Option<identity_endpoint_shared::fact::EndpointSharedFact> {
+    let envelope = signed_fact::layout::decode_signed_fact(&payload.bytes).ok()?;
+    if envelope.inner_type != identity_endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
+        return None;
+    }
+    let endpoint = identity_endpoint_shared::layout::decode_fact(&envelope.payload).ok()?;
+    (envelope.signer_public_key == endpoint.signing_public_key).then_some(endpoint)
+}
+
+fn scope_workspace_id(scope: &FactScope) -> Result<FactId, String> {
+    match scope {
+        FactScope::Scoped { kind, id } if kind.as_str() == "workspace" => Ok(*id),
+        _ => Err("sealed-message signer need is not workspace scoped".to_string()),
+    }
 }
 
 pub(super) fn validate_deletion_context(
@@ -48,20 +84,21 @@ pub(super) fn validate_deletion_context(
     Ok(())
 }
 
-pub(super) fn has_matched_secret(
-    context: &ProjectionContext,
+pub(super) fn matched_secret_payload<'a>(
+    context: &'a ProjectionContext,
     need: &ContextNeed,
-) -> Result<bool, String> {
-    let mut has_secret = false;
+) -> Result<Option<&'a Fact>, String> {
+    let mut payload = None;
     for matched in context
         .matched_context()
         .iter()
         .filter(|matched| matched.need == *need)
     {
         validate_secret_context(matched, need)?;
-        has_secret = true;
+        payload = Some(&matched.payload);
+        break;
     }
-    Ok(has_secret)
+    Ok(payload)
 }
 
 fn validate_secret_context(matched: &MatchedContext, need: &ContextNeed) -> Result<(), String> {

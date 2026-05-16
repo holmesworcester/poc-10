@@ -1,13 +1,16 @@
+use topo::core::crypto;
 use topo::core::facts::Fact;
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::sealed_message::fact::{
-    SealedMessageFact, SecretNodeFact, SignerPubkeyFact, NONCE_BYTES,
+use topo::event_modules::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
+use topo::event_modules::encryption::{
+    layout as encryption_layout, matchers as encryption_context,
 };
+use topo::event_modules::sealed_message::create as sealed_create;
+use topo::event_modules::sealed_message::fact::{SealedMessageFact, SignerPubkeyFact, NONCE_BYTES};
 use topo::event_modules::sealed_message::matchers::SecretCoverageMatcher;
-use topo::event_modules::sealed_message::project as sealed_project;
 use topo::event_modules::sealed_message::rows::{
     decode_sealed_message_row, message_key, SEALED_MESSAGE_ROWS,
 };
@@ -18,6 +21,9 @@ use topo::event_modules::sync::fact::{
 use topo::event_modules::sync::matchers::{self as context, RangeEventMatcher};
 use topo::event_modules::sync::{layout, project};
 use topo::handlers::transit;
+use topo::protocol::runtime::ProtocolProjector;
+
+const DISPLAY_SECRET: [u8; 32] = [0x66; 32];
 
 #[test]
 fn sync_request_sends_encrypted_message_when_out_of_range_dep_and_key_arrive() {
@@ -138,23 +144,27 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
     );
 
     let signer = id(72);
-    let frontier = id(73);
+    let frontier_fact = removal_frontier_fact(workspace, id(73), day_ms);
+    let frontier = frontier_fact.id;
     let leaf = id(74);
     let sealed_message = sealed_message_fact(workspace, signer, frontier, day_ms / 60_000, leaf);
     let signer_fact = sealed_signer_fact(workspace, signer);
-    let secret_fact = sealed_secret_fact(workspace, frontier, 0, u64::MAX, 0, [0; 32]);
+    let secret_fact = local_key_secret_fact(workspace, frontier, id(73));
+    let frontier_matcher = ExactSelectorMatcher::new(encryption_context::frontier_role());
     let signer_matcher = ExactSelectorMatcher::new(sealed_context::signer_role());
     let deletion_matcher = ExactSelectorMatcher::new(sealed_context::deletion_role());
     let secret_matcher = SecretCoverageMatcher::new();
     let sealed_matchers = [
+        &frontier_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
         &deletion_matcher as &dyn ContextMatcher,
         &secret_matcher as &dyn ContextMatcher,
     ];
-    let sealed_projector = sealed_project::SealedMessageProjector::new();
+    let sealed_projector = ProtocolProjector;
     let mut receiver = WakeLoop::new();
 
     receiver.submit_fact(signer_fact);
+    receiver.submit_fact(frontier_fact);
     receiver.submit_fact(secret_fact);
     receiver
         .drain(&sealed_projector, &sealed_matchers, 4)
@@ -168,7 +178,7 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
         opened.projections <= 3,
         "message display should be a bounded context wake, not a key request loop: {opened:?}"
     );
-    assert_eq!(receiver.intents().len(), 1);
+    assert_eq!(receiver.intents().len(), 3);
     let sealed_row = match AtomicIntent::from_intent(&receiver.intents()[0], &[SEALED_MESSAGE_ROWS])
         .expect("sealed row intent")
     {
@@ -184,13 +194,14 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
     );
     let remaining_needs = &receiver
         .context(&sealed_message.id)
-        .expect("message should retain only update needs")
+        .expect("message should retain only live context needs")
         .needs;
     assert!(
         remaining_needs
             .iter()
-            .all(|need| need.role == sealed_context::deletion_role()),
-        "secret and signer needs should clear once key context is matched"
+            .all(|need| need.role == sealed_context::deletion_role()
+                || need.role == sealed_context::signer_role()),
+        "secret need should clear once key context is matched"
     );
 }
 
@@ -551,10 +562,21 @@ fn sealed_message_fact(
             minute,
             leaf_id,
             nonce: [78; NONCE_BYTES],
-            ciphertext: b"display".to_vec(),
+            ciphertext: encrypted_display_body(workspace_id, frontier_id, minute),
         })
         .expect("encode sealed message"),
     )
+}
+
+fn encrypted_display_body(workspace_id: [u8; 32], frontier_id: [u8; 32], minute: u64) -> Vec<u8> {
+    let plaintext = sealed_create::pad_plaintext(b"display").expect("pad display plaintext");
+    crypto::xchacha20poly1305_encrypt(
+        &DISPLAY_SECRET,
+        &sealed_create::associated_data(workspace_id, frontier_id, minute),
+        &[78; NONCE_BYTES],
+        &plaintext,
+    )
+    .expect("encrypt display message")
 }
 
 fn sealed_signer_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
@@ -569,26 +591,39 @@ fn sealed_signer_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
     )
 }
 
-fn sealed_secret_fact(
+fn removal_frontier_fact(
     workspace_id: [u8; 32],
-    frontier_id: [u8; 32],
-    start_minute: u64,
-    end_minute: u64,
-    prefix_bytes: u8,
-    leaf_prefix: [u8; 32],
+    owner_endpoint_id: [u8; 32],
+    created_at_ms: u64,
 ) -> Fact {
     Fact::new(
         sealed_context::workspace_scope(workspace_id),
-        start_minute,
-        sealed_layout::encode_secret_node(&SecretNodeFact {
+        created_at_ms,
+        encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
+            workspace_id,
+            owner_endpoint_id,
+            created_at_ms,
+        })
+        .expect("encode frontier"),
+    )
+}
+
+fn local_key_secret_fact(
+    workspace_id: [u8; 32],
+    frontier_id: [u8; 32],
+    owner_endpoint_id: [u8; 32],
+) -> Fact {
+    Fact::new(
+        topo::core::facts::FactScope::Local,
+        1,
+        encryption_layout::encode_local_key_secret(&LocalKeySecretFact {
             workspace_id,
             frontier_id,
-            start_minute,
-            end_minute,
-            prefix_bytes,
-            leaf_prefix,
+            owner_endpoint_id,
+            created_at_ms: 1,
+            key_secret: DISPLAY_SECRET,
         })
-        .expect("encode secret node"),
+        .expect("encode local key secret"),
     )
 }
 

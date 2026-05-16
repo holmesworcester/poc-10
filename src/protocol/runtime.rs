@@ -5,15 +5,19 @@
 //! tables needed by `core::runtime::Runtime<Protocol>`.
 
 use crate::core::context::Role;
-use crate::core::facts::Fact;
+use crate::core::daemon::TickReport;
+use crate::core::facts::{Fact, FactScope};
 use crate::core::handler_dispatch::HandlerContext;
 use crate::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use crate::core::network_queues;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::core::runtime::{RuntimeHandlers, RuntimeMatchers, RuntimeProtocol};
 use crate::core::schema_dsl::{
     CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
 };
+use crate::core::store::Store;
 use crate::core::store::TableName;
+use crate::core::tcp;
 use crate::core::wake_loop::{DispatchReport, WakeLoop};
 use crate::event_modules::{
     connection_ephemeral_secret, connection_request, connection_response, content_event,
@@ -26,12 +30,181 @@ use crate::event_modules::{
     transit_received,
 };
 use crate::handlers::{
-    connection_response as connection_response_handler, handle_sync, materialize_key_wraps,
-    network_send, purge_cascade, purge_event, purge_retired_recipient_material, receive_transit,
-    retention_expiry, retention_floor, sync_index_update, transit, unwrap_key_wrap,
+    bootstrap_send, connection_response as connection_response_handler, handle_sync,
+    materialize_key_wraps, network_send, purge_cascade, purge_event,
+    purge_retired_recipient_material, receive_transit, retention_expiry, retention_floor,
+    sync_index_update, transit, unwrap_key_wrap,
 };
+use std::collections::BTreeSet;
 
 pub type ProtocolRuntime = crate::core::runtime::Runtime<super::Protocol>;
+
+impl crate::core::runtime::Runtime<super::Protocol> {
+    pub fn daemon_tick(
+        &mut self,
+        listener: &tcp::Listener,
+        work_limit: usize,
+    ) -> Result<TickReport, String> {
+        self.reload_wake_loop()?;
+        let accepted = listener.accept_available(self.store())?;
+        let inbound = network_queues::claim_inbound(self.store(), work_limit)?;
+        for row in &inbound {
+            self.submit_intent(receive_transit::receive_transit_frame_intent(
+                receive_transit::ReceiveTransitFrame {
+                    frame: row.bytes.clone(),
+                    origin_addr: row.source.addr().to_string().into_bytes(),
+                    received_at_local_ms: now_ms(),
+                },
+            ))?;
+        }
+        network_queues::delete_inbound(self.store(), &inbound)?;
+
+        let projection_before_handlers = self.drain_projection_until_idle(4, work_limit)?;
+        let dispatched = self.dispatch_intents(work_limit)?;
+        let seeded_sync = self.seed_sync_have_ids(work_limit)?;
+        let projection_after_seed = self.drain_projection_until_idle(4, work_limit)?;
+        let dispatched_after_seed = self.dispatch_intents(work_limit)?;
+        let projection_after_handlers = self.drain_projection_until_idle(4, work_limit)?;
+        self.save()?;
+
+        Ok(TickReport {
+            accepted_connections: accepted.accepted_connections,
+            received_frames: accepted.value.received_frames,
+            projections: projection_before_handlers.projections
+                + projection_after_seed.projections
+                + projection_after_handlers.projections,
+            handled_intents: dispatched.handled + dispatched_after_seed.handled,
+            emitted_facts: dispatched.facts + dispatched_after_seed.facts + seeded_sync,
+            emitted_intents: dispatched.intents + dispatched_after_seed.intents,
+        })
+    }
+
+    fn seed_sync_have_ids(&mut self, limit: usize) -> Result<usize, String> {
+        let mut seeded = 0usize;
+        let Some(local_endpoint) = identity_endpoint::queries::local_endpoint(self.store())? else {
+            return Ok(0);
+        };
+        let endpoint_memberships = endpoint_memberships(self.store())?;
+        let connections = self
+            .store()
+            .table_rows(connection_response::rows::CONNECTION_RESPONSE_ROWS)
+            .map_err(|err| format!("load connection rows for sync seed: {err}"))?;
+        if connections.is_empty() {
+            return Ok(0);
+        }
+        let facts = self.facts().cloned().collect::<Vec<_>>();
+        for (connection_key, connection_value) in connections {
+            let row = connection_response::rows::decode_connection_response_row(
+                &connection_key,
+                &connection_value,
+            )?;
+            let Some(remote_endpoint) =
+                remote_endpoint_for_connection(&row, local_endpoint.endpoint)
+            else {
+                continue;
+            };
+            for fact in &facts {
+                if seeded >= limit {
+                    return Ok(seeded);
+                }
+                if !is_sync_seed_fact(fact)
+                    || !may_seed_fact_to_endpoint(fact, remote_endpoint, &endpoint_memberships)
+                {
+                    continue;
+                }
+                let have = sync_have_id::fact::SyncHaveIdFact {
+                    connection_id: row.connection_id,
+                    timestamp: fact.timestamp,
+                    event_id: fact.id,
+                };
+                let have_fact = Fact::new(
+                    FactScope::Global,
+                    fact.timestamp,
+                    sync_have_id::layout::encode_fact(&have)?,
+                );
+                if self.submit_fact(have_fact.clone()) {
+                    self.submit_intent(transit::send_on_connection_intent(
+                        transit::TransitSendOnConnection {
+                            connection_id: row.connection_id,
+                            fact_ids: vec![have_fact.id],
+                        },
+                    ))?;
+                    seeded += 1;
+                }
+            }
+        }
+        Ok(seeded)
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub(crate) fn is_sync_seed_fact(fact: &Fact) -> bool {
+    if fact.scope == FactScope::Local {
+        return false;
+    }
+    let Some(tag) = fact.bytes.first().copied() else {
+        return false;
+    };
+    if matches!(
+        tag,
+        sync_compare::layout::TYPE_SYNC_COMPARE
+            | sync_have_id::layout::TYPE_SYNC_HAVE_ID
+            | sync_need_id::layout::TYPE_SYNC_NEED_ID
+            | sync::layout::TYPE_SYNC_RANGE_REQUEST
+            | sync::layout::TYPE_SHARED_EVENT
+            | sync::layout::TYPE_ENCRYPTED_ROOT
+            | sync::layout::TYPE_KEY_WRAP_AVAILABLE
+    ) {
+        return false;
+    }
+    crate::event_modules::transit::create::require_sendable_fact(fact).is_ok()
+}
+
+fn remote_endpoint_for_connection(
+    row: &connection_response::rows::ConnectionResponseRow,
+    local_endpoint: [u8; 32],
+) -> Option<[u8; 32]> {
+    if row.from_endpoint == local_endpoint {
+        Some(row.to_endpoint)
+    } else if row.to_endpoint == local_endpoint {
+        Some(row.from_endpoint)
+    } else {
+        None
+    }
+}
+
+fn endpoint_memberships(store: &Store) -> Result<BTreeSet<([u8; 32], [u8; 32])>, String> {
+    let rows = store
+        .table_rows(identity_endpoint_shared::rows::ENDPOINT_SHARED_ROWS)
+        .map_err(|err| format!("load endpoint membership rows for sync seed: {err}"))?;
+    rows.into_iter()
+        .map(|(key, value)| {
+            identity_endpoint_shared::rows::decode_endpoint_shared_row(&key, &value)
+                .map(|row| (row.workspace_id, row.endpoint_id))
+        })
+        .collect()
+}
+
+fn may_seed_fact_to_endpoint(
+    fact: &Fact,
+    remote_endpoint: [u8; 32],
+    endpoint_memberships: &BTreeSet<([u8; 32], [u8; 32])>,
+) -> bool {
+    match &fact.scope {
+        FactScope::Global => true,
+        FactScope::Local => false,
+        FactScope::Scoped { kind, id } if kind.as_str() == "workspace" => {
+            endpoint_memberships.contains(&(*id, remote_endpoint))
+        }
+        FactScope::Scoped { .. } => false,
+    }
+}
 
 const SCHEMA_SOURCES: &[&str] = &[
     CORE_SCHEMA_SOURCE,
@@ -68,6 +241,7 @@ const ATOMIC_ROW_TABLES: &[TableName] = &[
     local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
     removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
     sealed_message::rows::MESSAGE_ROWS,
+    sealed_message::rows::OPENED_MESSAGE_ROWS,
     sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
     sealed_message::rows::SEALED_MESSAGE_ROWS,
     sync_compare::rows::SYNC_COMPARE_ROWS,
@@ -170,6 +344,28 @@ impl Projector for ProtocolProjector {
             signed_fact::layout::TYPE_SIGNED_FACT => {
                 let envelope = signed_fact::layout::decode_signed_fact(&fact.bytes)?;
                 match envelope.inner_type {
+                    identity_user_invite::layout::TYPE_USER_INVITE => {
+                        identity_user_invite::project::UserInviteProjector::new()
+                            .project(fact, context)
+                    }
+                    identity_user::layout::TYPE_USER => {
+                        identity_user::project::UserProjector::new().project(fact, context)
+                    }
+                    identity_admin::layout::TYPE_ADMIN => {
+                        identity_admin::project::AdminProjector::new().project(fact, context)
+                    }
+                    identity_endpoint_shared::layout::TYPE_ENDPOINT_SHARED => {
+                        identity_endpoint_shared::project::EndpointSharedProjector::new()
+                            .project(fact, context)
+                    }
+                    identity_device_invite::layout::TYPE_DEVICE_INVITE => {
+                        identity_device_invite::project::DeviceInviteProjector::new()
+                            .project(fact, context)
+                    }
+                    identity_invite_server::layout::TYPE_INVITE_SERVER => {
+                        identity_invite_server::project::InviteServerProjector::new()
+                            .project(fact, context)
+                    }
                     encryption::layout::TYPE_KEY_WRAP => {
                         encryption::project::EncryptionProjector::new().project(fact, context)
                     }
@@ -316,9 +512,12 @@ fn exact_matcher(role: Role) -> Box<dyn ContextMatcher> {
 
 #[derive(Debug, Clone)]
 pub struct ProtocolHandlers {
+    bootstrap_send: bootstrap_send::BootstrapSendRequestHandler,
     connection_response: connection_response_handler::ConnectionResponseHandler,
     handle_sync: handle_sync::HandleSyncHandler,
     respond_to_sync_compare: handle_sync::RespondToSyncCompareHandler,
+    request_sync_id: handle_sync::RequestSyncIdHandler,
+    respond_to_sync_need: handle_sync::RespondToSyncNeedHandler,
     materialize_key_wraps: materialize_key_wraps::MaterializeKeyWrapsHandler,
     network_send: network_send::NetworkSendHandler,
     purge_cascade: purge_cascade::PurgeCascadeHandler,
@@ -336,9 +535,12 @@ pub struct ProtocolHandlers {
 impl ProtocolHandlers {
     fn new() -> Self {
         Self {
+            bootstrap_send: bootstrap_send::BootstrapSendRequestHandler::new(),
             connection_response: connection_response_handler::ConnectionResponseHandler::new(),
             handle_sync: handle_sync::HandleSyncHandler::new(),
             respond_to_sync_compare: handle_sync::RespondToSyncCompareHandler::new(),
+            request_sync_id: handle_sync::RequestSyncIdHandler::new(),
+            respond_to_sync_need: handle_sync::RespondToSyncNeedHandler::new(),
             materialize_key_wraps: materialize_key_wraps::MaterializeKeyWrapsHandler::new(),
             network_send: network_send::NetworkSendHandler::new(),
             purge_cascade: purge_cascade::PurgeCascadeHandler::new(),
@@ -357,70 +559,126 @@ impl ProtocolHandlers {
     fn dispatch_all(
         &self,
         wake_loop: &mut WakeLoop,
+        store: &Store,
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String> {
         let mut total = DispatchReport::default();
         self.dispatch_one(
             wake_loop,
-            &self.connection_response,
+            &self.bootstrap_send,
+            store,
             limit_per_handler,
             &mut total,
         )?;
-        self.dispatch_one(wake_loop, &self.handle_sync, limit_per_handler, &mut total)?;
+        self.dispatch_one(
+            wake_loop,
+            &self.connection_response,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.handle_sync,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
         self.dispatch_one(
             wake_loop,
             &self.respond_to_sync_compare,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.request_sync_id,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.respond_to_sync_need,
+            store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
             &self.materialize_key_wraps,
+            store,
             limit_per_handler,
             &mut total,
         )?;
-        self.dispatch_one(wake_loop, &self.network_send, limit_per_handler, &mut total)?;
         self.dispatch_one(
             wake_loop,
             &self.purge_cascade,
+            store,
             limit_per_handler,
             &mut total,
         )?;
-        self.dispatch_one(wake_loop, &self.purge_event, limit_per_handler, &mut total)?;
+        self.dispatch_one(
+            wake_loop,
+            &self.purge_event,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
         self.dispatch_one(
             wake_loop,
             &self.purge_retired_recipient_material,
+            store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
             &self.receive_transit,
+            store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
             &self.retention_expiry,
+            store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
             &self.retention_floor,
+            store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
             &self.sync_index_update,
+            store,
             limit_per_handler,
             &mut total,
         )?;
-        self.dispatch_one(wake_loop, &self.transit, limit_per_handler, &mut total)?;
+        self.dispatch_one(
+            wake_loop,
+            &self.transit,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.network_send,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
         self.dispatch_one(
             wake_loop,
             &self.unwrap_key_wrap,
+            store,
             limit_per_handler,
             &mut total,
         )?;
@@ -431,15 +689,17 @@ impl ProtocolHandlers {
         &self,
         wake_loop: &mut WakeLoop,
         handler: &impl crate::core::handler_dispatch::IntentHandler,
+        store: &Store,
         limit: usize,
         total: &mut DispatchReport,
     ) -> Result<(), String> {
-        let report = wake_loop.dispatch_deferred_intents_with_fact_context(handler, limit)?;
+        let report = wake_loop
+            .dispatch_deferred_intents_with_fact_context_and_store(handler, store, limit)?;
         total.handled += report.handled;
         total.facts += report.facts;
         total.intents += report.intents;
         if report.handled == 0 {
-            let empty_context = HandlerContext::new();
+            let empty_context = HandlerContext::new().with_store(store);
             let report = wake_loop.dispatch_atomic_intents(handler, &empty_context, limit)?;
             total.handled += report.handled;
             total.facts += report.facts;
@@ -453,8 +713,9 @@ impl RuntimeHandlers for ProtocolHandlers {
     fn dispatch(
         &self,
         wake_loop: &mut WakeLoop,
+        store: &Store,
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String> {
-        self.dispatch_all(wake_loop, limit_per_handler)
+        self.dispatch_all(wake_loop, store, limit_per_handler)
     }
 }

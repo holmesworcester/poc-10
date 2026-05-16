@@ -1,14 +1,18 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
 use topo::core::intents::IntentExecution;
+use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
+use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::sync_compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 use topo::event_modules::sync_compare::layout as sync_compare_layout;
+use topo::event_modules::sync_have_id::layout as sync_have_id_layout;
 use topo::handlers::handle_sync as sync_intent;
 use topo::handlers::handle_sync::HandleSyncHandler;
 use topo::handlers::handle_sync::RespondToSyncCompareHandler;
 use topo::handlers::sync_index_update as index_intent;
 use topo::handlers::sync_index_update::SyncIndexUpdateHandler;
+use topo::handlers::transit;
 
 #[test]
 fn handle_sync_emits_need_id_for_missing_dependency() {
@@ -117,13 +121,10 @@ fn sync_index_update_handler_queues_until_durable_fact_lands() {
     bus.submit_intent(intent.clone()).expect("submit update");
 
     let handler = SyncIndexUpdateHandler::new();
-    let err = bus
+    let report = bus
         .dispatch_deferred_intents_with_fact_context(&handler, 10)
-        .expect_err("missing event fact must stay queued for retry");
-    assert!(
-        err.contains("missing fact"),
-        "unexpected error from sync_index_update handler: {err}"
-    );
+        .expect("missing event fact is not dispatchable yet");
+    assert_eq!(report.handled, 0);
 
     // The handler must not consume the intent until its exact event fact is
     // available through the deferred fact context.
@@ -206,21 +207,81 @@ fn respond_to_sync_compare_declares_compare_fact_as_exact_input() {
 }
 
 #[test]
-fn respond_to_sync_compare_stays_queued_until_range_index_context_exists() {
-    let fact = sync_compare_fact(true);
+fn respond_to_sync_compare_emits_local_summary_and_have_ids() {
+    let compare_fact = sync_compare_fact(true);
+    let in_range = event_fact([50; 32], 1_250);
+    let out_of_range = event_fact([51; 32], 9_999);
     let intent = sync_intent::respond_to_sync_compare_intent(sync_intent::RespondToSyncCompare {
-        compare_fact_id: fact.id,
+        compare_fact_id: compare_fact.id,
+    });
+    let handler = RespondToSyncCompareHandler::new();
+
+    let output = handler
+        .handle(
+            &intent,
+            &HandlerContext::with_facts([
+                compare_fact.clone(),
+                in_range.clone(),
+                out_of_range.clone(),
+            ]),
+        )
+        .expect("respond to compare");
+
+    assert!(output.purged_facts.is_empty());
+    assert_eq!(output.facts.len(), 2, "response compare + one have-id");
+    assert_eq!(output.intents.len(), 1);
+    let send = transit::decode_send_on_connection(&output.intents[0])
+        .expect("decode emitted transit send");
+    assert_eq!(send.connection_id, [31; 32]);
+    assert_eq!(
+        send.fact_ids,
+        output.facts.iter().map(|fact| fact.id).collect::<Vec<_>>()
+    );
+    let response =
+        sync_compare_layout::decode_fact(&output.facts[0].bytes).expect("decode response compare");
+    assert_eq!(response.connection_id, [31; 32]);
+    assert_eq!(response.range.start, 1_000);
+    assert_eq!(response.range.end, 2_000);
+    assert_eq!(response.summary.count, 1);
+    assert_ne!(response.summary.fingerprint, [0; 32]);
+    assert!(!response.response_requested);
+
+    let have = sync_have_id_layout::decode_fact(&output.facts[1].bytes).expect("decode have-id");
+    assert_eq!(have.connection_id, [31; 32]);
+    assert_eq!(have.timestamp, in_range.timestamp);
+    assert_eq!(have.event_id, in_range.id);
+}
+
+#[test]
+fn respond_to_sync_compare_dispatch_consumes_intent_after_emitting_response_facts() {
+    let compare_fact = sync_compare_fact(true);
+    let in_range = Fact::new(FactScope::Global, 1_250, b"in-range-event".to_vec());
+    let intent = sync_intent::respond_to_sync_compare_intent(sync_intent::RespondToSyncCompare {
+        compare_fact_id: compare_fact.id,
     });
     let mut bus = WakeLoop::new();
-    bus.submit_fact(fact);
+    bus.submit_fact(compare_fact);
+    bus.submit_fact(in_range);
     bus.submit_intent(intent).expect("submit response intent");
+    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("store");
+    bus.save(&store)
+        .expect("persist facts for response handler");
 
-    let err = bus
-        .dispatch_deferred_intents_with_fact_context(&RespondToSyncCompareHandler::new(), 10)
-        .expect_err("missing bounded range index must keep intent queued");
+    let report = bus
+        .dispatch_deferred_intents_with_fact_context_and_store(
+            &RespondToSyncCompareHandler::new(),
+            &store,
+            10,
+        )
+        .expect("range context emits response facts");
 
-    assert_eq!(err, sync_intent::SYNC_COMPARE_RANGE_INDEX_NOT_READY);
-    assert_eq!(bus.intents().len(), 1, "intent must remain queued");
+    assert_eq!(report.handled, 1);
+    assert_eq!(report.facts, 2);
+    assert_eq!(bus.intents().len(), 1);
+    assert_eq!(
+        bus.intents()[0].kind.as_str(),
+        transit::TRANSIT_SEND_ON_CONNECTION
+    );
 }
 
 #[test]

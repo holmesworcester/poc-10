@@ -29,4 +29,5 @@ pub struct ConnectionRequestFact {
     pub initiator_ephemeral_secret_event_id: EventId,
     pub initiator_ephemeral_public_key: EndpointId,
     pub from_listen_addr: Option<SocketAddr>,
+    pub to_listen_addr: Option<SocketAddr>,
 }

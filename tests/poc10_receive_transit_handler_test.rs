@@ -12,6 +12,8 @@ use topo::event_modules::encryption::fact::{
 };
 use topo::event_modules::encryption::{create as encryption_create, layout as encryption_layout};
 use topo::event_modules::signed_fact;
+use topo::event_modules::sync_compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
+use topo::event_modules::sync_compare::layout as sync_compare_layout;
 use topo::event_modules::transit::frame::{
     self as transit_frame, SealConnectionFrame, TransitFactBundle,
 };
@@ -133,6 +135,47 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_receive_provenance() {
     assert_eq!(provenance.request_id, Some(connection.request_id));
     assert_eq!(provenance.frame_hash, crypto::hash(&frame));
     assert_eq!(provenance.received_at_local_ms, RECEIVED_AT);
+}
+
+#[test]
+fn well_formed_frame_admits_sync_compare_and_records_receive_provenance() {
+    let (connection_fact, connection) = connection_fact();
+    let compare_bytes = sync_compare_layout::encode_fact(&SyncCompareFact {
+        connection_id: connection_fact.id,
+        range: TimestampRange { start: 10, end: 20 },
+        summary: RangeSummary {
+            count: 0,
+            fingerprint: [0; 32],
+        },
+        response_requested: true,
+    })
+    .expect("sync compare");
+    let frame = transit_frame::seal_connection_frame(SealConnectionFrame {
+        connection_id: connection_fact.id,
+        sender_endpoint_id: connection.from_endpoint,
+        receiver_endpoint_id: connection.to_endpoint,
+        connection_secret: connection.connection_secret,
+        nonce: [29; 24],
+        facts: TransitFactBundle::from_bytes([compare_bytes.clone()]),
+    })
+    .expect("seal transit frame");
+    let intent = receive_intent(frame);
+
+    let output = ReceiveTransitHandler::new()
+        .handle(&intent, &HandlerContext::with_facts([connection_fact]))
+        .expect("receive transit opens sync compare");
+
+    assert_eq!(output.facts.len(), 2);
+    let admitted = Fact::new(FactScope::Global, 0, compare_bytes);
+    assert!(output.facts.iter().any(|fact| *fact == admitted));
+    let provenance_fact = output
+        .facts
+        .iter()
+        .find(|fact| fact.scope == FactScope::Local)
+        .expect("local provenance fact");
+    let provenance =
+        transit_received::layout::decode_fact(&provenance_fact.bytes).expect("decode provenance");
+    assert_eq!(provenance.received_fact_id, admitted.id);
 }
 
 #[test]

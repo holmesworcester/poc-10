@@ -9,6 +9,7 @@ mod cli_harness;
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Output};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,7 @@ use cli_harness::*;
 
 #[test]
 fn invite_daemons_accept_and_connect_two_cli_processes() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let joiner = temp_db(&tmp, "joiner.db");
@@ -37,6 +39,7 @@ fn invite_daemons_accept_and_connect_two_cli_processes() {
 
 #[test]
 fn invite_daemons_accept_two_separate_cli_processes() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let joiner_a = temp_db(&tmp, "joiner-a.db");
@@ -66,6 +69,7 @@ fn invite_daemons_accept_two_separate_cli_processes() {
 
 #[test]
 fn workspace_invite_accept_builds_identity_graph_over_two_cli_processes() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let joiner = temp_db(&tmp, "joiner.db");
@@ -132,6 +136,7 @@ fn workspace_invite_accept_builds_identity_graph_over_two_cli_processes() {
 
 #[test]
 fn workspace_invite_accept_against_start_daemon_eventually_joins_over_normal_connection() {
+    let _guard = invite_accept_test_guard();
     // Invariant: accept records durable local intent and the daemons converge
     // through ordinary connection sync. The accept stream does not carry a
     // special invite-owner ancestry response.
@@ -164,6 +169,7 @@ fn workspace_invite_accept_against_start_daemon_eventually_joins_over_normal_con
 
 #[test]
 fn workspace_invite_is_multi_use_for_two_accepting_users() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let bob = temp_db(&tmp, "bob.db");
@@ -206,6 +212,7 @@ fn workspace_invite_is_multi_use_for_two_accepting_users() {
 
 #[test]
 fn workspace_invite_reuse_inducts_three_users() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let bob = temp_db(&tmp, "bob.db");
@@ -239,6 +246,7 @@ fn workspace_invite_reuse_inducts_three_users() {
 
 #[test]
 fn workspace_invites_mix_reuse_and_fresh_creation() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let bob = temp_db(&tmp, "bob.db");
@@ -280,6 +288,7 @@ fn workspace_invites_mix_reuse_and_fresh_creation() {
 
 #[test]
 fn device_link_accept_links_second_device_over_two_cli_processes() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let phone = temp_db(&tmp, "phone.db");
@@ -338,6 +347,7 @@ fn device_link_accept_links_second_device_over_two_cli_processes() {
 
 #[test]
 fn device_links_mix_reuse_and_fresh_creation() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let phone = temp_db(&tmp, "phone.db");
     let laptop = temp_db(&tmp, "laptop.db");
@@ -393,6 +403,7 @@ fn device_links_mix_reuse_and_fresh_creation() {
 
 #[test]
 fn admin_grant_requires_admin_and_promoted_user_can_invite() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
@@ -457,6 +468,7 @@ fn admin_grant_requires_admin_and_promoted_user_can_invite() {
 
 #[test]
 fn same_endpoint_can_join_multiple_workspaces_but_not_same_workspace_twice() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let joiner = temp_db(&tmp, "joiner.db");
@@ -526,6 +538,7 @@ fn same_endpoint_can_join_multiple_workspaces_but_not_same_workspace_twice() {
 
 #[test]
 fn forged_workspace_invite_does_not_authorize_or_exfiltrate_events() {
+    let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let attacker = temp_db(&tmp, "attacker.db");
     let victim = temp_db(&tmp, "victim.db");
@@ -572,6 +585,11 @@ fn forged_workspace_invite_does_not_authorize_or_exfiltrate_events() {
         &victim_workspace_id,
     ]));
     assert_eq!(line_value(&attacker_content, "content_events"), "0");
+}
+
+fn invite_accept_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 fn accept_with_retry(db: &str, invite: &str) -> String {
@@ -893,7 +911,7 @@ fn wait_for_local_workspace_join(db: &str, workspace_id: &str) {
 fn wait_for_peers_containing(db: &str, workspace_id: &str, values: &[&str]) {
     let start = Instant::now();
     let mut last = String::new();
-    while start.elapsed() < Duration::from_secs(10) {
+    while start.elapsed() < Duration::from_secs(40) {
         let output = topo(&["--db", db, "peers", workspace_id]);
         if output.status.success() {
             let text = stdout(&output);

@@ -14,9 +14,11 @@ fn match_help_is_served_by_the_product_boundary() {
     let stdout = assert_success(match_cli(&["--help"]));
 
     assert!(
-        stdout.contains("match --db PATH create-workspace --public-key HEX64 --name NAME")
+        stdout.contains("match --db PATH create-workspace")
+            && stdout.contains("NAME --username USER --devicename DEVICE")
             && stdout.contains("match --db PATH workspaces")
             && stdout.contains("match --db PATH count")
+            && stdout.contains("match --db PATH start --listen IP PORT")
             && stdout.contains("target core runtime facade")
             && !stdout.contains("legacy"),
         "top-level help should describe the target app boundary; got:\n{stdout}"
@@ -34,7 +36,8 @@ fn match_without_a_command_does_not_enter_legacy_cli() {
     let stderr = cli_harness::stderr(&output);
     assert!(
         stderr.contains("missing command")
-            && stderr.contains("match --db PATH create-workspace --public-key HEX64 --name NAME")
+            && stderr.contains("match --db PATH create-workspace")
+            && stderr.contains("NAME --username USER --devicename DEVICE")
             && !stderr.contains("legacy"),
         "missing command should be rejected at the target app boundary; got:\n{stderr}"
     );
@@ -51,9 +54,37 @@ fn match_demo_is_rejected_at_the_product_boundary() {
     let stderr = cli_harness::stderr(&output);
     assert!(
         stderr.contains("command `demo` is not ported to the target runtime yet")
-            && stderr.contains("match --db PATH create-workspace --public-key HEX64 --name NAME")
+            && stderr.contains("match --db PATH create-workspace")
+            && stderr.contains("NAME --username USER --devicename DEVICE")
             && !stderr.contains("walkthrough"),
         "`match demo` should be rejected by the real CLI boundary; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn match_create_workspace_accepts_positional_identity_shape() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = temp_db(&temp, "match.db");
+
+    let stdout = assert_success(match_cli(&[
+        "--db",
+        &db,
+        "create-workspace",
+        "Runtime Team",
+        "--username",
+        "alice",
+        "--devicename",
+        "alice-laptop",
+    ]));
+
+    let workspace_id = line_value(&stdout, "workspace_id");
+    assert_eq!(workspace_id.len(), 64);
+    assert!(stdout.contains("name: Runtime Team"));
+
+    let workspaces = assert_success(match_cli(&["--db", &db, "workspaces"]));
+    assert!(
+        workspaces.contains("workspaces: 1") && workspaces.contains(&workspace_id),
+        "created workspace should be projected through target rows; got:\n{workspaces}"
     );
 }
 
@@ -123,5 +154,5 @@ fn match_workspace_reads_use_target_rows() {
     );
 
     let count = assert_success(match_cli(&["--db", &db, "count"]));
-    assert_eq!(count.trim(), "workspace_rows: 2");
+    assert_eq!(line_value(&count, "workspace_rows"), "2");
 }

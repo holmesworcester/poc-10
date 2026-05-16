@@ -21,8 +21,9 @@ use crate::event_modules::{
     sealed_message, signed_fact, sync, sync_compare, sync_have_id, sync_need_id, transit_received,
 };
 use crate::handlers::{
-    connection, connection_response as connection_response_handler, handle_sync, network_send,
-    purge_cascade, receive_transit, retention_expiry, retention_floor, sync_index_update, transit,
+    bootstrap_send, connection, connection_response as connection_response_handler, handle_sync,
+    network_send, purge_cascade, receive_transit, retention_expiry, retention_floor,
+    sync_index_update, transit,
 };
 
 /// Concrete protocol selected by the `match` binary.
@@ -75,6 +76,7 @@ pub enum IntentExecutionKind {
 pub struct HandlerRegistration {
     pub module: &'static str,
     pub handler: &'static str,
+    pub runtime_field: &'static str,
     pub intents: &'static [&'static str],
 }
 
@@ -516,6 +518,11 @@ pub const INTENTS: &[IntentRegistration] = &[
         declared_by: "core",
     },
     IntentRegistration {
+        kind: bootstrap_send::BOOTSTRAP_SEND_REQUEST,
+        execution: IntentExecutionKind::Deferred,
+        declared_by: "handlers::bootstrap_send",
+    },
+    IntentRegistration {
         kind: connection::CONNECTION_MARK_SENT,
         execution: IntentExecutionKind::Deferred,
         declared_by: "handlers::connection",
@@ -571,6 +578,16 @@ pub const INTENTS: &[IntentRegistration] = &[
         declared_by: "handlers::handle_sync",
     },
     IntentRegistration {
+        kind: handle_sync::REQUEST_SYNC_ID,
+        execution: IntentExecutionKind::Deferred,
+        declared_by: "handlers::handle_sync",
+    },
+    IntentRegistration {
+        kind: handle_sync::RESPOND_TO_SYNC_NEED,
+        execution: IntentExecutionKind::Deferred,
+        declared_by: "handlers::handle_sync",
+    },
+    IntentRegistration {
         kind: network_send::NETWORK_SEND_FRAME,
         execution: IntentExecutionKind::Deferred,
         declared_by: "handlers::network_send",
@@ -619,68 +636,99 @@ pub const INTENTS: &[IntentRegistration] = &[
 
 pub const HANDLERS: &[HandlerRegistration] = &[
     HandlerRegistration {
+        module: "bootstrap_send",
+        handler: "BootstrapSendRequestHandler",
+        runtime_field: "bootstrap_send",
+        intents: &[bootstrap_send::BOOTSTRAP_SEND_REQUEST],
+    },
+    HandlerRegistration {
         module: "connection_response",
         handler: "ConnectionResponseHandler",
+        runtime_field: "connection_response",
         intents: &[connection_response_handler::CONNECTION_RESPONSE],
     },
     HandlerRegistration {
         module: "handle_sync",
         handler: "HandleSyncHandler",
+        runtime_field: "handle_sync",
         intents: &[handle_sync::PROCESS_SYNC_INBOUND, handle_sync::SYNC_NEED_ID],
     },
     HandlerRegistration {
         module: "handle_sync",
         handler: "RespondToSyncCompareHandler",
+        runtime_field: "respond_to_sync_compare",
         intents: &[handle_sync::RESPOND_TO_SYNC_COMPARE],
+    },
+    HandlerRegistration {
+        module: "handle_sync",
+        handler: "RequestSyncIdHandler",
+        runtime_field: "request_sync_id",
+        intents: &[handle_sync::REQUEST_SYNC_ID],
+    },
+    HandlerRegistration {
+        module: "handle_sync",
+        handler: "RespondToSyncNeedHandler",
+        runtime_field: "respond_to_sync_need",
+        intents: &[handle_sync::RESPOND_TO_SYNC_NEED],
     },
     HandlerRegistration {
         module: "materialize_key_wraps",
         handler: "MaterializeKeyWrapsHandler",
+        runtime_field: "materialize_key_wraps",
         intents: &[encryption::intent::MATERIALIZE_KEY_WRAPS],
     },
     HandlerRegistration {
         module: "network_send",
         handler: "NetworkSendHandler",
+        runtime_field: "network_send",
         intents: &[network_send::NETWORK_SEND_FRAME],
     },
     HandlerRegistration {
         module: "purge_event",
         handler: "PurgeEventHandler",
+        runtime_field: "purge_event",
         intents: &[sealed_message::intent::PURGE_EVENT],
     },
     HandlerRegistration {
         module: "purge_cascade",
         handler: "PurgeCascadeHandler",
+        runtime_field: "purge_cascade",
         intents: &[purge_cascade::CASCADE_CHILD_PURGE],
     },
     HandlerRegistration {
         module: "purge_retired_recipient_material",
         handler: "PurgeRetiredRecipientMaterialHandler",
+        runtime_field: "purge_retired_recipient_material",
         intents: &[encryption::intent::PURGE_RETIRED_RECIPIENT_MATERIAL],
     },
     HandlerRegistration {
         module: "receive_transit",
         handler: "ReceiveTransitHandler",
+        runtime_field: "receive_transit",
         intents: &[receive_transit::RECEIVE_TRANSIT_FRAME],
     },
     HandlerRegistration {
         module: "retention_expiry",
         handler: "RetentionExpiryHandler",
+        runtime_field: "retention_expiry",
         intents: &[retention_expiry::EXPIRE_MESSAGE],
     },
     HandlerRegistration {
         module: "retention_floor",
         handler: "RetentionFloorHandler",
+        runtime_field: "retention_floor",
         intents: &[retention_floor::APPLY_RETENTION_FLOOR],
     },
     HandlerRegistration {
         module: "sync_index_update",
         handler: "SyncIndexUpdateHandler",
+        runtime_field: "sync_index_update",
         intents: &[sync_index_update::RECORD_INDEXED_EVENT],
     },
     HandlerRegistration {
         module: "transit",
         handler: "TransitSendOnConnectionHandler",
+        runtime_field: "transit",
         intents: &[
             transit::TRANSIT_SEND_ON_CONNECTION,
             transit::TRANSIT_WRAP_CONNECTION_BATCH,
@@ -689,6 +737,7 @@ pub const HANDLERS: &[HandlerRegistration] = &[
     HandlerRegistration {
         module: "unwrap_key_wrap",
         handler: "UnwrapKeyWrapHandler",
+        runtime_field: "unwrap_key_wrap",
         intents: &[encryption::intent::UNWRAP_KEY_WRAP],
     },
 ];

@@ -3,6 +3,7 @@
 //! Concrete handlers should appear here only when they own bounded stateful
 //! effects. Projection-owned row materialization stays under event modules.
 
+pub mod bootstrap_send;
 pub mod connection;
 pub mod connection_response;
 pub mod handle_sync;

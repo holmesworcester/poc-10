@@ -1,6 +1,8 @@
+use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput};
+use crate::event_modules::encryption;
 use crate::event_modules::signed_fact;
 
 use super::super::fact::SealedMessageFact;
@@ -10,11 +12,12 @@ use super::super::intent::{
 use super::super::layout;
 use super::super::matchers;
 use super::super::rows::{
-    message_key, message_tombstone_row, sealed_message_row, SealedMessageRow, MESSAGE_ROWS,
+    message_key, message_row, message_tombstone_row, opened_message_row, sealed_message_row,
+    MessageRow, OpenedMessageRow, SealedMessageRow, MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
     SEALED_MESSAGE_ROWS,
 };
 use super::validation::{
-    has_matched_secret, require_fact_scope, validate_deletion_context, validate_signer_context,
+    matched_secret_payload, require_fact_scope, validate_deletion_context, validate_signer_context,
 };
 
 pub(super) fn project_message(
@@ -80,6 +83,13 @@ fn project_decoded_message(
             )
             .intent(
                 AtomicIntent::DeleteRow(TableDelete {
+                    table: OPENED_MESSAGE_ROWS,
+                    key: row_key.clone(),
+                })
+                .into_intent(),
+            )
+            .intent(
+                AtomicIntent::DeleteRow(TableDelete {
                     table: SEALED_MESSAGE_ROWS,
                     key: row_key,
                 })
@@ -106,7 +116,7 @@ fn project_decoded_message(
         message.signer_id,
         signed_public_key,
     )?;
-    let has_secret = has_matched_secret(context, &secret_need)?;
+    let secret_payload = matched_secret_payload(context, &secret_need)?;
 
     let sealed_row = AtomicIntent::PutRow(sealed_message_row(SealedMessageRow {
         workspace_id: message.workspace_id,
@@ -125,16 +135,71 @@ fn project_decoded_message(
     })?)
     .into_intent();
 
-    if has_secret {
+    if let Some(secret_payload) = secret_payload {
+        let text = decrypt_text(&message, secret_payload)?;
         return Ok(ProjectionOutput::new()
+            .need(signer_need)
             .need(deletion_need)
-            .intent(sealed_row));
+            .intent(sealed_row)
+            .intent(
+                AtomicIntent::PutRow(message_row(MessageRow {
+                    workspace_id: message.workspace_id,
+                    message_id: fact.id,
+                    created_at_ms: message.created_at_ms,
+                    author_user_id: message.author_user_id,
+                    signer_id: message.signer_id,
+                    minute: message.minute,
+                    leaf_id: message.leaf_id,
+                }))
+                .into_intent(),
+            )
+            .intent(
+                AtomicIntent::PutRow(opened_message_row(OpenedMessageRow {
+                    workspace_id: message.workspace_id,
+                    message_id: fact.id,
+                    created_at_ms: message.created_at_ms,
+                    author_user_id: message.author_user_id,
+                    signer_id: message.signer_id,
+                    text,
+                }))
+                .into_intent(),
+            ));
     }
 
     Ok(ProjectionOutput::new()
+        .need(signer_need)
         .need(secret_need)
         .need(deletion_need)
         .intent(sealed_row))
+}
+
+fn decrypt_text(message: &SealedMessageFact, secret_payload: &Fact) -> Result<String, String> {
+    let key = if let Ok(secret) = encryption::layout::decode_local_key_secret(&secret_payload.bytes)
+    {
+        if secret.workspace_id != message.workspace_id || secret.frontier_id != message.frontier_id
+        {
+            return Err("sealed-message root secret does not match message".to_string());
+        }
+        secret.key_secret
+    } else {
+        let node = encryption::layout::decode_local_history_node_secret(&secret_payload.bytes)
+            .map_err(|_| "sealed-message secret context is not local key material".to_string())?;
+        if node.workspace_id != message.workspace_id || node.frontier_id != message.frontier_id {
+            return Err("sealed-message history secret does not match message".to_string());
+        }
+        node.node_secret
+    };
+    let plaintext = crypto::xchacha20poly1305_decrypt(
+        &key,
+        &crate::event_modules::sealed_message::create::associated_data(
+            message.workspace_id,
+            message.frontier_id,
+            message.minute,
+        ),
+        &message.nonce,
+        &message.ciphertext,
+    )?;
+    crate::event_modules::sealed_message::create::recover_text(&plaintext)
 }
 
 fn deletion_reason_fact_id(

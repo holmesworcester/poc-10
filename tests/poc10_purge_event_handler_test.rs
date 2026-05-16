@@ -31,11 +31,11 @@ fn purge_event_missing_target_keeps_intent_queued() {
 
     bus.submit_fact(deletion);
     bus.submit_intent(intent).expect("submit purge intent");
-    let err = bus
+    let report = bus
         .dispatch_deferred_intents_with_fact_context(&PurgeEventHandler::new(), 10)
-        .expect_err("missing target keeps purge intent queued");
+        .expect("missing target leaves purge intent queued");
 
-    assert!(err.contains("missing fact"), "{err}");
+    assert_eq!(report.handled, 0);
     assert_eq!(bus.intents().len(), 1);
 }
 
@@ -48,11 +48,11 @@ fn purge_event_missing_proof_keeps_intent_queued() {
 
     bus.submit_fact(message.clone());
     bus.submit_intent(intent).expect("submit purge intent");
-    let err = bus
+    let report = bus
         .dispatch_deferred_intents_with_fact_context(&PurgeEventHandler::new(), 10)
-        .expect_err("missing proof keeps purge intent queued");
+        .expect("missing proof leaves purge intent queued");
 
-    assert!(err.contains("missing fact"), "{err}");
+    assert_eq!(report.handled, 0);
     assert!(bus.has_fact(&message.id));
     assert_eq!(bus.intents().len(), 1);
 }

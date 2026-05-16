@@ -33,6 +33,7 @@ impl IntentHandler for UnwrapKeyWrapHandler {
             input.key_wrap_id,
             input.local_recipient_key_id,
             input.recipient_key_id,
+            input.frontier_id,
         ])
     }
 
@@ -41,8 +42,14 @@ impl IntentHandler for UnwrapKeyWrapHandler {
         let key_wrap = context.require_fact(&input.key_wrap_id)?;
         let local_recipient_key = context.require_fact(&input.local_recipient_key_id)?;
         let recipient = context.require_fact(&input.recipient_key_id)?;
-        let secret =
-            create::unwrap_key_wrap_fact(&input, key_wrap, local_recipient_key, recipient)?;
+        let frontier = context.require_fact(&input.frontier_id)?;
+        let secret = create::unwrap_key_wrap_fact(
+            &input,
+            key_wrap,
+            local_recipient_key,
+            recipient,
+            frontier,
+        )?;
         Ok(HandlerOutput::new().fact(secret))
     }
 }

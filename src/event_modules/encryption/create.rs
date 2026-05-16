@@ -92,6 +92,7 @@ pub fn unwrap_key_wrap_fact(
     key_wrap_fact: &Fact,
     local_recipient_key_fact: &Fact,
     recipient_fact: &Fact,
+    frontier_fact: &Fact,
 ) -> Result<Fact, String> {
     if key_wrap_fact.id != intent.key_wrap_id {
         return Err("key wrap fact id does not match unwrap intent".to_string());
@@ -101,6 +102,9 @@ pub fn unwrap_key_wrap_fact(
     }
     if recipient_fact.id != intent.recipient_key_id {
         return Err("recipient fact id does not match unwrap intent".to_string());
+    }
+    if frontier_fact.id != intent.frontier_id {
+        return Err("frontier fact id does not match unwrap intent".to_string());
     }
 
     let envelope = signed_fact::layout::decode_signed_fact(&key_wrap_fact.bytes)?;
@@ -113,6 +117,13 @@ pub fn unwrap_key_wrap_fact(
     let recipient = layout::decode_recipient_key(&recipient_fact.bytes)?;
     if recipient.workspace_id != intent.workspace_id {
         return Err("recipient key workspace does not match unwrap intent".to_string());
+    }
+    let frontier = layout::decode_removal_frontier(&frontier_fact.bytes)?;
+    if frontier.workspace_id != intent.workspace_id {
+        return Err("removal frontier workspace does not match unwrap intent".to_string());
+    }
+    if frontier.owner_endpoint_id != wrap.signer_endpoint_id {
+        return Err("key wrap signer does not own unwrap frontier".to_string());
     }
     let local = layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
     require_local_recipient_key(intent, &recipient, &local)?;
@@ -149,6 +160,9 @@ pub fn materialize_signed_key_wrap_fact(
     let signer = signed_fact::layout::decode_local_signer_secret(&signer_secret_fact.bytes)?;
     if signer_secret_fact.id != intent.signer_secret_fact_id {
         return Err("signer secret fact id does not match materialize intent".to_string());
+    }
+    if signer.workspace_id != intent.workspace_id {
+        return Err("signer secret workspace does not match materialize intent".to_string());
     }
     let key_wrap = layout::decode_key_wrap(&wrap.bytes)?;
     if signer.signer_id != key_wrap.signer_endpoint_id {

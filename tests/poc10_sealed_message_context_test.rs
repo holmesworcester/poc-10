@@ -1,8 +1,11 @@
+use topo::core::crypto;
 use topo::core::facts::Fact;
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, Projector};
 use topo::core::wake_loop::WakeLoop;
+use topo::event_modules::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
+use topo::event_modules::encryption::layout as encryption_layout;
 use topo::event_modules::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact, NONCE_BYTES,
 };
@@ -13,31 +16,37 @@ use topo::event_modules::sealed_message::rows::{
     decode_message_tombstone_row, decode_sealed_message_row, message_key, MESSAGE_ROWS,
     MESSAGE_TOMBSTONE_ROWS, SEALED_MESSAGE_ROWS,
 };
-use topo::event_modules::sealed_message::{layout, project};
+use topo::event_modules::sealed_message::{create as sealed_create, layout, project};
+use topo::protocol::runtime::ProtocolProjector;
 
 const DEFAULT_AUTHOR: [u8; 32] = [6; 32];
+const DEFAULT_SECRET: [u8; 32] = [0x66; 32];
 
 #[test]
 fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
     let workspace = [7; 32];
     let signer = [8; 32];
-    let frontier = [9; 32];
+    let frontier = removal_frontier_fact(workspace, [0x71; 32], 9);
+    let frontier_id = frontier.id;
     let leaf = [0b1010_1111; 32];
-    let message = message_fact(workspace, signer, frontier, 42, leaf);
+    let message = message_fact(workspace, signer, frontier_id, 42, leaf);
     let signer_fact = signer_fact(workspace, signer);
-    let secret_root = secret_node_fact(workspace, frontier, 0, 99, 0, [0; 32]);
+    let secret_root = local_key_secret_fact(workspace, frontier_id, [0x71; 32]);
     let mut prefix = [0; 32];
     prefix[0] = 0b1010_1111;
-    let secret_internal = secret_node_fact(workspace, frontier, 40, 50, 1, prefix);
+    let secret_internal = secret_node_fact(workspace, frontier_id, 40, 50, 1, prefix);
+    let frontier_matcher =
+        ExactSelectorMatcher::new(topo::event_modules::encryption::matchers::frontier_role());
     let signer_matcher = ExactSelectorMatcher::new(context::signer_role());
     let deletion_matcher = ExactSelectorMatcher::new(context::deletion_role());
     let secret_matcher = SecretCoverageMatcher::new();
     let matchers = [
+        &frontier_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
         &deletion_matcher as &dyn ContextMatcher,
         &secret_matcher as &dyn ContextMatcher,
     ];
-    let projector = project::SealedMessageProjector::new();
+    let projector = ProtocolProjector;
     let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
@@ -53,7 +62,7 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
     assert_eq!(signer_seen.wakes, 1);
     assert_eq!(signer_seen.intents, 1);
     let standing = bus.context(&message.id).expect("message still waiting");
-    assert_eq!(standing.needs.len(), 2);
+    assert_eq!(standing.needs.len(), 3);
     assert_eq!(bus.intents().len(), 1);
     assert_eq!(bus.intents()[0].kind.as_str(), "put_row");
     let sealed_row = match AtomicIntent::from_intent(&bus.intents()[0], &[SEALED_MESSAGE_ROWS])
@@ -67,9 +76,10 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
         decode_sealed_message_row(&sealed_row.key, &sealed_row.value)
             .expect("decode sealed row")
             .ciphertext,
-        b"sealed".to_vec()
+        message_body(&message).ciphertext
     );
 
+    bus.submit_fact(frontier);
     bus.submit_fact(secret_root);
     bus.submit_fact(secret_internal);
     let covered = bus
@@ -77,9 +87,9 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
         .expect("secret coverage wakes message");
 
     assert!(covered.wakes >= 1);
-    assert_eq!(covered.intents, 0);
-    assert_eq!(bus.context(&message.id).unwrap().needs.len(), 1);
-    assert_eq!(bus.intents().len(), 1);
+    assert_eq!(covered.intents, 2);
+    assert_eq!(bus.context(&message.id).unwrap().needs.len(), 2);
+    assert_eq!(bus.intents().len(), 3);
 
     let deletion = deletion_fact(workspace, message.id);
     bus.submit_fact(deletion);
@@ -87,11 +97,11 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
         .drain(&projector, &matchers, 10)
         .expect("deletion wakes covered message");
     assert_eq!(purged.wakes, 1);
-    assert_eq!(purged.intents, 4);
+    assert_eq!(purged.intents, 5);
     assert!(bus.context(&message.id).is_none());
-    assert_eq!(bus.intents().len(), 5);
-    assert_eq!(bus.intents()[1].kind.as_str(), "put_row");
-    let tombstone = match AtomicIntent::from_intent(&bus.intents()[1], &[MESSAGE_TOMBSTONE_ROWS])
+    assert_eq!(bus.intents().len(), 8);
+    assert_eq!(bus.intents()[3].kind.as_str(), "put_row");
+    let tombstone = match AtomicIntent::from_intent(&bus.intents()[3], &[MESSAGE_TOMBSTONE_ROWS])
         .expect("tombstone row intent")
     {
         AtomicIntent::PutRow(row) => row,
@@ -103,26 +113,28 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
             .authored_minute,
         42
     );
-    assert_eq!(bus.intents()[2].kind.as_str(), "delete_row");
-    assert_eq!(bus.intents()[3].kind.as_str(), "delete_row");
-    assert_eq!(bus.intents()[4].kind.as_str(), "purge_event");
+    assert_eq!(bus.intents()[4].kind.as_str(), "delete_row");
+    assert_eq!(bus.intents()[5].kind.as_str(), "delete_row");
+    assert_eq!(bus.intents()[6].kind.as_str(), "delete_row");
+    assert_eq!(bus.intents()[7].kind.as_str(), "purge_event");
 
-    let secret_leaf = secret_node_fact(workspace, frontier, 42, 42, 32, leaf);
+    let secret_leaf = secret_node_fact(workspace, frontier_id, 42, 42, 32, leaf);
     bus.submit_fact(secret_leaf);
     let duplicate = bus
         .drain(&projector, &matchers, 10)
         .expect("extra secret offer does not reopen");
     assert_eq!(duplicate.intents, 0);
-    assert_eq!(bus.intents().len(), 5);
+    assert_eq!(bus.intents().len(), 8);
 }
 
 #[test]
 fn deletion_update_purges_message_before_keys_arrive() {
     let workspace = [17; 32];
     let signer = [18; 32];
-    let frontier = [19; 32];
+    let frontier = removal_frontier_fact(workspace, [0x72; 32], 19);
+    let frontier_id = frontier.id;
     let leaf = [20; 32];
-    let message = message_fact(workspace, signer, frontier, 42, leaf);
+    let message = message_fact(workspace, signer, frontier_id, 42, leaf);
     let deletion = deletion_fact(workspace, message.id);
     let signer_matcher = ExactSelectorMatcher::new(context::signer_role());
     let deletion_matcher = ExactSelectorMatcher::new(context::deletion_role());
@@ -132,7 +144,7 @@ fn deletion_update_purges_message_before_keys_arrive() {
         &deletion_matcher as &dyn ContextMatcher,
         &secret_matcher as &dyn ContextMatcher,
     ];
-    let projector = project::SealedMessageProjector::new();
+    let projector = ProtocolProjector;
     let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
@@ -143,39 +155,45 @@ fn deletion_update_purges_message_before_keys_arrive() {
         .expect("deletion purges without keys");
 
     assert_eq!(purged.wakes, 1);
-    assert_eq!(purged.intents, 4);
+    assert_eq!(purged.intents, 5);
     assert!(bus.context(&message.id).is_none());
     assert_eq!(bus.intents()[0].kind.as_str(), "put_row");
     assert_eq!(bus.intents()[1].kind.as_str(), "delete_row");
     assert_eq!(bus.intents()[2].kind.as_str(), "delete_row");
-    assert_eq!(bus.intents()[3].kind.as_str(), "purge_event");
+    assert_eq!(bus.intents()[3].kind.as_str(), "delete_row");
+    assert_eq!(bus.intents()[4].kind.as_str(), "purge_event");
 
     bus.submit_fact(signer_fact(workspace, signer));
-    bus.submit_fact(secret_node_fact(workspace, frontier, 0, 99, 0, [0; 32]));
+    bus.submit_fact(frontier);
+    bus.submit_fact(local_key_secret_fact(workspace, frontier_id, [0x72; 32]));
     let later_context = bus
         .drain(&projector, &matchers, 10)
         .expect("later keys do not reopen purged message");
     assert_eq!(later_context.intents, 0);
-    assert_eq!(bus.intents().len(), 4);
+    assert_eq!(bus.intents().len(), 5);
 }
 
 #[test]
 fn non_author_deletion_does_not_purge_or_wake_message() {
     let workspace = [21; 32];
     let signer = [22; 32];
-    let frontier = [23; 32];
+    let frontier = removal_frontier_fact(workspace, [0x73; 32], 23);
+    let frontier_id = frontier.id;
     let leaf = [24; 32];
-    let message = message_fact(workspace, signer, frontier, 42, leaf);
+    let message = message_fact(workspace, signer, frontier_id, 42, leaf);
     let wrong_deletion = deletion_fact_by_author(workspace, message.id, [25; 32]);
     let signer_matcher = ExactSelectorMatcher::new(context::signer_role());
     let deletion_matcher = ExactSelectorMatcher::new(context::deletion_role());
     let secret_matcher = SecretCoverageMatcher::new();
+    let frontier_matcher =
+        ExactSelectorMatcher::new(topo::event_modules::encryption::matchers::frontier_role());
     let matchers = [
+        &frontier_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
         &deletion_matcher as &dyn ContextMatcher,
         &secret_matcher as &dyn ContextMatcher,
     ];
-    let projector = project::SealedMessageProjector::new();
+    let projector = ProtocolProjector;
     let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
@@ -190,12 +208,13 @@ fn non_author_deletion_does_not_purge_or_wake_message() {
     assert_eq!(bus.context(&message.id).unwrap().needs.len(), 3);
 
     bus.submit_fact(signer_fact(workspace, signer));
-    bus.submit_fact(secret_node_fact(workspace, frontier, 0, 99, 0, [0; 32]));
+    bus.submit_fact(frontier);
+    bus.submit_fact(local_key_secret_fact(workspace, frontier_id, [0x73; 32]));
     bus.drain(&projector, &matchers, 10)
         .expect("valid context still projects sealed row");
 
-    assert_eq!(bus.context(&message.id).unwrap().needs.len(), 1);
-    assert_eq!(bus.intents().len(), 1);
+    assert_eq!(bus.context(&message.id).unwrap().needs.len(), 2);
+    assert_eq!(bus.intents().len(), 3);
     assert_eq!(bus.intents()[0].kind.as_str(), "put_row");
 }
 
@@ -203,8 +222,8 @@ fn non_author_deletion_does_not_purge_or_wake_message() {
 fn deletion_before_message_purges_when_target_later_arrives() {
     let workspace = [26; 32];
     let signer = [27; 32];
-    let frontier = [28; 32];
-    let message = message_fact(workspace, signer, frontier, 42, [29; 32]);
+    let frontier = removal_frontier_fact(workspace, [0x74; 32], 28);
+    let message = message_fact(workspace, signer, frontier.id, 42, [29; 32]);
     let deletion = deletion_fact(workspace, message.id);
     let signer_matcher = ExactSelectorMatcher::new(context::signer_role());
     let deletion_matcher = ExactSelectorMatcher::new(context::deletion_role());
@@ -214,7 +233,7 @@ fn deletion_before_message_purges_when_target_later_arrives() {
         &deletion_matcher as &dyn ContextMatcher,
         &secret_matcher as &dyn ContextMatcher,
     ];
-    let projector = project::SealedMessageProjector::new();
+    let projector = ProtocolProjector;
     let mut bus = WakeLoop::new();
 
     bus.submit_fact(deletion);
@@ -226,10 +245,10 @@ fn deletion_before_message_purges_when_target_later_arrives() {
         .expect("message sees prior deletion");
 
     assert!(purged.wakes >= 1);
-    assert_eq!(purged.intents, 4);
+    assert_eq!(purged.intents, 5);
     assert!(bus.context(&message.id).is_none());
     assert_eq!(bus.intents()[0].kind.as_str(), "put_row");
-    assert_eq!(bus.intents()[3].kind.as_str(), "purge_event");
+    assert_eq!(bus.intents()[4].kind.as_str(), "purge_event");
 }
 
 #[test]
@@ -339,9 +358,65 @@ fn message_fact(
             minute,
             leaf_id,
             nonce: [12; NONCE_BYTES],
-            ciphertext: b"sealed".to_vec(),
+            ciphertext: encrypted_body(workspace_id, frontier_id, minute, DEFAULT_SECRET),
         })
         .expect("encode sealed message"),
+    )
+}
+
+fn message_body(message: &Fact) -> SealedMessageFact {
+    layout::decode_sealed_message(&message.bytes).expect("decode message")
+}
+
+fn encrypted_body(
+    workspace_id: [u8; 32],
+    frontier_id: [u8; 32],
+    minute: u64,
+    secret_key: [u8; 32],
+) -> Vec<u8> {
+    let plaintext = sealed_create::pad_plaintext(b"sealed").expect("pad plaintext");
+    crypto::xchacha20poly1305_encrypt(
+        &secret_key,
+        &sealed_create::associated_data(workspace_id, frontier_id, minute),
+        &[12; NONCE_BYTES],
+        &plaintext,
+    )
+    .expect("encrypt sealed test message")
+}
+
+fn removal_frontier_fact(
+    workspace_id: [u8; 32],
+    owner_endpoint_id: [u8; 32],
+    created_at_ms: u64,
+) -> Fact {
+    Fact::new(
+        workspace_scope(workspace_id),
+        created_at_ms,
+        encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
+            workspace_id,
+            owner_endpoint_id,
+            created_at_ms,
+        })
+        .expect("encode frontier"),
+    )
+}
+
+fn local_key_secret_fact(
+    workspace_id: [u8; 32],
+    frontier_id: [u8; 32],
+    owner_endpoint_id: [u8; 32],
+) -> Fact {
+    Fact::new(
+        topo::core::facts::FactScope::Local,
+        3,
+        encryption_layout::encode_local_key_secret(&LocalKeySecretFact {
+            workspace_id,
+            frontier_id,
+            owner_endpoint_id,
+            created_at_ms: 3,
+            key_secret: DEFAULT_SECRET,
+        })
+        .expect("encode local secret"),
     )
 }
 

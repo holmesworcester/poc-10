@@ -7,7 +7,7 @@
 
 use crate::core::store::{Schema, Store, TableName, TableRow};
 
-pub const LOGICAL_CLOCK: TableName = TableName::new("core.logical_clock");
+pub const LOGICAL_CLOCK: TableName = TableName::new("clock");
 pub const SCHEMAS: &[Schema] = &[Schema::durable_row_table(
     "core.logical_clock.v1",
     LOGICAL_CLOCK,

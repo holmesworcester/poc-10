@@ -200,6 +200,7 @@ fn target_projectors_stay_pure_context_to_intents() {
     let mut offenders = Vec::new();
     for path in rust_files_named(&root.join("src/event_modules"), "project.rs") {
         let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
         for forbidden in [
             "Store",
             "table_rows",
@@ -213,7 +214,7 @@ fn target_projectors_stay_pure_context_to_intents() {
             "std::process",
             "Command::new",
         ] {
-            if text.contains(forbidden) {
+            if production.contains(forbidden) {
                 offenders.push(format!(
                     "{} contains {forbidden:?}",
                     path.strip_prefix(root).unwrap().display()

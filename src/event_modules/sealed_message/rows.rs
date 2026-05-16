@@ -9,6 +9,7 @@ use super::fact::{
 };
 
 pub const MESSAGE_ROWS: TableName = TableName::new("message_rows");
+pub const OPENED_MESSAGE_ROWS: TableName = TableName::new("opened_message_rows");
 pub const SEALED_MESSAGE_ROWS: TableName = TableName::new("sealed_message_rows");
 pub const MESSAGE_TOMBSTONE_ROWS: TableName = TableName::new("message_tombstone_rows");
 
@@ -38,6 +39,16 @@ pub struct MessageRow {
     pub signer_id: SignerId,
     pub minute: u64,
     pub leaf_id: FactId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedMessageRow {
+    pub workspace_id: WorkspaceId,
+    pub message_id: FactId,
+    pub created_at_ms: u64,
+    pub author_user_id: AuthorId,
+    pub signer_id: SignerId,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +151,43 @@ pub fn decode_message_row(key: &[u8], value: &[u8]) -> Result<MessageRow, String
         signer_id: value[41..73].try_into().unwrap(),
         minute: u64::from_be_bytes(value[73..81].try_into().unwrap()),
         leaf_id: value[81..113].try_into().unwrap(),
+    })
+}
+
+pub fn opened_message_row(input: OpenedMessageRow) -> TableRow {
+    let text = input.text.as_bytes();
+    let mut value = Vec::with_capacity(1 + 8 + 32 + 32 + 4 + text.len());
+    value.push(1);
+    value.extend_from_slice(&input.created_at_ms.to_be_bytes());
+    value.extend_from_slice(&input.author_user_id);
+    value.extend_from_slice(&input.signer_id);
+    value.extend_from_slice(&(text.len() as u32).to_be_bytes());
+    value.extend_from_slice(text);
+    TableRow {
+        table: OPENED_MESSAGE_ROWS,
+        key: message_key(input.workspace_id, input.message_id),
+        value,
+    }
+}
+
+pub fn decode_opened_message_row(key: &[u8], value: &[u8]) -> Result<OpenedMessageRow, String> {
+    let (workspace_id, message_id) = decode_message_key(key, "opened message row key")?;
+    if value.len() < 77 || value[0] != 1 {
+        return Err("invalid opened message value".to_string());
+    }
+    let text_len = u32::from_be_bytes(value[73..77].try_into().unwrap()) as usize;
+    if value.len() != 77 + text_len {
+        return Err("opened message text length does not match value".to_string());
+    }
+    let text = String::from_utf8(value[77..].to_vec())
+        .map_err(|err| format!("opened message text is not utf8: {err}"))?;
+    Ok(OpenedMessageRow {
+        workspace_id,
+        message_id,
+        created_at_ms: u64::from_be_bytes(value[1..9].try_into().unwrap()),
+        author_user_id: value[9..41].try_into().unwrap(),
+        signer_id: value[41..73].try_into().unwrap(),
+        text,
     })
 }
 

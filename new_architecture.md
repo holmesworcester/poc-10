@@ -79,8 +79,9 @@ with the `poc-8` behavior still green.
 
 ## Current Migration Checkpoint
 
-As of the 2026-05-15 checkpoint on branch `new-architecture`, the repo is in a
-mixed state by design:
+As of the 2026-05-15 checkpoint on branch `main`, the repo is in a cutover
+state with target code active and remaining gaps called out by ignored guardrail
+or black-box tests:
 
 - `src/main.rs` delegates to the product-facing `match` entrypoint.
 - Product commands are being cut over to a generic core runtime/app facade
@@ -100,8 +101,10 @@ mixed state by design:
 - The old handler subdirectory shape has been removed.
 - Target receive transit can open fixed transit frames that carry signed
   key-wrap facts, admit the opened fact, and record local receive provenance.
-  Send-side packaging and TCP send remain bounded handler cuts/stubs until the
-  event-module constructors own the remaining frame and crypto helpers.
+  Send-side flow now emits send-on-connection and network-send intents and can
+  write a bounded TCP frame when route context is present. Remaining send-side
+  debt is fixed-layout intent generation from schema, durable acknowledgements,
+  cursors, and richer route retry policy.
 - Target purge can remove exact retained target facts through handler output;
   cascade discovery, secret retirement, and sync-index repair still need their
   bounded handler cuts before target purge behavior is complete.
@@ -120,8 +123,9 @@ Implemented target slices:
   purges, and follow-up intents.
 - Target tests for signed facts, sealed messages, key wraps, key request
   healing, recipient-key supersession cleanup, signed key-wrap transit receive,
-  transit frame layout, sync context, receive provenance, and flat handler
-  contracts.
+  transit frame layout, sync context, receive provenance, flat handler
+  contracts, black-box invite/accept/link flows, basic content send/messages,
+  encryption CLI flows, and daemon lifecycle.
 - `CommandContext` for user-facing target commands that may read projected state
   through module `queries.rs`, but do not call legacy workers or handler
   dispatch directly. The type lives in `core::command_context`.
@@ -129,23 +133,18 @@ Implemented target slices:
 Current hard gaps:
 
 - The production CLI still needs to finish moving through a generic core
-  runtime/app facade configured by the protocol registry. Signed key-wrap
-  receive is the first implemented target admission cut because it exercises
-  signed facts, context, key offers, unwrap intents, receive provenance, and
-  anti-amplification. General shared fact admission still needs the same
-  treatment.
-- Transit wrap/unwrap is not fully target-owned. The remaining work is to move
-  frame packaging, nonce derivation, associated data, payload packing, and size
-  choice into event-module constructors so handlers can emit follow-up intents
-  without owning wire or crypto semantics.
+  runtime/app facade configured by the protocol registry. Several user-facing
+  commands are target-owned and black-box tested, but `match_app.rs` still has
+  hand routing and explicit "not ported" paths.
+- Transit wrap/unwrap is not fully target-owned. The remaining work is to make
+  intent/frame layouts schema-generated and fixed length, finish durable
+  network acknowledgements/cursors, and keep crypto semantics in event-module
+  constructors instead of handlers.
 - Sync still needs the target context transfer for key dependencies. In-range
   encrypted content must bring relevant out-of-range key wraps or retained key
   nodes, and perf tests should prove that display remains fast.
 - Purge still needs bounded cuts for cascade discovery, secret retirement, and
   sync-index purge/update.
-- Broad encryption code still needs more narrow files around recipient keys,
-  key requests, key wraps, local secrets, wrap-source/frontier validation, and
-  secret coverage matching.
 - Remaining poc-8 behavior needs unchanged or harness-only-adjusted target
   coverage before the migration can be called complete.
 

@@ -87,11 +87,11 @@ fn missing_source_context_leaves_materialize_intent_queued() {
     bus.submit_fact(recipient);
     bus.submit_fact(signer);
     bus.submit_intent(materialize).expect("submit materialize");
-    let err = bus
+    let report = bus
         .dispatch_deferred_intents_with_fact_context(&handler, 10)
-        .expect_err("missing source fact must fail");
+        .expect("missing source fact leaves intent queued");
 
-    assert!(err.contains("handler context missing fact"), "{err}");
+    assert_eq!(report.handled, 0);
     assert_eq!(bus.intents().len(), 1);
 }
 
@@ -122,11 +122,11 @@ fn missing_signer_context_leaves_materialize_intent_queued() {
     bus.submit_fact(recipient);
     bus.submit_fact(source);
     bus.submit_intent(materialize).expect("submit materialize");
-    let err = bus
+    let report = bus
         .dispatch_deferred_intents_with_fact_context(&handler, 10)
-        .expect_err("missing signer fact must fail");
+        .expect("missing signer fact leaves intent queued");
 
-    assert!(err.contains("handler context missing fact"), "{err}");
+    assert_eq!(report.handled, 0);
     assert_eq!(bus.intents().len(), 1);
 }
 

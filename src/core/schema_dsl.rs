@@ -648,6 +648,7 @@ mod tests {
             table_names(&event_modules),
             vec![
                 "message_rows",
+                "opened_message_rows",
                 "sealed_message_rows",
                 "message_tombstone_rows",
                 "file_rows",

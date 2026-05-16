@@ -128,9 +128,17 @@ impl<'a> Reader<'a> {
 // core should admit.
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
-use crate::event_modules::transit::{
-    frame,
-    receive::{self, OpenReceivedFrame},
+use crate::core::network_queues::{NetworkTarget, OutboundNetworkRow};
+use crate::core::tcp;
+use crate::event_modules::{
+    identity_endpoint,
+    transit::{
+        frame,
+        receive::{
+            self, BootstrapFrameKind, OpenBootstrapRequest, OpenBootstrapResponse,
+            OpenReceivedFrame,
+        },
+    },
 };
 
 #[derive(Debug, Clone, Default)]
@@ -149,19 +157,60 @@ impl IntentHandler for ReceiveTransitHandler {
 
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_receive_transit_frame(intent)?;
-        Ok(vec![frame::received_connection_fact_id(&input.frame)?])
+        match receive::bootstrap_frame_kind(&input.frame)? {
+            BootstrapFrameKind::ConnectionRequest(request) => {
+                Ok(vec![request.invite_secret_event_id])
+            }
+            BootstrapFrameKind::ConnectionResponse(response) => Ok(vec![
+                response.request_id,
+                response.invite_secret_event_id,
+                response.initiator_ephemeral_secret_event_id,
+            ]),
+            BootstrapFrameKind::ConnectionFrame => {
+                Ok(vec![frame::received_connection_fact_id(&input.frame)?])
+            }
+        }
     }
 
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
         let input = decode_receive_transit_frame(intent)?;
-        let connection_id = frame::received_connection_fact_id(&input.frame)?;
-        let connection_fact = context.require_fact(&connection_id)?;
-        let facts = receive::open_received_frame(OpenReceivedFrame {
-            frame: &input.frame,
-            connection_fact,
-            origin_addr: &input.origin_addr,
-            received_at_local_ms: input.received_at_local_ms,
-        })?;
+        let facts = match receive::bootstrap_frame_kind(&input.frame)? {
+            BootstrapFrameKind::ConnectionRequest(request) => {
+                let invite_fact = context.require_fact(&request.invite_secret_event_id)?;
+                let local_endpoint = identity_endpoint::queries::local_endpoint(context.store()?)?
+                    .ok_or_else(|| {
+                        "bootstrap request receiver has no local endpoint".to_string()
+                    })?;
+                let opened = receive::open_bootstrap_request(OpenBootstrapRequest {
+                    frame: &input.frame,
+                    invite_fact,
+                    local_endpoint: &local_endpoint,
+                    origin_addr: &input.origin_addr,
+                    received_at_local_ms: input.received_at_local_ms,
+                })?;
+                let target = NetworkTarget::new(opened.return_addr);
+                let row = OutboundNetworkRow::new(target, opened.response_bytes);
+                tcp::send_once(context.store()?, target, vec![row], (), |_, _| Ok(()))?;
+                opened.facts
+            }
+            BootstrapFrameKind::ConnectionResponse(_) => {
+                receive::open_bootstrap_response(OpenBootstrapResponse {
+                    frame: &input.frame,
+                    origin_addr: &input.origin_addr,
+                    received_at_local_ms: input.received_at_local_ms,
+                })?
+            }
+            BootstrapFrameKind::ConnectionFrame => {
+                let connection_id = frame::received_connection_fact_id(&input.frame)?;
+                let connection_fact = context.require_fact(&connection_id)?;
+                receive::open_received_frame(OpenReceivedFrame {
+                    frame: &input.frame,
+                    connection_fact,
+                    origin_addr: &input.origin_addr,
+                    received_at_local_ms: input.received_at_local_ms,
+                })?
+            }
+        };
         let mut output = HandlerOutput::new();
         for fact in facts {
             output = output.fact(fact);

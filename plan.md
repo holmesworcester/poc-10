@@ -36,8 +36,9 @@ Reviewer instructions:
 - [x] Legacy source island has been removed from the target tree.
 - [x] Root `src/commands.rs`, `src/event_modules.rs`, and `src/handlers.rs` are
   gone; registries live under their directories.
-- [ ] No `src/workers`, worker catalog, round-robin scheduler, ready queue,
-  blocked queue, recently-valid queue, or pending-reprojection queue remains.
+- [x] No `src/workers`, worker catalog, round-robin scheduler, ready queue,
+  blocked queue, recently-valid queue, or pending-reprojection queue remains in
+  the active target tree.
 - [ ] Runtime code is consolidated: core owns the generic runtime/app facade;
   protocol supplies the registry; event modules and handlers do not know the
   product entrypoint.
@@ -147,8 +148,9 @@ Reviewer instructions:
   and receive-metadata context as required by poc-8.
 - [ ] Transit-received metadata is modeled as a local fact/about-context offer
   so state can track where transit events came from.
-- [ ] Transit unwrap is real: inbound network frame -> receive_transit intent ->
-  authenticated open -> fact admission plus transit_received provenance fact.
+- [x] Transit unwrap admits signed key-wrap and sync compare/have/need facts:
+  inbound network frame -> receive_transit intent -> authenticated open -> fact
+  admission plus transit_received provenance fact.
 - [ ] Transit wrap is real: send-on-connection intent -> fixed-size transit
   frame -> network_send intent -> durable send acknowledgement.
 - [ ] Connection handlers are bounded and idempotent; they do not define fact
@@ -157,10 +159,11 @@ Reviewer instructions:
 
 ## Sync And Dep-Aware Range Closure
 
-- [ ] Sync compare projection writes the row and emits a response intent when
+- [x] Sync compare projection writes the row and emits a response intent when
   `response_requested=true`.
-- [ ] Sync response handler computes real compare/have/need facts from bounded
-  durable range/index state; it must not fake summaries.
+- [ ] Sync response handler computes compare/have facts from current fact
+  context and sends them over transit; the remaining cutover is to replace the
+  in-memory fact scan with bounded durable range/index state.
 - [ ] Sync have/need projectors emit real follow-up intents/offers as needed,
   not only rows if poc-8 responded transitively.
 - [ ] Dep-aware sync range closure includes all out-of-range dependency facts
@@ -197,7 +200,7 @@ Reviewer instructions:
   enough for read-your-writes behavior.
 - [ ] Black-box CLI tests use the real `match` binary and real daemon/runtime
   path. They do not seed rows, call workers, or assert legacy queue state.
-- [ ] First make poc-8 CLI suites true black-box behavior tests, prove them
+- [x] First make poc-8 CLI suites true black-box behavior tests, prove them
   green there, then port those contracts to poc-10 unchanged except for harness
   and binary-name changes.
 - [ ] Every non-ignored poc-8 black-box behavior test is ported unchanged except
@@ -244,6 +247,8 @@ Reviewer instructions:
 - [ ] `cargo test --test poc10_intent_cleanliness_test`
 - [ ] `cargo test --test poc10_protocol_registry_test`
 - [ ] `cargo test --test poc10_cutover_todo_test -- --ignored`
+- [x] `cargo test --test daemon_lifecycle_cli_test -- --nocapture`
+- [x] `cargo test --test poc10_topo_cli_test -- --nocapture`
 - [ ] No ignored poc-10 guardrail remains unless it names a real blocker in this
   checklist.
 - [ ] Projector tests that are not black-box behavior tests live with the module
@@ -252,12 +257,36 @@ Reviewer instructions:
 
 ## Current Known Blockers
 
-- [ ] Endpoint-shared projection still needs the full signed/device-invite and
-  invite-server authority path.
-- [ ] Sync compare response intent exists, but real bounded range-index response
-  state is not complete yet.
-- [ ] Several content/encryption projectors still advertise parity gaps in
-  comments; each must become real behavior or a failing guardrail.
-- [ ] Black-box poc-8 CLI suites still contain legacy-worker vocabulary; first
-  clean and prove the poc-8 contracts, then port them to the real `match`
-  runtime.
+- [x] Invite/accept/link, invite-server/accept-invite-server, local identity,
+  `users`, `peers`, and normal black-box multi-daemon membership flows are
+  ported to the target runtime and covered by `invite_accept_cli_test`.
+- [x] Target `generate`, `content-count`, `send`, and `messages` have active
+  black-box coverage through the `match` binary.
+- [x] Encryption CLI flows for recipient rotation, key wrap/access, chop, and
+  invite-server key-recipient denial are active and green.
+- [ ] `view`, `react`, file send/save/listing, disappearing-message
+  expiry/retention/key-derive, leaf-coordinate, cascade perf, and negentropy
+  purge/sync-status CLI surfaces remain explicit ignored cutover blockers.
+- [ ] Sync compare response now emits response facts and a transit send intent
+  from current facts, but real bounded durable range-index response state is not
+  complete yet.
+- [ ] `network_send` now resolves connection-request listen routes and attempts
+  bounded TCP delivery through core network queues. Remaining gaps: durable send
+  acknowledgement/cursors, bidirectional route hints, and nonfatal daemon retry
+  policy for offline peers.
+- [ ] Transit send still needs schema-generated fixed-layout intent/frame
+  codecs for the two supported size classes; current handler tests prove
+  bounded TCP send, not the final wire-layout source of truth.
+- [ ] General shared signed-fact admission is not complete. Signed key-wrap
+  receive is real, but other shared signed fact families still enter through
+  module-specific paths and need the same target admission treatment.
+- [ ] Removal-frontier projection still has an ignored guardrail because the
+  current fact shape lacks signed/admin authority fields.
+- [ ] Dep-aware sync has no apples-to-apples perf proof yet for fast display of
+  in-range encrypted messages whose deps/key offers are out of range.
+- [ ] Purge is not fully decomposed into bounded cascade, physical byte purge,
+  retained-secret retirement, and sync-index repair handlers.
+- [ ] `match_app.rs` still owns product command routing directly. End state is a
+  generic core app facade driven by protocol command registries.
+- [ ] Guardrails still include ignored cutover TODO tests. A normal non-ignored
+  suite passing is not the same as the final review passing.

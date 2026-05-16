@@ -13,7 +13,8 @@ use crate::core::intents::{Intent, IntentExecution, IntentKind};
 pub const PROCESS_SYNC_INBOUND: &str = "process_sync_inbound";
 pub const SYNC_NEED_ID: &str = "sync_need_id";
 pub const RESPOND_TO_SYNC_COMPARE: &str = "respond_to_sync_compare";
-pub const SYNC_COMPARE_RANGE_INDEX_NOT_READY: &str = "sync_compare_range_index_not_ready";
+pub const REQUEST_SYNC_ID: &str = "request_sync_id";
+pub const RESPOND_TO_SYNC_NEED: &str = "respond_to_sync_need";
 
 pub type HandlerId = [u8; 32];
 
@@ -35,6 +36,16 @@ pub struct SyncNeedId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RespondToSyncCompare {
     pub compare_fact_id: HandlerId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestSyncId {
+    pub have_fact_id: HandlerId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RespondToSyncNeed {
+    pub need_fact_id: HandlerId,
 }
 
 pub fn process_sync_inbound_intent(input: ProcessSyncInbound) -> Intent {
@@ -136,6 +147,70 @@ pub fn respond_to_sync_compare_intent(input: RespondToSyncCompare) -> Intent {
     )
 }
 
+pub fn request_sync_id_intent(input: RequestSyncId) -> Intent {
+    let mut payload = Vec::with_capacity(1 + 32);
+    payload.push(1);
+    payload.extend_from_slice(&input.have_fact_id);
+    Intent::new(
+        IntentKind::new(REQUEST_SYNC_ID).expect("valid request_sync_id kind"),
+        IntentExecution::Deferred,
+        request_sync_id_key(&input),
+        payload,
+    )
+}
+
+pub fn decode_request_sync_id(intent: &Intent) -> Result<RequestSyncId, String> {
+    if intent.kind.as_str() != REQUEST_SYNC_ID {
+        return Err("expected request_sync_id intent".to_string());
+    }
+    if intent.execution != IntentExecution::Deferred {
+        return Err("request_sync_id intent must be deferred".to_string());
+    }
+    let mut reader = Reader::new(&intent.payload);
+    if reader.u8()? != 1 {
+        return Err("request_sync_id payload version unsupported".to_string());
+    }
+    let have_fact_id = reader.id()?;
+    reader.finish()?;
+    let input = RequestSyncId { have_fact_id };
+    if intent.key != request_sync_id_key(&input) {
+        return Err("request_sync_id idempotence key does not match payload".to_string());
+    }
+    Ok(input)
+}
+
+pub fn respond_to_sync_need_intent(input: RespondToSyncNeed) -> Intent {
+    let mut payload = Vec::with_capacity(1 + 32);
+    payload.push(1);
+    payload.extend_from_slice(&input.need_fact_id);
+    Intent::new(
+        IntentKind::new(RESPOND_TO_SYNC_NEED).expect("valid respond_to_sync_need kind"),
+        IntentExecution::Deferred,
+        respond_to_sync_need_key(&input),
+        payload,
+    )
+}
+
+pub fn decode_respond_to_sync_need(intent: &Intent) -> Result<RespondToSyncNeed, String> {
+    if intent.kind.as_str() != RESPOND_TO_SYNC_NEED {
+        return Err("expected respond_to_sync_need intent".to_string());
+    }
+    if intent.execution != IntentExecution::Deferred {
+        return Err("respond_to_sync_need intent must be deferred".to_string());
+    }
+    let mut reader = Reader::new(&intent.payload);
+    if reader.u8()? != 1 {
+        return Err("respond_to_sync_need payload version unsupported".to_string());
+    }
+    let need_fact_id = reader.id()?;
+    reader.finish()?;
+    let input = RespondToSyncNeed { need_fact_id };
+    if intent.key != respond_to_sync_need_key(&input) {
+        return Err("respond_to_sync_need idempotence key does not match payload".to_string());
+    }
+    Ok(input)
+}
+
 pub fn decode_respond_to_sync_compare(intent: &Intent) -> Result<RespondToSyncCompare, String> {
     if intent.kind.as_str() != RESPOND_TO_SYNC_COMPARE {
         return Err("expected respond_to_sync_compare intent".to_string());
@@ -183,6 +258,20 @@ fn respond_to_sync_compare_key(input: &RespondToSyncCompare) -> Vec<u8> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"topo:sync:respond-to-compare:v1:");
     hash.update(&input.compare_fact_id);
+    hash.finalize().as_bytes().to_vec()
+}
+
+fn request_sync_id_key(input: &RequestSyncId) -> Vec<u8> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"topo:sync:request-id:v1:");
+    hash.update(&input.have_fact_id);
+    hash.finalize().as_bytes().to_vec()
+}
+
+fn respond_to_sync_need_key(input: &RespondToSyncNeed) -> Vec<u8> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"topo:sync:respond-to-need:v1:");
+    hash.update(&input.need_fact_id);
     hash.finalize().as_bytes().to_vec()
 }
 
@@ -236,6 +325,8 @@ impl<'a> Reader<'a> {
 // deterministic `sync_need_id` follow-up.
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::event_modules::{sync_have_id, sync_need_id};
+use crate::handlers::transit::{send_on_connection_intent, TransitSendOnConnection};
 
 #[derive(Debug, Clone, Default)]
 pub struct HandleSyncHandler;
@@ -243,6 +334,97 @@ pub struct HandleSyncHandler;
 impl HandleSyncHandler {
     pub fn new() -> Self {
         Self
+    }
+}
+
+// Handler for sync have-id follow-up.
+//
+// A `sync_have_id` fact says a peer has a concrete event id. If the local store
+// lacks that id, this handler creates and sends the deterministic
+// `sync_need_id` fact for the same connection. The presence check is stateful
+// and exact, so it belongs in this bounded handler rather than in the
+// have-id projector.
+
+#[derive(Debug, Clone, Default)]
+pub struct RequestSyncIdHandler;
+
+impl RequestSyncIdHandler {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl IntentHandler for RequestSyncIdHandler {
+    fn accepts(&self, intent: &Intent) -> bool {
+        intent.kind.as_str() == REQUEST_SYNC_ID
+    }
+
+    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        let input = decode_request_sync_id(intent)?;
+        Ok(vec![input.have_fact_id])
+    }
+
+    fn handle(&self, raw: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+        let input = decode_request_sync_id(raw)?;
+        let have_fact = context.require_fact(&input.have_fact_id)?;
+        let have = sync_have_id::layout::decode_fact(&have_fact.bytes)?;
+        if crate::core::wake_loop::persisted_fact(context.store()?, &have.event_id)?.is_some() {
+            return Ok(HandlerOutput::new());
+        }
+        let need = sync_need_id::fact::SyncNeedIdFact {
+            connection_id: have.connection_id,
+            event_id: have.event_id,
+        };
+        let need_fact = sync_need_id::create::fact(need, have_fact.timestamp)?;
+        Ok(HandlerOutput::new()
+            .fact(need_fact.clone())
+            .intent(send_on_connection_intent(TransitSendOnConnection {
+                connection_id: have.connection_id,
+                fact_ids: vec![need_fact.id],
+            })))
+    }
+}
+
+// Handler for sync need-id answers.
+//
+// A `sync_need_id` fact is a deterministic request for one event id. If this
+// store has the event and transit allows it to be sent, the handler emits the
+// normal send-on-connection intent for that fact id.
+
+#[derive(Debug, Clone, Default)]
+pub struct RespondToSyncNeedHandler;
+
+impl RespondToSyncNeedHandler {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl IntentHandler for RespondToSyncNeedHandler {
+    fn accepts(&self, intent: &Intent) -> bool {
+        intent.kind.as_str() == RESPOND_TO_SYNC_NEED
+    }
+
+    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        let input = decode_respond_to_sync_need(intent)?;
+        Ok(vec![input.need_fact_id])
+    }
+
+    fn handle(&self, raw: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+        let input = decode_respond_to_sync_need(raw)?;
+        let need_fact = context.require_fact(&input.need_fact_id)?;
+        let need = sync_need_id::layout::decode_fact(&need_fact.bytes)?;
+        let Some(fact) = crate::core::wake_loop::persisted_fact(context.store()?, &need.event_id)?
+        else {
+            return Ok(HandlerOutput::new());
+        };
+        crate::event_modules::transit::create::require_sendable_fact(&fact)?;
+        Ok(
+            HandlerOutput::new().intent(send_on_connection_intent(TransitSendOnConnection {
+                connection_id: need.connection_id,
+                fact_ids: vec![need.event_id],
+            })),
+        )
     }
 }
 
@@ -281,10 +463,10 @@ impl IntentHandler for HandleSyncHandler {
 
 // Handler for sync compare responses.
 //
-// The intent is real and retryable: it names the exact compare fact to answer,
-// and this handler decodes that fact before deciding what can happen. The
-// bounded range-summary source is not available through HandlerContext yet, so
-// response generation deliberately stops before creating invented have/need facts.
+// The intent names the exact compare fact to answer. Core supplies the durable
+// fact context; this handler then filters that context to the compare's bounded
+// timestamp range, computes the local summary, emits a response compare, and
+// advertises local ids when the peer's summary differs.
 
 #[derive(Debug, Clone, Default)]
 pub struct RespondToSyncCompareHandler;
@@ -309,9 +491,28 @@ impl IntentHandler for RespondToSyncCompareHandler {
         let input = decode_respond_to_sync_compare(raw)?;
         let compare_fact = context.require_fact(&input.compare_fact_id)?;
         let compare = crate::event_modules::sync_compare::layout::decode_fact(&compare_fact.bytes)?;
-        if !compare.response_requested {
-            return Ok(HandlerOutput::new());
+        let available_facts = match context.store() {
+            Ok(store) => crate::core::wake_loop::persisted_facts(store)?,
+            Err(_) => context.facts().cloned().collect(),
+        };
+        let mut output = HandlerOutput::new();
+        let response_facts = crate::event_modules::sync_compare::create::response_facts(
+            compare_fact,
+            available_facts.iter(),
+        )?;
+        let fact_ids = response_facts
+            .iter()
+            .map(|fact| fact.id)
+            .collect::<Vec<_>>();
+        for fact in response_facts {
+            output = output.fact(fact);
         }
-        Err(SYNC_COMPARE_RANGE_INDEX_NOT_READY.to_string())
+        if !fact_ids.is_empty() {
+            output = output.intent(send_on_connection_intent(TransitSendOnConnection {
+                connection_id: compare.connection_id,
+                fact_ids,
+            }));
+        }
+        Ok(output)
     }
 }

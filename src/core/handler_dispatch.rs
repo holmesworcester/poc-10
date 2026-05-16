@@ -2,16 +2,29 @@
 
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Intent;
+use crate::core::store::Store;
 use std::collections::BTreeMap;
+use std::fmt;
 
 pub type HandlerFactId = FactId;
 
-#[derive(Debug, Clone, Default)]
-pub struct HandlerContext {
+#[derive(Clone, Default)]
+pub struct HandlerContext<'a> {
     facts: BTreeMap<FactId, Fact>,
+    store: Option<&'a Store>,
 }
 
-impl HandlerContext {
+impl fmt::Debug for HandlerContext<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HandlerContext")
+            .field("facts", &self.facts)
+            .field("has_store", &self.store.is_some())
+            .finish()
+    }
+}
+
+impl<'a> HandlerContext<'a> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -22,11 +35,26 @@ impl HandlerContext {
                 .into_iter()
                 .map(|fact| (fact.id, fact))
                 .collect::<BTreeMap<_, _>>(),
+            store: None,
         }
+    }
+
+    pub fn with_store(mut self, store: &'a Store) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    pub fn store(&self) -> Result<&Store, String> {
+        self.store
+            .ok_or_else(|| "handler context missing store".to_string())
     }
 
     pub fn fact(&self, id: &FactId) -> Option<&Fact> {
         self.facts.get(id)
+    }
+
+    pub fn facts(&self) -> impl Iterator<Item = &Fact> {
+        self.facts.values()
     }
 
     pub fn require_fact(&self, id: &FactId) -> Result<&Fact, String> {
@@ -80,7 +108,11 @@ pub trait IntentHandler {
         Ok(Vec::new())
     }
 
-    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String>;
+    fn handle(
+        &self,
+        intent: &Intent,
+        context: &HandlerContext<'_>,
+    ) -> Result<HandlerOutput, String>;
 }
 
 #[cfg(test)]

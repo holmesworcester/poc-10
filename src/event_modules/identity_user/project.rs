@@ -1,17 +1,15 @@
 //! Poc-10 user projector.
 //!
-//! Validates the user fact payload and emits a single `PutRow` atomic intent.
-//!
-//! Legacy parity gap (intentional): this validates the user-invite key context
-//! and records the matched invite id, but it still does not unwrap or verify
-//! the legacy signed envelope. This will be tightened once signed-fact
-//! integration lands.
+//! Users are signed by the user-invite key that authorizes the account. The
+//! signed envelope supplies the signer id/public key, while the matched
+//! `user_invite` context proves that key belongs to the same workspace.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::event_modules::identity_matchers;
 use crate::event_modules::identity_user_invite::layout as user_invite_layout;
+use crate::event_modules::signed_fact;
 
 use super::layout;
 use super::rows::user_row;
@@ -34,7 +32,12 @@ impl Projector for UserProjector {
         if fact.scope != FactScope::Global {
             return Err("user fact must have global scope".to_string());
         }
-        let user = layout::decode_fact(&fact.bytes)?;
+        let envelope = signed_fact::layout::decode_signed_fact(&fact.bytes)
+            .map_err(|_| "user fact must be signed".to_string())?;
+        if envelope.inner_type != layout::TYPE_USER {
+            return Err("signed fact does not contain a user".to_string());
+        }
+        let user = layout::decode_fact(&envelope.payload)?;
         if user.workspace_id == [0; 32] {
             return Err("user workspace_id must not be empty".to_string());
         }
@@ -44,29 +47,201 @@ impl Projector for UserProjector {
         if user.username.trim().is_empty() {
             return Err("username must not be empty".to_string());
         }
-        let invite_need = identity_matchers::scoped_key_need(
+        let invite_need = identity_matchers::exact_need(
             fact.id,
-            identity_matchers::user_invite_key_role(),
-            user.workspace_id,
-            user.public_key.to_vec(),
+            identity_matchers::user_invite_role(),
+            envelope.signer_id,
         );
         let Some(invite_fact) = context.payload_for(&invite_need) else {
             return Ok(ProjectionOutput::new().need(invite_need));
         };
-        let invite = user_invite_layout::decode_fact(&invite_fact.bytes)
+        if invite_fact.id != envelope.signer_id {
+            return Err("user signer context payload id mismatch".to_string());
+        }
+        let invite_envelope = signed_fact::layout::decode_signed_fact(&invite_fact.bytes)
+            .map_err(|_| "user signer context must be a signed user_invite fact".to_string())?;
+        if invite_envelope.inner_type != user_invite_layout::TYPE_USER_INVITE {
+            return Err("user signer context must be a signed user_invite fact".to_string());
+        }
+        let invite = user_invite_layout::decode_fact(&invite_envelope.payload)
             .map_err(|_| "user signer context must be a user_invite fact".to_string())?;
         if invite.workspace_id != user.workspace_id {
-            return Err("user_invite belongs to a different workspace".to_string());
+            return Err("user workspace does not match user_invite workspace".to_string());
         }
-        if invite.public_key != user.public_key {
-            return Err("user public_key does not match user_invite public_key".to_string());
+        if invite.public_key != envelope.signer_public_key {
+            return Err("signed user signer key does not match user_invite public key".to_string());
         }
         let user_invite_id = invite_fact.id;
         Ok(ProjectionOutput::new()
+            .need(invite_need)
             .offer(identity_matchers::exact_offer(
                 fact.id,
                 identity_matchers::user_role(),
             ))
             .intent(AtomicIntent::PutRow(user_row(fact.id, user_invite_id, &user)?).into_intent()))
+    }
+}
+
+#[cfg(test)]
+mod projector_tests {
+    use crate as topo;
+
+    use topo::core::crypto;
+    use topo::core::facts::{Fact, FactScope};
+    use topo::core::intents::AtomicIntent;
+    use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
+    use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
+    use topo::core::store::Store;
+    use topo::core::wake_loop::WakeLoop;
+    use topo::event_modules::identity_matchers as identity_context;
+    use topo::event_modules::identity_user::fact::UserFact;
+    use topo::event_modules::identity_user::{layout, project, rows};
+    use topo::event_modules::identity_user_invite::{
+        fact::UserInviteFact, layout as invite_layout,
+    };
+    use topo::event_modules::signed_fact;
+
+    const INVITE_PRIVATE_KEY: [u8; 32] = [8; 32];
+
+    #[test]
+    fn user_projector_materializes_row_through_atomic_intent() {
+        let user = UserFact {
+            created_at_ms: 100,
+            workspace_id: [2; 32],
+            public_key: [7; 32],
+            username: "alice".to_string(),
+        };
+        let invite_fact = signed_user_invite_fact(user.workspace_id, INVITE_PRIVATE_KEY);
+        let fact = signed_user_fact(&user, invite_fact.id, INVITE_PRIVATE_KEY);
+        let context = ProjectionContext::from_matches(vec![MatchedContext {
+            need: identity_context::exact_need(
+                fact.id,
+                identity_context::user_invite_role(),
+                invite_fact.id,
+            ),
+            offer: identity_context::user_invite_offer(invite_fact.id),
+            payload: invite_fact.clone(),
+        }]);
+
+        let output = project::UserProjector::new()
+            .project(&fact, &context)
+            .expect("project user");
+        assert_eq!(output.needs.len(), 1);
+        assert_eq!(output.intents.len(), 1);
+        let row_intent =
+            AtomicIntent::from_intent(&output.intents[0], &[rows::USER_ROWS]).expect("row intent");
+        let AtomicIntent::PutRow(stored) = row_intent else {
+            panic!("expected put row");
+        };
+        let row = rows::decode_user_row(&stored.key, &stored.value).expect("decode row");
+        assert_eq!(row.workspace_id, [2; 32]);
+        assert_eq!(row.user_id, fact.id);
+        assert_eq!(row.username, "alice");
+        assert_eq!(row.public_key, [7; 32]);
+        assert_eq!(row.user_invite_id, invite_fact.id);
+    }
+
+    #[test]
+    fn user_projector_waits_for_user_invite_context() {
+        let user = UserFact {
+            created_at_ms: 100,
+            workspace_id: [2; 32],
+            public_key: [7; 32],
+            username: "alice".to_string(),
+        };
+        let invite_fact = signed_user_invite_fact(user.workspace_id, INVITE_PRIVATE_KEY);
+        let fact = signed_user_fact(&user, invite_fact.id, INVITE_PRIVATE_KEY);
+
+        let output = project::UserProjector::new()
+            .project(&fact, &ProjectionContext::new(Vec::new()))
+            .expect("project waits");
+
+        assert_eq!(output.needs.len(), 1);
+        assert!(output.intents.is_empty());
+        assert_eq!(output.needs[0].role, identity_context::user_invite_role());
+        assert_eq!(output.needs[0].selector.as_bytes(), &invite_fact.id);
+    }
+
+    fn signed_user_invite_fact(workspace_id: [u8; 32], private_key: [u8; 32]) -> Fact {
+        let invite = UserInviteFact {
+            created_at_ms: 1,
+            public_key: crypto::ed25519_public_key(&private_key),
+            workspace_id,
+            authority_event_id: workspace_id,
+        };
+        make_signed_fact(
+            workspace_id,
+            private_key,
+            invite_layout::encode_fact(&invite).expect("encode user_invite"),
+            1,
+        )
+    }
+
+    fn signed_user_fact(user: &UserFact, signer_id: [u8; 32], private_key: [u8; 32]) -> Fact {
+        make_signed_fact(
+            signer_id,
+            private_key,
+            layout::encode_fact(user).expect("encode user"),
+            user.created_at_ms,
+        )
+    }
+
+    fn make_signed_fact(
+        signer_id: [u8; 32],
+        private_key: [u8; 32],
+        payload: Vec<u8>,
+        timestamp: u64,
+    ) -> Fact {
+        let bytes = signed_fact::create::sign_payload_bytes(signer_id, &private_key, payload)
+            .expect("sign fact");
+        Fact::new(FactScope::Global, timestamp, bytes)
+    }
+
+    #[test]
+    fn user_projector_rejects_blank_username() {
+        let user = UserFact {
+            created_at_ms: 1,
+            workspace_id: [2; 32],
+            public_key: [7; 32],
+            username: "   ".to_string(),
+        };
+        let invite_fact = signed_user_invite_fact(user.workspace_id, INVITE_PRIVATE_KEY);
+        let fact = signed_user_fact(&user, invite_fact.id, INVITE_PRIVATE_KEY);
+        let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
+            .expect("open target schema");
+        let mut bus = WakeLoop::new();
+
+        assert!(bus.submit_fact(fact));
+        let err = bus
+            .drain_applying_atomic_rows(
+                &project::UserProjector::new(),
+                &[],
+                &store,
+                &[rows::USER_ROWS],
+                10,
+            )
+            .expect_err("blank username must fail");
+        assert!(err.contains("username"), "{err}");
+    }
+
+    #[test]
+    fn user_projector_rejects_unsigned_user_fact() {
+        let user = UserFact {
+            created_at_ms: 1,
+            workspace_id: [2; 32],
+            public_key: [7; 32],
+            username: "alice".to_string(),
+        };
+        let fact = Fact::new(
+            FactScope::Global,
+            user.created_at_ms,
+            layout::encode_fact(&user).expect("encode user"),
+        );
+
+        let err = project::UserProjector::new()
+            .project(&fact, &ProjectionContext::new(Vec::new()))
+            .expect_err("unsigned user must fail");
+
+        assert_eq!(err, "user fact must be signed");
     }
 }
