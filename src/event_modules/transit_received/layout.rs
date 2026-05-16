@@ -7,6 +7,7 @@ use super::fact::{
     TransitReceivedFact, ORIGIN_ADDR_BYTES, TRANSIT_KIND_BOOTSTRAP, TRANSIT_KIND_CONNECTION,
     TRANSIT_KIND_CONNECTION_HANDSHAKE,
 };
+use super::origin_addr::normalize_origin_addr_bytes;
 
 pub const TYPE_TRANSIT_RECEIVED: u8 = 164;
 
@@ -29,7 +30,8 @@ pub fn encode_fact(fact: &TransitReceivedFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; TRANSIT_RECEIVED_BYTES];
     wire::put_u8(TYPE_TRANSIT_RECEIVED, &mut out[0..1]).map_err(wire_err)?;
     out[RECEIVED_FACT_OFFSET..ORIGIN_OFFSET].copy_from_slice(&fact.received_fact_id);
-    FixedSlot::<ORIGIN_ADDR_BYTES>::new(&fact.origin_addr)
+    let origin_addr = normalize_origin_addr_bytes(&fact.origin_addr)?;
+    FixedSlot::<ORIGIN_ADDR_BYTES>::new(&origin_addr)
         .map_err(wire_err)?
         .encode(&mut out[ORIGIN_OFFSET..LOCAL_ENDPOINT_OFFSET])
         .map_err(wire_err)?;
@@ -77,6 +79,10 @@ pub fn decode_fact(bytes: &[u8]) -> Result<TransitReceivedFact, String> {
             .map_err(wire_err)?
             .bytes()
             .to_vec();
+    let canonical_origin_addr = normalize_origin_addr_bytes(&origin_addr)?;
+    if canonical_origin_addr != origin_addr {
+        return Err("transit received origin addr is not canonical".to_string());
+    }
     let transit_kind =
         wire::take_u8(&bytes[TRANSIT_KIND_OFFSET..HAS_CONNECTION_OFFSET]).map_err(wire_err)?;
     validate_transit_kind(transit_kind)?;
@@ -155,6 +161,28 @@ mod tests {
     }
 
     #[test]
+    fn transit_received_encode_normalizes_friendly_origin_addr() {
+        let mut fact = fact();
+        fact.origin_addr = b"127.0.0.1_41001".to_vec();
+        let encoded = encode_fact(&fact).expect("encode");
+        let decoded = decode_fact(&encoded).expect("decode");
+
+        assert_eq!(decoded.origin_addr, b"127.0.0.1:41001");
+    }
+
+    #[test]
+    fn transit_received_decode_rejects_noncanonical_origin_addr() {
+        let mut encoded = encode_fact(&fact()).expect("encode");
+        let friendly = b"127.0.0.1_41001";
+        encoded[ORIGIN_OFFSET..ORIGIN_OFFSET + 4]
+            .copy_from_slice(&(friendly.len() as u32).to_be_bytes());
+        encoded[ORIGIN_OFFSET + 4..ORIGIN_OFFSET + 4 + friendly.len()].copy_from_slice(friendly);
+
+        let err = decode_fact(&encoded).expect_err("noncanonical origin should fail");
+        assert!(err.contains("not canonical"), "{err}");
+    }
+
+    #[test]
     fn transit_received_roundtrips_without_connection() {
         let fact = TransitReceivedFact {
             transit_kind: TRANSIT_KIND_BOOTSTRAP,
@@ -187,9 +215,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_origin_addr_overflow() {
+    fn rejects_invalid_origin_addr() {
         let fact = TransitReceivedFact {
-            origin_addr: vec![b'x'; ORIGIN_ADDR_BYTES + 1],
+            origin_addr: b"not-a-socket-addr".to_vec(),
             ..fact()
         };
         assert!(encode_fact(&fact).is_err());

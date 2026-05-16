@@ -29,11 +29,16 @@ const ORIGIN: &[u8] = b"127.0.0.1:41001";
 const RECEIVED_AT: u64 = 1_700_000_222;
 
 fn receive_intent(frame: Vec<u8>) -> topo::core::intents::Intent {
+    receive_intent_from_origin(frame, ORIGIN)
+}
+
+fn receive_intent_from_origin(frame: Vec<u8>, origin: &[u8]) -> topo::core::intents::Intent {
     receive_transit_frame_intent(ReceiveTransitFrame {
         frame,
-        origin_addr: ORIGIN.to_vec(),
+        origin_addr: origin.to_vec(),
         received_at_local_ms: RECEIVED_AT,
     })
+    .expect("receive intent")
 }
 
 fn connection_fact() -> (Fact, ConnectionResponseFact) {
@@ -135,6 +140,28 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_receive_provenance() {
     assert_eq!(provenance.request_id, Some(connection.request_id));
     assert_eq!(provenance.frame_hash, crypto::hash(&frame));
     assert_eq!(provenance.received_at_local_ms, RECEIVED_AT);
+}
+
+#[test]
+fn friendly_origin_addr_is_normalized_before_receive_provenance_fact() {
+    let (frame, connection_fact, _, signed_wrap) = encrypted_small_frame();
+    let intent = receive_intent_from_origin(frame, b"127.0.0.1_41001");
+
+    let output = ReceiveTransitHandler::new()
+        .handle(&intent, &HandlerContext::with_facts([connection_fact]))
+        .expect("receive transit opens frame");
+
+    let admitted_wrap =
+        encryption_create::admit_signed_key_wrap_fact(signed_wrap).expect("admit expected wrap");
+    let provenance_fact = output
+        .facts
+        .iter()
+        .find(|fact| fact.scope == FactScope::Local && fact.id != admitted_wrap.id)
+        .expect("local provenance fact");
+    let provenance =
+        transit_received::layout::decode_fact(&provenance_fact.bytes).expect("decode provenance");
+
+    assert_eq!(provenance.origin_addr, ORIGIN);
 }
 
 #[test]

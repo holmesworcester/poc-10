@@ -2,10 +2,11 @@
 //!
 //! Receive-transit handlers own decoding an inbound transit frame, verifying
 //! the public envelope, and emitting the recovered inner fact for admission.
-//! The intent payload carries only the opaque outer frame bytes; cryptographic
-//! material is loaded by the handler from the fact context.
+//! The intent payload carries the opaque outer frame bytes plus normalized local
+//! receive metadata; cryptographic material is loaded from fact context.
 
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::event_modules::transit_received::origin_addr::normalize_origin_addr_bytes;
 
 pub const RECEIVE_TRANSIT_FRAME: &str = "receive_transit_frame";
 
@@ -14,23 +15,25 @@ pub struct ReceiveTransitFrame {
     /// Raw outer transit frame bytes as received from the network. The handler
     /// peeks the public header and dispatches to the matching size class.
     pub frame: Vec<u8>,
-    /// Observed local origin string, usually the peer socket address.
+    /// Observed local origin string, usually the peer socket address. Accepted
+    /// boundary input is normalized before the intent is queued or handled.
     pub origin_addr: Vec<u8>,
     /// Local receive time used only for the local receive-provenance fact.
     pub received_at_local_ms: u64,
 }
 
-pub fn receive_transit_frame_intent(input: ReceiveTransitFrame) -> Intent {
+pub fn receive_transit_frame_intent(input: ReceiveTransitFrame) -> Result<Intent, String> {
+    let input = normalized_input(input)?;
     let mut payload = Vec::with_capacity(16 + input.origin_addr.len() + input.frame.len());
     push_bytes(&mut payload, &input.origin_addr);
     payload.extend_from_slice(&input.received_at_local_ms.to_be_bytes());
     push_bytes(&mut payload, &input.frame);
-    Intent::new(
+    Ok(Intent::new(
         IntentKind::new(RECEIVE_TRANSIT_FRAME).expect("valid receive transit intent kind"),
         IntentExecution::Deferred,
         receive_transit_key(&input),
         payload,
-    )
+    ))
 }
 
 pub fn decode_receive_transit_frame(intent: &Intent) -> Result<ReceiveTransitFrame, String> {
@@ -42,7 +45,7 @@ pub fn decode_receive_transit_frame(intent: &Intent) -> Result<ReceiveTransitFra
     }
 
     let mut reader = Reader::new(&intent.payload);
-    let origin_addr = reader.bytes()?.to_vec();
+    let origin_addr = normalize_origin_addr_bytes(reader.bytes()?)?;
     let received_at_local_ms = reader.u64()?;
     let frame = reader.bytes()?.to_vec();
     reader.finish()?;
@@ -55,6 +58,11 @@ pub fn decode_receive_transit_frame(intent: &Intent) -> Result<ReceiveTransitFra
     if intent.key != receive_transit_key(&input) {
         return Err("receive transit idempotence key does not match payload".to_string());
     }
+    Ok(input)
+}
+
+fn normalized_input(mut input: ReceiveTransitFrame) -> Result<ReceiveTransitFrame, String> {
+    input.origin_addr = normalize_origin_addr_bytes(&input.origin_addr)?;
     Ok(input)
 }
 

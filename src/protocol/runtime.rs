@@ -52,10 +52,12 @@ impl crate::core::runtime::Runtime<super::Protocol> {
             self.submit_intent(receive_transit::receive_transit_frame_intent(
                 receive_transit::ReceiveTransitFrame {
                     frame: row.bytes.clone(),
-                    origin_addr: row.source.addr().to_string().into_bytes(),
+                    origin_addr: transit_received::origin_addr::canonical_origin_addr_bytes(
+                        row.source.addr(),
+                    ),
                     received_at_local_ms: now_ms(),
                 },
-            ))?;
+            )?)?;
         }
         network_queues::delete_inbound(self.store(), &inbound)?;
 

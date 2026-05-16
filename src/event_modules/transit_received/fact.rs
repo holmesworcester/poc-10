@@ -3,6 +3,7 @@
 //! A `TransitReceivedFact` is a local about-fact for one received shared fact.
 //! It records observational receive metadata and projects a context offer keyed
 //! by `received_fact_id`; it does not validate or authorize the received fact.
+//! `origin_addr` is stored as canonical `SocketAddr::to_string()` bytes.
 
 use crate::core::facts::FactId;
 
