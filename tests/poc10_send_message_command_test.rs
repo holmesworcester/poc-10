@@ -4,7 +4,7 @@
 //! drive the command, and assert: (1) the happy path produces one fact and a
 //! receipt, (2) blank or empty text is rejected, (3) the produced fact is a
 //! signed envelope whose inner payload decodes through
-//! `sealed_message::layout::decode_sealed_message` and whose ciphertext
+//! `content::sealed_message::layout::decode_sealed_message` and whose ciphertext
 //! decrypts back to the original plaintext under the workspace key.
 
 use std::cell::Cell;
@@ -14,13 +14,13 @@ use topo::core::command_context::{
     WorkspaceId,
 };
 use topo::core::crypto;
-use topo::protocol::fact_modules::encryption::fact::LocalKeySecretFact;
-use topo::protocol::fact_modules::sealed_message::create::{
+use topo::protocol::facts::content::sealed_message::create::{
     associated_data, recover_text, send_message,
 };
-use topo::protocol::fact_modules::sealed_message::layout::decode_sealed_message;
-use topo::protocol::fact_modules::signed_fact::fact::LocalSignerSecretFact;
-use topo::protocol::fact_modules::signed_fact::layout::decode_signed_fact;
+use topo::protocol::facts::content::sealed_message::layout::decode_sealed_message;
+use topo::protocol::facts::encryption::fact::LocalKeySecretFact;
+use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::facts::identity::signed_fact::layout::decode_signed_fact;
 
 struct FixedClock(Cell<u64>);
 

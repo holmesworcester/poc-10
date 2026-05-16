@@ -13,28 +13,15 @@ use crate::core::matchers::ContextMatcher;
 use crate::core::network_queues;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::core::runtime::{RuntimeHandlers, RuntimeMatchers, RuntimeProtocol};
-use crate::core::schema_dsl::{
-    CORE_SCHEMA_SOURCE, FACT_MODULES_SCHEMA_SOURCE, INTENT_HANDLERS_SCHEMA_SOURCE,
-};
+use crate::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use crate::core::store::Store;
 use crate::core::store::TableName;
 use crate::core::tcp;
 use crate::core::wake_loop::{DispatchReport, WakeLoop};
-use crate::protocol::fact_modules::{
-    cascade_event, connection_ephemeral_secret, connection_request, connection_response,
-    content_event, content_file, content_file_deletion, content_file_slice, content_message,
-    content_message_deletion, content_reaction, disappearing_messages_setting, encryption,
-    identity_admin, identity_device_invite, identity_endpoint, identity_endpoint_shared,
-    identity_invite, identity_invite_accepted, identity_invite_server, identity_user,
-    identity_user_invite, identity_workspace, local_history_node_secret, removal_frontier,
-    sealed_message, signed_fact, sync_compare, sync_encrypted_root, sync_have_id,
-    sync_key_wrap_available, sync_need_id, sync_range_request, sync_shared_event, transit_received,
-};
-use crate::protocol::intent_handlers::{
-    bootstrap_send, connection_response as connection_response_handler, handle_sync,
-    materialize_key_wraps, network_send, purge_cascade, purge_event,
-    purge_retired_recipient_material, receive_transit, retention_expiry, retention_floor,
-    sync_index_update, transit, unwrap_key_wrap,
+use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
+use crate::protocol::intents::{
+    connection as connection_intents, content as content_intents, encryption as encryption_intents,
+    sync as sync_intents, transport as transport_intents,
 };
 use crate::protocol::matchers::ExactSelectorMatcher;
 use std::collections::BTreeSet;
@@ -51,15 +38,17 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         let accepted = listener.accept_available(self.store())?;
         let inbound = network_queues::claim_inbound(self.store(), work_limit)?;
         for row in &inbound {
-            self.submit_intent(receive_transit::receive_transit_frame_intent(
-                receive_transit::ReceiveTransitFrame {
-                    frame: row.bytes.clone(),
-                    origin_addr: transit_received::addr::canonical_origin_addr_bytes(
-                        row.source.addr(),
-                    ),
-                    received_at_local_ms: now_ms(),
-                },
-            )?)?;
+            self.submit_intent(
+                transport_intents::receive_transit_frame::receive_transit_frame_intent(
+                    transport_intents::receive_transit_frame::ReceiveTransitFrame {
+                        frame: row.bytes.clone(),
+                        origin_addr: transport::transit_received::addr::canonical_origin_addr_bytes(
+                            row.source.addr(),
+                        ),
+                        received_at_local_ms: now_ms(),
+                    },
+                )?,
+            )?;
         }
         network_queues::delete_inbound(self.store(), &inbound)?;
 
@@ -91,10 +80,12 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         let now_minute = now_ms / 60_000;
         let sealed_rows = self
             .store()
-            .table_rows(sealed_message::rows::SEALED_MESSAGE_ROWS)
+            .table_rows(content::sealed_message::rows::SEALED_MESSAGE_ROWS)
             .map_err(|err| format!("load sealed message rows for retention: {err}"))?
             .into_iter()
-            .map(|(key, value)| sealed_message::rows::decode_sealed_message_row(&key, &value))
+            .map(|(key, value)| {
+                content::sealed_message::rows::decode_sealed_message_row(&key, &value)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let mut queued = 0usize;
         for row in sealed_rows {
@@ -102,31 +93,37 @@ impl crate::core::runtime::Runtime<super::Protocol> {
                 break;
             }
             if row.expires_at_minute != u64::MAX && row.expires_at_minute <= now_minute {
-                if self.submit_intent(retention_expiry::expire_message_intent(
-                    retention_expiry::ExpireMessage {
-                        workspace_id: row.workspace_id,
-                        target_id: row.message_id,
-                        now_minute,
-                    },
-                ))? {
+                if self.submit_intent(
+                    content_intents::purge_expired_message::purge_expired_message_intent(
+                        content_intents::purge_expired_message::PurgeExpiredMessage {
+                            workspace_id: row.workspace_id,
+                            target_id: row.message_id,
+                            now_minute,
+                        },
+                    ),
+                )? {
                     queued += 1;
                 }
                 continue;
             }
-            let Some(active) = disappearing_messages_setting::queries::active_for_workspace(
-                self.store(),
-                row.workspace_id,
-            )?
-            .filter(|setting| row.minute < setting.retire_minute) else {
+            let Some(active) =
+                encryption::disappearing_messages_setting::queries::active_for_workspace(
+                    self.store(),
+                    row.workspace_id,
+                )?
+                .filter(|setting| row.minute < setting.retire_minute)
+            else {
                 continue;
             };
-            if self.submit_intent(retention_floor::apply_retention_floor_intent(
-                retention_floor::ApplyRetentionFloor {
-                    workspace_id: row.workspace_id,
-                    setting_id: active.setting_id,
-                    target_id: row.message_id,
-                },
-            ))? {
+            if self.submit_intent(
+                content_intents::purge_below_retention_floor::purge_below_retention_floor_intent(
+                    content_intents::purge_below_retention_floor::PurgeBelowRetentionFloor {
+                        workspace_id: row.workspace_id,
+                        setting_id: active.setting_id,
+                        target_id: row.message_id,
+                    },
+                ),
+            )? {
                 queued += 1;
             }
         }
@@ -135,21 +132,22 @@ impl crate::core::runtime::Runtime<super::Protocol> {
 
     fn seed_sync_have_ids(&mut self, limit: usize) -> Result<usize, String> {
         let mut seeded = 0usize;
-        let Some(local_endpoint) = identity_endpoint::local_endpoint::local_endpoint(self.store())?
+        let Some(local_endpoint) =
+            identity::endpoint::local_endpoint::local_endpoint(self.store())?
         else {
             return Ok(0);
         };
         let endpoint_memberships = endpoint_memberships(self.store())?;
         let connections = self
             .store()
-            .table_rows(connection_response::rows::CONNECTION_RESPONSE_ROWS)
+            .table_rows(connection::response::rows::CONNECTION_RESPONSE_ROWS)
             .map_err(|err| format!("load connection rows for sync seed: {err}"))?;
         if connections.is_empty() {
             return Ok(0);
         }
         let facts = self.facts().cloned().collect::<Vec<_>>();
         for (connection_key, connection_value) in connections {
-            let row = connection_response::rows::decode_connection_response_row(
+            let row = connection::response::rows::decode_connection_response_row(
                 &connection_key,
                 &connection_value,
             )?;
@@ -167,19 +165,19 @@ impl crate::core::runtime::Runtime<super::Protocol> {
                 {
                     continue;
                 }
-                let have = sync_have_id::fact::SyncHaveIdFact {
+                let have = sync::have_id::fact::SyncHaveIdFact {
                     connection_id: row.connection_id,
                     timestamp: fact.timestamp,
-                    event_id: fact.id,
+                    fact_id: fact.id,
                 };
                 let have_fact = Fact::new(
                     FactScope::Global,
                     fact.timestamp,
-                    sync_have_id::layout::encode_fact(&have)?,
+                    sync::have_id::layout::encode_fact(&have)?,
                 );
                 if self.submit_fact(have_fact.clone()) {
-                    self.submit_intent(transit::send_on_connection_intent(
-                        transit::TransitSendOnConnection {
+                    self.submit_intent(transport_intents::send_facts_on_connection::send_facts_on_connection_intent(
+                        transport_intents::send_facts_on_connection::SendFactsOnConnection {
                             connection_id: row.connection_id,
                             fact_ids: vec![have_fact.id],
                         },
@@ -208,21 +206,21 @@ pub(crate) fn is_sync_seed_fact(fact: &Fact) -> bool {
     };
     if matches!(
         tag,
-        sync_compare::layout::TYPE_SYNC_COMPARE
-            | sync_have_id::layout::TYPE_SYNC_HAVE_ID
-            | sync_need_id::layout::TYPE_SYNC_NEED_ID
-            | sync_range_request::layout::TYPE_SYNC_RANGE_REQUEST
-            | sync_shared_event::layout::TYPE_SHARED_EVENT
-            | sync_encrypted_root::layout::TYPE_ENCRYPTED_ROOT
-            | sync_key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE
+        sync::compare::layout::TYPE_SYNC_COMPARE
+            | sync::have_id::layout::TYPE_SYNC_HAVE_ID
+            | sync::need_id::layout::TYPE_SYNC_NEED_ID
+            | sync::range_request::layout::TYPE_SYNC_RANGE_REQUEST
+            | sync::shared_fact::layout::TYPE_SHARED_FACT
+            | sync::encrypted_root::layout::TYPE_ENCRYPTED_ROOT
+            | sync::key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE
     ) {
         return false;
     }
-    crate::protocol::fact_modules::transit::create::require_sendable_fact(fact).is_ok()
+    crate::protocol::facts::transport::transit::create::require_sendable_fact(fact).is_ok()
 }
 
 fn remote_endpoint_for_connection(
-    row: &connection_response::rows::ConnectionResponseRow,
+    row: &connection::response::rows::ConnectionResponseRow,
     local_endpoint: [u8; 32],
 ) -> Option<[u8; 32]> {
     if row.from_endpoint == local_endpoint {
@@ -236,11 +234,11 @@ fn remote_endpoint_for_connection(
 
 fn endpoint_memberships(store: &Store) -> Result<BTreeSet<([u8; 32], [u8; 32])>, String> {
     let rows = store
-        .table_rows(identity_endpoint_shared::rows::ENDPOINT_SHARED_ROWS)
+        .table_rows(identity::endpoint_shared::rows::ENDPOINT_SHARED_ROWS)
         .map_err(|err| format!("load endpoint membership rows for sync seed: {err}"))?;
     rows.into_iter()
         .map(|(key, value)| {
-            identity_endpoint_shared::rows::decode_endpoint_shared_row(&key, &value)
+            identity::endpoint_shared::rows::decode_endpoint_shared_row(&key, &value)
                 .map(|row| (row.workspace_id, row.endpoint_id))
         })
         .collect()
@@ -263,46 +261,46 @@ fn may_seed_fact_to_endpoint(
 
 const SCHEMA_SOURCES: &[&str] = &[
     CORE_SCHEMA_SOURCE,
-    FACT_MODULES_SCHEMA_SOURCE,
-    INTENT_HANDLERS_SCHEMA_SOURCE,
+    FACTS_SCHEMA_SOURCE,
+    INTENTS_SCHEMA_SOURCE,
 ];
 
 const ATOMIC_ROW_TABLES: &[TableName] = &[
-    cascade_event::rows::CASCADE_STAGED_EVENT_ROWS,
-    connection_ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
-    connection_request::rows::CONNECTION_REQUEST_ROWS,
-    connection_response::rows::CONNECTION_RESPONSE_ROWS,
-    content_event::rows::CONTENT_EVENT_ROWS,
-    content_file::rows::FILE_ROWS,
-    content_file_deletion::rows::FILE_DELETION_ROWS,
-    content_file_slice::rows::FILE_SLICE_ROWS,
-    content_message::rows::CONTENT_MESSAGE_ROWS,
-    content_message_deletion::rows::MESSAGE_DELETION_ROWS,
-    content_reaction::rows::REACTION_ROWS,
-    disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
+    sync::cascade_fact::rows::CASCADE_STAGED_FACT_ROWS,
+    connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
+    connection::request::rows::CONNECTION_REQUEST_ROWS,
+    connection::response::rows::CONNECTION_RESPONSE_ROWS,
+    content::event::rows::CONTENT_EVENT_ROWS,
+    content::file::rows::FILE_ROWS,
+    content::file_deletion::rows::FILE_DELETION_ROWS,
+    content::file_slice::rows::FILE_SLICE_ROWS,
+    content::message::rows::CONTENT_MESSAGE_ROWS,
+    content::message_deletion::rows::MESSAGE_DELETION_ROWS,
+    content::reaction::rows::REACTION_ROWS,
+    encryption::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
     encryption::rows::KEY_WRAP_ROWS,
-    identity_admin::rows::ADMIN_ROWS,
-    identity_device_invite::rows::DEVICE_INVITE_ROWS,
-    identity_endpoint::rows::LOCAL_ENDPOINT_ROWS,
-    identity_endpoint::rows::LOCAL_ENDPOINT_SECRET_ROWS,
-    identity_endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-    identity_endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
-    identity_endpoint_shared::rows::ENDPOINT_SHARED_ROWS,
-    identity_invite::rows::INVITE_SECRET_ROWS,
-    identity_invite_accepted::rows::INVITE_ACCEPTED_ROWS,
-    identity_invite_server::rows::INVITE_SERVER_ROWS,
-    identity_user::rows::USER_ROWS,
-    identity_user_invite::rows::USER_INVITE_ROWS,
-    identity_workspace::rows::WORKSPACE_ROWS,
-    local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
-    removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
-    sealed_message::rows::MESSAGE_ROWS,
-    sealed_message::rows::OPENED_MESSAGE_ROWS,
-    sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
-    sealed_message::rows::SEALED_MESSAGE_ROWS,
-    sync_compare::rows::SYNC_COMPARE_ROWS,
-    sync_have_id::rows::SYNC_HAVE_ID_ROWS,
-    sync_need_id::rows::SYNC_NEED_ID_ROWS,
+    identity::admin::rows::ADMIN_ROWS,
+    identity::device_invite::rows::DEVICE_INVITE_ROWS,
+    identity::endpoint::rows::LOCAL_ENDPOINT_ROWS,
+    identity::endpoint::rows::LOCAL_ENDPOINT_SECRET_ROWS,
+    identity::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
+    identity::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
+    identity::endpoint_shared::rows::ENDPOINT_SHARED_ROWS,
+    identity::invite::rows::INVITE_SECRET_ROWS,
+    identity::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
+    identity::invite_server::rows::INVITE_SERVER_ROWS,
+    identity::user::rows::USER_ROWS,
+    identity::user_invite::rows::USER_INVITE_ROWS,
+    identity::workspace::rows::WORKSPACE_ROWS,
+    encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
+    encryption::removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
+    content::sealed_message::rows::MESSAGE_ROWS,
+    content::sealed_message::rows::OPENED_MESSAGE_ROWS,
+    content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
+    content::sealed_message::rows::SEALED_MESSAGE_ROWS,
+    sync::compare::rows::SYNC_COMPARE_ROWS,
+    sync::have_id::rows::SYNC_HAVE_ID_ROWS,
+    sync::need_id::rows::SYNC_NEED_ID_ROWS,
 ];
 
 impl RuntimeProtocol for super::Protocol {
@@ -344,43 +342,43 @@ impl Projector for ProtocolProjector {
             return Err("cannot project empty fact bytes".to_string());
         };
         match tag {
-            cascade_event::layout::TYPE_CASCADE_EVENT => {
-                cascade_event::project::CascadeEventProjector::new().project(fact, context)
+            sync::cascade_fact::layout::TYPE_CASCADE_FACT => {
+                sync::cascade_fact::project::CascadeFactProjector::new().project(fact, context)
             }
-            connection_ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET => {
-                connection_ephemeral_secret::project::ConnectionEphemeralSecretProjector::new()
+            connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET => {
+                connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector::new()
                     .project(fact, context)
             }
-            connection_request::layout::TYPE_CONNECTION_REQUEST => {
-                connection_request::project::ConnectionRequestProjector::new()
+            connection::request::layout::TYPE_CONNECTION_REQUEST => {
+                connection::request::project::ConnectionRequestProjector::new()
                     .project(fact, context)
             }
-            connection_response::layout::TYPE_CONNECTION_RESPONSE => {
-                connection_response::project::ConnectionResponseProjector::new()
+            connection::response::layout::TYPE_CONNECTION_RESPONSE => {
+                connection::response::project::ConnectionResponseProjector::new()
                     .project(fact, context)
             }
-            content_event::layout::TYPE_CONTENT_EVENT => {
-                content_event::project::ContentEventProjector::new().project(fact, context)
+            content::event::layout::TYPE_CONTENT_EVENT => {
+                content::event::project::ContentEventProjector::new().project(fact, context)
             }
-            content_file::layout::TYPE_CONTENT_FILE => {
-                content_file::project::ContentFileProjector::new().project(fact, context)
+            content::file::layout::TYPE_CONTENT_FILE => {
+                content::file::project::ContentFileProjector::new().project(fact, context)
             }
-            content_file_deletion::layout::TYPE_CONTENT_FILE_DELETION => {
-                content_file_deletion::project::ContentFileDeletionProjector::new()
+            content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION => {
+                content::file_deletion::project::ContentFileDeletionProjector::new()
                     .project(fact, context)
             }
-            content_file_slice::layout::TYPE_CONTENT_FILE_SLICE => {
-                content_file_slice::project::ContentFileSliceProjector::new().project(fact, context)
+            content::file_slice::layout::TYPE_CONTENT_FILE_SLICE => {
+                content::file_slice::project::ContentFileSliceProjector::new().project(fact, context)
             }
-            content_message::layout::TYPE_CONTENT_MESSAGE => {
-                content_message::project::ContentMessageProjector::new().project(fact, context)
+            content::message::layout::TYPE_CONTENT_MESSAGE => {
+                content::message::project::ContentMessageProjector::new().project(fact, context)
             }
-            content_message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION => {
-                content_message_deletion::project::ContentMessageDeletionProjector::new()
+            content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION => {
+                content::message_deletion::project::ContentMessageDeletionProjector::new()
                     .project(fact, context)
             }
-            content_reaction::layout::TYPE_CONTENT_REACTION => {
-                content_reaction::project::ContentReactionProjector::new().project(fact, context)
+            content::reaction::layout::TYPE_CONTENT_REACTION => {
+                content::reaction::project::ContentReactionProjector::new().project(fact, context)
             }
             encryption::layout::TYPE_RECIPIENT_KEY
             | encryption::layout::TYPE_REMOVAL_FRONTIER
@@ -391,45 +389,45 @@ impl Projector for ProtocolProjector {
             | encryption::layout::TYPE_LOCAL_RECIPIENT_KEY => {
                 encryption::project::EncryptionProjector::new().project(fact, context)
             }
-            identity_endpoint::layout::TYPE_LOCAL_ENDPOINT => {
-                identity_endpoint::project::EndpointProjector::new().project(fact, context)
+            identity::endpoint::layout::TYPE_LOCAL_ENDPOINT => {
+                identity::endpoint::project::EndpointProjector::new().project(fact, context)
             }
-            identity_invite::layout::TYPE_INVITE_SECRET => {
-                identity_invite::project::InviteSecretProjector::new().project(fact, context)
+            identity::invite::layout::TYPE_INVITE_SECRET => {
+                identity::invite::project::InviteSecretProjector::new().project(fact, context)
             }
-            identity_workspace::layout::TYPE_WORKSPACE => {
-                identity_workspace::project::WorkspaceProjector::new().project(fact, context)
+            identity::workspace::layout::TYPE_WORKSPACE => {
+                identity::workspace::project::WorkspaceProjector::new().project(fact, context)
             }
-            signed_fact::layout::TYPE_SIGNED_FACT => {
-                let envelope = signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+            identity::signed_fact::layout::TYPE_SIGNED_FACT => {
+                let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)?;
                 match envelope.inner_type {
-                    identity_user_invite::layout::TYPE_USER_INVITE => {
-                        identity_user_invite::project::UserInviteProjector::new()
+                    identity::user_invite::layout::TYPE_USER_INVITE => {
+                        identity::user_invite::project::UserInviteProjector::new()
                             .project(fact, context)
                     }
-                    identity_user::layout::TYPE_USER => {
-                        identity_user::project::UserProjector::new().project(fact, context)
+                    identity::user::layout::TYPE_USER => {
+                        identity::user::project::UserProjector::new().project(fact, context)
                     }
-                    identity_admin::layout::TYPE_ADMIN => {
-                        identity_admin::project::AdminProjector::new().project(fact, context)
+                    identity::admin::layout::TYPE_ADMIN => {
+                        identity::admin::project::AdminProjector::new().project(fact, context)
                     }
-                    identity_endpoint_shared::layout::TYPE_ENDPOINT_SHARED => {
-                        identity_endpoint_shared::project::EndpointSharedProjector::new()
+                    identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED => {
+                        identity::endpoint_shared::project::EndpointSharedProjector::new()
                             .project(fact, context)
                     }
-                    identity_device_invite::layout::TYPE_DEVICE_INVITE => {
-                        identity_device_invite::project::DeviceInviteProjector::new()
+                    identity::device_invite::layout::TYPE_DEVICE_INVITE => {
+                        identity::device_invite::project::DeviceInviteProjector::new()
                             .project(fact, context)
                     }
-                    identity_invite_server::layout::TYPE_INVITE_SERVER => {
-                        identity_invite_server::project::InviteServerProjector::new()
+                    identity::invite_server::layout::TYPE_INVITE_SERVER => {
+                        identity::invite_server::project::InviteServerProjector::new()
                             .project(fact, context)
                     }
                     encryption::layout::TYPE_KEY_WRAP => {
                         encryption::project::EncryptionProjector::new().project(fact, context)
                     }
-                    sealed_message::layout::TYPE_SEALED_MESSAGE => {
-                        sealed_message::project::SealedMessageProjector::new()
+                    content::sealed_message::layout::TYPE_SEALED_MESSAGE => {
+                        content::sealed_message::project::SealedMessageProjector::new()
                             .project(fact, context)
                     }
                     inner_type => Err(format!(
@@ -437,76 +435,76 @@ impl Projector for ProtocolProjector {
                     )),
                 }
             }
-            signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET => {
-                signed_fact::project::SignedFactProjector::new().project(fact, context)
+            identity::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET => {
+                identity::signed_fact::project::SignedFactProjector::new().project(fact, context)
             }
-            identity_device_invite::layout::TYPE_DEVICE_INVITE => {
-                identity_device_invite::project::DeviceInviteProjector::new().project(fact, context)
+            identity::device_invite::layout::TYPE_DEVICE_INVITE => {
+                identity::device_invite::project::DeviceInviteProjector::new().project(fact, context)
             }
-            identity_endpoint_shared::layout::TYPE_ENDPOINT_SHARED => {
-                identity_endpoint_shared::project::EndpointSharedProjector::new()
+            identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED => {
+                identity::endpoint_shared::project::EndpointSharedProjector::new()
                     .project(fact, context)
             }
-            identity_invite_server::layout::TYPE_INVITE_SERVER => {
-                identity_invite_server::project::InviteServerProjector::new().project(fact, context)
+            identity::invite_server::layout::TYPE_INVITE_SERVER => {
+                identity::invite_server::project::InviteServerProjector::new().project(fact, context)
             }
-            identity_admin::layout::TYPE_ADMIN => {
-                identity_admin::project::AdminProjector::new().project(fact, context)
+            identity::admin::layout::TYPE_ADMIN => {
+                identity::admin::project::AdminProjector::new().project(fact, context)
             }
-            sealed_message::layout::TYPE_SEALED_MESSAGE
-            | sealed_message::layout::TYPE_SIGNER_PUBKEY
-            | sealed_message::layout::TYPE_SECRET_NODE => {
-                sealed_message::project::SealedMessageProjector::new().project(fact, context)
+            content::sealed_message::layout::TYPE_SEALED_MESSAGE
+            | content::sealed_message::layout::TYPE_SIGNER_PUBKEY
+            | content::sealed_message::layout::TYPE_SECRET_NODE => {
+                content::sealed_message::project::SealedMessageProjector::new().project(fact, context)
             }
-            sealed_message::layout::TYPE_MESSAGE_DELETION => {
-                sealed_message::project::SealedMessageProjector::new().project(fact, context)
+            content::sealed_message::layout::TYPE_MESSAGE_DELETION => {
+                content::sealed_message::project::SealedMessageProjector::new().project(fact, context)
             }
-            identity_invite_accepted::layout::TYPE_INVITE_ACCEPTED => {
-                identity_invite_accepted::project::InviteAcceptedProjector::new()
+            identity::invite_accepted::layout::TYPE_INVITE_ACCEPTED => {
+                identity::invite_accepted::project::InviteAcceptedProjector::new()
                     .project(fact, context)
             }
-            disappearing_messages_setting::layout::TYPE_DISAPPEARING_MESSAGES_SETTING => {
-                disappearing_messages_setting::project::DisappearingMessagesSettingProjector::new()
+            encryption::disappearing_messages_setting::layout::TYPE_DISAPPEARING_MESSAGES_SETTING => {
+                encryption::disappearing_messages_setting::project::DisappearingMessagesSettingProjector::new()
                     .project(fact, context)
             }
-            sync_range_request::layout::TYPE_SYNC_RANGE_REQUEST => {
-                sync_range_request::project::SyncRangeRequestProjector::new().project(fact, context)
+            sync::range_request::layout::TYPE_SYNC_RANGE_REQUEST => {
+                sync::range_request::project::SyncRangeRequestProjector::new().project(fact, context)
             }
-            sync_encrypted_root::layout::TYPE_ENCRYPTED_ROOT => {
-                sync_encrypted_root::project::SyncEncryptedRootProjector::new()
+            sync::encrypted_root::layout::TYPE_ENCRYPTED_ROOT => {
+                sync::encrypted_root::project::SyncEncryptedRootProjector::new()
                     .project(fact, context)
             }
-            sync_shared_event::layout::TYPE_SHARED_EVENT => {
-                sync_shared_event::project::SyncSharedEventProjector::new().project(fact, context)
+            sync::shared_fact::layout::TYPE_SHARED_FACT => {
+                sync::shared_fact::project::SyncSharedFactProjector::new().project(fact, context)
             }
-            sync_key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE => {
-                sync_key_wrap_available::project::SyncKeyWrapAvailableProjector::new()
+            sync::key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE => {
+                sync::key_wrap_available::project::SyncKeyWrapAvailableProjector::new()
                     .project(fact, context)
             }
-            sync_compare::layout::TYPE_SYNC_COMPARE => {
-                sync_compare::project::SyncCompareProjector::new().project(fact, context)
+            sync::compare::layout::TYPE_SYNC_COMPARE => {
+                sync::compare::project::SyncCompareProjector::new().project(fact, context)
             }
-            sync_have_id::layout::TYPE_SYNC_HAVE_ID => {
-                sync_have_id::project::SyncHaveIdProjector::new().project(fact, context)
+            sync::have_id::layout::TYPE_SYNC_HAVE_ID => {
+                sync::have_id::project::SyncHaveIdProjector::new().project(fact, context)
             }
-            sync_need_id::layout::TYPE_SYNC_NEED_ID => {
-                sync_need_id::project::SyncNeedIdProjector::new().project(fact, context)
+            sync::need_id::layout::TYPE_SYNC_NEED_ID => {
+                sync::need_id::project::SyncNeedIdProjector::new().project(fact, context)
             }
-            transit_received::layout::TYPE_TRANSIT_RECEIVED => {
-                transit_received::project::TransitReceivedProjector::new().project(fact, context)
+            transport::transit_received::layout::TYPE_TRANSIT_RECEIVED => {
+                transport::transit_received::project::TransitReceivedProjector::new().project(fact, context)
             }
-            identity_user_invite::layout::TYPE_USER_INVITE => {
-                identity_user_invite::project::UserInviteProjector::new().project(fact, context)
+            identity::user_invite::layout::TYPE_USER_INVITE => {
+                identity::user_invite::project::UserInviteProjector::new().project(fact, context)
             }
-            identity_user::layout::TYPE_USER => {
-                identity_user::project::UserProjector::new().project(fact, context)
+            identity::user::layout::TYPE_USER => {
+                identity::user::project::UserProjector::new().project(fact, context)
             }
-            local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET => {
-                local_history_node_secret::project::LocalHistoryNodeSecretProjector::new()
+            encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET => {
+                encryption::local_history_node_secret::project::LocalHistoryNodeSecretProjector::new()
                     .project(fact, context)
             }
-            removal_frontier::layout::TYPE_REMOVAL_FRONTIER => {
-                removal_frontier::project::RemovalFrontierProjector::new().project(fact, context)
+            encryption::removal_frontier::layout::TYPE_REMOVAL_FRONTIER => {
+                encryption::removal_frontier::project::RemovalFrontierProjector::new().project(fact, context)
             }
             _ => Err(format!("no target projector registered for fact tag {tag}")),
         }
@@ -528,7 +526,7 @@ impl ProtocolContextMatchers {
                         Role::new(registration.role).expect("registered exact matcher role"),
                     );
                 }
-                "RangeEventMatcher" | "SecretCoverageMatcher" | "WrapSourceMatcher" => {
+                "RangeFactMatcher" | "SecretCoverageMatcher" | "WrapSourceMatcher" => {
                     custom_matcher_names.insert(registration.matcher);
                 }
                 other => panic!("unknown context matcher {other}"),
@@ -539,8 +537,8 @@ impl ProtocolContextMatchers {
             exact_roles.into_iter().map(exact_matcher).collect();
         for matcher in custom_matcher_names {
             match matcher {
-                "RangeEventMatcher" => {
-                    matchers.push(Box::new(super::matchers::RangeEventMatcher::new()));
+                "RangeFactMatcher" => {
+                    matchers.push(Box::new(super::matchers::RangeFactMatcher::new()));
                 }
                 "SecretCoverageMatcher" => {
                     matchers.push(Box::new(super::matchers::SecretCoverageMatcher::new()));
@@ -574,47 +572,61 @@ fn exact_matcher(role: Role) -> Box<dyn ContextMatcher> {
 
 #[derive(Debug, Clone)]
 pub struct ProtocolHandlers {
-    bootstrap_send: bootstrap_send::BootstrapSendRequestHandler,
-    connection_response: connection_response_handler::ConnectionResponseHandler,
-    handle_sync: handle_sync::HandleSyncHandler,
-    respond_to_sync_compare: handle_sync::RespondToSyncCompareHandler,
-    request_sync_id: handle_sync::RequestSyncIdHandler,
-    respond_to_sync_need: handle_sync::RespondToSyncNeedHandler,
-    materialize_key_wraps: materialize_key_wraps::MaterializeKeyWrapsHandler,
-    network_send: network_send::NetworkSendHandler,
-    purge_cascade: purge_cascade::PurgeCascadeHandler,
-    purge_event: purge_event::PurgeEventHandler,
+    send_bootstrap_connection_request:
+        connection_intents::send_bootstrap_request::SendBootstrapConnectionRequestHandler,
+    create_connection_response:
+        connection_intents::create_response::CreateConnectionResponseHandler,
+    send_sync_compare_response: sync_intents::send_compare_response::SendSyncCompareResponseHandler,
+    send_needed_fact_id: sync_intents::send_needed_fact_id::SendNeededFactIdHandler,
+    send_requested_fact: sync_intents::send_requested_fact::SendRequestedFactHandler,
+    record_indexed_fact: sync_intents::record_indexed_fact::RecordIndexedFactHandler,
+    create_key_wrap: encryption_intents::create_key_wrap::CreateKeyWrapHandler,
     purge_retired_recipient_material:
-        purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler,
-    receive_transit: receive_transit::ReceiveTransitHandler,
-    retention_expiry: retention_expiry::RetentionExpiryHandler,
-    retention_floor: retention_floor::RetentionFloorHandler,
-    sync_index_update: sync_index_update::SyncIndexUpdateHandler,
-    transit: transit::TransitSendOnConnectionHandler,
-    unwrap_key_wrap: unwrap_key_wrap::UnwrapKeyWrapHandler,
+        encryption_intents::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler,
+    unwrap_key_wrap: encryption_intents::unwrap_key_wrap::UnwrapKeyWrapHandler,
+    purge_deleted_message: content_intents::purge_deleted_message::PurgeDeletedMessageHandler,
+    purge_message_child: content_intents::purge_message_child::PurgeMessageChildHandler,
+    purge_expired_message: content_intents::purge_expired_message::PurgeExpiredMessageHandler,
+    purge_below_retention_floor:
+        content_intents::purge_below_retention_floor::PurgeBelowRetentionFloorHandler,
+    send_facts_on_connection:
+        transport_intents::send_facts_on_connection::SendFactsOnConnectionHandler,
+    send_network_frame: transport_intents::send_network_frame::SendNetworkFrameHandler,
+    receive_transit_frame: transport_intents::receive_transit_frame::ReceiveTransitFrameHandler,
 }
 
 impl ProtocolHandlers {
     fn new() -> Self {
         Self {
-            bootstrap_send: bootstrap_send::BootstrapSendRequestHandler::new(),
-            connection_response: connection_response_handler::ConnectionResponseHandler::new(),
-            handle_sync: handle_sync::HandleSyncHandler::new(),
-            respond_to_sync_compare: handle_sync::RespondToSyncCompareHandler::new(),
-            request_sync_id: handle_sync::RequestSyncIdHandler::new(),
-            respond_to_sync_need: handle_sync::RespondToSyncNeedHandler::new(),
-            materialize_key_wraps: materialize_key_wraps::MaterializeKeyWrapsHandler::new(),
-            network_send: network_send::NetworkSendHandler::new(),
-            purge_cascade: purge_cascade::PurgeCascadeHandler::new(),
-            purge_event: purge_event::PurgeEventHandler::new(),
+            send_bootstrap_connection_request:
+                connection_intents::send_bootstrap_request::SendBootstrapConnectionRequestHandler::new(),
+            create_connection_response:
+                connection_intents::create_response::CreateConnectionResponseHandler::new(),
+            send_sync_compare_response:
+                sync_intents::send_compare_response::SendSyncCompareResponseHandler::new(),
+            send_needed_fact_id: sync_intents::send_needed_fact_id::SendNeededFactIdHandler::new(),
+            send_requested_fact:
+                sync_intents::send_requested_fact::SendRequestedFactHandler::new(),
+            record_indexed_fact:
+                sync_intents::record_indexed_fact::RecordIndexedFactHandler::new(),
+            create_key_wrap: encryption_intents::create_key_wrap::CreateKeyWrapHandler::new(),
             purge_retired_recipient_material:
-                purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler::new(),
-            receive_transit: receive_transit::ReceiveTransitHandler::new(),
-            retention_expiry: retention_expiry::RetentionExpiryHandler::new(),
-            retention_floor: retention_floor::RetentionFloorHandler::new(),
-            sync_index_update: sync_index_update::SyncIndexUpdateHandler::new(),
-            transit: transit::TransitSendOnConnectionHandler::new(),
-            unwrap_key_wrap: unwrap_key_wrap::UnwrapKeyWrapHandler::new(),
+                encryption_intents::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler::new(),
+            unwrap_key_wrap: encryption_intents::unwrap_key_wrap::UnwrapKeyWrapHandler::new(),
+            purge_deleted_message:
+                content_intents::purge_deleted_message::PurgeDeletedMessageHandler::new(),
+            purge_message_child:
+                content_intents::purge_message_child::PurgeMessageChildHandler::new(),
+            purge_expired_message:
+                content_intents::purge_expired_message::PurgeExpiredMessageHandler::new(),
+            purge_below_retention_floor:
+                content_intents::purge_below_retention_floor::PurgeBelowRetentionFloorHandler::new(),
+            send_facts_on_connection:
+                transport_intents::send_facts_on_connection::SendFactsOnConnectionHandler::new(),
+            send_network_frame:
+                transport_intents::send_network_frame::SendNetworkFrameHandler::new(),
+            receive_transit_frame:
+                transport_intents::receive_transit_frame::ReceiveTransitFrameHandler::new(),
         }
     }
 
@@ -627,63 +639,49 @@ impl ProtocolHandlers {
         let mut total = DispatchReport::default();
         self.dispatch_one(
             wake_loop,
-            &self.bootstrap_send,
+            &self.send_bootstrap_connection_request,
             store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
-            &self.connection_response,
+            &self.create_connection_response,
             store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
-            &self.handle_sync,
+            &self.send_sync_compare_response,
             store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
-            &self.respond_to_sync_compare,
+            &self.send_needed_fact_id,
             store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
-            &self.request_sync_id,
+            &self.send_requested_fact,
             store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
-            &self.respond_to_sync_need,
+            &self.record_indexed_fact,
             store,
             limit_per_handler,
             &mut total,
         )?;
         self.dispatch_one(
             wake_loop,
-            &self.materialize_key_wraps,
-            store,
-            limit_per_handler,
-            &mut total,
-        )?;
-        self.dispatch_one(
-            wake_loop,
-            &self.purge_cascade,
-            store,
-            limit_per_handler,
-            &mut total,
-        )?;
-        self.dispatch_one(
-            wake_loop,
-            &self.purge_event,
+            &self.create_key_wrap,
             store,
             limit_per_handler,
             &mut total,
@@ -697,49 +695,56 @@ impl ProtocolHandlers {
         )?;
         self.dispatch_one(
             wake_loop,
-            &self.receive_transit,
-            store,
-            limit_per_handler,
-            &mut total,
-        )?;
-        self.dispatch_one(
-            wake_loop,
-            &self.retention_expiry,
-            store,
-            limit_per_handler,
-            &mut total,
-        )?;
-        self.dispatch_one(
-            wake_loop,
-            &self.retention_floor,
-            store,
-            limit_per_handler,
-            &mut total,
-        )?;
-        self.dispatch_one(
-            wake_loop,
-            &self.sync_index_update,
-            store,
-            limit_per_handler,
-            &mut total,
-        )?;
-        self.dispatch_one(
-            wake_loop,
-            &self.transit,
-            store,
-            limit_per_handler,
-            &mut total,
-        )?;
-        self.dispatch_one(
-            wake_loop,
-            &self.network_send,
-            store,
-            limit_per_handler,
-            &mut total,
-        )?;
-        self.dispatch_one(
-            wake_loop,
             &self.unwrap_key_wrap,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.purge_deleted_message,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.purge_message_child,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.purge_expired_message,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.purge_below_retention_floor,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.send_facts_on_connection,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.send_network_frame,
+            store,
+            limit_per_handler,
+            &mut total,
+        )?;
+        self.dispatch_one(
+            wake_loop,
+            &self.receive_transit_frame,
             store,
             limit_per_handler,
             &mut total,

@@ -165,11 +165,11 @@ pub const LOCAL_SECRET_SOURCE_ROLE: &str = "local_secret_source";
 pub const LOCAL_SIGNER_SECRET_ROLE: &str = "local_signer_secret";
 pub const RECIPIENT_KEY_ROLE: &str = "recipient_key";
 pub const RECIPIENT_SUPERSEDED_ROLE: &str = "recipient_superseded";
-pub const REMOVAL_FRONTIER_ROLE: &str = "removal_frontier";
+pub const REMOVAL_FRONTIER_ROLE: &str = "encryption_removal_frontier";
 pub const SIGNER_PUBKEY_ROLE: &str = "signer_pubkey";
-pub const SYNC_EXACT_EVENT_ROLE: &str = "sync_exact_event";
+pub const SYNC_EXACT_FACT_ROLE: &str = "sync_exact_fact";
 pub const SYNC_KEY_WRAP_ROLE: &str = "sync_key_wrap";
-pub const TRANSIT_RECEIVED_ROLE: &str = "transit_received";
+pub const TRANSIT_RECEIVED_ROLE: &str = "transport_transit_received";
 
 pub fn protocol_role(name: &'static str) -> Role {
     Role::new(name).expect("valid protocol context role")
@@ -461,9 +461,9 @@ pub fn invite_server_key_offer(
     )
 }
 
-pub fn device_invite_key(user_authority_event_id: FactId, public_key: [u8; 32]) -> Vec<u8> {
+pub fn device_invite_key(user_authority_fact_id: FactId, public_key: [u8; 32]) -> Vec<u8> {
     let mut key = Vec::with_capacity(64);
-    key.extend_from_slice(&user_authority_event_id);
+    key.extend_from_slice(&user_authority_fact_id);
     key.extend_from_slice(&public_key);
     key
 }
@@ -626,21 +626,21 @@ pub fn signer_offer(owner: FactId, scope: FactScope, signer_id: FactId) -> Conte
     exact_offer_for_selector(owner, signer_role(), scope, signer_id, owner)
 }
 
-pub fn exact_event_role() -> Role {
-    protocol_role(SYNC_EXACT_EVENT_ROLE)
+pub fn exact_fact_role() -> Role {
+    protocol_role(SYNC_EXACT_FACT_ROLE)
 }
 
-pub fn exact_event_need(owner: FactId, scope: FactScope, event_id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, exact_event_role(), scope, event_id)
+pub fn exact_fact_need(owner: FactId, scope: FactScope, fact_id: FactId) -> ContextNeed {
+    exact_need_for_selector(owner, exact_fact_role(), scope, fact_id)
 }
 
-pub fn exact_event_offer(
+pub fn exact_fact_offer(
     owner: FactId,
     scope: FactScope,
-    event_id: FactId,
+    fact_id: FactId,
     payload_ref: FactId,
 ) -> ContextOffer {
-    exact_offer_for_selector(owner, exact_event_role(), scope, event_id, payload_ref)
+    exact_offer_for_selector(owner, exact_fact_role(), scope, fact_id, payload_ref)
 }
 
 pub fn key_wrap_role() -> Role {
@@ -741,11 +741,11 @@ mod tests {
     fn exact_helpers_encode_only_role_scope_selector_and_payload_ref() {
         let owner = [1; 32];
         let scope = workspace_scope([2; 32]);
-        let need = exact_event_need(owner, scope.clone(), [3; 32]);
-        let offer = exact_event_offer([4; 32], scope.clone(), [3; 32], [5; 32]);
+        let need = exact_fact_need(owner, scope.clone(), [3; 32]);
+        let offer = exact_fact_offer([4; 32], scope.clone(), [3; 32], [5; 32]);
 
-        assert_eq!(need.role, exact_event_role());
-        assert_eq!(offer.role, exact_event_role());
+        assert_eq!(need.role, exact_fact_role());
+        assert_eq!(offer.role, exact_fact_role());
         assert_eq!(need.scope, scope);
         assert_eq!(offer.scope, scope);
         assert_eq!(need.selector, offer.selector);

@@ -152,7 +152,7 @@ fn cli_disappearing_status_round_trips_known_setup() {
         &workspace_id,
         "5",
     ]));
-    let setting_event_id = line_value(&set_out, "setting_event_id");
+    let setting_fact_id = line_value(&set_out, "setting_fact_id");
 
     // Author 2 messages so live_messages == 2.
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "hello"]));
@@ -165,7 +165,7 @@ fn cli_disappearing_status_round_trips_known_setup() {
         &workspace_id,
     ]));
     assert_eq!(line_value(&status, "workspace"), workspace_id);
-    assert_eq!(line_value(&status, "setting_event_id"), setting_event_id);
+    assert_eq!(line_value(&status, "setting_fact_id"), setting_fact_id);
     assert_eq!(line_value(&status, "current_ttl_minutes"), "5");
     assert_eq!(line_value(&status, "current_floor_minute"), "95");
     assert_eq!(line_value(&status, "now_minute"), "100");

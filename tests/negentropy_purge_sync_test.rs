@@ -3,7 +3,7 @@
 //! Exercises the deferred sync-vs-purge interaction noted in
 //! `tests/disappearing_messages_cli_test.rs::cli_disappearing_messages_two_peer_convergence`:
 //!
-//!   * Two peers that purge the same set of admitted shared event ids
+//!   * Two peers that purge the same set of admitted shared fact ids
 //!     reach byte-identical negentropy `root_fingerprint` values.
 //!   * Expired content disappears locally and is not reintroduced by
 //!     follow-up sync rounds.
@@ -43,10 +43,10 @@ fn cli_negentropy_settles_root_after_expiry() {
     assert_eq!(message_lines(&alice, &workspace_id).len(), 3);
 
     let pre = sync_status(&alice);
-    let pre_count: u64 = line_value(&pre, "indexed_events").parse().expect("count");
+    let pre_count: u64 = line_value(&pre, "indexed_facts").parse().expect("count");
     assert!(
         pre_count >= 3,
-        "indexed events must include at least the three authored messages:\n{pre}"
+        "indexed facts must include at least the three authored messages:\n{pre}"
     );
     let pre_fingerprint = line_value(&pre, "root_fingerprint");
 
@@ -181,8 +181,8 @@ fn cli_negentropy_two_peers_converge_on_root_after_synchronized_purge() {
     // content_count stays at 0 on both peers across a follow-up sync
     // round, which we drive by waiting a short time and re-checking.
     thread::sleep(Duration::from_millis(500));
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
-    assert_eq!(content_event_count(&bob, &workspace_id), "0");
+    assert_eq!(content_fact_count(&alice, &workspace_id), "0");
+    assert_eq!(content_fact_count(&bob, &workspace_id), "0");
     // And one more cross-peer summary check after the follow-up round
     // to prove the sync exchange did not perturb the converged state.
     let stable_alice = sync_status(&alice);
@@ -275,9 +275,9 @@ fn cli_negentropy_asymmetric_purge_alice_does_not_readmit_from_bob() {
     // expired messages must remain absent from the CLI projections.
     thread::sleep(Duration::from_millis(1500));
     assert_eq!(
-        content_event_count(&alice, &workspace_id),
+        content_fact_count(&alice, &workspace_id),
         "0",
-        "content events must stay at 0 after the follow-up sync round"
+        "content facts must stay at 0 after the follow-up sync round"
     );
     assert!(
         message_lines(&alice, &workspace_id).is_empty(),
@@ -313,7 +313,7 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), N);
     let pre = sync_status(&alice);
-    let pre_count: u64 = line_value(&pre, "indexed_events")
+    let pre_count: u64 = line_value(&pre, "indexed_facts")
         .parse()
         .expect("pre count");
     let pre_fp = line_value(&pre, "root_fingerprint");
@@ -324,7 +324,7 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
     wait_for_content_count(&alice, &workspace_id, "0");
 
     let post = wait_for_root_fingerprint_to_change(&alice, &pre_fp);
-    let post_count: u64 = line_value(&post, "indexed_events")
+    let post_count: u64 = line_value(&post, "indexed_facts")
         .parse()
         .expect("post count");
     let post_fp = line_value(&post, "root_fingerprint");
@@ -334,15 +334,15 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
     );
     assert!(
         post_count + (N as u64) <= pre_count,
-        "indexed_events must drop by at least N=10: pre={pre_count}, post={post_count}"
+        "indexed_facts must drop by at least N=10: pre={pre_count}, post={post_count}"
     );
 }
 
 // ---------------------------------------------------------------------------
 // Test 5: sync summary is stable when nothing expires.
 //
-// With no expired events, repeated CLI invocations of `sync-status` must
-// leave indexed_events, root_count, and root_fingerprint byte-identical.
+// With no expired facts, repeated CLI invocations of `sync-status` must
+// leave indexed_facts, root_count, and root_fingerprint byte-identical.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -362,16 +362,16 @@ fn cli_negentropy_sync_status_is_stable_when_nothing_expires() {
 
     // First snapshot captures the baseline.
     let first = sync_status(&alice);
-    let first_indexed = line_value(&first, "indexed_events");
+    let first_indexed = line_value(&first, "indexed_facts");
     let first_count = line_value(&first, "root_count");
     let first_fp = line_value(&first, "root_fingerprint");
 
     // Second snapshot should match while all messages are still live.
     let second = sync_status(&alice);
     assert_eq!(
-        line_value(&second, "indexed_events"),
+        line_value(&second, "indexed_facts"),
         first_indexed,
-        "no-op sync-status must not change indexed_events"
+        "no-op sync-status must not change indexed_facts"
     );
     assert_eq!(
         line_value(&second, "root_count"),
@@ -387,7 +387,7 @@ fn cli_negentropy_sync_status_is_stable_when_nothing_expires() {
     // Third snapshot for good measure — three back-to-back reads must
     // yield byte-identical sync-status outputs.
     let third = sync_status(&alice);
-    assert_eq!(line_value(&third, "indexed_events"), first_indexed);
+    assert_eq!(line_value(&third, "indexed_facts"), first_indexed);
     assert_eq!(line_value(&third, "root_count"), first_count);
     assert_eq!(line_value(&third, "root_fingerprint"), first_fp);
 }
@@ -517,7 +517,7 @@ fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
 
     let pre_restart = sync_status(&alice);
     let pre_fp = line_value(&pre_restart, "root_fingerprint");
-    let pre_count: u64 = line_value(&pre_restart, "indexed_events")
+    let pre_count: u64 = line_value(&pre_restart, "indexed_facts")
         .parse()
         .expect("pre count");
 
@@ -555,7 +555,7 @@ fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
 
     let post = wait_for_root_fingerprint_to_change(&alice, &pre_fp);
     let post_fp = line_value(&post, "root_fingerprint");
-    let post_count: u64 = line_value(&post, "indexed_events")
+    let post_count: u64 = line_value(&post, "indexed_facts")
         .parse()
         .expect("post count");
     assert_ne!(
@@ -565,7 +565,7 @@ fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
     );
     assert!(
         post_count + 4 <= pre_count,
-        "indexed_events must drop by at least the 4 purged messages \
+        "indexed_facts must drop by at least the 4 purged messages \
          after a stop/restart cycle: pre={pre_count}, post={post_count}"
     );
 }
@@ -573,7 +573,7 @@ fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
 // ---------------------------------------------------------------------------
 // Test 8: two peers purge the same id from independent expiry triggers.
 //
-// Both peers admit the same shared events and then independently advance
+// Both peers admit the same shared facts and then independently advance
 // their clocks past TTL. They must converge on byte-identical root
 // fingerprints. This is the same end-state as test 2 (synchronized
 // purge), but the trigger paths are independent — neither peer's purge
@@ -730,9 +730,9 @@ fn message_lines(db: &str, workspace_id: &str) -> Vec<String> {
         .collect()
 }
 
-fn content_event_count(db: &str, workspace_id: &str) -> String {
+fn content_fact_count(db: &str, workspace_id: &str) -> String {
     let out = assert_success(topo(&["--db", db, "content-count", workspace_id]));
-    line_value(&out, "content_events")
+    line_value(&out, "content_facts")
 }
 
 fn wait_for_leaf_count(db: &str, workspace_id: &str, expected: &str) {
@@ -754,7 +754,7 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         let output = topo(&["--db", db, "content-count", workspace_id]);
         if output.status.success() {
             let out = stdout(&output);
-            if line_value(&out, "content_events") == expected {
+            if line_value(&out, "content_facts") == expected {
                 return;
             }
             last = out;
@@ -868,7 +868,7 @@ fn wait_for_message_text(db: &str, workspace_id: &str, expected_suffix: &str) {
 
 /// Poll until `db` and `other` agree on `root_fingerprint`. Returns
 /// the final `db` sync-status output. Convergence requires both
-/// daemons to have caught up on each other's events; the wait is
+/// daemons to have caught up on each other's facts; the wait is
 /// bounded by the same 300-tick budget as the rest of the harness.
 fn wait_for_root_fingerprint_to_match(db: &str, other: &str) -> String {
     let mut last = String::new();
@@ -915,7 +915,7 @@ fn key_wrap_with_retry(
 ///
 /// The caller must already have a running `topo start` daemon on `host` bound
 /// to `port` and a running daemon on `joiner` (any port). The host's daemon
-/// serves the bootstrap; the joiner's daemon admits the user/endpoint events
+/// serves the bootstrap; the joiner's daemon admits the user/endpoint facts
 /// and connects back. After this returns, both peers' projections include the
 /// new membership and sync continues over the daemons' transport routes.
 fn join_workspace(

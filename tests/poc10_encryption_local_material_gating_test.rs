@@ -1,9 +1,9 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
-use topo::protocol::fact_modules::encryption::fact::{
+use topo::protocol::facts::encryption::fact::{
     LocalHistoryNodeSecretFact, LocalKeySecretFact, RemovalFrontierFact,
 };
-use topo::protocol::fact_modules::encryption::{
+use topo::protocol::facts::encryption::{
     layout as encryption_layout, project::EncryptionProjector,
 };
 use topo::protocol::matchers as encryption_context;
@@ -151,7 +151,7 @@ fn history_node_fact(
             range_start,
             range_width,
             bit_depth: 0,
-            event_id_prefix: [0; 32],
+            fact_id_prefix: [0; 32],
             tombstone_node_id,
             node_secret: [0x79; 32],
         })

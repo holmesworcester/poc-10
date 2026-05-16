@@ -6,13 +6,13 @@ use topo::core::command_context::{
     CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
     WorkspaceId,
 };
-use topo::core::schema_dsl::FACT_MODULES_SCHEMA_SOURCE;
+use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::protocol::fact_modules::identity_workspace::commands::create_workspace;
-use topo::protocol::fact_modules::identity_workspace::layout as workspace_layout;
-use topo::protocol::fact_modules::identity_workspace::project as workspace_project;
-use topo::protocol::fact_modules::identity_workspace::rows as workspace_rows;
+use topo::protocol::facts::identity::workspace::commands::create_workspace;
+use topo::protocol::facts::identity::workspace::layout as workspace_layout;
+use topo::protocol::facts::identity::workspace::project as workspace_project;
+use topo::protocol::facts::identity::workspace::rows as workspace_rows;
 
 struct FixedClock(Cell<u64>);
 
@@ -80,7 +80,7 @@ fn create_workspace_rejects_blank_or_oversize_name() {
 
 #[test]
 fn create_workspace_fact_projects_through_target_bus() {
-    let store = Store::open_memory_with_schema_sources(&[FACT_MODULES_SCHEMA_SOURCE])
+    let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
         .expect("open store with schema");
     let clock = FixedClock(Cell::new(120_000));
     let vault = EmptyVault;

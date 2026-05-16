@@ -204,7 +204,7 @@ fn cli_two_long_running_daemons_converge_messages_without_manual_sync() {
 }
 
 #[test]
-#[ignore = "asymmetric three-peer late-joiner convergence still has a transit \
+#[ignore = "asymmetric three-peer late-joiner convergence still has a transport::transit \
 admission race when alice processes bob's sync compares while accepting carol's \
 bootstrap stream; tracked as a follow-on \
 fix"]

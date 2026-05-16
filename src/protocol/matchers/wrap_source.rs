@@ -59,7 +59,7 @@ pub enum WrapSourceKind {
         range_start: u64,
         range_width: u64,
         bit_depth: u16,
-        event_id_prefix: FactId,
+        fact_id_prefix: FactId,
     },
 }
 
@@ -102,7 +102,7 @@ pub fn history_node_wrap_source_offer(
     range_start: u64,
     range_width: u64,
     bit_depth: u16,
-    event_id_prefix: FactId,
+    fact_id_prefix: FactId,
 ) -> ContextOffer {
     wrap_source_offer(
         owner,
@@ -116,7 +116,7 @@ pub fn history_node_wrap_source_offer(
                 range_start,
                 range_width,
                 bit_depth,
-                event_id_prefix,
+                fact_id_prefix,
             },
         },
     )
@@ -157,8 +157,8 @@ pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSele
             let range_start = u64::from_be_bytes(bytes[106..114].try_into().ok()?);
             let range_width = u64::from_be_bytes(bytes[114..122].try_into().ok()?);
             let bit_depth = u16::from_be_bytes(bytes[122..124].try_into().ok()?);
-            let event_id_prefix = bytes[124..156].try_into().ok()?;
-            if !valid_history_coordinate(range_start, range_width, bit_depth, event_id_prefix) {
+            let fact_id_prefix = bytes[124..156].try_into().ok()?;
+            if !valid_history_coordinate(range_start, range_width, bit_depth, fact_id_prefix) {
                 return None;
             }
             Some(WrapSourceSelector {
@@ -170,7 +170,7 @@ pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSele
                     range_start,
                     range_width,
                     bit_depth,
-                    event_id_prefix,
+                    fact_id_prefix,
                 },
             })
         }
@@ -194,13 +194,13 @@ pub fn encode_wrap_source_selector(source: &WrapSourceSelector) -> Selector {
             range_start,
             range_width,
             bit_depth,
-            event_id_prefix,
+            fact_id_prefix,
         } => {
             bytes.push(2);
             bytes.extend_from_slice(&range_start.to_be_bytes());
             bytes.extend_from_slice(&range_width.to_be_bytes());
             bytes.extend_from_slice(&bit_depth.to_be_bytes());
-            bytes.extend_from_slice(&event_id_prefix);
+            bytes.extend_from_slice(&fact_id_prefix);
         }
     }
     Selector::from_bytes(bytes)
@@ -210,14 +210,14 @@ fn valid_history_coordinate(
     range_start: u64,
     range_width: u64,
     bit_depth: u16,
-    event_id_prefix: FactId,
+    fact_id_prefix: FactId,
 ) -> bool {
     range_width != 0
         && range_width.is_power_of_two()
         && range_start % range_width == 0
         && bit_depth <= 256
-        && event_id_prefix == mask_prefix_to_depth(event_id_prefix, bit_depth)
-        && (range_width == 1 || (bit_depth == 0 && event_id_prefix == [0; 32]))
+        && fact_id_prefix == mask_prefix_to_depth(fact_id_prefix, bit_depth)
+        && (range_width == 1 || (bit_depth == 0 && fact_id_prefix == [0; 32]))
 }
 
 fn mask_prefix_to_depth(mut prefix: FactId, bit_depth: u16) -> FactId {

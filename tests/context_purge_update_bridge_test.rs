@@ -47,7 +47,7 @@ fn deletion_update_offer_wakes_waiting_content_fact_and_emits_purge_intent() {
     assert_eq!(purged.intents, 1);
     assert!(bus.context(&target.id).is_none());
     assert_eq!(bus.intents().len(), 1);
-    assert_eq!(bus.intents()[0].kind.as_str(), "purge_event");
+    assert_eq!(bus.intents()[0].kind.as_str(), "purge_deleted_message");
     assert_eq!(bus.intents()[0].key, purge_key(workspace, target.id));
 }
 
@@ -118,7 +118,7 @@ impl Projector for ContentPurgeBridge {
                     .any(|offer| offer.role == deletion_role())
                 {
                     return Ok(ProjectionOutput::new().intent(Intent::new(
-                        IntentKind::new("purge_event").unwrap(),
+                        IntentKind::new("purge_deleted_message").unwrap(),
                         IntentExecution::Deferred,
                         purge_key(self.workspace, fact.id),
                         fact.id,

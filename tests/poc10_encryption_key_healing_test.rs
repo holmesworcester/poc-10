@@ -6,33 +6,34 @@ use topo::core::projection::{MatchedContext, ProjectionContext, ProjectionOutput
 use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::protocol::fact_modules::encryption::fact::{
+use topo::protocol::facts::content::sealed_message::fact::{
+    SealedMessageFact, SignerPubkeyFact, NONCE_BYTES,
+};
+use topo::protocol::facts::content::sealed_message::rows::{
+    message_key, MESSAGE_ROWS, OPENED_MESSAGE_ROWS, SEALED_MESSAGE_ROWS,
+};
+use topo::protocol::facts::content::sealed_message::{
+    layout as message_layout, project as message_project,
+};
+use topo::protocol::facts::encryption::fact::{
     KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact,
     LocalRecipientKeyFact, RecipientKeyFact, RemovalFrontierFact, WrappedSecretKind,
     NO_PREVIOUS_RECIPIENT_KEY,
 };
-use topo::protocol::fact_modules::encryption::intent::{
-    decode_materialize_key_wraps_intent, decode_purge_retired_recipient_material_intent,
+use topo::protocol::facts::encryption::intent::{
+    decode_create_key_wrap_intent, decode_purge_retired_recipient_material_intent,
     decode_unwrap_key_wrap_intent, purge_retired_recipient_material_intent,
     PurgeRetiredRecipientMaterialIntent,
 };
-use topo::protocol::fact_modules::encryption::{
+use topo::protocol::facts::encryption::{
     create as encryption_create, layout as encryption_layout, project as encryption_project,
     rows as encryption_rows,
 };
-use topo::protocol::fact_modules::sealed_message::fact::{
-    SealedMessageFact, SignerPubkeyFact, NONCE_BYTES,
-};
-use topo::protocol::fact_modules::sealed_message::rows::{
-    message_key, MESSAGE_ROWS, OPENED_MESSAGE_ROWS, SEALED_MESSAGE_ROWS,
-};
-use topo::protocol::fact_modules::sealed_message::{
-    layout as message_layout, project as message_project,
-};
-use topo::protocol::fact_modules::signed_fact::{self, fact::LocalSignerSecretFact};
-use topo::protocol::intent_handlers::materialize_key_wraps::MaterializeKeyWrapsHandler;
-use topo::protocol::intent_handlers::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler;
-use topo::protocol::intent_handlers::unwrap_key_wrap::UnwrapKeyWrapHandler;
+use topo::protocol::facts::identity;
+use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::intents::encryption::create_key_wrap::CreateKeyWrapHandler;
+use topo::protocol::intents::encryption::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler;
+use topo::protocol::intents::encryption::unwrap_key_wrap::UnwrapKeyWrapHandler;
 use topo::protocol::matchers as sync_context;
 use topo::protocol::matchers::ExactSelectorMatcher;
 use topo::protocol::matchers::{
@@ -79,7 +80,7 @@ fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appe
     let wrap_intents = bus
         .intents()
         .iter()
-        .filter_map(|intent| decode_materialize_key_wraps_intent(intent).ok())
+        .filter_map(|intent| decode_create_key_wrap_intent(intent).ok())
         .collect::<Vec<_>>();
     assert_eq!(wrap_intents.len(), 1, "{wrap_intents:?}");
     let intent = &wrap_intents[0];
@@ -172,7 +173,7 @@ fn rotated_recipient_key_does_not_receive_old_frontier_sources() {
     let wrap_intents = bus
         .intents()
         .iter()
-        .filter_map(|intent| decode_materialize_key_wraps_intent(intent).ok())
+        .filter_map(|intent| decode_create_key_wrap_intent(intent).ok())
         .collect::<Vec<_>>();
     assert_eq!(wrap_intents.len(), 1, "{wrap_intents:?}");
     let intent = &wrap_intents[0];
@@ -241,7 +242,7 @@ fn removal_frontier_projection_must_wait_for_signed_admin_authority() {
 
     assert!(
         output.offers.is_empty(),
-        "removal_frontier must not offer frontier context before signed admin/root authority is validated"
+        "encryption::removal_frontier must not offer frontier context before signed admin/root authority is validated"
     );
 }
 
@@ -297,7 +298,7 @@ fn duplicate_key_requests_converge_on_one_wrap_intent_without_request_entropy() 
         1,
         "duplicate request facts and proactive reconcile must converge on one edge"
     );
-    let intent = decode_materialize_key_wraps_intent(&bus.intents()[0]).expect("wrap intent");
+    let intent = decode_create_key_wrap_intent(&bus.intents()[0]).expect("wrap intent");
     assert_eq!(
         intent.recipient_key_id,
         recipient_key_fact(workspace, requester, NO_PREVIOUS_RECIPIENT_KEY, 50).id
@@ -358,7 +359,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     bus.drain(&projector, &matchers, 100)
         .expect("key request emits materialize intent");
     assert_eq!(bus.intents().len(), 1);
-    let intent = decode_materialize_key_wraps_intent(&bus.intents()[0]).expect("wrap intent");
+    let intent = decode_create_key_wrap_intent(&bus.intents()[0]).expect("wrap intent");
     assert_eq!(intent.recipient_key_id, recipient.id);
     assert_eq!(intent.source_fact_id, root.id);
     assert_eq!(intent.signer_secret_fact_id, signer.id);
@@ -367,10 +368,10 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     let mut restarted = WakeLoop::load(&store).expect("load bus with wrap intent");
     assert_eq!(restarted.intents().len(), 1);
     let expected_signed_wrap =
-        encryption_create::materialize_signed_key_wrap_fact(&intent, &recipient, &root, &signer)
+        encryption_create::create_signed_key_wrap_fact(&intent, &recipient, &root, &signer)
             .expect("materialize expected signed wrap");
     let dispatch = restarted
-        .dispatch_deferred_intents_with_fact_context(&MaterializeKeyWrapsHandler::new(), 10)
+        .dispatch_deferred_intents_with_fact_context(&CreateKeyWrapHandler::new(), 10)
         .expect("dispatch materialize handler after restart");
 
     assert_eq!(dispatch.handled, 1);
@@ -390,7 +391,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
             && offer.payload_ref == expected_signed_wrap.id
     }));
     assert!(signed_context.offers.iter().any(|offer| {
-        offer.role == sync_context::exact_event_role()
+        offer.role == sync_context::exact_fact_role()
             && offer.selector.as_bytes() == expected_signed_wrap.id
             && offer.payload_ref == expected_signed_wrap.id
     }));
@@ -403,8 +404,8 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
         .iter()
         .any(|offer| offer.role == message_context::secret_role()));
 
-    let envelope =
-        signed_fact::layout::decode_signed_fact(&expected_signed_wrap.bytes).expect("signed wrap");
+    let envelope = identity::signed_fact::layout::decode_signed_fact(&expected_signed_wrap.bytes)
+        .expect("signed wrap");
     assert_eq!(envelope.signer_id, responder);
     assert_eq!(
         envelope.signer_public_key,
@@ -535,7 +536,7 @@ fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
     let intents = output
         .intents
         .iter()
-        .map(decode_materialize_key_wraps_intent)
+        .map(decode_create_key_wrap_intent)
         .collect::<Result<Vec<_>, _>>()
         .expect("decode wrap intents");
     assert!(intents
@@ -708,8 +709,8 @@ fn generated_history_node_wrap_uses_source_fact_time() {
         recipient_key_fact_with_public(workspace, [27; 32], recipient_public, [0; 32], 80);
     let signer = local_signer_secret_fact(workspace, [0x76; 32]);
     let retained = history_node_fact(workspace, frontier.id, 51, 1, 8, byte_prefix(0xaa));
-    let intent = decode_materialize_key_wraps_intent(
-        &topo::protocol::fact_modules::encryption::intent::materialize_key_wraps_intent(
+    let intent = decode_create_key_wrap_intent(
+        &topo::protocol::facts::encryption::intent::create_key_wrap_intent(
             recipient.id,
             retained.id,
             signer.id,
@@ -722,19 +723,18 @@ fn generated_history_node_wrap_uses_source_fact_time() {
                     range_start: 51,
                     range_width: 1,
                     bit_depth: 8,
-                    event_id_prefix: byte_prefix(0xaa),
+                    fact_id_prefix: byte_prefix(0xaa),
                 },
             },
         ),
     )
     .expect("decode materialize intent");
 
-    let signed_wrap = encryption_create::materialize_signed_key_wrap_fact(
-        &intent, &recipient, &retained, &signer,
-    )
-    .expect("materialize history wrap");
-    let envelope =
-        signed_fact::layout::decode_signed_fact(&signed_wrap.bytes).expect("decode signed wrap");
+    let signed_wrap =
+        encryption_create::create_signed_key_wrap_fact(&intent, &recipient, &retained, &signer)
+            .expect("materialize history wrap");
+    let envelope = identity::signed_fact::layout::decode_signed_fact(&signed_wrap.bytes)
+        .expect("decode signed wrap");
     let wrap = encryption_layout::decode_key_wrap(&envelope.payload).expect("decode key wrap");
 
     assert_eq!(wrap.created_at_ms, retained.timestamp);
@@ -787,7 +787,7 @@ fn supersession_wakes_old_recipient_key_and_purges_material_instead_of_wrapping(
     let materialized_for_old = bus
         .intents()
         .iter()
-        .filter_map(|intent| decode_materialize_key_wraps_intent(intent).ok())
+        .filter_map(|intent| decode_create_key_wrap_intent(intent).ok())
         .filter(|intent| intent.recipient_key_id == old.id)
         .count();
 
@@ -1022,7 +1022,7 @@ fn signed_key_wrap_waits_for_context_then_offers_sync_key_and_row() {
             && offer.payload_ref == signed_wrap.id
     }));
     assert!(ready.offers.iter().any(|offer| {
-        offer.role == sync_context::exact_event_role()
+        offer.role == sync_context::exact_fact_role()
             && offer.selector.as_bytes() == signed_wrap.id
             && offer.payload_ref == signed_wrap.id
     }));
@@ -1080,8 +1080,8 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
         signer_id,
         crypto::ed25519_public_key(&signer_private_key),
     );
-    let materialize = decode_materialize_key_wraps_intent(
-        &topo::protocol::fact_modules::encryption::intent::materialize_key_wraps_intent(
+    let materialize = decode_create_key_wrap_intent(
+        &topo::protocol::facts::encryption::intent::create_key_wrap_intent(
             recipient.id,
             root.id,
             signer.id,
@@ -1095,13 +1095,9 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
         ),
     )
     .expect("decode materialize intent");
-    let signed_wrap = encryption_create::materialize_signed_key_wrap_fact(
-        &materialize,
-        &recipient,
-        &root,
-        &signer,
-    )
-    .expect("materialize signed key wrap");
+    let signed_wrap =
+        encryption_create::create_signed_key_wrap_fact(&materialize, &recipient, &root, &signer)
+            .expect("materialize signed key wrap");
     let message = sealed_message_fact(workspace, signer_id, frontier.id, 15, [74; 32], [0x66; 32]);
     let projector = CombinedProjector;
     let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
@@ -1251,8 +1247,9 @@ fn signed_key_wrap_rejects_envelope_signer_mismatch() {
         [55; 32],
     ))
     .expect("encode key wrap");
-    let bytes = signed_fact::create::sign_payload_bytes(envelope_signer, &[53; 32], payload)
-        .expect("sign key wrap");
+    let bytes =
+        identity::signed_fact::create::sign_payload_bytes(envelope_signer, &[53; 32], payload)
+            .expect("sign key wrap");
     let fact = Fact::new(workspace_scope(workspace), 10, bytes);
 
     let err = encryption_project::EncryptionProjector::new()
@@ -1362,7 +1359,7 @@ fn recipient_key_projector_revalidates_wrap_source_context_before_wrapping() {
         output
             .intents
             .iter()
-            .all(|intent| decode_materialize_key_wraps_intent(intent).is_err()),
+            .all(|intent| decode_create_key_wrap_intent(intent).is_err()),
         "stale wrap source must not emit a wrap intent"
     );
 }
@@ -1382,11 +1379,11 @@ impl Projector for CombinedProjector {
             | Some(encryption_layout::TYPE_LOCAL_HISTORY_NODE_SECRET)
             | Some(encryption_layout::TYPE_LOCAL_RECIPIENT_KEY)
             | Some(encryption_layout::TYPE_KEY_REQUEST)
-            | Some(signed_fact::layout::TYPE_SIGNED_FACT) => {
+            | Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) => {
                 encryption_project::EncryptionProjector::new().project(fact, context)
             }
-            Some(signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET) => {
-                signed_fact::project::SignedFactProjector::new().project(fact, context)
+            Some(identity::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET) => {
+                identity::signed_fact::project::SignedFactProjector::new().project(fact, context)
             }
             _ => message_project::SealedMessageProjector::new().project(fact, context),
         }
@@ -1472,7 +1469,7 @@ fn history_node_fact(
     range_start: u64,
     range_width: u64,
     bit_depth: u16,
-    event_id_prefix: [u8; 32],
+    fact_id_prefix: [u8; 32],
 ) -> Fact {
     Fact::new(
         FactScope::Local,
@@ -1485,7 +1482,7 @@ fn history_node_fact(
             range_start,
             range_width,
             bit_depth,
-            event_id_prefix,
+            fact_id_prefix,
             tombstone_node_id: [0x78; 32],
             node_secret: [0x79; 32],
         })
@@ -1502,7 +1499,7 @@ fn history_node_fact_with_source(
     range_start: u64,
     range_width: u64,
     bit_depth: u16,
-    event_id_prefix: [u8; 32],
+    fact_id_prefix: [u8; 32],
 ) -> Fact {
     Fact::new(
         FactScope::Local,
@@ -1515,7 +1512,7 @@ fn history_node_fact_with_source(
             range_start,
             range_width,
             bit_depth,
-            event_id_prefix,
+            fact_id_prefix,
             tombstone_node_id,
             node_secret: [0x79; 32],
         })
@@ -1535,7 +1532,7 @@ fn local_signer_secret_fact_with_private(
     Fact::new(
         FactScope::Local,
         0,
-        signed_fact::layout::encode_local_signer_secret(&LocalSignerSecretFact {
+        identity::signed_fact::layout::encode_local_signer_secret(&LocalSignerSecretFact {
             workspace_id,
             signer_id,
             public_key: topo::core::crypto::ed25519_public_key(&private_key),
@@ -1621,11 +1618,12 @@ fn sealed_message_fact(
     secret_key: [u8; 32],
 ) -> Fact {
     let nonce = [0xa4; NONCE_BYTES];
-    let plaintext = topo::protocol::fact_modules::sealed_message::create::pad_plaintext(b"healing")
-        .expect("plaintext");
+    let plaintext =
+        topo::protocol::facts::content::sealed_message::create::pad_plaintext(b"healing")
+            .expect("plaintext");
     let ciphertext = crypto::xchacha20poly1305_encrypt(
         &secret_key,
-        &topo::protocol::fact_modules::sealed_message::create::associated_data(
+        &topo::protocol::facts::content::sealed_message::create::associated_data(
             workspace_id,
             frontier_id,
             minute,
@@ -1693,8 +1691,9 @@ fn signed_key_wrap_fact(
         recipient_key_id,
     ))
     .expect("encode key wrap");
-    let bytes = signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
-        .expect("sign key wrap");
+    let bytes =
+        identity::signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+            .expect("sign key wrap");
     Fact::new(workspace_scope(workspace_id), 10, bytes)
 }
 
@@ -1716,7 +1715,7 @@ fn key_wrap_fact(
         range_start: 0,
         range_width: 0,
         bit_depth: 0,
-        event_id_prefix: [0; 32],
+        fact_id_prefix: [0; 32],
         recipient_key_id,
         sender_wrap_public_key: [0x56; 32],
         nonce: [0x57; 24],
@@ -1762,8 +1761,9 @@ fn signed_key_wrap_rejects_recipient_workspace_mismatch() {
         tampered_recipient.id,
     ))
     .expect("encode key wrap");
-    let bytes = signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
-        .expect("sign key wrap");
+    let bytes =
+        identity::signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+            .expect("sign key wrap");
     let signed_wrap = Fact::new(workspace_scope(wrap_workspace), 10, bytes);
     let signer_public_key = topo::core::crypto::ed25519_public_key(&signer_private_key);
     let signer_fact_bytes = message_layout::encode_signer_pubkey(&SignerPubkeyFact {
@@ -1848,8 +1848,9 @@ fn signed_key_wrap_rejects_frontier_workspace_mismatch() {
         recipient.id,
     ))
     .expect("encode key wrap");
-    let bytes = signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
-        .expect("sign key wrap");
+    let bytes =
+        identity::signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+            .expect("sign key wrap");
     let signed_wrap = Fact::new(workspace_scope(wrap_workspace), 10, bytes);
     let signer_public_key = topo::core::crypto::ed25519_public_key(&signer_private_key);
     let signer_fact_bytes = message_layout::encode_signer_pubkey(&SignerPubkeyFact {

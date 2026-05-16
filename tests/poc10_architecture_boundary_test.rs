@@ -113,7 +113,7 @@ fn source_code_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&st
 }
 
 fn target_projector_files(root: &Path) -> Vec<PathBuf> {
-    let event_modules = root.join("src/protocol/fact_modules");
+    let event_modules = root.join("src/protocol/facts");
     source_files(&event_modules)
         .into_iter()
         .filter(|path| {
@@ -148,13 +148,13 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         "There is no `mod.rs` anywhere in the repository.",
         "There is no root `src/commands` module",
         "src/core/command_context.rs",
-        "src/protocol/fact_modules.rs",
-        "src/protocol/intent_handlers.rs",
+        "src/protocol/facts.rs",
+        "src/protocol/intents.rs",
         "There is no product `demo` or `smoke` command",
         "generic runtime/app mechanics",
         "src/core/schema.p8sql",
-        "src/protocol/fact_modules/schema.p8sql",
-        "src/protocol/intent_handlers/schema.p8sql",
+        "src/protocol/facts/schema.p8sql",
+        "src/protocol/intents/schema.p8sql",
         "### Projector Style",
         "### Intent Handler Style",
         "### Wire And Codec Style",
@@ -219,8 +219,8 @@ fn poc10_root_exports_protocol_owned_manifests() {
 
     for required in [
         "src/core/command_context.rs",
-        "src/protocol/fact_modules.rs",
-        "src/protocol/intent_handlers.rs",
+        "src/protocol/facts.rs",
+        "src/protocol/intents.rs",
     ] {
         assert!(root.join(required).is_file(), "missing {required}");
     }
@@ -346,12 +346,12 @@ fn poc10_core_wake_loop_exposes_protocol_neutral_vocabulary() {
         "pending_reprojections",
         "recently_valid_events",
         "event_receive_context",
-        "applied_shared_events",
+        "applied_shared_facts",
         "dependency_updates",
         "context_updates",
         "canonical.in",
         "sync.in",
-        "transit.out",
+        "transport::transit.out",
         "content.purge_instructions",
         "encryption.pending_key_requests",
         "encryption.pending_key_unwraps",
@@ -429,7 +429,7 @@ fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
         "event_modules.pending_reprojections",
         "event_modules.recently_valid_events",
         "event_modules.event_receive_context",
-        "event_modules.applied_shared_events",
+        "event_modules.applied_shared_facts",
         "ready_events",
         "blocked_events_by_missing_dep",
         "missing_deps_by_blocked_event",
@@ -438,19 +438,15 @@ fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
         "pending_reprojections",
         "recently_valid_events",
         "event_receive_context",
-        "applied_shared_events",
+        "applied_shared_facts",
         "dependency_updates",
         "context_updates",
         "updates",
     ];
-    let target_paths = [
-        "src/core",
-        "src/protocol/fact_modules",
-        "src/protocol/intent_handlers",
-    ]
-    .into_iter()
-    .flat_map(|path| source_files(&root.join(path)))
-    .collect::<Vec<_>>();
+    let target_paths = ["src/core", "src/protocol/facts", "src/protocol/intents"]
+        .into_iter()
+        .flat_map(|path| source_files(&root.join(path)))
+        .collect::<Vec<_>>();
     let offenders = source_matches_in_paths(root, target_paths, &forbidden);
 
     assert!(
@@ -466,7 +462,7 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
     let forbidden = [
         "canonical.in",
         "sync.in",
-        "transit.out",
+        "transport::transit.out",
         "content.purge_instructions",
         "encryption.pending_key_requests",
         "encryption.pending_key_unwraps",
@@ -484,14 +480,10 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
         "pending_connection_attempts",
         "pending_connection_responses",
     ];
-    let target_paths = [
-        "src/core",
-        "src/protocol/fact_modules",
-        "src/protocol/intent_handlers",
-    ]
-    .into_iter()
-    .flat_map(|path| source_files(&root.join(path)))
-    .collect::<Vec<_>>();
+    let target_paths = ["src/core", "src/protocol/facts", "src/protocol/intents"]
+        .into_iter()
+        .flat_map(|path| source_files(&root.join(path)))
+        .collect::<Vec<_>>();
     let offenders = source_code_matches_in_paths(root, target_paths, &forbidden);
 
     assert!(
@@ -527,7 +519,7 @@ fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
     let projector_paths = target_projector_files(root);
     assert!(
         !projector_paths.is_empty(),
-        "scan target src/protocol/fact_modules/**/project.rs files"
+        "scan target src/protocol/facts/**/project.rs files"
     );
     let forbidden = [
         "ProjectionOutput::rows",
@@ -591,8 +583,8 @@ fn poc10_target_has_exactly_three_schema_dsl_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let expected = [
         "src/core/schema.p8sql",
-        "src/protocol/fact_modules/schema.p8sql",
-        "src/protocol/intent_handlers/schema.p8sql",
+        "src/protocol/facts/schema.p8sql",
+        "src/protocol/intents/schema.p8sql",
     ];
 
     for path in expected {
@@ -656,8 +648,8 @@ fn poc10_target_root_manifests_are_declarations_only() {
     let manifests = [
         "src/lib.rs",
         "src/core.rs",
-        "src/protocol/fact_modules.rs",
-        "src/protocol/intent_handlers.rs",
+        "src/protocol/facts.rs",
+        "src/protocol/intents.rs",
     ];
 
     for manifest in manifests {

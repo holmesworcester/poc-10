@@ -1,4 +1,4 @@
-//! Golden-bytes tests for the fixed transit frame layouts.
+//! Golden-bytes tests for the fixed transport::transit frame layouts.
 //!
 //! These tests lock the public header byte layout, the size-class discriminator,
 //! and the rejection behaviour for wrong-length, trailing-byte, and mismatched
@@ -6,10 +6,10 @@
 
 use topo::core::crypto::{XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES};
 use topo::core::wire::{Ciphertext, FixedBytes, FixedLayout, WireError};
-use topo::protocol::fact_modules::transit::frame::{
+use topo::protocol::facts::transport::transit::frame::{
     self as transit_frame, SealConnectionFrame, TransitFactBundle,
 };
-use topo::protocol::fact_modules::transit::layout::{
+use topo::protocol::facts::transport::transit::layout::{
     decode_frame_parts, peek_frame_header, TransitFrameHeader, TransitLargeV1, TransitSmallV1,
     TRANSIT_FRAME_SIZE_CLASS_LARGE, TRANSIT_FRAME_SIZE_CLASS_SMALL, TRANSIT_FRAME_TAG,
     TRANSIT_FRAME_VERSION, TRANSIT_HEADER_BYTES, TRANSIT_LARGE_CIPHERTEXT_BYTES,
@@ -328,8 +328,8 @@ fn sealed_small_connection_frame_fills_fixed_ciphertext_slot() {
     assert_eq!(parts.header.size_class, TRANSIT_FRAME_SIZE_CLASS_SMALL);
     assert_eq!(parts.ciphertext.len(), TRANSIT_SMALL_CIPHERTEXT_BYTES);
 
-    let opened =
-        transit_frame::open_connection_frame(&frame, &SECRET).expect("open small transit frame");
+    let opened = transit_frame::open_connection_frame(&frame, &SECRET)
+        .expect("open small transport::transit frame");
     assert_eq!(
         opened.facts.into_iter().collect::<Vec<_>>(),
         vec![b"alpha".to_vec(), b"beta".to_vec()]
@@ -356,7 +356,7 @@ fn sealed_large_connection_frame_fills_fixed_ciphertext_slot() {
         assert_eq!(parts.ciphertext.len(), TRANSIT_LARGE_CIPHERTEXT_BYTES);
 
         let opened = transit_frame::open_connection_frame(&frame, &SECRET)
-            .expect("open large transit frame");
+            .expect("open large transport::transit frame");
         assert_eq!(
             opened.facts.into_iter().collect::<Vec<_>>(),
             vec![large_fact]
@@ -366,7 +366,7 @@ fn sealed_large_connection_frame_fills_fixed_ciphertext_slot() {
 
 #[test]
 fn opening_rejects_variable_length_ciphertext_slot() {
-    let frame = topo::protocol::fact_modules::transit::layout::encode_frame_bytes(
+    let frame = topo::protocol::facts::transport::transit::layout::encode_frame_bytes(
         TRANSIT_FRAME_SIZE_CLASS_SMALL,
         FixedBytes(SENDER),
         FixedBytes(RECEIVER),

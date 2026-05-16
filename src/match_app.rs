@@ -11,15 +11,12 @@ use crate::core::command_context::{
 };
 use crate::core::daemon;
 use crate::core::logical_clock;
-use crate::protocol::fact_modules::cascade_event;
-use crate::protocol::fact_modules::connection_response;
-use crate::protocol::fact_modules::sealed_message;
-use crate::protocol::fact_modules::{
-    content_event, disappearing_messages_setting, identity_invite, identity_user,
-    identity_workspace,
+use crate::protocol::facts::connection;
+use crate::protocol::facts::sync;
+use crate::protocol::facts::{content, encryption, identity};
+use crate::protocol::intents::content::purge_below_retention_floor::{
+    purge_below_retention_floor_intent, PurgeBelowRetentionFloor,
 };
-use crate::protocol::fact_modules::{encryption, identity_admin, identity_endpoint_shared};
-use crate::protocol::intent_handlers::retention_floor;
 use crate::protocol::runtime::ProtocolRuntime;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -115,31 +112,31 @@ fn top_level_usage(reason: &str) -> String {
          match --db PATH stop\n\
          match --db PATH reset\n\n\
         available commands run through the target core runtime facade",
-        create_workspace_usage = identity_workspace::cli::CREATE_WORKSPACE_USAGE,
-        invite_usage = identity_invite::cli::INVITE_USAGE,
-        invite_server_usage = identity_invite::cli::INVITE_SERVER_USAGE,
-        accept_usage = identity_invite::cli::ACCEPT_USAGE,
-        accept_invite_server_usage = identity_invite::cli::ACCEPT_INVITE_SERVER_USAGE,
-        link_usage = identity_invite::cli::LINK_USAGE,
-        accept_link_usage = identity_invite::cli::ACCEPT_LINK_USAGE,
-        identity_usage = identity_endpoint_shared::cli::IDENTITY_USAGE,
-        peers_usage = identity_endpoint_shared::cli::PEERS_USAGE,
-        workspaces_usage = identity_workspace::cli::WORKSPACES_USAGE,
-        users_usage = identity_user::cli::USERS_USAGE,
+        create_workspace_usage = identity::workspace::cli::CREATE_WORKSPACE_USAGE,
+        invite_usage = identity::invite::cli::INVITE_USAGE,
+        invite_server_usage = identity::invite::cli::INVITE_SERVER_USAGE,
+        accept_usage = identity::invite::cli::ACCEPT_USAGE,
+        accept_invite_server_usage = identity::invite::cli::ACCEPT_INVITE_SERVER_USAGE,
+        link_usage = identity::invite::cli::LINK_USAGE,
+        accept_link_usage = identity::invite::cli::ACCEPT_LINK_USAGE,
+        identity_usage = identity::endpoint_shared::cli::IDENTITY_USAGE,
+        peers_usage = identity::endpoint_shared::cli::PEERS_USAGE,
+        workspaces_usage = identity::workspace::cli::WORKSPACES_USAGE,
+        users_usage = identity::user::cli::USERS_USAGE,
         key_recipient_usage = encryption::cli::KEY_RECIPIENT_USAGE,
         key_rotate_recipient_usage = encryption::cli::KEY_ROTATE_RECIPIENT_USAGE,
         key_frontier_usage = encryption::cli::KEY_FRONTIER_USAGE,
         key_wrap_usage = encryption::cli::KEY_WRAP_USAGE,
         key_access_usage = encryption::cli::KEY_ACCESS_USAGE,
-        send_usage = sealed_message::cli::SEND_USAGE,
-        messages_usage = sealed_message::cli::MESSAGES_USAGE,
-        view_usage = sealed_message::cli::VIEW_USAGE,
-        grant_admin_usage = identity_admin::cli::GRANT_ADMIN_USAGE,
-        generate_usage = content_event::cli::GENERATE_USAGE,
-        generate_deps_usage = cascade_event::cli::GENERATE_DEPS_USAGE,
-        replay_deps_reverse_usage = cascade_event::cli::REPLAY_DEPS_REVERSE_USAGE,
-        content_count_usage = content_event::cli::CONTENT_COUNT_USAGE,
-        count_usage = identity_workspace::cli::COUNT_USAGE
+        send_usage = content::sealed_message::cli::SEND_USAGE,
+        messages_usage = content::sealed_message::cli::MESSAGES_USAGE,
+        view_usage = content::sealed_message::cli::VIEW_USAGE,
+        grant_admin_usage = identity::admin::cli::GRANT_ADMIN_USAGE,
+        generate_usage = content::event::cli::GENERATE_USAGE,
+        generate_deps_usage = sync::cascade_fact::cli::GENERATE_DEPS_USAGE,
+        replay_deps_reverse_usage = sync::cascade_fact::cli::REPLAY_DEPS_REVERSE_USAGE,
+        content_count_usage = content::event::cli::CONTENT_COUNT_USAGE,
+        count_usage = identity::workspace::cli::COUNT_USAGE
     )
 }
 
@@ -152,7 +149,7 @@ fn run_identity(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_endpoint_shared::cli::identity(&ctx, CliArgs::new(&parsed.command[1..]))?
+        identity::endpoint_shared::cli::identity(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     for line in output.lines {
         println!("{line}");
@@ -169,7 +166,7 @@ fn run_peers(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_endpoint_shared::cli::peers(&ctx, CliArgs::new(&parsed.command[1..]))?
+        identity::endpoint_shared::cli::peers(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     for line in output.lines {
         println!("{line}");
@@ -186,13 +183,13 @@ fn run_invite(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_invite::cli::invite(&ctx, CliArgs::new(&parsed.command[1..]))?
+        identity::invite::cli::invite(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     runtime.drain_projection_until_idle(8, 64)?;
     runtime.save()?;
 
-    for line in identity_invite::cli::invite_output(&receipt).lines {
+    for line in identity::invite::cli::invite_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -207,13 +204,13 @@ fn run_invite_server(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_invite::cli::invite_server(&ctx, CliArgs::new(&parsed.command[1..]))?
+        identity::invite::cli::invite_server(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
 
-    for line in identity_invite::cli::invite_output(&receipt).lines {
+    for line in identity::invite::cli::invite_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -229,21 +226,21 @@ fn run_accept(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_invite::cli::accept(&ctx, CliArgs::new(&parsed.command[1..]), from_listen_addr)?
+        identity::invite::cli::accept(&ctx, CliArgs::new(&parsed.command[1..]), from_listen_addr)?
     };
     let receipt = runtime.submit_command_output(output)?;
     runtime.dispatch_intents(64)?;
     runtime.drain_projection_until_idle(8, 64)?;
     runtime.save()?;
     if from_listen_addr.is_some() {
-        connection_response::commands::wait_for_request_response(
+        connection::response::commands::wait_for_request_response(
             &mut runtime,
             receipt.request_id,
             Duration::from_secs(10),
         )?;
     }
 
-    for line in identity_invite::cli::accept_output(&receipt).lines {
+    for line in identity::invite::cli::accept_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -259,7 +256,7 @@ fn run_accept_invite_server(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_invite::cli::accept_invite_server(
+        identity::invite::cli::accept_invite_server(
             &ctx,
             CliArgs::new(&parsed.command[1..]),
             from_listen_addr,
@@ -269,13 +266,13 @@ fn run_accept_invite_server(parsed: ParsedArgs) -> Result<(), String> {
     runtime.dispatch_intents(64)?;
     runtime.drain_projection_until_idle(8, 64)?;
     runtime.save()?;
-    connection_response::commands::wait_for_request_response(
+    connection::response::commands::wait_for_request_response(
         &mut runtime,
         receipt.request_id,
         Duration::from_secs(10),
     )?;
 
-    for line in identity_invite::cli::accept_output(&receipt).lines {
+    for line in identity::invite::cli::accept_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -290,13 +287,13 @@ fn run_link(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_invite::cli::link(&ctx, CliArgs::new(&parsed.command[1..]))?
+        identity::invite::cli::link(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     runtime.drain_projection_until_idle(8, 64)?;
     runtime.save()?;
 
-    for line in identity_invite::cli::invite_output(&receipt).lines {
+    for line in identity::invite::cli::invite_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -312,7 +309,7 @@ fn run_accept_link(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_invite::cli::accept_link(
+        identity::invite::cli::accept_link(
             &ctx,
             CliArgs::new(&parsed.command[1..]),
             from_listen_addr,
@@ -323,14 +320,14 @@ fn run_accept_link(parsed: ParsedArgs) -> Result<(), String> {
     runtime.drain_projection_until_idle(8, 64)?;
     runtime.save()?;
     if from_listen_addr.is_some() {
-        connection_response::commands::wait_for_request_response(
+        connection::response::commands::wait_for_request_response(
             &mut runtime,
             receipt.request_id,
             Duration::from_secs(10),
         )?;
     }
 
-    for line in identity_invite::cli::accept_output(&receipt).lines {
+    for line in identity::invite::cli::accept_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -383,20 +380,20 @@ fn run_create_workspace(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_workspace::cli::create_workspace(&ctx, CliArgs::new(&parsed.command[1..]))?
+        identity::workspace::cli::create_workspace(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     runtime.drain_projection_until_idle(8, 64)?;
     let workspace =
-        identity_workspace::queries::workspace_by_id(runtime.store(), receipt.workspace_fact_id)?;
+        identity::workspace::queries::workspace_by_id(runtime.store(), receipt.workspace_fact_id)?;
     let bootstrap_user_id =
-        identity_user::queries::users_in_workspace(runtime.store(), receipt.workspace_fact_id)?
+        identity::user::queries::users_in_workspace(runtime.store(), receipt.workspace_fact_id)?
             .first()
             .map(|user| user.user_id);
     runtime.save()?;
 
     for line in
-        identity_workspace::cli::created_workspace_output(&workspace, bootstrap_user_id).lines
+        identity::workspace::cli::created_workspace_output(&workspace, bootstrap_user_id).lines
     {
         println!("{line}");
     }
@@ -412,10 +409,10 @@ fn run_workspaces(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_workspace::cli::workspaces(&ctx, CliArgs::new(&parsed.command[1..]))?
+        identity::workspace::cli::workspaces(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
 
-    for line in identity_workspace::cli::workspaces_output(&output).lines {
+    for line in identity::workspace::cli::workspaces_output(&output).lines {
         println!("{line}");
     }
     Ok(())
@@ -426,9 +423,9 @@ fn run_count(parsed: ParsedArgs) -> Result<(), String> {
         .db
         .ok_or_else(|| top_level_usage("count requires --db PATH"))?;
     let runtime = ProtocolRuntime::open_disk(db)?;
-    CliArgs::new(&parsed.command[1..]).require_len(0, identity_workspace::cli::COUNT_USAGE)?;
-    let report = identity_workspace::runtime_counts::runtime_count_report(&runtime)?;
-    for line in identity_workspace::cli::count_report_output(&report).lines {
+    CliArgs::new(&parsed.command[1..]).require_len(0, identity::workspace::cli::COUNT_USAGE)?;
+    let report = identity::workspace::runtime_counts::runtime_count_report(&runtime)?;
+    for line in identity::workspace::cli::count_report_output(&report).lines {
         println!("{line}");
     }
     Ok(())
@@ -443,10 +440,10 @@ fn run_users(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_user::cli::users(&ctx, CliArgs::new(&parsed.command[1..]))?
+        identity::user::cli::users(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
 
-    for line in identity_user::cli::users_output(&output).lines {
+    for line in identity::user::cli::users_output(&output).lines {
         println!("{line}");
     }
     Ok(())
@@ -615,14 +612,14 @@ fn run_keys(parsed: ParsedArgs) -> Result<(), String> {
     let sealed_messages = sealed_message_rows(store, workspace_id)?;
     let local_history_rows = store
         .table_rows_with_key_prefix(
-            crate::protocol::fact_modules::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
+            crate::protocol::facts::encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
             &workspace_id,
             usize::MAX,
         )
         .map_err(|err| format!("load local history rows: {err}"))?;
     let message_tombstones = store
         .table_rows_with_key_prefix(
-            sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
+            content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
             &workspace_id,
             usize::MAX,
         )
@@ -722,9 +719,9 @@ fn run_disappearing_set(parsed: ParsedArgs) -> Result<(), String> {
     let mut runtime = ProtocolRuntime::open_disk(db)?;
     drain_runtime(&mut runtime)?;
     let now_ms = next_cli_timestamp(&runtime)?;
-    let output = disappearing_messages_setting::commands::author_set_with_auto_floor(
+    let output = encryption::disappearing_messages_setting::commands::author_set_with_auto_floor(
         runtime.store(),
-        disappearing_messages_setting::commands::AuthorSetting {
+        encryption::disappearing_messages_setting::commands::AuthorSetting {
             workspace_id: args.workspace_id,
             now_ms,
             ttl_minutes: args.ttl_minutes,
@@ -738,8 +735,8 @@ fn run_disappearing_set(parsed: ParsedArgs) -> Result<(), String> {
         .new_floor_minute
         .saturating_sub(receipt.previous_floor_minute);
     println!(
-        "setting_event_id: {}",
-        encode_hex_32(&receipt.setting_event_id)
+        "setting_fact_id: {}",
+        encode_hex_32(&receipt.setting_fact_id)
     );
     println!("ttl_minutes: {}", args.ttl_minutes);
     println!("previous_floor_minute: {}", receipt.previous_floor_minute);
@@ -760,8 +757,11 @@ fn run_disappearing_status(parsed: ParsedArgs) -> Result<(), String> {
     drain_runtime(&mut runtime)?;
     runtime.save()?;
     let store = runtime.store();
-    let active = disappearing_messages_setting::queries::active_for_workspace(store, workspace_id)?;
-    let setting_event_id = active
+    let active = encryption::disappearing_messages_setting::queries::active_for_workspace(
+        store,
+        workspace_id,
+    )?;
+    let setting_fact_id = active
         .as_ref()
         .map(|row| encode_hex_32(&row.setting_id))
         .unwrap_or_else(|| "none".to_string());
@@ -781,7 +781,7 @@ fn run_disappearing_status(parsed: ParsedArgs) -> Result<(), String> {
     let live_messages = sealed_message_rows(store, workspace_id)?.len();
     let message_tombstones = store
         .table_rows_with_key_prefix(
-            sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
+            content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
             &workspace_id,
             usize::MAX,
         )
@@ -789,7 +789,7 @@ fn run_disappearing_status(parsed: ParsedArgs) -> Result<(), String> {
         .len();
 
     println!("workspace: {}", encode_hex_32(&workspace_id));
-    println!("setting_event_id: {setting_event_id}");
+    println!("setting_fact_id: {setting_fact_id}");
     println!("current_ttl_minutes: {ttl}");
     println!("current_floor_minute: {setting_floor}");
     println!("last_chopped_floor: none");
@@ -814,27 +814,31 @@ fn run_disappearing_tighten(parsed: ParsedArgs) -> Result<(), String> {
     let mut runtime = ProtocolRuntime::open_disk(db)?;
     drain_runtime(&mut runtime)?;
     let now_ms = next_cli_timestamp(&runtime)?;
-    let input = disappearing_messages_setting::commands::AuthorTighten {
+    let input = encryption::disappearing_messages_setting::commands::AuthorTighten {
         workspace_id: args.workspace_id,
         now_ms,
         ttl_minutes: args.ttl_minutes,
     };
-    let plan = disappearing_messages_setting::commands::plan_tighten(runtime.store(), input)?;
-    let output = disappearing_messages_setting::commands::author_tighten(runtime.store(), input)?;
+    let plan =
+        encryption::disappearing_messages_setting::commands::plan_tighten(runtime.store(), input)?;
+    let output = encryption::disappearing_messages_setting::commands::author_tighten(
+        runtime.store(),
+        input,
+    )?;
     let receipt = runtime.submit_command_output(output)?;
     drain_runtime(&mut runtime)?;
     enqueue_floor_retention(
         &mut runtime,
         args.workspace_id,
-        receipt.setting_event_id,
+        receipt.setting_fact_id,
         receipt.target_floor_minute,
     )?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
 
     println!(
-        "setting_event_id: {}",
-        encode_hex_32(&receipt.setting_event_id)
+        "setting_fact_id: {}",
+        encode_hex_32(&receipt.setting_fact_id)
     );
     println!("ttl_minutes: {}", args.ttl_minutes);
     println!("previous_floor_minute: {}", receipt.previous_floor_minute);
@@ -854,9 +858,9 @@ fn run_disappearing_compact(parsed: ParsedArgs) -> Result<(), String> {
     let mut runtime = ProtocolRuntime::open_disk(db)?;
     drain_runtime(&mut runtime)?;
     let now_ms = next_cli_timestamp(&runtime)?;
-    let output = disappearing_messages_setting::commands::author_compact(
+    let output = encryption::disappearing_messages_setting::commands::author_compact(
         runtime.store(),
-        disappearing_messages_setting::commands::AuthorCompact {
+        encryption::disappearing_messages_setting::commands::AuthorCompact {
             workspace_id,
             now_ms,
         },
@@ -868,8 +872,8 @@ fn run_disappearing_compact(parsed: ParsedArgs) -> Result<(), String> {
         .new_floor_minute
         .saturating_sub(receipt.previous_floor_minute);
     println!(
-        "setting_event_id: {}",
-        encode_hex_32(&receipt.setting_event_id)
+        "setting_fact_id: {}",
+        encode_hex_32(&receipt.setting_fact_id)
     );
     println!("ttl_minutes: {}", receipt.ttl_minutes);
     println!("previous_floor_minute: {}", receipt.previous_floor_minute);
@@ -886,24 +890,26 @@ fn run_send(parsed: ParsedArgs) -> Result<(), String> {
     let workspace_id = parsed
         .command
         .get(1)
-        .ok_or_else(|| sealed_message::cli::SEND_USAGE.to_string())
+        .ok_or_else(|| content::sealed_message::cli::SEND_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     let text = parsed
         .command
         .get(2)
-        .ok_or_else(|| sealed_message::cli::SEND_USAGE.to_string())?
+        .ok_or_else(|| content::sealed_message::cli::SEND_USAGE.to_string())?
         .clone();
     let clock = FixedClock(next_cli_timestamp(&runtime)?);
-    let vault =
-        sealed_message::authoring::SealedMessageVault::for_workspace(&runtime, workspace_id)?;
+    let vault = content::sealed_message::authoring::SealedMessageVault::for_workspace(
+        &runtime,
+        workspace_id,
+    )?;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        sealed_message::cli::send(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::sealed_message::cli::send(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
-    for line in sealed_message::cli::send_output(&receipt, &text).lines {
+    for line in content::sealed_message::cli::send_output(&receipt, &text).lines {
         println!("{line}");
     }
     Ok(())
@@ -920,7 +926,7 @@ fn run_messages(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        sealed_message::cli::messages(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::sealed_message::cli::messages(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     for line in output.lines {
         println!("{line}");
@@ -939,7 +945,7 @@ fn run_view(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        sealed_message::cli::view(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::sealed_message::cli::view(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     for line in output.lines {
         println!("{line}");
@@ -956,13 +962,13 @@ fn run_grant_admin(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        identity_admin::cli::grant_admin(&ctx, CliArgs::new(&parsed.command[1..]))?
+        identity::admin::cli::grant_admin(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     runtime.drain_projection_until_idle(8, 64)?;
     runtime.save()?;
 
-    for line in identity_admin::cli::grant_admin_output(&receipt).lines {
+    for line in identity::admin::cli::grant_admin_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -977,13 +983,13 @@ fn run_generate(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        content_event::cli::generate(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::event::cli::generate(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     let _report = runtime.drain_projection_until_idle(8, 1024)?;
     runtime.save()?;
 
-    for line in content_event::cli::generated_output(&receipt, receipt.generated_events).lines {
+    for line in content::event::cli::generated_output(&receipt, receipt.generated_facts).lines {
         println!("{line}");
     }
     Ok(())
@@ -994,11 +1000,15 @@ fn run_generate_deps(parsed: ParsedArgs) -> Result<(), String> {
         .db
         .ok_or_else(|| top_level_usage("generate-deps requires --db PATH"))?;
     let runtime = ProtocolRuntime::open_disk(db)?;
-    let args = cascade_event::cli::parse_generate_deps_args(CliArgs::new(&parsed.command[1..]))?;
-    let receipt =
-        cascade_event::commands::generate_deps(runtime.store(), args.count, args.deps_per_event)?;
+    let args =
+        sync::cascade_fact::cli::parse_generate_deps_args(CliArgs::new(&parsed.command[1..]))?;
+    let receipt = sync::cascade_fact::commands::generate_deps(
+        runtime.store(),
+        args.count,
+        args.deps_per_fact,
+    )?;
 
-    for line in cascade_event::cli::generate_deps_output(&receipt).lines {
+    for line in sync::cascade_fact::cli::generate_deps_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -1009,11 +1019,11 @@ fn run_replay_deps_reverse(parsed: ParsedArgs) -> Result<(), String> {
         .db
         .ok_or_else(|| top_level_usage("replay-deps-reverse requires --db PATH"))?;
     CliArgs::new(&parsed.command[1..])
-        .require_len(0, cascade_event::cli::REPLAY_DEPS_REVERSE_USAGE)?;
+        .require_len(0, sync::cascade_fact::cli::REPLAY_DEPS_REVERSE_USAGE)?;
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    let receipt = cascade_event::commands::replay_deps_reverse(&mut runtime)?;
+    let receipt = sync::cascade_fact::commands::replay_deps_reverse(&mut runtime)?;
 
-    for line in cascade_event::cli::replay_deps_reverse_output(&receipt).lines {
+    for line in sync::cascade_fact::cli::replay_deps_reverse_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -1052,10 +1062,10 @@ fn run_content_count(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        content_event::cli::content_count(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::event::cli::content_count(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
 
-    for line in content_event::cli::content_count_output(output).lines {
+    for line in content::event::cli::content_count_output(output).lines {
         println!("{line}");
     }
     Ok(())
@@ -1092,7 +1102,7 @@ fn run_clock(parsed: ParsedArgs) -> Result<(), String> {
     }
 
     let logical_time = logical_clock::logical_time(runtime.store())?;
-    let observed_max = content_event::queries::max_timestamp(runtime.store())?;
+    let observed_max = content::event::queries::max_timestamp(runtime.store())?;
     let next_timestamp = logical_clock::next_timestamp(runtime.store(), observed_max)?;
     let logical_time = logical_time
         .map(|timestamp| timestamp.to_string())
@@ -1109,12 +1119,12 @@ fn next_cli_timestamp(runtime: &ProtocolRuntime) -> Result<u64, String> {
 }
 
 fn max_cli_timestamp(store: &crate::core::store::Store) -> Result<u64, String> {
-    let mut max_timestamp = content_event::queries::max_timestamp(store)?;
+    let mut max_timestamp = content::event::queries::max_timestamp(store)?;
     for (key, value) in store
-        .table_rows(sealed_message::rows::SEALED_MESSAGE_ROWS)
+        .table_rows(content::sealed_message::rows::SEALED_MESSAGE_ROWS)
         .map_err(|err| format!("load sealed messages for clock: {err}"))?
     {
-        let row = sealed_message::rows::decode_sealed_message_row(&key, &value);
+        let row = content::sealed_message::rows::decode_sealed_message_row(&key, &value);
         if let Ok(row) = row {
             max_timestamp = max_timestamp.max(row.created_at_ms);
         }
@@ -1133,8 +1143,8 @@ fn enqueue_floor_retention(
         if message.minute >= floor_minute {
             continue;
         }
-        if runtime.submit_intent(retention_floor::apply_retention_floor_intent(
-            retention_floor::ApplyRetentionFloor {
+        if runtime.submit_intent(purge_below_retention_floor_intent(
+            PurgeBelowRetentionFloor {
                 workspace_id,
                 setting_id,
                 target_id: message.message_id,
@@ -1149,16 +1159,16 @@ fn enqueue_floor_retention(
 fn sealed_message_rows(
     store: &crate::core::store::Store,
     workspace_id: [u8; 32],
-) -> Result<Vec<sealed_message::rows::SealedMessageRow>, String> {
+) -> Result<Vec<content::sealed_message::rows::SealedMessageRow>, String> {
     store
         .table_rows_with_key_prefix(
-            sealed_message::rows::SEALED_MESSAGE_ROWS,
+            content::sealed_message::rows::SEALED_MESSAGE_ROWS,
             &workspace_id,
             usize::MAX,
         )
         .map_err(|err| format!("load sealed message rows: {err}"))?
         .into_iter()
-        .map(|(key, value)| sealed_message::rows::decode_sealed_message_row(&key, &value))
+        .map(|(key, value)| content::sealed_message::rows::decode_sealed_message_row(&key, &value))
         .collect()
 }
 
@@ -1186,17 +1196,19 @@ fn root_summary(runtime: &ProtocolRuntime) -> (u64, [u8; 32]) {
 fn is_sync_control_fact(tag: Option<u8>) -> bool {
     matches!(
         tag,
-        Some(crate::protocol::fact_modules::sync_compare::layout::TYPE_SYNC_COMPARE)
-            | Some(crate::protocol::fact_modules::sync_have_id::layout::TYPE_SYNC_HAVE_ID)
-            | Some(crate::protocol::fact_modules::sync_need_id::layout::TYPE_SYNC_NEED_ID)
-            | Some(crate::protocol::fact_modules::sync_range_request::layout::TYPE_SYNC_RANGE_REQUEST)
-            | Some(crate::protocol::fact_modules::sync_shared_event::layout::TYPE_SHARED_EVENT)
-            | Some(crate::protocol::fact_modules::sync_encrypted_root::layout::TYPE_ENCRYPTED_ROOT)
-            | Some(crate::protocol::fact_modules::sync_key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE)
+        Some(crate::protocol::facts::sync::compare::layout::TYPE_SYNC_COMPARE)
+            | Some(crate::protocol::facts::sync::have_id::layout::TYPE_SYNC_HAVE_ID)
+            | Some(crate::protocol::facts::sync::need_id::layout::TYPE_SYNC_NEED_ID)
+            | Some(crate::protocol::facts::sync::range_request::layout::TYPE_SYNC_RANGE_REQUEST)
+            | Some(crate::protocol::facts::sync::shared_fact::layout::TYPE_SHARED_FACT)
+            | Some(crate::protocol::facts::sync::encrypted_root::layout::TYPE_ENCRYPTED_ROOT)
+            | Some(
+                crate::protocol::facts::sync::key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE
+            )
     )
 }
 
-fn cover_summary(messages: &[sealed_message::rows::SealedMessageRow]) -> String {
+fn cover_summary(messages: &[content::sealed_message::rows::SealedMessageRow]) -> String {
     let mut hash = blake3::Hasher::new();
     for message in messages {
         hash.update(&message.message_id);

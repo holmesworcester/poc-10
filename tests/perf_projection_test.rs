@@ -11,17 +11,15 @@ use std::time::{Duration, Instant};
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactId};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
-use topo::core::schema_dsl::FACT_MODULES_SCHEMA_SOURCE;
+use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wake_loop::{DrainReport, WakeLoop};
-use topo::protocol::fact_modules::content_file::fact::ContentFileFact;
-use topo::protocol::fact_modules::content_file::layout as file_layout;
-use topo::protocol::fact_modules::content_file_slice::fact::ContentFileSliceFact;
-use topo::protocol::fact_modules::content_file_slice::{
-    layout as slice_layout, rows as slice_rows,
-};
-use topo::protocol::fact_modules::content_message::fact::{unix_minute_for, ContentMessageFact};
-use topo::protocol::fact_modules::content_message::layout as message_layout;
+use topo::protocol::facts::content::file::fact::ContentFileFact;
+use topo::protocol::facts::content::file::layout as file_layout;
+use topo::protocol::facts::content::file_slice::fact::ContentFileSliceFact;
+use topo::protocol::facts::content::file_slice::{layout as slice_layout, rows as slice_rows};
+use topo::protocol::facts::content::message::fact::{unix_minute_for, ContentMessageFact};
+use topo::protocol::facts::content::message::layout as message_layout;
 use topo::protocol::matchers as file_context;
 use topo::protocol::matchers as message_context;
 use topo::protocol::matchers::ExactSelectorMatcher;
@@ -43,7 +41,7 @@ struct PerfFixture {
 impl PerfFixture {
     fn new() -> Self {
         Self {
-            store: Store::open_memory_with_schema_sources(&[FACT_MODULES_SCHEMA_SOURCE])
+            store: Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
                 .expect("open target schema"),
             bus: WakeLoop::new(),
             workspace_id: [1; 32],
@@ -136,8 +134,8 @@ impl PerfFixture {
                 &[&message_matcher, &file_matcher],
                 &self.store,
                 &[
-                    topo::protocol::fact_modules::content_message::rows::CONTENT_MESSAGE_ROWS,
-                    topo::protocol::fact_modules::content_file::rows::FILE_ROWS,
+                    topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
+                    topo::protocol::facts::content::file::rows::FILE_ROWS,
                     slice_rows::FILE_SLICE_ROWS,
                 ],
                 usize::MAX,
@@ -146,29 +144,26 @@ impl PerfFixture {
     }
 
     fn message_exists(&self, message_id: FactId) -> bool {
-        let key = topo::protocol::fact_modules::content_message::rows::content_message_key(
+        let key = topo::protocol::facts::content::message::rows::content_message_key(
             self.workspace_id,
             message_id,
         );
         self.store
             .table_row(
-                topo::protocol::fact_modules::content_message::rows::CONTENT_MESSAGE_ROWS,
+                topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
                 &key,
             )
             .expect("load message row")
             .is_some()
     }
 
-    fn file_exists(&self, file_event_id: FactId) -> bool {
-        let key = topo::protocol::fact_modules::content_file::rows::content_file_key(
+    fn file_exists(&self, file_fact_id: FactId) -> bool {
+        let key = topo::protocol::facts::content::file::rows::content_file_key(
             &self.workspace_id,
-            &file_event_id,
+            &file_fact_id,
         );
         self.store
-            .table_row(
-                topo::protocol::fact_modules::content_file::rows::FILE_ROWS,
-                &key,
-            )
+            .table_row(topo::protocol::facts::content::file::rows::FILE_ROWS, &key)
             .expect("load file row")
             .is_some()
     }
@@ -316,14 +311,14 @@ fn run_file_projection_perf(mib: usize) {
     let message_id = parent.id;
     let file_id = derive_file_id(&fixture, message_id, blob_bytes as u64);
     let file = fixture.next_file(message_id, file_id, blob_bytes, total_slices);
-    let file_event_id = file.id;
+    let file_fact_id = file.id;
 
     let started = Instant::now();
     let root_report = fixture.project_facts(vec![parent, file]);
     projection_elapsed += started.elapsed();
     assert_eq!(root_report.intents, 2);
     assert!(fixture.message_exists(message_id));
-    assert!(fixture.file_exists(file_event_id));
+    assert!(fixture.file_exists(file_fact_id));
     let mut projected_events = root_report.intents;
 
     let mut slice_index = 0u32;
@@ -367,16 +362,17 @@ impl Projector for ProjectionPerfProjector {
     ) -> Result<ProjectionOutput, String> {
         match fact.bytes.first().copied() {
             Some(message_layout::TYPE_CONTENT_MESSAGE) => {
-                topo::protocol::fact_modules::content_message::project::ContentMessageProjector::new()
+                topo::protocol::facts::content::message::project::ContentMessageProjector::new()
                     .project(fact, context)
             }
             Some(file_layout::TYPE_CONTENT_FILE) => {
-                topo::protocol::fact_modules::content_file::project::ContentFileProjector::new()
+                topo::protocol::facts::content::file::project::ContentFileProjector::new()
                     .project(fact, context)
             }
             Some(slice_layout::TYPE_CONTENT_FILE_SLICE) => {
-                topo::protocol::fact_modules::content_file_slice::project::ContentFileSliceProjector::new()
-                    .project(fact, context)
+                topo::protocol::facts::content::file_slice::project::ContentFileSliceProjector::new(
+                )
+                .project(fact, context)
             }
             _ => Err("unknown projection perf fact".to_string()),
         }

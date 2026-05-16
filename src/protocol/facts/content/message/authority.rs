@@ -1,0 +1,114 @@
+use crate::core::context::ContextNeed;
+use crate::core::facts::{Fact, FactId};
+use crate::core::projection::ProjectionContext;
+use crate::protocol::facts::identity;
+use crate::protocol::facts::identity::endpoint_shared::layout as endpoint_shared_layout;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedPayload {
+    pub payload: Vec<u8>,
+    pub signer: Option<SignedSigner>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedSigner {
+    pub signer_id: FactId,
+    pub signer_public_key: [u8; 32],
+}
+
+pub fn decode_raw_or_signed(
+    fact: &Fact,
+    expected_type: u8,
+    label: &str,
+) -> Result<DecodedPayload, String> {
+    if fact.bytes.first().copied() == Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) {
+        let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)
+            .map_err(|err| format!("{label} signed fact is invalid: {err}"))?;
+        if envelope.inner_type != expected_type {
+            return Err(format!("signed fact does not contain a {label}"));
+        }
+        return Ok(DecodedPayload {
+            payload: envelope.payload,
+            signer: Some(SignedSigner {
+                signer_id: envelope.signer_id,
+                signer_public_key: envelope.signer_public_key,
+            }),
+        });
+    }
+
+    Ok(DecodedPayload {
+        payload: fact.bytes.clone(),
+        signer: None,
+    })
+}
+
+pub fn signer_need(owner: FactId, signer: Option<SignedSigner>) -> Option<ContextNeed> {
+    signer.map(|signer| {
+        crate::protocol::matchers::exact_need(
+            owner,
+            crate::protocol::matchers::endpoint_shared_role(),
+            signer.signer_id,
+        )
+    })
+}
+
+pub fn validate_signer_context(
+    context: &ProjectionContext,
+    need: &ContextNeed,
+    signer: SignedSigner,
+    workspace_id: FactId,
+    author_user_id: Option<FactId>,
+    label: &str,
+) -> Result<bool, String> {
+    let Some(payload) = payload_for_need(context, need, &format!("{label} signer"))? else {
+        return Ok(false);
+    };
+    if payload.id != signer.signer_id {
+        return Err(format!(
+            "{label} signer endpoint context payload id mismatch"
+        ));
+    }
+    let envelope = identity::signed_fact::layout::decode_signed_fact(&payload.bytes)
+        .map_err(|_| format!("{label} signer context is not a signed endpoint_shared"))?;
+    if envelope.inner_type != endpoint_shared_layout::TYPE_ENDPOINT_SHARED {
+        return Err(format!(
+            "{label} signer context is not a signed endpoint_shared"
+        ));
+    }
+    let endpoint = endpoint_shared_layout::decode_fact(&envelope.payload)
+        .map_err(|_| format!("{label} signer context is not an endpoint_shared"))?;
+    if endpoint.workspace_id != workspace_id {
+        return Err(format!(
+            "{label} signer endpoint_shared workspace does not match {label}"
+        ));
+    }
+    if endpoint.signing_public_key != signer.signer_public_key {
+        return Err(format!(
+            "{label} signer public key does not match endpoint_shared"
+        ));
+    }
+    if author_user_id.is_some_and(|author| endpoint.user_authority_fact_id != author) {
+        return Err(format!(
+            "{label} signer endpoint is not authorized by the named author"
+        ));
+    }
+    Ok(true)
+}
+
+pub fn payload_for_need<'a>(
+    context: &'a ProjectionContext,
+    need: &ContextNeed,
+    label: &str,
+) -> Result<Option<&'a Fact>, String> {
+    let Some(matched) = context
+        .matched_context()
+        .iter()
+        .find(|matched| matched.need == *need)
+    else {
+        return Ok(None);
+    };
+    if matched.offer.payload_ref != matched.payload.id {
+        return Err(format!("{label} context offer payload mismatch"));
+    }
+    Ok(Some(&matched.payload))
+}

@@ -448,7 +448,7 @@ impl Store {
     /// Scan one declared table by lexicographic key range.
     ///
     /// This is still a row-store primitive, not a protocol index. Protocol
-    /// modules choose key encodings such as `(timestamp, event_id)` and store
+    /// modules choose key encodings such as `(timestamp, fact_id)` and store
     /// only asks SQLite for rows whose opaque keys fall in the requested span.
     pub fn table_rows_in_key_range(
         &self,

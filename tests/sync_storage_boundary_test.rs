@@ -9,7 +9,7 @@ use std::time::Duration;
 use cli_harness::*;
 
 #[test]
-fn accept_handshake_does_not_create_durable_events() {
+fn accept_handshake_does_not_create_durable_facts() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
@@ -17,9 +17,9 @@ fn accept_handshake_does_not_create_durable_events() {
     let alice_port = free_port();
     let bob_invite = invite(&bob, port);
     assert_eq!(
-        sync_event_count(&bob),
+        sync_fact_count(&bob),
         0,
-        "invite facts must not become syncable events"
+        "invite facts must not become syncable facts"
     );
 
     let _daemon = spawn_daemon(&bob, port);
@@ -27,22 +27,22 @@ fn accept_handshake_does_not_create_durable_events() {
     let connected = accept_connection_with_retry(&alice, &bob_invite);
     assert!(connected.contains("connected:"), "{connected}");
     wait_for_connection_count(&bob, 1);
-    wait_for_connection_event_count(&bob, 2);
+    wait_for_connection_fact_count(&bob, 2);
 
     assert_eq!(
-        sync_event_count(&alice),
+        sync_fact_count(&alice),
         0,
         "accept must not store syncable bootstrap items"
     );
     assert_eq!(
-        sync_event_count(&bob),
+        sync_fact_count(&bob),
         0,
         "connect must not store syncable bootstrap items"
     );
     assert_eq!(connection_count(&alice), 1);
     assert_eq!(connection_count(&bob), 1);
-    assert_eq!(connection_event_count(&alice), 2);
-    assert_eq!(connection_event_count(&bob), 2);
+    assert_eq!(connection_fact_count(&alice), 2);
+    assert_eq!(connection_fact_count(&bob), 2);
 }
 
 #[test]
@@ -70,12 +70,12 @@ fn wrong_invite_private_key_does_not_project_receiver_connection() {
     );
     thread::sleep(Duration::from_millis(500));
 
-    assert_eq!(sync_event_count(&alice), 0);
-    assert_eq!(sync_event_count(&bob), 0);
+    assert_eq!(sync_fact_count(&alice), 0);
+    assert_eq!(sync_fact_count(&bob), 0);
     assert_eq!(connection_count(&alice), 0);
     assert_eq!(connection_count(&bob), 0);
-    assert_eq!(connection_event_count(&alice), 1);
-    assert_eq!(connection_event_count(&bob), 0);
+    assert_eq!(connection_fact_count(&alice), 1);
+    assert_eq!(connection_fact_count(&bob), 0);
 }
 
 #[test]
@@ -94,9 +94,9 @@ fn accept_reports_unreachable_invite_address() {
         "stderr:\n{}",
         stderr(&connected)
     );
-    assert_eq!(sync_event_count(&alice), 0);
+    assert_eq!(sync_fact_count(&alice), 0);
     assert_eq!(connection_count(&alice), 0);
-    assert_eq!(connection_event_count(&alice), 0);
+    assert_eq!(connection_fact_count(&alice), 0);
 }
 
 struct RunningDaemon {
@@ -175,16 +175,16 @@ fn wait_for_connection_count(db: &str, expected: usize) {
     );
 }
 
-fn wait_for_connection_event_count(db: &str, expected: usize) {
+fn wait_for_connection_fact_count(db: &str, expected: usize) {
     for _ in 0..100 {
-        if connection_event_count(db) == expected {
+        if connection_fact_count(db) == expected {
             return;
         }
         thread::sleep(Duration::from_millis(50));
     }
     panic!(
-        "connection event count never reached {expected}; current {}",
-        connection_event_count(db)
+        "connection fact count never reached {expected}; current {}",
+        connection_fact_count(db)
     );
 }
 
@@ -206,11 +206,11 @@ fn replace_invite_part(link: &str, label: &str, value: &str) -> String {
         .join("/")
 }
 
-fn sync_event_count(db: &str) -> usize {
+fn sync_fact_count(db: &str) -> usize {
     let out = assert_success(topo(&["--db", db, "count"]));
-    line_value(&out, "sync_events")
+    line_value(&out, "sync_facts")
         .parse()
-        .expect("parse sync event count")
+        .expect("parse sync fact count")
 }
 
 fn connection_count(db: &str) -> usize {
@@ -220,9 +220,9 @@ fn connection_count(db: &str) -> usize {
         .expect("parse connection count")
 }
 
-fn connection_event_count(db: &str) -> usize {
+fn connection_fact_count(db: &str) -> usize {
     let out = assert_success(topo(&["--db", db, "count"]));
-    line_value(&out, "connection_events")
+    line_value(&out, "connection_facts")
         .parse()
-        .expect("parse connection event count")
+        .expect("parse connection fact count")
 }

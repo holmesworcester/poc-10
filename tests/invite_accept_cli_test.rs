@@ -554,7 +554,7 @@ fn forged_workspace_invite_does_not_authorize_or_exfiltrate_events() {
         "2",
         "128",
     ]));
-    assert!(generated.contains("generated_events: 2"), "{generated}");
+    assert!(generated.contains("generated_facts: 2"), "{generated}");
 
     let attacker_created = create_workspace(&attacker, "Attacker", "attacker", "attacker-laptop");
     let attacker_workspace_id = line_value(&attacker_created, "workspace_id");
@@ -945,7 +945,7 @@ fn wait_for_connection_count(db: &str, expected: usize) {
 }
 
 fn connection_event_count(db: &str) -> usize {
-    count_value(db, "connection_events")
+    count_value(db, "connection_facts")
 }
 
 fn invite_accepted_count(db: &str) -> usize {

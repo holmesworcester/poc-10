@@ -1,6 +1,6 @@
-//! Behavioural tests for the target `connection_response` handler.
+//! Behavioural tests for the target `connection::response` handler.
 //!
-//! Synthesises a connection_request + invite_secret + local endpoint fact
+//! Synthesises a connection::request + invite_secret + local endpoint fact
 //! context, drives the handler, and verifies the emitted response fact
 //! decodes into a `ConnectionResponseFact` with the request's dependency
 //! edges copied through and a non-degenerate connection secret. A second
@@ -11,24 +11,24 @@
 use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
-use topo::protocol::fact_modules::connection_request::fact::ConnectionRequestFact;
-use topo::protocol::fact_modules::connection_request::layout as request_layout;
-use topo::protocol::fact_modules::connection_response::layout as response_layout;
-use topo::protocol::fact_modules::identity_endpoint::fact::EndpointFact;
-use topo::protocol::fact_modules::identity_endpoint::layout as endpoint_layout;
-use topo::protocol::fact_modules::identity_invite::fact::InviteSecretFact;
-use topo::protocol::fact_modules::identity_invite::layout as invite_layout;
-use topo::protocol::intent_handlers::connection_response::{
-    connection_response_intent, ConnectionResponseIntent,
+use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
+use topo::protocol::facts::connection::request::layout as request_layout;
+use topo::protocol::facts::connection::response::layout as response_layout;
+use topo::protocol::facts::identity::endpoint::fact::EndpointFact;
+use topo::protocol::facts::identity::endpoint::layout as endpoint_layout;
+use topo::protocol::facts::identity::invite::fact::InviteSecretFact;
+use topo::protocol::facts::identity::invite::layout as invite_layout;
+use topo::protocol::intents::connection::create_response::{
+    create_connection_response_intent, CreateConnectionResponse,
 };
-use topo::protocol::intent_handlers::connection_response::{
-    ConnectionResponseHandler, DEPENDENCY_NOT_WIRED,
+use topo::protocol::intents::connection::create_response::{
+    CreateConnectionResponseHandler, DEPENDENCY_NOT_WIRED,
 };
 
 #[test]
 fn handler_emits_decodable_response_fact_for_addressed_request() {
     let scenario = synthesize_scenario(SynthOpts::default());
-    let handler = ConnectionResponseHandler::new();
+    let handler = CreateConnectionResponseHandler::new();
     let context = HandlerContext::with_facts([
         scenario.request_fact.clone(),
         scenario.invite_fact.clone(),
@@ -58,7 +58,7 @@ fn handler_rejects_request_addressed_to_a_different_endpoint() {
         request_to_endpoint: Some(crypto::x25519_public_key(&[77u8; 32])),
         ..SynthOpts::default()
     });
-    let handler = ConnectionResponseHandler::new();
+    let handler = CreateConnectionResponseHandler::new();
     let context = HandlerContext::with_facts([
         scenario.request_fact.clone(),
         scenario.invite_fact.clone(),
@@ -80,7 +80,7 @@ fn handler_stops_at_placeholder_ephemeral_sentinel_so_intent_stays_queued() {
         zero_responder_ephemeral: true,
         ..SynthOpts::default()
     });
-    let handler = ConnectionResponseHandler::new();
+    let handler = CreateConnectionResponseHandler::new();
     let context = HandlerContext::with_facts([
         scenario.request_fact.clone(),
         scenario.invite_fact.clone(),
@@ -149,11 +149,11 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         from_endpoint: initiator_endpoint,
         to_endpoint: opts.request_to_endpoint.unwrap_or(responder_endpoint),
         nonce: [77u8; 32],
-        invite_event_id: [88u8; 32],
+        invite_fact_id: [88u8; 32],
         bootstrap_hash: invite.bootstrap_hash,
         invite_signature: [0u8; ED25519_SIGNATURE_BYTES],
-        invite_secret_event_id: invite_fact.id,
-        initiator_ephemeral_secret_event_id: [99u8; 32],
+        invite_secret_fact_id: invite_fact.id,
+        initiator_ephemeral_secret_fact_id: [99u8; 32],
         initiator_ephemeral_public_key: initiator_ephemeral_public,
         from_listen_addr: None,
         to_listen_addr: None,
@@ -164,17 +164,17 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         request_layout::encode_fact(&request).expect("encode request"),
     );
 
-    let responder_ephemeral_secret_event_id = if opts.zero_responder_ephemeral {
+    let responder_ephemeral_secret_fact_id = if opts.zero_responder_ephemeral {
         [0u8; 32]
     } else {
         *blake3::hash(&crypto::x25519_public_key(&responder_ephemeral_private)).as_bytes()
     };
 
-    let intent = connection_response_intent(ConnectionResponseIntent {
+    let intent = create_connection_response_intent(CreateConnectionResponse {
         request_id: request_fact.id,
         invite_secret_id: invite_fact.id,
         local_endpoint_id: endpoint_fact.id,
-        responder_ephemeral_secret_event_id,
+        responder_ephemeral_secret_fact_id,
         responder_ephemeral_private_key: responder_ephemeral_private,
     });
 

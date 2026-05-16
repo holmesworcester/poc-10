@@ -2,15 +2,15 @@ use std::collections::BTreeSet;
 
 use rusqlite::Connection;
 use topo::core::schema_dsl::{
-    parse_schema, CORE_SCHEMA_SOURCE, FACT_MODULES_SCHEMA_SOURCE, INTENT_HANDLERS_SCHEMA_SOURCE,
+    parse_schema, CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE,
 };
 use topo::core::store::{Store, TableName, TableRow};
 
 fn checked_schema_sources() -> [&'static str; 3] {
     [
         CORE_SCHEMA_SOURCE,
-        FACT_MODULES_SCHEMA_SOURCE,
-        INTENT_HANDLERS_SCHEMA_SOURCE,
+        FACTS_SCHEMA_SOURCE,
+        INTENTS_SCHEMA_SOURCE,
     ]
 }
 
@@ -61,7 +61,7 @@ fn schema_sources_create_declared_row_tables() {
                 value: b"message bytes".to_vec(),
             },
             TableRow {
-                table: TableName::new("network_send_cursors"),
+                table: TableName::new("send_network_frame_cursors"),
                 key: b"cursor/1".to_vec(),
                 value: b"cursor bytes".to_vec(),
             },

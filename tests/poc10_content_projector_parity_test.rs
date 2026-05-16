@@ -1,15 +1,8 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactId, FactScope};
 use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
-use topo::protocol::fact_modules::content_event;
-use topo::protocol::fact_modules::content_file;
-use topo::protocol::fact_modules::content_file_deletion;
-use topo::protocol::fact_modules::content_message;
-use topo::protocol::fact_modules::content_message_deletion;
-use topo::protocol::fact_modules::content_reaction;
-use topo::protocol::fact_modules::identity_endpoint_shared;
-use topo::protocol::fact_modules::identity_user;
-use topo::protocol::fact_modules::signed_fact;
+use topo::protocol::facts::content;
+use topo::protocol::facts::identity;
 
 const WORKSPACE: FactId = [7; 32];
 const CONTENT_SIGNING_KEY: [u8; 32] = [9; 32];
@@ -18,7 +11,7 @@ const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [11; 32];
 #[test]
 fn signed_content_event_waits_for_endpoint_shared_signer_context() {
     let signer = endpoint_shared_fact(WORKSPACE, [22; 32], CONTENT_SIGNING_KEY);
-    let event = content_event::fact::ContentEventFact {
+    let event = content::event::fact::ContentEventFact {
         workspace_id: WORKSPACE,
         timestamp: 12,
         payload: b"hello".to_vec(),
@@ -26,11 +19,11 @@ fn signed_content_event_waits_for_endpoint_shared_signer_context() {
     let fact = signed_fact_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
-        content_event::layout::encode_fact(&event).expect("encode event"),
+        content::event::layout::encode_fact(&event).expect("encode event"),
         event.timestamp,
     );
 
-    let output = content_event::project::ContentEventProjector::new()
+    let output = content::event::project::ContentEventProjector::new()
         .project(&fact, &ProjectionContext::default())
         .expect("missing signer waits");
 
@@ -46,7 +39,7 @@ fn signed_content_event_waits_for_endpoint_shared_signer_context() {
 #[test]
 fn signed_content_event_rejects_signer_public_key_mismatch() {
     let signer = endpoint_shared_fact(WORKSPACE, [22; 32], [10; 32]);
-    let event = content_event::fact::ContentEventFact {
+    let event = content::event::fact::ContentEventFact {
         workspace_id: WORKSPACE,
         timestamp: 12,
         payload: b"hello".to_vec(),
@@ -54,11 +47,11 @@ fn signed_content_event_rejects_signer_public_key_mismatch() {
     let fact = signed_fact_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
-        content_event::layout::encode_fact(&event).expect("encode event"),
+        content::event::layout::encode_fact(&event).expect("encode event"),
         event.timestamp,
     );
 
-    let err = content_event::project::ContentEventProjector::new()
+    let err = content::event::project::ContentEventProjector::new()
         .project(
             &fact,
             &ProjectionContext::from_matches(vec![signer_match(&fact, &signer)]),
@@ -73,7 +66,7 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
     let author = user_fact(WORKSPACE, [31; 32], "alice");
     let wrong_author = user_fact(WORKSPACE, [32; 32], "mallory");
     let signer = endpoint_shared_fact(WORKSPACE, wrong_author.id, CONTENT_SIGNING_KEY);
-    let message = content_message::fact::ContentMessageFact {
+    let message = content::message::fact::ContentMessageFact {
         workspace_id: WORKSPACE,
         author_user_id: author.id,
         created_at_ms: 60_000,
@@ -85,11 +78,11 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
     let fact = signed_fact_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
-        content_message::layout::encode_fact(&message).expect("encode message"),
+        content::message::layout::encode_fact(&message).expect("encode message"),
         message.created_at_ms,
     );
 
-    let err = content_message::project::ContentMessageProjector::new()
+    let err = content::message::project::ContentMessageProjector::new()
         .project(
             &fact,
             &ProjectionContext::from_matches(vec![signer_match(&fact, &signer)]),
@@ -103,7 +96,7 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
 fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
     let author = user_fact(WORKSPACE, [31; 32], "alice");
     let signer = endpoint_shared_fact(WORKSPACE, author.id, CONTENT_SIGNING_KEY);
-    let file = content_file::fact::ContentFileFact {
+    let file = content::file::fact::ContentFileFact {
         workspace_id: WORKSPACE,
         created_at_ms: 70_000,
         message_id: [55; 32],
@@ -112,17 +105,17 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
         blob_bytes: 1_024,
         total_slices: 1,
         slice_bytes: 1_024,
-        root_hash: [44; content_file::fact::FILE_ROOT_HASH_BYTES],
+        root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: b"sealed".to_vec(),
     };
     let fact = signed_fact_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
-        content_file::layout::encode_fact(&file).expect("encode file"),
+        content::file::layout::encode_fact(&file).expect("encode file"),
         file.created_at_ms,
     );
 
-    let output = content_file::project::ContentFileProjector::new()
+    let output = content::file::project::ContentFileProjector::new()
         .project(&fact, &ProjectionContext::default())
         .expect("missing context waits");
 
@@ -140,7 +133,7 @@ fn signed_content_file_rejects_signer_not_authorized_by_author() {
     let author = user_fact(WORKSPACE, [31; 32], "alice");
     let wrong_author = user_fact(WORKSPACE, [32; 32], "mallory");
     let signer = endpoint_shared_fact(WORKSPACE, wrong_author.id, CONTENT_SIGNING_KEY);
-    let file = content_file::fact::ContentFileFact {
+    let file = content::file::fact::ContentFileFact {
         workspace_id: WORKSPACE,
         created_at_ms: 70_000,
         message_id: [55; 32],
@@ -149,17 +142,17 @@ fn signed_content_file_rejects_signer_not_authorized_by_author() {
         blob_bytes: 1_024,
         total_slices: 1,
         slice_bytes: 1_024,
-        root_hash: [44; content_file::fact::FILE_ROOT_HASH_BYTES],
+        root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: b"sealed".to_vec(),
     };
     let fact = signed_fact_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
-        content_file::layout::encode_fact(&file).expect("encode file"),
+        content::file::layout::encode_fact(&file).expect("encode file"),
         file.created_at_ms,
     );
 
-    let err = content_file::project::ContentFileProjector::new()
+    let err = content::file::project::ContentFileProjector::new()
         .project(
             &fact,
             &ProjectionContext::from_matches(vec![signer_match(&fact, &signer)]),
@@ -176,22 +169,22 @@ fn signed_content_reaction_rejects_signer_not_authorized_by_author() {
     let wrong_author = user_fact(WORKSPACE, [32; 32], "mallory");
     let target = message_fact(WORKSPACE, target_author.id);
     let signer = endpoint_shared_fact(WORKSPACE, wrong_author.id, CONTENT_SIGNING_KEY);
-    let reaction = content_reaction::fact::ContentReactionFact {
+    let reaction = content::reaction::fact::ContentReactionFact {
         workspace_id: WORKSPACE,
         created_at_ms: 80_000,
         target_message_id: target.id,
         author_user_id: reaction_author.id,
-        nonce: [6; content_reaction::fact::REACTION_NONCE_BYTES],
+        nonce: [6; content::reaction::fact::REACTION_NONCE_BYTES],
         ciphertext: b"sealed-reaction".to_vec(),
     };
     let fact = signed_fact_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
-        content_reaction::layout::encode_fact(&reaction).expect("encode reaction"),
+        content::reaction::layout::encode_fact(&reaction).expect("encode reaction"),
         reaction.created_at_ms,
     );
 
-    let err = content_reaction::project::ContentReactionProjector::new()
+    let err = content::reaction::project::ContentReactionProjector::new()
         .project(
             &fact,
             &ProjectionContext::from_matches(vec![signer_match(&fact, &signer)]),
@@ -206,7 +199,7 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
     let author = user_fact(WORKSPACE, [31; 32], "alice");
     let signer = endpoint_shared_fact(WORKSPACE, author.id, CONTENT_SIGNING_KEY);
     let target = message_fact(WORKSPACE, author.id);
-    let deletion = content_message_deletion::fact::ContentMessageDeletionFact {
+    let deletion = content::message_deletion::fact::ContentMessageDeletionFact {
         workspace_id: WORKSPACE,
         created_at_ms: 90_000,
         target_message_id: target.id,
@@ -215,11 +208,11 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
     let fact = signed_fact_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
-        content_message_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
+        content::message_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
         deletion.created_at_ms,
     );
 
-    let output = content_message_deletion::project::ContentMessageDeletionProjector::new()
+    let output = content::message_deletion::project::ContentMessageDeletionProjector::new()
         .project(
             &fact,
             &ProjectionContext::from_matches(vec![
@@ -244,7 +237,7 @@ fn signed_file_deletion_rejects_signer_not_authorized_by_author() {
     let deleter = user_fact(WORKSPACE, [32; 32], "mallory");
     let target = file_fact(WORKSPACE, file_author.id);
     let signer = endpoint_shared_fact(WORKSPACE, file_author.id, CONTENT_SIGNING_KEY);
-    let deletion = content_file_deletion::fact::ContentFileDeletionFact {
+    let deletion = content::file_deletion::fact::ContentFileDeletionFact {
         workspace_id: WORKSPACE,
         created_at_ms: 100_000,
         target_file_id: target.id,
@@ -253,11 +246,11 @@ fn signed_file_deletion_rejects_signer_not_authorized_by_author() {
     let fact = signed_fact_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
-        content_file_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
+        content::file_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
         deletion.created_at_ms,
     );
 
-    let err = content_file_deletion::project::ContentFileDeletionProjector::new()
+    let err = content::file_deletion::project::ContentFileDeletionProjector::new()
         .project(
             &fact,
             &ProjectionContext::from_matches(vec![signer_match(&fact, &signer)]),
@@ -269,29 +262,29 @@ fn signed_file_deletion_rejects_signer_not_authorized_by_author() {
 
 fn endpoint_shared_fact(
     workspace_id: FactId,
-    user_authority_event_id: FactId,
+    user_authority_fact_id: FactId,
     content_signing_key: [u8; 32],
 ) -> Fact {
-    let endpoint = identity_endpoint_shared::fact::EndpointSharedFact {
+    let endpoint = identity::endpoint_shared::fact::EndpointSharedFact {
         created_at_ms: 1,
         workspace_id,
-        user_authority_event_id,
+        user_authority_fact_id,
         endpoint_id: [21; 32],
         signing_public_key: crypto::ed25519_public_key(&content_signing_key),
-        endpoint_role: identity_endpoint_shared::fact::EndpointRole::Device,
+        endpoint_role: identity::endpoint_shared::fact::EndpointRole::Device,
         device_name: "laptop".to_string(),
     };
-    let bytes = signed_fact::create::sign_payload_bytes(
+    let bytes = identity::signed_fact::create::sign_payload_bytes(
         [8; 32],
         &ENDPOINT_AUTHORITY_KEY,
-        identity_endpoint_shared::layout::encode_fact(&endpoint).expect("encode endpoint_shared"),
+        identity::endpoint_shared::layout::encode_fact(&endpoint).expect("encode endpoint_shared"),
     )
     .expect("sign endpoint_shared");
     Fact::new(FactScope::Global, endpoint.created_at_ms, bytes)
 }
 
 fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact {
-    let user = identity_user::fact::UserFact {
+    let user = identity::user::fact::UserFact {
         created_at_ms: 2,
         workspace_id,
         public_key,
@@ -300,12 +293,12 @@ fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact
     Fact::new(
         FactScope::Global,
         user.created_at_ms,
-        identity_user::layout::encode_fact(&user).expect("encode user"),
+        identity::user::layout::encode_fact(&user).expect("encode user"),
     )
 }
 
 fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
-    let message = content_message::fact::ContentMessageFact {
+    let message = content::message::fact::ContentMessageFact {
         workspace_id,
         author_user_id,
         created_at_ms: 60_000,
@@ -317,12 +310,12 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     Fact::new(
         topo::protocol::matchers::workspace_scope(workspace_id),
         message.created_at_ms,
-        content_message::layout::encode_fact(&message).expect("encode message"),
+        content::message::layout::encode_fact(&message).expect("encode message"),
     )
 }
 
 fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
-    let file = content_file::fact::ContentFileFact {
+    let file = content::file::fact::ContentFileFact {
         workspace_id,
         created_at_ms: 70_000,
         message_id: [55; 32],
@@ -331,13 +324,13 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         blob_bytes: 1_024,
         total_slices: 1,
         slice_bytes: 1_024,
-        root_hash: [44; content_file::fact::FILE_ROOT_HASH_BYTES],
+        root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: b"sealed".to_vec(),
     };
     Fact::new(
         topo::protocol::matchers::workspace_scope(workspace_id),
         file.created_at_ms,
-        content_file::layout::encode_fact(&file).expect("encode file"),
+        content::file::layout::encode_fact(&file).expect("encode file"),
     )
 }
 
@@ -350,7 +343,7 @@ fn signed_fact_in_workspace(
     Fact::new(
         topo::protocol::matchers::workspace_scope(WORKSPACE),
         timestamp,
-        signed_fact::create::sign_payload_bytes(signer_id, &private_key, payload)
+        identity::signed_fact::create::sign_payload_bytes(signer_id, &private_key, payload)
             .expect("sign content fact"),
     )
 }
@@ -404,8 +397,8 @@ fn message_match(owner: &Fact, message: &Fact) -> MatchedContext {
 #[allow(dead_code)]
 fn file_event_match(owner: &Fact, file: &Fact) -> MatchedContext {
     MatchedContext {
-        need: topo::protocol::matchers::exact_event_need(owner.id, file.scope.clone(), file.id),
-        offer: topo::protocol::matchers::exact_event_offer(
+        need: topo::protocol::matchers::exact_fact_need(owner.id, file.scope.clone(), file.id),
+        offer: topo::protocol::matchers::exact_fact_offer(
             file.id,
             file.scope.clone(),
             file.id,

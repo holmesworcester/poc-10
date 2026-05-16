@@ -64,7 +64,7 @@ fn protocol_registry_names_the_target_surfaces() {
     assert!(PROTOCOL
         .facts
         .iter()
-        .any(|fact| fact.module == "sealed_message" && fact.name == "sealed_message"));
+        .any(|fact| fact.module == "content::sealed_message" && fact.name == "sealed_message"));
     assert!(PROTOCOL
         .context_matchers
         .iter()
@@ -72,7 +72,7 @@ fn protocol_registry_names_the_target_surfaces() {
     assert!(PROTOCOL
         .handlers
         .iter()
-        .any(|handler| handler.module == "receive_transit"));
+        .any(|handler| handler.module == "transport::receive_transit_frame"));
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn target_context_roles_are_registered() {
 #[test]
 fn context_matcher_plumbing_is_centralized_by_matching_relation() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let forbidden_fact_module_files = rust_files(&root.join("src/protocol/fact_modules"))
+    let forbidden_fact_module_files = rust_files(&root.join("src/protocol/facts"))
         .into_iter()
         .filter(|path| {
             path.file_name()
@@ -177,12 +177,15 @@ fn duplicate_fact_names_are_known_migration_debt() {
             "local_history_node_secret".to_string(),
             vec![
                 "encryption".to_string(),
-                "local_history_node_secret".to_string(),
+                "encryption::local_history_node_secret".to_string(),
             ],
         ),
         (
             "removal_frontier".to_string(),
-            vec!["encryption".to_string(), "removal_frontier".to_string()],
+            vec![
+                "encryption".to_string(),
+                "encryption::removal_frontier".to_string(),
+            ],
         ),
     ];
 
@@ -243,6 +246,6 @@ fn row_intents_are_registered_as_atomic_and_effects_as_deferred() {
         .intents
         .iter()
         .find(|intent| intent.kind == "receive_transit_frame")
-        .expect("receive transit intent");
+        .expect("receive transport::transit intent");
     assert_eq!(receive_transit.execution, IntentExecutionKind::Deferred);
 }

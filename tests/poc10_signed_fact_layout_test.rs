@@ -1,14 +1,14 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projection::{ProjectionContext, Projector};
-use topo::protocol::fact_modules::encryption::fact::{
+use topo::protocol::facts::encryption::fact::{
     KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, LocalRecipientKeyFact,
     WrappedSecretKind,
 };
-use topo::protocol::fact_modules::encryption::layout as key_wrap_layout;
-use topo::protocol::fact_modules::signed_fact::fact::LocalSignerSecretFact;
-use topo::protocol::fact_modules::signed_fact::project::SignedFactProjector;
-use topo::protocol::fact_modules::signed_fact::{create, layout};
+use topo::protocol::facts::encryption::layout as key_wrap_layout;
+use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::facts::identity::signed_fact::project::SignedFactProjector;
+use topo::protocol::facts::identity::signed_fact::{create, layout};
 use topo::protocol::matchers::workspace_scope;
 
 #[test]
@@ -72,7 +72,7 @@ fn signed_fact_uses_fixed_payload_slot_with_canonical_padding() {
     let private_key = [9; 32];
     let oversized = vec![
         key_wrap_layout::TYPE_KEY_WRAP;
-        topo::protocol::fact_modules::signed_fact::SIGNED_FACT_PAYLOAD_BYTES + 1
+        topo::protocol::facts::identity::signed_fact::SIGNED_FACT_PAYLOAD_BYTES + 1
     ];
     assert!(create::sign_payload_bytes(signer_id, &private_key, oversized).is_err());
 
@@ -162,7 +162,7 @@ fn signed_fact_rejects_private_payload_tags() {
             range_start: 8,
             range_width: 8,
             bit_depth: 0,
-            event_id_prefix: [0; 32],
+            fact_id_prefix: [0; 32],
             tombstone_node_id: [7; 32],
             node_secret: [8; 32],
         })
@@ -202,7 +202,7 @@ fn key_wrap() -> KeyWrapFact {
         range_start: 0,
         range_width: 0,
         bit_depth: 0,
-        event_id_prefix: [0; 32],
+        fact_id_prefix: [0; 32],
         recipient_key_id: [5; 32],
         sender_wrap_public_key: [6; 32],
         nonce: [7; 24],

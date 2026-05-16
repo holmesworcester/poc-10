@@ -7,17 +7,17 @@ use topo::core::command_context::{
 };
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
-use topo::protocol::fact_modules::encryption::{
+use topo::protocol::facts::content::sealed_message::{
+    create::send_message, fact::SignerPubkeyFact, layout as sealed_layout, rows as sealed_rows,
+};
+use topo::protocol::facts::encryption::{
     fact::{LocalKeySecretFact, RemovalFrontierFact},
     layout as encryption_layout,
 };
-use topo::protocol::fact_modules::identity_workspace::{
+use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::facts::identity::workspace::{
     commands::create_workspace, rows as workspace_rows,
 };
-use topo::protocol::fact_modules::sealed_message::{
-    create::send_message, fact::SignerPubkeyFact, layout as sealed_layout, rows as sealed_rows,
-};
-use topo::protocol::fact_modules::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::runtime::ProtocolRuntime;
 use topo::protocol::PROTOCOL;
 
@@ -182,7 +182,11 @@ fn runtime_dispatches_every_protocol_handler_registration() {
         .collect::<BTreeSet<_>>();
     let dispatched = runtime_dispatch_handler_fields();
 
-    for required in ["purge_cascade", "retention_expiry", "retention_floor"] {
+    for required in [
+        "purge_message_child",
+        "purge_expired_message",
+        "purge_below_retention_floor",
+    ] {
         assert!(
             declared.contains(required),
             "{required} must be declared in src/protocol.rs"

@@ -8,9 +8,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub const CORE_SCHEMA_SOURCE: &str = include_str!("schema.p8sql");
-pub const FACT_MODULES_SCHEMA_SOURCE: &str = include_str!("../protocol/fact_modules/schema.p8sql");
-pub const INTENT_HANDLERS_SCHEMA_SOURCE: &str =
-    include_str!("../protocol/intent_handlers/schema.p8sql");
+pub const FACTS_SCHEMA_SOURCE: &str = include_str!("../protocol/facts/schema.p8sql");
+pub const INTENTS_SCHEMA_SOURCE: &str = include_str!("../protocol/intents/schema.p8sql");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDocument {
@@ -627,9 +626,8 @@ mod tests {
     #[test]
     fn parses_initial_poc10_schema_files() {
         let core = parse_schema(CORE_SCHEMA_SOURCE).expect("core schema parses");
-        let fact_modules =
-            parse_schema(FACT_MODULES_SCHEMA_SOURCE).expect("fact module schema parses");
-        let handlers = parse_schema(INTENT_HANDLERS_SCHEMA_SOURCE).expect("handler schema parses");
+        let facts = parse_schema(FACTS_SCHEMA_SOURCE).expect("fact module schema parses");
+        let handlers = parse_schema(INTENTS_SCHEMA_SOURCE).expect("handler schema parses");
 
         assert_eq!(
             table_names(&core),
@@ -646,7 +644,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            table_names(&fact_modules),
+            table_names(&facts),
             vec![
                 "message_rows",
                 "opened_message_rows",
@@ -664,7 +662,7 @@ mod tests {
                 "local_endpoint_signing_secret_rows",
                 "identity_endpoint_shared_rows",
                 "content_event_rows",
-                "cascade_staged_event_rows",
+                "cascade_staged_fact_rows",
                 "admin_rows",
                 "reaction_rows",
                 "content_message_rows",
@@ -692,11 +690,11 @@ mod tests {
                 "purge_retire_coords",
                 "sync_index_snapshots",
                 "connection_attempt_checkpoints",
-                "network_send_cursors",
+                "send_network_frame_cursors",
             ]
         );
 
-        for document in [&core, &fact_modules, &handlers] {
+        for document in [&core, &facts, &handlers] {
             for table in &document.tables {
                 assert_eq!(table.row_key.columns, vec!["key"]);
                 assert_eq!(

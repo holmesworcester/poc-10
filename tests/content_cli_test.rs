@@ -273,7 +273,7 @@ fn cli_delete_message_removes_target_from_listing() {
     assert!(!before.contains("(deleted)"), "{before}");
 
     let deleted = assert_success(topo(&["--db", &db, "delete-message", &workspace_id, "#1"]));
-    assert!(deleted.contains("event_id:"), "{deleted}");
+    assert!(deleted.contains("fact_id:"), "{deleted}");
 
     let after = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert_eq!(line_value(&after, "messages"), "0");
@@ -303,7 +303,7 @@ fn cli_send_file_then_save_file_round_trips_bytes_through_real_binary() {
     ]));
     assert!(sent.contains("filename: input.bin"), "{sent}");
     assert_eq!(line_value(&sent, "blob_bytes"), "8192");
-    let file_event_id = line_value(&sent, "file_event_id");
+    let file_fact_id = line_value(&sent, "file_fact_id");
 
     let files = assert_success(topo(&["--db", &db, "files", &workspace_id]));
     assert_eq!(files_total(&files), "1");
@@ -343,7 +343,7 @@ fn cli_send_file_then_save_file_round_trips_bytes_through_real_binary() {
         &db,
         "save-file",
         &workspace_id,
-        &file_event_id,
+        &file_fact_id,
         out_path.to_str().expect("path utf-8"),
     ]);
     assert!(
@@ -873,7 +873,7 @@ fn cli_delete_message_hides_attached_file_and_rejects_save() {
         "--file",
         in_path.to_str().expect("path"),
     ]));
-    let file_event_id = line_value(&sent, "file_event_id");
+    let file_fact_id = line_value(&sent, "file_fact_id");
     let files_before = assert_success(topo(&["--db", &db, "files", &workspace_id]));
     assert_eq!(files_total(&files_before), "1");
 
@@ -890,7 +890,7 @@ fn cli_delete_message_hides_attached_file_and_rejects_save() {
         &db,
         "save-file",
         &workspace_id,
-        &file_event_id,
+        &file_fact_id,
         out_path.to_str().expect("path"),
     ]);
     assert!(
@@ -931,7 +931,7 @@ fn cli_delete_message_hides_attached_file_on_peer_after_sync() {
         "--file",
         in_path.to_str().expect("path"),
     ]));
-    let file_event_id = line_value(&sent, "file_event_id");
+    let file_fact_id = line_value(&sent, "file_fact_id");
     wait_for_files_count(&bob, &workspace_id, "1");
 
     assert_success(topo(&[
@@ -952,7 +952,7 @@ fn cli_delete_message_hides_attached_file_on_peer_after_sync() {
         &bob,
         "save-file",
         &workspace_id,
-        &file_event_id,
+        &file_fact_id,
         out_path.to_str().expect("path"),
     ]);
     assert!(

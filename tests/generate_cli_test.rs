@@ -3,14 +3,14 @@ mod cli_harness;
 use cli_harness::*;
 
 #[test]
-fn generate_cli_uses_real_store_and_reports_applied_events() {
+fn generate_cli_uses_real_store_and_reports_applied_facts() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "generate.db");
     let workspace_id = create_workspace(&db);
 
     let generated = assert_success(topo(&["--db", &db, "generate", &workspace_id, "7", "128"]));
-    assert!(generated.contains("generated_events: 7"), "{generated}");
-    assert!(generated.contains("applied_events: 7"), "{generated}");
+    assert!(generated.contains("generated_facts: 7"), "{generated}");
+    assert!(generated.contains("applied_facts: 7"), "{generated}");
     assert!(generated.contains("event_size_bytes: 128"), "{generated}");
     assert!(generated.contains("first_timestamp: 1"), "{generated}");
     assert!(generated.contains("last_timestamp: 7"), "{generated}");
@@ -22,12 +22,12 @@ fn generate_cli_uses_real_store_and_reports_applied_events() {
     let status = assert_success(topo(&["--db", &db, "count"]));
     // create-workspace emits the bootstrap graph plus the local endpoint fact,
     // and `generate` adds 7 content events on top.
-    assert_eq!(line_value(&status, "events"), "16");
-    assert_eq!(line_value(&status, "applied_events"), "16");
+    assert_eq!(line_value(&status, "facts"), "16");
+    assert_eq!(line_value(&status, "applied_facts"), "16");
 }
 
 #[test]
-fn clock_cli_sets_logical_timestamp_lower_bound_for_generated_events() {
+fn clock_cli_sets_logical_timestamp_lower_bound_for_generated_facts() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "clocked-generate.db");
     let workspace_id = create_workspace(&db);

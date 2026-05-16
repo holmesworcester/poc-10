@@ -86,7 +86,7 @@ fn cli_minute_node_is_shared_across_messages_in_same_minute() {
             line.contains("history_node:")
                 && line.contains("start=100")
                 && line.contains("width=1")
-                && !line.contains("event_id_in_minute=none")
+                && !line.contains("fact_id_in_minute=none")
         })
         .collect();
     assert_eq!(leaf_lines.len(), 3, "expected 3 leaf rows in minute 100");
@@ -112,15 +112,15 @@ fn cli_message_leaf_coord_is_stable_in_public_key_listing() {
     let keys = keys_value(&db, &workspace_id);
     let leaf_line = keys
         .lines()
-        .find(|line| line.contains("history_node:") && !line.contains("event_id_in_minute=none"))
+        .find(|line| line.contains("history_node:") && !line.contains("fact_id_in_minute=none"))
         .expect("expected one per-message leaf row");
     let observed_coord_hex = leaf_line
-        .split("event_id_in_minute=")
+        .split("fact_id_in_minute=")
         .nth(1)
-        .expect("leaf line carries event_id_in_minute")
+        .expect("leaf line carries fact_id_in_minute")
         .split_whitespace()
         .next()
-        .expect("event_id_in_minute hex token");
+        .expect("fact_id_in_minute hex token");
     assert_eq!(
         observed_coord_hex.len(),
         64,
@@ -130,15 +130,15 @@ fn cli_message_leaf_coord_is_stable_in_public_key_listing() {
     let keys_again = keys_value(&db, &workspace_id);
     let leaf_line_again = keys_again
         .lines()
-        .find(|line| line.contains("history_node:") && !line.contains("event_id_in_minute=none"))
+        .find(|line| line.contains("history_node:") && !line.contains("fact_id_in_minute=none"))
         .expect("expected one per-message leaf row on second read");
     let observed_again = leaf_line_again
-        .split("event_id_in_minute=")
+        .split("fact_id_in_minute=")
         .nth(1)
-        .expect("leaf line carries event_id_in_minute")
+        .expect("leaf line carries fact_id_in_minute")
         .split_whitespace()
         .next()
-        .expect("event_id_in_minute hex token");
+        .expect("fact_id_in_minute hex token");
     assert_eq!(observed_again, observed_coord_hex);
 }
 
@@ -200,13 +200,13 @@ fn cli_delete_purges_only_the_leaf_event() {
     assert_success(topo(&["--db", &db, "clock", "set", "6000000"]));
     let send1 = assert_success(topo(&["--db", &db, "send", &workspace_id, "first"]));
     assert_success(topo(&["--db", &db, "send", &workspace_id, "second"]));
-    let _msg1_id = line_value(&send1, "event_id");
+    let _msg1_id = line_value(&send1, "fact_id");
 
     let pre = keys_value(&db, &workspace_id);
     let pre_summary = cover_summary_value(&pre);
     let mut pre_leaf_ids: Vec<String> = pre
         .lines()
-        .filter(|line| line.contains("history_node:") && !line.contains("event_id_in_minute=none"))
+        .filter(|line| line.contains("history_node:") && !line.contains("fact_id_in_minute=none"))
         .filter_map(|line| line.split_whitespace().nth(1).map(ToOwned::to_owned))
         .collect();
     pre_leaf_ids.sort();
@@ -218,7 +218,7 @@ fn cli_delete_purges_only_the_leaf_event() {
     let post = keys_value(&db, &workspace_id);
     let mut post_leaf_ids: Vec<String> = post
         .lines()
-        .filter(|line| line.contains("history_node:") && !line.contains("event_id_in_minute=none"))
+        .filter(|line| line.contains("history_node:") && !line.contains("fact_id_in_minute=none"))
         .filter_map(|line| line.split_whitespace().nth(1).map(ToOwned::to_owned))
         .collect();
     post_leaf_ids.sort();
@@ -338,7 +338,7 @@ fn cli_delete_file_retires_its_leaf_without_touching_message_leaf() {
         "--file",
         in_path.to_str().expect("utf-8"),
     ]));
-    let file_event_id = line_value(&send_out, "file_event_id");
+    let file_fact_id = line_value(&send_out, "file_fact_id");
 
     let pre = keys_value(&db, &workspace_id);
     assert_eq!(line_value(&pre, "local_history_leaves"), "2");
@@ -349,7 +349,7 @@ fn cli_delete_file_retires_its_leaf_without_touching_message_leaf() {
         &db,
         "delete-file",
         &workspace_id,
-        &file_event_id,
+        &file_fact_id,
     ]));
 
     let post = keys_value(&db, &workspace_id);
@@ -546,7 +546,7 @@ fn cli_concurrent_peer_send_survives_sibling_delete() {
 
     // Alice deletes her own message M_A. The retire walk on her side
     // materializes the minute_node + trie internals between (M_A's
-    // event_id_in_minute) and (M_B's event_id_in_minute), exact-deletes
+    // fact_id_in_minute) and (M_B's fact_id_in_minute), exact-deletes
     // M_A's leaf row, and purges M_A's canonical bytes.
     assert_success(topo(&[
         "--db",

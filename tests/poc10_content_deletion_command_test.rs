@@ -7,10 +7,10 @@ use topo::core::command_context::{
     WorkspaceId,
 };
 use topo::core::store::Store;
-use topo::protocol::fact_modules::content_file_deletion::commands::delete_file;
-use topo::protocol::fact_modules::content_file_deletion::layout as file_deletion_layout;
-use topo::protocol::fact_modules::content_message_deletion::commands::delete_message;
-use topo::protocol::fact_modules::content_message_deletion::layout as message_deletion_layout;
+use topo::protocol::facts::content::file_deletion::commands::delete_file;
+use topo::protocol::facts::content::file_deletion::layout as file_deletion_layout;
+use topo::protocol::facts::content::message_deletion::commands::delete_message;
+use topo::protocol::facts::content::message_deletion::layout as message_deletion_layout;
 
 struct FixedClock(Cell<u64>);
 

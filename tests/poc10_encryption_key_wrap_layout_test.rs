@@ -1,8 +1,8 @@
 use topo::core::crypto::{self, XCHACHA20_POLY1305_NONCE_BYTES};
-use topo::protocol::fact_modules::encryption::fact::{
+use topo::protocol::facts::encryption::fact::{
     KeyWrapFact, LocalRecipientKeyFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
-use topo::protocol::fact_modules::encryption::layout::{
+use topo::protocol::facts::encryption::layout::{
     decode_key_wrap, decode_local_recipient_key, encode_key_wrap, encode_local_recipient_key,
     frontier_root_key_wrap_coordinate_key, history_node_key_wrap_coordinate_key,
     key_wrap_coordinate_key, KEY_WRAP_BYTES, KEY_WRAP_COORDINATE_KEY_BYTES,
@@ -25,7 +25,7 @@ fn root_fact() -> KeyWrapFact {
         range_start: 0,
         range_width: 0,
         bit_depth: 0,
-        event_id_prefix: [0; 32],
+        fact_id_prefix: [0; 32],
         recipient_key_id: id(4),
         sender_wrap_public_key: id(5),
         nonce: [6; XCHACHA20_POLY1305_NONCE_BYTES],
@@ -48,7 +48,7 @@ fn history_fact() -> KeyWrapFact {
         range_start: 42,
         range_width: 1,
         bit_depth: 4,
-        event_id_prefix: prefix,
+        fact_id_prefix: prefix,
         recipient_key_id: id(16),
         sender_wrap_public_key: id(17),
         nonce: [18; XCHACHA20_POLY1305_NONCE_BYTES],
@@ -90,7 +90,7 @@ fn history_node_coordinate_is_deterministic_and_distinct_from_root() {
         fact.range_start,
         fact.range_width,
         fact.bit_depth,
-        fact.event_id_prefix,
+        fact.fact_id_prefix,
     )
     .expect("history coordinate key");
     assert_eq!(coordinate_key, helper_key);
@@ -102,7 +102,7 @@ fn history_node_coordinate_is_deterministic_and_distinct_from_root() {
     );
     assert_ne!(coordinate_key, root_key);
 
-    let mut changed_prefix = fact.event_id_prefix;
+    let mut changed_prefix = fact.fact_id_prefix;
     changed_prefix[0] = 0b1011_0000;
     let changed_key = history_node_key_wrap_coordinate_key(
         fact.workspace_id,
@@ -134,9 +134,9 @@ fn history_key_wrap_requires_valid_history_coordinate() {
     assert!(err.contains("range_width"));
 
     let mut fact = history_fact();
-    fact.event_id_prefix[1] = 1;
+    fact.fact_id_prefix[1] = 1;
     let err = encode_key_wrap(&fact).expect_err("history prefix must be masked");
-    assert!(err.contains("event_id_prefix"));
+    assert!(err.contains("fact_id_prefix"));
 }
 
 #[test]

@@ -114,7 +114,7 @@ fn matching_lines_with_comment_mode(
 }
 
 fn project_files(root: &Path) -> Vec<PathBuf> {
-    rust_files_under(&root.join("src/protocol/fact_modules"))
+    rust_files_under(&root.join("src/protocol/facts"))
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "project.rs"))
         .collect()
@@ -239,7 +239,7 @@ fn cutover_active_non_legacy_source_has_no_legacy_imports_worker_runs_or_old_que
         "WorkerRun",
         "canonical.in",
         "sync.in",
-        "transit.out",
+        "transport::transit.out",
         "content.purge_instructions",
         "encryption.pending_key_requests",
         "encryption.pending_key_unwraps",
@@ -367,7 +367,7 @@ fn cutover_legacy_island_is_deleted() {
         .collect::<Vec<_>>();
     assert!(
         remaining.is_empty(),
-        "delete the legacy compatibility island as one cut after target runtime, CLI, daemon, sync, transit, purge, and tests are cut over:\n{}",
+        "delete the legacy compatibility island as one cut after target runtime, CLI, daemon, sync, transport::transit, purge, and tests are cut over:\n{}",
         remaining.join("\n")
     );
 }
@@ -388,7 +388,7 @@ fn cutover_projector_output_guardrail_is_real_and_enabled() {
     let body = &test[start..];
     assert!(
         body.contains("project.rs"),
-        "{fn_name} must scan target src/protocol/fact_modules/**/project.rs files"
+        "{fn_name} must scan target src/protocol/facts/**/project.rs files"
     );
     assert!(
         !body.contains("projector.rs"),
@@ -397,13 +397,13 @@ fn cutover_projector_output_guardrail_is_real_and_enabled() {
 }
 
 #[test]
-#[ignore = "cutover todo: transit send packaging must be real and fixed-layout"]
+#[ignore = "cutover todo: transport::transit send packaging must be real and fixed-layout"]
 fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
     let root = root();
     let paths = vec![
-        root.join("src/protocol/intent_handlers/transit.rs"),
-        root.join("src/protocol/fact_modules/transit/frame.rs"),
-        root.join("src/protocol/fact_modules/transit/create.rs"),
+        root.join("src/protocol/intents/transport::transit.rs"),
+        root.join("src/protocol/facts/transport::transit/frame.rs"),
+        root.join("src/protocol/facts/transport::transit/create.rs"),
     ];
     let offenders = matching_lines_including_comments(
         &root,
@@ -418,7 +418,7 @@ fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
     );
     assert!(
         offenders.is_empty(),
-        "transit send still has placeholder packaging or variable payload slots:\n{}",
+        "transport::transit send still has placeholder packaging or variable payload slots:\n{}",
         offenders.join("\n")
     );
 }
@@ -426,9 +426,9 @@ fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
 #[test]
 fn cutover_sync_has_no_legacy_sync_index_escape_hatch() {
     let root = root();
-    let mut paths = rust_files_under(&root.join("src/protocol/intent_handlers"));
+    let mut paths = rust_files_under(&root.join("src/protocol/intents"));
     paths.extend(
-        rust_files_under(&root.join("src/protocol/fact_modules"))
+        rust_files_under(&root.join("src/protocol/facts"))
             .into_iter()
             .filter(|path| {
                 path.components()
@@ -460,7 +460,7 @@ fn cutover_sync_compare_response_uses_bounded_durable_range_index() {
     let root = root();
     let offenders = matching_lines_including_comments(
         &root,
-        vec![root.join("src/protocol/intent_handlers/handle_sync.rs")],
+        vec![root.join("src/protocol/intents/sync/send_compare_response.rs")],
         &[
             "SYNC_COMPARE_RANGE_INDEX_NOT_READY",
             "sync_compare_range_index_not_ready",
@@ -468,7 +468,7 @@ fn cutover_sync_compare_response_uses_bounded_durable_range_index() {
     );
     assert!(
         offenders.is_empty(),
-        "sync_compare response generation is intentionally parked until core/runtime can provide a bounded durable range-index summary for the compare fact's timestamp range; remove the retry-only stop and produce compare/have/need response facts once that range-index context exists:\n{}",
+        "sync::compare response generation is intentionally parked until core/runtime can provide a bounded durable range-index summary for the compare fact's timestamp range; remove the retry-only stop and produce compare/have/need response facts once that range-index context exists:\n{}",
         offenders.join("\n")
     );
 }
@@ -496,9 +496,9 @@ fn cutover_dep_aware_sync_has_encrypted_out_of_range_display_perf_proof() {
 
 #[test]
 #[ignore = "cutover todo: purge must be decomposed into bounded target handlers"]
-fn cutover_purge_cascade_secret_retirement_sync_and_expiry_are_target_handlers() {
+fn cutover_purge_child_secret_retirement_sync_and_expiry_are_target_handlers() {
     let root = root();
-    let handlers = files_under(&root.join("src/protocol/intent_handlers"))
+    let handlers = files_under(&root.join("src/protocol/intents"))
         .into_iter()
         .filter_map(|path| {
             path.file_stem()
@@ -509,10 +509,10 @@ fn cutover_purge_cascade_secret_retirement_sync_and_expiry_are_target_handlers()
 
     for required_fragment in [
         "purge",
-        "cascade",
-        "retire",
-        "sync_index",
-        "expiry",
+        "message_child",
+        "retired_recipient",
+        "record_indexed",
+        "expired",
         "floor",
     ] {
         assert!(
@@ -606,17 +606,17 @@ fn cutover_imported_black_box_tests_have_no_extra_ignores() {
 fn cutover_encryption_is_not_a_multi_fact_bundle() {
     let root = root();
     let bundled_paths = [
-        "src/protocol/fact_modules/encryption/fact.rs",
-        "src/protocol/fact_modules/encryption/layout.rs",
-        "src/protocol/fact_modules/encryption/create.rs",
-        "src/protocol/fact_modules/encryption/commands.rs",
-        "src/protocol/fact_modules/encryption/project.rs",
-        "src/protocol/fact_modules/encryption/recipient_key.rs",
-        "src/protocol/fact_modules/encryption/local_recipient_key.rs",
-        "src/protocol/fact_modules/encryption/removal_frontier.rs",
-        "src/protocol/fact_modules/encryption/key_request.rs",
-        "src/protocol/fact_modules/encryption/local_material.rs",
-        "src/protocol/fact_modules/encryption/signed_key_wrap.rs",
+        "src/protocol/facts/encryption/fact.rs",
+        "src/protocol/facts/encryption/layout.rs",
+        "src/protocol/facts/encryption/create.rs",
+        "src/protocol/facts/encryption/commands.rs",
+        "src/protocol/facts/encryption/project.rs",
+        "src/protocol/facts/encryption/recipient_key.rs",
+        "src/protocol/facts/encryption/local_recipient_key.rs",
+        "src/protocol/facts/encryption/encryption::removal_frontier.rs",
+        "src/protocol/facts/encryption/key_request.rs",
+        "src/protocol/facts/encryption/local_material.rs",
+        "src/protocol/facts/encryption/signed_key_wrap.rs",
     ];
     let remaining = bundled_paths
         .into_iter()
@@ -632,7 +632,7 @@ fn cutover_encryption_is_not_a_multi_fact_bundle() {
 #[test]
 fn cutover_sync_is_not_a_multi_fact_project_bundle() {
     let root = root();
-    let sync_dir = root.join("src/protocol/fact_modules/sync");
+    let sync_dir = root.join("src/protocol/facts/sync");
     let project_subdir = sync_dir.join("project");
     let fact_file = sync_dir.join("fact.rs");
 
@@ -653,7 +653,7 @@ fn cutover_sync_is_not_a_multi_fact_project_bundle() {
             .collect::<Vec<_>>();
         if fact_structs.len() > 1 {
             offenders.push(format!(
-                "src/protocol/fact_modules/sync/fact.rs defines multiple fact families: {}",
+                "src/protocol/facts/sync/fact.rs defines multiple fact families: {}",
                 fact_structs.join(", ")
             ));
         }
@@ -661,7 +661,7 @@ fn cutover_sync_is_not_a_multi_fact_project_bundle() {
 
     assert!(
         offenders.is_empty(),
-        "sync must not be a dumping folder for range/key/support facts. Split sync_range_request, sync_encrypted_root, sync_shared_event, and sync_key_wrap_available into fact-family modules with their own fact/layout/project files; sync/project/* subtrees are not allowed:\n{}",
+        "sync must not be a dumping folder for range/key/support facts. Split sync::range_request, sync::encrypted_root, sync::shared_fact, and sync::key_wrap_available into fact-family modules with their own fact/layout/project files; sync/project/* subtrees are not allowed:\n{}",
         offenders.join("\n")
     );
 }
@@ -669,7 +669,7 @@ fn cutover_sync_is_not_a_multi_fact_project_bundle() {
 #[test]
 fn cutover_queries_are_not_context_capability_or_cross_module_dumping_grounds() {
     let root = root();
-    let query_files = rust_files_under(&root.join("src/protocol/fact_modules"))
+    let query_files = rust_files_under(&root.join("src/protocol/facts"))
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "queries.rs"))
         .collect::<Vec<_>>();
@@ -697,7 +697,7 @@ fn cutover_queries_are_not_context_capability_or_cross_module_dumping_grounds() 
     for path in query_files {
         let relative = path.strip_prefix(&root).unwrap().display().to_string();
         let text = source_text(&path);
-        if relative.ends_with("queries.rs") && text.contains("crate::protocol::fact_modules::{") {
+        if relative.ends_with("queries.rs") && text.contains("crate::protocol::facts::{") {
             offenders.push(format!(
                 "{relative} imports a grouped cross-module event_modules namespace"
             ));
@@ -774,7 +774,7 @@ fn cutover_projector_files_stay_small_and_split_by_fact_family() {
 
 #[test]
 #[ignore = "cutover todo: move non-black-box projector tests inline beside their modules"]
-fn cutover_projector_unit_tests_are_inline_with_fact_modules() {
+fn cutover_projector_unit_tests_are_inline_with_facts() {
     let root = root();
     let mut offenders = projector_test_files(&root)
         .into_iter()

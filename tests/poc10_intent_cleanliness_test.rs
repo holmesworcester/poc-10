@@ -110,7 +110,7 @@ fn contains_context_matcher_logic(text: &str) -> bool {
 #[test]
 fn sealed_message_intents_do_not_encode_projection_work() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let intent = source_text(&root.join("src/protocol/fact_modules/sealed_message/intent.rs"));
+    let intent = source_text(&root.join("src/protocol/facts/content/sealed_message/intent.rs"));
 
     for forbidden in [
         "open_message",
@@ -125,7 +125,7 @@ fn sealed_message_intents_do_not_encode_projection_work() {
     ] {
         assert!(
             !intent.contains(forbidden),
-            "sealed_message intent layout must not own projection/opening detail: {forbidden}"
+            "content::sealed_message intent layout must not own projection/opening detail: {forbidden}"
         );
     }
 }
@@ -133,7 +133,7 @@ fn sealed_message_intents_do_not_encode_projection_work() {
 #[test]
 fn handlers_do_not_own_event_module_projection_rows() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let handler_root = root.join("src/protocol/intent_handlers");
+    let handler_root = root.join("src/protocol/intents");
     if !handler_root.exists() {
         return;
     }
@@ -166,9 +166,9 @@ fn handlers_do_not_own_event_module_projection_rows() {
 }
 
 #[test]
-fn purge_event_handler_must_be_real_retention_work_when_it_exists() {
+fn purge_deleted_message_handler_must_be_real_retention_work_when_it_exists() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/protocol/intent_handlers/purge_event.rs");
+    let path = root.join("src/protocol/intents/content/purge_deleted_message.rs");
     if !path.exists() {
         return;
     }
@@ -183,16 +183,16 @@ fn purge_event_handler_must_be_real_retention_work_when_it_exists() {
     ] {
         assert!(
             !text.contains(forbidden),
-            "PurgeEvent handler must not be projection row cleanup: {forbidden}"
+            "PurgeDeletedMessage handler must not be projection row cleanup: {forbidden}"
         );
     }
     assert!(
-        text.contains("purge_event_storage_in_tx")
+        text.contains("purge_deleted_message")
             || text.contains("purge_fact")
             || text.contains("DiscoverCascade")
             || text.contains("RetireSecret")
             || text.contains("SyncIndexPurge"),
-        "PurgeEvent handler must preserve real retention/cascade/retire behavior"
+        "PurgeDeletedMessage handler must preserve real retention/cascade/retire behavior"
     );
 }
 
@@ -200,7 +200,7 @@ fn purge_event_handler_must_be_real_retention_work_when_it_exists() {
 fn target_projectors_stay_pure_context_to_intents() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/fact_modules"), "project.rs") {
+    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
@@ -235,7 +235,7 @@ fn target_projectors_stay_pure_context_to_intents() {
 #[test]
 fn event_module_context_rs_files_do_not_reappear() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let offenders = rust_files_named(&root.join("src/protocol/fact_modules"), "context.rs")
+    let offenders = rust_files_named(&root.join("src/protocol/facts"), "context.rs")
         .into_iter()
         .map(|path| path.strip_prefix(root).unwrap().display().to_string())
         .collect::<Vec<_>>();
@@ -279,7 +279,7 @@ fn context_matcher_logic_lives_under_protocol_matchers() {
 fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/fact_modules"), "context.rs") {
+    for path in rust_files_named(&root.join("src/protocol/facts"), "context.rs") {
         let text = source_text(&path);
         for forbidden in [
             "Intent",
@@ -314,7 +314,7 @@ fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
 fn target_row_layouts_do_not_emit_context_or_intents() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/fact_modules"), "rows.rs") {
+    for path in rust_files_named(&root.join("src/protocol/facts"), "rows.rs") {
         let text = source_text(&path);
         for forbidden in [
             "ContextNeed",
@@ -343,10 +343,10 @@ fn target_row_layouts_do_not_emit_context_or_intents() {
 }
 
 #[test]
-fn target_fact_modules_do_not_use_legacy_file_names() {
+fn target_facts_do_not_use_legacy_file_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files(&root.join("src/protocol/fact_modules")) {
+    for path in rust_files(&root.join("src/protocol/facts")) {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
@@ -357,7 +357,7 @@ fn target_fact_modules_do_not_use_legacy_file_names() {
 
     assert!(
         offenders.is_empty(),
-        "target fact modules should use explicit role files, not legacy module manifests or dumping-ground names:\n{}",
+        "target facts should use explicit role files, not legacy module manifests or dumping-ground names:\n{}",
         offenders.join("\n")
     );
 }
@@ -367,18 +367,18 @@ fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     files.extend(rust_files_named(
-        &root.join("src/protocol/fact_modules"),
+        &root.join("src/protocol/facts"),
         "project.rs",
     ));
     files.extend(
-        rust_files(&root.join("src/protocol/fact_modules"))
+        rust_files(&root.join("src/protocol/facts"))
             .into_iter()
             .filter(|path| {
                 path.components()
                     .any(|component| component.as_os_str() == "project")
             }),
     );
-    files.extend(rust_files(&root.join("src/protocol/intent_handlers")));
+    files.extend(rust_files(&root.join("src/protocol/intents")));
 
     let mut offenders = Vec::new();
     for path in files {
@@ -393,15 +393,13 @@ fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
         }
         for line in text.lines() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("use crate::protocol::fact_modules")
-                && trimmed.contains("commands")
-            {
+            if trimmed.starts_with("use crate::protocol::facts") && trimmed.contains("commands") {
                 offenders.push(format!(
                     "{} imports fact-module commands from reactive code: {trimmed}",
                     path.strip_prefix(root).unwrap().display()
                 ));
             }
-            if trimmed.starts_with("use crate::protocol::fact_modules") && trimmed.contains("cli") {
+            if trimmed.starts_with("use crate::protocol::facts") && trimmed.contains("cli") {
                 offenders.push(format!(
                     "{} imports fact-module cli from reactive code: {trimmed}",
                     path.strip_prefix(root).unwrap().display()
@@ -420,10 +418,10 @@ fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
 }
 
 #[test]
-fn target_fact_modules_do_not_import_legacy_protocol_or_workers() {
+fn target_facts_do_not_import_legacy_protocol_or_workers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files(&root.join("src/protocol/fact_modules")) {
+    for path in rust_files(&root.join("src/protocol/facts")) {
         let text = source_text(&path);
         for forbidden in [
             "crate::legacy::protocol",
@@ -451,7 +449,7 @@ fn target_fact_modules_do_not_import_legacy_protocol_or_workers() {
 fn target_intent_files_only_encode_intent_payloads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/fact_modules"), "intent.rs") {
+    for path in rust_files_named(&root.join("src/protocol/facts"), "intent.rs") {
         let text = source_text(&path);
         for forbidden in [
             "Store",
@@ -488,7 +486,7 @@ fn target_intent_files_only_encode_intent_payloads() {
 fn target_projectors_do_not_define_intent_payloads_or_handler_logic() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/fact_modules"), "project.rs") {
+    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
         let text = source_text(&path);
         for forbidden in [
             "IntentKind::new",
@@ -520,12 +518,10 @@ fn target_manifests_are_declarations_only() {
     let mut manifests = vec![
         root.join("src/lib.rs"),
         root.join("src/core.rs"),
-        root.join("src/protocol/fact_modules.rs"),
-        root.join("src/protocol/intent_handlers.rs"),
+        root.join("src/protocol/facts.rs"),
+        root.join("src/protocol/intents.rs"),
     ];
-    manifests.extend(immediate_rust_children(
-        &root.join("src/protocol/fact_modules"),
-    ));
+    manifests.extend(immediate_rust_children(&root.join("src/protocol/facts")));
 
     let mut offenders = Vec::new();
     for path in manifests {
@@ -590,10 +586,7 @@ fn concrete_protocol_manifests_live_under_protocol() {
         stale.join("\n")
     );
 
-    for required in [
-        "src/protocol/fact_modules.rs",
-        "src/protocol/intent_handlers.rs",
-    ] {
+    for required in ["src/protocol/facts.rs", "src/protocol/intents.rs"] {
         assert!(
             root.join(required).is_file(),
             "missing protocol-owned manifest {required}"
@@ -604,16 +597,13 @@ fn concrete_protocol_manifests_live_under_protocol() {
 #[test]
 fn target_manifests_match_their_filesystem_modules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let event_root = root.join("src/protocol/fact_modules");
-    let handler_root = root.join("src/protocol/intent_handlers");
+    let event_root = root.join("src/protocol/facts");
+    let handler_root = root.join("src/protocol/intents");
     let mut offenders = Vec::new();
 
     for (manifest, module_root) in [
-        (
-            root.join("src/protocol/fact_modules.rs"),
-            event_root.clone(),
-        ),
-        (root.join("src/protocol/intent_handlers.rs"), handler_root),
+        (root.join("src/protocol/facts.rs"), event_root.clone()),
+        (root.join("src/protocol/intents.rs"), handler_root),
     ] {
         let declared = declared_modules_in(&source_text(&manifest));
         let mut files = immediate_rust_module_names(&module_root);
@@ -688,13 +678,16 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 #[test]
-fn target_fact_module_child_files_use_narrow_slice_names() {
+fn target_fact_child_files_use_narrow_slice_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let event_root = root.join("src/protocol/fact_modules");
+    let event_root = root.join("src/protocol/facts");
     let mut offenders = Vec::new();
 
     for path in rust_files(&event_root) {
         if path.parent() == Some(event_root.as_path()) {
+            continue;
+        }
+        if path.parent().and_then(|parent| parent.parent()) == Some(event_root.as_path()) {
             continue;
         }
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -708,6 +701,7 @@ fn target_fact_module_child_files_use_narrow_slice_names() {
                 | "create.rs"
                 | "commands.rs"
                 | "queries.rs"
+                | "retention.rs"
                 | "cli.rs"
                 | "fact.rs"
                 | "frame.rs"
@@ -724,7 +718,6 @@ fn target_fact_module_child_files_use_narrow_slice_names() {
                 | "range_request.rs"
                 | "receive.rs"
                 | "recipient_key.rs"
-                | "removal_frontier.rs"
                 | "rows.rs"
                 | "runtime_counts.rs"
                 | "secret_path.rs"
@@ -737,7 +730,7 @@ fn target_fact_module_child_files_use_narrow_slice_names() {
 
     assert!(
         offenders.is_empty(),
-        "target fact-module child files should stay in named responsibility slices, not generic helper or catch-all files:\n{}",
+        "target fact child files should stay in named responsibility slices, not generic helper or catch-all files:\n{}",
         offenders.join("\n")
     );
 }
@@ -793,18 +786,32 @@ fn target_protocol_registry_is_declarative_only() {
 }
 
 #[test]
-fn target_handlers_are_flat_files_without_driver_or_intent_submodules() {
+fn target_intents_are_themed_handler_files_without_driver_or_intent_submodules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let handler_root = root.join("src/protocol/intent_handlers");
+    let handler_root = root.join("src/protocol/intents");
     if !handler_root.exists() {
         return;
     }
 
     let mut offenders = Vec::new();
+    let allowed_themes = ["connection", "content", "encryption", "sync", "transport"];
     for entry in std::fs::read_dir(&handler_root).expect("read handlers") {
         let path = entry.expect("handler dir entry").path();
         if path.is_dir() {
-            offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+            let dir_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if !allowed_themes.contains(&dir_name) {
+                offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+                continue;
+            }
+            for child in std::fs::read_dir(&path).expect("read intent theme") {
+                let child_path = child.expect("intent theme entry").path();
+                if child_path.is_dir() {
+                    offenders.push(child_path.strip_prefix(root).unwrap().display().to_string());
+                }
+            }
         }
     }
     for path in rust_files(&handler_root) {
@@ -818,7 +825,7 @@ fn target_handlers_are_flat_files_without_driver_or_intent_submodules() {
 
     assert!(
         offenders.is_empty(),
-        "handlers should be self-contained flat files under src/protocol/intent_handlers:\n{}",
+        "intents should be themed once, with self-contained handler files under src/protocol/intents/<theme>:\n{}",
         offenders.join("\n")
     );
 }
@@ -826,7 +833,7 @@ fn target_handlers_are_flat_files_without_driver_or_intent_submodules() {
 #[test]
 fn target_handler_files_do_not_define_fact_or_crypto_outputs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let handler_root = root.join("src/protocol/intent_handlers");
+    let handler_root = root.join("src/protocol/intents");
     if !handler_root.exists() {
         return;
     }
@@ -876,7 +883,7 @@ fn target_handler_files_do_not_define_fact_or_crypto_outputs() {
 #[test]
 fn connection_intents_treat_transit_frames_as_opaque() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/protocol/intent_handlers/connection.rs");
+    let path = root.join("src/protocol/intents/connection.rs");
     if !path.exists() {
         return;
     }
@@ -886,7 +893,7 @@ fn connection_intents_treat_transit_frames_as_opaque() {
     let mut offenders = Vec::new();
     for forbidden in [
         "canonical_events",
-        "fact_modules::encryption",
+        "facts::encryption",
         "XChaCha",
         "X25519",
         "ciphertext",
@@ -904,7 +911,7 @@ fn connection_intents_treat_transit_frames_as_opaque() {
 
     assert!(
         offenders.is_empty(),
-        "connection intents must treat transit frames as opaque transport bytes:\n{}",
+        "connection intents must treat transport::transit frames as opaque transport bytes:\n{}",
         offenders.join("\n")
     );
 }
@@ -912,7 +919,7 @@ fn connection_intents_treat_transit_frames_as_opaque() {
 #[test]
 fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let signed_root = root.join("src/protocol/fact_modules/signed_fact");
+    let signed_root = root.join("src/protocol/facts/identity::signed_fact");
     if !signed_root.exists() {
         return;
     }
@@ -922,10 +929,10 @@ fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
-            "fact_modules::encryption",
-            "fact_modules::sealed_message",
-            "fact_modules::sync",
-            "fact_modules::identity_workspace",
+            "facts::encryption",
+            "facts::content::sealed_message",
+            "facts::sync",
+            "facts::identity::workspace",
             "decode_key_wrap",
             "encode_key_wrap",
             "SealedMessage",
@@ -944,7 +951,7 @@ fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
 
     assert!(
         offenders.is_empty(),
-        "signed_fact must stay an envelope helper, not a central protocol dispatcher:\n{}",
+        "identity::signed_fact must stay an envelope helper, not a central protocol dispatcher:\n{}",
         offenders.join("\n")
     );
 }
@@ -958,9 +965,8 @@ fn core_handler_dispatch_stays_protocol_neutral() {
     let mut offenders = Vec::new();
 
     for forbidden in [
-        "fact_modules::",
-        "intent_handlers::connection",
-        "intent_handlers::transit",
+        "crate::protocol",
+        "topo::protocol",
         "KeyWrap",
         "Transit",
         "Connection",
@@ -985,8 +991,8 @@ fn target_schema_dsl_files_are_declarative_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let schema_files = [
         root.join("src/core/schema.p8sql"),
-        root.join("src/protocol/fact_modules/schema.p8sql"),
-        root.join("src/protocol/intent_handlers/schema.p8sql"),
+        root.join("src/protocol/facts/schema.p8sql"),
+        root.join("src/protocol/intents/schema.p8sql"),
     ];
     let mut offenders = Vec::new();
 
@@ -1024,7 +1030,7 @@ fn target_schema_dsl_parser_stays_protocol_neutral() {
     let mut offenders = Vec::new();
 
     for forbidden in [
-        "crate::protocol::fact_modules",
+        "crate::protocol::facts",
         "crate::legacy::protocol",
         "crate::legacy::workers",
         "TableRow",
@@ -1033,7 +1039,7 @@ fn target_schema_dsl_parser_stays_protocol_neutral() {
         "ContextNeed",
         "ContextOffer",
         "workspace",
-        "sealed_message",
+        "content::sealed_message",
         "recipient_key",
         "connection",
         "sync_index",
@@ -1057,7 +1063,7 @@ fn target_schema_dsl_parser_stays_protocol_neutral() {
 fn target_layout_files_do_not_own_projection_intents_handlers_or_cli() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/fact_modules"), "layout.rs") {
+    for path in rust_files_named(&root.join("src/protocol/facts"), "layout.rs") {
         let text = source_text(&path);
         for forbidden in [
             "TableRow",
@@ -1101,7 +1107,7 @@ fn target_layout_files_do_not_own_projection_intents_handlers_or_cli() {
 fn target_projectors_do_not_define_row_tables_or_row_shapes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/fact_modules"), "project.rs") {
+    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
         let text = source_text(&path);
         for forbidden in ["TableRow", "TableName", "TableName::new", "_ROWS:"] {
             if text.contains(forbidden) {
@@ -1124,10 +1130,10 @@ fn target_projectors_do_not_define_row_tables_or_row_shapes() {
 fn target_cli_equivalents_do_not_exist_or_parse_user_commands() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files(&root.join("src/protocol/fact_modules"))
+    for path in rust_files(&root.join("src/protocol/facts"))
         .into_iter()
         .filter(|path| path.file_name().is_none_or(|name| name != "cli.rs"))
-        .chain(rust_files(&root.join("src/protocol/intent_handlers")))
+        .chain(rust_files(&root.join("src/protocol/intents")))
     {
         let text = source_text(&path);
         for forbidden in [
@@ -1162,7 +1168,7 @@ fn target_cli_equivalents_do_not_exist_or_parse_user_commands() {
 #[test]
 fn target_handlers_do_not_own_projection_rows_or_projector_context() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let handler_root = root.join("src/protocol/intent_handlers");
+    let handler_root = root.join("src/protocol/intents");
     if !handler_root.exists() {
         return;
     }
@@ -1200,7 +1206,7 @@ fn target_handlers_do_not_own_projection_rows_or_projector_context() {
 #[test]
 fn target_handlers_do_not_define_fact_wire_layouts_or_fake_crypto_facts() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let handler_root = root.join("src/protocol/intent_handlers");
+    let handler_root = root.join("src/protocol/intents");
     if !handler_root.exists() {
         return;
     }
@@ -1256,7 +1262,7 @@ fn target_handlers_do_not_define_fact_wire_layouts_or_fake_crypto_facts() {
 
     assert!(
         offenders.is_empty(),
-        "intent handlers must not define protocol fact wire layouts, fact-module fact tags, or crypto-shaped placeholder facts; put fact shapes and fixed bytes under src/protocol/fact_modules:\n{}",
+        "intent handlers must not define protocol fact wire layouts, fact-module fact tags, or crypto-shaped placeholder facts; put fact shapes and fixed bytes under src/protocol/facts:\n{}",
         offenders.join("\n")
     );
 }

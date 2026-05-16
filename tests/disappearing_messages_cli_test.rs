@@ -36,7 +36,7 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     // minute 101; minute 102 is safely past expiry.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     let send = assert_success(topo(&["--db", &alice, "send", &workspace_id, "secret"]));
-    let _message_id = line_value(&send, "event_id");
+    let _message_id = line_value(&send, "fact_id");
 
     wait_for_message_text(&alice, &workspace_id, "alice: secret");
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
@@ -171,7 +171,7 @@ fn cli_disappearing_messages_two_peer_convergence() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: later admin-signed `disappearing_messages_setting` events
+// Test 3: later admin-signed `encryption::disappearing_messages_setting` events
 // supersede earlier ones; messages stamped under an earlier setting
 // retain their stamped TTL. `workspace::commands::create` emits the
 // workspace's initial setting alongside the workspace event, so the
@@ -553,7 +553,7 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
 //
 // Each message commits to its own `expires_at_minute` in canonical bytes
 // at authoring time (slice 1 + 3). The admin-signed
-// `disappearing_messages_setting` event tightens the TTL used for
+// `encryption::disappearing_messages_setting` event tightens the TTL used for
 // SUBSEQUENT authoring (slice 2) without retroactively rewriting earlier
 // messages. The deletion floor is intentionally NOT advanced here — the
 // CLI's `disappearing-set` always sets `expires_at_or_before_minute = 0`,
@@ -775,7 +775,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
     let send_out = assert_success(topo(&["--db", &alice, "send", &workspace_id, "ancient-x"]));
-    let message_event_id = line_value(&send_out, "event_id");
+    let message_fact_id = line_value(&send_out, "fact_id");
     wait_for_message_text(&alice, &workspace_id, "alice: ancient-x");
 
     // Advance bob's clock past the horizon. With T_AUTHOR=100 and
@@ -805,11 +805,11 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
     // place X could land on bob without a full decryption path.
     let bob_live_messages_before = line_value(&bob_disappearing_before, "live_messages");
     // Bob must not already have the canonical bytes of X — i.e. EVENTS
-    // must not contain `message_event_id` before the redelivery attempt.
+    // must not contain `message_fact_id` before the redelivery attempt.
     // If bob's messages output already contains the id, the test setup
     // failed to isolate the wedge.
     let bob_messages_listing_before = messages_text(&bob, &workspace_id);
-    let bob_already_had_event_bytes = bob_messages_listing_before.contains(&message_event_id);
+    let bob_already_had_event_bytes = bob_messages_listing_before.contains(&message_fact_id);
     // The test isolates the late-delivery path: bob must NOT have admitted
     // X before alice's daemon was killed. If sync raced ahead, the wedge
     // we're trying to assert never had a chance to fire and the test
@@ -924,7 +924,7 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
     // Alice authors X. X is immediately admitted on alice. Bob will
     // attempt to admit X via sync; without F, the cover check rejects.
     let send_out = assert_success(topo(&["--db", &alice, "send", &workspace_id, "early-x"]));
-    let message_event_id = line_value(&send_out, "event_id");
+    let message_fact_id = line_value(&send_out, "fact_id");
     wait_for_message_text(&alice, &workspace_id, "alice: early-x");
 
     // Bob receives the proactive wrap and derives F. Once F exists, sync
@@ -943,7 +943,7 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
     // already proves bob recovered the key material needed to open it.
     let bob_post_listing = messages_text(&bob, &workspace_id);
     assert!(
-        bob_post_listing.contains(&message_event_id),
+        bob_post_listing.contains(&message_fact_id),
         "EVENTS on bob must contain X's id after F arrives and sync \
          redelivers:\n{bob_post_listing}"
     );

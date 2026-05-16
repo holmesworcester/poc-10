@@ -4,32 +4,32 @@ use topo::core::intents::AtomicIntent;
 use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wake_loop::WakeLoop;
-use topo::protocol::fact_modules::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
-use topo::protocol::fact_modules::encryption::layout as encryption_layout;
-use topo::protocol::fact_modules::sealed_message::create as sealed_create;
-use topo::protocol::fact_modules::sealed_message::fact::{
+use topo::protocol::facts::content::sealed_message::create as sealed_create;
+use topo::protocol::facts::content::sealed_message::fact::{
     SealedMessageFact, SignerPubkeyFact, NONCE_BYTES,
 };
-use topo::protocol::fact_modules::sealed_message::layout as sealed_layout;
-use topo::protocol::fact_modules::sealed_message::rows::{
+use topo::protocol::facts::content::sealed_message::layout as sealed_layout;
+use topo::protocol::facts::content::sealed_message::rows::{
     decode_sealed_message_row, message_key, SEALED_MESSAGE_ROWS,
 };
-use topo::protocol::fact_modules::sync_encrypted_root::fact::EncryptedRootFact;
-use topo::protocol::fact_modules::sync_encrypted_root::layout as encrypted_root_layout;
-use topo::protocol::fact_modules::sync_key_wrap_available::fact::KeyWrapAvailableFact;
-use topo::protocol::fact_modules::sync_key_wrap_available::layout as key_wrap_available_layout;
-use topo::protocol::fact_modules::sync_range_request::fact::SyncRangeRequestFact;
-use topo::protocol::fact_modules::sync_range_request::{
+use topo::protocol::facts::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
+use topo::protocol::facts::encryption::layout as encryption_layout;
+use topo::protocol::facts::sync::encrypted_root::fact::EncryptedRootFact;
+use topo::protocol::facts::sync::encrypted_root::layout as encrypted_root_layout;
+use topo::protocol::facts::sync::key_wrap_available::fact::KeyWrapAvailableFact;
+use topo::protocol::facts::sync::key_wrap_available::layout as key_wrap_available_layout;
+use topo::protocol::facts::sync::range_request::fact::SyncRangeRequestFact;
+use topo::protocol::facts::sync::range_request::{
     layout as sync_range_request_layout, project as sync_range_request_project,
 };
-use topo::protocol::fact_modules::sync_shared_event::fact::SharedEventFact;
-use topo::protocol::fact_modules::sync_shared_event::layout as shared_event_layout;
-use topo::protocol::intent_handlers::transit;
+use topo::protocol::facts::sync::shared_fact::fact::SharedFact;
+use topo::protocol::facts::sync::shared_fact::layout as shared_fact_layout;
+use topo::protocol::intents::transport::send_facts_on_connection;
 use topo::protocol::matchers as encryption_context;
 use topo::protocol::matchers as sealed_context;
 use topo::protocol::matchers::ExactSelectorMatcher;
 use topo::protocol::matchers::SecretCoverageMatcher;
-use topo::protocol::matchers::{self as context, RangeEventMatcher};
+use topo::protocol::matchers::{self as context, RangeFactMatcher};
 use topo::protocol::runtime::ProtocolProjector;
 
 const DISPLAY_SECRET: [u8; 32] = [0x66; 32];
@@ -38,19 +38,19 @@ const DISPLAY_SECRET: [u8; 32] = [0x66; 32];
 fn sync_request_sends_encrypted_message_when_out_of_range_dep_and_key_arrive() {
     let workspace = [7; 32];
     let connection = [8; 32];
-    let message_event_id = id(9);
+    let message_fact_id = id(9);
     let dep_id = id(10);
     let key_wrap_id = id(11);
     let request = sync_range_request_fact(workspace, connection, 100, 110);
-    let message = encrypted_root_fact(workspace, 105, message_event_id, dep_id, key_wrap_id);
-    let dep = shared_event_fact(workspace, 12, dep_id);
+    let message = encrypted_root_fact(workspace, 105, message_fact_id, dep_id, key_wrap_id);
+    let dep = shared_fact_fact(workspace, 12, dep_id);
     let key = key_wrap_available_fact(workspace, 200, key_wrap_id);
-    let range_matcher = RangeEventMatcher::new();
-    let event_matcher = ExactSelectorMatcher::new(context::exact_event_role());
+    let range_matcher = RangeFactMatcher::new();
+    let fact_matcher = ExactSelectorMatcher::new(context::exact_fact_role());
     let key_matcher = ExactSelectorMatcher::new(context::key_wrap_role());
     let matchers = [
         &range_matcher as &dyn ContextMatcher,
-        &event_matcher as &dyn ContextMatcher,
+        &fact_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
     let projector = ProtocolProjector;
@@ -79,11 +79,11 @@ fn sync_request_sends_encrypted_message_when_out_of_range_dep_and_key_arrive() {
     assert_eq!(bus.intents().len(), 1);
     assert_eq!(
         bus.intents()[0].kind.as_str(),
-        transit::TRANSIT_SEND_ON_CONNECTION
+        send_facts_on_connection::SEND_FACTS_ON_CONNECTION
     );
     assert_eq!(
         decode_send_fact_ids(&bus.intents()[0]),
-        vec![message_event_id, dep_id, key_wrap_id]
+        vec![message_fact_id, dep_id, key_wrap_id]
     );
     assert!(
         bus.context(&request.id)
@@ -97,20 +97,20 @@ fn sync_request_sends_encrypted_message_when_out_of_range_dep_and_key_arrive() {
 fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
     let workspace = [67; 32];
     let connection = [68; 32];
-    let message_event_id = id(69);
+    let message_fact_id = id(69);
     let dep_id = id(70);
     let key_wrap_id = id(71);
     let day_ms = 86_400_000;
     let request = sync_range_request_fact(workspace, connection, day_ms, day_ms + 10);
-    let message = encrypted_root_fact(workspace, day_ms + 5, message_event_id, dep_id, key_wrap_id);
-    let dep = shared_event_fact(workspace, 0, dep_id);
+    let message = encrypted_root_fact(workspace, day_ms + 5, message_fact_id, dep_id, key_wrap_id);
+    let dep = shared_fact_fact(workspace, 0, dep_id);
     let key = key_wrap_available_fact(workspace, day_ms * 2, key_wrap_id);
-    let range_matcher = RangeEventMatcher::new();
-    let event_matcher = ExactSelectorMatcher::new(context::exact_event_role());
+    let range_matcher = RangeFactMatcher::new();
+    let fact_matcher = ExactSelectorMatcher::new(context::exact_fact_role());
     let key_matcher = ExactSelectorMatcher::new(context::key_wrap_role());
     let matchers = [
         &range_matcher as &dyn ContextMatcher,
-        &event_matcher as &dyn ContextMatcher,
+        &fact_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
     let projector = ProtocolProjector;
@@ -120,7 +120,7 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
     bus.submit_fact(dep);
     bus.submit_fact(key);
     for value in 100..164 {
-        bus.submit_fact(shared_event_fact(workspace, value, id(value as u8)));
+        bus.submit_fact(shared_fact_fact(workspace, value, id(value as u8)));
         bus.submit_fact(key_wrap_available_fact(
             workspace,
             day_ms * 3 + value,
@@ -143,7 +143,7 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
     assert_eq!(bus.intents().len(), 1);
     assert_eq!(
         decode_send_fact_ids(&bus.intents()[0]),
-        vec![message_event_id, dep_id, key_wrap_id]
+        vec![message_fact_id, dep_id, key_wrap_id]
     );
     assert!(
         bus.context(&request.id)
@@ -218,18 +218,18 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
 fn sync_request_does_not_send_message_before_out_of_range_key_wrap() {
     let workspace = [17; 32];
     let connection = [18; 32];
-    let message_event_id = id(19);
+    let message_fact_id = id(19);
     let dep_id = id(20);
     let key_wrap_id = id(21);
     let request = sync_range_request_fact(workspace, connection, 100, 110);
-    let message = encrypted_root_fact(workspace, 105, message_event_id, dep_id, key_wrap_id);
-    let dep = shared_event_fact(workspace, 1, dep_id);
-    let range_matcher = RangeEventMatcher::new();
-    let event_matcher = ExactSelectorMatcher::new(context::exact_event_role());
+    let message = encrypted_root_fact(workspace, 105, message_fact_id, dep_id, key_wrap_id);
+    let dep = shared_fact_fact(workspace, 1, dep_id);
+    let range_matcher = RangeFactMatcher::new();
+    let fact_matcher = ExactSelectorMatcher::new(context::exact_fact_role());
     let key_matcher = ExactSelectorMatcher::new(context::key_wrap_role());
     let matchers = [
         &range_matcher as &dyn ContextMatcher,
-        &event_matcher as &dyn ContextMatcher,
+        &fact_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
     let projector = ProtocolProjector;
@@ -257,36 +257,36 @@ fn sync_request_does_not_send_message_before_out_of_range_key_wrap() {
 fn sync_request_sends_ready_root_when_an_earlier_root_is_missing_a_key() {
     let workspace = [27; 32];
     let connection = [28; 32];
-    let blocked_event_id = id(29);
+    let blocked_fact_id = id(29);
     let blocked_dep_id = id(30);
     let blocked_key_wrap_id = id(31);
-    let ready_event_id = id(32);
+    let ready_fact_id = id(32);
     let ready_dep_id = id(33);
     let ready_key_wrap_id = id(34);
     let request = sync_range_request_fact(workspace, connection, 100, 110);
     let blocked = encrypted_root_fact(
         workspace,
         101,
-        blocked_event_id,
+        blocked_fact_id,
         blocked_dep_id,
         blocked_key_wrap_id,
     );
     let ready = encrypted_root_fact(
         workspace,
         102,
-        ready_event_id,
+        ready_fact_id,
         ready_dep_id,
         ready_key_wrap_id,
     );
-    let blocked_dep = shared_event_fact(workspace, 1, blocked_dep_id);
-    let ready_dep = shared_event_fact(workspace, 2, ready_dep_id);
+    let blocked_dep = shared_fact_fact(workspace, 1, blocked_dep_id);
+    let ready_dep = shared_fact_fact(workspace, 2, ready_dep_id);
     let ready_key = key_wrap_available_fact(workspace, 3, ready_key_wrap_id);
-    let range_matcher = RangeEventMatcher::new();
-    let event_matcher = ExactSelectorMatcher::new(context::exact_event_role());
+    let range_matcher = RangeFactMatcher::new();
+    let fact_matcher = ExactSelectorMatcher::new(context::exact_fact_role());
     let key_matcher = ExactSelectorMatcher::new(context::key_wrap_role());
     let matchers = [
         &range_matcher as &dyn ContextMatcher,
-        &event_matcher as &dyn ContextMatcher,
+        &fact_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
     let projector = ProtocolProjector;
@@ -308,7 +308,7 @@ fn sync_request_sends_ready_root_when_an_earlier_root_is_missing_a_key() {
     assert_eq!(bus.intents().len(), 1);
     assert_eq!(
         decode_send_fact_ids(&bus.intents()[0]),
-        vec![ready_event_id, ready_dep_id, ready_key_wrap_id]
+        vec![ready_fact_id, ready_dep_id, ready_key_wrap_id]
     );
     let standing = bus
         .context(&request.id)
@@ -325,27 +325,27 @@ fn sync_request_sends_ready_root_when_an_earlier_root_is_missing_a_key() {
 fn sync_request_emits_all_complete_roots_in_deterministic_order() {
     let workspace = [37; 32];
     let connection = [38; 32];
-    let early_event_id = id(39);
+    let early_fact_id = id(39);
     let early_dep_id = id(40);
     let early_key_wrap_id = id(41);
-    let late_event_id = id(42);
+    let late_fact_id = id(42);
     let late_dep_id = id(43);
     let late_key_wrap_id = id(44);
     let request = sync_range_request_fact(workspace, connection, 100, 110);
-    let late = encrypted_root_fact(workspace, 109, late_event_id, late_dep_id, late_key_wrap_id);
+    let late = encrypted_root_fact(workspace, 109, late_fact_id, late_dep_id, late_key_wrap_id);
     let early = encrypted_root_fact(
         workspace,
         101,
-        early_event_id,
+        early_fact_id,
         early_dep_id,
         early_key_wrap_id,
     );
-    let range_matcher = RangeEventMatcher::new();
-    let event_matcher = ExactSelectorMatcher::new(context::exact_event_role());
+    let range_matcher = RangeFactMatcher::new();
+    let fact_matcher = ExactSelectorMatcher::new(context::exact_fact_role());
     let key_matcher = ExactSelectorMatcher::new(context::key_wrap_role());
     let matchers = [
         &range_matcher as &dyn ContextMatcher,
-        &event_matcher as &dyn ContextMatcher,
+        &fact_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
     let projector = ProtocolProjector;
@@ -355,9 +355,9 @@ fn sync_request_emits_all_complete_roots_in_deterministic_order() {
         request.clone(),
         late,
         early,
-        shared_event_fact(workspace, 1, late_dep_id),
+        shared_fact_fact(workspace, 1, late_dep_id),
         key_wrap_available_fact(workspace, 1, late_key_wrap_id),
-        shared_event_fact(workspace, 1, early_dep_id),
+        shared_fact_fact(workspace, 1, early_dep_id),
         key_wrap_available_fact(workspace, 1, early_key_wrap_id),
     ] {
         bus.submit_fact(fact);
@@ -373,10 +373,10 @@ fn sync_request_emits_all_complete_roots_in_deterministic_order() {
     assert_eq!(
         sent,
         vec![
-            vec![early_event_id, early_dep_id, early_key_wrap_id],
-            vec![late_event_id, late_dep_id, late_key_wrap_id],
+            vec![early_fact_id, early_dep_id, early_key_wrap_id],
+            vec![late_fact_id, late_dep_id, late_key_wrap_id],
         ],
-        "complete roots should be sent in timestamp/event-id order, independent of submission order"
+        "complete roots should be sent in timestamp/fact-id order, independent of submission order"
     );
     assert!(
         bus.context(&request.id)
@@ -390,33 +390,33 @@ fn sync_request_emits_all_complete_roots_in_deterministic_order() {
 fn sync_range_matching_ignores_out_of_range_roots_and_their_context() {
     let workspace = [47; 32];
     let connection = [48; 32];
-    let in_range_event_id = id(49);
+    let in_range_fact_id = id(49);
     let in_range_dep_id = id(50);
     let in_range_key_wrap_id = id(51);
-    let out_of_range_event_id = id(52);
+    let out_of_range_fact_id = id(52);
     let out_of_range_dep_id = id(53);
     let out_of_range_key_wrap_id = id(54);
     let request = sync_range_request_fact(workspace, connection, 100, 110);
     let in_range = encrypted_root_fact(
         workspace,
         105,
-        in_range_event_id,
+        in_range_fact_id,
         in_range_dep_id,
         in_range_key_wrap_id,
     );
     let out_of_range = encrypted_root_fact(
         workspace,
         111,
-        out_of_range_event_id,
+        out_of_range_fact_id,
         out_of_range_dep_id,
         out_of_range_key_wrap_id,
     );
-    let range_matcher = RangeEventMatcher::new();
-    let event_matcher = ExactSelectorMatcher::new(context::exact_event_role());
+    let range_matcher = RangeFactMatcher::new();
+    let fact_matcher = ExactSelectorMatcher::new(context::exact_fact_role());
     let key_matcher = ExactSelectorMatcher::new(context::key_wrap_role());
     let matchers = [
         &range_matcher as &dyn ContextMatcher,
-        &event_matcher as &dyn ContextMatcher,
+        &fact_matcher as &dyn ContextMatcher,
         &key_matcher as &dyn ContextMatcher,
     ];
     let projector = ProtocolProjector;
@@ -426,7 +426,7 @@ fn sync_range_matching_ignores_out_of_range_roots_and_their_context() {
         request.clone(),
         out_of_range,
         in_range,
-        shared_event_fact(workspace, 1, out_of_range_dep_id),
+        shared_fact_fact(workspace, 1, out_of_range_dep_id),
         key_wrap_available_fact(workspace, 1, out_of_range_key_wrap_id),
     ] {
         bus.submit_fact(fact);
@@ -456,14 +456,14 @@ fn sync_range_matching_ignores_out_of_range_roots_and_their_context() {
 fn sync_projector_revalidates_matched_range_payload() {
     let workspace = [57; 32];
     let connection = [58; 32];
-    let message_event_id = id(59);
+    let message_fact_id = id(59);
     let dep_id = id(60);
     let key_wrap_id = id(61);
     let request = sync_range_request_fact(workspace, connection, 100, 110);
-    let payload = encrypted_root_fact(workspace, 105, message_event_id, dep_id, key_wrap_id);
+    let payload = encrypted_root_fact(workspace, 105, message_fact_id, dep_id, key_wrap_id);
     let range_need =
-        context::range_event_need(request.id, context::workspace_scope(workspace), 100, 110);
-    let mismatched_offer = context::range_event_offer(
+        context::range_fact_need(request.id, context::workspace_scope(workspace), 100, 110);
+    let mismatched_offer = context::range_fact_offer(
         payload.id,
         context::workspace_scope(workspace),
         105,
@@ -508,7 +508,7 @@ fn sync_range_request_fact(
 fn encrypted_root_fact(
     workspace_id: [u8; 32],
     timestamp: u64,
-    event_id: [u8; 32],
+    fact_id: [u8; 32],
     dependency_id: [u8; 32],
     key_wrap_id: [u8; 32],
 ) -> Fact {
@@ -517,7 +517,7 @@ fn encrypted_root_fact(
         timestamp,
         encrypted_root_layout::encode_fact(&EncryptedRootFact {
             workspace_id,
-            event_id,
+            fact_id,
             dependency_id,
             key_wrap_id,
         })
@@ -525,15 +525,15 @@ fn encrypted_root_fact(
     )
 }
 
-fn shared_event_fact(workspace_id: [u8; 32], timestamp: u64, event_id: [u8; 32]) -> Fact {
+fn shared_fact_fact(workspace_id: [u8; 32], timestamp: u64, fact_id: [u8; 32]) -> Fact {
     Fact::new(
         context::workspace_scope(workspace_id),
         timestamp,
-        shared_event_layout::encode_fact(&SharedEventFact {
+        shared_fact_layout::encode_fact(&SharedFact {
             workspace_id,
-            event_id,
+            fact_id,
         })
-        .expect("encode shared event"),
+        .expect("encode shared fact"),
     )
 }
 
@@ -637,8 +637,8 @@ fn local_key_secret_fact(
 }
 
 fn decode_send_fact_ids(intent: &topo::core::intents::Intent) -> Vec<[u8; 32]> {
-    transit::decode_send_on_connection(intent)
-        .expect("decode send_on_connection")
+    send_facts_on_connection::decode_send_facts_on_connection(intent)
+        .expect("decode send_facts_on_connection")
         .fact_ids
 }
 

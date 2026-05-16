@@ -4,16 +4,16 @@ use topo::core::intents::AtomicIntent;
 use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{ProjectionContext, Projector};
 use topo::core::wake_loop::WakeLoop;
-use topo::protocol::fact_modules::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
-use topo::protocol::fact_modules::encryption::layout as encryption_layout;
-use topo::protocol::fact_modules::sealed_message::fact::{
+use topo::protocol::facts::content::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact, NONCE_BYTES,
 };
-use topo::protocol::fact_modules::sealed_message::rows::{
+use topo::protocol::facts::content::sealed_message::rows::{
     decode_message_tombstone_row, decode_sealed_message_row, message_key, MESSAGE_ROWS,
     MESSAGE_TOMBSTONE_ROWS, SEALED_MESSAGE_ROWS,
 };
-use topo::protocol::fact_modules::sealed_message::{create as sealed_create, layout, project};
+use topo::protocol::facts::content::sealed_message::{create as sealed_create, layout, project};
+use topo::protocol::facts::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
+use topo::protocol::facts::encryption::layout as encryption_layout;
 use topo::protocol::matchers::ExactSelectorMatcher;
 use topo::protocol::matchers::{self as context, workspace_scope, SecretCoverageMatcher};
 use topo::protocol::runtime::ProtocolProjector;
@@ -114,7 +114,7 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
     assert_eq!(bus.intents()[4].kind.as_str(), "delete_row");
     assert_eq!(bus.intents()[5].kind.as_str(), "delete_row");
     assert_eq!(bus.intents()[6].kind.as_str(), "delete_row");
-    assert_eq!(bus.intents()[7].kind.as_str(), "purge_event");
+    assert_eq!(bus.intents()[7].kind.as_str(), "purge_deleted_message");
 
     let secret_leaf = secret_node_fact(workspace, frontier_id, 42, 42, 32, leaf);
     bus.submit_fact(secret_leaf);
@@ -159,7 +159,7 @@ fn deletion_update_purges_message_before_keys_arrive() {
     assert_eq!(bus.intents()[1].kind.as_str(), "delete_row");
     assert_eq!(bus.intents()[2].kind.as_str(), "delete_row");
     assert_eq!(bus.intents()[3].kind.as_str(), "delete_row");
-    assert_eq!(bus.intents()[4].kind.as_str(), "purge_event");
+    assert_eq!(bus.intents()[4].kind.as_str(), "purge_deleted_message");
 
     bus.submit_fact(signer_fact(workspace, signer));
     bus.submit_fact(frontier);
@@ -245,7 +245,7 @@ fn deletion_before_message_purges_when_target_later_arrives() {
     assert_eq!(purged.intents, 5);
     assert!(bus.context(&message.id).is_none());
     assert_eq!(bus.intents()[0].kind.as_str(), "put_row");
-    assert_eq!(bus.intents()[4].kind.as_str(), "purge_event");
+    assert_eq!(bus.intents()[4].kind.as_str(), "purge_deleted_message");
 }
 
 #[test]
