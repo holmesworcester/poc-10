@@ -394,6 +394,56 @@ fn target_manifests_are_declarations_only() {
 }
 
 #[test]
+fn target_protocol_registry_is_declarative_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("src/protocol.rs");
+    let text = source_text(&path);
+
+    for required in [
+        "pub const PROTOCOL: ProtocolRegistry",
+        "pub const SCHEMAS: &[SchemaRegistration]",
+        "pub const FACTS: &[FactRegistration]",
+        "pub const CONTEXT_MATCHERS: &[ContextMatcherRegistration]",
+        "pub const INTENTS: &[IntentRegistration]",
+        "pub const HANDLERS: &[HandlerRegistration]",
+    ] {
+        assert!(
+            text.contains(required),
+            "protocol registry missing {required}"
+        );
+    }
+
+    let mut offenders = Vec::new();
+    for line in meaningful_source_lines(&text) {
+        for forbidden in [
+            "fn ",
+            "impl ",
+            "match ",
+            "if ",
+            "for ",
+            "while ",
+            "Store",
+            "WakeLoop",
+            ".project(",
+            ".handle(",
+            "open_",
+            "std::net",
+            "tcp::",
+        ] {
+            if line.contains(forbidden) {
+                offenders.push(format!("line contains {forbidden:?}: {line}"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "src/protocol.rs should be a descriptor registry, not runtime logic:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn target_handlers_are_flat_files_without_driver_or_intent_submodules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let handler_root = root.join("src/handlers");

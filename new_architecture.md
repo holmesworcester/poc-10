@@ -58,8 +58,10 @@ The migration succeeds when:
 - Schema declarations exist in exactly three visible places:
   `src/core/schema.p8sql`, `src/event_modules/schema.p8sql`, and
   `src/handlers/schema.p8sql`.
-- Wire layouts are declarative and fixed length unless a fact explicitly stores
-  opaque chunk bytes with a fixed outer slot.
+- The schema declaration surface is the source of truth for storage tables,
+  read-model row codecs, and canonical fact wire codecs.
+- Wire layouts are declarative and fixed length. There are no variable payload
+  slots.
 - Transit frames use the same fixed-layout wire machinery and support only the
   two configured frame sizes.
 - Boundary tests fail if new dumping-ground files, ad hoc SQL, ad hoc codecs,
@@ -153,6 +155,7 @@ src/
   event_modules.rs
   handlers.rs
   commands.rs
+  protocol.rs
   legacy.rs
 
   core/
@@ -211,6 +214,12 @@ The exact event module names can change. The ownership pattern should not.
 `src/commands.rs`, and `src/legacy.rs` are manifests. They declare modules and
 may re-export narrow APIs; they should not accumulate behavior.
 
+`src/protocol.rs` is the target protocol registry. It is a declarative table of
+contents across schema sources, fact registrations, context matcher roles,
+intent kinds, and handlers. It does not replace `src/event_modules.rs` or
+`src/handlers.rs`: those files define Rust namespaces, while `protocol.rs`
+declares which namespaces make up the concrete `match` protocol.
+
 `src/legacy/` is a migration boundary. It keeps old production behavior
 reachable while `match` is cut over. It is not a compatibility layer to keep
 forever.
@@ -238,7 +247,7 @@ fact.rs
   protocol data types and semantic field names
 
 layout.rs
-  declarative fixed-length wire layout for that fact type
+  current migration checkpoint for fixed-length fact wire layout
 
 create.rs
   local constructors that produce proposed facts or intent payloads
@@ -285,6 +294,9 @@ network_out
 ```
 
 `src/event_modules/schema.p8sql` contains projection/read-model state.
+In the end state it also declares fact wire layouts and read-model row
+key/value layouts. Generated codecs use those declarations to produce
+fixed-length fact encoders/decoders and row key/value constructors.
 
 `src/handlers/schema.p8sql` contains handler checkpoint or operational state.
 
@@ -429,6 +441,29 @@ Recipient-key supersession matcher
 Scope is part of the match key. Projectors still validate semantic correctness,
 including workspace membership, fact type, signer authority, endpoint role, and
 local/private state.
+
+## Protocol Registry
+
+The concrete protocol has one registry file:
+
+```text
+src/protocol.rs
+```
+
+It may declare:
+
+```text
+schema sources
+fact names and tags
+projector names
+context matcher roles
+intent kinds and execution class
+handler names and accepted intent kinds
+```
+
+It must not run projection, construct handlers, open stores, branch on fact
+bytes, parse CLI input, or call transport IO. Registry entries should reference
+module constants where possible so renames fail at compile time.
 
 ## Projectors
 
@@ -642,11 +677,12 @@ Ciphertext<N>
 Padding<N>
 ```
 
-Event modules declare layouts and should not hand-roll byte parsing loops. The
-current checkpoint still has per-module layout files; those files should remain
-declarative and converge on generated fixed-layout readers/writers.
+Event modules declare fixed fact layouts in `src/event_modules/schema.p8sql`
+and should not hand-roll byte parsing loops. The current checkpoint still has
+per-module layout files; those files should remain declarative and converge on
+generated fixed-layout readers/writers.
 
-The layout system should generate:
+The declaration system should generate:
 
 ```text
 encoded length constant
@@ -658,9 +694,25 @@ trailing-byte rejection
 golden vector tests
 ```
 
-Fixed length remains the default. If a logical value is variable length, use a
-fixed encrypted slot, a fixed chunk fact, a hash pointer to separately chunked
-bytes, or a fixed enum variant with its own total length.
+All protocol facts are fixed length. If content is larger than one fact, split
+it into fixed-size chunk facts. Do not add variable payload slots, hash-pointer
+payload indirection, or handwritten per-module byte slicing.
+
+Read-model row codecs come from the same declaration surface:
+
+```text
+table declaration
+  durable table shape
+  row key fields
+  row value fields
+  fixed byte widths
+  generated key/value constructors
+  generated key/value decoders
+```
+
+This removes handwritten per-module `rows.rs` files in the end state. Projectors
+still make the semantic decision to write a row; generated codecs only build the
+bounded bytes for `PutRow` and `DeleteRow` intents.
 
 ## Transit
 
@@ -972,8 +1024,7 @@ adding new compatibility layers:
 - Keep every handler as one flat file under `src/handlers/`.
 - Register fact types, context roles, intent kinds, handlers, and wire layouts
   in visible manifests.
-- Generate row and wire boilerplate from declarative schema/layouts wherever
-  possible.
+- Generate row and wire boilerplate from the three schema declaration files.
 - Prefer one exact helper per invariant over one flexible helper with flags.
 - Give every deferred intent kind an idempotence key.
 - Give every context matcher deterministic tests for new-need-to-old-offer and
