@@ -7,6 +7,7 @@
 use crate::core::context::Role;
 use crate::core::daemon::TickReport;
 use crate::core::facts::{Fact, FactScope};
+use crate::core::generic_matchers::ExactSelectorMatcher;
 use crate::core::handler_dispatch::HandlerContext;
 use crate::core::logical_clock;
 use crate::core::matchers::ContextMatcher;
@@ -23,7 +24,6 @@ use crate::protocol::intents::{
     connection as connection_intents, content as content_intents, encryption as encryption_intents,
     sync as sync_intents, transport as transport_intents,
 };
-use crate::protocol::matchers::ExactSelectorMatcher;
 use std::collections::BTreeSet;
 
 pub type ProtocolRuntime = crate::core::runtime::Runtime<super::Protocol>;

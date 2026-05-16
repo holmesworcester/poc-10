@@ -1281,7 +1281,7 @@ mod tests {
     use crate::core::intents::{IntentExecution, IntentKind};
     use crate::core::projection::{ProjectionContext, ProjectionOutput};
     use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
-    use crate::protocol::matchers::ExactSelectorMatcher;
+    use crate::core::generic_matchers::ExactSelectorMatcher;
     use std::cell::Cell;
 
     #[test]
