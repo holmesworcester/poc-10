@@ -1,12 +1,12 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projection::{ProjectionContext, Projector};
-use topo::event_modules::encryption::context::workspace_scope;
 use topo::event_modules::encryption::fact::{
     KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, LocalRecipientKeyFact,
     WrappedSecretKind,
 };
 use topo::event_modules::encryption::layout as key_wrap_layout;
+use topo::event_modules::encryption::matchers::workspace_scope;
 use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
 use topo::event_modules::signed_fact::project::SignedFactProjector;
 use topo::event_modules::signed_fact::{create, layout};

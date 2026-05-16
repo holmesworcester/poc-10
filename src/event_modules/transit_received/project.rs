@@ -3,7 +3,7 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
-use super::{context, layout};
+use super::{layout, matchers};
 
 #[derive(Debug, Clone, Default)]
 pub struct TransitReceivedProjector;
@@ -25,7 +25,7 @@ impl Projector for TransitReceivedProjector {
         }
         let received = layout::decode_fact(&fact.bytes)?;
         Ok(
-            ProjectionOutput::new().offer(context::transit_received_offer(
+            ProjectionOutput::new().offer(matchers::transit_received_offer(
                 fact.id,
                 received.received_fact_id,
             )),

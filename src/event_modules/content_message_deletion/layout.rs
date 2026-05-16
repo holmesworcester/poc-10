@@ -11,7 +11,7 @@ use crate::core::wire;
 
 use super::fact::ContentMessageDeletionFact;
 
-pub const TYPE_CONTENT_MESSAGE_DELETION: u8 = 151;
+pub const TYPE_CONTENT_MESSAGE_DELETION: u8 = 51;
 
 pub const CONTENT_MESSAGE_DELETION_BYTES: usize = 1 + 32 + 8 + 32 + 32;
 

@@ -1,18 +1,23 @@
 //! Poc-10 local history node secret projector.
 //!
-//! Decodes the local-only fact body, asserts `FactScope::Local`, and emits a
-//! single `PutRow` atomic intent. The legacy projector also walked source-
-//! secret and removal-frontier dependencies, validated time-tree and trie
-//! parent/child relationships, and exact-deleted tombstoned siblings. Those
-//! checks are deferred until the surrounding key-secret modules are also
-//! ported into the target tree (Wave 6 reconciliation).
+//! Decodes the local-only fact body, asserts `FactScope::Local`, waits for the
+//! referenced removal frontier and source/tombstone secrets, validates the
+//! tree relationship, and only then emits row/secret context.
+
+mod secret_path;
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::event_modules::sealed_message;
+use crate::event_modules::sync;
 
 use super::layout;
+use super::matchers as history_matchers;
 use super::rows::local_history_node_secret_row;
+use secret_path::{
+    validate_child_addressing, validate_frontier, validate_source, validate_tombstone, SourceKind,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalHistoryNodeSecretProjector;
@@ -27,14 +32,110 @@ impl Projector for LocalHistoryNodeSecretProjector {
     fn project(
         &self,
         fact: &Fact,
-        _context: &ProjectionContext,
+        projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         if fact.scope != FactScope::Local {
             return Err("local history node secret fact must have FactScope::Local".to_string());
         }
         let node = layout::decode_fact(&fact.bytes)?;
-        Ok(ProjectionOutput::new().intent(
-            AtomicIntent::PutRow(local_history_node_secret_row(fact.id, &node)?).into_intent(),
-        ))
+        let workspace_scope = sealed_message::matchers::workspace_scope(node.workspace_id);
+        let frontier_need = sync::matchers::exact_event_need(
+            fact.id,
+            workspace_scope.clone(),
+            node.removal_frontier_id,
+        );
+        let source_need = history_matchers::source_secret_need(fact.id, node.source_secret_id);
+        let tombstone_need = if node.tombstone_node_id == [0; 32] {
+            None
+        } else {
+            Some(history_matchers::source_secret_need(
+                fact.id,
+                node.tombstone_node_id,
+            ))
+        };
+
+        let mut waiting = ProjectionOutput::new()
+            .need(frontier_need.clone())
+            .need(source_need.clone());
+        if let Some(need) = &tombstone_need {
+            waiting = waiting.need(need.clone());
+        }
+
+        let Some(frontier_fact) = projection_context.payload_for(&frontier_need) else {
+            return Ok(waiting);
+        };
+        let Some(source_fact) = projection_context.payload_for(&source_need) else {
+            return Ok(waiting);
+        };
+        let tombstone_fact = if let Some(need) = &tombstone_need {
+            let Some(payload) = projection_context.payload_for(need) else {
+                return Ok(waiting);
+            };
+            Some(payload)
+        } else {
+            None
+        };
+
+        validate_frontier(frontier_fact, &node)?;
+        let source = validate_source(source_fact, &node)?;
+        match source {
+            SourceKind::HistoryNode(source_node) => {
+                validate_child_addressing(&source_node, &node)?;
+                if node.tombstone_node_id != [0; 32]
+                    && node.tombstone_node_id != node.source_secret_id
+                {
+                    return Err(
+                        "local history node tombstone must retire its source path node".to_string(),
+                    );
+                }
+            }
+            SourceKind::Root => {
+                if node.tombstone_node_id != [0; 32] {
+                    return Err(
+                        "local history node cannot tombstone without a history source".to_string(),
+                    );
+                }
+            }
+        }
+        if let Some(tombstone) = tombstone_fact {
+            validate_tombstone(tombstone, &node)?;
+        }
+
+        let end_minute = node
+            .range_start
+            .checked_add(node.range_width - 1)
+            .ok_or_else(|| "local history node range end overflow".to_string())?;
+
+        Ok(ProjectionOutput::new()
+            .offer(sync::matchers::exact_event_offer(
+                fact.id,
+                FactScope::Local,
+                fact.id,
+                fact.id,
+            ))
+            .offer(history_matchers::source_secret_offer(fact.id, fact.id))
+            .offer(sealed_message::matchers::secret_offer(
+                fact.id,
+                workspace_scope,
+                node.workspace_id,
+                node.removal_frontier_id,
+                node.range_start,
+                end_minute,
+                prefix_bytes(node.bit_depth)?,
+                node.event_id_prefix,
+            ))
+            .intent(
+                AtomicIntent::PutRow(local_history_node_secret_row(fact.id, &node)?).into_intent(),
+            ))
     }
+}
+
+fn prefix_bytes(bit_depth: u16) -> Result<u8, String> {
+    if bit_depth % 8 != 0 {
+        return Err(
+            "local history node prefix depth must be byte-aligned for coverage".to_string(),
+        );
+    }
+    u8::try_from(bit_depth / 8)
+        .map_err(|_| "local history node prefix depth is too large".to_string())
 }

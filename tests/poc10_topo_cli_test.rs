@@ -1,39 +1,127 @@
 //! CLI tests that drive the `match` binary in the target shape.
 //!
 //! Follows the same daemon-and-CLI model as the poc-8 e2e tests: build the
-//! `match` binary once, then exercise the target-tree subcommands by
-//! spawning the binary through the shared `cli_harness`. As more target
-//! subcommands land (`match start`, `match send`, etc.),
-//! their tests should sit here next to this walkthrough so the daemon
-//! model stays a real binary contract rather than an in-process fixture.
+//! `match` binary once, then exercise the target-tree subcommands by spawning
+//! the binary through the shared `cli_harness`. Smoke coverage belongs here as
+//! black-box checks on the real binary, not as an in-crate demo command.
 
 mod cli_harness;
 
-use cli_harness::{assert_success, topo};
+use cli_harness::{assert_success, line_value, match_cli, temp_db};
 
 #[test]
-fn match_demo_runs_the_target_walkthrough() {
-    let output = topo(&["demo"]);
-    let stdout = assert_success(output);
+fn match_help_is_served_by_the_product_boundary() {
+    let stdout = assert_success(match_cli(&["--help"]));
 
-    // The walkthrough is structured by named steps. Pin the high-level
-    // structure so regressions surface as a missing step rather than as a
-    // silent change in semantics.
-    for marker in [
-        "step 1: admit workspace fact",
-        "workspace_rows materialised: 1",
-        "step 2: admit signer + sealed message + secret coverage",
-        "sealed_message_rows: 1",
-        "step 3: confirm opened message rows are not synthesized",
-        "message_rows (opened): 0",
-        "no fake plaintext row was written",
-        "step 4: send_message through CommandContext",
-        "recovered plaintext via workspace key: \"via CommandContext\"",
-        "No legacy code path was used",
-    ] {
-        assert!(
-            stdout.contains(marker),
-            "expected stdout to contain `{marker}`; got:\n{stdout}"
-        );
-    }
+    assert!(
+        stdout.contains("match --db PATH create-workspace --public-key HEX64 --name NAME")
+            && stdout.contains("match --db PATH workspaces")
+            && stdout.contains("match --db PATH count")
+            && stdout.contains("target core runtime facade")
+            && !stdout.contains("legacy"),
+        "top-level help should describe the target app boundary; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn match_without_a_command_does_not_enter_legacy_cli() {
+    let output = match_cli(&[]);
+
+    assert!(
+        !output.status.success(),
+        "missing command should fail with top-level usage"
+    );
+    let stderr = cli_harness::stderr(&output);
+    assert!(
+        stderr.contains("missing command")
+            && stderr.contains("match --db PATH create-workspace --public-key HEX64 --name NAME")
+            && !stderr.contains("legacy"),
+        "missing command should be rejected at the target app boundary; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn match_demo_is_rejected_at_the_product_boundary() {
+    let output = match_cli(&["demo"]);
+
+    assert!(
+        !output.status.success(),
+        "`match demo` must not remain as a hidden smoke path"
+    );
+    let stderr = cli_harness::stderr(&output);
+    assert!(
+        stderr.contains("command `demo` is not ported to the target runtime yet")
+            && stderr.contains("match --db PATH create-workspace --public-key HEX64 --name NAME")
+            && !stderr.contains("walkthrough"),
+        "`match demo` should be rejected by the real CLI boundary; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn match_create_workspace_uses_target_runtime() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = temp_db(&temp, "match.db");
+    let public_key = "0707070707070707070707070707070707070707070707070707070707070707";
+
+    let stdout = assert_success(match_cli(&[
+        "--db",
+        &db,
+        "create-workspace",
+        "--public-key",
+        public_key,
+        "--name",
+        "Runtime CLI",
+    ]));
+
+    let workspace_id = line_value(&stdout, "workspace_id");
+    assert_eq!(workspace_id.len(), 64);
+    assert!(stdout.contains("name: Runtime CLI"));
+
+    let workspaces = assert_success(match_cli(&["--db", &db, "workspaces"]));
+    assert!(
+        workspaces.contains("workspaces: 1")
+            && workspaces.contains(&workspace_id)
+            && workspaces.contains(&format!("public_key={public_key} name=Runtime CLI")),
+        "created workspace should be visible through the real read command; got:\n{workspaces}"
+    );
+}
+
+#[test]
+fn match_workspace_reads_use_target_rows() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = temp_db(&temp, "match.db");
+
+    assert_success(match_cli(&[
+        "--db",
+        &db,
+        "create-workspace",
+        "--public-key",
+        "0101010101010101010101010101010101010101010101010101010101010101",
+        "--name",
+        "Alpha",
+    ]));
+    assert_success(match_cli(&[
+        "--db",
+        &db,
+        "create-workspace",
+        "--public-key",
+        "0202020202020202020202020202020202020202020202020202020202020202",
+        "--name",
+        "Beta",
+    ]));
+
+    let workspaces = assert_success(match_cli(&["--db", &db, "workspaces"]));
+    assert!(
+        workspaces.contains("workspaces: 2")
+            && workspaces.contains(
+                "public_key=0101010101010101010101010101010101010101010101010101010101010101 name=Alpha"
+            )
+            && workspaces.contains(
+                "public_key=0202020202020202020202020202020202020202020202020202020202020202 name=Beta"
+            ),
+        "workspace list should be decoded from target rows; got:\n{workspaces}"
+    );
+
+    let count = assert_success(match_cli(&["--db", &db, "count"]));
+    assert_eq!(count.trim(), "workspace_rows: 2");
 }

@@ -11,7 +11,7 @@ use crate::core::wire;
 
 use super::fact::ContentFileDeletionFact;
 
-pub const TYPE_CONTENT_FILE_DELETION: u8 = 152;
+pub const TYPE_CONTENT_FILE_DELETION: u8 = 53;
 
 pub const CONTENT_FILE_DELETION_BYTES: usize = 1 + 32 + 8 + 32 + 32;
 

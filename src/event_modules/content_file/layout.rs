@@ -19,7 +19,7 @@ use crate::core::wire;
 
 use super::fact::{ContentFileFact, FILE_ROOT_HASH_BYTES};
 
-pub const TYPE_CONTENT_FILE: u8 = 160;
+pub const TYPE_CONTENT_FILE: u8 = 54;
 pub const HEADER_BYTES: usize = 1 + 32 + 8 + 32 + 32 + 32 + 8 + 4 + 4 + FILE_ROOT_HASH_BYTES + 4;
 
 pub fn encode_fact(fact: &ContentFileFact) -> Result<Vec<u8>, String> {

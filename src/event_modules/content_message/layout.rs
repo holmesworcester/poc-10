@@ -14,7 +14,7 @@ use crate::core::wire;
 
 use super::fact::ContentMessageFact;
 
-pub const TYPE_CONTENT_MESSAGE: u8 = 151;
+pub const TYPE_CONTENT_MESSAGE: u8 = 50;
 
 pub const CONTENT_MESSAGE_BYTES: usize = 1 + 32 + 32 + 8 + 32 + 8 + 32 + 32;
 

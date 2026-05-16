@@ -13,6 +13,7 @@ use crate::core::facts::{Fact, FactScope};
 
 use super::fact::ConnectionResponseFact;
 use super::layout;
+use crate::event_modules::connection_ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 use crate::event_modules::connection_request::fact::ConnectionRequestFact;
 use crate::event_modules::identity_endpoint::fact::EndpointFact;
 use crate::event_modules::identity_invite::fact::InviteSecretFact;
@@ -44,6 +45,12 @@ pub struct BuildResponderResponse<'a> {
 pub struct BuildResponderResult {
     pub fact: Fact,
     pub response: ConnectionResponseFact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandshakeMaterial {
+    pub handshake_hash: [u8; 32],
+    pub connection_secret: [u8; 32],
 }
 
 /// Compute the responder handshake schedule and emit the canonical
@@ -78,17 +85,14 @@ pub fn build_responder_response(
     );
     let es = x25519_diffie_hellman(&endpoint.secret, &request.initiator_ephemeral_public_key);
 
-    let transcript = public_transcript(request_id, request, &responder_ephemeral_public_key);
-
-    let mut ikm = Vec::with_capacity(32 * 4);
-    ikm.extend_from_slice(&invite.bootstrap_secret);
-    ikm.extend_from_slice(&ee);
-    ikm.extend_from_slice(&es);
-    ikm.extend_from_slice(&request.bootstrap_hash);
-    let response_key = crypto::hkdf_sha256_key(&ikm, HANDSHAKE_PURPOSE, &transcript)?;
-    let handshake_hash = crypto::hash(&transcript);
-    let connection_secret =
-        crypto::hkdf_sha256_key(&response_key, CONNECTION_SECRET_PURPOSE, &handshake_hash)?;
+    let material = material(
+        request_id,
+        request,
+        invite,
+        &responder_ephemeral_public_key,
+        ee,
+        es,
+    )?;
 
     let response = ConnectionResponseFact {
         from_endpoint: endpoint.endpoint,
@@ -98,12 +102,86 @@ pub fn build_responder_response(
         initiator_ephemeral_secret_event_id: request.initiator_ephemeral_secret_event_id,
         responder_ephemeral_secret_event_id,
         responder_ephemeral_public_key,
-        handshake_hash,
-        connection_secret,
+        handshake_hash: material.handshake_hash,
+        connection_secret: material.connection_secret,
     };
     let bytes = layout::encode_fact(&response)?;
     let fact = Fact::new(FactScope::Local, created_at_ms, bytes);
     Ok(BuildResponderResult { fact, response })
+}
+
+pub fn initiator_material(
+    request_id: [u8; 32],
+    request: &ConnectionRequestFact,
+    invite: &InviteSecretFact,
+    initiator_ephemeral: &ConnectionEphemeralSecretFact,
+    responder_ephemeral_public_key: &[u8; 32],
+) -> Result<HandshakeMaterial, String> {
+    if initiator_ephemeral.owner_endpoint != request.from_endpoint {
+        return Err(
+            "connection response initiator ephemeral owner does not match request".to_string(),
+        );
+    }
+    if initiator_ephemeral.ephemeral_public_key != request.initiator_ephemeral_public_key {
+        return Err(
+            "connection response initiator ephemeral public key does not match request".to_string(),
+        );
+    }
+    let ee = x25519_diffie_hellman(
+        &initiator_ephemeral.ephemeral_private_key,
+        responder_ephemeral_public_key,
+    );
+    let es = x25519_diffie_hellman(
+        &initiator_ephemeral.ephemeral_private_key,
+        &request.to_endpoint,
+    );
+    material(
+        request_id,
+        request,
+        invite,
+        responder_ephemeral_public_key,
+        ee,
+        es,
+    )
+}
+
+pub fn public_handshake_hash(
+    request_id: [u8; 32],
+    request: &ConnectionRequestFact,
+    responder_ephemeral_public_key: &[u8; 32],
+) -> [u8; 32] {
+    crypto::hash(&public_transcript(
+        request_id,
+        request,
+        responder_ephemeral_public_key,
+    ))
+}
+
+fn material(
+    request_id: [u8; 32],
+    request: &ConnectionRequestFact,
+    invite: &InviteSecretFact,
+    responder_ephemeral_public_key: &[u8; 32],
+    ee: [u8; 32],
+    es: [u8; 32],
+) -> Result<HandshakeMaterial, String> {
+    if invite.bootstrap_hash != request.bootstrap_hash {
+        return Err("connection handshake invite secret does not match request".to_string());
+    }
+    let transcript = public_transcript(request_id, request, responder_ephemeral_public_key);
+    let mut ikm = Vec::with_capacity(32 * 4);
+    ikm.extend_from_slice(&invite.bootstrap_secret);
+    ikm.extend_from_slice(&ee);
+    ikm.extend_from_slice(&es);
+    ikm.extend_from_slice(&request.bootstrap_hash);
+    let response_key = crypto::hkdf_sha256_key(&ikm, HANDSHAKE_PURPOSE, &transcript)?;
+    let handshake_hash = crypto::hash(&transcript);
+    let connection_secret =
+        crypto::hkdf_sha256_key(&response_key, CONNECTION_SECRET_PURPOSE, &handshake_hash)?;
+    Ok(HandshakeMaterial {
+        handshake_hash,
+        connection_secret,
+    })
 }
 
 fn public_transcript(

@@ -15,6 +15,7 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::event_modules::identity_matchers;
 
 use super::layout;
 use super::rows::invite_secret_row;
@@ -39,6 +40,7 @@ impl Projector for InviteSecretProjector {
         }
         let invite_secret = layout::decode_fact(&fact.bytes)?;
         Ok(ProjectionOutput::new()
+            .offer(identity_matchers::invite_secret_offer(fact.id))
             .intent(AtomicIntent::PutRow(invite_secret_row(&invite_secret)?).into_intent()))
     }
 }

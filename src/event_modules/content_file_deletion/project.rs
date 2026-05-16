@@ -10,9 +10,7 @@
 //!   endpoint_shared signer to the named author. The target signed-fact
 //!   envelope and identity dependency context are separate event modules and
 //!   not consulted here.
-//! - Legacy enqueues a `purge_instructions` row tagged `PurgeKind::File` into
-//!   the content-purge queue. The target purge queue lives in a separate
-//!   handler module and is deferred.
+//! - Physical cleanup orchestration is handled outside this row projector.
 //! - Legacy emits a context update labelling the target file id with the
 //!   deletion author. The target context-update channel is not yet wired into
 //!   the projection pipeline and is deferred.
@@ -20,6 +18,8 @@
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+
+use crate::event_modules::content_message::matchers;
 
 use super::layout;
 use super::rows::{file_deletion_row, FileDeletionRow};
@@ -40,6 +40,8 @@ impl Projector for ContentFileDeletionProjector {
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         let deletion = layout::decode_fact(&fact.bytes)?;
+        let scope = matchers::workspace_scope(deletion.workspace_id);
+        require_fact_scope(fact, &scope)?;
         let row = file_deletion_row(FileDeletionRow {
             workspace_id: deletion.workspace_id,
             target_file_id: deletion.target_file_id,
@@ -47,6 +49,21 @@ impl Projector for ContentFileDeletionProjector {
             created_at_ms: deletion.created_at_ms,
             author_user_id: deletion.author_user_id,
         })?;
-        Ok(ProjectionOutput::new().intent(AtomicIntent::PutRow(row).into_intent()))
+        Ok(ProjectionOutput::new()
+            .offer(matchers::deletion_offer(
+                fact.id,
+                scope,
+                deletion.target_file_id,
+                deletion.author_user_id,
+            ))
+            .intent(AtomicIntent::PutRow(row).into_intent()))
+    }
+}
+
+fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {
+    if &fact.scope == expected {
+        Ok(())
+    } else {
+        Err("content file deletion fact scope does not match body workspace".to_string())
     }
 }

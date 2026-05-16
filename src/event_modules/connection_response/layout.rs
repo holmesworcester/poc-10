@@ -8,7 +8,7 @@ use crate::core::wire;
 
 use super::fact::ConnectionResponseFact;
 
-pub const TYPE_CONNECTION_RESPONSE: u8 = 43;
+pub const TYPE_CONNECTION_RESPONSE: u8 = 44;
 pub const FACT_BYTES: usize = 1 + 32 * 9;
 
 pub fn encode_fact(fact: &ConnectionResponseFact) -> Result<Vec<u8>, String> {

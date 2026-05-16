@@ -1,82 +1,263 @@
-# Current Plan
+# Poc-10 Cutover Checklist
 
-This is the short handoff plan for the poc-10 rewrite. The destination design
-is `new_architecture.md`; durable encryption rules are in `encryption.md`;
-dep-aware sync notes are in `negentropy_recs.md`.
+This is the working checklist for finishing the poc-10 rewrite. The destination
+architecture is `new_architecture.md`; encryption/key-rotation rules are in
+`encryption.md`. Reviewers should use this as the acceptance list and fail the
+work on any fake or missing behavior.
 
-## Current State
+## Review Loop
 
-- Branch: `new-architecture`.
-- Product-facing binary: `match`.
-- Target code lives in `src/core`, `src/event_modules`, `src/handlers`,
-  `src/commands`, `src/match_app.rs`, and `src/demo.rs`.
-- Legacy production code is contained in `src/legacy/` so it can be deleted as
-  one island after cutover.
-- Full `cargo test` passed after the `match` binary rename, command-module
-  move, flat handler layout, `WakeLoop` rename, and legacy island move.
-- Two target architecture guardrails remain intentionally ignored until old
-  worker queues and projector row/label output are fully replaced.
+- [ ] A reviewer has checked this checklist against the current tree.
+- [ ] Every review finding is either fixed or represented by a failing/ignored
+  guardrail test with the exact blocker named.
+- [ ] No item is marked done because a comment says it is deferred. Comments are
+  useful only when paired with a concrete test or a listed blocker below.
+- [ ] If a projector, handler, command, or CLI path is fake, row-only when
+  context is required, or looser than poc-8, add the missing behavior or a
+  failing test before continuing.
+- [ ] The loop repeats until review says target poc-10 is real,
+  poc-8-equivalent where claimed, and free of legacy holdovers.
 
-## Recent Structural Decisions
+Reviewer instructions:
 
-- Use "facts" as the conceptual model.
-- Wake scheduling now lives in `WakeLoop`.
-- The executable is `match` because context matching is central and topo-sort is
-  no longer the mental model.
-- Concrete command constructors moved into event modules:
-  `identity_workspace::create::create_workspace` and
-  `sealed_message::create::send_message`.
-- `src/commands` now only exposes `CommandContext` and `CommandOutput`.
-- Handlers are flat files under `src/handlers/<handler>.rs`; handler
-  subdirectories are forbidden.
-- `src/legacy/` contains old app/daemon/protocol/worker code. New target work
-  should not add behavior there.
-- `src/legacy/round_robin.rs` is only the old daemon scheduler loop. It cannot
-  be removed until `match start/stop/reset` no longer depend on legacy daemon
-  scheduling.
+1. Read this checklist first.
+2. Inspect production code, not only tests.
+3. Compare target behavior with the corresponding poc-8 projector, command,
+   worker, or CLI test.
+4. Fail on hidden dumping grounds, unbounded handlers, fake response paths,
+   placeholder crypto/transit/sync behavior, missing need/offer relationships,
+   or missing authorization checks.
+5. Report findings as file paths plus required fixes. Prefer concrete failing
+   tests over prose.
 
-## Target Runtime Cutover
+## Source Shape
 
-The next production-path work is a target runtime facade that owns:
+- [x] Product binary is `match`, not `topo`, `demo`, or `smoke`.
+- [x] Legacy source island has been removed from the target tree.
+- [x] Root `src/commands.rs`, `src/event_modules.rs`, and `src/handlers.rs` are
+  gone; registries live under their directories.
+- [ ] No `src/workers`, worker catalog, round-robin scheduler, ready queue,
+  blocked queue, recently-valid queue, or pending-reprojection queue remains.
+- [ ] Runtime code is consolidated: core owns the generic runtime/app facade;
+  protocol supplies the registry; event modules and handlers do not know the
+  product entrypoint.
+- [ ] Event modules use consistent files:
+  `fact.rs`, `layout.rs`, `create.rs`, `commands.rs`, `queries.rs`,
+  `matchers.rs`, `project.rs`, `rows.rs`, and module-specific small files only
+  when they make the projector clearer.
+- [ ] No hidden `project/` subtrees remain unless explicitly justified; split
+  projector families should use clear flat names.
+- [ ] No dumping-ground files exist. `mod.rs`, broad `schema.rs`, broad
+  `codec.rs`, and broad `cli.rs` are not allowed as logic sinks.
+- [ ] Schema is declared only in the three DSL files:
+  `src/core/schema.p8sql`, `src/event_modules/schema.p8sql`,
+  `src/handlers/schema.p8sql`.
 
-- store opening from the three schema files.
-- `WakeLoop` load/save.
-- projector registry.
-- context matcher registry.
-- handler registry.
-- `submit_fact` and `submit_intent`.
-- bounded projection drain.
-- bounded deferred intent dispatch.
-- command output submission and draining.
+## Projector Contract
 
-`match_app` should then call that facade instead of
-`legacy::app::run::<legacy::protocol::Protocol>`.
+- [ ] Every target projector reads like: decode, validate local invariants,
+  declare needs, inspect supplied context, validate context authority, emit
+  offers/intents.
+- [ ] A projector that needs another fact emits a `ContextNeed` and returns
+  without materializing state until matching context is supplied.
+- [ ] A projector that can be re-run by later updates keeps standing needs for
+  those updates.
+- [ ] Projectors never query SQLite directly and never call handlers, workers,
+  network code, or other stateful services.
+- [ ] Projectors may use `core::crypto` for deterministic verification,
+  signing/envelope checks, and encryption/decryption that is genuinely part of
+  projection.
+- [ ] Projectors return only needs, offers, and intents. Atomic row writes are
+  intents; deferred work is an intent handled elsewhere.
+- [ ] Root/local facts with no context requirements are explicitly identified;
+  every other row-only projector is suspect until proven against poc-8.
 
-## Hard Behavior Still Needed
+## Identity Projectors
 
-- Full receive path for signed key-wrap facts:
-  transit frame open -> signed envelope validation -> key-wrap projector ->
-  unwrap/materialize intents -> key coverage offers.
-- Real target transit packaging and network send:
-  connection send intent -> transit frame creation -> network send intent ->
-  send acknowledgement.
-- Durable sync index/checkpoint facts or handler state, replacing the legacy
-  in-memory `SyncIndex`.
-- Dep-aware sync range closure that includes out-of-range dependencies and key
-  offers for in-range facts.
-- Purge split:
-  exact content purge, cascade discovery, secret retirement, sync-index purge,
-  and expiry/floor handling as bounded intents/handlers.
-- Projection/open path for encrypted content using supplied key context without
-  introducing an open-message worker.
+- [ ] Workspace projection matches poc-8 root workspace behavior.
+- [ ] User-invite projection validates workspace/admin authority through
+  need/offer context and signed authority where poc-8 required it.
+- [ ] User projection waits for matching user-invite key context and checks
+  workspace and public-key binding.
+- [ ] Admin projection waits for workspace/admin/user context and enforces
+  bootstrap and delegated admin rules from poc-8.
+- [ ] Device-invite projection waits for user and optional user-invite context,
+  checks workspace/user/key binding, and emits the invite-key offer used by
+  endpoint_shared.
+- [ ] Invite-server projection waits for workspace/admin context, checks
+  authority, and emits the invite-server key offer used by endpoint_shared.
+- [ ] Endpoint-shared projection is not row-only: it waits for either
+  device-invite-key or invite-server-key context, verifies signer/public-key,
+  workspace, user authority, and role, then writes endpoint rows and membership
+  rows.
+- [ ] Invite-accepted projection waits for invite-secret context and produces
+  the real local state/intents needed for bootstrap.
+- [ ] Signed envelope validation is integrated for every identity fact that was
+  signed in poc-8; raw inner payload projection must not silently admit shared
+  authority facts.
 
-## Cleanup Rules
+## Content Projectors
 
-- Do not add new target behavior under `src/legacy/`.
-- Do not add broad files named `runtime`, `state`, `schema.rs`, `codec.rs`, or
-  `cli.rs`.
-- Do not add handler subdirectories.
-- Do not let intents become logic sinks. Intents name work; handlers perform one
-  bounded effect; event modules own protocol fact construction and validation.
-- Keep docs short and current. Delete historical plans instead of preserving
-  stale architecture guidance.
+- [ ] Content message projection validates signer endpoint/user/workspace
+  authority, deterministic leaf binding, disappearance setting, and deletion
+  updates from poc-8.
+- [ ] Message deletion projection waits for target message and author context;
+  it only materializes if the deletion author is authorized by poc-8 rules.
+- [ ] File projection waits for parent message, deletion updates, and validates
+  file metadata/blob invariants from poc-8.
+- [ ] File-slice projection waits for parent file context and validates slice
+  range/proof/hash rules from poc-8.
+- [ ] File deletion projection waits for target file and author/admin context
+  and emits purge/cascade intents according to poc-8 behavior.
+- [ ] Reaction projection waits for target message context, deletion updates,
+  signer/author context, and does not use placeholder deletion layouts.
+- [ ] Content-event projection is either removed if redundant or made fully real
+  with its poc-8 signature and membership checks.
+
+## Encryption And Key Healing
+
+- [ ] Encryption projector layout is consistent and easy to review.
+- [ ] Recipient-key projection emits the recipient offer, supersession need, and
+  proactive wrap intents only for non-superseded keys.
+- [ ] Recipient-key rotation does not rewrap old frontiers for superseded keys.
+- [ ] Local recipient-key projection waits for recipient context and emits purge
+  intents when superseded.
+- [ ] Removal-frontier projection checks admin/root authority and emits frontier
+  and sync offers.
+- [ ] Local key-secret and history-node projection wait for frontier/source
+  context, validate retained path structure, and emit secret coverage offers.
+- [ ] Key-request projection waits for recipient/frontier/source/signer context
+  and materializes deterministic/idempotent wraps.
+- [ ] Signed key-wrap receive path is complete: signed envelope validation,
+  signer authority, recipient/frontier context, key-wrap row, sync key offer,
+  local unwrap intent when local recipient material exists.
+- [ ] Key unwrap writes only local secret facts/offers authorized by the signed
+  key wrap.
+- [ ] Concurrent join during removal heals through deterministic key requests.
+- [ ] Post-deletion retained path key requests can wrap path keys without
+  resurrecting a purged frontier root.
+- [ ] Key amplification is bounded: no request entropy in wrap identity, no
+  repeated wraps for acknowledged/superseded/stable context.
+- [ ] Purging of recipient material is event-triggered by deletion/retirement
+  facts, not by time-based background GC.
+
+## Transit And Connections
+
+- [ ] Connection request/response projectors wait for invite, ephemeral secret,
+  and receive-metadata context as required by poc-8.
+- [ ] Transit-received metadata is modeled as a local fact/about-context offer
+  so state can track where transit events came from.
+- [ ] Transit unwrap is real: inbound network frame -> receive_transit intent ->
+  authenticated open -> fact admission plus transit_received provenance fact.
+- [ ] Transit wrap is real: send-on-connection intent -> fixed-size transit
+  frame -> network_send intent -> durable send acknowledgement.
+- [ ] Connection handlers are bounded and idempotent; they do not define fact
+  wire formats, crypto-shaped fake facts, or protocol projection state.
+- [ ] Network handlers treat transit frames as opaque bytes.
+
+## Sync And Dep-Aware Range Closure
+
+- [ ] Sync compare projection writes the row and emits a response intent when
+  `response_requested=true`.
+- [ ] Sync response handler computes real compare/have/need facts from bounded
+  durable range/index state; it must not fake summaries.
+- [ ] Sync have/need projectors emit real follow-up intents/offers as needed,
+  not only rows if poc-8 responded transitively.
+- [ ] Dep-aware sync range closure includes all out-of-range dependency facts
+  needed to project in-range facts.
+- [ ] Dep-aware sync also includes relevant key-wrap offers for encrypted
+  in-range facts so encrypted messages display without day-scale delay.
+- [ ] Sync state is durable fact/handler state, not a mutable global `SyncIndex`
+  escape hatch.
+- [ ] Purge and sync coordinate so purged canonical bytes are not reintroduced,
+  while retained path keys needed for surviving ciphertext can still heal.
+
+## Purge, Retention, And Forward Secrecy
+
+- [ ] Content purge is represented as explicit purge/cascade/retirement intents,
+  all idempotent and event-triggered.
+- [ ] Purge handlers perform physical canonical-byte deletion and local row
+  cleanup after the intent is valid.
+- [ ] Secret retirement happens after purge commits and does not remove retained
+  path keys still needed by surviving ciphertext.
+- [ ] Disappearing-message expiry/floor behavior is represented as facts/intents,
+  not implicit worker scans.
+- [ ] Forward secrecy tests prove deleted frontiers cannot be re-shared while
+  retained path keys can still satisfy valid requests.
+
+## Commands And CLI
+
+- [ ] Commands live with their event modules.
+- [ ] `create.rs` constructs deterministic facts from explicit params.
+- [ ] `commands.rs` owns user-facing workflow composition and may use
+  `CommandContext`; automatic/reactive behavior must use intents and handlers.
+- [ ] `queries.rs` owns read-only projected-state lookups.
+- [ ] `cli.rs` only parses user input and formats output.
+- [ ] Commands return ids/output only after submitted facts/intents are drained
+  enough for read-your-writes behavior.
+- [ ] Black-box CLI tests use the real `match` binary and real daemon/runtime
+  path. They do not seed rows, call workers, or assert legacy queue state.
+- [ ] First make poc-8 CLI suites true black-box behavior tests, prove them
+  green there, then port those contracts to poc-10 unchanged except for harness
+  and binary-name changes.
+- [ ] Every non-ignored poc-8 black-box behavior test is ported unchanged except
+  for harness and binary-name changes.
+
+## Apples-To-Apples Performance
+
+- [ ] Use `scripts/perf_compare.py` as the concrete runner. It writes measured
+  JSON/Markdown results under ignored `target/perf-compare/` and records skipped
+  rows when a worktree lacks the inspected equivalent.
+- [ ] Smoke command:
+  `python3 scripts/perf_compare.py --keep-going`
+- [ ] 100k command:
+  `python3 scripts/perf_compare.py --keep-going --messages 100000 --sync-messages 100000 --display-messages 10000 --cascade-events 50000`
+- [ ] Perf harness can run the same workload against `/home/holmes/poc-7`,
+  `/home/holmes/poc-8`, and this poc-10 tree without changing workload
+  semantics per repo.
+- [ ] 100,000-message projection benchmark records wall time, rows/facts
+  produced, database size, and peak memory if available.
+- [ ] Sync perf benchmark records time to converge two peers with 100,000
+  messages and reports bytes/frames/facts transferred where available.
+- [ ] Encrypted-message display-latency benchmark includes messages whose deps
+  and key offers are outside the main sync range, so dep-aware sync/key healing
+  is tested instead of only local projection.
+- [ ] Topo cascade benchmark covers the old cascade workload and reports
+  projection/wake counts plus wall time for poc-7, poc-8, and poc-10.
+- [ ] Harness has a small smoke mode for CI and a documented full command for
+  100,000-message runs. It must never print invented comparison numbers;
+  missing metrics are reported as unavailable.
+- [ ] Treat the poc-7 sync result as the daemon baseline and poc-8/poc-10 sync
+  results as the shared black-box CLI scenario until a single common sync
+  harness exists in all three worktrees.
+- [ ] Compare poc-8 and poc-10 projection output directly; poc-7 has no
+  equivalent 100,000-message projection test in the inspected tree.
+- [ ] Perf results are checked into a dated report only after a real local run,
+  with machine/runtime details.
+
+## Guardrails And Tests
+
+- [ ] `cargo fmt --check`
+- [ ] `cargo test --no-run`
+- [ ] `cargo test`
+- [ ] `cargo test --test poc10_architecture_boundary_test`
+- [ ] `cargo test --test poc10_intent_cleanliness_test`
+- [ ] `cargo test --test poc10_protocol_registry_test`
+- [ ] `cargo test --test poc10_cutover_todo_test -- --ignored`
+- [ ] No ignored poc-10 guardrail remains unless it names a real blocker in this
+  checklist.
+- [ ] Projector tests that are not black-box behavior tests live with the module
+  they test, or there is a tracked migration item explaining why they remain in
+  `tests/`.
+
+## Current Known Blockers
+
+- [ ] Endpoint-shared projection still needs the full signed/device-invite and
+  invite-server authority path.
+- [ ] Sync compare response intent exists, but real bounded range-index response
+  state is not complete yet.
+- [ ] Several content/encryption projectors still advertise parity gaps in
+  comments; each must become real behavior or a failing guardrail.
+- [ ] Black-box poc-8 CLI suites still contain legacy-worker vocabulary; first
+  clean and prove the poc-8 contracts, then port them to the real `match`
+  runtime.

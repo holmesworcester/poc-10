@@ -1,1184 +1,470 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
-use topo::core::store::Store;
-use topo::legacy::protocol::event_modules::content::content_event;
-use topo::legacy::protocol::event_modules::identity::{endpoint, endpoint_shared, workspace};
-use topo::legacy::protocol::event_modules::rows::{self as event_schema, ContextUpdate};
-use topo::legacy::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
-use topo::legacy::protocol::event_modules::worker::{
-    self, CommandOutput, EventRegistry, EventWithContext, ProjectionDecision, ProjectionOutput,
-};
-use topo::legacy::protocol::event_modules::Modules;
-use topo::legacy::protocol::Protocol;
-use topo::legacy::workers::queue_rows as worker_rows;
-use topo::legacy::workers::{dependency_unblock, event_admission, event_projection, sync};
+use topo::core::context::{ContextNeed, ContextOffer, Role, Selector};
+use topo::core::facts::{Fact, FactId, FactScope};
+use topo::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
+use topo::core::intents::{Intent, IntentExecution, IntentKind};
+use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use topo::core::wake_loop::WakeLoop;
 
 #[test]
-fn command_admission_returns_event_ids_for_chaining() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("worker.db")).unwrap();
-    let modules = Modules::new();
-    let (workspace_id, endpoint_shared_id, signing_secret) = install_local_content_signer(&store);
+fn target_admission_tracks_fact_ids_and_drains_local_batch_directly() {
+    let facts = vec![fact("batch-a", 1), fact("batch-b", 2), fact("batch-c", 3)];
+    let proposed_ids = facts.iter().map(|fact| fact.id).collect::<Vec<_>>();
+    let mut bus = WakeLoop::new();
 
-    let output = content_event::commands::generate(
-        workspace_id,
-        endpoint_shared_id,
-        signing_secret,
-        1,
-        3,
-        64,
-    )
-    .unwrap();
-    let proposed_ids = output
-        .events
-        .iter()
-        .map(|event| {
-            assert_eq!(event.event_id(), event_id(&event.record().canonical_bytes));
-            event.event_id()
-        })
-        .collect::<Vec<_>>();
-    let (_, report) = worker::run(&store, &modules, output).unwrap();
-
-    assert_eq!(report.event_ids, proposed_ids);
-    for event_id in report.event_ids {
-        assert!(event_schema::has_shared_event(&store, &event_id).unwrap());
+    for fact in facts {
+        assert!(bus.submit_fact(fact.clone()));
+        assert!(bus.has_fact(&fact.id));
     }
+
+    let projector = CountingProjector::default();
+    let report = bus.drain(&projector, &[], 10).expect("drain batch");
+
+    assert_eq!(report.projections, proposed_ids.len());
+    assert_eq!(report.wakes, 0);
+    assert_eq!(report.intents, 0);
+    assert_eq!(bus.pending_len(), 0);
+    assert_eq!(projector.projected.borrow().as_slice(), proposed_ids);
+
+    let duplicate = fact("batch-a", 1);
+    assert!(!bus.submit_fact(duplicate));
+    let duplicate_report = bus
+        .drain(&projector, &[], 10)
+        .expect("duplicate fact has no work");
+    assert_eq!(duplicate_report.projections, 0);
 }
 
-/// Invariant: command-created events are already decoded `EventRecord`s, so
-/// local command admission must process the whole proposed batch directly
-/// instead of scheduling itself through daemon `canonical.in` one event at a
-/// time.
 #[test]
-fn command_admission_processes_local_batch_without_per_event_hook_ticks() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("command-batch.db")).unwrap();
-    let registry = BatchHookRegistry {
-        accepted_bytes: vec![
-            b"batch-a".to_vec(),
-            b"batch-b".to_vec(),
-            b"batch-c".to_vec(),
-        ],
-        hook_calls: Cell::new(0),
-    };
-    let records = registry
-        .accepted_bytes
-        .iter()
-        .map(|bytes| registry.record_for(bytes.clone()).unwrap())
-        .collect::<Vec<_>>();
+fn target_drain_limit_applies_only_one_pending_projection_batch() {
+    let mut bus = WakeLoop::new();
+    bus.submit_fact(fact("limit-a", 1));
+    bus.submit_fact(fact("limit-b", 2));
+    let projector = CountingProjector::default();
 
-    let (_, report) = worker::run(&store, &registry, CommandOutput::with_events((), records))
-        .expect("admit local command batch");
+    let first = bus.drain(&projector, &[], 1).expect("first limited drain");
+    assert_eq!(first.projections, 1);
+    assert_eq!(bus.pending_len(), 1);
+    assert_eq!(projector.projected.borrow().len(), 1);
 
-    assert_eq!(report.inserted_events, 3);
-    assert_eq!(report.applied_events, 3);
-    assert_eq!(registry.hook_calls.get(), 1);
+    let second = bus.drain(&projector, &[], 1).expect("second limited drain");
+    assert_eq!(second.projections, 1);
+    assert_eq!(bus.pending_len(), 0);
+    assert_eq!(projector.projected.borrow().len(), 2);
+}
+
+#[test]
+fn target_wake_loop_fetches_dependency_payload_before_reprojection() {
+    let role = role("dependency");
+    let matcher = ExactSelectorMatcher::new(role.clone());
+    let dep = fact("dependency-source", 1);
+    let child = fact("dependency-child", 2);
+    let projector = DependencyProjector::new(role, dep.id, child.id);
+    let mut bus = WakeLoop::new();
+
+    bus.submit_fact(child.clone());
+    let waiting = bus
+        .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+        .expect("child waits for dependency");
+    assert_eq!(waiting.projections, 1);
+    assert_eq!(waiting.wakes, 0);
+    assert_eq!(bus.context(&child.id).unwrap().needs.len(), 1);
+    assert!(projector.child_payloads.borrow().is_empty());
+
+    bus.submit_fact(dep.clone());
+    let resolved = bus
+        .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+        .expect("dependency wakes child");
+
+    assert_eq!(resolved.projections, 2);
+    assert_eq!(resolved.wakes, 1);
+    assert_eq!(projector.child_projections.get(), 2);
     assert_eq!(
-        store
-            .table_row_count(worker_rows::CANONICAL_IN)
-            .expect("count canonical in"),
-        0,
-        "local command batches should not enqueue themselves through canonical.in"
+        projector.child_payloads.borrow().as_slice(),
+        &[dep.bytes.clone()]
     );
-    assert_eq!(
-        store
-            .table_row_count(worker_rows::RECENTLY_VALID_EVENTS)
-            .expect("count recently valid"),
-        0,
-        "local command batches should consume their recently-valid unblock inputs"
-    );
-}
-
-fn install_local_content_signer(store: &Store) -> (EventId, EventId, [u8; 32]) {
-    let local = endpoint::commands::create_local_keypair().value;
-    store
-        .insert_table_rows(endpoint::projector::local_endpoint(local))
-        .expect("insert local endpoint");
-    let workspace_id = [1; 32];
-    let endpoint_shared_id = [2; 32];
-    let device_invite_id = [3; 32];
-    let event = endpoint_shared::types::EndpointSharedEvent {
-        created_at_ms: 1,
-        workspace_id,
-        user_authority_event_id: [4; 32],
-        endpoint_id: local.endpoint,
-        signing_public_key: local.signing_public_key,
-        endpoint_role: endpoint::types::EndpointRole::Device,
-        device_name: "worker".to_string(),
-    };
-    store
-        .insert_table_rows(vec![endpoint_shared::rows::endpoint_membership_row(
-            endpoint_shared_id,
-            device_invite_id,
-            &event,
-        )])
-        .expect("insert local membership");
-    (workspace_id, endpoint_shared_id, local.signing_secret)
+    assert!(bus.context(&child.id).is_none());
+    assert_eq!(bus.intents().len(), 1);
+    assert_eq!(bus.intents()[0].payload, dep.bytes);
 }
 
 #[test]
-fn worker_fetches_dependency_records_and_context_updates_before_projection() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("context.db")).unwrap();
-
-    let dep_bytes = b"dep".to_vec();
-    let child_bytes = b"child".to_vec();
-    let dep_id = event_id(&dep_bytes);
-    let child_id = event_id(&child_bytes);
-    let registry = ContextRegistry {
-        dep_id,
-        child_id,
-        dep_bytes: dep_bytes.clone(),
-        child_bytes: child_bytes.clone(),
-        child_saw_context: Cell::new(false),
-    };
-
-    let child = registry.record_for(child_bytes).unwrap();
-    let (_, child_report) = worker::run(
-        &store,
-        &registry,
-        CommandOutput::with_events((), vec![child]),
-    )
-    .unwrap();
-    assert_eq!(child_report.blocked_events, 1);
-    assert_eq!(child_report.applied_events, 0);
-
-    let dep = registry.record_for(dep_bytes).unwrap();
-    let (_, dep_report) =
-        worker::run(&store, &registry, CommandOutput::with_events((), vec![dep])).unwrap();
-    assert_eq!(dep_report.applied_events, 1);
-    assert!(registry.child_saw_context.get());
-
-    let drain = worker::run(&store, &registry, worker::DrainUntilIdle { batch_size: 10 }).unwrap();
-    assert_eq!(drain.applied_events, 0);
-}
-
-#[test]
-fn new_dependency_context_update_reprojects_already_applied_direct_dependents() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("context-update-wake-applied.db")).unwrap();
-
-    let dep_bytes = b"wake-dep".to_vec();
-    let child_bytes = b"wake-child".to_vec();
-    let updater_bytes = b"wake-updater".to_vec();
-    let dep_id = event_id(&dep_bytes);
-    let child_id = event_id(&child_bytes);
-    let updater_id = event_id(&updater_bytes);
-    let registry = ContextUpdateWakeRegistry {
-        dep_id,
-        child_id,
-        updater_id,
-        dep_bytes: dep_bytes.clone(),
-        child_bytes: child_bytes.clone(),
-        updater_bytes: updater_bytes.clone(),
-        child_projections: Cell::new(0),
-        child_saw_dependency_update: Cell::new(false),
-    };
-
-    let dep = registry.record_for(dep_bytes).unwrap();
-    let child = registry.record_for(child_bytes).unwrap();
-    let report = worker::run(
-        &store,
-        &registry,
-        worker::AdmitAndDrain {
-            output: CommandOutput::with_events((), vec![dep, child]),
-            batch_size: 10,
-        },
-    )
-    .expect("admit dep and child");
-    assert_eq!(report.admitted.applied_events, 2);
-    assert_eq!(report.drained.applied_events, 0);
-    assert_eq!(registry.child_projections.get(), 1);
-    assert!(!registry.child_saw_dependency_update.get());
-
-    let updater = registry.record_for(updater_bytes).unwrap();
-    let (_, update_report) = worker::run(
-        &store,
-        &registry,
-        CommandOutput::with_events((), vec![updater]),
-    )
-    .expect("admit updater");
-
-    assert_eq!(update_report.applied_events, 1);
-    assert_eq!(registry.child_projections.get(), 2);
-    assert!(registry.child_saw_dependency_update.get());
-    assert_eq!(
-        store
-            .table_row_count(worker_rows::PENDING_REPROJECTIONS)
-            .expect("count reprojections"),
-        0
+fn target_update_context_reprojects_applied_and_waiting_dependents() {
+    let base_role = role("base_dep");
+    let update_role = role("update_dep");
+    let base_matcher = ExactSelectorMatcher::new(base_role.clone());
+    let update_matcher = ExactSelectorMatcher::new(update_role.clone());
+    let dep = fact("update-base-dep", 1);
+    let child = fact("update-child", 2);
+    let blocked = fact("update-blocked-target", 3);
+    let updater = fact("update-signal", 4);
+    let missing_primary = [88; 32];
+    let projector = UpdateProjector::new(
+        base_role,
+        update_role,
+        dep.id,
+        child.id,
+        blocked.id,
+        missing_primary,
+        updater.id,
     );
+    let matchers = [
+        &base_matcher as &dyn ContextMatcher,
+        &update_matcher as &dyn ContextMatcher,
+    ];
+    let mut bus = WakeLoop::new();
+
+    bus.submit_fact(child.clone());
+    bus.submit_fact(blocked.clone());
+    bus.submit_fact(dep);
+    let initial = bus
+        .drain(&projector, &matchers, 10)
+        .expect("base dependency drain");
+
+    assert_eq!(initial.projections, 4);
+    assert_eq!(projector.child_projections.get(), 1);
+    assert!(!projector.child_saw_update.get());
+    assert_eq!(bus.context(&child.id).unwrap().needs.len(), 1);
+    assert_eq!(bus.context(&blocked.id).unwrap().needs.len(), 2);
+
+    bus.submit_fact(updater);
+    let updated = bus
+        .drain(&projector, &matchers, 10)
+        .expect("update wakes dependents");
+
+    assert_eq!(updated.projections, 3);
+    assert_eq!(updated.wakes, 2);
+    assert_eq!(projector.child_projections.get(), 2);
+    assert!(projector.child_saw_update.get());
+    assert_eq!(projector.blocked_retired.get(), 1);
+    assert!(bus.context(&blocked.id).is_none());
+    assert!(bus.intents().iter().any(|intent| {
+        intent.kind.as_str() == "retire_fact"
+            && intent.execution == IntentExecution::Deferred
+            && intent.key == blocked.id
+    }));
 }
 
 #[test]
-fn context_update_on_blocked_event_gives_projector_a_purge_pass() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("context-update-wake-blocked.db")).unwrap();
+fn target_failed_projection_never_surfaces_dependency_context_until_retry() {
+    let role = role("retry_dep");
+    let matcher = ExactSelectorMatcher::new(role.clone());
+    let dep = fact("retry-dependency", 1);
+    let child = fact("retry-child", 2);
+    let projector = DependencyProjector::new(role, dep.id, child.id);
+    projector.reject_dependency.set(true);
+    let mut bus = WakeLoop::new();
 
-    let target_bytes = b"blocked-target".to_vec();
-    let updater_bytes = b"blocked-updater".to_vec();
-    let missing_dep_id = [77; 32];
-    let target_id = event_id(&target_bytes);
-    let updater_id = event_id(&updater_bytes);
-    let registry = BlockedContextUpdateWakeRegistry {
-        target_id,
-        updater_id,
-        missing_dep_id,
-        target_bytes: target_bytes.clone(),
-        updater_bytes: updater_bytes.clone(),
-        target_purge_projected: Cell::new(false),
-    };
+    bus.submit_fact(child.clone());
+    bus.submit_fact(dep.clone());
+    let err = bus
+        .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+        .expect_err("dependency projection fails");
 
-    let target = registry.record_for(target_bytes).unwrap();
-    let (_, target_report) = worker::run(
-        &store,
-        &registry,
-        CommandOutput::with_events((), vec![target]),
-    )
-    .expect("admit blocked target");
-    assert_eq!(target_report.blocked_events, 1);
-    assert_eq!(target_report.applied_events, 0);
-
-    let updater = registry.record_for(updater_bytes).unwrap();
-    let (_, update_report) = worker::run(
-        &store,
-        &registry,
-        CommandOutput::with_events((), vec![updater]),
-    )
-    .expect("admit updater");
-
-    assert_eq!(update_report.applied_events, 1);
-    assert!(registry.target_purge_projected.get());
-    assert!(event_schema::context_updates(&store, &target_id)
-        .expect("updates")
-        .contains(&b"purge-projected".to_vec()));
-}
-
-#[test]
-fn event_pipeline_workers_claim_and_consume_explicit_queues() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("explicit-queues.db")).unwrap();
-
-    let dep_bytes = b"queued-dep".to_vec();
-    let child_bytes = b"queued-child".to_vec();
-    let dep_id = event_id(&dep_bytes);
-    let child_id = event_id(&child_bytes);
-    let registry = ContextRegistry {
-        dep_id,
-        child_id,
-        dep_bytes: dep_bytes.clone(),
-        child_bytes: child_bytes.clone(),
-        child_saw_context: Cell::new(false),
-    };
-
-    let child = registry.record_for(child_bytes).unwrap();
-    store
-        .insert_table_rows(vec![worker_rows::canonical_in_row(child, None)])
-        .expect("enqueue child canonical in");
-    let child_admission =
-        event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
-            .expect("admit queued child");
-    assert_eq!(child_admission.blocked_events, 1);
-    assert_eq!(
-        store
-            .table_row_count(worker_rows::CANONICAL_IN)
-            .expect("count canonical in"),
-        0,
-        "admission consumes claimed canonical in rows"
-    );
-
-    let dep = registry.record_for(dep_bytes).unwrap();
-    store
-        .insert_table_rows(vec![worker_rows::canonical_in_row(dep, None)])
-        .expect("enqueue dep canonical in");
-    let dep_admission =
-        event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
-            .expect("admit queued dependency");
-    assert_eq!(dep_admission.applied_events, 1);
-    assert_eq!(
-        store
-            .table_row_count(worker_rows::RECENTLY_VALID_EVENTS)
-            .expect("count recently valid"),
-        1,
-        "projection writes recently-valid unblock input"
-    );
-
-    let unblock = dependency_unblock::run(&store, dependency_unblock::Work::Drain { limit: 1 })
-        .expect("unblock child");
-    assert_eq!(unblock.unblocked_events, 1);
-    assert_eq!(
-        store
-            .table_row_count(worker_rows::RECENTLY_VALID_EVENTS)
-            .expect("count recently valid after unblock"),
-        0,
-        "dependency unblock consumes recently-valid rows"
-    );
-
-    let projected = event_projection::run(
-        &store,
-        &registry,
-        event_projection::Work::Drain { limit: 1 },
-    )
-    .expect("project child");
-    assert_eq!(projected.applied_events, 1);
-    assert!(registry.child_saw_context.get());
-}
-
-#[test]
-fn canonical_in_rejects_are_consumed_and_do_not_poison_later_work() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("rejected-event-in.db")).unwrap();
-
-    let bad_bytes = b"bad-event-in".to_vec();
-    let good_bytes = b"good-event-in".to_vec();
-    let registry = RejectThenAcceptRegistry {
-        bad_id: event_id(&bad_bytes),
-        good_id: event_id(&good_bytes),
-        bad_bytes: bad_bytes.clone(),
-        good_bytes: good_bytes.clone(),
-        good_applied: Cell::new(false),
-    };
-
-    let bad = registry.record_for(bad_bytes).unwrap();
-    store
-        .insert_table_rows(vec![worker_rows::canonical_in_row(bad, None)])
-        .expect("enqueue rejected canonical in");
-    let err = event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
-        .expect_err("bad event should reject");
-    assert!(err.contains("intentional projection reject"), "{err}");
-    assert_eq!(
-        store
-            .table_row_count(worker_rows::CANONICAL_IN)
-            .expect("count canonical in after reject"),
-        0,
-        "rejected canonical in rows must be consumed"
-    );
-
-    let good = registry.record_for(good_bytes).unwrap();
-    store
-        .insert_table_rows(vec![worker_rows::canonical_in_row(good, None)])
-        .expect("enqueue good canonical in");
-    let report = event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
-        .expect("good event should not be blocked by rejected input");
-    assert_eq!(report.applied_events, 1);
-    assert!(registry.good_applied.get());
-}
-
-#[test]
-fn sync_worker_consumes_applied_shared_event_queue() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("sync-index-queue.db")).unwrap();
-    let modules = Modules::new();
-
-    let signer_private_key = [11; 32];
-    let signer_public_key = topo::core::crypto::ed25519_public_key(&signer_private_key);
-    let output = workspace::commands::create(workspace::commands::CreateWorkspace {
-        created_at_ms: 1,
-        public_key: signer_public_key,
-        signer_private_key,
-        disappearing_ttl_minutes: 0,
-        name: "queue-index".to_string(),
-    })
-    .unwrap();
-    worker::run(&store, &modules, output).expect("admit shared event");
-    // create-workspace emits two shared events: the workspace event and an
-    // initial disappearing_messages_setting event.
-    assert_eq!(
-        store
-            .table_row_count(worker_rows::APPLIED_SHARED_EVENTS)
-            .expect("count sync index queue"),
-        2
-    );
-
-    let index = topo::legacy::protocol::event_modules::sync::SyncIndex::default();
-    let output = sync::run(&store, &index, sync::Work::DrainIndex { limit: 16 })
-        .expect("drain sync index queue");
-    let sync::Output::Indexed(report) = output else {
-        panic!("sync worker returned non-index output");
-    };
-    assert_eq!(report.indexed_events, 2);
-    assert_eq!(
-        store
-            .table_row_count(worker_rows::APPLIED_SHARED_EVENTS)
-            .expect("count sync index queue after drain"),
-        0
-    );
-}
-
-#[test]
-fn admit_and_drain_admits_command_output_then_drains_ready_events() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("admit-and-drain.db")).unwrap();
-
-    let dep_bytes = b"admit-drain-dep".to_vec();
-    let child_bytes = b"admit-drain-child".to_vec();
-    let dep_id = event_id(&dep_bytes);
-    let child_id = event_id(&child_bytes);
-    let registry = ContextRegistry {
-        dep_id,
-        child_id,
-        dep_bytes: dep_bytes.clone(),
-        child_bytes: child_bytes.clone(),
-        child_saw_context: Cell::new(false),
-    };
-
-    let child = registry.record_for(child_bytes).unwrap();
-    let (_, child_report) = worker::run(
-        &store,
-        &registry,
-        CommandOutput::with_events((), vec![child]),
-    )
-    .unwrap();
-    assert_eq!(child_report.blocked_events, 1);
-
-    let dep = registry.record_for(dep_bytes).unwrap();
-    let report = worker::run(
-        &store,
-        &registry,
-        worker::AdmitAndDrain {
-            output: CommandOutput::with_events("dependency".to_string(), vec![dep]),
-            batch_size: 10,
-        },
-    )
-    .unwrap();
-
-    assert_eq!(report.value, "dependency");
-    assert_eq!(report.admitted.applied_events, 1);
-    assert_eq!(report.drained.applied_events, 1);
-    assert!(registry.child_saw_context.get());
-}
-
-#[test]
-fn drain_ready_batch_applies_only_one_batch() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("batch.db")).unwrap();
-
-    let registry = BatchRegistry::new();
-    let child_events = registry
-        .child_bytes
-        .iter()
-        .map(|bytes| registry.record_for(bytes.clone()).unwrap())
-        .collect::<Vec<_>>();
-
-    let (_, blocked) = worker::run(
-        &store,
-        &registry,
-        CommandOutput::with_events((), child_events),
-    )
-    .unwrap();
-    assert_eq!(blocked.blocked_events, 2);
-    assert_eq!(registry.children_applied.get(), 0);
-
-    let dep = registry.record_for(registry.dep_bytes.clone()).unwrap();
-    let (_, dep_report) =
-        worker::run(&store, &registry, CommandOutput::with_events((), vec![dep])).unwrap();
-    assert_eq!(dep_report.applied_events, 1);
-    assert_eq!(registry.children_applied.get(), 0);
-
-    let first = worker::run(&store, &registry, worker::DrainReadyBatch { batch_size: 1 }).unwrap();
-    assert_eq!(first.applied_events, 1);
-    assert_eq!(registry.children_applied.get(), 1);
-
-    let second = worker::run(&store, &registry, worker::DrainReadyBatch { batch_size: 1 }).unwrap();
-    assert_eq!(second.applied_events, 1);
-    assert_eq!(registry.children_applied.get(), 2);
-}
-
-#[test]
-fn worker_never_surfaces_failed_projection_as_dependency_context() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("invalid-context.db")).unwrap();
-
-    let gate_bytes = b"gate".to_vec();
-    let bad_dep_bytes = b"bad-dep".to_vec();
-    let child_bytes = b"child-after-bad-dep".to_vec();
-    let gate_id = event_id(&gate_bytes);
-    let bad_dep_id = event_id(&bad_dep_bytes);
-    let child_id = event_id(&child_bytes);
-    let registry = ValidDependencyContextRegistry {
-        gate_id,
-        bad_dep_id,
-        child_id,
-        gate_bytes: gate_bytes.clone(),
-        bad_dep_bytes: bad_dep_bytes.clone(),
-        child_bytes: child_bytes.clone(),
-        child_saw_context: Cell::new(false),
-    };
-
-    let bad_dep = registry.record_for(bad_dep_bytes).unwrap();
-    let child = registry.record_for(child_bytes).unwrap();
-    let (_, blocked_report) = worker::run(
-        &store,
-        &registry,
-        CommandOutput::with_events((), vec![child, bad_dep]),
-    )
-    .unwrap();
-    assert_eq!(blocked_report.blocked_events, 2);
-    assert_eq!(blocked_report.applied_events, 0);
-
-    let gate = registry.record_for(gate_bytes).unwrap();
-    let (_, gate_report) = worker::run(
-        &store,
-        &registry,
-        CommandOutput::with_events((), vec![gate]),
-    )
-    .unwrap();
-    assert_eq!(gate_report.applied_events, 1);
-
-    let err = worker::run(&store, &registry, worker::DrainUntilIdle { batch_size: 10 })
-        .expect_err("invalid dependency projection must fail");
     assert!(
-        err.contains("bad dependency rejected by projector"),
+        err.contains("dependency rejected by target projector"),
         "{err}"
     );
+    assert_eq!(bus.pending_len(), 1);
+    assert_eq!(projector.child_projections.get(), 1);
+    assert!(projector.child_payloads.borrow().is_empty());
+    assert!(bus.context(&dep.id).is_none());
+    assert_eq!(bus.context(&child.id).unwrap().needs.len(), 1);
 
-    let statuses = event_schema::status_counts(&store).expect("status counts");
-    assert_eq!(statuses.applied, 1, "only the gate event should apply");
-    assert_eq!(statuses.ready, 1, "failed dependency should remain ready");
-    assert_eq!(
-        statuses.blocked, 1,
-        "child should remain blocked on bad dep"
-    );
-    assert_eq!(statuses.blocked_edges, 1);
-    assert!(
-        !registry.child_saw_context.get(),
-        "child projector must not receive failed dependency in context"
-    );
+    projector.reject_dependency.set(false);
+    let retry = bus
+        .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
+        .expect("dependency retry succeeds");
+
+    assert_eq!(retry.projections, 2);
+    assert_eq!(retry.wakes, 1);
+    assert_eq!(projector.child_payloads.borrow().as_slice(), &[dep.bytes]);
+    assert_eq!(bus.pending_len(), 0);
 }
 
 #[test]
-fn admit_and_drain_calls_post_admission_hook_once_per_admission_run() {
-    // Property: every admission entry point asks the protocol's registry to
-    // run any bounded post-admission drains it owns. This is the contract
-    // that lets a deletion-fact admission trigger the content-purge worker
-    // inside the same admission call: without it, in-process callers would
-    // depend on a separate daemon tick for the purge to land on disk.
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("post-admit-hook.db")).unwrap();
+fn target_deferred_handler_consumes_only_after_exact_fact_context_exists() {
+    let fact = fact("handler-input-fact", 7);
+    let mut bus = WakeLoop::new();
+    bus.submit_intent(echo_fact_intent(fact.id))
+        .expect("submit echo intent");
 
-    let event_bytes = b"post-hook-event".to_vec();
-    let event_event_id = event_id(&event_bytes);
-    let registry = HookCountingRegistry {
-        event_id: event_event_id,
-        event_bytes: event_bytes.clone(),
-        hook_calls: Cell::new(0),
-    };
+    let err = bus
+        .dispatch_deferred_intents_with_fact_context(&EchoFactHandler, 10)
+        .expect_err("missing fact keeps intent queued");
+    assert!(err.contains("handler context missing fact"), "{err}");
+    assert_eq!(bus.intents().len(), 1);
 
-    let proposed = registry.record_for(event_bytes).unwrap();
-    let report = worker::run(
-        &store,
-        &registry,
-        worker::AdmitAndDrain {
-            output: CommandOutput::with_events("done".to_string(), vec![proposed]),
-            batch_size: 16,
-        },
-    )
-    .expect("admit and drain");
+    bus.submit_fact(fact.clone());
+    let report = bus
+        .dispatch_deferred_intents_with_fact_context(&EchoFactHandler, 10)
+        .expect("dispatch with exact fact context");
 
-    assert_eq!(report.value, "done");
-    assert_eq!(report.admitted.applied_events, 1);
-    assert!(
-        registry.hook_calls.get() >= 1,
-        "post_admission_hook must fire when admission applies any event; saw {} calls",
-        registry.hook_calls.get()
-    );
+    assert_eq!(report.handled, 1);
+    assert_eq!(report.intents, 1);
+    assert_eq!(bus.intents().len(), 1);
+    assert_eq!(bus.intents()[0].kind.as_str(), "echoed_fact");
+    assert_eq!(bus.intents()[0].payload, fact.bytes);
 }
 
-#[test]
-fn event_admission_drain_calls_post_admission_hook_when_events_admit() {
-    // The daemon admission worker exposes `event_admission::run`, which
-    // drains queued canonical bytes. Bytes admitted through this path must
-    // also see the registry's post-admission hook so daemon-driven and
-    // CLI-driven flows reach the same end state. This proves a deletion
-    // event admitted from a sync round trip would still trigger
-    // content_purge inside the same admission step.
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("post-admit-hook-canonical-in.db")).unwrap();
-
-    let event_bytes = b"post-hook-canonical-in-event".to_vec();
-    let event_event_id = event_id(&event_bytes);
-    let registry = HookCountingRegistry {
-        event_id: event_event_id,
-        event_bytes: event_bytes.clone(),
-        hook_calls: Cell::new(0),
-    };
-
-    let proposed = registry.record_for(event_bytes).unwrap();
-    store
-        .insert_table_rows(vec![worker_rows::canonical_in_row(proposed, None)])
-        .expect("enqueue canonical in");
-
-    let report = event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 1 })
-        .expect("admit queued event");
-    assert_eq!(report.applied_events, 1);
-    assert!(
-        registry.hook_calls.get() >= 1,
-        "event_admission::run must call post_admission_hook when admitting work; saw {} calls",
-        registry.hook_calls.get()
-    );
+#[derive(Default)]
+struct CountingProjector {
+    projected: RefCell<Vec<FactId>>,
 }
 
-#[test]
-fn post_admission_hook_is_skipped_when_admission_finds_no_new_work() {
-    // A no-op admission (empty queue or duplicate) should not waste effort
-    // running protocol-defined drains. The hook is bounded but each call
-    // does at least one queue lookup, so the pipeline calls the hook only
-    // when something actually admitted.
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Protocol::open_store(tmp.path().join("post-admit-hook-noop.db")).unwrap();
-
-    let registry = HookCountingRegistry {
-        event_id: [0; 32],
-        event_bytes: Vec::new(),
-        hook_calls: Cell::new(0),
-    };
-
-    let report = event_admission::run(&store, &registry, event_admission::Work::Drain { limit: 4 })
-        .expect("drain empty canonical in");
-    assert_eq!(report.inserted_events, 0);
-    assert_eq!(report.applied_events, 0);
-    assert_eq!(
-        registry.hook_calls.get(),
-        0,
-        "no admission work should not trigger the post-admission hook"
-    );
-}
-
-struct HookCountingRegistry {
-    event_id: EventId,
-    event_bytes: Vec<u8>,
-    hook_calls: Cell<usize>,
-}
-
-struct BatchHookRegistry {
-    accepted_bytes: Vec<Vec<u8>>,
-    hook_calls: Cell<usize>,
-}
-
-impl HookCountingRegistry {
-    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        if bytes == self.event_bytes {
-            return Ok(EventRecord {
-                timestamp: 1,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: Vec::new(),
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        Err("unknown hook-counting event".to_string())
-    }
-}
-
-impl EventRegistry for HookCountingRegistry {
-    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        self.record_for(bytes)
-    }
-
-    fn project_record(
+impl Projector for CountingProjector {
+    fn project(
         &self,
-        _store: &Store,
-        event: &EventWithContext<'_>,
-    ) -> Result<ProjectionDecision, String> {
-        if event.context.event_id == self.event_id {
-            return Ok(ProjectionOutput::default().into());
-        }
-        Err("unknown hook-counting projection".to_string())
-    }
-
-    fn post_admission_hook(&self, _store: &Store) -> Result<(), String> {
-        self.hook_calls.set(self.hook_calls.get().saturating_add(1));
-        Ok(())
+        fact: &Fact,
+        _context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        self.projected.borrow_mut().push(fact.id);
+        Ok(ProjectionOutput::new())
     }
 }
 
-impl BatchHookRegistry {
-    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        if self
-            .accepted_bytes
-            .iter()
-            .any(|candidate| candidate == &bytes)
-        {
-            return Ok(EventRecord {
-                timestamp: 1,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: Vec::new(),
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        Err("unknown batch hook event".to_string())
-    }
-}
-
-impl EventRegistry for BatchHookRegistry {
-    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        self.record_for(bytes)
-    }
-
-    fn project_record(
-        &self,
-        _store: &Store,
-        event: &EventWithContext<'_>,
-    ) -> Result<ProjectionDecision, String> {
-        if self
-            .accepted_bytes
-            .iter()
-            .any(|bytes| event_id(bytes) == event.context.event_id)
-        {
-            return Ok(ProjectionOutput::default().into());
-        }
-        Err("unknown batch hook projection".to_string())
-    }
-
-    fn post_admission_hook(&self, _store: &Store) -> Result<(), String> {
-        self.hook_calls.set(self.hook_calls.get().saturating_add(1));
-        Ok(())
-    }
-}
-
-struct ContextRegistry {
-    dep_id: EventId,
-    child_id: EventId,
-    dep_bytes: Vec<u8>,
-    child_bytes: Vec<u8>,
-    child_saw_context: Cell<bool>,
-}
-
-struct ContextUpdateWakeRegistry {
-    dep_id: EventId,
-    child_id: EventId,
-    updater_id: EventId,
-    dep_bytes: Vec<u8>,
-    child_bytes: Vec<u8>,
-    updater_bytes: Vec<u8>,
+struct DependencyProjector {
+    role: Role,
+    dep_id: FactId,
+    child_id: FactId,
+    reject_dependency: Cell<bool>,
     child_projections: Cell<usize>,
-    child_saw_dependency_update: Cell<bool>,
+    child_payloads: RefCell<Vec<Vec<u8>>>,
 }
 
-struct BlockedContextUpdateWakeRegistry {
-    target_id: EventId,
-    updater_id: EventId,
-    missing_dep_id: EventId,
-    target_bytes: Vec<u8>,
-    updater_bytes: Vec<u8>,
-    target_purge_projected: Cell<bool>,
-}
-
-struct BatchRegistry {
-    dep_id: EventId,
-    dep_bytes: Vec<u8>,
-    child_ids: Vec<EventId>,
-    child_bytes: Vec<Vec<u8>>,
-    children_applied: Cell<usize>,
-}
-
-impl BatchRegistry {
-    fn new() -> Self {
-        let dep_bytes = b"batch-dep".to_vec();
-        let child_bytes = vec![b"batch-child-a".to_vec(), b"batch-child-b".to_vec()];
-        let dep_id = event_id(&dep_bytes);
-        let child_ids = child_bytes
-            .iter()
-            .map(|bytes| event_id(bytes))
-            .collect::<Vec<_>>();
+impl DependencyProjector {
+    fn new(role: Role, dep_id: FactId, child_id: FactId) -> Self {
         Self {
+            role,
             dep_id,
-            dep_bytes,
-            child_ids,
-            child_bytes,
-            children_applied: Cell::new(0),
+            child_id,
+            reject_dependency: Cell::new(false),
+            child_projections: Cell::new(0),
+            child_payloads: RefCell::new(Vec::new()),
         }
     }
 
-    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        if bytes == self.dep_bytes {
-            return Ok(EventRecord {
-                timestamp: 1,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: Vec::new(),
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
+    fn dependency_need(&self) -> ContextNeed {
+        ContextNeed {
+            owner: self.child_id,
+            role: self.role.clone(),
+            scope: FactScope::Global,
+            selector: Selector::from_bytes(self.dep_id),
         }
-        if self.child_bytes.iter().any(|candidate| candidate == &bytes) {
-            return Ok(EventRecord {
-                timestamp: 2,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: vec![self.dep_id],
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        Err("unknown batch event".to_string())
     }
 }
 
-struct ValidDependencyContextRegistry {
-    gate_id: EventId,
-    bad_dep_id: EventId,
-    child_id: EventId,
-    gate_bytes: Vec<u8>,
-    bad_dep_bytes: Vec<u8>,
-    child_bytes: Vec<u8>,
-    child_saw_context: Cell<bool>,
-}
-
-struct RejectThenAcceptRegistry {
-    bad_id: EventId,
-    good_id: EventId,
-    bad_bytes: Vec<u8>,
-    good_bytes: Vec<u8>,
-    good_applied: Cell<bool>,
-}
-
-impl ContextRegistry {
-    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        if bytes == self.dep_bytes {
-            return Ok(EventRecord {
-                timestamp: 1,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: Vec::new(),
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        if bytes == self.child_bytes {
-            return Ok(EventRecord {
-                timestamp: 2,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: vec![self.dep_id],
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        Err("unknown test event".to_string())
-    }
-}
-
-impl ContextUpdateWakeRegistry {
-    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        if bytes == self.dep_bytes || bytes == self.updater_bytes {
-            return Ok(EventRecord {
-                timestamp: 1,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: Vec::new(),
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        if bytes == self.child_bytes {
-            return Ok(EventRecord {
-                timestamp: 2,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: vec![self.dep_id],
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        Err("unknown context update wake event".to_string())
-    }
-}
-
-impl BlockedContextUpdateWakeRegistry {
-    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        if bytes == self.updater_bytes {
-            return Ok(EventRecord {
-                timestamp: 1,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: Vec::new(),
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        if bytes == self.target_bytes {
-            return Ok(EventRecord {
-                timestamp: 2,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: vec![self.missing_dep_id],
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        Err("unknown blocked context update wake event".to_string())
-    }
-}
-
-impl ValidDependencyContextRegistry {
-    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        if bytes == self.gate_bytes {
-            return Ok(EventRecord {
-                timestamp: 1,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: Vec::new(),
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        if bytes == self.bad_dep_bytes {
-            return Ok(EventRecord {
-                timestamp: 2,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: vec![self.gate_id],
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        if bytes == self.child_bytes {
-            return Ok(EventRecord {
-                timestamp: 3,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: vec![self.bad_dep_id],
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        Err("unknown test event".to_string())
-    }
-}
-
-impl RejectThenAcceptRegistry {
-    fn record_for(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        if bytes == self.bad_bytes || bytes == self.good_bytes {
-            return Ok(EventRecord {
-                timestamp: 1,
-                body_len: bytes.len(),
-                canonical_bytes: bytes,
-                dependencies: Vec::new(),
-                workspace_id: None,
-                scope: EventScope::Shared,
-            });
-        }
-        Err("unknown reject test event".to_string())
-    }
-}
-
-impl EventRegistry for ContextRegistry {
-    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        self.record_for(bytes)
-    }
-
-    fn project_record(
+impl Projector for DependencyProjector {
+    fn project(
         &self,
-        _store: &Store,
-        event: &EventWithContext<'_>,
-    ) -> Result<ProjectionDecision, String> {
-        if event.context.event_id == self.dep_id {
-            return Ok(ProjectionOutput::context_updates(vec![
-                ContextUpdate {
-                    event_id: self.child_id,
-                    update: b"dep-applied".to_vec(),
-                },
-                ContextUpdate {
-                    event_id: self.dep_id,
-                    update: b"dep-self".to_vec(),
-                },
-            ])
-            .into());
-        }
-        if event.context.event_id == self.child_id {
-            if let Some(wait) = wait_for_missing(event, &[self.dep_id]) {
-                return Ok(wait);
+        fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        if fact.id == self.dep_id {
+            if self.reject_dependency.get() {
+                return Err("dependency rejected by target projector".to_string());
             }
-            assert_eq!(
-                event
-                    .context
-                    .dependency(&self.dep_id)
-                    .expect("dependency context")
-                    .canonical_bytes,
-                self.dep_bytes
-            );
-            assert!(event.context.has_update(b"dep-applied"));
-            assert!(event
-                .context
-                .dependency_has_update(&self.dep_id, b"dep-self"));
-            self.child_saw_context.set(true);
-            return Ok(ProjectionOutput::default().into());
+            return Ok(ProjectionOutput::new().offer(ContextOffer {
+                owner: fact.id,
+                role: self.role.clone(),
+                scope: fact.scope.clone(),
+                selector: Selector::from_bytes(fact.id),
+                payload_ref: fact.id,
+            }));
         }
-        Err("unknown projection".to_string())
-    }
-}
 
-impl EventRegistry for ContextUpdateWakeRegistry {
-    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        self.record_for(bytes)
-    }
-
-    fn project_record(
-        &self,
-        _store: &Store,
-        event: &EventWithContext<'_>,
-    ) -> Result<ProjectionDecision, String> {
-        if event.context.event_id == self.dep_id {
-            return Ok(ProjectionOutput::default().into());
-        }
-        if event.context.event_id == self.child_id {
-            if let Some(wait) = wait_for_missing(event, &[self.dep_id]) {
-                return Ok(wait);
-            }
+        if fact.id == self.child_id {
             self.child_projections
                 .set(self.child_projections.get().saturating_add(1));
-            assert_eq!(
-                event
-                    .context
-                    .dependency(&self.dep_id)
-                    .expect("dependency context")
-                    .canonical_bytes,
-                self.dep_bytes
-            );
-            if event
-                .context
-                .dependency_has_update(&self.dep_id, b"dep-updated")
-            {
-                self.child_saw_dependency_update.set(true);
+            let need = self.dependency_need();
+            if let Some(payload) = context.payload_for(&need) {
+                self.child_payloads.borrow_mut().push(payload.bytes.clone());
+                return Ok(ProjectionOutput::new().intent(Intent::new(
+                    kind("dependency_child_ready"),
+                    IntentExecution::Deferred,
+                    fact.id,
+                    payload.bytes.clone(),
+                )));
             }
-            return Ok(ProjectionOutput::default().into());
+            return Ok(ProjectionOutput::new().need(need));
         }
-        if event.context.event_id == self.updater_id {
-            return Ok(ProjectionOutput::context_updates(vec![ContextUpdate {
-                event_id: self.dep_id,
-                update: b"dep-updated".to_vec(),
-            }])
-            .into());
-        }
-        Err("unknown context update wake projection".to_string())
+
+        Err("unknown dependency contract fact".to_string())
     }
 }
 
-impl EventRegistry for BlockedContextUpdateWakeRegistry {
-    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        self.record_for(bytes)
+struct UpdateProjector {
+    base_role: Role,
+    update_role: Role,
+    dep_id: FactId,
+    child_id: FactId,
+    blocked_id: FactId,
+    missing_primary_id: FactId,
+    updater_id: FactId,
+    child_projections: Cell<usize>,
+    child_saw_update: Cell<bool>,
+    blocked_retired: Cell<usize>,
+}
+
+impl UpdateProjector {
+    fn new(
+        base_role: Role,
+        update_role: Role,
+        dep_id: FactId,
+        child_id: FactId,
+        blocked_id: FactId,
+        missing_primary_id: FactId,
+        updater_id: FactId,
+    ) -> Self {
+        Self {
+            base_role,
+            update_role,
+            dep_id,
+            child_id,
+            blocked_id,
+            missing_primary_id,
+            updater_id,
+            child_projections: Cell::new(0),
+            child_saw_update: Cell::new(false),
+            blocked_retired: Cell::new(0),
+        }
     }
 
-    fn project_record(
+    fn base_need(&self, owner: FactId, selector: FactId) -> ContextNeed {
+        ContextNeed {
+            owner,
+            role: self.base_role.clone(),
+            scope: FactScope::Global,
+            selector: Selector::from_bytes(selector),
+        }
+    }
+
+    fn update_need(&self, owner: FactId) -> ContextNeed {
+        ContextNeed {
+            owner,
+            role: self.update_role.clone(),
+            scope: FactScope::Global,
+            selector: Selector::from_bytes(owner),
+        }
+    }
+
+    fn offer(&self, owner: FactId, role: Role, selector: FactId) -> ContextOffer {
+        ContextOffer {
+            owner,
+            role,
+            scope: FactScope::Global,
+            selector: Selector::from_bytes(selector),
+            payload_ref: owner,
+        }
+    }
+}
+
+impl Projector for UpdateProjector {
+    fn project(
         &self,
-        _store: &Store,
-        event: &EventWithContext<'_>,
-    ) -> Result<ProjectionDecision, String> {
-        if event.context.event_id == self.updater_id {
-            return Ok(ProjectionOutput::context_updates(vec![ContextUpdate {
-                event_id: self.target_id,
-                update: b"delete".to_vec(),
-            }])
-            .into());
+        fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        if fact.id == self.dep_id {
+            return Ok(ProjectionOutput::new().offer(self.offer(
+                fact.id,
+                self.base_role.clone(),
+                self.dep_id,
+            )));
         }
-        if event.context.event_id == self.target_id {
-            if event.context.has_update(b"delete") {
-                self.target_purge_projected.set(true);
-                return Ok(ProjectionOutput::context_updates(vec![ContextUpdate {
-                    event_id: self.target_id,
-                    update: b"purge-projected".to_vec(),
-                }])
-                .into());
+
+        if fact.id == self.updater_id {
+            return Ok(ProjectionOutput::new()
+                .offer(self.offer(fact.id, self.update_role.clone(), self.child_id))
+                .offer(self.offer(fact.id, self.update_role.clone(), self.blocked_id)));
+        }
+
+        if fact.id == self.child_id {
+            let update_need = self.update_need(self.child_id);
+            if context.payload_for(&update_need).is_some() {
+                self.child_projections
+                    .set(self.child_projections.get().saturating_add(1));
+                self.child_saw_update.set(true);
+                return Ok(ProjectionOutput::new().need(update_need));
             }
-            return Ok(ProjectionDecision::wait_for(vec![self.missing_dep_id]));
+
+            let base_need = self.base_need(self.child_id, self.dep_id);
+            if context.payload_for(&base_need).is_some() {
+                self.child_projections
+                    .set(self.child_projections.get().saturating_add(1));
+                return Ok(ProjectionOutput::new().need(update_need));
+            }
+
+            return Ok(ProjectionOutput::new().need(base_need).need(update_need));
         }
-        Err("unknown blocked context update wake projection".to_string())
+
+        if fact.id == self.blocked_id {
+            let update_need = self.update_need(self.blocked_id);
+            if context.payload_for(&update_need).is_some() {
+                self.blocked_retired
+                    .set(self.blocked_retired.get().saturating_add(1));
+                return Ok(ProjectionOutput::new().intent(Intent::new(
+                    kind("retire_fact"),
+                    IntentExecution::Deferred,
+                    fact.id,
+                    b"retired".to_vec(),
+                )));
+            }
+
+            return Ok(ProjectionOutput::new()
+                .need(self.base_need(self.blocked_id, self.missing_primary_id))
+                .need(update_need));
+        }
+
+        Err("unknown update contract fact".to_string())
     }
 }
 
-impl EventRegistry for BatchRegistry {
-    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        self.record_for(bytes)
+struct EchoFactHandler;
+
+impl IntentHandler for EchoFactHandler {
+    fn accepts(&self, intent: &Intent) -> bool {
+        intent.kind.as_str() == "echo_fact"
     }
 
-    fn project_record(
-        &self,
-        _store: &Store,
-        event: &EventWithContext<'_>,
-    ) -> Result<ProjectionDecision, String> {
-        if event.context.event_id == self.dep_id {
-            return Ok(ProjectionOutput::default().into());
-        }
-        if self.child_ids.contains(&event.context.event_id) {
-            if let Some(wait) = wait_for_missing(event, &[self.dep_id]) {
-                return Ok(wait);
-            }
-            self.children_applied
-                .set(self.children_applied.get().saturating_add(1));
-            return Ok(ProjectionOutput::default().into());
-        }
-        Err("unknown batch projection".to_string())
-    }
-}
-
-impl EventRegistry for ValidDependencyContextRegistry {
-    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        self.record_for(bytes)
+    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<FactId>, String> {
+        let id: FactId = intent
+            .key
+            .as_slice()
+            .try_into()
+            .map_err(|_| "echo fact intent key must be a fact id".to_string())?;
+        Ok(vec![id])
     }
 
-    fn project_record(
-        &self,
-        _store: &Store,
-        event: &EventWithContext<'_>,
-    ) -> Result<ProjectionDecision, String> {
-        if event.context.event_id == self.gate_id {
-            assert!(event.context.dependencies.is_empty());
-            return Ok(ProjectionOutput::default().into());
-        }
-        if event.context.event_id == self.bad_dep_id {
-            if let Some(wait) = wait_for_missing(event, &[self.gate_id]) {
-                return Ok(wait);
-            }
-            assert_eq!(
-                event
-                    .context
-                    .dependency(&self.gate_id)
-                    .expect("gate dependency")
-                    .canonical_bytes,
-                self.gate_bytes
-            );
-            return Err("bad dependency rejected by projector".to_string());
-        }
-        if event.context.event_id == self.child_id {
-            if let Some(wait) = wait_for_missing(event, &[self.bad_dep_id]) {
-                return Ok(wait);
-            }
-            self.child_saw_context.set(true);
-            panic!("child must remain blocked until bad dependency is applied");
-        }
-        Err("unknown projection".to_string())
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+        let id: FactId = intent
+            .key
+            .as_slice()
+            .try_into()
+            .map_err(|_| "echo fact intent key must be a fact id".to_string())?;
+        let fact = context.require_fact(&id)?;
+        Ok(HandlerOutput::new().intent(Intent::new(
+            kind("echoed_fact"),
+            IntentExecution::Deferred,
+            id,
+            fact.bytes.clone(),
+        )))
     }
 }
 
-impl EventRegistry for RejectThenAcceptRegistry {
-    fn event_from_bytes(&self, bytes: Vec<u8>) -> Result<EventRecord, String> {
-        self.record_for(bytes)
-    }
-
-    fn project_record(
-        &self,
-        _store: &Store,
-        event: &EventWithContext<'_>,
-    ) -> Result<ProjectionDecision, String> {
-        if event.context.event_id == self.bad_id {
-            return Err("intentional projection reject".to_string());
-        }
-        if event.context.event_id == self.good_id {
-            self.good_applied.set(true);
-            return Ok(ProjectionOutput::default().into());
-        }
-        Err("unknown reject projection".to_string())
-    }
+fn echo_fact_intent(id: FactId) -> Intent {
+    Intent::new(kind("echo_fact"), IntentExecution::Deferred, id, Vec::new())
 }
 
-fn wait_for_missing(
-    event: &EventWithContext<'_>,
-    dependencies: &[EventId],
-) -> Option<ProjectionDecision> {
-    let missing = event.context.missing_dependencies_from(dependencies);
-    (!missing.is_empty()).then(|| ProjectionDecision::wait_for(missing))
+fn fact(label: &str, timestamp: u64) -> Fact {
+    Fact::new(FactScope::Global, timestamp, label.as_bytes().to_vec())
+}
+
+fn role(name: &str) -> Role {
+    Role::new(name).expect("valid test role")
+}
+
+fn kind(name: &str) -> IntentKind {
+    IntentKind::new(name).expect("valid test intent kind")
 }

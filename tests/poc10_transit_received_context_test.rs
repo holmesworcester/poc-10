@@ -3,10 +3,10 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::transit_received::context;
 use topo::event_modules::transit_received::fact::{
     TransitReceivedFact, TRANSIT_KIND_CONNECTION_HANDSHAKE,
 };
+use topo::event_modules::transit_received::matchers as context;
 use topo::event_modules::transit_received::{layout, project};
 
 fn received_fact() -> TransitReceivedFact {

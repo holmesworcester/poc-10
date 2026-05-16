@@ -2,14 +2,14 @@
 //!
 //! The tests hand-build a `CommandContext` from a vault and a fixed clock,
 //! drive the command, and assert: (1) the happy path produces one fact and a
-//! summary, (2) blank or empty text is rejected, (3) the produced fact is a
+//! receipt, (2) blank or empty text is rejected, (3) the produced fact is a
 //! signed envelope whose inner payload decodes through
 //! `sealed_message::layout::decode_sealed_message` and whose ciphertext
 //! decrypts back to the original plaintext under the workspace key.
 
 use std::cell::Cell;
 
-use topo::commands::context::{
+use topo::core::command_context::{
     CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
     WorkspaceId,
 };
@@ -113,8 +113,8 @@ fn send_message_happy_path_emits_one_sealed_message_fact() {
     let output =
         send_message(&ctx, workspace_id, "hello, target tree").expect("happy path send_message");
 
-    assert_eq!(output.summary.workspace_id, workspace_id);
-    assert_eq!(output.summary.created_at_ms, 60_000);
+    assert_eq!(output.receipt.workspace_id, workspace_id);
+    assert_eq!(output.receipt.created_at_ms, 60_000);
     assert_eq!(output.facts.len(), 1, "one fact per send_message");
     assert!(output.intents.is_empty(), "no intents in the first cut");
 

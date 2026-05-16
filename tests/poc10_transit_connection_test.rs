@@ -2,8 +2,31 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
 use topo::core::intents::IntentKind;
 use topo::core::wake_loop::WakeLoop;
+use topo::event_modules::connection_response::fact::ConnectionResponseFact;
+use topo::event_modules::connection_response::layout as connection_response_layout;
+use topo::event_modules::transit::frame as transit_frame;
 use topo::event_modules::{encryption, signed_fact, sync};
-use topo::handlers::{connection, transit};
+use topo::handlers::{connection, network_send, transit};
+
+fn connection_fact() -> (Fact, ConnectionResponseFact) {
+    let connection = ConnectionResponseFact {
+        from_endpoint: [10; 32],
+        to_endpoint: [11; 32],
+        request_id: [12; 32],
+        invite_secret_event_id: [13; 32],
+        initiator_ephemeral_secret_event_id: [14; 32],
+        responder_ephemeral_secret_event_id: [15; 32],
+        responder_ephemeral_public_key: [16; 32],
+        handshake_hash: [17; 32],
+        connection_secret: [18; 32],
+    };
+    let fact = Fact::new(
+        FactScope::Local,
+        1,
+        connection_response_layout::encode_fact(&connection).expect("connection response"),
+    );
+    (fact, connection)
+}
 
 fn connection_drain_output() -> HandlerOutput {
     HandlerOutput::new().intent(transit::wrap_connection_batch_intent(
@@ -12,8 +35,14 @@ fn connection_drain_output() -> HandlerOutput {
             sender_endpoint: [2; 32],
             recipient_endpoint: [3; 32],
             connection_secret_id: [4; 32],
-            send_item_keys: vec![b"out-key-1".to_vec(), b"out-key-2".to_vec()],
-            canonical_events: vec![b"event:a".to_vec(), b"event:b".to_vec()],
+            send_item_keys: transit::TransitIntentBytes::from_bytes([
+                b"out-key-1".to_vec(),
+                b"out-key-2".to_vec(),
+            ]),
+            canonical_events: transit::TransitIntentBytes::from_bytes([
+                b"event:a".to_vec(),
+                b"event:b".to_vec(),
+            ]),
         },
     ))
 }
@@ -27,7 +56,7 @@ fn completed_transit_packaging_output(
     HandlerOutput::new().intent(connection::send_frame_intent(
         connection::ConnectionSendFrame {
             target_addr: target_addr.to_string(),
-            send_item_keys: batch.send_item_keys,
+            send_item_keys: batch.send_item_keys.into_items().collect(),
             frame: opaque_frame,
         },
     ))
@@ -57,6 +86,7 @@ fn sync_send_on_connection_names_ordered_fact_bundle() {
 
 #[test]
 fn transit_send_guard_refuses_forged_local_fact_reference() {
+    let (connection_fact, _) = connection_fact();
     let fact = Fact::new(
         FactScope::Local,
         1,
@@ -67,10 +97,10 @@ fn transit_send_guard_refuses_forged_local_fact_reference() {
         .expect("encode shared event"),
     );
     let intent = transit::send_on_connection_intent(transit::TransitSendOnConnection {
-        connection_id: [9; 32],
+        connection_id: connection_fact.id,
         fact_ids: vec![fact.id],
     });
-    let context = HandlerContext::with_facts([fact]);
+    let context = HandlerContext::with_facts([connection_fact, fact]);
 
     let err = transit::TransitSendOnConnectionHandler::new()
         .handle(&intent, &context)
@@ -84,6 +114,7 @@ fn transit_send_guard_refuses_forged_local_fact_reference() {
 
 #[test]
 fn transit_send_guard_refuses_forged_private_tag_reference() {
+    let (connection_fact, _) = connection_fact();
     for private_tag in [
         signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET,
         encryption::layout::TYPE_LOCAL_KEY_SECRET,
@@ -91,15 +122,15 @@ fn transit_send_guard_refuses_forged_private_tag_reference() {
         encryption::layout::TYPE_LOCAL_RECIPIENT_KEY,
     ] {
         let fact = Fact::new(
-            sync::context::workspace_scope([7; 32]),
+            sync::matchers::workspace_scope([7; 32]),
             1,
             vec![private_tag, 1, 2, 3],
         );
         let intent = transit::send_on_connection_intent(transit::TransitSendOnConnection {
-            connection_id: [9; 32],
+            connection_id: connection_fact.id,
             fact_ids: vec![fact.id],
         });
-        let context = HandlerContext::with_facts([fact]);
+        let context = HandlerContext::with_facts([connection_fact.clone(), fact]);
 
         let err = transit::TransitSendOnConnectionHandler::new()
             .handle(&intent, &context)
@@ -114,8 +145,9 @@ fn transit_send_guard_refuses_forged_private_tag_reference() {
 
 #[test]
 fn transit_send_guard_accepts_normal_shared_facts() {
+    let (connection_fact, connection) = connection_fact();
     let fact = Fact::new(
-        sync::context::workspace_scope([7; 32]),
+        sync::matchers::workspace_scope([7; 32]),
         1,
         sync::layout::encode_shared_event(&sync::fact::SharedEventFact {
             workspace_id: [7; 32],
@@ -124,22 +156,31 @@ fn transit_send_guard_accepts_normal_shared_facts() {
         .expect("encode shared event"),
     );
     let intent = transit::send_on_connection_intent(transit::TransitSendOnConnection {
-        connection_id: [9; 32],
+        connection_id: connection_fact.id,
         fact_ids: vec![fact.id],
     });
-    let context = HandlerContext::with_facts([fact]);
+    let context = HandlerContext::with_facts([connection_fact.clone(), fact.clone()]);
 
-    let err = transit::TransitSendOnConnectionHandler::new()
+    let output = transit::TransitSendOnConnectionHandler::new()
         .handle(&intent, &context)
-        .expect_err("packaging is not wired yet");
+        .expect("normal shared fact packages for transit");
 
-    assert_eq!(err, transit::NOT_YET_WIRED);
+    assert_eq!(output.intents.len(), 1);
+    let send = network_send::decode_network_send_frame(&output.intents[0]).unwrap();
+    assert_eq!(send.routing_key, connection_fact.id);
+    let opened = transit_frame::open_connection_frame(&send.frame, &connection.connection_secret)
+        .expect("open packaged transit frame");
+    assert_eq!(
+        opened.facts.into_iter().collect::<Vec<_>>(),
+        vec![fact.bytes]
+    );
 }
 
 #[test]
-fn send_on_connection_handler_failure_keeps_intent_queued() {
+fn send_on_connection_handler_success_emits_network_send_and_clears_intent() {
+    let (connection_fact, _) = connection_fact();
     let fact = Fact::new(
-        sync::context::workspace_scope([7; 32]),
+        sync::matchers::workspace_scope([7; 32]),
         1,
         sync::layout::encode_shared_event(&sync::fact::SharedEventFact {
             workspace_id: [7; 32],
@@ -148,25 +189,27 @@ fn send_on_connection_handler_failure_keeps_intent_queued() {
         .expect("encode shared event"),
     );
     let intent = transit::send_on_connection_intent(transit::TransitSendOnConnection {
-        connection_id: [9; 32],
+        connection_id: connection_fact.id,
         fact_ids: vec![fact.id],
     });
     let mut bus = WakeLoop::new();
+    bus.submit_fact(connection_fact);
     bus.submit_fact(fact);
     bus.submit_intent(intent).expect("queue send work");
 
-    let err = bus
+    let report = bus
         .dispatch_deferred_intents_with_fact_context(
             &transit::TransitSendOnConnectionHandler::new(),
             10,
         )
-        .expect_err("send handler is not live yet");
+        .expect("dispatch transit send");
 
-    assert!(err.contains("not yet wired"), "{err}");
+    assert_eq!(report.handled, 1);
+    assert_eq!(report.intents, 1);
     assert_eq!(bus.intents().len(), 1);
     assert_eq!(
         bus.intents()[0].kind.as_str(),
-        transit::TRANSIT_SEND_ON_CONNECTION
+        network_send::NETWORK_SEND_FRAME
     );
 }
 
@@ -189,7 +232,7 @@ fn connection_drain_emits_transit_wrap_not_network_send() {
 
     let decoded = transit::decode_wrap_connection_batch(&output.intents[0]).unwrap();
     assert_eq!(
-        decoded.canonical_events,
+        decoded.canonical_events.into_items().collect::<Vec<_>>(),
         vec![b"event:a".to_vec(), b"event:b".to_vec()]
     );
     assert_eq!(
@@ -276,8 +319,8 @@ fn idempotence_keys_distinguish_parallel_batches_on_same_route() {
         sender_endpoint: [2; 32],
         recipient_endpoint: [3; 32],
         connection_secret_id: [4; 32],
-        send_item_keys: vec![b"out-key-1".to_vec()],
-        canonical_events: vec![b"event:a".to_vec()],
+        send_item_keys: transit::TransitIntentBytes::from_bytes([b"out-key-1".to_vec()]),
+        canonical_events: transit::TransitIntentBytes::from_bytes([b"event:a".to_vec()]),
     });
     let first_wrap_duplicate = transit::wrap_connection_batch_intent(
         transit::decode_wrap_connection_batch(&first_wrap).unwrap(),
@@ -287,8 +330,8 @@ fn idempotence_keys_distinguish_parallel_batches_on_same_route() {
         sender_endpoint: [2; 32],
         recipient_endpoint: [3; 32],
         connection_secret_id: [4; 32],
-        send_item_keys: vec![b"out-key-2".to_vec()],
-        canonical_events: vec![b"event:b".to_vec()],
+        send_item_keys: transit::TransitIntentBytes::from_bytes([b"out-key-2".to_vec()]),
+        canonical_events: transit::TransitIntentBytes::from_bytes([b"event:b".to_vec()]),
     });
 
     assert_eq!(first_wrap.key, first_wrap_duplicate.key);

@@ -11,7 +11,7 @@ use super::fact::{
 use super::intent::{
     MaterializeKeyWrapsIntent, PurgeRetiredRecipientMaterialIntent, UnwrapKeyWrapIntent,
 };
-use super::{context, layout};
+use super::{layout, matchers};
 
 pub const KEY_WRAP_PURPOSE: &[u8] = b"topo key wrap v1";
 
@@ -81,7 +81,7 @@ pub fn materialize_key_wrap_fact(
         .map_err(|_| "key wrap ciphertext length mismatch".to_string())?;
 
     Ok(Fact::new(
-        context::workspace_scope(intent.workspace_id),
+        matchers::workspace_scope(intent.workspace_id),
         wrap.created_at_ms,
         layout::encode_key_wrap(&wrap)?,
     ))
@@ -169,7 +169,7 @@ pub fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
         return Err("key wrap signer does not match signed envelope signer".to_string());
     }
     Ok(Fact::new(
-        context::workspace_scope(wrap.workspace_id),
+        matchers::workspace_scope(wrap.workspace_id),
         wrap.created_at_ms,
         bytes,
     ))
@@ -203,12 +203,12 @@ fn wrap_material(
         return Err("source fact id does not match materialize intent".to_string());
     }
     match intent.source {
-        context::WrapSourceKind::FrontierRoot => {
+        matchers::WrapSourceKind::FrontierRoot => {
             let source = layout::decode_local_key_secret(&source_fact.bytes)?;
             require_source_workspace_and_frontier(intent, source.workspace_id, source.frontier_id)?;
             Ok(root_material(source_fact.id, source))
         }
-        context::WrapSourceKind::HistoryNode {
+        matchers::WrapSourceKind::HistoryNode {
             range_start,
             range_width,
             bit_depth,
@@ -462,7 +462,7 @@ mod tests {
 
         let fact = admit_signed_key_wrap_fact(bytes.clone()).expect("admit signed key wrap");
 
-        assert_eq!(fact.scope, context::workspace_scope(wrap.workspace_id));
+        assert_eq!(fact.scope, matchers::workspace_scope(wrap.workspace_id));
         assert_eq!(fact.timestamp, wrap.created_at_ms);
         assert_eq!(fact.bytes, bytes);
     }

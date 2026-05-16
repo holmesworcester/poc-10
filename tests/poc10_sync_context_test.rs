@@ -1,10 +1,21 @@
 use topo::core::facts::Fact;
+use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::sync::context::{self, RangeEventMatcher};
+use topo::event_modules::sealed_message::fact::{
+    SealedMessageFact, SecretNodeFact, SignerPubkeyFact, NONCE_BYTES,
+};
+use topo::event_modules::sealed_message::matchers::SecretCoverageMatcher;
+use topo::event_modules::sealed_message::project as sealed_project;
+use topo::event_modules::sealed_message::rows::{
+    decode_sealed_message_row, message_key, SEALED_MESSAGE_ROWS,
+};
+use topo::event_modules::sealed_message::{layout as sealed_layout, matchers as sealed_context};
 use topo::event_modules::sync::fact::{
     EncryptedRootFact, KeyWrapAvailableFact, SharedEventFact, SyncRangeRequestFact,
 };
+use topo::event_modules::sync::matchers::{self as context, RangeEventMatcher};
 use topo::event_modules::sync::{layout, project};
 use topo::handlers::transit;
 
@@ -64,6 +75,122 @@ fn sync_request_sends_encrypted_message_when_out_of_range_dep_and_key_arrive() {
             .map(|context| context.needs.is_empty())
             .unwrap_or(true),
         "request should not retain range/dependency/key needs once send is ready"
+    );
+}
+
+#[test]
+fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
+    let workspace = [67; 32];
+    let connection = [68; 32];
+    let message_event_id = id(69);
+    let dep_id = id(70);
+    let key_wrap_id = id(71);
+    let day_ms = 86_400_000;
+    let request = sync_range_request_fact(workspace, connection, day_ms, day_ms + 10);
+    let message = encrypted_root_fact(workspace, day_ms + 5, message_event_id, dep_id, key_wrap_id);
+    let dep = shared_event_fact(workspace, 0, dep_id);
+    let key = key_wrap_available_fact(workspace, day_ms * 2, key_wrap_id);
+    let range_matcher = RangeEventMatcher::new();
+    let event_matcher = ExactSelectorMatcher::new(context::exact_event_role());
+    let key_matcher = ExactSelectorMatcher::new(context::key_wrap_role());
+    let matchers = [
+        &range_matcher as &dyn ContextMatcher,
+        &event_matcher as &dyn ContextMatcher,
+        &key_matcher as &dyn ContextMatcher,
+    ];
+    let projector = project::SyncContextProjector::new();
+    let mut bus = WakeLoop::new();
+
+    bus.submit_fact(message);
+    bus.submit_fact(dep);
+    bus.submit_fact(key);
+    for value in 100..164 {
+        bus.submit_fact(shared_event_fact(workspace, value, id(value as u8)));
+        bus.submit_fact(key_wrap_available_fact(
+            workspace,
+            day_ms * 3 + value,
+            id((value + 64) as u8),
+        ));
+    }
+    bus.drain(&projector, &matchers, 300)
+        .expect("pre-existing sync context offers should project");
+    assert!(bus.intents().is_empty());
+
+    bus.submit_fact(request.clone());
+    let ready = bus
+        .drain(&projector, &matchers, 4)
+        .expect("range request should resolve from matched context");
+
+    assert!(
+        ready.projections <= 4,
+        "sync should use range/exact context matches instead of scanning unrelated history: {ready:?}"
+    );
+    assert_eq!(bus.intents().len(), 1);
+    assert_eq!(
+        decode_send_fact_ids(&bus.intents()[0]),
+        vec![message_event_id, dep_id, key_wrap_id]
+    );
+    assert!(
+        bus.context(&request.id)
+            .map(|context| context.needs.is_empty())
+            .unwrap_or(true),
+        "request should not keep key needs once out-of-range key context is matched"
+    );
+
+    let signer = id(72);
+    let frontier = id(73);
+    let leaf = id(74);
+    let sealed_message = sealed_message_fact(workspace, signer, frontier, day_ms / 60_000, leaf);
+    let signer_fact = sealed_signer_fact(workspace, signer);
+    let secret_fact = sealed_secret_fact(workspace, frontier, 0, u64::MAX, 0, [0; 32]);
+    let signer_matcher = ExactSelectorMatcher::new(sealed_context::signer_role());
+    let deletion_matcher = ExactSelectorMatcher::new(sealed_context::deletion_role());
+    let secret_matcher = SecretCoverageMatcher::new();
+    let sealed_matchers = [
+        &signer_matcher as &dyn ContextMatcher,
+        &deletion_matcher as &dyn ContextMatcher,
+        &secret_matcher as &dyn ContextMatcher,
+    ];
+    let sealed_projector = sealed_project::SealedMessageProjector::new();
+    let mut receiver = WakeLoop::new();
+
+    receiver.submit_fact(signer_fact);
+    receiver.submit_fact(secret_fact);
+    receiver
+        .drain(&sealed_projector, &sealed_matchers, 4)
+        .expect("receiver projects pre-existing signer and key offers");
+    receiver.submit_fact(sealed_message.clone());
+    let opened = receiver
+        .drain(&sealed_projector, &sealed_matchers, 3)
+        .expect("sealed message should resolve from matched key context");
+
+    assert!(
+        opened.projections <= 3,
+        "message display should be a bounded context wake, not a key request loop: {opened:?}"
+    );
+    assert_eq!(receiver.intents().len(), 1);
+    let sealed_row = match AtomicIntent::from_intent(&receiver.intents()[0], &[SEALED_MESSAGE_ROWS])
+        .expect("sealed row intent")
+    {
+        AtomicIntent::PutRow(row) => row,
+        AtomicIntent::DeleteRow(_) => panic!("sealed projection should put a row"),
+    };
+    assert_eq!(sealed_row.key, message_key(workspace, sealed_message.id));
+    assert_eq!(
+        decode_sealed_message_row(&sealed_row.key, &sealed_row.value)
+            .expect("decode sealed row")
+            .message_id,
+        sealed_message.id
+    );
+    let remaining_needs = &receiver
+        .context(&sealed_message.id)
+        .expect("message should retain only update needs")
+        .needs;
+    assert!(
+        remaining_needs
+            .iter()
+            .all(|need| need.role == sealed_context::deletion_role()),
+        "secret and signer needs should clear once key context is matched"
     );
 }
 
@@ -145,7 +272,14 @@ fn sync_request_sends_ready_root_when_an_earlier_root_is_missing_a_key() {
     let projector = project::SyncContextProjector::new();
     let mut bus = WakeLoop::new();
 
-    for fact in [request, blocked, ready, blocked_dep, ready_dep, ready_key] {
+    for fact in [
+        request.clone(),
+        blocked,
+        ready,
+        blocked_dep,
+        ready_dep,
+        ready_key,
+    ] {
         bus.submit_fact(fact);
     }
     bus.drain(&projector, &matchers, 100)
@@ -155,6 +289,180 @@ fn sync_request_sends_ready_root_when_an_earlier_root_is_missing_a_key() {
     assert_eq!(
         decode_send_fact_ids(&bus.intents()[0]),
         vec![ready_event_id, ready_dep_id, ready_key_wrap_id]
+    );
+    let standing = bus
+        .context(&request.id)
+        .expect("incomplete root should keep request context");
+    assert!(
+        standing.needs.iter().any(|need| {
+            need.role == context::key_wrap_role() && need.selector.as_bytes() == blocked_key_wrap_id
+        }),
+        "sending a complete root must not drop the missing key need for another in-range root"
+    );
+}
+
+#[test]
+fn sync_request_emits_all_complete_roots_in_deterministic_order() {
+    let workspace = [37; 32];
+    let connection = [38; 32];
+    let early_event_id = id(39);
+    let early_dep_id = id(40);
+    let early_key_wrap_id = id(41);
+    let late_event_id = id(42);
+    let late_dep_id = id(43);
+    let late_key_wrap_id = id(44);
+    let request = sync_range_request_fact(workspace, connection, 100, 110);
+    let late = encrypted_root_fact(workspace, 109, late_event_id, late_dep_id, late_key_wrap_id);
+    let early = encrypted_root_fact(
+        workspace,
+        101,
+        early_event_id,
+        early_dep_id,
+        early_key_wrap_id,
+    );
+    let range_matcher = RangeEventMatcher::new();
+    let event_matcher = ExactSelectorMatcher::new(context::exact_event_role());
+    let key_matcher = ExactSelectorMatcher::new(context::key_wrap_role());
+    let matchers = [
+        &range_matcher as &dyn ContextMatcher,
+        &event_matcher as &dyn ContextMatcher,
+        &key_matcher as &dyn ContextMatcher,
+    ];
+    let projector = project::SyncContextProjector::new();
+    let mut bus = WakeLoop::new();
+
+    for fact in [
+        request.clone(),
+        late,
+        early,
+        shared_event_fact(workspace, 1, late_dep_id),
+        key_wrap_available_fact(workspace, 1, late_key_wrap_id),
+        shared_event_fact(workspace, 1, early_dep_id),
+        key_wrap_available_fact(workspace, 1, early_key_wrap_id),
+    ] {
+        bus.submit_fact(fact);
+    }
+    bus.drain(&projector, &matchers, 100)
+        .expect("sync should send every complete root");
+
+    let sent = bus
+        .intents()
+        .iter()
+        .map(decode_send_fact_ids)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sent,
+        vec![
+            vec![early_event_id, early_dep_id, early_key_wrap_id],
+            vec![late_event_id, late_dep_id, late_key_wrap_id],
+        ],
+        "complete roots should be sent in timestamp/event-id order, independent of submission order"
+    );
+    assert!(
+        bus.context(&request.id)
+            .map(|context| context.needs.is_empty())
+            .unwrap_or(true),
+        "a fully complete range request should not retain broad range context"
+    );
+}
+
+#[test]
+fn sync_range_matching_ignores_out_of_range_roots_and_their_context() {
+    let workspace = [47; 32];
+    let connection = [48; 32];
+    let in_range_event_id = id(49);
+    let in_range_dep_id = id(50);
+    let in_range_key_wrap_id = id(51);
+    let out_of_range_event_id = id(52);
+    let out_of_range_dep_id = id(53);
+    let out_of_range_key_wrap_id = id(54);
+    let request = sync_range_request_fact(workspace, connection, 100, 110);
+    let in_range = encrypted_root_fact(
+        workspace,
+        105,
+        in_range_event_id,
+        in_range_dep_id,
+        in_range_key_wrap_id,
+    );
+    let out_of_range = encrypted_root_fact(
+        workspace,
+        111,
+        out_of_range_event_id,
+        out_of_range_dep_id,
+        out_of_range_key_wrap_id,
+    );
+    let range_matcher = RangeEventMatcher::new();
+    let event_matcher = ExactSelectorMatcher::new(context::exact_event_role());
+    let key_matcher = ExactSelectorMatcher::new(context::key_wrap_role());
+    let matchers = [
+        &range_matcher as &dyn ContextMatcher,
+        &event_matcher as &dyn ContextMatcher,
+        &key_matcher as &dyn ContextMatcher,
+    ];
+    let projector = project::SyncContextProjector::new();
+    let mut bus = WakeLoop::new();
+
+    for fact in [
+        request.clone(),
+        out_of_range,
+        in_range,
+        shared_event_fact(workspace, 1, out_of_range_dep_id),
+        key_wrap_available_fact(workspace, 1, out_of_range_key_wrap_id),
+    ] {
+        bus.submit_fact(fact);
+    }
+    bus.drain(&projector, &matchers, 100)
+        .expect("sync should inspect only matching range roots");
+
+    assert!(bus.intents().is_empty());
+    let standing = bus.context(&request.id).expect("request still waiting");
+    assert!(
+        standing.needs.iter().any(|need| {
+            need.role == context::key_wrap_role()
+                && need.selector.as_bytes() == in_range_key_wrap_id
+        }),
+        "in-range root should produce an exact key-wrap need"
+    );
+    assert!(
+        standing.needs.iter().all(|need| {
+            need.selector.as_bytes() != out_of_range_dep_id
+                && need.selector.as_bytes() != out_of_range_key_wrap_id
+        }),
+        "out-of-range roots must not create exact dependency/key needs"
+    );
+}
+
+#[test]
+fn sync_projector_revalidates_matched_range_payload() {
+    let workspace = [57; 32];
+    let connection = [58; 32];
+    let message_event_id = id(59);
+    let dep_id = id(60);
+    let key_wrap_id = id(61);
+    let request = sync_range_request_fact(workspace, connection, 100, 110);
+    let payload = encrypted_root_fact(workspace, 105, message_event_id, dep_id, key_wrap_id);
+    let range_need =
+        context::range_event_need(request.id, context::workspace_scope(workspace), 100, 110);
+    let mismatched_offer = context::range_event_offer(
+        payload.id,
+        context::workspace_scope(workspace),
+        105,
+        id(62),
+        dep_id,
+        key_wrap_id,
+    );
+    let projection_context = ProjectionContext::from_matches(vec![MatchedContext {
+        need: range_need,
+        offer: mismatched_offer,
+        payload,
+    }]);
+
+    let err = project::SyncContextProjector::new()
+        .project(&request, &projection_context)
+        .expect_err("matched context must be semantically revalidated");
+    assert!(
+        err.contains("range context offer does not match"),
+        "unexpected sync validation error: {err}"
     );
 }
 
@@ -218,6 +526,69 @@ fn key_wrap_available_fact(workspace_id: [u8; 32], timestamp: u64, key_wrap_id: 
             key_wrap_id,
         })
         .expect("encode key wrap availability"),
+    )
+}
+
+fn sealed_message_fact(
+    workspace_id: [u8; 32],
+    signer_id: [u8; 32],
+    frontier_id: [u8; 32],
+    minute: u64,
+    leaf_id: [u8; 32],
+) -> Fact {
+    Fact::new(
+        sealed_context::workspace_scope(workspace_id),
+        minute,
+        sealed_layout::encode_sealed_message(&SealedMessageFact {
+            workspace_id,
+            created_at_ms: minute * 60_000,
+            author_user_id: [75; 32],
+            signer_id,
+            frontier_id,
+            local_history_node_secret_id: [76; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [77; 32],
+            minute,
+            leaf_id,
+            nonce: [78; NONCE_BYTES],
+            ciphertext: b"display".to_vec(),
+        })
+        .expect("encode sealed message"),
+    )
+}
+
+fn sealed_signer_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
+    Fact::new(
+        sealed_context::workspace_scope(workspace_id),
+        1,
+        sealed_layout::encode_signer_pubkey(&SignerPubkeyFact {
+            signer_id,
+            public_key: [79; 32],
+        })
+        .expect("encode signer pubkey"),
+    )
+}
+
+fn sealed_secret_fact(
+    workspace_id: [u8; 32],
+    frontier_id: [u8; 32],
+    start_minute: u64,
+    end_minute: u64,
+    prefix_bytes: u8,
+    leaf_prefix: [u8; 32],
+) -> Fact {
+    Fact::new(
+        sealed_context::workspace_scope(workspace_id),
+        start_minute,
+        sealed_layout::encode_secret_node(&SecretNodeFact {
+            workspace_id,
+            frontier_id,
+            start_minute,
+            end_minute,
+            prefix_bytes,
+            leaf_prefix,
+        })
+        .expect("encode secret node"),
     )
 }
 

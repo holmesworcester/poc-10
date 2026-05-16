@@ -2,14 +2,14 @@
 
 use std::cell::Cell;
 
-use topo::commands::context::{
+use topo::core::command_context::{
     CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
     WorkspaceId,
 };
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::identity_workspace::create::create_workspace;
+use topo::event_modules::identity_workspace::commands::create_workspace;
 use topo::event_modules::identity_workspace::layout as workspace_layout;
 use topo::event_modules::identity_workspace::project as workspace_project;
 use topo::event_modules::identity_workspace::rows as workspace_rows;
@@ -54,8 +54,8 @@ fn create_workspace_emits_decodable_workspace_fact() {
 
     assert_eq!(output.facts.len(), 1, "one workspace fact");
     assert!(output.intents.is_empty());
-    assert_eq!(output.summary.name, "Research");
-    assert_eq!(output.summary.created_at_ms, 60_000);
+    assert_eq!(output.receipt.created_at_ms, 60_000);
+    assert_eq!(output.receipt.workspace_fact_id, output.facts[0].id);
 
     let decoded = workspace_layout::decode_fact(&output.facts[0].bytes).expect("decode fact");
     assert_eq!(decoded.public_key, public_key);

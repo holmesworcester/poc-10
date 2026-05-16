@@ -4,6 +4,7 @@ use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::content_event::fact::ContentEventFact;
 use topo::event_modules::content_event::{layout, project, rows};
+use topo::event_modules::content_message::matchers as message_context;
 
 #[test]
 fn content_event_projector_materializes_row_through_atomic_intent() {
@@ -13,7 +14,7 @@ fn content_event_projector_materializes_row_through_atomic_intent() {
         payload: vec![0; 17],
     };
     let fact = Fact::new(
-        FactScope::Global,
+        message_context::workspace_scope(event.workspace_id),
         event.timestamp,
         layout::encode_fact(&event).expect("encode content event"),
     );

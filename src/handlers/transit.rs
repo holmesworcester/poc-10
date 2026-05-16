@@ -21,11 +21,51 @@ pub struct TransitWrapConnectionBatch {
     pub connection_secret_id: HandlerId,
     /// Deterministic send item keys represented by this batch. Connection send
     /// handlers mark these only after network send succeeds.
-    pub send_item_keys: Vec<Vec<u8>>,
+    pub send_item_keys: TransitIntentBytes,
     /// Canonical event bytes to be wrapped. Transit may inspect these only as
     /// plaintext inputs to packaging; connection transport receives only the
     /// resulting opaque frame.
-    pub canonical_events: Vec<Vec<u8>>,
+    pub canonical_events: TransitIntentBytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TransitIntentBytes {
+    items: Vec<TransitIntentByteItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransitIntentByteItem {
+    bytes: Vec<u8>,
+}
+
+impl TransitIntentBytes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_bytes(bytes: impl IntoIterator<Item = Vec<u8>>) -> Self {
+        let mut items = Self::new();
+        for bytes in bytes {
+            items.push(bytes);
+        }
+        items
+    }
+
+    pub fn push(&mut self, bytes: Vec<u8>) {
+        self.items.push(TransitIntentByteItem { bytes });
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        self.items.iter().map(|item| item.bytes.as_slice())
+    }
+
+    pub fn into_items(self) -> impl Iterator<Item = Vec<u8>> {
+        self.items.into_iter().map(|item| item.bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,8 +82,8 @@ pub fn wrap_connection_batch_intent(input: TransitWrapConnectionBatch) -> Intent
     push_id(&mut payload, &input.sender_endpoint);
     push_id(&mut payload, &input.recipient_endpoint);
     push_id(&mut payload, &input.connection_secret_id);
-    push_vecs(&mut payload, &input.send_item_keys);
-    push_vecs(&mut payload, &input.canonical_events);
+    push_byte_items(&mut payload, &input.send_item_keys);
+    push_byte_items(&mut payload, &input.canonical_events);
 
     Intent::new(
         IntentKind::new(TRANSIT_WRAP_CONNECTION_BATCH)
@@ -67,8 +107,8 @@ pub fn decode_wrap_connection_batch(intent: &Intent) -> Result<TransitWrapConnec
     let sender_endpoint = reader.id()?;
     let recipient_endpoint = reader.id()?;
     let connection_secret_id = reader.id()?;
-    let send_item_keys = reader.vecs()?;
-    let canonical_events = reader.vecs()?;
+    let send_item_keys = reader.byte_items()?;
+    let canonical_events = reader.byte_items()?;
     reader.finish()?;
 
     let input = TransitWrapConnectionBatch {
@@ -143,14 +183,14 @@ fn wrap_connection_batch_key(input: &TransitWrapConnectionBatch) -> Vec<u8> {
     hash.update(&input.sender_endpoint);
     hash.update(&input.recipient_endpoint);
     hash.update(&input.connection_secret_id);
-    hash_vecs(&mut hash, &input.send_item_keys);
-    hash_vecs(&mut hash, &input.canonical_events);
+    hash_byte_items(&mut hash, &input.send_item_keys);
+    hash_byte_items(&mut hash, &input.canonical_events);
     hash.finalize().as_bytes().to_vec()
 }
 
-fn hash_vecs(hash: &mut blake3::Hasher, values: &[Vec<u8>]) {
+fn hash_byte_items(hash: &mut blake3::Hasher, values: &TransitIntentBytes) {
     hash.update(&(values.len() as u32).to_be_bytes());
-    for value in values {
+    for value in values.iter() {
         hash.update(&(value.len() as u32).to_be_bytes());
         hash.update(value);
     }
@@ -160,9 +200,9 @@ fn push_id(out: &mut Vec<u8>, id: &HandlerId) {
     out.extend_from_slice(id);
 }
 
-fn push_vecs(out: &mut Vec<u8>, values: &[Vec<u8>]) {
+fn push_byte_items(out: &mut Vec<u8>, values: &TransitIntentBytes) {
     out.extend_from_slice(&(values.len() as u32).to_be_bytes());
-    for value in values {
+    for value in values.iter() {
         push_bytes(out, value);
     }
 }
@@ -202,9 +242,9 @@ impl<'a> Reader<'a> {
         Ok(values)
     }
 
-    fn vecs(&mut self) -> Result<Vec<Vec<u8>>, String> {
+    fn byte_items(&mut self) -> Result<TransitIntentBytes, String> {
         let len = self.u32()? as usize;
-        let mut values = Vec::with_capacity(len);
+        let mut values = TransitIntentBytes::new();
         for _ in 0..len {
             values.push(self.bytes()?.to_vec());
         }
@@ -243,26 +283,15 @@ impl<'a> Reader<'a> {
     }
 }
 
-// Handler for the target `transit_send_on_connection` handler.
-//
-// The wave-5 prototype of this handler contained the full transit packaging
-// pipeline — frame size selection, inner-payload framing, deterministic
-// AEAD-input derivation, AEAD encryption into the fixed slot, and the
-// `transit_network_send` follow-up intent. The poc10 intent-cleanliness
-// guardrail rejects fact / wire-layout / AEAD machinery inside
-// `src/handlers/`: that code belongs in `src/event_modules/transit/`.
-// The current handler decodes its intent, asks the transit event module to
-// validate that requested fact ids are sendable, and returns `NOT_YET_WIRED`
-// so the intent stays queued until real frame packaging lands.
-//
-// This is therefore an *envelope-decode + sendability guard* handler, not
-// real transit packaging. The `receive_transit` handler follows the same
-// contract on the inbound side.
-
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
-use crate::event_modules::transit::create;
-
-pub const NOT_YET_WIRED: &str = "transit packaging not yet wired";
+use crate::event_modules::{
+    connection_response,
+    transit::{
+        create,
+        frame::{self, TransitFactBundle},
+    },
+};
+use crate::handlers::network_send::{self, NetworkSendFrame};
 
 #[derive(Debug, Clone, Default)]
 pub struct TransitSendOnConnectionHandler;
@@ -279,15 +308,42 @@ impl IntentHandler for TransitSendOnConnectionHandler {
     }
 
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        Ok(decode_send_on_connection(intent)?.fact_ids)
+        let input = decode_send_on_connection(intent)?;
+        let mut ids = Vec::with_capacity(1 + input.fact_ids.len());
+        ids.push(input.connection_id);
+        ids.extend(input.fact_ids);
+        Ok(ids)
     }
 
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
         let input = decode_send_on_connection(intent)?;
+        let connection_fact = context.require_fact(&input.connection_id)?;
+        let connection = connection_response::layout::decode_fact(&connection_fact.bytes)?;
+        if connection_fact.id != input.connection_id {
+            return Err("send_on_connection connection fact id mismatch".to_string());
+        }
+
+        let mut facts = TransitFactBundle::new();
         for fact_id in &input.fact_ids {
             let fact = context.require_fact(fact_id)?;
-            create::require_sendable_fact(fact)?;
+            facts.push(create::require_sendable_fact(fact)?.to_vec());
         }
-        Err(NOT_YET_WIRED.to_string())
+        let frame = frame::seal_connection_send_frame(
+            input.connection_id,
+            connection.from_endpoint,
+            connection.to_endpoint,
+            connection.connection_secret,
+            &input.fact_ids,
+            facts,
+        )?;
+
+        Ok(
+            HandlerOutput::new().intent(network_send::network_send_frame_intent(
+                NetworkSendFrame {
+                    routing_key: input.connection_id,
+                    frame,
+                },
+            )),
+        )
     }
 }

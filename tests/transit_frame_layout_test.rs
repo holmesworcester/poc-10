@@ -6,8 +6,11 @@
 
 use topo::core::crypto::{XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES};
 use topo::core::wire::{Ciphertext, FixedBytes, FixedLayout, WireError};
+use topo::event_modules::transit::frame::{
+    self as transit_frame, SealConnectionFrame, TransitFactBundle,
+};
 use topo::event_modules::transit::layout::{
-    peek_frame_header, TransitFrameHeader, TransitLargeV1, TransitSmallV1,
+    decode_frame_parts, peek_frame_header, TransitFrameHeader, TransitLargeV1, TransitSmallV1,
     TRANSIT_FRAME_SIZE_CLASS_LARGE, TRANSIT_FRAME_SIZE_CLASS_SMALL, TRANSIT_FRAME_TAG,
     TRANSIT_FRAME_VERSION, TRANSIT_HEADER_BYTES, TRANSIT_LARGE_CIPHERTEXT_BYTES,
     TRANSIT_LARGE_PLAINTEXT_BYTES, TRANSIT_LARGE_WIRE_BYTES, TRANSIT_SMALL_CIPHERTEXT_BYTES,
@@ -18,6 +21,7 @@ const SENDER: [u8; 32] = [0x11; 32];
 const RECEIVER: [u8; 32] = [0x22; 32];
 const CONNECTION: [u8; 32] = [0x33; 32];
 const NONCE: [u8; XCHACHA20_POLY1305_NONCE_BYTES] = [0x44; XCHACHA20_POLY1305_NONCE_BYTES];
+const SECRET: [u8; 32] = [0x66; 32];
 
 fn small_sample() -> TransitSmallV1 {
     TransitSmallV1 {
@@ -305,4 +309,74 @@ fn ciphertext_slot_capacity_accepts_full_plaintext_plus_aead_tag() {
         Ciphertext::<TRANSIT_SMALL_CIPHERTEXT_BYTES>::new(&oversize).unwrap_err(),
         WireError::ValueTooLarge { .. }
     ));
+}
+
+#[test]
+fn sealed_small_connection_frame_fills_fixed_ciphertext_slot() {
+    let frame = transit_frame::seal_connection_frame(SealConnectionFrame {
+        connection_id: CONNECTION,
+        sender_endpoint_id: SENDER,
+        receiver_endpoint_id: RECEIVER,
+        connection_secret: SECRET,
+        nonce: NONCE,
+        facts: TransitFactBundle::from_bytes([b"alpha".to_vec(), b"beta".to_vec()]),
+    })
+    .expect("seal small frame");
+
+    assert_eq!(frame.len(), TRANSIT_SMALL_WIRE_BYTES);
+    let parts = decode_frame_parts(&frame).expect("decode frame parts");
+    assert_eq!(parts.header.size_class, TRANSIT_FRAME_SIZE_CLASS_SMALL);
+    assert_eq!(parts.ciphertext.len(), TRANSIT_SMALL_CIPHERTEXT_BYTES);
+
+    let opened =
+        transit_frame::open_connection_frame(&frame, &SECRET).expect("open small transit frame");
+    assert_eq!(
+        opened.facts.into_iter().collect::<Vec<_>>(),
+        vec![b"alpha".to_vec(), b"beta".to_vec()]
+    );
+}
+
+#[test]
+fn sealed_large_connection_frame_fills_fixed_ciphertext_slot() {
+    on_big_stack(|| {
+        let large_fact = vec![0x55; TRANSIT_SMALL_PLAINTEXT_BYTES];
+        let frame = transit_frame::seal_connection_frame(SealConnectionFrame {
+            connection_id: CONNECTION,
+            sender_endpoint_id: SENDER,
+            receiver_endpoint_id: RECEIVER,
+            connection_secret: SECRET,
+            nonce: NONCE,
+            facts: TransitFactBundle::from_bytes([large_fact.clone()]),
+        })
+        .expect("seal large frame");
+
+        assert_eq!(frame.len(), TRANSIT_LARGE_WIRE_BYTES);
+        let parts = decode_frame_parts(&frame).expect("decode frame parts");
+        assert_eq!(parts.header.size_class, TRANSIT_FRAME_SIZE_CLASS_LARGE);
+        assert_eq!(parts.ciphertext.len(), TRANSIT_LARGE_CIPHERTEXT_BYTES);
+
+        let opened = transit_frame::open_connection_frame(&frame, &SECRET)
+            .expect("open large transit frame");
+        assert_eq!(
+            opened.facts.into_iter().collect::<Vec<_>>(),
+            vec![large_fact]
+        );
+    });
+}
+
+#[test]
+fn opening_rejects_variable_length_ciphertext_slot() {
+    let frame = topo::event_modules::transit::layout::encode_frame_bytes(
+        TRANSIT_FRAME_SIZE_CLASS_SMALL,
+        FixedBytes(SENDER),
+        FixedBytes(RECEIVER),
+        FixedBytes(CONNECTION),
+        FixedBytes(NONCE),
+        b"short ciphertext",
+    )
+    .expect("variable slot frame");
+
+    let err = transit_frame::open_connection_frame(&frame, &SECRET)
+        .expect_err("open rejects unfilled fixed ciphertext slot");
+    assert!(err.contains("fixed slot"), "{err}");
 }

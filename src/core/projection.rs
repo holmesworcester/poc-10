@@ -45,6 +45,17 @@ impl ProjectionContext {
         &self.matched
     }
 
+    /// Return the payload fact supplied for an exact need, if any.
+    ///
+    /// This is a lookup over context core already matched and loaded before
+    /// projection. It does not query storage or run matcher logic.
+    pub fn payload_for(&self, need: &ContextNeed) -> Option<&Fact> {
+        self.matched
+            .iter()
+            .find(|matched| matched.need == *need)
+            .map(|matched| &matched.payload)
+    }
+
     pub fn payload_refs(&self) -> impl Iterator<Item = FactId> + '_ {
         self.offers.iter().map(|offer| offer.payload_ref)
     }

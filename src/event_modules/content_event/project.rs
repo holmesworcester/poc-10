@@ -13,6 +13,8 @@ use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
+use crate::event_modules::content_message::matchers;
+
 use super::layout;
 use super::rows::content_event_row;
 
@@ -32,7 +34,17 @@ impl Projector for ContentEventProjector {
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         let event = layout::decode_fact(&fact.bytes)?;
+        let scope = matchers::workspace_scope(event.workspace_id);
+        require_fact_scope(fact, &scope)?;
         Ok(ProjectionOutput::new()
             .intent(AtomicIntent::PutRow(content_event_row(fact.id, &event)?).into_intent()))
+    }
+}
+
+fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {
+    if &fact.scope == expected {
+        Ok(())
+    } else {
+        Err("content event fact scope does not match body workspace".to_string())
     }
 }

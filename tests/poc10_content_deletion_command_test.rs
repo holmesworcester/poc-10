@@ -1,0 +1,103 @@
+//! Command tests for target content deletion constructors.
+
+use std::cell::Cell;
+
+use topo::core::command_context::{
+    CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
+    WorkspaceId,
+};
+use topo::core::store::Store;
+use topo::event_modules::content_file_deletion::commands::delete_file;
+use topo::event_modules::content_file_deletion::layout as file_deletion_layout;
+use topo::event_modules::content_message_deletion::commands::delete_message;
+use topo::event_modules::content_message_deletion::layout as message_deletion_layout;
+
+struct FixedClock(Cell<u64>);
+
+impl CommandClock for FixedClock {
+    fn next_timestamp(&self) -> u64 {
+        let next = self.0.get();
+        self.0.set(next + 1);
+        next
+    }
+}
+
+struct EmptyVault;
+
+impl IdentityVault for EmptyVault {
+    fn local_signing_capability(
+        &self,
+        _workspace_id: WorkspaceId,
+    ) -> Result<LocalSigningCapability, String> {
+        Err("no signing capability".to_string())
+    }
+
+    fn local_encryption_capability(
+        &self,
+        _workspace_id: WorkspaceId,
+    ) -> Result<LocalEncryptionCapability, String> {
+        Err("no encryption capability".to_string())
+    }
+}
+
+fn ctx<'a>(store: &'a Store, clock: &'a FixedClock, vault: &'a EmptyVault) -> CommandContext<'a> {
+    CommandContext::new(store, clock, vault)
+}
+
+#[test]
+fn delete_message_emits_decodable_target_fact() {
+    let store = Store::open_memory().expect("store");
+    let clock = FixedClock(Cell::new(100));
+    let vault = EmptyVault;
+    let ctx = ctx(&store, &clock, &vault);
+
+    let output = delete_message(&ctx, [1; 32], [2; 32], [3; 32]).expect("delete message");
+
+    assert_eq!(output.facts.len(), 1);
+    assert!(output.intents.is_empty());
+    assert_eq!(output.receipt.created_at_ms, 100);
+    assert_eq!(output.receipt.deletion_fact_id, output.facts[0].id);
+
+    let decoded =
+        message_deletion_layout::decode_fact(&output.facts[0].bytes).expect("decode deletion");
+    assert_eq!(decoded.workspace_id, [1; 32]);
+    assert_eq!(decoded.created_at_ms, 100);
+    assert_eq!(decoded.target_message_id, [2; 32]);
+    assert_eq!(decoded.author_user_id, [3; 32]);
+}
+
+#[test]
+fn delete_file_emits_decodable_target_fact() {
+    let store = Store::open_memory().expect("store");
+    let clock = FixedClock(Cell::new(200));
+    let vault = EmptyVault;
+    let ctx = ctx(&store, &clock, &vault);
+
+    let output = delete_file(&ctx, [4; 32], [5; 32], [6; 32]).expect("delete file");
+
+    assert_eq!(output.facts.len(), 1);
+    assert!(output.intents.is_empty());
+    assert_eq!(output.receipt.created_at_ms, 200);
+    assert_eq!(output.receipt.deletion_fact_id, output.facts[0].id);
+
+    let decoded =
+        file_deletion_layout::decode_fact(&output.facts[0].bytes).expect("decode deletion");
+    assert_eq!(decoded.workspace_id, [4; 32]);
+    assert_eq!(decoded.created_at_ms, 200);
+    assert_eq!(decoded.target_file_id, [5; 32]);
+    assert_eq!(decoded.author_user_id, [6; 32]);
+}
+
+#[test]
+fn deletion_commands_reject_empty_ids() {
+    let store = Store::open_memory().expect("store");
+    let clock = FixedClock(Cell::new(0));
+    let vault = EmptyVault;
+    let ctx = ctx(&store, &clock, &vault);
+
+    let err = delete_message(&ctx, [0; 32], [2; 32], [3; 32]).expect_err("empty workspace");
+    assert!(err.contains("workspace_id"), "{err}");
+
+    let err = delete_file(&ctx, [4; 32], [0; 32], [6; 32]).expect_err("empty target");
+    assert!(err.contains("target_file_id"), "{err}");
+}

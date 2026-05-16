@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 fn source_text(path: &Path) -> String {
@@ -48,10 +49,60 @@ fn immediate_rust_children(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn immediate_rust_module_names(root: &Path) -> BTreeSet<String> {
+    immediate_rust_children(root)
+        .into_iter()
+        .filter_map(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn declared_modules_in(text: &str) -> BTreeSet<String> {
+    meaningful_source_lines(text)
+        .into_iter()
+        .filter_map(|line| {
+            line.strip_prefix("pub mod ")
+                .or_else(|| line.strip_prefix("mod "))
+                .and_then(|rest| rest.strip_suffix(';'))
+                .map(str::trim)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 fn production_text_before_unit_tests(text: &str) -> &str {
     text.find("#[cfg(test)]")
         .map(|index| &text[..index])
         .unwrap_or(text)
+}
+
+fn strip_line_comments(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                ""
+            } else {
+                line.split_once("//").map_or(line, |(code, _)| code)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn contains_context_matcher_logic(text: &str) -> bool {
+    let production = strip_line_comments(production_text_before_unit_tests(text));
+    [
+        "impl ContextMatcher",
+        "ContextMatch",
+        "match_need_to_offers",
+        "match_offer_to_needs",
+    ]
+    .into_iter()
+    .any(|needle| production.contains(needle))
 }
 
 #[test]
@@ -179,7 +230,50 @@ fn target_projectors_stay_pure_context_to_intents() {
 }
 
 #[test]
-fn target_context_matchers_do_not_emit_work_or_rows() {
+fn event_module_context_rs_files_do_not_reappear() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let offenders = rust_files_named(&root.join("src/event_modules"), "context.rs")
+        .into_iter()
+        .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "protocol-specific event-module context.rs files are dumping-ground risks, not a target source of truth. Core-owned src/core/context.rs is allowed; put role constants in project.rs and role-specific matching in matchers.rs instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn context_matcher_logic_lives_in_matchers_rs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in rust_files(&root.join("src/event_modules")) {
+        let text = source_text(&path);
+        if !contains_context_matcher_logic(&text) {
+            continue;
+        }
+        if path
+            .file_name()
+            .is_some_and(|file_name| file_name == "matchers.rs")
+        {
+            continue;
+        }
+
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        offenders.push(relative);
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "role-specific ContextMatcher logic belongs in event-module matchers.rs files, not project.rs or protocol-specific context.rs dumping grounds:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
     for path in rust_files_named(&root.join("src/event_modules"), "context.rs") {
@@ -194,6 +288,8 @@ fn target_context_matchers_do_not_emit_work_or_rows() {
             "insert_table_rows",
             "delete_table_rows",
             "write_transaction",
+            "ProjectionContext",
+            "MatchedContext",
         ] {
             if text.contains(forbidden) {
                 offenders.push(format!(
@@ -206,7 +302,7 @@ fn target_context_matchers_do_not_emit_work_or_rows() {
 
     assert!(
         offenders.is_empty(),
-        "context matchers should only define needs/offers/selectors and matching:\n{}",
+        "temporary protocol context.rs helper files are not the context source of truth; until deleted they may only contain narrow role constants, selectors, and need/offer constructors. ProjectionContext inspection belongs in project.rs, and matcher logic belongs in matchers.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -251,17 +347,69 @@ fn target_event_modules_do_not_use_legacy_file_names() {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if matches!(
-            file_name,
-            "mod.rs" | "schema.rs" | "codec.rs" | "cli.rs" | "commands.rs" | "queries.rs"
-        ) {
+        if matches!(file_name, "mod.rs" | "schema.rs" | "codec.rs") {
             offenders.push(path.strip_prefix(root).unwrap().display().to_string());
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "target event modules should use fact/layout/project/context/intent/rows/read files, not legacy names:\n{}",
+        "target event modules should use explicit role files, not legacy module manifests or dumping-ground names:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    files.extend(rust_files_named(
+        &root.join("src/event_modules"),
+        "project.rs",
+    ));
+    files.extend(
+        rust_files(&root.join("src/event_modules"))
+            .into_iter()
+            .filter(|path| {
+                path.components()
+                    .any(|component| component.as_os_str() == "project")
+            }),
+    );
+    files.extend(rust_files(&root.join("src/handlers")));
+
+    let mut offenders = Vec::new();
+    for path in files {
+        let text = source_text(&path);
+        for forbidden in ["/commands.rs", "::commands", "/cli.rs", "::cli"] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("use crate::event_modules") && trimmed.contains("commands") {
+                offenders.push(format!(
+                    "{} imports event-module commands from reactive code: {trimmed}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+            if trimmed.starts_with("use crate::event_modules") && trimmed.contains("cli") {
+                offenders.push(format!(
+                    "{} imports event-module cli from reactive code: {trimmed}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    offenders.sort();
+    offenders.dedup();
+    assert!(
+        offenders.is_empty(),
+        "projectors and handlers are automatic/reactive paths; they may share create.rs constructors but must not call user-facing commands.rs or cli.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -365,8 +513,10 @@ fn target_projectors_do_not_define_intent_payloads_or_handler_logic() {
 fn target_manifests_are_declarations_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut manifests = vec![
-        root.join("src/event_modules.rs"),
-        root.join("src/handlers.rs"),
+        root.join("src/lib.rs"),
+        root.join("src/core.rs"),
+        root.join("src/event_modules/registry.rs"),
+        root.join("src/handlers/registry.rs"),
     ];
     manifests.extend(immediate_rust_children(&root.join("src/event_modules")));
 
@@ -374,7 +524,8 @@ fn target_manifests_are_declarations_only() {
     for path in manifests {
         let text = source_text(&path);
         for line in meaningful_source_lines(&text) {
-            if !(line.starts_with("pub mod ")
+            if !(line.starts_with("#[path = ")
+                || line.starts_with("pub mod ")
                 || line.starts_with("mod ")
                 || line.starts_with("pub use "))
             {
@@ -389,6 +540,189 @@ fn target_manifests_are_declarations_only() {
     assert!(
         offenders.is_empty(),
         "target root/module manifests must not accumulate behavior:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn root_command_module_does_not_reappear() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let offenders = ["src/commands.rs", "src/commands"]
+        .into_iter()
+        .filter(|path| root.join(path).exists())
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "there is no root command module. User-facing command context lives in src/core/command_context.rs, and module commands stay under event modules:\n{}",
+        offenders.join("\n")
+    );
+
+    assert!(
+        root.join("src/core/command_context.rs").is_file(),
+        "missing src/core/command_context.rs"
+    );
+}
+
+#[test]
+fn root_event_and_handler_manifests_live_in_registry_files() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let stale = ["src/event_modules.rs", "src/handlers.rs"]
+        .into_iter()
+        .filter(|path| root.join(path).exists())
+        .collect::<Vec<_>>();
+
+    assert!(
+        stale.is_empty(),
+        "event-module and handler manifests should live under their directories as registry.rs files, not root dumping-ground manifests:\n{}",
+        stale.join("\n")
+    );
+
+    let lib = source_text(&root.join("src/lib.rs"));
+    for required in [
+        r#"#[path = "event_modules/registry.rs"]"#,
+        r#"#[path = "handlers/registry.rs"]"#,
+    ] {
+        assert!(
+            lib.contains(required),
+            "src/lib.rs should export registry files with #[path]: missing {required}"
+        );
+    }
+}
+
+#[test]
+fn target_manifests_match_their_filesystem_modules() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/event_modules");
+    let handler_root = root.join("src/handlers");
+    let mut offenders = Vec::new();
+
+    for (manifest, module_root) in [
+        (
+            root.join("src/event_modules/registry.rs"),
+            event_root.clone(),
+        ),
+        (root.join("src/handlers/registry.rs"), handler_root),
+    ] {
+        let declared = declared_modules_in(&source_text(&manifest));
+        let mut files = immediate_rust_module_names(&module_root);
+        files.remove("registry");
+        let missing_files = declared.difference(&files).cloned().collect::<Vec<_>>();
+        let missing_declarations = files.difference(&declared).cloned().collect::<Vec<_>>();
+        if !missing_files.is_empty() {
+            offenders.push(format!(
+                "{} declares modules without files: {}",
+                manifest.strip_prefix(root).unwrap().display(),
+                missing_files.join(", ")
+            ));
+        }
+        if !missing_declarations.is_empty() {
+            offenders.push(format!(
+                "{} has files not declared by manifest: {}",
+                module_root.strip_prefix(root).unwrap().display(),
+                missing_declarations.join(", ")
+            ));
+        }
+    }
+
+    for manifest in immediate_rust_children(&event_root) {
+        if manifest
+            .file_name()
+            .is_some_and(|file_name| file_name == "registry.rs")
+        {
+            continue;
+        }
+        let module_name = manifest
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("module file stem");
+        let declared = declared_modules_in(&source_text(&manifest));
+        let module_root = event_root.join(module_name);
+        if declared.is_empty() && !module_root.exists() {
+            continue;
+        }
+        if !module_root.exists() {
+            offenders.push(format!(
+                "{} declares children but {} is missing",
+                manifest.strip_prefix(root).unwrap().display(),
+                module_root.strip_prefix(root).unwrap().display()
+            ));
+            continue;
+        }
+
+        let files = immediate_rust_module_names(&module_root);
+        let missing_files = declared.difference(&files).cloned().collect::<Vec<_>>();
+        let missing_declarations = files.difference(&declared).cloned().collect::<Vec<_>>();
+        if !missing_files.is_empty() {
+            offenders.push(format!(
+                "{} declares child modules without files: {}",
+                manifest.strip_prefix(root).unwrap().display(),
+                missing_files.join(", ")
+            ));
+        }
+        if !missing_declarations.is_empty() {
+            offenders.push(format!(
+                "{} has child files not declared by manifest: {}",
+                module_root.strip_prefix(root).unwrap().display(),
+                missing_declarations.join(", ")
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "target module manifests must stay synchronized with the filesystem so orphan files cannot become hidden dumping grounds:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_event_module_child_files_use_narrow_slice_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_root = root.join("src/event_modules");
+    let mut offenders = Vec::new();
+
+    for path in rust_files(&event_root) {
+        if path.parent() == Some(event_root.as_path()) {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !matches!(
+            file_name,
+            "addr.rs"
+                | "create.rs"
+                | "commands.rs"
+                | "queries.rs"
+                | "cli.rs"
+                | "fact.rs"
+                | "frame.rs"
+                | "intent.rs"
+                | "layout.rs"
+                | "key_request.rs"
+                | "local_material.rs"
+                | "local_recipient_key.rs"
+                | "matchers.rs"
+                | "message.rs"
+                | "offers.rs"
+                | "project.rs"
+                | "range_request.rs"
+                | "receive.rs"
+                | "recipient_key.rs"
+                | "removal_frontier.rs"
+                | "rows.rs"
+                | "secret_path.rs"
+                | "signed_key_wrap.rs"
+                | "validation.rs"
+        ) {
+            offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "target event-module child files should stay in named responsibility slices, not generic helper or catch-all files:\n{}",
         offenders.join("\n")
     );
 }
@@ -777,6 +1111,7 @@ fn target_cli_equivalents_do_not_exist_or_parse_user_commands() {
     let mut offenders = Vec::new();
     for path in rust_files(&root.join("src/event_modules"))
         .into_iter()
+        .filter(|path| path.file_name().is_none_or(|name| name != "cli.rs"))
         .chain(rust_files(&root.join("src/handlers")))
     {
         let text = source_text(&path);

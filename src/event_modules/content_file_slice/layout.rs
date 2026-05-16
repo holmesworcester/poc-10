@@ -14,7 +14,7 @@ use crate::core::wire;
 
 use super::fact::ContentFileSliceFact;
 
-pub const TYPE_CONTENT_FILE_SLICE: u8 = 161;
+pub const TYPE_CONTENT_FILE_SLICE: u8 = 55;
 pub const HEADER_BYTES: usize = 1 + 32 + 8 + 32 + 4 + 4;
 
 pub fn encode_fact(fact: &ContentFileSliceFact) -> Result<Vec<u8>, String> {

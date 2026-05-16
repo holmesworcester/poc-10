@@ -42,10 +42,6 @@ fn source_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
 }
 
-fn source_matches(root: &Path, needles: &[&str]) -> Vec<String> {
-    source_matches_in_paths(root, source_files(&root.join("src")), needles)
-}
-
 fn source_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&str]) -> Vec<String> {
     let mut matches = Vec::new();
     for path in paths {
@@ -65,6 +61,46 @@ fn source_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&str]) -
     matches.sort();
     matches.dedup();
     matches
+}
+
+fn source_code_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&str]) -> Vec<String> {
+    let mut matches = Vec::new();
+    for path in paths {
+        let text = source_text(&path);
+        for (line_index, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let code = line.split_once("//").map_or(line, |(code, _)| code);
+            for needle in needles {
+                if code.contains(needle) {
+                    matches.push(format!(
+                        "{}:{} contains {needle:?}",
+                        path.strip_prefix(root).unwrap().display(),
+                        line_index + 1
+                    ));
+                }
+            }
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    matches
+}
+
+fn target_projector_files(root: &Path) -> Vec<PathBuf> {
+    let event_modules = root.join("src/event_modules");
+    source_files(&event_modules)
+        .into_iter()
+        .filter(|path| {
+            if !path.extension().is_some_and(|ext| ext == "rs") {
+                return false;
+            }
+            let relative = path.strip_prefix(root).unwrap().display().to_string();
+            relative.ends_with("/project.rs") || relative.contains("/project/")
+        })
+        .collect()
 }
 
 fn meaningful_manifest_lines(text: &str) -> Vec<&str> {
@@ -87,7 +123,12 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         "## Poc-10 Success Criteria",
         "Every non-ignored `poc-8` test passes in `poc-10`",
         "There is no `mod.rs` anywhere in the repository.",
-        "There is no per-module `rows.rs`, `layout.rs`, or `cli.rs`",
+        "There is no root `src/commands` module",
+        "src/core/command_context.rs",
+        "src/event_modules/registry.rs",
+        "src/handlers/registry.rs",
+        "There is no product `demo` or `smoke` command",
+        "generic runtime/app mechanics",
         "src/core/schema.p8sql",
         "src/event_modules/schema.p8sql",
         "src/handlers/schema.p8sql",
@@ -113,6 +154,8 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
 fn poc10_core_contract_files_are_present() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let required = [
+        "src/core/command_context.rs",
+        "src/core/runtime.rs",
         "src/core/facts.rs",
         "src/core/context.rs",
         "src/core/matchers.rs",
@@ -130,6 +173,73 @@ fn poc10_core_contract_files_are_present() {
         missing.is_empty(),
         "missing poc-10 core contract files:\n{}",
         missing.join("\n")
+    );
+}
+
+#[test]
+fn poc10_root_uses_registry_path_exports_not_root_manifests() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    for forbidden in [
+        "src/commands.rs",
+        "src/commands",
+        "src/event_modules.rs",
+        "src/handlers.rs",
+    ] {
+        assert!(
+            !root.join(forbidden).exists(),
+            "{forbidden} should not exist; command context belongs in core and module manifests live in registry.rs files"
+        );
+    }
+
+    for required in [
+        "src/core/command_context.rs",
+        "src/event_modules/registry.rs",
+        "src/handlers/registry.rs",
+    ] {
+        assert!(root.join(required).is_file(), "missing {required}");
+    }
+
+    let lib = source_text(&root.join("src/lib.rs"));
+    for required in [
+        r#"#[path = "event_modules/registry.rs"]"#,
+        "pub mod event_modules;",
+        r#"#[path = "handlers/registry.rs"]"#,
+        "pub mod handlers;",
+    ] {
+        assert!(
+            lib.contains(required),
+            "src/lib.rs must export registry files with #[path]: missing {required}"
+        );
+    }
+}
+
+#[test]
+fn poc10_has_no_product_demo_or_smoke_command_surface() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    for forbidden in [
+        "src/demo.rs",
+        "src/demo",
+        "examples/match_demo.rs",
+        "tests/match_smoke.rs",
+    ] {
+        assert!(
+            !root.join(forbidden).exists(),
+            "{forbidden} should not exist; smoke coverage belongs in black-box CLI tests"
+        );
+    }
+
+    let app = source_text(&root.join("src/match_app.rs"));
+    let forbidden = ["Some(\"demo\")", "\"demo\"", "Some(\"smoke\")", "\"smoke\""];
+    let offenders = forbidden
+        .into_iter()
+        .filter(|needle| app.contains(needle))
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "the product CLI should not expose demo/smoke commands: {}",
+        offenders.join(", ")
     );
 }
 
@@ -264,9 +374,9 @@ fn poc10_target_has_no_mod_rs_files() {
 }
 
 #[test]
-fn poc10_target_has_no_per_module_schema_codec_or_cli_files() {
+fn poc10_target_has_no_per_module_schema_or_codec_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let forbidden = ["schema.rs", "codec.rs", "cli.rs"];
+    let forbidden = ["schema.rs", "codec.rs"];
     let offenders = rust_files(&root.join("src"))
         .into_iter()
         .filter(|path| {
@@ -279,7 +389,7 @@ fn poc10_target_has_no_per_module_schema_codec_or_cli_files() {
 
     assert!(
         offenders.is_empty(),
-        "poc-10 target forbids per-module schema.rs, codec.rs, and cli.rs files:\n{}",
+        "poc-10 target forbids per-module schema.rs and codec.rs files:\n{}",
         offenders.join("\n")
     );
 }
@@ -327,7 +437,6 @@ fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
 }
 
 #[test]
-#[ignore = "poc-10 target guardrail: enable after worker queues are replaced by core intents"]
 fn poc10_target_source_has_no_old_worker_queue_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let forbidden = [
@@ -351,7 +460,11 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
         "pending_connection_attempts",
         "pending_connection_responses",
     ];
-    let offenders = source_matches(root, &forbidden);
+    let target_paths = ["src/core", "src/event_modules", "src/handlers"]
+        .into_iter()
+        .flat_map(|path| source_files(&root.join(path)))
+        .collect::<Vec<_>>();
+    let offenders = source_code_matches_in_paths(root, target_paths, &forbidden);
 
     assert!(
         offenders.is_empty(),
@@ -361,21 +474,33 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
 }
 
 #[test]
-#[ignore = "poc-10 target guardrail: enable after projector rows, deletes, and labels are emitted as needs/offers/intents"]
+fn poc10_architecture_docs_describe_legacy_queues_as_removed_mechanisms() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let architecture = source_text(&root.join("new_architecture.md"));
+    let migration = source_text(&root.join("poc10_migration.md"));
+
+    for required in [
+        "These names are legacy/removal vocabulary only.",
+        "must not reappear in",
+        "target code paths except in tests or documentation",
+        "No old labels, blocker tables, ready queues, canonical ingress queues",
+        "recently-valid queues, pending reprojection queues, or worker catalogs remain",
+    ] {
+        assert!(
+            architecture.contains(required) || migration.contains(required),
+            "architecture docs must frame old worker queues as removed target mechanisms: {required}"
+        );
+    }
+}
+
+#[test]
 fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let projector_paths = source_files(&root.join("src"))
-        .into_iter()
-        .filter(|path| {
-            path.file_name().is_some_and(|name| name == "projector.rs")
-                || path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .display()
-                    .to_string()
-                    .ends_with("src/legacy/workers/pipeline_helpers/event_pipeline.rs")
-        })
-        .collect::<Vec<_>>();
+    let projector_paths = target_projector_files(root);
+    assert!(
+        !projector_paths.is_empty(),
+        "scan target src/event_modules/**/project.rs files"
+    );
     let forbidden = [
         "ProjectionOutput::rows",
         "ProjectionOutput::labels",
@@ -387,18 +512,48 @@ fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
         "pub rows:",
         "pub deletes:",
         "pub updates:",
-        "rows:",
-        "deletes:",
-        "updates:",
+        "pub labels:",
         ".rows",
         ".deletes",
         ".updates",
+        ".labels",
     ];
-    let offenders = source_matches_in_paths(root, projector_paths, &forbidden);
+    let offenders = source_code_matches_in_paths(root, projector_paths, &forbidden);
 
     assert!(
         offenders.is_empty(),
-        "poc-10 target projectors should emit only needs, offers, and intents; rows, deletes, and labels must be atomic intents or context output:\n{}",
+        "poc-10 target projectors should emit only needs, offers, and intents; rows, deletes, and labels must go through atomic intents or context output:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn poc10_target_projectors_do_not_write_store_rows_directly() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let projector_paths = target_projector_files(root);
+    let forbidden = [
+        "crate::core::store",
+        "core::store",
+        "Store",
+        "rusqlite",
+        ".write_transaction(",
+        ".insert_table_rows(",
+        ".insert_table_rows_in_tx(",
+        ".replace_table_rows_in_tx(",
+        ".delete_table_rows(",
+        ".delete_table_rows_in_tx(",
+        ".execute(",
+        ".execute_batch(",
+        ".prepare(",
+        ".query(",
+        ".query_row(",
+        ".query_map(",
+    ];
+    let offenders = source_code_matches_in_paths(root, projector_paths, &forbidden);
+
+    assert!(
+        offenders.is_empty(),
+        "poc-10 target projectors must not write store rows directly; emit AtomicIntent row mutations through ProjectionOutput::intents instead:\n{}",
         offenders.join("\n")
     );
 }
@@ -471,10 +626,10 @@ fn poc10_target_has_no_dumping_ground_filenames() {
 fn poc10_target_root_manifests_are_declarations_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifests = [
+        "src/lib.rs",
         "src/core.rs",
-        "src/event_modules.rs",
-        "src/handlers.rs",
-        "src/commands.rs",
+        "src/event_modules/registry.rs",
+        "src/handlers/registry.rs",
     ];
 
     for manifest in manifests {
@@ -484,7 +639,8 @@ fn poc10_target_root_manifests_are_declarations_only() {
         let offenders = meaningful_manifest_lines(&text)
             .into_iter()
             .filter(|line| {
-                !(line.starts_with("pub mod ")
+                !(line.starts_with("#[path = ")
+                    || line.starts_with("pub mod ")
                     || line.starts_with("mod ")
                     || line.starts_with("pub use "))
             })

@@ -4,8 +4,10 @@
 //! store. The checks stay beside the transit protocol rules instead of in the
 //! handler that performs the eventual network effect.
 
-use crate::core::facts::{Fact, FactScope};
-use crate::event_modules::{encryption, signed_fact};
+use crate::core::facts::{Fact, FactId, FactScope};
+use crate::event_modules::{connection_response, encryption, signed_fact};
+
+use super::frame::{self, SealConnectionFrame, TransitFactBundle};
 
 /// Return the bytes that may be packaged into a transit frame.
 ///
@@ -55,4 +57,36 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
             | encryption::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
             | encryption::layout::TYPE_LOCAL_RECIPIENT_KEY
     )
+}
+
+pub fn seal_connection_send_frame(
+    connection_id: FactId,
+    fact_ids: &[FactId],
+    connection_fact: &Fact,
+    facts: &[&Fact],
+) -> Result<Vec<u8>, String> {
+    if connection_fact.id != connection_id {
+        return Err("send_on_connection connection fact id mismatch".to_string());
+    }
+    if fact_ids.len() != facts.len() {
+        return Err("send_on_connection fact id list does not match loaded facts".to_string());
+    }
+    let connection = connection_response::layout::decode_fact(&connection_fact.bytes)?;
+
+    let mut bundle = TransitFactBundle::new();
+    for (expected_id, fact) in fact_ids.iter().zip(facts.iter().copied()) {
+        if fact.id != *expected_id {
+            return Err("send_on_connection loaded fact id mismatch".to_string());
+        }
+        bundle.push(require_sendable_fact(fact)?.to_vec());
+    }
+
+    frame::seal_connection_frame(SealConnectionFrame {
+        connection_id,
+        sender_endpoint_id: connection.from_endpoint,
+        receiver_endpoint_id: connection.to_endpoint,
+        connection_secret: connection.connection_secret,
+        nonce: frame::connection_send_nonce(connection_id, fact_ids),
+        facts: bundle,
+    })
 }

@@ -3,9 +3,11 @@ use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, Projector};
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::sealed_message::context::{self, workspace_scope, SecretCoverageMatcher};
 use topo::event_modules::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact, NONCE_BYTES,
+};
+use topo::event_modules::sealed_message::matchers::{
+    self as context, workspace_scope, SecretCoverageMatcher,
 };
 use topo::event_modules::sealed_message::rows::{
     decode_message_tombstone_row, decode_sealed_message_row, message_key, MESSAGE_ROWS,

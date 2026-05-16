@@ -1,16 +1,34 @@
 use topo::core::facts::{Fact, FactScope};
+use topo::core::matchers::ExactSelectorMatcher;
+use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::content_file::fact::{ContentFileFact, FILE_ROOT_HASH_BYTES};
 use topo::event_modules::content_file::{layout, project, rows};
+use topo::event_modules::content_message::fact::ContentMessageFact;
+use topo::event_modules::content_message::{layout as message_layout, matchers as message_context};
 
 #[test]
 fn content_file_projector_materializes_row_through_atomic_intent() {
+    let parent = ContentMessageFact {
+        workspace_id: [9; 32],
+        author_user_id: [44; 32],
+        created_at_ms: 12_000,
+        frontier_id: [55; 32],
+        minute: 0,
+        leaf_id: [66; 32],
+        sealed_body_ref: [77; 32],
+    };
+    let parent_fact = Fact::new(
+        message_context::workspace_scope(parent.workspace_id),
+        parent.created_at_ms,
+        message_layout::encode_fact(&parent).expect("encode parent message"),
+    );
     let file = ContentFileFact {
         workspace_id: [9; 32],
         created_at_ms: 12345,
-        message_id: [11; 32],
+        message_id: parent_fact.id,
         author_user_id: [22; 32],
         file_id: [33; 32],
         blob_bytes: 1_048_576,
@@ -20,7 +38,7 @@ fn content_file_projector_materializes_row_through_atomic_intent() {
         sealed_metadata: b"sealed-filename-and-mime".to_vec(),
     };
     let fact = Fact::new(
-        FactScope::Global,
+        message_context::workspace_scope(file.workspace_id),
         file.created_at_ms,
         layout::encode_fact(&file).expect("encode file"),
     );
@@ -28,18 +46,24 @@ fn content_file_projector_materializes_row_through_atomic_intent() {
         .expect("open target schema");
     let mut bus = WakeLoop::new();
 
+    let matcher = ExactSelectorMatcher::new(message_context::message_role());
+
     assert!(bus.submit_fact(fact.clone()));
+    assert!(bus.submit_fact(parent_fact));
     let projected = bus
         .drain_applying_atomic_rows(
-            &project::ContentFileProjector::new(),
-            &[],
+            &CombinedProjector,
+            &[&matcher],
             &store,
-            &[rows::FILE_ROWS],
+            &[
+                rows::FILE_ROWS,
+                topo::event_modules::content_message::rows::CONTENT_MESSAGE_ROWS,
+            ],
             10,
         )
         .expect("project file");
-    assert_eq!(projected.projections, 1);
-    assert_eq!(projected.intents, 1);
+    assert_eq!(projected.projections, 3);
+    assert_eq!(projected.intents, 2);
     assert!(bus.intents().is_empty());
 
     let table = store.table_rows(rows::FILE_ROWS).expect("file rows");
@@ -59,6 +83,130 @@ fn content_file_projector_materializes_row_through_atomic_intent() {
 }
 
 #[test]
+fn content_file_projector_waits_for_parent_message_context() {
+    let file = ContentFileFact {
+        workspace_id: [9; 32],
+        created_at_ms: 12345,
+        message_id: [11; 32],
+        author_user_id: [22; 32],
+        file_id: [33; 32],
+        blob_bytes: 1_048_576,
+        total_slices: 4,
+        slice_bytes: 262_144,
+        root_hash: [44; FILE_ROOT_HASH_BYTES],
+        sealed_metadata: b"sealed-filename-and-mime".to_vec(),
+    };
+    let fact = Fact::new(
+        message_context::workspace_scope(file.workspace_id),
+        file.created_at_ms,
+        layout::encode_fact(&file).expect("encode file"),
+    );
+    let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
+        .expect("open target schema");
+    let mut bus = WakeLoop::new();
+
+    assert!(bus.submit_fact(fact.clone()));
+    let projected = bus
+        .drain_applying_atomic_rows(
+            &project::ContentFileProjector::new(),
+            &[],
+            &store,
+            &[rows::FILE_ROWS],
+            10,
+        )
+        .expect("project file");
+    assert_eq!(projected.projections, 1);
+    assert_eq!(projected.intents, 0);
+    let context = bus.context(&fact.id).expect("file context");
+    assert_eq!(context.needs.len(), 2);
+    assert!(context
+        .needs
+        .iter()
+        .any(|need| need.role == message_context::message_role()));
+    assert!(context
+        .needs
+        .iter()
+        .any(|need| need.role == message_context::deletion_role()));
+    assert!(store
+        .table_rows(rows::FILE_ROWS)
+        .expect("file rows")
+        .is_empty());
+}
+
+#[test]
+fn content_file_parent_offer_before_need_wakes_file() {
+    let parent = ContentMessageFact {
+        workspace_id: [9; 32],
+        author_user_id: [44; 32],
+        created_at_ms: 12_000,
+        frontier_id: [55; 32],
+        minute: 0,
+        leaf_id: [66; 32],
+        sealed_body_ref: [77; 32],
+    };
+    let parent_fact = Fact::new(
+        message_context::workspace_scope(parent.workspace_id),
+        parent.created_at_ms,
+        message_layout::encode_fact(&parent).expect("encode parent message"),
+    );
+    let file = ContentFileFact {
+        workspace_id: [9; 32],
+        created_at_ms: 12345,
+        message_id: parent_fact.id,
+        author_user_id: [22; 32],
+        file_id: [33; 32],
+        blob_bytes: 1_048_576,
+        total_slices: 4,
+        slice_bytes: 262_144,
+        root_hash: [44; FILE_ROOT_HASH_BYTES],
+        sealed_metadata: b"sealed-filename-and-mime".to_vec(),
+    };
+    let fact = Fact::new(
+        message_context::workspace_scope(file.workspace_id),
+        file.created_at_ms,
+        layout::encode_fact(&file).expect("encode file"),
+    );
+    let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
+        .expect("open target schema");
+    let mut bus = WakeLoop::new();
+    let matcher = ExactSelectorMatcher::new(message_context::message_role());
+
+    assert!(bus.submit_fact(parent_fact));
+    bus.drain_applying_atomic_rows(
+        &CombinedProjector,
+        &[&matcher],
+        &store,
+        &[
+            rows::FILE_ROWS,
+            topo::event_modules::content_message::rows::CONTENT_MESSAGE_ROWS,
+        ],
+        10,
+    )
+    .expect("project parent first");
+
+    assert!(bus.submit_fact(fact.clone()));
+    let projected = bus
+        .drain_applying_atomic_rows(
+            &CombinedProjector,
+            &[&matcher],
+            &store,
+            &[
+                rows::FILE_ROWS,
+                topo::event_modules::content_message::rows::CONTENT_MESSAGE_ROWS,
+            ],
+            10,
+        )
+        .expect("parent offer wakes file need");
+
+    assert_eq!(projected.projections, 2);
+    assert_eq!(projected.intents, 1);
+    let table = store.table_rows(rows::FILE_ROWS).expect("file rows");
+    assert_eq!(table.len(), 1);
+    let row = rows::decode_content_file_row(&table[0].0, &table[0].1).expect("decode file row");
+    assert_eq!(row.file_event_id, fact.id);
+}
+
+#[test]
 fn content_file_projector_rejects_malformed_fact_bytes() {
     let fact = Fact::new(FactScope::Global, 0, vec![0; 8]);
     let mut bus = WakeLoop::new();
@@ -70,4 +218,25 @@ fn content_file_projector_rejects_malformed_fact_bytes() {
         err.to_lowercase().contains("file") || err.to_lowercase().contains("length"),
         "{err}"
     );
+}
+
+struct CombinedProjector;
+
+impl Projector for CombinedProjector {
+    fn project(
+        &self,
+        fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        match fact.bytes.first().copied() {
+            Some(message_layout::TYPE_CONTENT_MESSAGE) => {
+                topo::event_modules::content_message::project::ContentMessageProjector::new()
+                    .project(fact, context)
+            }
+            Some(layout::TYPE_CONTENT_FILE) => {
+                project::ContentFileProjector::new().project(fact, context)
+            }
+            _ => Err("unknown combined content file test fact".to_string()),
+        }
+    }
 }

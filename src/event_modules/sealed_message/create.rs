@@ -11,7 +11,7 @@
 //! fixed sealed-message slot. `decode_sealed_message` plus the workspace
 //! key recover the original text exactly.
 
-use crate::commands::context::{CommandContext, CommandOutput, WorkspaceId};
+use crate::core::command_context::{CommandContext, CommandOutput, WorkspaceId};
 use crate::core::crypto::{self, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_TAG_BYTES};
 use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::wire;
@@ -31,9 +31,9 @@ pub const TEXT_LENGTH_PREFIX_BYTES: usize = 4;
 pub const PLAINTEXT_SLOT_BYTES: usize = CIPHERTEXT_BYTES - XCHACHA20_POLY1305_TAG_BYTES;
 pub const MAX_TEXT_BYTES: usize = PLAINTEXT_SLOT_BYTES - TEXT_LENGTH_PREFIX_BYTES;
 
-/// A typed summary of a successful `send_message` call.
+/// A typed receipt of a successful `send_message` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SendSummary {
+pub struct SendReceipt {
     pub workspace_id: WorkspaceId,
     pub message_fact_id: crate::core::facts::FactId,
     pub created_at_ms: u64,
@@ -53,7 +53,7 @@ pub fn send_message(
     ctx: &CommandContext<'_>,
     workspace_id: WorkspaceId,
     text: &str,
-) -> Result<CommandOutput<SendSummary>, String> {
+) -> Result<CommandOutput<SendReceipt>, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err("send_message text must not be blank".to_string());
@@ -131,7 +131,7 @@ pub fn send_message(
     // on the envelope payload.
     let fact = Fact::new(scope, created_at_ms, envelope_bytes);
 
-    Ok(CommandOutput::new(SendSummary {
+    Ok(CommandOutput::new(SendReceipt {
         workspace_id,
         message_fact_id: fact.id,
         created_at_ms,

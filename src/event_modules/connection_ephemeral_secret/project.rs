@@ -13,6 +13,7 @@ use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use super::layout;
+use super::matchers;
 use super::rows::connection_ephemeral_secret_row;
 
 #[derive(Debug, Clone, Default)]
@@ -34,8 +35,13 @@ impl Projector for ConnectionEphemeralSecretProjector {
         if crypto::x25519_public_key(&secret.ephemeral_private_key) != secret.ephemeral_public_key {
             return Err("connection ephemeral public key does not match private key".to_string());
         }
-        Ok(ProjectionOutput::new().intent(
-            AtomicIntent::PutRow(connection_ephemeral_secret_row(fact.id, &secret)?).into_intent(),
-        ))
+        Ok(ProjectionOutput::new()
+            .offer(matchers::connection_ephemeral_secret_offer(
+                fact.id, fact.id,
+            ))
+            .intent(
+                AtomicIntent::PutRow(connection_ephemeral_secret_row(fact.id, &secret)?)
+                    .into_intent(),
+            ))
     }
 }

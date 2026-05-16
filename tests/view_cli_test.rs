@@ -1,9 +1,9 @@
 //! Black-box CLI tests for the cross-module `view` rendering command.
 //!
-//! Setup deliberately goes through the real `match` binary: workspace creation,
+//! Setup deliberately goes through the real `topo` binary: workspace creation,
 //! content key derivation, message/reaction/file send. These tests must not
-//! install identity graphs or content rows by importing protocol/store
-//! internals; the `view` rendering boundary is the invariant under test.
+//! install identity graphs or content rows through test-only hooks; the `view`
+//! rendering boundary is the invariant under test.
 
 mod cli_harness;
 

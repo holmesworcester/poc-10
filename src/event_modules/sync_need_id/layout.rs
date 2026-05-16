@@ -6,7 +6,7 @@ use crate::core::wire;
 
 use super::fact::SyncNeedIdFact;
 
-pub const TYPE_SYNC_NEED_ID: u8 = 142;
+pub const TYPE_SYNC_NEED_ID: u8 = 167;
 pub const ENCODED_BYTES: usize = 1 + 32 + 32;
 
 pub fn encode_fact(fact: &SyncNeedIdFact) -> Result<Vec<u8>, String> {

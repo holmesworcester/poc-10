@@ -9,7 +9,7 @@
 use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
-use super::{context, layout};
+use super::{layout, matchers};
 
 #[derive(Debug, Clone, Default)]
 pub struct SignedFactProjector;
@@ -38,7 +38,7 @@ fn project_local_signer_secret(fact: &Fact) -> Result<ProjectionOutput, String> 
     require_local_scope(fact)?;
     let scope = workspace_scope(secret.workspace_id);
     Ok(
-        ProjectionOutput::new().offer(context::local_signer_secret_offer(
+        ProjectionOutput::new().offer(matchers::local_signer_secret_offer(
             fact.id,
             scope,
             secret.signer_id,

@@ -8,7 +8,6 @@ facts
 context needs
 context offers
 context matchers
-pending projection
 projectors
 intents
 intent handlers
@@ -31,11 +30,12 @@ The migration succeeds when:
 - The old mechanisms are gone, not wrapped: legacy labels, blocked tables,
   ready queues, pending reprojection queues, worker-specific domain queues, and
   receive metadata side channels.
-- Core owns facts, context, context matchers, pending projection, `WakeLoop`,
-  intents, handler dispatch, storage mechanics, wire field primitives, and
-  crypto helpers.
+- Core owns facts, context, command context, context matchers, `WakeLoop`,
+  generic runtime/app mechanics, intents, handler dispatch, storage mechanics,
+  wire field primitives, and crypto helpers.
 - Event modules own fact semantics: layouts, projectors, context roles,
-  command constructors, read-model rows, and protocol validation rules.
+  command constructors, read-model rows, module-local CLI adapters, module
+  queries, and protocol validation rules.
 - Intent handlers own bounded stateful work and handler checkpoint state.
 - Projectors return only needs, offers, and intents.
 - Intent handlers return only facts and intents. The current `purged_facts`
@@ -46,15 +46,21 @@ The migration succeeds when:
 - There is no event-bus layer. `WakeLoop` is the target projection and intent
   coordinator.
 - The product-facing binary is `match`; the package may still be named `topo`.
-- `src/match_app.rs` is the bridge from `src/main.rs` to either target
-  walkthrough code or the contained legacy compatibility path.
+- Product entry is a thin root function that supplies the CLI name and protocol
+  registry to generic core runtime/app code. It must not contain
+  `MatchRuntime`-specific product logic.
+- There is no product `demo` or `smoke` command. Smoke coverage belongs in
+  black-box CLI tests against the real `match` binary.
 - Every handler is a flat `src/handlers/<name>.rs` file declared from
-  `src/handlers.rs`; handler-owned subdirectories are not part of the target.
+  `src/handlers/registry.rs`; handler-owned subdirectories are not part of the
+  target.
+- Event-module and handler manifests live at `src/event_modules/registry.rs`
+  and `src/handlers/registry.rs`, exported from `src/lib.rs` with `#[path]`.
+- There is no root `src/commands` module. The command context lives in
+  `src/core/command_context.rs` as `core::command_context`.
 - There is no `mod.rs` anywhere in the repository.
-- End-state guardrail: There is no per-module `rows.rs`, `layout.rs`, or `cli.rs`
-  where logic can hide. During the current checkpoint, existing
-  `rows.rs` and `layout.rs` files are narrow/declarative migration files; they
-  must not become protocol logic sinks.
+- End-state guardrail: `rows.rs`, `layout.rs`, and module-local `cli.rs` stay
+  narrow and declarative. They must not become protocol logic sinks.
 - Schema declarations exist in exactly three visible places:
   `src/core/schema.p8sql`, `src/event_modules/schema.p8sql`, and
   `src/handlers/schema.p8sql`.
@@ -76,21 +82,21 @@ with the `poc-8` behavior still green.
 As of the 2026-05-15 checkpoint on branch `new-architecture`, the repo is in a
 mixed state by design:
 
-- `src/main.rs` delegates to `topo::match_app::run`.
-- `src/match_app.rs` is the product-facing bridge. `match demo` runs the
-  target-tree walkthrough in `src/demo.rs`; other commands still dispatch
-  through `crate::legacy::app::run::<crate::legacy::protocol::Protocol>`.
-- `examples/match_demo.rs` is a thin wrapper around the same target walkthrough.
-- `src/legacy.rs` and `src/legacy/` are the contained compatibility island for
-  old production CLI and daemon behavior. New architecture work should not add
-  behavior there.
-- `src/core/wake_loop.rs` persists and reloads facts, needs, offers,
-  pending projection, and intents. It also feeds exact declared fact inputs into
+- `src/main.rs` delegates to the product-facing `match` entrypoint.
+- Product commands are being cut over to a generic core runtime/app facade
+  configured by `src/protocol.rs`. Any product-specific runtime facade is
+  temporary cutover debt, not the target architecture.
+- Smoke behavior is tested through black-box CLI tests on the real `match`
+  binary, not through a demo command or demo source file.
+- The legacy module island has been removed; new behavior belongs in target
+  modules only.
+- `src/core/wake_loop.rs` persists and reloads facts, needs, offers, internal
+  projection wakes, and intents. It also feeds exact declared fact inputs into
   handlers instead of exposing all facts.
 - Target event modules under `src/event_modules/` are exercised by poc-10 tests
   and are not yet the whole production path.
 - Target handlers under `src/handlers/` are flat files and are registered from
-  `src/handlers.rs`.
+  `src/handlers/registry.rs`.
 - The old handler subdirectory shape has been removed.
 - Target receive transit can open fixed transit frames that carry signed
   key-wrap facts, admit the opened fact, and record local receive provenance.
@@ -98,7 +104,7 @@ mixed state by design:
   event-module constructors own the remaining frame and crypto helpers.
 - Target purge can remove exact retained target facts through handler output;
   cascade discovery, secret retirement, and sync-index repair still need their
-  bounded handler cuts before legacy purge code can disappear.
+  bounded handler cuts before target purge behavior is complete.
 
 Implemented target slices:
 
@@ -116,16 +122,18 @@ Implemented target slices:
   healing, recipient-key supersession cleanup, signed key-wrap transit receive,
   transit frame layout, sync context, receive provenance, and flat handler
   contracts.
-- `CommandContext` for pure target command constructors that do not call legacy
-  workers or handler dispatch directly.
+- `CommandContext` for user-facing target commands that may read projected state
+  through module `queries.rs`, but do not call legacy workers or handler
+  dispatch directly. The type lives in `core::command_context`.
 
 Current hard gaps:
 
-- The production CLI still needs to run through target `WakeLoop`, target
-  projectors, and target handlers. Signed key-wrap receive is the first
-  implemented target admission cut because it exercises signed facts, context,
-  key offers, unwrap intents, receive provenance, and anti-amplification.
-  General shared fact admission still needs the same treatment.
+- The production CLI still needs to finish moving through a generic core
+  runtime/app facade configured by the protocol registry. Signed key-wrap
+  receive is the first implemented target admission cut because it exercises
+  signed facts, context, key offers, unwrap intents, receive provenance, and
+  anti-amplification. General shared fact admission still needs the same
+  treatment.
 - Transit wrap/unwrap is not fully target-owned. The remaining work is to move
   frame packaging, nonce derivation, associated data, payload packing, and size
   choice into event-module constructors so handlers can emit follow-up intents
@@ -138,8 +146,8 @@ Current hard gaps:
 - Broad encryption code still needs more narrow files around recipient keys,
   key requests, key wraps, local secrets, wrap-source/frontier validation, and
   secret coverage matching.
-- The legacy compatibility island should be deleted only after unchanged or
-  harness-only-adjusted `poc-8` tests cover the target behavior.
+- Remaining poc-8 behavior needs unchanged or harness-only-adjusted target
+  coverage before the migration can be called complete.
 
 ## File Organization
 
@@ -150,16 +158,14 @@ src/
   lib.rs
   main.rs
   match_app.rs
-  demo.rs
   core.rs
-  event_modules.rs
-  handlers.rs
-  commands.rs
   protocol.rs
-  legacy.rs
 
   core/
     schema.p8sql
+    command_context.rs
+    cli.rs
+    runtime.rs
     facts.rs
     context.rs
     matchers.rs
@@ -173,17 +179,22 @@ src/
     schema_dsl.rs
 
   event_modules/
+    registry.rs
     schema.p8sql
     <module>.rs
     <module>/
       fact.rs
       layout.rs
       create.rs
+      commands.rs
+      cli.rs
       project.rs
+      queries.rs
       rows.rs
-      context.rs
+      matchers.rs
 
   handlers/
+    registry.rs
     schema.p8sql
     connection.rs
     connection_response.rs
@@ -197,32 +208,32 @@ src/
     transit.rs
     unwrap_key_wrap.rs
 
-  commands/
-    context.rs
-
-  legacy/
-    app.rs
-    daemon.rs
-    protocol.rs
-    round_robin.rs
-    workers.rs
 ```
 
 The exact event module names can change. The ownership pattern should not.
+Only `src/core/context.rs` owns context primitives. Protocol-specific
+event-module `context.rs` files are migration debt and a likely dumping
+ground. Projection logic belongs in `project.rs`; role constants and selector
+construction should stay narrow and close to the projector unless a custom
+matcher needs them; role-specific matching belongs in `matchers.rs`, with
+`src/protocol.rs` declaring the role-to-matcher binding.
 
-`src/lib.rs`, `src/core.rs`, `src/event_modules.rs`, `src/handlers.rs`,
-`src/commands.rs`, and `src/legacy.rs` are manifests. They declare modules and
-may re-export narrow APIs; they should not accumulate behavior.
+`src/lib.rs`, `src/core.rs`, `src/event_modules/registry.rs`, and
+`src/handlers/registry.rs` are manifests. They declare modules and may
+re-export narrow APIs; they should not accumulate behavior. `src/lib.rs` uses
+`#[path = "event_modules/registry.rs"]` and
+`#[path = "handlers/registry.rs"]` so the public namespaces remain
+`topo::event_modules` and `topo::handlers` without root dumping-ground files.
 
 `src/protocol.rs` is the target protocol registry. It is a declarative table of
 contents across schema sources, fact registrations, context matcher roles,
-intent kinds, and handlers. It does not replace `src/event_modules.rs` or
-`src/handlers.rs`: those files define Rust namespaces, while `protocol.rs`
-declares which namespaces make up the concrete `match` protocol.
+intent kinds, and handlers. It does not replace the event-module or handler
+registries: those files define Rust namespaces, while `protocol.rs` declares
+which namespaces make up the concrete `match` protocol.
 
-`src/legacy/` is a migration boundary. It keeps old production behavior
-reachable while `match` is cut over. It is not a compatibility layer to keep
-forever.
+The old legacy source island has been removed. Do not recreate compatibility
+bridges; port behavior into the target runtime, event modules, handlers, and
+queries instead.
 
 ### No `mod.rs`
 
@@ -230,10 +241,8 @@ Rust module declarations live in manifest files:
 
 ```text
 src/core.rs
-src/event_modules.rs
-src/handlers.rs
-src/commands.rs
-src/legacy.rs
+src/event_modules/registry.rs
+src/handlers/registry.rs
 ```
 
 Those files should contain declarations and narrow re-exports only.
@@ -250,20 +259,62 @@ layout.rs
   current migration checkpoint for fixed-length fact wire layout
 
 create.rs
-  local constructors that produce proposed facts or intent payloads
+  deterministic constructors from explicit parameters to proposed facts or
+  intent payloads. Projectors, handlers, and user-facing commands may share
+  this layer.
+
+commands.rs
+  user-facing or API-facing workflows over `CommandContext`. Commands can
+  call `queries.rs` for read-before-create decisions, compose multiple
+  constructors, and return facts/intents plus a typed receipt. They do not run
+  projection, dispatch handlers, or mutate the store.
+
+cli.rs
+  frontend adapter: argv parsing and text formatting only. It calls
+  `commands.rs` and leaves runtime draining and persistence to the root
+  app/runtime boundary.
 
 project.rs
   one projector entry point plus local validation glue
 
+queries.rs
+  read-only projected-state lookups used by CLI/reporting and by explicitly
+  user-facing commands. Query helpers may inspect rows but never write,
+  project, dispatch handlers, or replace context.
+
 rows.rs
   current migration checkpoint for read-model row shapes
 
-context.rs
-  context roles, selectors, offers, needs, and matcher helpers
+matchers.rs
+  role constants, selector constructors, need/offer constructors, and custom
+  role-specific matching when a core matcher is not enough
 
 frame.rs / receive.rs
   transit-specific fixed-frame helpers and receive classification
 ```
+
+### Command Chaining
+
+Commands are not the automatic/reactive mechanism. If behavior is triggered by
+new facts, missing context, transit receive, sync, or purge, it belongs in
+projectors plus intent handlers and receives inputs through
+`ProjectionContext`/`HandlerContext`.
+
+User-facing operations may chain command work:
+
+```text
+parse CLI/API request
+call module command
+submit facts/intents to core runtime
+drain projection and relevant handlers
+call module query for the displayed result
+```
+
+That post-command query is valid only because the runtime step establishes the
+previous state in the local store. If a later step cannot know that prior state
+has projected, it must not query optimistically; it should emit or retain a
+context need and let the wake loop re-run the owning projector when the matching
+offer exists.
 
 Avoid broad names such as `utils`, `helpers`, `common`, `misc`, `manager`, and
 `service`. If a helper is real, its file should name the invariant it enforces
@@ -347,8 +398,8 @@ Workspace remains a protocol concept, not a special core concept.
 
 ## Context
 
-Projectors do not issue arbitrary broad queries. They receive context by
-declaring needs and consuming matching offers:
+Projectors do not issue arbitrary broad queries. Core supplies
+`ProjectionContext` from offers matched by registered `ContextMatcher`s:
 
 ```rust
 struct ContextNeed {
@@ -371,6 +422,13 @@ Core does not decide whether a need is required or optional. The projector
 decides that by whether it emits rows, offers, or intents when the context is
 missing.
 
+The source of truth is the `ContextNeed` / `ContextOffer` / `ContextMatcher`
+model, not protocol helper files. A projector first inspects the supplied
+`ProjectionContext`. If required matched context is absent, it emits a stable
+`ContextNeed` and no materialized rows or intents for that branch. A fact emits
+`ContextOffer`s only after the projector has validated that the fact is valid
+context for that role.
+
 Each projection pass owns the current context surface for its fact. `WakeLoop`
 diffs the new needs/offers against the old needs/offers for the same owner:
 
@@ -388,8 +446,8 @@ removed need/offer
   delete it
 ```
 
-This makes standing watches stable. Re-emitting a watch does not wake the owner
-again unless a matching offer changes.
+This keeps needs stable. Re-emitting the same need does not wake the owner
+again unless matching offers change.
 
 ## Context Matchers
 
@@ -413,6 +471,11 @@ trait ContextMatcher {
     ) -> Result<Vec<FactId>, String>;
 }
 ```
+
+The matcher owns both directions of role-specific matching: new need against
+existing offers, and new offer against existing needs. A match only supplies
+candidate context. The target projector must still decode and validate matched
+facts semantically before emitting rows, offers, or intents.
 
 Standard matchers:
 
@@ -485,25 +548,50 @@ struct ProjectionOutput {
 A projector should read like validation followed by output:
 
 ```rust
-pub fn project(fact: &Fact, ctx: &ProjectionContext) -> ProjectionOutput {
+pub fn project(fact: &Fact, ctx: &ProjectionContext) -> Result<ProjectionOutput, String> {
     let message = decode_message(fact)?;
-    let workspace = ctx.require_fact(message.workspace_id)?;
-    let signer = ctx.require_fact(message.signer_key_id)?;
-    ctx.watch("message_deletion", fact.id);
+    let workspace_need = workspace_need(fact.id, message.workspace_id);
+    let signer_need = signer_need(fact.id, message.signer_key_id);
+
+    let waiting = output()
+        .need(workspace_need.clone())
+        .need(signer_need.clone());
+
+    let Some(workspace) = ctx.payload_for(&workspace_need) else {
+        return Ok(waiting);
+    };
+    let Some(signer) = ctx.payload_for(&signer_need) else {
+        return Ok(waiting);
+    };
 
     require_signature(&message, &signer)?;
     require_workspace_membership(&signer, &workspace)?;
 
-    output()
+    Ok(output()
+        .need(workspace_need)
+        .need(signer_need)
         .offer_fact(fact.id)
-        .intent(put_row(message_row(&message)))
+        .intent(put_row(message_row(&message))))
 }
 ```
+
+`payload_for` finds the `MatchedContext` for the exact need the projector
+emitted and returns `matched.payload`. It does not query the store, run matcher
+logic, or decide authorization; core already built the context from matched
+needs/offers before invoking the projector.
+
+The `waiting` output is not a blocked state. It is the fact's current standing
+context surface. If either matching offer already exists from an earlier pass,
+the matcher will wake this fact and core will supply that matched context on
+the next projection. If the output can be affected by future update/about facts
+such as deletions or key coverage, the projector keeps those stable needs in
+the successful output too.
 
 Projector rules:
 
 ```text
 - Pure over fact plus provided context.
+- Inspects supplied ProjectionContext before emitting required ContextNeeds.
 - May use core::crypto for deterministic encryption/decryption over context.
 - Does not do IO.
 - Does not read broad state.
@@ -517,6 +605,36 @@ Projector rules:
 Projectors validate protocol meaning. Core may supply candidate context; the
 projector must still verify type, scope, workspace, signer, author, endpoint,
 role, and authorization.
+
+### Projector Translation Checklist
+
+When translating a legacy projector into the target tree:
+
+```text
+1. Read the legacy projector and record every require_dependency, update label,
+   receive/provenance check, queued side effect, and row write.
+2. For each requirement, inspect supplied ProjectionContext first. If matched
+   context is absent, emit a stable target ContextNeed unless the fact is
+   local-only or truly dependency-free.
+3. Decode matched context inside the target projector and re-check type, scope,
+   workspace, signer/author authority, and endpoint role before writing rows.
+4. Emit ContextOffers only after the fact is valid context for that role.
+5. If required context is missing, return stable needs and no materialized rows
+   or intents for that branch.
+6. Convert bounded row writes/deletes to atomic intents.
+7. Convert async, retryable, IO, purge, transit, sync, and key-healing work to
+   explicit typed deferred intents owned by handlers.
+8. Keep helper functions small, local to the fact family, and named after the
+   invariant they validate.
+9. Register any new context role in src/protocol.rs with the matcher that owns
+   both new-need-to-old-offer and new-offer-to-old-need semantics.
+10. If a port is temporarily a row shell because sibling context is not ready,
+    document the exact legacy parity gap in the module docs and remove that gap
+    when the sibling context lands.
+11. Do not add a protocol-specific context.rs helper/source-of-truth layer.
+    Keep projection logic in project.rs and role-specific matching in
+    matchers.rs.
+```
 
 ## Intents
 
@@ -631,7 +749,7 @@ capabilities are precisely why the work is not projector work.
 ```text
 submit fact
   persist fact if new
-  enqueue pending projection
+  enqueue an internal projection wake
 
 project pending facts
   load matched context from current needs/offers
@@ -987,7 +1105,7 @@ They are replaced by:
 core.facts
 core.needs
 core.offers
-core.pending_projection
+core.pending_projection as an internal WakeLoop checkpoint
 core.intents
 core.inbox
 local receive facts

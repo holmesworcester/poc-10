@@ -14,7 +14,7 @@ use crate::core::wire::{FixedLayout, FixedSlot};
 
 use super::fact::{ContentReactionFact, REACTION_CIPHERTEXT_BYTES, REACTION_NONCE_BYTES};
 
-pub const TYPE_CONTENT_REACTION: u8 = 150;
+pub const TYPE_CONTENT_REACTION: u8 = 52;
 
 pub const CONTENT_REACTION_BYTES: usize =
     1 + 32 + 8 + 32 + 32 + REACTION_NONCE_BYTES + 4 + REACTION_CIPHERTEXT_BYTES;

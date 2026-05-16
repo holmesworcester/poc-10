@@ -4,6 +4,7 @@ use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::content_file_deletion::fact::ContentFileDeletionFact;
 use topo::event_modules::content_file_deletion::{layout, project, rows};
+use topo::event_modules::content_message::matchers as message_context;
 
 #[test]
 fn content_file_deletion_projector_materializes_row_through_atomic_intent() {
@@ -14,7 +15,7 @@ fn content_file_deletion_projector_materializes_row_through_atomic_intent() {
         author_user_id: [22; 32],
     };
     let fact = Fact::new(
-        FactScope::Global,
+        message_context::workspace_scope(deletion.workspace_id),
         deletion.created_at_ms,
         layout::encode_fact(&deletion).expect("encode deletion"),
     );
@@ -47,6 +48,9 @@ fn content_file_deletion_projector_materializes_row_through_atomic_intent() {
     assert_eq!(row.deletion_id, fact.id);
     assert_eq!(row.created_at_ms, 54321);
     assert_eq!(row.author_user_id, deletion.author_user_id);
+    let context = bus.context(&fact.id).expect("deletion context");
+    assert_eq!(context.offers.len(), 1);
+    assert_eq!(context.offers[0].role, message_context::deletion_role());
 }
 
 #[test]

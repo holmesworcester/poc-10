@@ -3,12 +3,14 @@ use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE};
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::sealed_message::context::{self, workspace_scope, SecretCoverageMatcher};
 use topo::event_modules::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES,
 };
 use topo::event_modules::sealed_message::intent::{
     self as purge_intent, PurgeEventIntent, PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
+};
+use topo::event_modules::sealed_message::matchers::{
+    self as context, workspace_scope, SecretCoverageMatcher,
 };
 use topo::event_modules::sealed_message::rows::{
     message_row, sealed_message_row, MessageRow, SealedMessageRow, MESSAGE_ROWS,

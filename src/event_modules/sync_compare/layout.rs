@@ -8,7 +8,7 @@ use crate::core::wire;
 
 use super::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 
-pub const TYPE_SYNC_COMPARE: u8 = 140;
+pub const TYPE_SYNC_COMPARE: u8 = 165;
 pub const ENCODED_BYTES: usize = 1 + 32 + 8 + 8 + 8 + 32 + 1;
 
 pub fn encode_fact(fact: &SyncCompareFact) -> Result<Vec<u8>, String> {

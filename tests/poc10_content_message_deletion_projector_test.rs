@@ -1,64 +1,224 @@
-use topo::core::facts::{Fact, FactScope};
-use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
-use topo::core::store::Store;
-use topo::core::wake_loop::WakeLoop;
+use topo::core::facts::{Fact, FactId, FactScope};
+use topo::core::intents::AtomicIntent;
+use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
+use topo::event_modules::content_message::matchers as message_context;
+use topo::event_modules::content_message::{fact::ContentMessageFact, layout as message_layout};
 use topo::event_modules::content_message_deletion::fact::ContentMessageDeletionFact;
 use topo::event_modules::content_message_deletion::{layout, project, rows};
+use topo::event_modules::identity_matchers;
+use topo::event_modules::identity_user::{fact::UserFact, layout as user_layout};
 
 #[test]
-fn content_message_deletion_projector_materializes_row_through_atomic_intent() {
-    let deletion = ContentMessageDeletionFact {
-        workspace_id: [9; 32],
-        created_at_ms: 12345,
-        target_message_id: [11; 32],
-        author_user_id: [22; 32],
-    };
-    let fact = Fact::new(
-        FactScope::Global,
-        deletion.created_at_ms,
-        layout::encode_fact(&deletion).expect("encode deletion"),
-    );
-    let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
-        .expect("open target schema");
-    let mut bus = WakeLoop::new();
+fn content_message_deletion_projector_materializes_authorized_author_delete() {
+    let workspace_id = [9; 32];
+    let author_user_id = user_fact(workspace_id, [22; 32], "alice");
+    let message_fact = message_fact(workspace_id, author_user_id.id);
+    let (deletion, fact) = deletion_fact(workspace_id, message_fact.id, author_user_id.id, 12_345);
 
-    assert!(bus.submit_fact(fact.clone()));
-    let projected = bus
-        .drain_applying_atomic_rows(
-            &project::ContentMessageDeletionProjector::new(),
-            &[],
-            &store,
-            &[rows::MESSAGE_DELETION_ROWS],
-            10,
+    let output = project::ContentMessageDeletionProjector::new()
+        .project(
+            &fact,
+            &authorized_context(&fact, &message_fact, &author_user_id),
         )
         .expect("project deletion");
-    assert_eq!(projected.projections, 1);
-    assert_eq!(projected.intents, 1);
-    assert!(bus.intents().is_empty());
 
-    let table = store
-        .table_rows(rows::MESSAGE_DELETION_ROWS)
-        .expect("message deletion rows");
-    assert_eq!(table.len(), 1);
-    let row = rows::decode_message_deletion_row(&table[0].0, &table[0].1)
+    assert!(output.needs.is_empty());
+    assert_eq!(output.offers.len(), 1);
+    assert_eq!(output.offers[0].role, message_context::deletion_role());
+    assert_eq!(output.intents.len(), 1);
+    let AtomicIntent::PutRow(stored) =
+        AtomicIntent::from_intent(&output.intents[0], &[rows::MESSAGE_DELETION_ROWS])
+            .expect("row intent")
+    else {
+        panic!("expected put row intent");
+    };
+    let row = rows::decode_message_deletion_row(&stored.key, &stored.value)
         .expect("decode message deletion row");
     assert_eq!(row.workspace_id, deletion.workspace_id);
     assert_eq!(row.target_message_id, deletion.target_message_id);
     assert_eq!(row.deletion_id, fact.id);
-    assert_eq!(row.created_at_ms, 12345);
+    assert_eq!(row.created_at_ms, 12_345);
     assert_eq!(row.author_user_id, deletion.author_user_id);
+}
+
+#[test]
+fn content_message_deletion_projector_waits_for_target_and_author_context() {
+    let workspace_id = [9; 32];
+    let author_user_id = [22; 32];
+    let (deletion, fact) = deletion_fact(workspace_id, [11; 32], author_user_id, 12_345);
+
+    let output = project::ContentMessageDeletionProjector::new()
+        .project(&fact, &ProjectionContext::default())
+        .expect("missing context is a need, not an unauthorized delete");
+
+    assert!(output.intents.is_empty());
+    assert!(output.offers.is_empty());
+    assert_eq!(output.needs.len(), 2);
+    assert!(output.needs.contains(&message_context::message_need(
+        fact.id,
+        message_context::workspace_scope(deletion.workspace_id),
+        deletion.target_message_id
+    )));
+    assert!(output.needs.contains(&identity_matchers::exact_need(
+        fact.id,
+        identity_matchers::user_role(),
+        deletion.author_user_id
+    )));
+}
+
+#[test]
+fn content_message_deletion_projector_waits_for_author_after_target_is_known() {
+    let workspace_id = [9; 32];
+    let author_user_id = [22; 32];
+    let message_fact = message_fact(workspace_id, author_user_id);
+    let (deletion, fact) = deletion_fact(workspace_id, message_fact.id, author_user_id, 12_345);
+
+    let output = project::ContentMessageDeletionProjector::new()
+        .project(
+            &fact,
+            &ProjectionContext::from_matches(vec![target_match(&fact, &message_fact)]),
+        )
+        .expect("missing author is a need, not an unauthorized delete");
+
+    assert!(output.intents.is_empty());
+    assert!(output.offers.is_empty());
+    assert_eq!(output.needs.len(), 2);
+    assert!(output.needs.contains(&message_context::message_need(
+        fact.id,
+        message_context::workspace_scope(deletion.workspace_id),
+        deletion.target_message_id
+    )));
+    assert!(output.needs.contains(&identity_matchers::exact_need(
+        fact.id,
+        identity_matchers::user_role(),
+        deletion.author_user_id
+    )));
+}
+
+#[test]
+fn content_message_deletion_projector_rejects_non_author_delete() {
+    let workspace_id = [9; 32];
+    let message_author = user_fact(workspace_id, [22; 32], "alice");
+    let deleter = user_fact(workspace_id, [44; 32], "mallory");
+    let message_fact = message_fact(workspace_id, message_author.id);
+    let (_deletion, fact) = deletion_fact(workspace_id, message_fact.id, deleter.id, 12_345);
+
+    let err = project::ContentMessageDeletionProjector::new()
+        .project(&fact, &authorized_context(&fact, &message_fact, &deleter))
+        .expect_err("non-author deletion must reject");
+
+    assert!(err.contains("not the target message author"), "{err}");
+}
+
+#[test]
+fn content_message_deletion_projector_rejects_author_from_other_workspace() {
+    let workspace_id = [9; 32];
+    let author_user_id = user_fact([8; 32], [22; 32], "alice");
+    let message_fact = message_fact(workspace_id, author_user_id.id);
+    let (_deletion, fact) = deletion_fact(workspace_id, message_fact.id, author_user_id.id, 12_345);
+
+    let err = project::ContentMessageDeletionProjector::new()
+        .project(
+            &fact,
+            &authorized_context(&fact, &message_fact, &author_user_id),
+        )
+        .expect_err("author from other workspace must reject");
+
+    assert!(err.contains("author workspace"), "{err}");
 }
 
 #[test]
 fn content_message_deletion_projector_rejects_malformed_fact_bytes() {
     let fact = Fact::new(FactScope::Global, 0, vec![0; 8]);
-    let mut bus = WakeLoop::new();
-    bus.submit_fact(fact);
-    let err = bus
-        .drain(&project::ContentMessageDeletionProjector::new(), &[], 10)
+    let err = project::ContentMessageDeletionProjector::new()
+        .project(&fact, &ProjectionContext::default())
         .expect_err("malformed bytes must fail projection");
     assert!(
         err.to_lowercase().contains("deletion") || err.to_lowercase().contains("length"),
         "{err}"
     );
+}
+
+fn deletion_fact(
+    workspace_id: FactId,
+    target_message_id: FactId,
+    author_user_id: FactId,
+    created_at_ms: u64,
+) -> (ContentMessageDeletionFact, Fact) {
+    let deletion = ContentMessageDeletionFact {
+        workspace_id,
+        created_at_ms,
+        target_message_id,
+        author_user_id,
+    };
+    let fact = Fact::new(
+        message_context::workspace_scope(deletion.workspace_id),
+        deletion.created_at_ms,
+        layout::encode_fact(&deletion).expect("encode deletion"),
+    );
+    (deletion, fact)
+}
+
+fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
+    let message = ContentMessageFact {
+        workspace_id,
+        author_user_id,
+        created_at_ms: 12_000,
+        frontier_id: [3; 32],
+        minute: 12,
+        leaf_id: [4; 32],
+        sealed_body_ref: [5; 32],
+    };
+    Fact::new(
+        message_context::workspace_scope(workspace_id),
+        message.created_at_ms,
+        message_layout::encode_fact(&message).expect("encode message"),
+    )
+}
+
+fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact {
+    let user = UserFact {
+        created_at_ms: 8_000,
+        workspace_id,
+        public_key,
+        username: username.to_string(),
+    };
+    Fact::new(
+        FactScope::Global,
+        user.created_at_ms,
+        user_layout::encode_fact(&user).expect("encode user"),
+    )
+}
+
+fn authorized_context(
+    deletion_fact: &Fact,
+    target_fact: &Fact,
+    author_fact: &Fact,
+) -> ProjectionContext {
+    ProjectionContext::from_matches(vec![
+        target_match(deletion_fact, target_fact),
+        author_match(deletion_fact, author_fact),
+    ])
+}
+
+fn target_match(deletion_fact: &Fact, target_fact: &Fact) -> MatchedContext {
+    let deletion = layout::decode_fact(&deletion_fact.bytes).expect("decode deletion");
+    let scope = message_context::workspace_scope(deletion.workspace_id);
+    MatchedContext {
+        need: message_context::message_need(deletion_fact.id, scope.clone(), target_fact.id),
+        offer: message_context::message_offer(target_fact.id, scope, target_fact.id),
+        payload: target_fact.clone(),
+    }
+}
+
+fn author_match(deletion_fact: &Fact, author_fact: &Fact) -> MatchedContext {
+    MatchedContext {
+        need: identity_matchers::exact_need(
+            deletion_fact.id,
+            identity_matchers::user_role(),
+            author_fact.id,
+        ),
+        offer: identity_matchers::exact_offer(author_fact.id, identity_matchers::user_role()),
+        payload: author_fact.clone(),
+    }
 }

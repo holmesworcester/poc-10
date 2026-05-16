@@ -12,7 +12,9 @@ use topo::event_modules::encryption::fact::{
 };
 use topo::event_modules::encryption::{create as encryption_create, layout as encryption_layout};
 use topo::event_modules::signed_fact;
-use topo::event_modules::transit::frame::{self as transit_frame, SealConnectionFrame};
+use topo::event_modules::transit::frame::{
+    self as transit_frame, SealConnectionFrame, TransitFactBundle,
+};
 use topo::event_modules::transit::layout::{
     self as transit_layout, TRANSIT_FRAME_SIZE_CLASS_LARGE,
 };
@@ -90,7 +92,7 @@ fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionResponseFact, Vec<u8>) {
         receiver_endpoint_id: connection.to_endpoint,
         connection_secret: connection.connection_secret,
         nonce: [19; 24],
-        facts: vec![signed_wrap.clone()],
+        facts: TransitFactBundle::from_bytes([signed_wrap.clone()]),
     })
     .expect("seal transit frame");
     (frame, connection_fact, connection, signed_wrap)

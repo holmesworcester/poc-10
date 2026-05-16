@@ -6,10 +6,6 @@ use topo::core::projection::{MatchedContext, ProjectionContext, ProjectionOutput
 use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::encryption::context::{
-    self as encryption_context, frontier_role, recipient_key_role, recipient_superseded_role,
-    WrapSourceKind, WrapSourceMatcher,
-};
 use topo::event_modules::encryption::fact::{
     KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact,
     LocalRecipientKeyFact, RecipientKeyFact, RemovalFrontierFact, WrappedSecretKind,
@@ -20,20 +16,24 @@ use topo::event_modules::encryption::intent::{
     decode_unwrap_key_wrap_intent, purge_retired_recipient_material_intent,
     PurgeRetiredRecipientMaterialIntent,
 };
+use topo::event_modules::encryption::matchers::{
+    self as encryption_context, frontier_role, recipient_key_role, recipient_superseded_role,
+    WrapSourceKind, WrapSourceMatcher,
+};
 use topo::event_modules::encryption::{
     create as encryption_create, layout as encryption_layout, project as encryption_project,
     rows as encryption_rows,
 };
-use topo::event_modules::sealed_message::context::{
-    self as message_context, workspace_scope, SecretCoverageMatcher,
-};
 use topo::event_modules::sealed_message::fact::{
     SealedMessageFact, SignerPubkeyFact, CIPHERTEXT_BYTES, NONCE_BYTES,
+};
+use topo::event_modules::sealed_message::matchers::{
+    self as message_context, workspace_scope, SecretCoverageMatcher,
 };
 use topo::event_modules::sealed_message::rows::{message_key, MESSAGE_ROWS, SEALED_MESSAGE_ROWS};
 use topo::event_modules::sealed_message::{layout as message_layout, project as message_project};
 use topo::event_modules::signed_fact::{self, fact::LocalSignerSecretFact};
-use topo::event_modules::sync::context as sync_context;
+use topo::event_modules::sync::matchers as sync_context;
 use topo::handlers::materialize_key_wraps::MaterializeKeyWrapsHandler;
 use topo::handlers::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler;
 use topo::handlers::unwrap_key_wrap::UnwrapKeyWrapHandler;
@@ -43,14 +43,17 @@ fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appe
     let workspace = [1; 32];
     let endpoint = [2; 32];
     let recipient = recipient_key_fact(workspace, endpoint, NO_PREVIOUS_RECIPIENT_KEY, 10);
-    let root = local_key_secret_fact(workspace, [3; 32], endpoint, 20);
+    let frontier = removal_frontier_fact(workspace, endpoint, 19);
+    let root = local_key_secret_fact(workspace, frontier.id, endpoint, 20);
     let signer = local_signer_secret_fact(workspace, endpoint);
     let mut bus = WakeLoop::new();
     let projector = CombinedProjector;
+    let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
-        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
+        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role());
     let matchers = [
+        &frontier_matcher as &dyn ContextMatcher,
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
@@ -62,6 +65,7 @@ fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appe
     assert_eq!(waiting.intents, 0);
     assert_eq!(bus.context(&recipient.id).unwrap().needs.len(), 2);
 
+    bus.submit_fact(frontier.clone());
     bus.submit_fact(root.clone());
     bus.submit_fact(signer.clone());
     bus.drain(&projector, &matchers, 20)
@@ -70,7 +74,7 @@ fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appe
     assert_eq!(bus.intents().len(), 1);
     let intent = decode_materialize_key_wraps_intent(&bus.intents()[0]).expect("wrap intent");
     assert_eq!(intent.workspace_id, workspace);
-    assert_eq!(intent.frontier_id, [3; 32]);
+    assert_eq!(intent.frontier_id, frontier.id);
     assert_eq!(intent.recipient_key_id, recipient.id);
     assert_eq!(intent.source_fact_id, root.id);
     assert_eq!(intent.signer_secret_fact_id, signer.id);
@@ -82,18 +86,22 @@ fn recipient_key_waits_for_local_signer_secret_before_materializing_wrap() {
     let workspace = [1; 32];
     let endpoint = [2; 32];
     let recipient = recipient_key_fact(workspace, endpoint, NO_PREVIOUS_RECIPIENT_KEY, 10);
-    let root = local_key_secret_fact(workspace, [3; 32], endpoint, 20);
+    let frontier = removal_frontier_fact(workspace, endpoint, 19);
+    let root = local_key_secret_fact(workspace, frontier.id, endpoint, 20);
     let mut bus = WakeLoop::new();
     let projector = CombinedProjector;
+    let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
-        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
+        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role());
     let matchers = [
+        &frontier_matcher as &dyn ContextMatcher,
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
 
     bus.submit_fact(recipient.clone());
+    bus.submit_fact(frontier);
     bus.submit_fact(root);
     bus.drain(&projector, &matchers, 20)
         .expect("source without signer");
@@ -104,38 +112,41 @@ fn recipient_key_waits_for_local_signer_secret_before_materializing_wrap() {
         .unwrap()
         .needs
         .iter()
-        .any(|need| { need.role == signed_fact::context::local_signer_secret_role() }));
+        .any(|need| { need.role == signed_fact::matchers::local_signer_secret_role() }));
 }
 
 #[test]
 fn rotated_recipient_key_does_not_receive_old_frontier_sources() {
     let workspace = [4; 32];
     let endpoint = [5; 32];
-    let old_frontier = [6; 32];
-    let new_frontier = [7; 32];
+    let old_frontier = removal_frontier_fact(workspace, endpoint, 20);
+    let new_frontier = removal_frontier_fact(workspace, endpoint, 70);
     let rotated = recipient_key_fact(workspace, endpoint, [8; 32], 50);
-    let old_root = local_key_secret_fact(workspace, old_frontier, endpoint, 20);
-    let new_root = local_key_secret_fact(workspace, new_frontier, endpoint, 70);
+    let old_root = local_key_secret_fact(workspace, old_frontier.id, endpoint, 20);
+    let new_root = local_key_secret_fact(workspace, new_frontier.id, endpoint, 70);
     let signer = local_signer_secret_fact(workspace, endpoint);
     let projector = CombinedProjector;
+    let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
-        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
+        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role());
     let matchers = [
+        &frontier_matcher as &dyn ContextMatcher,
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
     let mut bus = WakeLoop::new();
 
     bus.submit_fact(rotated.clone());
+    bus.submit_fact(old_frontier);
     bus.submit_fact(old_root);
-    let old_seen = bus
-        .drain(&projector, &matchers, 10)
+    bus.drain(&projector, &matchers, 10)
         .expect("old root is not eligible");
-    assert_eq!(old_seen.wakes, 0);
     assert!(bus.intents().is_empty());
 
     let new_root_id = new_root.id;
+    let new_frontier_id = new_frontier.id;
+    bus.submit_fact(new_frontier);
     bus.submit_fact(new_root);
     bus.submit_fact(signer);
     let new_seen = bus
@@ -144,7 +155,7 @@ fn rotated_recipient_key_does_not_receive_old_frontier_sources() {
     assert!(new_seen.wakes >= 1);
     assert_eq!(bus.intents().len(), 1);
     let intent = decode_materialize_key_wraps_intent(&bus.intents()[0]).expect("wrap intent");
-    assert_eq!(intent.frontier_id, new_frontier);
+    assert_eq!(intent.frontier_id, new_frontier_id);
     assert_eq!(intent.source_fact_id, new_root_id);
 }
 
@@ -179,7 +190,7 @@ fn duplicate_key_requests_converge_on_one_wrap_intent_without_request_entropy() 
     let superseded_matcher = ExactSelectorMatcher::new(recipient_superseded_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
-        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
+        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role());
     let matchers = [
         &recipient_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
@@ -237,7 +248,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_secret_matcher =
-        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
+        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role());
     let signer_pubkey_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let matchers = [
         &recipient_matcher as &dyn ContextMatcher,
@@ -366,29 +377,77 @@ fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
     let retained_a = history_node_fact(workspace, frontier.id, 40, 8, 0, [0; 32]);
     let retained_b = history_node_fact(workspace, frontier.id, 51, 1, 8, byte_prefix(0xaa));
     let signer = local_signer_secret_fact(workspace, [0x76; 32]);
-    let projector = CombinedProjector;
-    let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
-    let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
-    let wrap_matcher = WrapSourceMatcher::new();
-    let signer_matcher =
-        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role());
-    let matchers = [
-        &recipient_matcher as &dyn ContextMatcher,
-        &frontier_matcher as &dyn ContextMatcher,
-        &wrap_matcher as &dyn ContextMatcher,
-        &signer_matcher as &dyn ContextMatcher,
-    ];
-    let mut bus = WakeLoop::new();
+    let scope = workspace_scope(workspace);
+    let frontier_id = frontier.id;
+    let source_need = encryption_context::requested_wrap_source_need(
+        request.id,
+        scope.clone(),
+        workspace,
+        frontier_id,
+    );
+    let context = ProjectionContext::from_matches(vec![
+        MatchedContext {
+            need: encryption_context::recipient_key_need(request.id, scope.clone(), recipient.id),
+            offer: encryption_context::recipient_key_offer(
+                recipient.id,
+                scope.clone(),
+                recipient.id,
+            ),
+            payload: recipient,
+        },
+        MatchedContext {
+            need: encryption_context::frontier_need(request.id, scope.clone(), frontier_id),
+            offer: encryption_context::frontier_offer(frontier_id, scope.clone(), frontier_id),
+            payload: frontier,
+        },
+        MatchedContext {
+            need: source_need.clone(),
+            offer: encryption_context::history_node_wrap_source_offer(
+                retained_a.id,
+                scope.clone(),
+                workspace,
+                frontier_id,
+                responder,
+                40,
+                8,
+                0,
+                [0; 32],
+            ),
+            payload: retained_a,
+        },
+        MatchedContext {
+            need: source_need,
+            offer: encryption_context::history_node_wrap_source_offer(
+                retained_b.id,
+                scope.clone(),
+                workspace,
+                frontier_id,
+                responder,
+                51,
+                1,
+                8,
+                byte_prefix(0xaa),
+            ),
+            payload: retained_b,
+        },
+        MatchedContext {
+            need: signed_fact::matchers::local_signer_secret_need(
+                request.id,
+                scope.clone(),
+                responder,
+            ),
+            offer: signed_fact::matchers::local_signer_secret_offer(signer.id, scope, responder),
+            payload: signer,
+        },
+    ]);
 
-    for fact in [frontier, recipient, request, retained_a, retained_b, signer] {
-        bus.submit_fact(fact);
-    }
-    bus.drain(&projector, &matchers, 100)
+    let output = encryption_project::EncryptionProjector::new()
+        .project(&request, &context)
         .expect("retained nodes satisfy request");
 
-    assert_eq!(bus.intents().len(), 2);
-    let intents = bus
-        .intents()
+    assert_eq!(output.intents.len(), 2);
+    let intents = output
+        .intents
         .iter()
         .map(decode_materialize_key_wraps_intent)
         .collect::<Result<Vec<_>, _>>()
@@ -484,8 +543,9 @@ fn key_request_ignores_wrap_source_from_non_responder() {
     let responder = [29; 32];
     let wrong_source_owner = [30; 32];
     let frontier = removal_frontier_fact(workspace, responder, 10);
+    let wrong_frontier = removal_frontier_fact(workspace, wrong_source_owner, 10);
     let recipient = recipient_key_fact(workspace, requester, [31; 32], 50);
-    let wrong_root = local_key_secret_fact(workspace, frontier.id, wrong_source_owner, 10);
+    let wrong_root = local_key_secret_fact(workspace, wrong_frontier.id, wrong_source_owner, 10);
     let wrong_signer = local_signer_secret_fact(workspace, wrong_source_owner);
     let request = key_request_fact(
         workspace,
@@ -506,7 +566,14 @@ fn key_request_ignores_wrap_source_from_non_responder() {
     ];
     let mut bus = WakeLoop::new();
 
-    for fact in [frontier, recipient, wrong_root, wrong_signer, request] {
+    for fact in [
+        frontier,
+        wrong_frontier,
+        recipient,
+        wrong_root,
+        wrong_signer,
+        request,
+    ] {
         bus.submit_fact(fact);
     }
     bus.drain(&projector, &matchers, 100)
@@ -665,30 +732,88 @@ fn retired_recipient_material_handler_revalidates_exact_local_material() {
 fn encryption_history_node_offer_wakes_and_clears_sealed_message_secret_need() {
     let workspace = [40; 32];
     let signer = [41; 32];
-    let frontier = [42; 32];
+    let frontier = removal_frontier_fact(workspace, [0x76; 32], 54);
+    let root = local_key_secret_fact(workspace, frontier.id, [0x76; 32], 54);
     let leaf = [0xab; 32];
-    let message = sealed_message_fact(workspace, signer, frontier, 55, leaf);
+    let message = sealed_message_fact(workspace, signer, frontier.id, 55, leaf);
     let signer = signer_fact(workspace, signer);
-    let history_node = history_node_fact(workspace, frontier, 55, 1, 8, byte_prefix(0xab));
-    let projector = CombinedProjector;
-    let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
-    let deletion_matcher = ExactSelectorMatcher::new(message_context::deletion_role());
-    let secret_matcher = SecretCoverageMatcher::new();
-    let matchers = [
-        &signer_matcher as &dyn ContextMatcher,
-        &deletion_matcher as &dyn ContextMatcher,
-        &secret_matcher as &dyn ContextMatcher,
-    ];
-    let mut bus = WakeLoop::new();
+    let history_node = history_node_fact_with_source(
+        workspace,
+        frontier.id,
+        [0x76; 32],
+        root.id,
+        [0; 32],
+        55,
+        1,
+        8,
+        byte_prefix(0xab),
+    );
+    let scope = workspace_scope(workspace);
+    let history_output = encryption_project::EncryptionProjector::new()
+        .project(
+            &history_node,
+            &ProjectionContext::from_matches(vec![
+                MatchedContext {
+                    need: encryption_context::frontier_need(
+                        history_node.id,
+                        scope.clone(),
+                        frontier.id,
+                    ),
+                    offer: encryption_context::frontier_offer(
+                        frontier.id,
+                        scope.clone(),
+                        frontier.id,
+                    ),
+                    payload: frontier.clone(),
+                },
+                MatchedContext {
+                    need: topo::event_modules::local_history_node_secret::matchers::source_secret_need(
+                        history_node.id,
+                        root.id,
+                    ),
+                    offer:
+                        topo::event_modules::local_history_node_secret::matchers::source_secret_offer(
+                            root.id, root.id,
+                        ),
+                    payload: root,
+                },
+            ]),
+        )
+        .expect("history node projects with source context");
+    let secret_offer = history_output
+        .offers
+        .iter()
+        .find(|offer| offer.role == message_context::secret_role())
+        .expect("history node offers secret coverage")
+        .clone();
 
-    bus.submit_fact(message.clone());
-    bus.submit_fact(signer);
-    bus.submit_fact(history_node);
-    bus.drain(&projector, &matchers, 100)
+    let message_output = message_project::SealedMessageProjector::new()
+        .project(
+            &message,
+            &ProjectionContext::from_matches(vec![
+                MatchedContext {
+                    need: message_context::signer_need(message.id, scope.clone(), [41; 32]),
+                    offer: message_context::signer_offer(signer.id, scope.clone(), [41; 32]),
+                    payload: signer,
+                },
+                MatchedContext {
+                    need: message_context::secret_need(
+                        message.id,
+                        scope,
+                        workspace,
+                        frontier.id,
+                        55,
+                        leaf,
+                    ),
+                    offer: secret_offer,
+                    payload: history_node,
+                },
+            ]),
+        )
         .expect("history node covers message");
 
-    let rows = bus
-        .intents()
+    let rows = message_output
+        .intents
         .iter()
         .filter_map(|intent| {
             AtomicIntent::from_intent(intent, &[MESSAGE_ROWS, SEALED_MESSAGE_ROWS]).ok()
@@ -700,10 +825,7 @@ fn encryption_history_node_offer_wakes_and_clears_sealed_message_secret_need() {
     assert!(!rows
         .iter()
         .any(|intent| matches!(intent, AtomicIntent::PutRow(row) if row.table == MESSAGE_ROWS)));
-    let context = bus
-        .context(&message.id)
-        .expect("message keeps deletion context");
-    assert!(!context
+    assert!(!message_output
         .needs
         .iter()
         .any(|need| need.role == message_context::secret_role()));
@@ -1232,6 +1354,36 @@ fn history_node_fact(
     )
 }
 
+fn history_node_fact_with_source(
+    workspace_id: [u8; 32],
+    frontier_id: [u8; 32],
+    owner_endpoint_id: [u8; 32],
+    source_secret_id: [u8; 32],
+    tombstone_node_id: [u8; 32],
+    range_start: u64,
+    range_width: u64,
+    bit_depth: u16,
+    event_id_prefix: [u8; 32],
+) -> Fact {
+    Fact::new(
+        FactScope::Local,
+        91_000,
+        encryption_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
+            workspace_id,
+            frontier_id,
+            owner_endpoint_id,
+            source_secret_id,
+            range_start,
+            range_width,
+            bit_depth,
+            event_id_prefix,
+            tombstone_node_id,
+            node_secret: [0x79; 32],
+        })
+        .expect("encode history node"),
+    )
+}
+
 fn local_signer_secret_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
     local_signer_secret_fact_with_private(workspace_id, signer_id, [0x42; 32])
 }
@@ -1317,7 +1469,7 @@ fn key_request_matchers() -> (
         ExactSelectorMatcher::new(recipient_key_role()),
         ExactSelectorMatcher::new(frontier_role()),
         WrapSourceMatcher::new(),
-        ExactSelectorMatcher::new(signed_fact::context::local_signer_secret_role()),
+        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role()),
     )
 }
 

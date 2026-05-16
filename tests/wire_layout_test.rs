@@ -6,7 +6,10 @@ use topo::core::wire::{
     fixed_tag, Bool8, Ciphertext, FixedBytes, FixedLayout, FixedSlot, Hash32, Id32, Nonce24,
     PublicKey32, Signature64, SymmetricKey32, Tag, U16be, U32be, U64be, WireError, U8,
 };
-use topo::legacy::protocol::event_modules::connection::transit::commands::TRANSIT_TARGET_PLAINTEXT_BYTES;
+use topo::event_modules::transit::layout::{
+    TRANSIT_LARGE_CIPHERTEXT_BYTES, TRANSIT_LARGE_PLAINTEXT_BYTES, TRANSIT_SMALL_CIPHERTEXT_BYTES,
+    TRANSIT_SMALL_PLAINTEXT_BYTES,
+};
 
 #[test]
 fn scalar_layouts_have_fixed_big_endian_golden_bytes() {
@@ -166,20 +169,34 @@ fn fixed_slots_lock_length_prefix_padding_and_rejection() {
 
 #[test]
 fn transit_ciphertext_slot_layout_includes_aead_tag_capacity() {
-    const TRANSIT_CIPHERTEXT_SLOT_BYTES: usize =
-        TRANSIT_TARGET_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
+    assert_eq!(TRANSIT_SMALL_PLAINTEXT_BYTES, 4 * 1024);
+    assert_eq!(
+        TRANSIT_SMALL_CIPHERTEXT_BYTES,
+        TRANSIT_SMALL_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES
+    );
+    assert_eq!(
+        Ciphertext::<TRANSIT_SMALL_CIPHERTEXT_BYTES>::DATA_LEN,
+        TRANSIT_SMALL_CIPHERTEXT_BYTES
+    );
+    assert_eq!(
+        Ciphertext::<TRANSIT_SMALL_CIPHERTEXT_BYTES>::LEN,
+        U32be::LEN + TRANSIT_SMALL_CIPHERTEXT_BYTES
+    );
 
-    assert_eq!(TRANSIT_TARGET_PLAINTEXT_BYTES, 32 * 1024 * 1024);
-    assert_eq!(TRANSIT_CIPHERTEXT_SLOT_BYTES, 33_554_448);
+    assert_eq!(TRANSIT_LARGE_PLAINTEXT_BYTES, 1024 * 1024);
     assert_eq!(
-        Ciphertext::<TRANSIT_CIPHERTEXT_SLOT_BYTES>::DATA_LEN,
-        TRANSIT_CIPHERTEXT_SLOT_BYTES
+        TRANSIT_LARGE_CIPHERTEXT_BYTES,
+        TRANSIT_LARGE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES
     );
     assert_eq!(
-        Ciphertext::<TRANSIT_CIPHERTEXT_SLOT_BYTES>::LEN,
-        U32be::LEN + TRANSIT_CIPHERTEXT_SLOT_BYTES
+        Ciphertext::<TRANSIT_LARGE_CIPHERTEXT_BYTES>::DATA_LEN,
+        TRANSIT_LARGE_CIPHERTEXT_BYTES
     );
-    assert!(TRANSIT_CIPHERTEXT_SLOT_BYTES <= u32::MAX as usize);
+    assert_eq!(
+        Ciphertext::<TRANSIT_LARGE_CIPHERTEXT_BYTES>::LEN,
+        U32be::LEN + TRANSIT_LARGE_CIPHERTEXT_BYTES
+    );
+    assert!(TRANSIT_LARGE_CIPHERTEXT_BYTES <= u32::MAX as usize);
 }
 
 fn assert_fixed_bytes_golden<const N: usize>(bytes: &[u8; N]) {

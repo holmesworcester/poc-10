@@ -6,6 +6,8 @@
 //! `handlers.rs`) keep Rust namespaces visible; this registry says which of
 //! those namespaces are part of the concrete protocol.
 
+pub mod runtime;
+
 use crate::core::schema_dsl::{
     CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
 };
@@ -20,8 +22,11 @@ use crate::event_modules::{
 };
 use crate::handlers::{
     connection, connection_response as connection_response_handler, handle_sync, network_send,
-    receive_transit, sync_index_update, transit,
+    purge_cascade, receive_transit, retention_expiry, retention_floor, sync_index_update, transit,
 };
+
+/// Concrete protocol selected by the `match` binary.
+pub struct Protocol;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtocolRegistry {
@@ -366,11 +371,87 @@ pub const FACTS: &[FactRegistration] = &[
 
 pub const CONTEXT_MATCHERS: &[ContextMatcherRegistration] = &[
     ContextMatcherRegistration {
+        role: "connection_ephemeral_secret",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "connection_invite_secret",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "connection_request",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "content_file",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "content_message",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "disappearing_authority",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "disappearing_previous",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
         role: "content_deleted",
         matcher: "ExactSelectorMatcher",
     },
     ContextMatcherRegistration {
+        role: "identity_admin",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "identity_device_invite",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "identity_device_invite_key",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "identity_endpoint_shared",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "identity_invite_secret",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "identity_invite_server",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "identity_invite_server_key",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "identity_user",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "identity_user_invite",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "identity_user_invite_key",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "identity_workspace",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
         role: "local_recipient_key",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "local_secret_source",
         matcher: "ExactSelectorMatcher",
     },
     ContextMatcherRegistration {
@@ -387,6 +468,10 @@ pub const CONTEXT_MATCHERS: &[ContextMatcherRegistration] = &[
     },
     ContextMatcherRegistration {
         role: "removal_frontier",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "removal_ref",
         matcher: "ExactSelectorMatcher",
     },
     ContextMatcherRegistration {
@@ -481,6 +566,11 @@ pub const INTENTS: &[IntentRegistration] = &[
         declared_by: "handlers::handle_sync",
     },
     IntentRegistration {
+        kind: handle_sync::RESPOND_TO_SYNC_COMPARE,
+        execution: IntentExecutionKind::Deferred,
+        declared_by: "handlers::handle_sync",
+    },
+    IntentRegistration {
         kind: network_send::NETWORK_SEND_FRAME,
         execution: IntentExecutionKind::Deferred,
         declared_by: "handlers::network_send",
@@ -494,6 +584,21 @@ pub const INTENTS: &[IntentRegistration] = &[
         kind: sealed_message::intent::PURGE_EVENT,
         execution: IntentExecutionKind::Deferred,
         declared_by: "handlers::purge_event",
+    },
+    IntentRegistration {
+        kind: purge_cascade::CASCADE_CHILD_PURGE,
+        execution: IntentExecutionKind::Deferred,
+        declared_by: "handlers::purge_cascade",
+    },
+    IntentRegistration {
+        kind: retention_expiry::EXPIRE_MESSAGE,
+        execution: IntentExecutionKind::Deferred,
+        declared_by: "handlers::retention_expiry",
+    },
+    IntentRegistration {
+        kind: retention_floor::APPLY_RETENTION_FLOOR,
+        execution: IntentExecutionKind::Deferred,
+        declared_by: "handlers::retention_floor",
     },
     IntentRegistration {
         kind: sync_index_update::RECORD_INDEXED_EVENT,
@@ -524,6 +629,11 @@ pub const HANDLERS: &[HandlerRegistration] = &[
         intents: &[handle_sync::PROCESS_SYNC_INBOUND, handle_sync::SYNC_NEED_ID],
     },
     HandlerRegistration {
+        module: "handle_sync",
+        handler: "RespondToSyncCompareHandler",
+        intents: &[handle_sync::RESPOND_TO_SYNC_COMPARE],
+    },
+    HandlerRegistration {
         module: "materialize_key_wraps",
         handler: "MaterializeKeyWrapsHandler",
         intents: &[encryption::intent::MATERIALIZE_KEY_WRAPS],
@@ -539,6 +649,11 @@ pub const HANDLERS: &[HandlerRegistration] = &[
         intents: &[sealed_message::intent::PURGE_EVENT],
     },
     HandlerRegistration {
+        module: "purge_cascade",
+        handler: "PurgeCascadeHandler",
+        intents: &[purge_cascade::CASCADE_CHILD_PURGE],
+    },
+    HandlerRegistration {
         module: "purge_retired_recipient_material",
         handler: "PurgeRetiredRecipientMaterialHandler",
         intents: &[encryption::intent::PURGE_RETIRED_RECIPIENT_MATERIAL],
@@ -547,6 +662,16 @@ pub const HANDLERS: &[HandlerRegistration] = &[
         module: "receive_transit",
         handler: "ReceiveTransitHandler",
         intents: &[receive_transit::RECEIVE_TRANSIT_FRAME],
+    },
+    HandlerRegistration {
+        module: "retention_expiry",
+        handler: "RetentionExpiryHandler",
+        intents: &[retention_expiry::EXPIRE_MESSAGE],
+    },
+    HandlerRegistration {
+        module: "retention_floor",
+        handler: "RetentionFloorHandler",
+        intents: &[retention_floor::APPLY_RETENTION_FLOOR],
     },
     HandlerRegistration {
         module: "sync_index_update",

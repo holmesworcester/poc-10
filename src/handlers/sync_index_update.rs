@@ -1,11 +1,10 @@
 //! Sync index update handler intent layout.
 //!
 //! `sync_index_update` records that an applied shared event has been
-//! observed by the local store so future summaries can include it. The
-//! legacy implementation in `src/legacy/workers/sync.rs::prepare_index_for_response`
-//! mutates a `SyncIndex` in place; this poc-10 layout pins down the
-//! deferred-intent shape so callers can begin emitting it ahead of
-//! Wave 6 lifting the mutable index into facts.
+//! observed by the local store so future summaries can derive from the
+//! durable fact set. The handler is intentionally bounded: it consumes the
+//! update only after the referenced non-local event fact is present with the
+//! expected timestamp.
 
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 
@@ -111,19 +110,14 @@ impl<'a> Reader<'a> {
     }
 }
 
-// Handler for sync index event recording.
+// Handler for sync event observation.
 //
-// The legacy `SyncIndex` in `src/legacy/workers/sync.rs` keeps a mutable in-memory
-// index that is fed by `prepare_index_for_response`. That mutable state
-// cannot move into a stateless `IntentHandler` until Wave 6 lifts the
-// index into facts. For poc-10 we pin down the deferred-intent contract
-// and prove dispatch wiring — the handler decodes its intent and then
-// returns `Err(NOT_YET_WIRED)` so callers can enqueue index-recording
-// intents now without losing them once the durable index lift lands.
+// The target path treats the fact table as the durable source of event
+// presence. This handler therefore declares the exact event fact it needs,
+// verifies it is available and non-local, and then consumes the deferred
+// update. It does not own a process-wide index or scan unrelated rows.
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
-
-pub const NOT_YET_WIRED: &str = "durable sync index update is not yet wired";
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncIndexUpdateHandler;
@@ -139,20 +133,18 @@ impl IntentHandler for SyncIndexUpdateHandler {
         intent.kind.as_str() == RECORD_INDEXED_EVENT
     }
 
-    fn input_fact_ids(&self, _intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        // Once Wave 6 lifts SyncIndex into facts, the matching index fact id
-        // will be declared here so the handler can update it deterministically.
-        Ok(Vec::new())
+    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        let input = decode_record_indexed_event(intent)?;
+        Ok(vec![input.event_id])
     }
 
-    fn handle(&self, raw: &Intent, _context: &HandlerContext) -> Result<HandlerOutput, String> {
-        // Decode the intent so malformed payloads are caught at the deferred
-        // boundary, but do not return success: producing an empty
-        // `HandlerOutput` from a successful handle removes the intent from
-        // the queue, which would silently swallow the index update until
-        // Wave 6 lifts `SyncIndex` into facts. Returning `Err` keeps the
-        // intent queued for retry once the durable path lands.
-        let _input = decode_record_indexed_event(raw)?;
-        Err(NOT_YET_WIRED.to_string())
+    fn handle(&self, raw: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+        let input = decode_record_indexed_event(raw)?;
+        let fact = context.require_fact(&input.event_id)?;
+        context.require_non_local_fact_bytes(&input.event_id)?;
+        if fact.timestamp != input.timestamp_ms {
+            return Err("record_indexed_event timestamp does not match fact".to_string());
+        }
+        Ok(HandlerOutput::new())
     }
 }
