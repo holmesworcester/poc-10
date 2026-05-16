@@ -170,7 +170,7 @@ impl<T> CommandOutput<T> {
 // Compile-time guard.
 //
 // This block proves, by source-level review and by the absence of any
-// `crate::workers::*`, `crate::protocol::*`, or `crate::core::handler_dispatch`
+// `crate::legacy::workers::*`, `crate::legacy::protocol::*`, or `crate::core::handler_dispatch`
 // import in `src/commands/`, that `CommandContext` cannot reach worker code or
 // the event registry. We also assert two structural shapes:
 //

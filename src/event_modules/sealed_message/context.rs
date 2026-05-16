@@ -1,4 +1,9 @@
 //! Context selectors and matchers for sealed-message projection.
+//!
+//! Exact selector roles cover signer and deletion facts. Secret coverage is a
+//! range/prefix relation: one key-secret offer can unblock many sealed messages
+//! when it covers the message minute and leaf id under the same workspace
+//! frontier.
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
@@ -122,6 +127,9 @@ pub fn secret_offer(
     }
 }
 
+// Versioned secret selectors make persisted context rows self-describing. A
+// need names one sealed message leaf at one minute; an offer names a closed
+// minute range plus a byte-prefix subtree of leaves.
 pub fn secret_need_selector(
     workspace_id: WorkspaceId,
     frontier_id: FrontierId,
@@ -270,6 +278,9 @@ fn secret_coverage_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Con
     let need_owner = need.owner;
     let need = decode_secret_need_selector(&need.selector)?;
     let offer_selector = decode_secret_offer_selector(&offer.selector)?;
+    // Match only within the same workspace frontier. A secret for another
+    // frontier may share time and leaf shape but belongs to a different removal
+    // state and must not wake this message.
     if need.workspace_id != offer_selector.workspace_id
         || need.frontier_id != offer_selector.frontier_id
         || offer_selector.start_minute > offer_selector.end_minute

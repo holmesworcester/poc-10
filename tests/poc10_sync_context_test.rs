@@ -1,6 +1,6 @@
-use topo::core::event_bus::EventBus;
 use topo::core::facts::Fact;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::sync::context::{self, RangeEventMatcher};
 use topo::event_modules::sync::fact::{
     EncryptedRootFact, KeyWrapAvailableFact, SharedEventFact, SyncRangeRequestFact,
@@ -28,7 +28,7 @@ fn sync_request_sends_encrypted_message_when_out_of_range_dep_and_key_arrive() {
         &key_matcher as &dyn ContextMatcher,
     ];
     let projector = project::SyncContextProjector::new();
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(request.clone());
     bus.drain(&projector, &matchers, 10)
@@ -86,7 +86,7 @@ fn sync_request_does_not_send_message_before_out_of_range_key_wrap() {
         &key_matcher as &dyn ContextMatcher,
     ];
     let projector = project::SyncContextProjector::new();
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     for fact in [request.clone(), message, dep] {
         bus.submit_fact(fact);
@@ -143,7 +143,7 @@ fn sync_request_sends_ready_root_when_an_earlier_root_is_missing_a_key() {
         &key_matcher as &dyn ContextMatcher,
     ];
     let projector = project::SyncContextProjector::new();
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     for fact in [request, blocked, ready, blocked_dep, ready_dep, ready_key] {
         bus.submit_fact(fact);

@@ -8,7 +8,7 @@
 //! wire; commands split unusually large concurrent removals into multiple
 //! frontier facts.
 //!
-//! The legacy module under `src/protocol/event_modules/encryption/` carried a
+//! The legacy module under `src/legacy/protocol/event_modules/encryption/` carried a
 //! signed envelope wrapping the payload plus admin/endpoint_shared dependency
 //! checks. The target tree does not yet have signed-envelope or admin
 //! projectors at this layer, so the target module accepts the raw fact and

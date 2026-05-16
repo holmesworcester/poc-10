@@ -1,17 +1,17 @@
 use std::cell::Cell;
 
 use topo::core::store::Store;
-use topo::protocol::event_modules::content::content_event;
-use topo::protocol::event_modules::identity::{endpoint, endpoint_shared, workspace};
-use topo::protocol::event_modules::rows::{self as event_schema, ContextUpdate};
-use topo::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
-use topo::protocol::event_modules::worker::{
+use topo::legacy::protocol::event_modules::content::content_event;
+use topo::legacy::protocol::event_modules::identity::{endpoint, endpoint_shared, workspace};
+use topo::legacy::protocol::event_modules::rows::{self as event_schema, ContextUpdate};
+use topo::legacy::protocol::event_modules::types::{event_id, EventId, EventRecord, EventScope};
+use topo::legacy::protocol::event_modules::worker::{
     self, CommandOutput, EventRegistry, EventWithContext, ProjectionDecision, ProjectionOutput,
 };
-use topo::protocol::event_modules::Modules;
-use topo::protocol::Protocol;
-use topo::workers::queue_rows as worker_rows;
-use topo::workers::{dependency_unblock, event_admission, event_projection, sync};
+use topo::legacy::protocol::event_modules::Modules;
+use topo::legacy::protocol::Protocol;
+use topo::legacy::workers::queue_rows as worker_rows;
+use topo::legacy::workers::{dependency_unblock, event_admission, event_projection, sync};
 
 #[test]
 fn command_admission_returns_event_ids_for_chaining() {
@@ -390,7 +390,7 @@ fn sync_worker_consumes_applied_shared_event_queue() {
         2
     );
 
-    let index = topo::protocol::event_modules::sync::SyncIndex::default();
+    let index = topo::legacy::protocol::event_modules::sync::SyncIndex::default();
     let output = sync::run(&store, &index, sync::Work::DrainIndex { limit: 16 })
         .expect("drain sync index queue");
     let sync::Output::Indexed(report) = output else {

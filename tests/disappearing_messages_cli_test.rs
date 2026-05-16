@@ -1,6 +1,6 @@
 //! Black-box CLI tests for disappearing-messages forward secrecy.
 //!
-//! Drives the real `topo` binary and asserts observable forward-secrecy
+//! Drives the real `match` binary and asserts observable forward-secrecy
 //! and convergence behavior through public CLI output. The tests
 //! intentionally do not seed protocol rows or call workers directly.
 //!
@@ -43,7 +43,7 @@
 //!     the current `keys` CLI.
 //!   * Whole-minute leaf retirement. Today the worker calls
 //!     `RetireDeletedEventLeaf` per message + per reaction; the
-//!     `src/workers/encryption.rs:1147` TODO ("whole-minute
+//!     `src/legacy/workers/encryption.rs:1147` TODO ("whole-minute
 //!     retirement") would consolidate to one tombstone per minute.
 //!     With per-message TTLs, leaves in the same minute can have
 //!     different stamped expiries, so the optimization only pays off
@@ -890,7 +890,7 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
 
     // Initial workspace TTL = 10 minutes. Workspace TTL must be non-zero so
     // the `disappearing_minute_expiry` worker actually scans this workspace
-    // (see `src/workers/disappearing_minute_expiry.rs:112`).
+    // (see `src/legacy/workers/disappearing_minute_expiry.rs:112`).
     let workspace_id = create_workspace_with_ttl(&alice, "MixedTtl", "alice", "alice-laptop", 10);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let _bob_daemon = spawn_daemon(&bob, bob_port);
@@ -926,7 +926,7 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
 
     // Tighten the future-stamping TTL to 1 minute. The CLI sets
     // `expires_at_or_before_minute: 0` (see
-    // `src/protocol/event_modules/encryption/cli.rs:603`), so the
+    // `src/legacy/protocol/event_modules/encryption/cli.rs:603`), so the
     // dispatcher's setting-floor source stays at 0 — no chop is provoked.
     // The setting's `created_at_ms` advances next_timestamp by 1ms; the
     // logical clock is still pinned at 6_000_000 so the setting itself
@@ -940,7 +940,7 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
     ]));
 
     // Author Y under the new TTL=1. The `send` path's `next_timestamp`
-    // (in `src/protocol/event_modules/content/message/cli.rs:605`) only
+    // (in `src/legacy/protocol/event_modules/content/message/cli.rs:605`) only
     // looks at content + message timestamps (NOT the encryption setting
     // event), so it returns max(X.created_at_ms + 1, logical_clock) =
     // max(6_000_001, 6_000_000) = 6_000_001. That is still in minute 100
@@ -1511,9 +1511,9 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
     // TTL=1 minute. Each authored message will be retired by the
     // disappearing-minute worker after the clock advances past minute
     // (authored_minute + 1). The retire writes a MESSAGE_TOMBSTONES row
-    // (per process_job in src/workers/disappearing_minute_expiry.rs:217)
+    // (per process_job in src/legacy/workers/disappearing_minute_expiry.rs:217)
     // AND per-leaf LOCAL_HISTORY_NODE_TOMBSTONES rows (per the retire
-    // walk in src/workers/encryption.rs).
+    // walk in src/legacy/workers/encryption.rs).
     let workspace_id = create_workspace_with_ttl(&alice, "ChopGc", "alice", "alice-laptop", 1);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
 

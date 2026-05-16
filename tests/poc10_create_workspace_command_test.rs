@@ -6,10 +6,10 @@ use topo::commands::context::{
     CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
     WorkspaceId,
 };
-use topo::commands::create_workspace::create_workspace;
-use topo::core::event_bus::EventBus;
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::core::wake_loop::WakeLoop;
+use topo::event_modules::identity_workspace::create::create_workspace;
 use topo::event_modules::identity_workspace::layout as workspace_layout;
 use topo::event_modules::identity_workspace::project as workspace_project;
 use topo::event_modules::identity_workspace::rows as workspace_rows;
@@ -88,7 +88,7 @@ fn create_workspace_fact_projects_through_target_bus() {
 
     let output = create_workspace(&ctx, [9u8; 32], "Production").expect("create_workspace");
     let fact = output.facts.into_iter().next().expect("one fact");
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     bus.submit_fact(fact.clone());
     let report = bus
         .drain_applying_atomic_rows(

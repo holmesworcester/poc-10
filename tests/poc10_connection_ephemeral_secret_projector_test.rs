@@ -1,8 +1,8 @@
 use topo::core::crypto::{self, X25519_PRIVATE_KEY_BYTES, X25519_PUBLIC_KEY_BYTES};
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::connection_ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 use topo::event_modules::connection_ephemeral_secret::{layout, project, rows};
 
@@ -27,7 +27,7 @@ fn connection_ephemeral_secret_projector_materializes_row_through_atomic_intent(
     );
     let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
         .expect("open target schema");
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     assert!(bus.submit_fact(fact.clone()));
     let projected = bus
@@ -65,7 +65,7 @@ fn connection_ephemeral_secret_projector_rejects_mismatched_public_key() {
         0,
         layout::encode_fact(&secret).expect("encode secret"),
     );
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     assert!(bus.submit_fact(fact));
     let err = bus
         .drain(&project::ConnectionEphemeralSecretProjector::new(), &[], 10)
@@ -76,7 +76,7 @@ fn connection_ephemeral_secret_projector_rejects_mismatched_public_key() {
 #[test]
 fn connection_ephemeral_secret_projector_rejects_malformed_bytes() {
     let fact = Fact::new(FactScope::Local, 0, vec![0; 4]);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     assert!(bus.submit_fact(fact));
     let err = bus
         .drain(&project::ConnectionEphemeralSecretProjector::new(), &[], 10)

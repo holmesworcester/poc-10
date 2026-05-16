@@ -1,8 +1,8 @@
 use topo::core::crypto::ED25519_SIGNATURE_BYTES;
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::connection_request::fact::ConnectionRequestFact;
 use topo::event_modules::connection_request::{layout, project, rows};
 
@@ -31,7 +31,7 @@ fn connection_request_projector_materializes_row_through_atomic_intent() {
     );
     let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
         .expect("open target schema");
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     assert!(bus.submit_fact(fact.clone()));
     let projected = bus
@@ -73,7 +73,7 @@ fn connection_request_projector_rejects_self_loop() {
         0,
         layout::encode_fact(&request).expect("encode request"),
     );
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     assert!(bus.submit_fact(fact));
     let err = bus
         .drain(&project::ConnectionRequestProjector::new(), &[], 10)
@@ -84,7 +84,7 @@ fn connection_request_projector_rejects_self_loop() {
 #[test]
 fn connection_request_projector_rejects_malformed_bytes() {
     let fact = Fact::new(FactScope::Local, 0, vec![0; 4]);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     assert!(bus.submit_fact(fact));
     let err = bus
         .drain(&project::ConnectionRequestProjector::new(), &[], 10)

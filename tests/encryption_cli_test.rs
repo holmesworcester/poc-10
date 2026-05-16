@@ -1,6 +1,6 @@
 //! Black-box CLI tests for encryption key availability.
 //!
-//! Setup goes through the real `topo` binary: workspace creation, invite
+//! Setup goes through the real `match` binary: workspace creation, invite
 //! listening, invite acceptance, transport connection learning, sync, key
 //! publication, wrap creation, and automatic derivation. The tests intentionally
 //! do not seed protocol rows or call workers directly; the CLI boundary is the
@@ -339,7 +339,7 @@ fn read_history_node_secret_bytes(db: &str, hex_id: &str) -> Vec<u8> {
     // + workspace(32 if present) + canonical_bytes(rest). The canonical bytes
     // start with a 1-byte tag; the local_history_node_secret tag is 145 and
     // the wire layout puts node_secret as the final 32 bytes of canonical
-    // bytes (per src/protocol/event_modules/encryption/local_history_node_secret/layout.rs).
+    // bytes (per src/legacy/protocol/event_modules/encryption/local_history_node_secret/layout.rs).
     let canonical = canonical_bytes_from_event_row(&bytes);
     assert_eq!(
         canonical.first().copied(),

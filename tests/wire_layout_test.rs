@@ -6,7 +6,7 @@ use topo::core::wire::{
     fixed_tag, Bool8, Ciphertext, FixedBytes, FixedLayout, FixedSlot, Hash32, Id32, Nonce24,
     PublicKey32, Signature64, SymmetricKey32, Tag, U16be, U32be, U64be, WireError, U8,
 };
-use topo::protocol::event_modules::connection::transit::commands::TRANSIT_TARGET_PLAINTEXT_BYTES;
+use topo::legacy::protocol::event_modules::connection::transit::commands::TRANSIT_TARGET_PLAINTEXT_BYTES;
 
 #[test]
 fn scalar_layouts_have_fixed_big_endian_golden_bytes() {

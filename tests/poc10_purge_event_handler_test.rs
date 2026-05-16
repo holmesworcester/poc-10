@@ -1,8 +1,8 @@
-use topo::core::event_bus::EventBus;
 use topo::core::facts::Fact;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE};
 use topo::core::store::Store;
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::sealed_message::context::{self, workspace_scope, SecretCoverageMatcher};
 use topo::event_modules::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES,
@@ -25,7 +25,7 @@ fn purge_event_missing_target_keeps_intent_queued() {
     let missing_target = [2; 32];
     let deletion = deletion_fact(workspace, missing_target, AUTHOR);
     let intent = purge_intent(workspace, missing_target, deletion.id);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(deletion);
     bus.submit_intent(intent).expect("submit purge intent");
@@ -42,7 +42,7 @@ fn purge_event_missing_proof_keeps_intent_queued() {
     let workspace = [3; 32];
     let message = message_fact(workspace, [4; 32], AUTHOR);
     let intent = purge_intent(workspace, message.id, [5; 32]);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
     bus.submit_intent(intent).expect("submit purge intent");
@@ -71,7 +71,7 @@ fn purge_event_with_author_proof_purges_target_fact_and_persists() {
     ];
     let store =
         Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open core store");
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
     bus.submit_fact(deletion.clone());
@@ -96,7 +96,7 @@ fn purge_event_with_author_proof_purges_target_fact_and_persists() {
         .all(|intent| intent.kind.as_str() != purge_intent::PURGE_EVENT));
 
     bus.save(&store).expect("save purged bus");
-    let loaded = EventBus::load(&store).expect("load purged bus");
+    let loaded = WakeLoop::load(&store).expect("load purged bus");
     assert!(!loaded.has_fact(&message.id));
     assert!(loaded.has_fact(&deletion.id));
 }
@@ -107,7 +107,7 @@ fn purge_event_invalid_proof_consumes_without_purge() {
     let message = message_fact(workspace, [12; 32], AUTHOR);
     let deletion = deletion_fact(workspace, message.id, [13; 32]);
     let intent = purge_intent(workspace, message.id, deletion.id);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
     bus.submit_fact(deletion);
@@ -158,7 +158,7 @@ fn purge_event_handler_does_not_delete_projection_rows() {
         .insert_table_rows(vec![sealed.clone(), opened.clone()])
         .expect("seed projection rows");
     let intent = purge_intent(workspace, message.id, deletion.id);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(message);
     bus.submit_fact(deletion);

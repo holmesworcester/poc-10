@@ -18,12 +18,8 @@ use topo::event_modules::identity_endpoint::fact::EndpointFact;
 use topo::event_modules::identity_endpoint::layout as endpoint_layout;
 use topo::event_modules::identity_invite::fact::InviteSecretFact;
 use topo::event_modules::identity_invite::layout as invite_layout;
-use topo::handlers::connection_response::driver::{
-    ConnectionResponseHandler, DEPENDENCY_NOT_WIRED,
-};
-use topo::handlers::connection_response::intent::{
-    connection_response_intent, ConnectionResponseIntent,
-};
+use topo::handlers::connection_response::{connection_response_intent, ConnectionResponseIntent};
+use topo::handlers::connection_response::{ConnectionResponseHandler, DEPENDENCY_NOT_WIRED};
 
 #[test]
 fn handler_emits_decodable_response_fact_for_addressed_request() {

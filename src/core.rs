@@ -6,13 +6,10 @@
 //! Crux command runner. It must not learn the vocabulary or validity rules of
 //! whatever protocol sits above it.
 
-pub mod app;
 pub mod commands;
 pub mod context;
 pub mod crux_runner;
 pub mod crypto;
-pub mod daemon;
-pub mod event_bus;
 pub mod facts;
 pub mod handler_dispatch;
 pub mod intents;
@@ -20,8 +17,8 @@ pub mod logical_clock;
 pub mod matchers;
 pub mod network_queues;
 pub mod projection;
-pub mod runtime;
 pub mod schema_dsl;
 pub mod store;
 pub mod tcp;
+pub mod wake_loop;
 pub mod wire;

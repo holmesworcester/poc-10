@@ -7,24 +7,32 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 pub fn topo(args: &[&str]) -> Output {
-    Command::new(topo_bin())
+    match_cli(args)
+}
+
+pub fn match_cli(args: &[&str]) -> Output {
+    Command::new(match_bin())
         .args(args)
         .output()
-        .expect("run topo")
+        .expect("run match")
 }
 
 pub fn spawn_topo(args: &[&str]) -> Child {
-    Command::new(topo_bin())
+    spawn_match(args)
+}
+
+pub fn spawn_match(args: &[&str]) -> Child {
+    Command::new(match_bin())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn topo")
+        .expect("spawn match")
 }
 
-fn topo_bin() -> &'static Path {
-    static TOPO_BIN: OnceLock<PathBuf> = OnceLock::new();
-    TOPO_BIN.get_or_init(|| {
+fn match_bin() -> &'static Path {
+    static MATCH_BIN: OnceLock<PathBuf> = OnceLock::new();
+    MATCH_BIN.get_or_init(|| {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let target_dir = manifest_dir.join("target").join("cli-black-box");
         let profile = std::env::var("TOPO_CLI_PROFILE").unwrap_or_else(|_| "release".to_string());
@@ -37,7 +45,7 @@ fn topo_bin() -> &'static Path {
             .arg("build")
             .arg("--quiet")
             .arg("--bin")
-            .arg("topo")
+            .arg("match")
             .arg("--manifest-path")
             .arg(manifest_dir.join("Cargo.toml"))
             .arg("--target-dir")
@@ -45,9 +53,9 @@ fn topo_bin() -> &'static Path {
         if profile == "release" {
             build.arg("--release");
         }
-        let status = build.status().expect("build topo binary");
-        assert!(status.success(), "build topo binary");
-        target_dir.join(profile).join("topo")
+        let status = build.status().expect("build match binary");
+        assert!(status.success(), "build match binary");
+        target_dir.join(profile).join("match")
     })
 }
 

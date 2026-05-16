@@ -1,9 +1,9 @@
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{AtomicIntent, TableDelete};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::sealed_message::rows::{
     decode_sealed_message_row, message_key, sealed_message_row, SealedMessageRow,
     SEALED_MESSAGE_ROWS,
@@ -14,7 +14,7 @@ fn projection_drain_applies_atomic_put_and_delete_rows_without_queueing_them() {
     let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
         .expect("open target schema");
     let fact = Fact::new(FactScope::Global, 1, b"sealed-row".to_vec());
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(fact.clone());
     let report = bus

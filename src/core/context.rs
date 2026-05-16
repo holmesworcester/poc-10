@@ -1,4 +1,16 @@
-//! Context needs and offers used to wake projection.
+//! Standing context relationships used to wake fact projection.
+//!
+//! Context is the durable matching surface between projectors; it is not a
+//! hidden dependency loader or a second projection queue. A projector writes
+//! the needs and offers it owns, and role-specific matchers report newly
+//! satisfiable relationships. The semantic meaning of a role or selector stays
+//! with the fact module that created it.
+//!
+//! `scope`, `role`, and `selector` form the match key. `owner` says which fact
+//! produced the row so later projection can replace that fact's context without
+//! deleting anyone else's rows. `payload_ref` names the fact to load after a
+//! match; keeping it separate from `owner` lets wrapper facts advertise inner
+//! material without pretending the wrapper and payload have the same id.
 
 use crate::core::facts::{FactId, FactScope};
 use std::collections::BTreeSet;
@@ -7,6 +19,10 @@ use std::collections::BTreeSet;
 pub struct Role(String);
 
 impl Role {
+    /// Roles are protocol identifiers, not free-form labels.
+    ///
+    /// The lowercase ASCII shape keeps persisted rows stable across languages
+    /// and makes accidental UI strings or Rust type names fail early.
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let value = value.into();
         if value.is_empty() {
@@ -30,6 +46,11 @@ impl Role {
 pub struct Selector(Vec<u8>);
 
 impl Selector {
+    /// Build an opaque selector owned by one fact module.
+    ///
+    /// Core stores and sorts these bytes, but never parses them. If matching
+    /// needs range, prefix, or version semantics, that logic belongs in the
+    /// module's `ContextMatcher`, not in this type.
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
         Self(bytes.into())
     }
@@ -39,6 +60,12 @@ impl Selector {
     }
 }
 
+/// A standing request by one fact for matching context.
+///
+/// The need's `owner` is the fact that should be woken when a compatible offer
+/// appears. A need is not inherently blocking: the owning projector decides on
+/// each run whether missing context means "wait", "project a partial result",
+/// or "stop needing this context".
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextNeed {
     pub owner: FactId,
@@ -47,6 +74,12 @@ pub struct ContextNeed {
     pub selector: Selector,
 }
 
+/// A standing statement that one fact can provide context to matching needs.
+///
+/// The offer's `owner` is the fact that emitted this relationship. `payload_ref`
+/// is the fact core should load and pass to the woken projector when this offer
+/// matches; it is usually the owner, but can name another fact when a local
+/// projection advertises context on behalf of a shared or derived fact.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextOffer {
     pub owner: FactId,
@@ -56,6 +89,11 @@ pub struct ContextOffer {
     pub payload_ref: FactId,
 }
 
+/// The complete standing context emitted by a single projection owner.
+///
+/// Projection output replaces the previous set for that owner. This replacement
+/// model is what prevents stable unmet needs from self-waking forever: only
+/// added or removed relationships produce a delta for matchers to inspect.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextSet {
     pub needs: Vec<ContextNeed>,
@@ -78,6 +116,9 @@ impl ContextSet {
     }
 
     pub fn normalized(mut self) -> Self {
+        // Normalization is deliberately mechanical. It gives the storage layer
+        // deterministic deltas without deciding whether any particular context
+        // row is semantically redundant.
         self.needs.sort();
         self.needs.dedup();
         self.offers.sort();
@@ -86,6 +127,11 @@ impl ContextSet {
     }
 }
 
+/// The added and removed relationships from replacing one owner's context set.
+///
+/// Matchers only consider additions for wake generation. Removals are still
+/// recorded so tests and persistence can prove that projection replacement is
+/// exact.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextSetDelta {
     pub added_needs: Vec<ContextNeed>,
@@ -103,6 +149,11 @@ impl ContextSetDelta {
     }
 }
 
+/// Compare relationship sets as durable facts, not queue entries.
+///
+/// The wake loop uses this after every projection. Re-emitting the same need or
+/// offer is a no-op; changing it is represented as removal plus addition so the
+/// matcher sees only genuinely new possible matches.
 pub fn diff_context_sets(previous: &ContextSet, next: &ContextSet) -> ContextSetDelta {
     let previous_needs = previous.needs.iter().cloned().collect::<BTreeSet<_>>();
     let next_needs = next.needs.iter().cloned().collect::<BTreeSet<_>>();

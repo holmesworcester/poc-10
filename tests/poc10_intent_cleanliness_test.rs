@@ -115,7 +115,7 @@ fn handlers_do_not_own_event_module_projection_rows() {
 #[test]
 fn purge_event_handler_must_be_real_retention_work_when_it_exists() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/handlers/purge_event/driver.rs");
+    let path = root.join("src/handlers/purge_event.rs");
     if !path.exists() {
         return;
     }
@@ -273,10 +273,10 @@ fn target_event_modules_do_not_import_legacy_protocol_or_workers() {
     for path in rust_files(&root.join("src/event_modules")) {
         let text = source_text(&path);
         for forbidden in [
-            "crate::protocol",
-            "crate::workers",
-            "topo::protocol",
-            "topo::workers",
+            "crate::legacy::protocol",
+            "crate::legacy::workers",
+            "topo::legacy::protocol",
+            "topo::legacy::workers",
         ] {
             if text.contains(forbidden) {
                 offenders.push(format!(
@@ -369,7 +369,6 @@ fn target_manifests_are_declarations_only() {
         root.join("src/handlers.rs"),
     ];
     manifests.extend(immediate_rust_children(&root.join("src/event_modules")));
-    manifests.extend(immediate_rust_children(&root.join("src/handlers")));
 
     let mut offenders = Vec::new();
     for path in manifests {
@@ -395,7 +394,7 @@ fn target_manifests_are_declarations_only() {
 }
 
 #[test]
-fn target_handler_intent_files_do_not_define_fact_or_crypto_outputs() {
+fn target_handlers_are_flat_files_without_driver_or_intent_submodules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let handler_root = root.join("src/handlers");
     if !handler_root.exists() {
@@ -403,7 +402,38 @@ fn target_handler_intent_files_do_not_define_fact_or_crypto_outputs() {
     }
 
     let mut offenders = Vec::new();
-    for path in rust_files_named(&handler_root, "intent.rs") {
+    for entry in std::fs::read_dir(&handler_root).expect("read handlers") {
+        let path = entry.expect("handler dir entry").path();
+        if path.is_dir() {
+            offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+    for path in rust_files(&handler_root) {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if matches!(file_name, "driver.rs" | "intent.rs") {
+            offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "handlers should be self-contained flat files under src/handlers:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_handler_files_do_not_define_fact_or_crypto_outputs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let handler_root = root.join("src/handlers");
+    if !handler_root.exists() {
+        return;
+    }
+
+    let mut offenders = Vec::new();
+    for path in rust_files(&handler_root) {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
@@ -439,7 +469,7 @@ fn target_handler_intent_files_do_not_define_fact_or_crypto_outputs() {
 
     assert!(
         offenders.is_empty(),
-        "handler intent files should encode/decode handler payloads, not facts or crypto outputs:\n{}",
+        "handler files should encode/decode payloads and execute bounded effects, not define facts or crypto outputs:\n{}",
         offenders.join("\n")
     );
 }
@@ -447,7 +477,7 @@ fn target_handler_intent_files_do_not_define_fact_or_crypto_outputs() {
 #[test]
 fn connection_intents_treat_transit_frames_as_opaque() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/handlers/connection/intent.rs");
+    let path = root.join("src/handlers/connection.rs");
     if !path.exists() {
         return;
     }
@@ -596,8 +626,8 @@ fn target_schema_dsl_parser_stays_protocol_neutral() {
 
     for forbidden in [
         "crate::event_modules",
-        "crate::protocol",
-        "crate::workers",
+        "crate::legacy::protocol",
+        "crate::legacy::workers",
         "TableRow",
         "Intent",
         "ProjectionOutput",

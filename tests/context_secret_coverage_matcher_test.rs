@@ -1,10 +1,10 @@
 use topo::core::context::{ContextNeed, ContextOffer, Role, Selector};
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactId, FactScope, ScopeKind};
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatch, ContextMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::store::{TableName, TableRow};
+use topo::core::wake_loop::WakeLoop;
 
 #[test]
 fn secret_coverage_matcher_handles_root_internal_leaf_ranges() {
@@ -44,7 +44,7 @@ fn secret_coverage_offer_wakes_message_without_event_dependency() {
     let message = message_fact(workspace, 42);
     let root_key = key_fact(workspace, 0, 99, 1);
     let internal_key = key_fact(workspace, 40, 50, 2);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
     let waiting = bus

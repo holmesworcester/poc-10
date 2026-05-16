@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 
 use topo::core::crypto::{self, XChaCha20Poly1305Key, XCHACHA20_POLY1305_TAG_BYTES};
 use topo::core::store::Store;
-use topo::protocol::event_modules::content::{file, file_slice, message};
-use topo::protocol::event_modules::encryption::{local_key_secret, removal_frontier};
-use topo::protocol::event_modules::identity::{
+use topo::legacy::protocol::event_modules::content::{file, file_slice, message};
+use topo::legacy::protocol::event_modules::encryption::{local_key_secret, removal_frontier};
+use topo::legacy::protocol::event_modules::identity::{
     admin, device_invite, endpoint, endpoint_shared, user, user_invite, workspace,
 };
-use topo::protocol::event_modules::types::EventId;
-use topo::protocol::event_modules::worker::{self, CommandOutput, ProposedEvent};
-use topo::protocol::Protocol;
+use topo::legacy::protocol::event_modules::types::EventId;
+use topo::legacy::protocol::event_modules::worker::{self, CommandOutput, ProposedEvent};
+use topo::legacy::protocol::Protocol;
 
 const MIB: usize = 1024 * 1024;
 const MESSAGE_BATCH: usize = 4096;

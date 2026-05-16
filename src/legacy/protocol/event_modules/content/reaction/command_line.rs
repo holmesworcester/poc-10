@@ -1,0 +1,114 @@
+//! Reaction CLI: `react`.
+//!
+//! This adapter resolves a message selector, loads local membership and content
+//! key material, then admits one signed reaction event. It does not own reaction
+//! projection, display grouping, or message deletion cleanup; those stay in the
+//! reaction projector/rows and content purge worker.
+
+use crate::core::commands::{CliArgs, CliCommand, CliOutput};
+use crate::legacy::protocol::commands::Context;
+use crate::legacy::protocol::event_modules::content::message;
+use crate::legacy::protocol::event_modules::identity::endpoint;
+use crate::legacy::protocol::event_modules::types::EventId;
+use crate::legacy::protocol::event_modules::worker;
+
+use super::commands;
+use super::types::reaction_event_id_in_minute;
+
+const REACT_USAGE: &str = "react WORKSPACE_ID_HEX MESSAGE_SELECTOR EMOJI";
+
+pub fn commands() -> Vec<CliCommand<Context>> {
+    vec![CliCommand {
+        name: "react",
+        usage: REACT_USAGE,
+        help: "React to a message in a workspace.",
+        run: run_react_command,
+    }]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactSummary {
+    pub event_id: EventId,
+    pub target_message_id: EventId,
+    pub emoji: String,
+}
+
+impl ReactSummary {
+    pub fn lines(&self) -> Vec<String> {
+        vec![
+            format!("event_id: {}", message::commands::hex_id(self.event_id)),
+            format!(
+                "target: {}",
+                message::commands::hex_id(self.target_message_id)
+            ),
+            format!("emoji: {}", self.emoji),
+        ]
+    }
+}
+
+fn run_react_command(context: &mut Context, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    args.require_len(3, REACT_USAGE)?;
+    let workspace_id =
+        message::commands::parse_hex_id(args.get(0).expect("length checked"), REACT_USAGE)?;
+    let target = message::commands::resolve_selector(
+        &context.store,
+        workspace_id,
+        args.get(1).expect("length checked"),
+    )?;
+    let emoji = args.get(2).expect("length checked").to_string();
+
+    let membership = message::commands::require_membership(&context.store, workspace_id)?;
+    let local = endpoint::commands::local_keypair(&context.store)?
+        .ok_or_else(|| "local endpoint is missing".to_string())?;
+
+    let timestamp = message::commands::next_timestamp(&context.store, workspace_id)?;
+    let removal_frontier_id =
+        message::commands::require_active_frontier_id(&context.store, workspace_id)?;
+    let event_id_in_minute = reaction_event_id_in_minute(
+        &workspace_id,
+        &membership.user_authority_event_id,
+        &target,
+        &removal_frontier_id,
+        timestamp,
+    );
+    let leaf = message::commands::derive_message_leaf(
+        &context.store,
+        &context.protocol,
+        workspace_id,
+        removal_frontier_id,
+        timestamp,
+        event_id_in_minute,
+    )?;
+    let post = commands::post(commands::PostReaction {
+        workspace_id,
+        created_at_ms: timestamp,
+        target_message_id: target,
+        author_user_id: membership.user_authority_event_id,
+        signer_endpoint_shared_id: membership.endpoint_shared_id,
+        signer_private_key: local.signing_secret,
+        removal_frontier_id,
+        local_history_node_secret_id: leaf.local_history_node_secret_id,
+        leaf_node_secret: leaf.leaf_node_secret,
+        emoji,
+    })?;
+    let report = worker::run(
+        &context.store,
+        &context.protocol,
+        worker::AdmitAndDrain {
+            output: post,
+            batch_size: worker::DEFAULT_READY_BATCH,
+        },
+    )
+    .map_err(|err| format!("admit reaction: {err}"))?;
+    if report.admitted.inserted_events == 0 {
+        return Err("reaction was not admitted".to_string());
+    }
+    Ok(CliOutput::lines(
+        ReactSummary {
+            event_id: report.value.reaction_id,
+            target_message_id: report.value.target_message_id,
+            emoji: report.value.emoji,
+        }
+        .lines(),
+    ))
+}

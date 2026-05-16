@@ -1,7 +1,7 @@
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
 use topo::core::intents::IntentKind;
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::{encryption, signed_fact, sync};
 use topo::handlers::{connection, transit};
 
@@ -133,7 +133,7 @@ fn transit_send_guard_accepts_normal_shared_facts() {
         .handle(&intent, &context)
         .expect_err("packaging is not wired yet");
 
-    assert_eq!(err, transit::driver::NOT_YET_WIRED);
+    assert_eq!(err, transit::NOT_YET_WIRED);
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn send_on_connection_handler_failure_keeps_intent_queued() {
         connection_id: [9; 32],
         fact_ids: vec![fact.id],
     });
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     bus.submit_fact(fact);
     bus.submit_intent(intent).expect("queue send work");
 

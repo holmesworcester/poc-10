@@ -1,7 +1,7 @@
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::identity_device_invite::fact::DeviceInviteFact;
 use topo::event_modules::identity_device_invite::{layout, project, rows};
 
@@ -25,7 +25,7 @@ fn device_invite_projector_materializes_row_through_atomic_intent() {
     );
     let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
         .expect("open target schema");
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     assert!(bus.submit_fact(fact.clone()));
     let projected = bus
@@ -80,7 +80,7 @@ fn device_invite_projector_persists_endpoint_shared_signed_without_user_invite()
     );
     let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
         .expect("open target schema");
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     assert!(bus.submit_fact(fact));
     bus.drain_applying_atomic_rows(
@@ -108,7 +108,7 @@ fn device_invite_projector_rejects_empty_user_authority() {
     );
     let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
         .expect("open target schema");
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     assert!(bus.submit_fact(fact));
     let err = bus

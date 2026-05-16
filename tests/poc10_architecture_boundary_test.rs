@@ -160,15 +160,15 @@ fn poc10_handler_output_contract_emits_only_facts_purges_and_intents() {
 }
 
 #[test]
-fn poc10_core_event_bus_exposes_protocol_neutral_vocabulary() {
+fn poc10_core_wake_loop_exposes_protocol_neutral_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let event_bus_path = root.join("src/core/event_bus.rs");
+    let wake_loop_path = root.join("src/core/wake_loop.rs");
     assert!(
-        event_bus_path.is_file(),
-        "missing src/core/event_bus.rs; when introduced, it must expose protocol-neutral terms for pending projection, context delta matching, and intent output"
+        wake_loop_path.is_file(),
+        "missing src/core/wake_loop.rs; when introduced, it must expose protocol-neutral terms for pending projection, context delta matching, and intent output"
     );
 
-    let text = source_text(&event_bus_path);
+    let text = source_text(&wake_loop_path);
     let required_terms = [
         (
             "pending projection",
@@ -201,7 +201,7 @@ fn poc10_core_event_bus_exposes_protocol_neutral_vocabulary() {
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "src/core/event_bus.rs must expose protocol-neutral event bus vocabulary:\n{}",
+        "src/core/wake_loop.rs must expose protocol-neutral wake loop vocabulary:\n{}",
         missing.join("\n")
     );
 
@@ -239,10 +239,10 @@ fn poc10_core_event_bus_exposes_protocol_neutral_vocabulary() {
         "pending_connection_attempts",
         "pending_connection_responses",
     ];
-    let offenders = source_matches_in_paths(root, vec![event_bus_path], &forbidden);
+    let offenders = source_matches_in_paths(root, vec![wake_loop_path], &forbidden);
     assert!(
         offenders.is_empty(),
-        "src/core/event_bus.rs must not expose old worker queue or event status vocabulary:\n{}",
+        "src/core/wake_loop.rs must not expose old worker queue or event status vocabulary:\n{}",
         offenders.join("\n")
     );
 }
@@ -373,7 +373,7 @@ fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
                     .unwrap()
                     .display()
                     .to_string()
-                    .ends_with("src/workers/pipeline_helpers/event_pipeline.rs")
+                    .ends_with("src/legacy/workers/pipeline_helpers/event_pipeline.rs")
         })
         .collect::<Vec<_>>();
     let forbidden = [

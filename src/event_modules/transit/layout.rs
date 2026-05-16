@@ -6,7 +6,9 @@
 //! the size class; per-batch sizing is hidden inside the ciphertext.
 
 use crate::core::crypto::{XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES};
-use crate::core::wire::{fixed_tag, Ciphertext, FixedLayout, Id32, Nonce24, Tag, WireError, U8};
+use crate::core::wire::{
+    self, fixed_tag, Ciphertext, FixedLayout, Id32, Nonce24, Tag, WireError, U8,
+};
 
 /// Public tag prefix shared by both transit frame variants.
 pub const TRANSIT_FRAME_TAG: Tag<4> = fixed_tag(b"TRNS");
@@ -153,6 +155,14 @@ pub struct TransitFrameHeader {
     pub nonce: Nonce24,
 }
 
+/// Borrowed transit frame payload recovered without materializing a large
+/// fixed-slot value on the stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitFrameParts<'a> {
+    pub header: TransitFrameHeader,
+    pub ciphertext: &'a [u8],
+}
+
 /// Inspect just the public header of a transit frame.
 ///
 /// Returns the size class byte and addressing fields. The caller decides which
@@ -185,6 +195,74 @@ pub fn peek_frame_header(bytes: &[u8]) -> Result<TransitFrameHeader, WireError> 
         connection_id,
         nonce,
     })
+}
+
+/// Decode the public header and borrowed ciphertext slot for either size
+/// class without copying the full padded payload.
+pub fn decode_frame_parts(bytes: &[u8]) -> Result<TransitFrameParts<'_>, WireError> {
+    let header = peek_frame_header(bytes)?;
+    let (expected_len, capacity) = frame_shape(header.size_class)?;
+    if bytes.len() != expected_len {
+        return Err(WireError::WrongLength {
+            expected: expected_len,
+            actual: bytes.len(),
+        });
+    }
+    let slot = &bytes[CIPHERTEXT_OFFSET..];
+    let ciphertext_len = wire::take_u32be(&slot[..4])? as usize;
+    if ciphertext_len > capacity {
+        return Err(WireError::ValueTooLarge {
+            max: capacity,
+            actual: ciphertext_len,
+        });
+    }
+    if let Some(offset) = slot[4 + ciphertext_len..]
+        .iter()
+        .position(|byte| *byte != 0)
+    {
+        return Err(WireError::NonZeroPadding {
+            index: CIPHERTEXT_OFFSET + 4 + ciphertext_len + offset,
+        });
+    }
+    Ok(TransitFrameParts {
+        header,
+        ciphertext: &slot[4..4 + ciphertext_len],
+    })
+}
+
+/// Encode a transit frame for either size class from already-encrypted bytes.
+pub fn encode_frame_bytes(
+    size_class: u8,
+    sender_endpoint_id: Id32,
+    receiver_endpoint_id: Id32,
+    connection_id: Id32,
+    nonce: Nonce24,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, WireError> {
+    let (wire_len, capacity) = frame_shape(size_class)?;
+    if ciphertext.len() > capacity {
+        return Err(WireError::ValueTooLarge {
+            max: capacity,
+            actual: ciphertext.len(),
+        });
+    }
+    let mut out = vec![0; wire_len];
+    encode_header(
+        &mut out,
+        wire_len,
+        size_class,
+        &sender_endpoint_id,
+        &receiver_endpoint_id,
+        &connection_id,
+        &nonce,
+    )?;
+    wire::put_u32be(
+        ciphertext.len() as u32,
+        &mut out[CIPHERTEXT_OFFSET..CIPHERTEXT_OFFSET + 4],
+    )?;
+    out[CIPHERTEXT_OFFSET + 4..CIPHERTEXT_OFFSET + 4 + ciphertext.len()]
+        .copy_from_slice(ciphertext);
+    Ok(out)
 }
 
 fn encode_header(
@@ -240,6 +318,18 @@ fn decode_header(
     let connection = Id32::decode(&bytes[CONNECTION_OFFSET..NONCE_OFFSET])?;
     let nonce = Nonce24::decode(&bytes[NONCE_OFFSET..CIPHERTEXT_OFFSET])?;
     Ok((sender, receiver, connection, nonce))
+}
+
+fn frame_shape(size_class: u8) -> Result<(usize, usize), WireError> {
+    match size_class {
+        TRANSIT_FRAME_SIZE_CLASS_SMALL => {
+            Ok((TRANSIT_SMALL_WIRE_BYTES, TRANSIT_SMALL_CIPHERTEXT_BYTES))
+        }
+        TRANSIT_FRAME_SIZE_CLASS_LARGE => {
+            Ok((TRANSIT_LARGE_WIRE_BYTES, TRANSIT_LARGE_CIPHERTEXT_BYTES))
+        }
+        other => Err(WireError::InvalidBool { actual: other }),
+    }
 }
 
 /// Sanity-check assertion that the constants above stay consistent.

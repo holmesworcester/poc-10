@@ -1,6 +1,6 @@
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::encryption::context::{
     workspace_scope, WrapSourceKind, WrapSourceSelector,
 };
@@ -74,7 +74,7 @@ fn missing_source_context_leaves_materialize_intent_queued() {
         frontier_created_at_ms: 10,
         kind: WrapSourceKind::FrontierRoot,
     };
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     let handler = MaterializeKeyWrapsHandler::new();
     let signer = local_signer_secret_fact(workspace, endpoint);
     let materialize = intent::materialize_key_wraps_intent(
@@ -110,7 +110,7 @@ fn missing_signer_context_leaves_materialize_intent_queued() {
         frontier_created_at_ms: 10,
         kind: WrapSourceKind::FrontierRoot,
     };
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     let handler = MaterializeKeyWrapsHandler::new();
     let materialize = intent::materialize_key_wraps_intent(
         recipient.id,

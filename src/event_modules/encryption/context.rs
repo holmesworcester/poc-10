@@ -1,4 +1,9 @@
 //! Context selectors and matchers for key wrap materialization.
+//!
+//! Most roles are exact dependencies on a recipient key, frontier, or local
+//! private key. Wrap-source context is wider: a source offer advertises key
+//! material that can satisfy either proactive rotation work or a specific remote
+//! key request, subject to the projector's signer checks.
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
@@ -151,6 +156,9 @@ pub fn proactive_wrap_source_need(
     }
 }
 
+// A proactive need is "any source in this workspace at or after this frontier
+// creation time"; a requested need is "the source for this exact frontier".
+// The leading tag keeps both shapes under one role without ambiguous lengths.
 pub fn requested_wrap_source_need(
     owner: FactId,
     scope: FactScope,
@@ -171,7 +179,12 @@ pub fn requested_wrap_source_need(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WrapSourceKind {
+    // The frontier root carries the whole active frontier and uses
+    // frontier_created_at_ms for proactive ordering.
     FrontierRoot,
+    // History nodes carry retired key material for a precise tree coordinate.
+    // Their creation time is deliberately zero so they never satisfy proactive
+    // "new enough frontier" work by accident.
     HistoryNode {
         range_start: u64,
         range_width: u64,
@@ -329,6 +342,9 @@ fn valid_history_coordinate(
     bit_depth: u16,
     event_id_prefix: FactId,
 ) -> bool {
+    // Internal history nodes cover time ranges only. Leaf nodes may additionally
+    // narrow by event-id prefix; non-leaf prefixes would make overlapping
+    // coverage ambiguous.
     range_width != 0
         && range_width.is_power_of_two()
         && range_start % range_width == 0
@@ -441,6 +457,9 @@ fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Context
         return None;
     }
     let source = decode_wrap_source_selector(&offer.selector)?;
+    // Scope equality keeps the match inside one workspace. The encoded
+    // workspace id is still checked because selector bytes are persisted and
+    // should be rejected if they drift from the scoped meaning.
     let matches = if let Some((workspace_id, min_frontier_created_at_ms)) =
         decode_proactive_wrap_need(&need.selector)
     {

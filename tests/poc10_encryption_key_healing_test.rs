@@ -1,11 +1,11 @@
 use topo::core::crypto;
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{MatchedContext, ProjectionContext, ProjectionOutput, Projector};
 use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::encryption::context::{
     self as encryption_context, frontier_role, recipient_key_role, recipient_superseded_role,
     WrapSourceKind, WrapSourceMatcher,
@@ -45,7 +45,7 @@ fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appe
     let recipient = recipient_key_fact(workspace, endpoint, NO_PREVIOUS_RECIPIENT_KEY, 10);
     let root = local_key_secret_fact(workspace, [3; 32], endpoint, 20);
     let signer = local_signer_secret_fact(workspace, endpoint);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     let projector = CombinedProjector;
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
@@ -83,7 +83,7 @@ fn recipient_key_waits_for_local_signer_secret_before_materializing_wrap() {
     let endpoint = [2; 32];
     let recipient = recipient_key_fact(workspace, endpoint, NO_PREVIOUS_RECIPIENT_KEY, 10);
     let root = local_key_secret_fact(workspace, [3; 32], endpoint, 20);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     let projector = CombinedProjector;
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
@@ -125,7 +125,7 @@ fn rotated_recipient_key_does_not_receive_old_frontier_sources() {
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(rotated.clone());
     bus.submit_fact(old_root);
@@ -187,7 +187,7 @@ fn duplicate_key_requests_converge_on_one_wrap_intent_without_request_entropy() 
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     for fact in [frontier, recipient, root, signer, request_a, request_b] {
         bus.submit_fact(fact);
@@ -246,7 +246,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
         &signer_secret_matcher as &dyn ContextMatcher,
         &signer_pubkey_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     for fact in [
         frontier.clone(),
@@ -267,7 +267,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     assert_eq!(intent.signer_secret_fact_id, signer.id);
     bus.save(&store).expect("save bus with pending wrap intent");
 
-    let mut restarted = EventBus::load(&store).expect("load bus with wrap intent");
+    let mut restarted = WakeLoop::load(&store).expect("load bus with wrap intent");
     assert_eq!(restarted.intents().len(), 1);
     let expected_signed_wrap =
         encryption_create::materialize_signed_key_wrap_fact(&intent, &recipient, &root, &signer)
@@ -343,7 +343,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     restarted
         .save(&store)
         .expect("save after dispatch and projection");
-    let loaded = EventBus::load(&store).expect("reload after dispatch");
+    let loaded = WakeLoop::load(&store).expect("reload after dispatch");
     assert_eq!(loaded.intents().len(), 1);
     assert!(loaded.context(&expected_signed_wrap.id).is_some());
 }
@@ -378,7 +378,7 @@ fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     for fact in [frontier, recipient, request, retained_a, retained_b, signer] {
         bus.submit_fact(fact);
@@ -424,7 +424,7 @@ fn key_request_rejects_recipient_that_is_not_requester() {
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     for fact in [frontier, recipient_for_someone_else, root, signer, request] {
         bus.submit_fact(fact);
@@ -464,7 +464,7 @@ fn key_request_rejects_frontier_that_is_not_responder_owned() {
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     for fact in [frontier, recipient, root, signer, request] {
         bus.submit_fact(fact);
@@ -504,7 +504,7 @@ fn key_request_ignores_wrap_source_from_non_responder() {
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     for fact in [frontier, recipient, wrong_root, wrong_signer, request] {
         bus.submit_fact(fact);
@@ -590,7 +590,7 @@ fn supersession_wakes_old_recipient_key_and_purges_material_instead_of_wrapping(
         &recipient_matcher as &dyn ContextMatcher,
         &local_recipient_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(old.clone());
     bus.submit_fact(local_old.clone());
@@ -638,7 +638,7 @@ fn retired_recipient_material_handler_revalidates_exact_local_material() {
         crypto::x25519_public_key(&[0x66; 32]),
         [0x66; 32],
     );
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     bus.submit_fact(wrong_local.clone());
     bus.submit_intent(purge_retired_recipient_material_intent(
         PurgeRetiredRecipientMaterialIntent {
@@ -679,7 +679,7 @@ fn encryption_history_node_offer_wakes_and_clears_sealed_message_secret_need() {
         &deletion_matcher as &dyn ContextMatcher,
         &secret_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
     bus.submit_fact(signer);
@@ -736,7 +736,7 @@ fn signed_key_wrap_waits_for_context_then_offers_sync_key_and_row() {
         &recipient_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(signed_wrap.clone());
     bus.drain(&CombinedProjector, &matchers, 10)
@@ -884,7 +884,7 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
         &deletion_matcher as &dyn ContextMatcher,
         &secret_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     for fact in [
         signed_wrap.clone(),
@@ -984,7 +984,7 @@ fn signed_key_wrap_rejects_signer_public_key_mismatch() {
         &recipient_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(signed_wrap.clone());
     bus.submit_fact(wrong_signer);
@@ -1055,7 +1055,7 @@ fn signed_key_wrap_rejects_frontier_owned_by_someone_else() {
         &recipient_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(signer);
     bus.submit_fact(frontier);
@@ -1273,7 +1273,7 @@ fn local_recipient_key_fact(
     )
 }
 
-fn message_rows(bus: &EventBus) -> Vec<topo::core::store::TableRow> {
+fn message_rows(bus: &WakeLoop) -> Vec<topo::core::store::TableRow> {
     bus.intents()
         .iter()
         .filter_map(|intent| AtomicIntent::from_intent(intent, &[MESSAGE_ROWS]).ok())
@@ -1684,7 +1684,7 @@ fn local_recipient_key_rejects_public_key_mismatch_with_recipient() {
         &superseded_matcher as &dyn ContextMatcher,
         &local_recipient_matcher as &dyn ContextMatcher,
     ];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(recipient);
     bus.submit_fact(local);

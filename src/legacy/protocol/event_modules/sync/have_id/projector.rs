@@ -1,0 +1,115 @@
+//! Projector for sync have-id events.
+//!
+//! A locally proposed have-id is queued for transit out by id. A
+//! received have-id becomes sync work so the sync worker can decide whether to
+//! ask for the id.
+
+use crate::legacy::protocol::event_modules::connection;
+use crate::legacy::protocol::event_modules::types::{ConnectionScope, EventScope};
+use crate::legacy::protocol::event_modules::worker::{EventWithContext, ProjectionOutput};
+use crate::legacy::workers::queue_rows as worker_rows;
+
+use super::layout;
+
+pub fn project(envelope: &EventWithContext<'_>) -> Result<ProjectionOutput, String> {
+    let bytes = &envelope.record.canonical_bytes;
+    let have = layout::decode(bytes)?;
+    match envelope.record.scope {
+        EventScope::Connection(ConnectionScope::Outgoing { connection_id }) => {
+            ensure_connection(have.connection_id, connection_id)?;
+            Ok(ProjectionOutput::table_writes(vec![
+                connection::rows::connection_scoped_event_row(
+                    envelope.context.event_id,
+                    bytes.to_vec(),
+                ),
+                worker_rows::transit_out_row(connection_id, envelope.context.event_id),
+            ]))
+        }
+        EventScope::Connection(ConnectionScope::Incoming { connection_id }) => {
+            ensure_connection(have.connection_id, connection_id)?;
+            Ok(ProjectionOutput::table_writes(vec![
+                worker_rows::sync_in_event_row(
+                    connection_id,
+                    envelope.context.event_id,
+                    bytes.to_vec(),
+                ),
+            ]))
+        }
+        _ => Err("sync have-id requires connection scope".to_string()),
+    }
+}
+
+fn ensure_connection(actual: [u8; 32], scoped: [u8; 32]) -> Result<(), String> {
+    if actual == scoped {
+        Ok(())
+    } else {
+        Err("sync have-id connection scope mismatch".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::legacy::protocol::event_modules::connection;
+    use crate::legacy::protocol::event_modules::types::{event_id, EventRecord};
+    use crate::legacy::protocol::event_modules::worker::EventContext;
+    use crate::legacy::workers::queue_rows as worker_rows;
+
+    use super::super::types::HaveIdEvent;
+    use super::*;
+
+    fn have_event() -> HaveIdEvent {
+        HaveIdEvent {
+            connection_id: [4; 32],
+            timestamp: 7,
+            id: [8; 32],
+        }
+    }
+
+    fn context_for(record: &EventRecord) -> EventWithContext<'_> {
+        EventWithContext {
+            record,
+            context: EventContext {
+                event_id: event_id(&record.canonical_bytes),
+                dependencies: Vec::new(),
+                updates: Vec::new(),
+                receive: None,
+                now_unix_minute: None,
+            },
+        }
+    }
+
+    #[test]
+    fn outgoing_have_id_projects_cached_event_and_transit_out_rows() {
+        let record = layout::outbound_record(have_event()).expect("record");
+        let output = project(&context_for(&record)).expect("project outgoing");
+
+        assert_eq!(output.legacy_rows().len(), 2);
+        assert_eq!(
+            output.legacy_rows()[0].table,
+            connection::rows::CONNECTION_SCOPED_EVENTS
+        );
+        assert_eq!(output.legacy_rows()[1].table, worker_rows::TRANSIT_OUT);
+    }
+
+    #[test]
+    fn incoming_have_id_projects_inbound_sync_work_row() {
+        let bytes = layout::encode(&have_event());
+        let record = layout::inbound_record_from_wire(bytes).expect("record");
+        let output = project(&context_for(&record)).expect("project incoming");
+
+        assert_eq!(output.legacy_rows().len(), 1);
+        assert_eq!(output.legacy_rows()[0].table, worker_rows::SYNC_IN_EVENTS);
+        assert_eq!(output.legacy_rows()[0].value, record.canonical_bytes);
+    }
+
+    #[test]
+    fn have_id_rejects_connection_scope_mismatch() {
+        let mut record = layout::outbound_record(have_event()).expect("record");
+        record.scope = EventScope::Connection(ConnectionScope::Outgoing {
+            connection_id: [9; 32],
+        });
+
+        let err = project(&context_for(&record)).expect_err("reject");
+        assert!(err.contains("connection scope mismatch"));
+    }
+}

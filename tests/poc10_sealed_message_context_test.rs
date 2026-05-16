@@ -1,8 +1,8 @@
-use topo::core::event_bus::EventBus;
 use topo::core::facts::Fact;
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, Projector};
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::sealed_message::context::{self, workspace_scope, SecretCoverageMatcher};
 use topo::event_modules::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact, NONCE_BYTES,
@@ -36,7 +36,7 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
         &secret_matcher as &dyn ContextMatcher,
     ];
     let projector = project::SealedMessageProjector::new();
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
     let waiting = bus.drain(&projector, &matchers, 10).expect("message waits");
@@ -131,7 +131,7 @@ fn deletion_update_purges_message_before_keys_arrive() {
         &secret_matcher as &dyn ContextMatcher,
     ];
     let projector = project::SealedMessageProjector::new();
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
     bus.drain(&projector, &matchers, 10).expect("message waits");
@@ -174,7 +174,7 @@ fn non_author_deletion_does_not_purge_or_wake_message() {
         &secret_matcher as &dyn ContextMatcher,
     ];
     let projector = project::SealedMessageProjector::new();
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(message.clone());
     bus.drain(&projector, &matchers, 10).expect("message waits");
@@ -213,7 +213,7 @@ fn deletion_before_message_purges_when_target_later_arrives() {
         &secret_matcher as &dyn ContextMatcher,
     ];
     let projector = project::SealedMessageProjector::new();
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(deletion);
     bus.drain(&projector, &matchers, 10)

@@ -1,9 +1,9 @@
-//! CLI tests that drive the `topo` binary in the poc-10 target shape.
+//! CLI tests that drive the `match` binary in the target shape.
 //!
 //! Follows the same daemon-and-CLI model as the poc-8 e2e tests: build the
-//! `topo` binary once, then exercise the target-tree subcommands by
+//! `match` binary once, then exercise the target-tree subcommands by
 //! spawning the binary through the shared `cli_harness`. As more target
-//! subcommands land (`topo poc10-daemon start`, `topo poc10-send`, etc.),
+//! subcommands land (`match start`, `match send`, etc.),
 //! their tests should sit here next to this walkthrough so the daemon
 //! model stays a real binary contract rather than an in-process fixture.
 
@@ -12,8 +12,8 @@ mod cli_harness;
 use cli_harness::{assert_success, topo};
 
 #[test]
-fn topo_poc10_demo_runs_the_target_walkthrough() {
-    let output = topo(&["poc10-demo"]);
+fn match_demo_runs_the_target_walkthrough() {
+    let output = topo(&["demo"]);
     let stdout = assert_success(output);
 
     // The walkthrough is structured by named steps. Pin the high-level

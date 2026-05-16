@@ -2,6 +2,11 @@
 name = "topo"
 version = "0.1.0"
 edition = "2021"
+autobins = false
+
+[[bin]]
+name = "match"
+path = "src/main.rs"
 
 [dependencies]
 bao = "0.13"

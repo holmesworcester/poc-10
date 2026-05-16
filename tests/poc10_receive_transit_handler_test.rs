@@ -1,90 +1,182 @@
 //! Receive-transit handler wiring tests.
-//!
-//! Build synthetic outer transit frames through `event_modules::transit::layout`,
-//! feed them to the `ReceiveTransitHandler`, and assert the public envelope is
-//! decoded and dispatched while the (not-yet-wired) inner AEAD step keeps the
-//! intent queued instead of dropping the frame.
 
+use topo::core::crypto;
+use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
-use topo::core::wire::{FixedBytes, FixedLayout, FixedSlot};
-use topo::event_modules::transit::layout::{
-    TransitSmallV1, TRANSIT_LARGE_WIRE_BYTES, TRANSIT_SMALL_WIRE_BYTES,
+use topo::core::wake_loop::WakeLoop;
+use topo::core::wire::FixedBytes;
+use topo::event_modules::connection_response::fact::ConnectionResponseFact;
+use topo::event_modules::connection_response::layout as connection_response_layout;
+use topo::event_modules::encryption::fact::{
+    KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
+use topo::event_modules::encryption::{create as encryption_create, layout as encryption_layout};
+use topo::event_modules::signed_fact;
+use topo::event_modules::transit::frame::{self as transit_frame, SealConnectionFrame};
+use topo::event_modules::transit::layout::{
+    self as transit_layout, TRANSIT_FRAME_SIZE_CLASS_LARGE,
+};
+use topo::event_modules::transit_received;
 use topo::handlers::receive_transit::{
-    receive_transit_frame_intent, ReceiveTransitFrame, ReceiveTransitHandler, INNER_OPEN_NOT_WIRED,
-    RECEIVE_TRANSIT_FRAME,
+    receive_transit_frame_intent, ReceiveTransitFrame, ReceiveTransitHandler, RECEIVE_TRANSIT_FRAME,
 };
 
-fn small_frame_bytes() -> Vec<u8> {
-    let frame = TransitSmallV1 {
-        sender_endpoint_id: FixedBytes([7u8; 32]),
-        receiver_endpoint_id: FixedBytes([8u8; 32]),
-        connection_id: FixedBytes([9u8; 32]),
-        nonce: FixedBytes([1u8; 24]),
-        ciphertext: FixedSlot::new(&[2u8; 32]).expect("small slot"),
-    };
-    let mut out = vec![0u8; TRANSIT_SMALL_WIRE_BYTES];
-    frame.encode(&mut out).expect("encode small frame");
-    out
+const ORIGIN: &[u8] = b"127.0.0.1:41001";
+const RECEIVED_AT: u64 = 1_700_000_222;
+
+fn receive_intent(frame: Vec<u8>) -> topo::core::intents::Intent {
+    receive_transit_frame_intent(ReceiveTransitFrame {
+        frame,
+        origin_addr: ORIGIN.to_vec(),
+        received_at_local_ms: RECEIVED_AT,
+    })
 }
 
-// Build a large-class frame's bytes directly on the heap. The
-// `TransitLargeV1` struct is ~1 MiB and cannot be constructed as a stack
-// literal in debug builds without overflowing the thread stack; here we
-// patch the size-class byte of a small frame onto a 1 MiB-sized buffer that
-// passes the header peek and outer-length check the driver runs.
-fn large_frame_bytes() -> Vec<u8> {
-    let small = small_frame_bytes();
-    let mut out = vec![0u8; TRANSIT_LARGE_WIRE_BYTES];
-    // Copy the public header (tag + version + size class + ids + nonce).
-    // Offsets are stable per `event_modules::transit::layout`.
-    let header_len = 4 + 1 + 1 + 32 + 32 + 32 + 24;
-    out[..header_len].copy_from_slice(&small[..header_len]);
-    // Patch the size class byte (offset 4 + 1 = 5).
-    out[5] = 1; // TRANSIT_FRAME_SIZE_CLASS_LARGE
-                // Leave payload slot zero-padded; FixedSlot decode treats the leading
-                // u32 length as 0 and the remaining N bytes as zero-padded payload.
-    out
+fn connection_fact() -> (Fact, ConnectionResponseFact) {
+    let connection = ConnectionResponseFact {
+        from_endpoint: [10; 32],
+        to_endpoint: [11; 32],
+        request_id: [12; 32],
+        invite_secret_event_id: [13; 32],
+        initiator_ephemeral_secret_event_id: [14; 32],
+        responder_ephemeral_secret_event_id: [15; 32],
+        responder_ephemeral_public_key: [16; 32],
+        handshake_hash: [17; 32],
+        connection_secret: [18; 32],
+    };
+    let fact = Fact::new(
+        FactScope::Local,
+        1,
+        connection_response_layout::encode_fact(&connection).expect("connection response"),
+    );
+    (fact, connection)
+}
+
+fn signed_key_wrap_bytes() -> Vec<u8> {
+    let signer_private_key = [31; 32];
+    let signer_id = [32; 32];
+    let wrap = KeyWrapFact {
+        workspace_id: [21; 32],
+        created_at_ms: 1_700_000_111,
+        signer_endpoint_id: signer_id,
+        frontier_id: [22; 32],
+        wrapped_secret_kind: WrappedSecretKind::FrontierRoot,
+        wrapped_secret_id: [23; 32],
+        wrapped_source_secret_id: [0; 32],
+        wrapped_tombstone_node_id: [0; 32],
+        range_start: 0,
+        range_width: 0,
+        bit_depth: 0,
+        event_id_prefix: [0; 32],
+        recipient_key_id: [24; 32],
+        sender_wrap_public_key: [25; 32],
+        nonce: [26; 24],
+        ciphertext: [27; KEY_WRAP_CIPHERTEXT_BYTES],
+    };
+    signed_fact::create::sign_payload_bytes(
+        signer_id,
+        &signer_private_key,
+        encryption_layout::encode_key_wrap(&wrap).expect("key wrap"),
+    )
+    .expect("signed key wrap")
+}
+
+fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionResponseFact, Vec<u8>) {
+    let (connection_fact, connection) = connection_fact();
+    let signed_wrap = signed_key_wrap_bytes();
+    let frame = transit_frame::seal_connection_frame(SealConnectionFrame {
+        connection_id: connection_fact.id,
+        sender_endpoint_id: connection.from_endpoint,
+        receiver_endpoint_id: connection.to_endpoint,
+        connection_secret: connection.connection_secret,
+        nonce: [19; 24],
+        facts: vec![signed_wrap.clone()],
+    })
+    .expect("seal transit frame");
+    (frame, connection_fact, connection, signed_wrap)
 }
 
 #[test]
-fn well_formed_small_frame_decodes_and_stops_at_inner_open() {
-    let bytes = small_frame_bytes();
-    let intent = receive_transit_frame_intent(ReceiveTransitFrame {
-        frame: bytes.clone(),
-    });
-
+fn well_formed_frame_opens_signed_key_wrap_and_records_receive_provenance() {
+    let (frame, connection_fact, connection, signed_wrap) = encrypted_small_frame();
+    let intent = receive_intent(frame.clone());
     assert_eq!(intent.kind.as_str(), RECEIVE_TRANSIT_FRAME);
 
-    let handler = ReceiveTransitHandler::new();
-    let err = handler
-        .handle(&intent, &HandlerContext::new())
-        .expect_err("inner AEAD open is not yet wired; intent must stay queued");
+    let output = ReceiveTransitHandler::new()
+        .handle(
+            &intent,
+            &HandlerContext::with_facts([connection_fact.clone()]),
+        )
+        .expect("receive transit opens frame");
 
-    assert_eq!(
-        err, INNER_OPEN_NOT_WIRED,
-        "well-formed frames pass envelope decode and only stop at inner-open stub: {err}"
+    assert_eq!(output.facts.len(), 2);
+    let admitted_wrap =
+        encryption_create::admit_signed_key_wrap_fact(signed_wrap).expect("admit expected wrap");
+    assert!(
+        output.facts.iter().any(|fact| *fact == admitted_wrap),
+        "opened frame should emit the admitted signed key-wrap fact"
     );
+    let provenance_fact = output
+        .facts
+        .iter()
+        .find(|fact| fact.scope == FactScope::Local && fact.id != admitted_wrap.id)
+        .expect("local provenance fact");
+    let provenance =
+        transit_received::layout::decode_fact(&provenance_fact.bytes).expect("decode provenance");
+    assert_eq!(provenance.received_fact_id, admitted_wrap.id);
+    assert_eq!(provenance.origin_addr, ORIGIN);
+    assert_eq!(provenance.local_endpoint_id, connection.to_endpoint);
+    assert_eq!(provenance.sender_endpoint_id, connection.from_endpoint);
+    assert_eq!(provenance.connection_id, Some(connection_fact.id));
+    assert_eq!(provenance.request_id, Some(connection.request_id));
+    assert_eq!(provenance.frame_hash, crypto::hash(&frame));
+    assert_eq!(provenance.received_at_local_ms, RECEIVED_AT);
 }
 
 #[test]
-fn well_formed_large_frame_decodes_and_stops_at_inner_open() {
-    let bytes = large_frame_bytes();
-    let intent = receive_transit_frame_intent(ReceiveTransitFrame { frame: bytes });
-    let handler = ReceiveTransitHandler::new();
+fn wake_loop_receive_dispatch_admits_opened_facts() {
+    let (frame, connection_fact, _, signed_wrap) = encrypted_small_frame();
+    let admitted_wrap =
+        encryption_create::admit_signed_key_wrap_fact(signed_wrap).expect("admit expected wrap");
+    let mut bus = WakeLoop::new();
+    assert!(bus.submit_fact(connection_fact));
+    bus.submit_intent(receive_intent(frame))
+        .expect("queue receive intent");
 
-    let err = handler
+    let report = bus
+        .dispatch_deferred_intents_with_fact_context(&ReceiveTransitHandler::new(), 10)
+        .expect("dispatch receive transit");
+
+    assert_eq!(report.handled, 1);
+    assert_eq!(report.facts, 2);
+    assert!(bus.has_fact(&admitted_wrap.id));
+    assert!(bus.intents().is_empty());
+}
+
+#[test]
+fn well_formed_large_frame_resolves_connection_without_materializing_large_slot() {
+    let (connection_fact, connection) = connection_fact();
+    let frame = transit_layout::encode_frame_bytes(
+        TRANSIT_FRAME_SIZE_CLASS_LARGE,
+        FixedBytes(connection.from_endpoint),
+        FixedBytes(connection.to_endpoint),
+        FixedBytes(connection_fact.id),
+        FixedBytes([19; 24]),
+        b"not-opened-without-context",
+    )
+    .expect("large frame");
+    let intent = receive_intent(frame);
+
+    let err = ReceiveTransitHandler::new()
         .handle(&intent, &HandlerContext::new())
-        .expect_err("large frame must also stop at inner-open stub");
+        .expect_err("missing connection context keeps intent queued");
 
-    assert_eq!(err, INNER_OPEN_NOT_WIRED);
+    assert!(err.contains("missing fact"), "{err}");
 }
 
 #[test]
 fn malformed_frame_header_is_rejected_before_inner_open() {
-    let intent = receive_transit_frame_intent(ReceiveTransitFrame {
-        frame: vec![0u8; 32],
-    });
+    let intent = receive_intent(vec![0u8; 32]);
     let handler = ReceiveTransitHandler::new();
 
     let err = handler
@@ -92,24 +184,23 @@ fn malformed_frame_header_is_rejected_before_inner_open() {
         .expect_err("frame too short to contain header");
 
     assert!(
-        err.contains("malformed frame header"),
-        "malformed frames must be rejected at the envelope, not at the inner-open stub: {err}"
+        err.contains("WrongLength"),
+        "malformed frames must be rejected at the envelope: {err}"
     );
-    assert!(!err.contains("connection secret"));
 }
 
 #[test]
 fn truncated_small_frame_after_valid_header_is_rejected() {
-    let mut bytes = small_frame_bytes();
-    bytes.truncate(TRANSIT_SMALL_WIRE_BYTES - 1);
-    let intent = receive_transit_frame_intent(ReceiveTransitFrame { frame: bytes });
+    let (mut bytes, _, _, _) = encrypted_small_frame();
+    bytes.truncate(bytes.len() - 1);
+    let intent = receive_intent(bytes);
 
     let err = ReceiveTransitHandler::new()
         .handle(&intent, &HandlerContext::new())
-        .expect_err("truncated frame must not reach inner-open stub");
+        .expect_err("truncated frame must not reach connection lookup");
 
     assert!(
-        err.contains("wrong outer length") || err.contains("decode failed"),
+        err.contains("WrongLength"),
         "truncated frames must be rejected at envelope decode: {err}"
     );
 }

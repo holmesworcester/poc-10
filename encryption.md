@@ -1,550 +1,149 @@
-# Encryption and Disappearing Messages
-
-This document describes how the current poc-8 codebase encrypts content
-events and disappears them on schedule. It is not a roadmap; every section
-references code that exists today.
-
-## Overview
-
-Every workspace has a `removal_frontier` event. The frontier identifies one
-content-derivation context whose root is the workspace's `local_key_secret`
-(F). Per-event content (`message`, `reaction`, `file`, `file_slice`) derives
-its own per-event leaf via a deterministic BLAKE3-keyed-hash KDF chain
-`F → minute_node → trie → leaf`, with the leaf coord
-`(unix_minute, event_id_in_minute)` recoverable from the event's canonical
-identifying fields. Disappearing messages stamp a per-message
-`expires_at_minute` into canonical bytes at authoring time and expire via
-the `disappearing_minute_expiry` worker. Admin-driven tightenings advance
-a workspace-wide monotonic floor; the `disappearing_floor_dispatcher`
-worker chops the time-tree prefix below that floor. A 30-day cover
-horizon (`COVER_HORIZON_MINUTES`) seals subtrees outside the active sync
-window and bounds steady-state storage.
-
-## Event vocabulary
-
-| Event type | Description | Module |
-|---|---|---|
-| `encryption::local_key_secret` | F per `(workspace_id, removal_frontier_id)`; local-only; the root secret for the content-derivation tree. | `src/protocol/event_modules/encryption/local_key_secret/` |
-| `encryption::local_history_node_secret` | Sibling and descend-path node secrets along the F → leaf chain; local-only; materialized opportunistically by retire/chop walks and per-event leaf derivation. | `src/protocol/event_modules/encryption/local_history_node_secret/` |
-| `encryption::removal_frontier` | Shared admin-signed event naming F's derivation context. Its event id is the `removal_frontier_id` named by everything below. | `src/protocol/event_modules/encryption/removal_frontier/` |
-| `encryption::recipient_key` | Shared per-endpoint X25519 public encryption key for a workspace. Supersession is encoded in the replacement event's `previous_recipient_key_id` field; the projector exact-deletes the predecessor's row in the same projection. | `src/protocol/event_modules/encryption/recipient_key/` |
-| `encryption::local_recipient_key` | Local-only X25519 private key paired to a `recipient_key`. | `src/protocol/event_modules/encryption/local_recipient_key/` |
-| `encryption::key_wrap` | Shared event carrying either F or one retained history-node secret wrapped to one `recipient_key` under XChaCha20-Poly1305. The desired edge is deterministic/idempotent: `(workspace, frontier, recipient_key, target)`. | `src/protocol/event_modules/encryption/key_wrap/` |
-| `encryption::key_request` | Shared event from a recipient endpoint to one responder endpoint asking it to materialize missing wraps for one frontier. | `src/protocol/event_modules/encryption/key_request/` |
-| `encryption::disappearing_messages_setting` | Shared admin-signed event setting `ttl_minutes` and the monotonic deletion floor `expires_at_or_before_minute`; chained via `previous_setting_id`. | `src/protocol/event_modules/encryption/disappearing_messages_setting/` |
-| `content::message` | Shared encrypted message event; stamps `expires_at_minute` and `disappearing_setting_id` in canonical bytes. | `src/protocol/event_modules/content/message/` |
-| `content::reaction` | Shared encrypted reaction event; inherits the parent message's expiry. | `src/protocol/event_modules/content/reaction/` |
-| `content::file` / `content::file_slice` | Shared encrypted file descriptor and chunked payload. | `src/protocol/event_modules/content/file/`, `.../file_slice/` |
-| `content::message_deletion` / `content::file_deletion` | Author-signed deletion facts. | `src/protocol/event_modules/content/message_deletion/`, `.../file_deletion/` |
-
-## Key derivation
-
-- **F's secret value is shared across peers; F's local storage is
-  per-peer.** F is the workspace's content-derivation root for a given
-  `removal_frontier`. The admin-signed frontier event implies a single F
-  secret; that secret is wrapped to each recipient via a `key_wrap`
-  event encrypted to the recipient's public key. Each peer unwraps its
-  own wrap to recover the SAME F secret value, then stores it locally
-  in its own `local_key_secret(F)` row. So the secret is shared by
-  construction; only the row holding it is per-peer.
-- F (`local_key_secret`) is decoded from a `key_wrap` payload by
-  `derive_key_secrets` in `src/workers/encryption.rs` (using
-  `crypto::x25519_xchacha20poly1305_decrypt`), then admitted as a
-  deterministic local event through the common pipeline. The fast path that
-  derives a leaf directly from F is in
-  `local_history_node_secret::commands::derive_event_leaf_from_root`, which
-  walks `(0, ROOT_TIME_TREE_WIDTH) → … → (unix_minute, 1)` on the time
-  axis, then takes one trie split to depth 256. The KDF is
-  `crypto::blake3_keyed_hash` with domain tags `TIME_SPLIT_DOMAIN`
-  (`b"topo time split v1"`) and `TRIE_SPLIT_DOMAIN`
-  (`b"topo trie split v1"`).
-- `core::crypto::hkdf_sha256_key` exists for purpose-keyed key derivation
-  but the leaf chain is BLAKE3-keyed; HKDF-SHA256 is the helper available
-  for non-leaf purposes (e.g. wrap-secret derivation in `x25519_*`).
-- Time tree root width: `TIME_TREE_ROOT_WIDTH = 1u64 << 63` (see
-  `src/workers/encryption.rs:90`). The implicit root covers
-  `(range_start=0, range_width=TIME_TREE_ROOT_WIDTH)` at
-  `TIME_TREE_BIT_DEPTH = 0`. Depth is log₂(width) ≈ 63 levels above
-  `range_width=1` (the minute_node).
-- Within-minute trie: 256-bit BLAKE3 event_id_in_minute coord. Leaves sit at
-  `TRIE_LEAF_BIT_DEPTH = 256` (see
-  `src/protocol/event_modules/encryption/local_history_node_secret/types.rs`).
-- Per-event leaf coord = `(unix_minute, event_id_in_minute)`. `unix_minute`
-  is `created_at_ms / UNIX_MINUTE_MS` (UNIX_MINUTE_MS = 60_000);
-  `event_id_in_minute` is a BLAKE3-keyed-hash of `(workspace_id,
-  author_user_id, removal_frontier_id, created_at_ms)` (see
-  `message::types::message_event_id_in_minute` and the parallel
-  `reaction::types::reaction_event_id_in_minute`). Both peers can recover
-  the coord from canonical identifying fields alone, before AEAD opening.
-- `closest_retained_ancestor` (`src/workers/encryption.rs:628`) finds the
-  deepest local row whose `(range_start, range_width, bit_depth,
-  event_id_prefix)` covers the target coord, falling back from F to the
-  deepest covering sibling row when F's row has been wiped.
-- `derive_event_leaf` (`src/workers/encryption.rs:709`) walks down from
-  that ancestor to the leaf, materializing only the leaf row in the common
-  fresh-encryption path.
-
-## Per-event leaf retirement (FS mechanism)
-
-### What FS means here
-
-Forward secrecy in this protocol means: an attacker who compromises
-this peer's disk AFTER a leaf is retired cannot decrypt that leaf's
-content. It does NOT mean attackers who already had pre-retirement
-disk access lose their copy of any cached ciphertext or derived
-secret. The guarantee is purely about post-retirement disk state.
-
-`Work::RetireDeletedEventLeaf` in `src/workers/encryption.rs:1301`
-(`retire_deleted_event_leaf`) walks the F → leaf path. At each time-split
-and trie-split level it admits both the descend-side child (to keep the
-chain valid for the source-dependency invariant) and the sibling child as
-local `local_history_node_secret` events. In a single transaction it then
-exact-deletes the entire descend chain — F's row plus every descend-side
-internal — calls `purging::purge_event_storage_in_tx` to drop their
-canonical bytes, writes one `LOCAL_HISTORY_NODE_TOMBSTONES` row per wiped
-internal, and finally exact-deletes the leaf row, purges its bytes, and
-tombstones it.
-
-After per-leaf retire, the only leaf coord that cannot be re-derived is
-the one the walk retired. Every other coord — including coords in the
-same `unix_minute` — derives from the deepest materialized sibling
-whose range covers it. The minute_node row IS wiped (it's on the
-descend path), but trie-level siblings within the same minute preserve
-coverage for every other event in that minute.
-`closest_retained_ancestor` finds the deepest covering sibling and
-derivation proceeds normally. The wedged coord set after retire is
-exactly `{the retired leaf coord}`.
-
-Each peer's KDF is deterministic, so each peer derives the same
-sibling secrets locally during the walk; no new key wraps to recipients
-are required for the F-wipe itself.
-
-Per-retirement cost scales with tree-structural depth (~63 time-axis
-levels + log₂(messages_in_minute) trie levels): ~5 KB in active workspaces
-where clustered authoring shares most of the path, up to ~22 KB worst-case
-under sparse retirements (see the `sparse_delete_materializes_log_n_internals_not_n_leaves`
-and `cover_summary_after_sparse_delete_is_logarithmic` tests in
-`src/workers/encryption.rs`).
-
-## Forward-secrecy scope and the recipient-key rotation requirement
-
-**Rule in one paragraph**: F's secret value is shared across peers; F's
-local storage is per-peer. The first deletion on a peer that wipes its
-local F triggers an atomic rotation of that peer's recipient keypair —
-wipe the `local_recipient_key` private half, generate a fresh keypair,
-emit a self-signed `recipient_key` event carrying
-`previous_recipient_key_id` pointing at the wiped pubkey. The single
-event acts as both the tombstone of the old pubkey and the
-introduction of the new one. Subsequent deletions under the same
-(now-wiped) F do nothing further — F's row and the privkey are already
-gone. Per peer, per F: at most ONE rotation. Network total: O(N peers)
-per F over F's lifetime, eventually consistent.
-
-F-wipe + sibling-cover gives forward secrecy of the retired leaf only if
-F is also unrecoverable from disk-state through any other path. The
-non-trivial path is: a `key_wrap` event encrypts F to a recipient
-public key; the recipient's `local_recipient_key` private half can
-unwrap it. If both survive a deletion, F is reconstructible and the
-retire walk's local F-wipe is moot.
-
-Therefore: **any deletion that wipes F (per-leaf retire, chop, or
-frontier rotation) MUST also force every recipient that received a
-`key_wrap` for that F to rotate their recipient keypair**. See
-`RULES.md` § "Forward Secrecy Requires Recipient Key Rotation On
-Wrap-Bound Deletion."
-
-The trigger is the F-wipe, not the deletion event itself. Per-leaf
-retire / chop / frontier rotation all eventually wipe F's row on this
-peer. Whichever deletion is the FIRST under F to wipe F is the
-deletion that triggers rotation. Subsequent deletions under the same
-(now-wiped) F do not re-rotate — they walk siblings without touching
-the privkey, because F's row is gone and the privkey is gone.
-
-So per peer, per F, there is at most ONE rotation in F's lifetime.
-
-When the F-wipe fires on this peer, the same atomic step:
-
-  * `local_key_secret(F)` row: **wiped** (this peer)
-  * Descend-path internal nodes: **wiped** (this peer)
-  * Canonical bytes for the wiped chain: **purged** (this peer)
-  * `local_recipient_key` private key that unwrapped F: **wiped**
-    (this peer)
-  * Fresh recipient keypair: **generated** (this peer)
-  * `recipient_key` event for the new pubkey carrying
-    `previous_recipient_key_id` pointing at the wiped pubkey:
-    **emitted**, self-signed by this peer
-
-That single `recipient_key` event acts as both the tombstone of the
-old pubkey AND the introduction of the new pubkey. Every other peer
-admits it, marks the old pubkey revoked, and uses the new pubkey for
-future wraps to this peer.
-
-After rotation, the surviving `key_wrap` for F is encrypted to a
-pubkey whose private half no longer exists on this peer's disk. An
-attacker with disk access post-deletion cannot unwrap to recover F.
-
-Cost per peer: O(1) per F over the F's lifetime — one keypair
-regeneration + one signed event, fired by whichever deletion happens
-to be the first to wipe F locally. Subsequent deletions under the
-already-wiped F are free of rotation work. So if hundreds of
-disappearing messages expire under one F, only the first one triggers
-rotation on this peer.
-
-Network cost: O(N peers) per F over the F's lifetime (each peer
-rotates once when its own deletion path first wipes F). The FS
-guarantee is eventually consistent — provided every peer eventually
-processes the deletion that wipes F, the workspace converges to a
-state where F is unrecoverable from any peer's disk via any retained
-wrap.
-
-A recipient_key may have received many wraps over its lifetime — one
-per F the peer was wrapped into. The rotation event invalidates all
-retained wraps to the old pubkey on this peer. Live frontiers other
-than the deleted one will need to be re-wrapped to the new pubkey via
-the normal key-distribution flow.
-
-## Disappearing messages
-
-- Each `MessageEvent` stamps `expires_at_minute = authored_minute +
-  ttl_minutes` in canonical bytes at authoring time (where
-  `ttl_minutes` is read from the active `disappearing_messages_setting`
-  for the workspace, or the workspace event's
-  `disappearing_ttl_minutes` fallback). The codec
-  (`message::codec::validate_expires_at_minute`) rejects any stamp earlier
-  than `authored_minute`. `EXPIRES_NEVER = u64::MAX` is the sentinel for
-  "no expiry".
-- Active setting: the latest admitted `disappearing_messages_setting` for
-  a workspace, looked up by
-  `disappearing_messages_setting::queries::active_for_workspace`. Setting
-  events chain via `previous_setting_id`, and the projector
-  (`disappearing_messages_setting::projector::validate_monotonic_floor`)
-  rejects a setting whose `expires_at_or_before_minute` is smaller than
-  the predecessor's.
-- Monotonic floor (`expires_at_or_before_minute`): a workspace-wide minute
-  below which all messages are gone regardless of per-message stamp. It is
-  non-decreasing across admitted settings by projector enforcement.
-- `disappearing_minute_expiry` worker
-  (`src/workers/disappearing_minute_expiry.rs`): per daemon tick, scans
-  every workspace's sealed messages (`message_queries::list_sealed`),
-  retires every row whose `expires_at_minute < now_minute` (where
-  `now_minute = logical_clock::logical_time / UNIX_MINUTE_MS`). For each
-  expired message it writes a `MESSAGE_TOMBSTONES` row, exact-deletes
-  the `MESSAGES` and `SEALED_MESSAGES` rows, purges canonical bytes via
-  `purging::purge_event_storage_in_tx`, and calls
-  `encryption_worker::run(Work::RetireDeletedEventLeaf)` for the
-  message's per-event leaf. After the per-message phase it retires
-  reaction leaves whose `target_message_id` is in the expired set
-  (`retire_reaction_leaves_for_expired_messages`), then triggers
-  `content_purge::run` to cascade read-model and canonical-bytes
-  cleanup for reactions, files, and file_slices.
-- `disappearing_floor_dispatcher` worker
-  (`src/workers/disappearing_floor_dispatcher.rs`): per tick, computes
-  `effective_floor = max(setting_floor, now_minute -
-  COVER_HORIZON_MINUTES)` per workspace. If higher than the persisted
-  `last_chopped_floor` (table `setting_schema::WORKSPACE_CHOP_FLOOR`), it
-  invokes `encryption_worker::run(Work::ChopTimeTreePrefix {
-  floor_minute: effective_floor })` and upserts the new floor. The two
-  workers run in this order in `daemon_workers()`: expiry first so the
-  chop subsumes any per-leaf tombstones whose minutes fall under the new
-  floor.
-- Why whole-minute retirement was rejected: under mutable per-message
-  TTL, two messages in one minute can have different stamped expiries
-  (mixed TTLs from a setting change mid-minute), and late-arriving
-  messages can land in already-retired minutes. Whole-minute retirement
-  would wipe live or yet-to-arrive content. Per-leaf retirement carries
-  per-leaf cost for eventual-consistency correctness.
-
-## Chop primitive
-
-`Work::ChopTimeTreePrefix { workspace_id, removal_frontier_id,
-floor_minute }` in `src/workers/encryption.rs:1574`
-(`chop_time_tree_prefix`) performs prefix-range deletion `[0,
-floor_minute)` on the time tree:
-
-- Walks the boundary descend path from F (or, when F is wiped, from the
-  deepest sibling row whose range covers `floor_minute`).
-- At each level: if the floor lives in the right half, the entire left
-  subtree is `< floor_minute` and gets one subtree tombstone; if the floor
-  lives in the left half, the right half is fully surviving and gets a
-  right-side sibling materialization so future authoring above the floor
-  still has a covering ancestor.
-- At most ~63 fully-left subtree tombstones (one per bit where the
-  boundary places an entire subtree inside the chop range) plus at most
-  ~63 boundary descend tombstones. Total ~14 KB, constant in the number
-  of messages chopped.
-- If F's row is alive at chop time, F is wiped along with the boundary
-  chain (forward secrecy for the chopped range).
-- GC: `gc_subsumed_tombstones` exact-deletes pre-existing
-  `LOCAL_HISTORY_NODE_TOMBSTONES` rows (for this `removal_frontier_id`)
-  and `MESSAGE_TOMBSTONES` rows whose ranges fall fully under
-  `[0, floor_minute)`, since the coarse subtree tombstones now cover
-  them.
-
-## 30-day cover horizon
-
-`COVER_HORIZON_MINUTES = 30 * 24 * 60` is defined in
-`src/protocol/event_modules/encryption/disappearing_messages_setting/types.rs:25`.
-
-The dispatcher uses it to compute `horizon_floor =
-now_minute.saturating_sub(COVER_HORIZON_MINUTES)`. Per-message
-retirements maintain sibling cover so future messages in not-yet-seen
-minutes can still be derived, but that cover is dead weight once no
-straggler can plausibly still deliver an old message. The dispatcher
-seals old subtrees by chopping them past the horizon.
-
-Steady-state effect: per-peer storage stabilizes — without the horizon,
-sibling cover from per-message retirements grows monotonically.
-
-Trade-off: a peer offline longer than `COVER_HORIZON_MINUTES` cannot
-deliver messages it authored before the horizon — receivers will have
-chopped the covering ancestor and the message's leaf will have no
-covering ancestor, so `admit_check_received` (or the deferred derivation
-in the encryption worker) will drop the event with a clean
-"no covering ancestor" error.
-
-## Negentropy purge plumbing
-
-- `encryption.negentropy_pending_purges.v1` is a workspace-keyed table
-  declared in `src/protocol/event_modules/sync/schema.rs` and named via
-  the `NEGENTROPY_PENDING_PURGES` constant. Every call to
-  `purge_event_storage_in_tx`
-  (`src/workers/pipeline_helpers/purging.rs:37`) that drops a shared
-  workspace-scoped event enqueues a row in this table inside the same
-  transaction as the canonical-bytes delete.
-- The drainer is folded into the sync worker:
-  `drain_pending_purges_in_tick`
-  (`src/workers/sync.rs:464`) runs as the first step of every sync tick,
-  pulls up to `DEFAULT_PURGE_DRAIN_LIMIT` rows, calls
-  `SyncIndex::remove_event` for each id (which XOR-folds the per-id
-  hash out of the warm fingerprint), and then exact-deletes the queue
-  rows.
-- This is the cross-worker communication channel: `content_purge` (for
-  author-driven deletions and cascade purges), the per-leaf retire walk
-  in `retire_deleted_event_leaf`, the chop walk in
-  `chop_time_tree_prefix`, and retired recipient material in
-  `purge_retired_recipient_material` all enqueue purge rows through the
-  same `purge_event_storage_in_tx` helper; sync drains them. The
-  `daemon_workers()` order in `src/workers/mod.rs` runs the dispatcher
-  (which writes purge rows during a chop) before the sync tick, so a
-  single tick observes the purges from both expiry and chop in one
-  fold.
-
-## Admission contract
-
-- Event-level dependencies are listed in `EventContext.dependencies`. The
-  common pipeline records blocked/unblocked edges via tables
-  `event_modules.blocked_events_by_missing_dep.v1` and
-  `event_modules.missing_deps_by_blocked_event.v1` (see
-  `src/protocol/event_modules/schema.rs`). Workers process newly-admitted
-  events; unblocking is driven by the
-  `dependency_unblock` worker (`src/workers/dependency_unblock.rs`).
-- Local key state (F's row, sibling history-node rows) is not part of the
-  event-dep graph. It is filled in by the encryption worker's derive /
-  retire / chop walks; the `drain_pending_message_leaves` work shape
-  scans blocked content events and derives their named leaves so the
-  dependency unblock can proceed.
-- The receive-side admit gate `admit_check_received`
-  (`src/protocol/event_modules/content/mod.rs:51`, dispatching to
-  per-event-type implementations like
-  `message::schema::admit_check_received` at
-  `src/protocol/event_modules/content/message/schema.rs:47`) runs in the
-  common pipeline's `drain_canonical_in` step before storage. It drops
-  re-deliveries whose id is already in `MESSAGE_TOMBSTONES`; for
-  messages whose `expires_at_minute` is past the local clock it writes
-  a tombstone row directly and drops the bytes
-  (`AdmitDecision::WriteRowsAndDrop`). It does not consult the
-  history-tree cover directly — coords with no covering ancestor wedge
-  later, when `derive_event_leaf` fails inside the encryption worker.
-
-## Decryption
-
-After admission the message lands as a `SEALED_MESSAGES` row carrying
-ciphertext, nonce, and `local_history_node_secret_id`. The encryption
-worker's `Work::DrainPendingMessageLeaves`
-(`src/workers/encryption.rs:2275`) opportunistically scans blocked
-content events, calls `derive_event_leaf` against the closest retained
-ancestor, and admits the leaf so the projector can decrypt and write
-the plaintext row.
-
-If derivation fails (no covering ancestor for the coord), the message
-stays in `SEALED_MESSAGES` until cover materializes (transient
-bootstrap case below) or forever (cover-horizon and tightening cases).
-
-## Storage shape in steady state
-
-A workspace at 100 retirements/day with the 30-day horizon and 5K alive
-messages settles at:
-
-- Active-window cover: 3000 × ~5 KB ≈ 15 MB
-- Live leaf rows: 5000 × ~400 B ≈ 2 MB
-- Sealed ranges (one per month): 12 × ~14 KB ≈ 170 KB
-- Per-message tombstones: ~5.5 MB/year; subsumed by subsequent chops
-
-Per-peer working set: tens of MB, stable. Without the cover horizon the
-same workload would grow into hundreds of MB to GBs.
-
-## Determinism invariants
-
-- Per-leaf retirement coord: deterministic function of message canonical
-  bytes (`workspace_id`, `author_user_id`, `removal_frontier_id`,
-  `created_at_ms`) — see `message_event_id_in_minute` and
-  `unix_minute_for`. Two peers retire the same coord with byte-identical
-  tombstone rows; clock skew may stagger the firing tick but cannot
-  change the result.
-- Chop output: deterministic function of `(floor_minute,
-  TIME_TREE_ROOT_WIDTH)`. Both peers compute byte-identical tombstone
-  rows from byte-identical inputs (the `chop_is_deterministic` tests in
-  `src/workers/encryption.rs`).
-- Negentropy drainer: `SyncIndex::remove_event` XOR-fold is
-  order-independent; the final fingerprint depends only on the set of
-  purged ids (the `drain_pending_purges_is_deterministic_under_two_drain_orderings`
-  and `drain_pending_purges_partial_subset_yields_same_summary_for_two_orderings`
-  tests in `src/workers/sync.rs`).
-- Two peers admitting the same canonical bytes write byte-identical
-  rows; running the same retire / chop on identical state produces
-  byte-identical effects.
-- Key-wrap materialization is keyed by the desired edge, not by the
-  queue that caused it. Proactive reconcile and explicit key requests
-  both call the same materializer. Repeated requests for the same
-  `(workspace, frontier, recipient_key, target)` either produce the
-  same canonical `key_wrap` bytes or find the projected row already
-  present.
-
-## Event-native key healing
-
-There are two triggers for wrap materialization:
-
-1. **Proactive reconcile.** Projecting a live `recipient_key` enqueues a
-   recipient-key reconcile hint; projecting a local F root or retained
-   history-node row enqueues a frontier reconcile hint. The encryption
-   worker drains those hints and, only on the deterministic frontier
-   owner (the endpoint that signed the `removal_frontier`), materializes
-   missing wraps. This makes "initial share" and "request response" the
-   same operation: the trigger is different, the desired edge is not.
-2. **Targeted key request.** A recipient endpoint emits a signed
-   `key_request` naming exactly one responder endpoint, one
-   `removal_frontier`, and its current `recipient_key`. Only the named
-   responder drains that request. If F is still present it wraps F; if F
-   was already wiped by deletion/chop, it wraps the retained
-   `local_history_node_secret` rows for that frontier instead.
-
-The second path is the monotonic healing path for valid members who join
-concurrent with a removal or while partitioned from the remover. The
-remover may not know them when it rotates or deletes; the member can
-still request the frontier after it learns enough workspace history.
-When F is gone, the responder never resurrects it. It wraps only the
-retained cover/leaf rows, preserving the original local history-node
-event ids so blocked content dependencies can unblock on the requester.
-
-Key amplification is bounded by two rules:
-
-- Requests are targeted to one responder, so a broadcast request does
-  not cause every peer with a cover row to respond.
-- Projection rows are keyed by the desired wrap edge. Duplicate request
-  events and duplicate reconcile hints converge to one local wrap row.
-
-## Dep-aware negentropy key closure
-
-Range sync should treat keys as an out-of-range dependency closure of
-the content events in the range:
-
-1. Build the ordinary dep-aware range response for event ids in the
-   requested range.
-2. Decode the in-range content events that name
-   `local_history_node_secret_id` and collect their
-   `(workspace, removal_frontier_id, created_at_ms,
-   event_id_in_minute, local_history_node_secret_id)` needs.
-3. For each need, check whether a key event/wrap satisfying that
-   dependency is already inside the range response. If not, add the
-   minimal out-of-range key closure:
-   - a `key_wrap` to the requester for F when F is still retained;
-   - otherwise `key_wrap` events for retained history-node rows whose
-     coordinates cover or exactly match the needed leaves.
-4. Bound the closure by retained rows, not by historical deletes. If no
-   retained row covers a need because the range is below the monotonic
-   floor or outside the cover horizon, return the sealed content without
-   a key closure; that is the terminal no-cover case already described
-   below.
-5. Prefer already-materialized deterministic wraps; otherwise enqueue a
-   targeted `key_request` to the frontier owner/responder and let the
-   normal materializer produce the missing edge before the next range
-   exchange.
-
-This keeps negentropy set reconciliation about event ids while making
-decryption dependencies explicit: keys required for in-range events may
-live outside the range, but they are included because they are in the
-dependency closure of those in-range events.
-
-## Three scenarios where a message arrives with no local covering ancestor
-
-1. **Cover-horizon sealing (terminal).** Peer offline for longer than
-   `COVER_HORIZON_MINUTES`; the dispatcher on receivers has chopped the
-   message's range while the author was offline. On reconnect, receivers'
-   `admit_check_received` admits the bytes if the stamped expiry is
-   future, but `derive_event_leaf` then fails — there is no covering
-   ancestor — and the message stays sealed forever on those peers. Not
-   decryptable.
-2. **Tightening (terminal).** Admin tightened the floor; pre-floor
-   messages from peers who hadn't seen the new setting yet arrive on
-   chopped peers. Same outcome as case 1.
-3. **Transient bootstrap (recoverable).** A peer just joined; F is being
-   derived in the background (waiting on `key_wrap` unwrap +
-   `local_key_secret` admission). The message admits and lands in
-   `SEALED_MESSAGES`; `derive_event_leaf` fails on the current tick.
-   When F arrives, `drain_pending_message_leaves` on the next encryption
-   tick derives the leaf and the projector decrypts.
-
-## Trust model and known gaps
-
-- Latest-setting trust gap: each `MessageEvent` references a specific
-  admitted `disappearing_messages_setting` (or the workspace event id as
-  the bootstrap fallback) via `disappearing_setting_id` and the
-  projector validates that `expires_at_minute` matches what that
-  referenced setting permits. But authors can choose *which* setting to
-  reference — honest authors pick the latest, malicious authors could
-  reference an older more-permissive setting to extend their messages'
-  effective TTL. Closing the gap requires committing to a specific
-  epoch (time-based, logical-order, or counter-based); not implemented.
-- Newly-invited endpoints recover through `key_request`. If F is still
-  retained they get the root wrap. If F was wiped, a responder wraps the
-  retained cover/leaf keys instead. Events outside the retained cover
-  horizon remain terminally sealed.
-- Forward secrecy for retired leaves is enforced against on-disk
-  attackers: after F-wipe + descend-chain wipe, no retained sibling row
-  derives the wiped leaf's secret (the
-  `adversary_cannot_re_derive_deleted_leaf_from_unrelated_retained_rows`
-  and `strict_adversary_no_retained_row_derives_deleted_leaf` tests in
-  `src/workers/encryption.rs`). An attacker who snapshotted F before
-  the wipe can still recompute the wiped chain — best-effort device
-  deletion is the bound, the same regime Signal / WhatsApp disappearing
-  messages operate in.
-
-## Rejected designs
-
-- **Whole-minute retirement of expired minutes.** Breaks eventual
-  consistency under mutable per-message TTL: mixed TTLs within a minute,
-  late-arriving messages in retired minutes. Permanently off the table.
-- **Deletion-summary `Hset` commitment over `(deleted_set,
-  retained_cover, expired_minute_set)`.** Redundant: per-message stamping
-  monotonically fixes each message's expiry in canonical bytes, the
-  monotonic floor provides the admin override, and chop output is a
-  deterministic function of `(floor_minute, TIME_TREE_ROOT_WIDTH)`. A
-  separate Hset summary added no convergence guarantees and was
-  abandoned.
-- **Per-leaf F-wipe forces frontier rotation.** False. F-wipe locally is
-  fine; sibling cover serves as the effective root for surviving
-  subtrees and each peer derives those siblings via the deterministic
-  KDF — no new wraps to recipients required. Rotation only happens for
-  recipient-revocation / key-compromise reasons, not retirement.
-- **"Best-effort" retirement that skips the F-wipe walk.** Briefly
-  considered for slice 5 as a way to avoid rotation. Discarded because
-  F-wipe and rotation are different things: F-wipe is local + cheap +
-  the FS mechanism; rotation (fresh root + re-wrap to N recipients) is
-  the expensive thing being avoided. The current implementation keeps
-  F-wipe.
-- **Drop semantic-validation checks in codec.** Codec is strictly bytes
-  ↔ struct + sign/verify. Validation belongs in
-  `commands.rs` (authoring) and `projector.rs` (receive). Codec only
-  validates structural well-formedness (field ranges, length checks like
-  `validate_expires_at_minute` in `message::codec` for the
-  authored-minute ≤ stamp invariant).
+# Encryption
+
+This document records the poc-10 encryption, key-healing, disappearing-message,
+and purge invariants. The current production implementation still lives partly
+under `src/legacy/`; target code must express the same behavior with facts,
+context needs/offers, `WakeLoop`, projectors, and handlers.
+
+## Fact Families
+
+- `removal_frontier`: shared fact naming a content-key frontier and its owner.
+- `recipient_key`: shared endpoint public key for receiving wraps.
+- `local_recipient_key`: local private material paired with one recipient key.
+- `key_wrap`: shared signed fact wrapping either a frontier root or one retained
+  history-node secret to one recipient key.
+- `key_request`: shared fact asking an authorized responder for missing key
+  material for one frontier.
+- `local_key_secret`: local opened frontier/root secret.
+- `local_history_node_secret`: local retained node in the time/trie key tree.
+- `sealed_message`: shared encrypted content that names its frontier and leaf
+  coordinate.
+- deletion/expiry/floor facts: semantic facts that make content unavailable and
+  wake purge/key-retirement behavior.
+
+## Content Key Tree
+
+Each frontier has one root secret. Content derives per-message or per-file leaf
+keys by walking a deterministic tree:
+
+```text
+frontier root -> time node -> in-minute trie node -> content leaf
+```
+
+The leaf coordinate is recoverable from canonical fact fields, so peers can
+describe what key coverage they need without decrypting the content first.
+Retained history-node secrets let a peer keep decrypting surviving content after
+the root and a deleted descend path have been purged.
+
+Target projection represents this with context:
+
+- sealed content emits a need for secret coverage over its frontier, minute, and
+  leaf coordinate.
+- local key material emits offers for the coverage it can derive.
+- a coverage matcher wakes sealed content when a root, retained node, or leaf
+  covers the requested coordinate.
+
+## Key Wraps
+
+Wraps are deterministic and idempotent for a wrap edge:
+
+```text
+workspace
+frontier
+recipient_key
+source key material
+source coordinate
+```
+
+The wrap idempotence key must not include request entropy. A duplicate request
+for the same edge should converge on the same pending wrap/fact, preventing key
+amplification.
+
+Generated wraps use the source fact time. Root wraps use frontier/root source
+time; retained-node wraps use the retained node source time. Request time may be
+recorded separately as provenance if needed, but it must not affect wrap
+identity.
+
+## Proactive Sharing
+
+Learning a current recipient key should proactively create deterministic wraps
+for current eligible sources, usually before the recipient asks. This makes the
+initial share and the key-request response the same operation: materialize the
+deterministic wrap edge if authorized and absent.
+
+Superseded recipient keys must not receive old frontiers. Their standing needs
+should be replaced by supersession cleanup, not by more wrap requests.
+
+## Key Requests
+
+Key requests are facts, not sync-layer privileges. The request projector must
+validate:
+
+- requester matches the recipient key being served.
+- responder owns the requested frontier or retained source.
+- requested recipient/frontier/source all belong to the same workspace.
+- the source is still shareable: root if available, retained nodes if the root
+  has been purged.
+
+For a partitioned valid member joining after deletion, the responder cannot
+share a purged root. It should wrap all retained path nodes needed to cover
+surviving content in the requested frontier.
+
+## Forward Secrecy Requires Recipient Key Rotation On Root Loss
+
+When deletion, expiry, or floor advancement purges a frontier root or makes it
+unavailable for future sharing, recipient keys must rotate. This prevents peers
+from continuing to wrap new material to a key that may have been exposed before
+the root was retired.
+
+Local private material for a superseded recipient key is purged by exact
+supersession proof. Shared superseded public keys remain as context so peers can
+reason about why old wraps stopped.
+
+Forward secrecy here is post-compromise secrecy for retired content: after the
+retirement transaction commits, remaining local disk state must not be enough to
+derive the retired leaf. It does not erase plaintext or keys an attacker saw
+before retirement.
+
+## Disappearing Messages And Purge
+
+Disappearing content has semantic expiry/floor facts. Those facts wake content
+projection and purge handlers through context offers.
+
+Purge is event-centric:
+
+- semantic deletion/expiry/floor facts authorize removal.
+- projectors emit deterministic purge intents once proof is present.
+- purge handlers perform bounded physical deletion of canonical bytes or local
+  secret material.
+- purge does not authorize remote erasure; it removes only local retained
+  material after durable semantic facts preserve what peers need to know.
+
+Deleting one event that used a recipient wrap is a natural trigger for pruning
+obsolete recipient key material and stale wrap relevance. There should be no
+time-only garbage collector responsible for core key correctness.
+
+## Open Content
+
+Opening encrypted content is projector work when all inputs are provided as
+context and the operation is deterministic: load sealed fact context, find
+covering local key material, derive the leaf, decrypt, and emit opened rows via
+atomic row intents.
+
+If opening ever requires broad scans, IO, clock reads, or external mutation,
+split that step into a bounded intent/handler. Do not create a generic
+"open-message worker" as a dumping ground.
+
+## Dep-Aware Sync
+
+For encrypted facts in a synced range, dep-aware sync must provide the relevant
+out-of-range key facts needed to project them:
+
+- recipient keys and supersession facts needed to validate wraps.
+- key wraps needed by the receiver.
+- retained history-node wraps when roots are unavailable.
+- key requests/responses as ordinary facts when a peer does not yet know what it
+  needs.
+
+The untrusted server may compare ranges, but key authority and key healing are
+event-layer facts.

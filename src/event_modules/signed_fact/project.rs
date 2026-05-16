@@ -1,4 +1,10 @@
 //! Projector for local signing capability facts.
+//!
+//! This projector exposes capability presence, not signing authority policy.
+//! It accepts only local secret facts, then offers the signer under the target
+//! workspace so commands can be woken when identity has already provisioned the
+//! key. Remote signed envelopes should validate signatures elsewhere and must
+//! not create local signer-secret offers here.
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};

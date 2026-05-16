@@ -1,6 +1,6 @@
 //! Black-box CLI tests for content events.
 //!
-//! Setup deliberately goes through the real `topo` binary: workspace creation,
+//! Setup deliberately goes through the real `match` binary: workspace creation,
 //! daemon-served invite acceptance, connection learning, sync, and content
 //! commands. These tests must not install identity graphs or content rows by
 //! importing protocol/store internals.

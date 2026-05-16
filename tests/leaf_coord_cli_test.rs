@@ -1,6 +1,6 @@
 //! Black-box CLI tests for the deterministic per-event leaf-coord design.
 //!
-//! Setup goes through the real `topo` binary: workspace creation, key
+//! Setup goes through the real `match` binary: workspace creation, key
 //! frontier, message authoring, deletion. The tests intentionally do not
 //! seed protocol rows or call workers directly; the CLI boundary is the
 //! invariant under test.
@@ -112,7 +112,7 @@ fn cli_message_leaf_coord_is_deterministic_from_canonical_fields() {
     // `message_event_id_in_minute`; if the protocol's hash construction
     // changes, this test changes too — that's the point.
     use topo::core::crypto;
-    use topo::protocol::event_modules::content::message::types::{
+    use topo::legacy::protocol::event_modules::content::message::types::{
         message_event_id_in_minute, MESSAGE_LEAF_COORD_DOMAIN,
     };
 

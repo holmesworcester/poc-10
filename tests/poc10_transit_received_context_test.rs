@@ -1,8 +1,8 @@
 use topo::core::context::Selector;
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::transit_received::context;
 use topo::event_modules::transit_received::fact::{
     TransitReceivedFact, TRANSIT_KIND_CONNECTION_HANDSHAKE,
@@ -31,7 +31,7 @@ fn transit_received_projector_offers_receive_context_by_received_fact_id() {
         1,
         layout::encode_fact(&provenance).expect("encode"),
     );
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     assert!(bus.submit_fact(fact.clone()));
     let projected = bus
@@ -65,7 +65,7 @@ fn transit_received_offer_wakes_matching_local_need() {
     );
     let matcher = ExactSelectorMatcher::new(context::transit_received_role());
     let matchers = [&matcher as &dyn ContextMatcher];
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     assert!(bus.submit_fact(waiter.clone()));
     bus.drain(&WaitingProjector { received_fact_id }, &matchers, 10)
@@ -89,7 +89,7 @@ fn transit_received_projector_rejects_non_local_scope() {
         1,
         layout::encode_fact(&received_fact()).expect("encode"),
     );
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     assert!(bus.submit_fact(fact));
     let err = bus

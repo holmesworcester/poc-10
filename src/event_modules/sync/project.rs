@@ -1,4 +1,10 @@
 //! Poc-10 sync context projector.
+//!
+//! Sync facts project availability and demand; they do not own socket IO or
+//! mutate the sync index. A range request becomes either context needs or a
+//! bounded send intent once the encrypted root, its dependency, and its key
+//! wrap are all visible in the same workspace. The projector therefore remains
+//! a deterministic bridge between context matching and handler work.
 
 use crate::core::facts::Fact;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
@@ -52,6 +58,9 @@ fn project_sync_range_request(
     };
 
     let mut output = ProjectionOutput::new().need(range_need);
+    // Pick the earliest complete root deterministically. Later complete roots
+    // stay available through their offers; this projection pass emits one send
+    // intent so retries and batching remain handler concerns.
     let mut ready = roots
         .iter()
         .copied()
@@ -74,6 +83,8 @@ fn project_sync_range_request(
         ));
     }
 
+    // Incomplete roots are still useful: they tell the matcher which precise
+    // dependency or key-wrap facts would make the original range request ready.
     for root in roots {
         let dep_need = context::exact_event_need(fact.id, scope.clone(), root.dependency_id);
         let key_need = context::key_wrap_need(fact.id, scope.clone(), root.key_wrap_id);

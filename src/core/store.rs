@@ -690,10 +690,15 @@ fn validate_row_table_declaration(table: &TableDeclaration) -> rusqlite::Result<
     )))
 }
 
+/// One column returned by SQLite's `PRAGMA table_info`.
+///
+/// This is storage metadata, not protocol schema. Store uses it only when a
+/// table already exists, to prove that the physical table still has the core
+/// row-store shape before writing opaque bytes into it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SqliteColumn {
+struct SqliteTableColumn {
     name: String,
-    ty: String,
+    declared_type: String,
     not_null: bool,
     primary_key_position: i64,
 }
@@ -701,12 +706,12 @@ struct SqliteColumn {
 fn sqlite_table_columns(
     conn: &SqliteConnection,
     quoted_table_name: &str,
-) -> rusqlite::Result<Vec<SqliteColumn>> {
+) -> rusqlite::Result<Vec<SqliteTableColumn>> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({quoted_table_name})"))?;
     let rows = stmt.query_map([], |row| {
-        Ok(SqliteColumn {
+        Ok(SqliteTableColumn {
             name: row.get(1)?,
-            ty: row.get(2)?,
+            declared_type: row.get(2)?,
             not_null: row.get::<_, i64>(3)? != 0,
             primary_key_position: row.get(5)?,
         })
@@ -714,14 +719,17 @@ fn sqlite_table_columns(
     rows.collect()
 }
 
-fn validate_sqlite_row_table(table_name: &str, columns: &[SqliteColumn]) -> rusqlite::Result<()> {
+fn validate_sqlite_row_table(
+    table_name: &str,
+    columns: &[SqliteTableColumn],
+) -> rusqlite::Result<()> {
     let valid = columns.len() == 2
         && columns[0].name == "row_key"
-        && columns[0].ty.eq_ignore_ascii_case("BLOB")
+        && columns[0].declared_type.eq_ignore_ascii_case("BLOB")
         && columns[0].not_null
         && columns[0].primary_key_position == 1
         && columns[1].name == "row_value"
-        && columns[1].ty.eq_ignore_ascii_case("BLOB")
+        && columns[1].declared_type.eq_ignore_ascii_case("BLOB")
         && columns[1].not_null
         && columns[1].primary_key_position == 0;
     if valid {

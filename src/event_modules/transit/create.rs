@@ -1,8 +1,8 @@
-//! Transit send construction helpers.
+//! Transit fact sendability helpers.
 //!
-//! This module owns fact-level sendability checks for outbound transit. The
-//! handler may load the exact input facts from core, but it delegates protocol
-//! knowledge such as private/local fact tags back here.
+//! Transit send handlers ask this module whether a fact may leave the local
+//! store. The checks stay beside the transit protocol rules instead of in the
+//! handler that performs the eventual network effect.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::event_modules::{encryption, signed_fact};

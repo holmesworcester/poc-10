@@ -1,10 +1,7 @@
-//! Target command manifest.
+//! Shared command context and output types.
 //!
-//! Commands are pure constructors that turn caller inputs plus a narrow,
-//! read-only `CommandContext` into proposed facts and intents. They are not
-//! allowed to import worker traits, the event registry, or any protocol-side
-//! orchestration shape.
+//! User-facing command constructors live with the fact modules that own the
+//! facts they create. This module only exposes the narrow context/output
+//! contract those constructors share.
 
 pub mod context;
-pub mod create_workspace;
-pub mod send_message;

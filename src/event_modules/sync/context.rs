@@ -1,4 +1,9 @@
 //! Context selectors and matchers for poc-10 sync projection.
+//!
+//! Exact event and key-wrap roles model single known ids. Range-event context
+//! models a time-window request: the requester asks for any event timestamp in a
+//! closed interval, and each offer carries the event plus the dependency and key
+//! wrap ids the sync response will need to send with it.
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
@@ -126,6 +131,9 @@ pub fn range_offer_selector(
     dependency_id: EventId,
     key_wrap_id: KeyWrapId,
 ) -> Selector {
+    // Keep timestamp first so range matching can reject by time before the
+    // payload ids matter. Big-endian encoding preserves numeric order for rows
+    // that are later sorted lexicographically.
     let mut bytes = Vec::with_capacity(104);
     bytes.extend_from_slice(&timestamp.to_be_bytes());
     bytes.extend_from_slice(&event_id);
@@ -206,6 +214,8 @@ pub fn range_event_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Con
     }
     let (start, end) = decode_range_need_selector(&need.selector)?;
     let offer_selector = decode_range_offer_selector(&offer.selector)?;
+    // The interval is inclusive: sync requests use durable boundary timestamps,
+    // so excluding either endpoint would drop events exactly at a range edge.
     if offer_selector.timestamp < start || offer_selector.timestamp > end {
         return None;
     }

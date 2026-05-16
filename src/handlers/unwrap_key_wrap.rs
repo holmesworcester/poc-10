@@ -1,3 +1,48 @@
-pub mod driver;
+// Handler for accepted key-wrap recovery.
+//
+// Acceptance is represented by the queued intent and its declared facts. The
+// handler does not scan for private keys or decide whether a wrap should have
+// been accepted; it only opens the specific wrap with the specific local
+// recipient material chosen by projection, then emits the resulting local
+// secret fact back into the common pipeline.
 
-pub use driver::UnwrapKeyWrapHandler;
+use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intents::Intent;
+use crate::event_modules::encryption::{create, intent};
+
+#[derive(Debug, Clone, Default)]
+pub struct UnwrapKeyWrapHandler;
+
+impl UnwrapKeyWrapHandler {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl IntentHandler for UnwrapKeyWrapHandler {
+    fn accepts(&self, intent: &Intent) -> bool {
+        intent.kind.as_str() == intent::UNWRAP_KEY_WRAP
+    }
+
+    fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        let input = intent::decode_unwrap_key_wrap_intent(raw_intent)?;
+        // Loading is intentionally exact. A local device may hold several
+        // recipient keys, but the projector selected the one whose context
+        // matched this wrap.
+        Ok(vec![
+            input.key_wrap_id,
+            input.local_recipient_key_id,
+            input.recipient_key_id,
+        ])
+    }
+
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+        let input = intent::decode_unwrap_key_wrap_intent(intent)?;
+        let key_wrap = context.require_fact(&input.key_wrap_id)?;
+        let local_recipient_key = context.require_fact(&input.local_recipient_key_id)?;
+        let recipient = context.require_fact(&input.recipient_key_id)?;
+        let secret =
+            create::unwrap_key_wrap_fact(&input, key_wrap, local_recipient_key, recipient)?;
+        Ok(HandlerOutput::new().fact(secret))
+    }
+}

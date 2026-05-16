@@ -1,9 +1,9 @@
 use topo::core::context::{ContextNeed, ContextOffer, Role, Selector};
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactId, FactScope, ScopeKind};
 use topo::core::intents::{Intent, IntentExecution, IntentKind};
 use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use topo::core::wake_loop::WakeLoop;
 
 #[test]
 fn deletion_update_offer_wakes_waiting_content_fact_and_emits_purge_intent() {
@@ -13,7 +13,7 @@ fn deletion_update_offer_wakes_waiting_content_fact_and_emits_purge_intent() {
     let primary_matcher = ExactSelectorMatcher::new(primary_role());
     let delete_matcher = ExactSelectorMatcher::new(deletion_role());
     let projector = ContentPurgeBridge::new(workspace, [77; 32]);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(target.clone());
     let waiting = bus
@@ -59,7 +59,7 @@ fn repeated_deletion_offers_do_not_amplify_purge_intents() {
     let primary_matcher = ExactSelectorMatcher::new(primary_role());
     let delete_matcher = ExactSelectorMatcher::new(deletion_role());
     let projector = ContentPurgeBridge::new(workspace, [88; 32]);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     bus.submit_fact(target.clone());
     bus.drain(

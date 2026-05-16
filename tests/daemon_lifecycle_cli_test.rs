@@ -1,6 +1,6 @@
 //! Black-box tests for `topo stop` and `topo reset`.
 //!
-//! These drive the real `topo` binary to prove the daemon actually exits, the
+//! These drive the real `match` binary to prove the daemon actually exits, the
 //! lock file is released, and reset removes the local store files. They use
 //! only the public CLI surface: process spawn, signal observation through
 //! `/proc`, and file-existence checks.

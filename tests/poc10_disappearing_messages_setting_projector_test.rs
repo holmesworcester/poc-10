@@ -1,7 +1,7 @@
-use topo::core::event_bus::EventBus;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::core::wake_loop::WakeLoop;
 use topo::event_modules::disappearing_messages_setting::fact::{
     DisappearingMessagesSettingFact, SCOPE_KIND_CHANNEL, SCOPE_KIND_WORKSPACE,
 };
@@ -30,7 +30,7 @@ fn setting_projector_materializes_row_through_atomic_intent() {
     );
     let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
         .expect("open target schema");
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     assert!(bus.submit_fact(fact.clone()));
     let projected = bus
@@ -77,7 +77,7 @@ fn setting_projector_admits_chained_successor_with_higher_retire_minute() {
     );
     let store = Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
         .expect("open target schema");
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
 
     assert!(bus.submit_fact(fact.clone()));
     bus.drain_applying_atomic_rows(
@@ -107,7 +107,7 @@ fn setting_projector_rejects_zero_ttl() {
         setting.created_at_ms,
         layout::encode_fact(&setting).expect("encode setting"),
     );
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     bus.submit_fact(fact);
     let err = bus
         .drain(
@@ -128,7 +128,7 @@ fn setting_projector_rejects_workspace_scope_with_mismatched_scope_id() {
         setting.created_at_ms,
         layout::encode_fact(&setting).expect("encode setting"),
     );
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     bus.submit_fact(fact);
     let err = bus
         .drain(
@@ -143,7 +143,7 @@ fn setting_projector_rejects_workspace_scope_with_mismatched_scope_id() {
 #[test]
 fn setting_projector_rejects_malformed_fact_bytes() {
     let fact = Fact::new(FactScope::Global, 0, vec![0; 8]);
-    let mut bus = EventBus::new();
+    let mut bus = WakeLoop::new();
     bus.submit_fact(fact);
     let err = bus
         .drain(

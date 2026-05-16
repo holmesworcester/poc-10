@@ -112,7 +112,7 @@ fn validate_command_names<C>(commands: &[CliCommand<C>]) -> Result<(), String> {
 pub fn usage<C>(commands: &[CliCommand<C>], reason: &str) -> String {
     let mut lines = vec![reason.to_string(), "usage:".to_string()];
     for command in commands {
-        lines.push(format!("  topo --db PATH {}", command.usage));
+        lines.push(format!("  match --db PATH {}", command.usage));
     }
     lines.join("\n")
 }

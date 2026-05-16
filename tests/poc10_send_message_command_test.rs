@@ -13,9 +13,9 @@ use topo::commands::context::{
     CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
     WorkspaceId,
 };
-use topo::commands::send_message::{associated_data, recover_text, send_message};
 use topo::core::crypto;
 use topo::event_modules::encryption::fact::LocalKeySecretFact;
+use topo::event_modules::sealed_message::create::{associated_data, recover_text, send_message};
 use topo::event_modules::sealed_message::layout::decode_sealed_message;
 use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
 use topo::event_modules::signed_fact::layout::decode_signed_fact;
