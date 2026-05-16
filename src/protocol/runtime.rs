@@ -7,10 +7,9 @@
 use crate::core::context::Role;
 use crate::core::daemon::TickReport;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::generic_matchers::ExactSelectorMatcher;
 use crate::core::handler_dispatch::HandlerContext;
 use crate::core::logical_clock;
-use crate::core::matchers::ContextMatcher;
+use crate::core::matchers::{ContextMatcher, ExactSelectorMatcher};
 use crate::core::network_queues;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::core::runtime::{RuntimeHandlers, RuntimeMatchers, RuntimeProtocol};

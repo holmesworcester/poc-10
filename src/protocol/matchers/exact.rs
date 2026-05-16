@@ -1,11 +1,11 @@
 //! Exact context matching vocabulary for the concrete protocol.
 //!
 //! This module owns the protocol need/offer constructors for exact
-//! role/scope/selector matching. The generic matcher itself lives in core.
+//! role/scope/selector matching. The exact matcher itself lives in core.
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
-pub use crate::core::generic_matchers::{exact_selector_match, ExactSelectorMatcher};
+pub use crate::core::matchers::{exact_selector_match, ExactSelectorMatcher};
 
 pub const CONNECTION_EPHEMERAL_SECRET_ROLE: &str = "connection_ephemeral_secret";
 pub const CONNECTION_INVITE_SECRET_ROLE: &str = "connection_invite_secret";

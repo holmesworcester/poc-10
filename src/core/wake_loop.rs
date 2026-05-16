@@ -1279,9 +1279,9 @@ mod tests {
     use crate::core::facts::FactScope;
     use crate::core::handler_dispatch::HandlerOutput;
     use crate::core::intents::{IntentExecution, IntentKind};
+    use crate::core::matchers::ExactSelectorMatcher;
     use crate::core::projection::{ProjectionContext, ProjectionOutput};
     use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
-    use crate::core::generic_matchers::ExactSelectorMatcher;
     use std::cell::Cell;
 
     #[test]

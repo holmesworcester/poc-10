@@ -13,7 +13,6 @@ pub mod crux_runner;
 pub mod crypto;
 pub mod daemon;
 pub mod facts;
-pub mod generic_matchers;
 pub mod handler_dispatch;
 pub mod intents;
 pub mod logical_clock;
