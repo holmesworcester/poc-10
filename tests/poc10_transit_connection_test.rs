@@ -3,20 +3,20 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
 use topo::core::intents::IntentKind;
 use topo::core::schema_dsl::{
-    CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
+    CORE_SCHEMA_SOURCE, FACT_MODULES_SCHEMA_SOURCE, INTENT_HANDLERS_SCHEMA_SOURCE,
 };
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::connection_response::fact::ConnectionResponseFact;
-use topo::event_modules::connection_response::layout as connection_response_layout;
-use topo::event_modules::identity_endpoint::fact::EndpointFact;
-use topo::event_modules::identity_endpoint::rows as endpoint_rows;
-use topo::event_modules::sync_shared_event::{
+use topo::protocol::fact_modules::connection_response::fact::ConnectionResponseFact;
+use topo::protocol::fact_modules::connection_response::layout as connection_response_layout;
+use topo::protocol::fact_modules::identity_endpoint::fact::EndpointFact;
+use topo::protocol::fact_modules::identity_endpoint::rows as endpoint_rows;
+use topo::protocol::fact_modules::sync_shared_event::{
     fact::SharedEventFact, layout as shared_event_layout,
 };
-use topo::event_modules::transit::frame as transit_frame;
-use topo::event_modules::{encryption, signed_fact, sync};
-use topo::handlers::{connection, network_send, transit};
+use topo::protocol::fact_modules::transit::frame as transit_frame;
+use topo::protocol::fact_modules::{encryption, signed_fact};
+use topo::protocol::intent_handlers::{connection, network_send, transit};
 
 fn connection_fact() -> (Fact, ConnectionResponseFact) {
     let local_endpoint = local_endpoint();
@@ -133,7 +133,7 @@ fn transit_send_guard_refuses_forged_private_tag_reference() {
         encryption::layout::TYPE_LOCAL_RECIPIENT_KEY,
     ] {
         let fact = Fact::new(
-            sync::matchers::workspace_scope([7; 32]),
+            topo::protocol::matchers::workspace_scope([7; 32]),
             1,
             vec![private_tag, 1, 2, 3],
         );
@@ -159,7 +159,7 @@ fn transit_send_guard_accepts_normal_shared_facts() {
     let store = store_with_local_endpoint();
     let (connection_fact, connection) = connection_fact();
     let fact = Fact::new(
-        sync::matchers::workspace_scope([7; 32]),
+        topo::protocol::matchers::workspace_scope([7; 32]),
         1,
         shared_event_layout::encode_fact(&SharedEventFact {
             workspace_id: [7; 32],
@@ -194,7 +194,7 @@ fn send_on_connection_handler_success_emits_network_send_and_clears_intent() {
     let store = store_with_local_endpoint();
     let (connection_fact, _) = connection_fact();
     let fact = Fact::new(
-        sync::matchers::workspace_scope([7; 32]),
+        topo::protocol::matchers::workspace_scope([7; 32]),
         1,
         shared_event_layout::encode_fact(&SharedEventFact {
             workspace_id: [7; 32],
@@ -231,8 +231,8 @@ fn send_on_connection_handler_success_emits_network_send_and_clears_intent() {
 fn store_with_local_endpoint() -> Store {
     let store = Store::open_memory_with_schema_sources(&[
         CORE_SCHEMA_SOURCE,
-        EVENT_MODULES_SCHEMA_SOURCE,
-        HANDLERS_SCHEMA_SOURCE,
+        FACT_MODULES_SCHEMA_SOURCE,
+        INTENT_HANDLERS_SCHEMA_SOURCE,
     ])
     .expect("store");
     store

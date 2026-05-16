@@ -1,42 +1,45 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::AtomicIntent;
-use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{MatchedContext, ProjectionContext, ProjectionOutput, Projector};
 use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::encryption::fact::{
+use topo::protocol::fact_modules::encryption::fact::{
     KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact,
     LocalRecipientKeyFact, RecipientKeyFact, RemovalFrontierFact, WrappedSecretKind,
     NO_PREVIOUS_RECIPIENT_KEY,
 };
-use topo::event_modules::encryption::intent::{
+use topo::protocol::fact_modules::encryption::intent::{
     decode_materialize_key_wraps_intent, decode_purge_retired_recipient_material_intent,
     decode_unwrap_key_wrap_intent, purge_retired_recipient_material_intent,
     PurgeRetiredRecipientMaterialIntent,
 };
-use topo::event_modules::encryption::matchers::{
-    self as encryption_context, frontier_role, recipient_key_role, recipient_superseded_role,
-    WrapSourceKind, WrapSourceMatcher,
-};
-use topo::event_modules::encryption::{
+use topo::protocol::fact_modules::encryption::{
     create as encryption_create, layout as encryption_layout, project as encryption_project,
     rows as encryption_rows,
 };
-use topo::event_modules::sealed_message::fact::{SealedMessageFact, SignerPubkeyFact, NONCE_BYTES};
-use topo::event_modules::sealed_message::matchers::{
-    self as message_context, workspace_scope, SecretCoverageMatcher,
+use topo::protocol::fact_modules::sealed_message::fact::{
+    SealedMessageFact, SignerPubkeyFact, NONCE_BYTES,
 };
-use topo::event_modules::sealed_message::rows::{
+use topo::protocol::fact_modules::sealed_message::rows::{
     message_key, MESSAGE_ROWS, OPENED_MESSAGE_ROWS, SEALED_MESSAGE_ROWS,
 };
-use topo::event_modules::sealed_message::{layout as message_layout, project as message_project};
-use topo::event_modules::signed_fact::{self, fact::LocalSignerSecretFact};
-use topo::event_modules::sync::matchers as sync_context;
-use topo::handlers::materialize_key_wraps::MaterializeKeyWrapsHandler;
-use topo::handlers::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler;
-use topo::handlers::unwrap_key_wrap::UnwrapKeyWrapHandler;
+use topo::protocol::fact_modules::sealed_message::{
+    layout as message_layout, project as message_project,
+};
+use topo::protocol::fact_modules::signed_fact::{self, fact::LocalSignerSecretFact};
+use topo::protocol::intent_handlers::materialize_key_wraps::MaterializeKeyWrapsHandler;
+use topo::protocol::intent_handlers::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler;
+use topo::protocol::intent_handlers::unwrap_key_wrap::UnwrapKeyWrapHandler;
+use topo::protocol::matchers as sync_context;
+use topo::protocol::matchers::ExactSelectorMatcher;
+use topo::protocol::matchers::{
+    self as encryption_context, frontier_role, recipient_key_role, recipient_superseded_role,
+    WrapSourceKind, WrapSourceMatcher,
+};
+use topo::protocol::matchers::{self as message_context, workspace_scope, SecretCoverageMatcher};
 
 #[test]
 fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appears() {
@@ -52,7 +55,7 @@ fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appe
     let superseded_matcher = ExactSelectorMatcher::new(recipient_superseded_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
-        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role());
+        ExactSelectorMatcher::new(topo::protocol::matchers::local_signer_secret_role());
     let matchers = [
         &frontier_matcher as &dyn ContextMatcher,
         &superseded_matcher as &dyn ContextMatcher,
@@ -100,7 +103,7 @@ fn recipient_key_waits_for_local_signer_secret_before_materializing_wrap() {
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
-        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role());
+        ExactSelectorMatcher::new(topo::protocol::matchers::local_signer_secret_role());
     let matchers = [
         &frontier_matcher as &dyn ContextMatcher,
         &wrap_matcher as &dyn ContextMatcher,
@@ -119,7 +122,7 @@ fn recipient_key_waits_for_local_signer_secret_before_materializing_wrap() {
         .unwrap()
         .needs
         .iter()
-        .any(|need| { need.role == signed_fact::matchers::local_signer_secret_role() }));
+        .any(|need| { need.role == topo::protocol::matchers::local_signer_secret_role() }));
 }
 
 #[test]
@@ -139,7 +142,7 @@ fn rotated_recipient_key_does_not_receive_old_frontier_sources() {
     let superseded_matcher = ExactSelectorMatcher::new(recipient_superseded_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
-        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role());
+        ExactSelectorMatcher::new(topo::protocol::matchers::local_signer_secret_role());
     let matchers = [
         &recipient_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
@@ -273,7 +276,7 @@ fn duplicate_key_requests_converge_on_one_wrap_intent_without_request_entropy() 
     let superseded_matcher = ExactSelectorMatcher::new(recipient_superseded_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
-        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role());
+        ExactSelectorMatcher::new(topo::protocol::matchers::local_signer_secret_role());
     let matchers = [
         &recipient_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
@@ -331,7 +334,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_secret_matcher =
-        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role());
+        ExactSelectorMatcher::new(topo::protocol::matchers::local_signer_secret_role());
     let signer_pubkey_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let matchers = [
         &recipient_matcher as &dyn ContextMatcher,
@@ -514,12 +517,12 @@ fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
             payload: retained_b,
         },
         MatchedContext {
-            need: signed_fact::matchers::local_signer_secret_need(
+            need: topo::protocol::matchers::local_signer_secret_need(
                 request.id,
                 scope.clone(),
                 responder,
             ),
-            offer: signed_fact::matchers::local_signer_secret_offer(signer.id, scope, responder),
+            offer: topo::protocol::matchers::local_signer_secret_offer(signer.id, scope, responder),
             payload: signer,
         },
     ]);
@@ -673,12 +676,12 @@ fn key_request_ignores_wrap_source_from_non_responder() {
             payload: wrong_root,
         },
         MatchedContext {
-            need: signed_fact::matchers::local_signer_secret_need(
+            need: topo::protocol::matchers::local_signer_secret_need(
                 request.id,
                 scope.clone(),
                 wrong_source_owner,
             ),
-            offer: signed_fact::matchers::local_signer_secret_offer(
+            offer: topo::protocol::matchers::local_signer_secret_offer(
                 wrong_signer.id,
                 scope,
                 wrong_source_owner,
@@ -706,7 +709,7 @@ fn generated_history_node_wrap_uses_source_fact_time() {
     let signer = local_signer_secret_fact(workspace, [0x76; 32]);
     let retained = history_node_fact(workspace, frontier.id, 51, 1, 8, byte_prefix(0xaa));
     let intent = decode_materialize_key_wraps_intent(
-        &topo::event_modules::encryption::intent::materialize_key_wraps_intent(
+        &topo::protocol::fact_modules::encryption::intent::materialize_key_wraps_intent(
             recipient.id,
             retained.id,
             signer.id,
@@ -876,14 +879,8 @@ fn encryption_history_node_offer_wakes_and_clears_sealed_message_secret_need() {
                     payload: frontier.clone(),
                 },
                 MatchedContext {
-                    need: topo::event_modules::local_history_node_secret::matchers::source_secret_need(
-                        history_node.id,
-                        root.id,
-                    ),
-                    offer:
-                        topo::event_modules::local_history_node_secret::matchers::source_secret_offer(
-                            root.id, root.id,
-                        ),
+                    need: topo::protocol::matchers::source_secret_need(history_node.id, root.id),
+                    offer: topo::protocol::matchers::source_secret_offer(root.id, root.id),
                     payload: root,
                 },
             ]),
@@ -1084,7 +1081,7 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
         crypto::ed25519_public_key(&signer_private_key),
     );
     let materialize = decode_materialize_key_wraps_intent(
-        &topo::event_modules::encryption::intent::materialize_key_wraps_intent(
+        &topo::protocol::fact_modules::encryption::intent::materialize_key_wraps_intent(
             recipient.id,
             root.id,
             signer.id,
@@ -1611,7 +1608,7 @@ fn key_request_matchers() -> (
         ExactSelectorMatcher::new(recipient_key_role()),
         ExactSelectorMatcher::new(frontier_role()),
         WrapSourceMatcher::new(),
-        ExactSelectorMatcher::new(signed_fact::matchers::local_signer_secret_role()),
+        ExactSelectorMatcher::new(topo::protocol::matchers::local_signer_secret_role()),
     )
 }
 
@@ -1624,11 +1621,11 @@ fn sealed_message_fact(
     secret_key: [u8; 32],
 ) -> Fact {
     let nonce = [0xa4; NONCE_BYTES];
-    let plaintext =
-        topo::event_modules::sealed_message::create::pad_plaintext(b"healing").expect("plaintext");
+    let plaintext = topo::protocol::fact_modules::sealed_message::create::pad_plaintext(b"healing")
+        .expect("plaintext");
     let ciphertext = crypto::xchacha20poly1305_encrypt(
         &secret_key,
-        &topo::event_modules::sealed_message::create::associated_data(
+        &topo::protocol::fact_modules::sealed_message::create::associated_data(
             workspace_id,
             frontier_id,
             minute,

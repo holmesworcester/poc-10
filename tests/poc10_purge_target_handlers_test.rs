@@ -1,26 +1,28 @@
 use topo::core::facts::Fact;
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::content_file::fact::ContentFileFact;
-use topo::event_modules::content_reaction::fact::{ContentReactionFact, REACTION_NONCE_BYTES};
-use topo::event_modules::disappearing_messages_setting::fact::{
+use topo::protocol::fact_modules::content_file::fact::ContentFileFact;
+use topo::protocol::fact_modules::content_reaction::fact::{
+    ContentReactionFact, REACTION_NONCE_BYTES,
+};
+use topo::protocol::fact_modules::disappearing_messages_setting::fact::{
     DisappearingMessagesSettingFact, SCOPE_KIND_WORKSPACE,
 };
-use topo::event_modules::sealed_message::fact::{
+use topo::protocol::fact_modules::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES,
 };
-use topo::event_modules::sealed_message::matchers::workspace_scope;
-use topo::event_modules::{content_file, content_reaction, disappearing_messages_setting};
-use topo::event_modules::{sealed_message, sealed_message::layout};
-use topo::handlers::purge_cascade::{
+use topo::protocol::fact_modules::{content_file, content_reaction, disappearing_messages_setting};
+use topo::protocol::fact_modules::{sealed_message, sealed_message::layout};
+use topo::protocol::intent_handlers::purge_cascade::{
     cascade_child_purge_intent, CascadeChildPurge, PurgeCascadeHandler, CASCADE_CHILD_FILE,
     CASCADE_CHILD_REACTION,
 };
-use topo::handlers::retention_expiry::{
+use topo::protocol::intent_handlers::retention_expiry::{
     expire_message_intent, ExpireMessage, RetentionExpiryHandler,
 };
-use topo::handlers::retention_floor::{
+use topo::protocol::intent_handlers::retention_floor::{
     apply_retention_floor_intent, ApplyRetentionFloor, RetentionFloorHandler,
 };
+use topo::protocol::matchers::workspace_scope;
 
 const WORKSPACE: [u8; 32] = [1; 32];
 const AUTHOR: [u8; 32] = [2; 32];

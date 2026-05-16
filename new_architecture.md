@@ -33,7 +33,7 @@ The migration succeeds when:
 - Core owns facts, context, command context, context matchers, `WakeLoop`,
   generic runtime/app mechanics, intents, handler dispatch, storage mechanics,
   wire field primitives, and crypto helpers.
-- Event modules own fact semantics: layouts, projectors, context roles,
+- Fact modules own fact semantics: layouts, projectors, context roles,
   command constructors, read-model rows, module-local CLI adapters, module
   queries, and protocol validation rules.
 - Intent handlers own bounded stateful work and handler checkpoint state.
@@ -41,7 +41,7 @@ The migration succeeds when:
 - Intent handlers return only facts and intents. The current `purged_facts`
   output is a migration checkpoint for exact retained fact purge, not a broad
   storage escape hatch.
-- No event module, handler, command, schema, or wire layout reaches around core
+- No fact module, intent handler, command, schema, or wire layout reaches around core
   to call another stage directly.
 - There is no event-bus layer. `WakeLoop` is the target projection and intent
   coordinator.
@@ -51,19 +51,19 @@ The migration succeeds when:
   `MatchRuntime`-specific product logic.
 - There is no product `demo` or `smoke` command. Smoke coverage belongs in
   black-box CLI tests against the real `match` binary.
-- Every handler is a flat `src/handlers/<name>.rs` file declared from
-  `src/handlers/registry.rs`; handler-owned subdirectories are not part of the
-  target.
-- Event-module and handler manifests live at `src/event_modules/registry.rs`
-  and `src/handlers/registry.rs`, exported from `src/lib.rs` with `#[path]`.
+- Every intent handler is a flat `src/protocol/intent_handlers/<name>.rs`
+  file declared from `src/protocol/intent_handlers.rs`; handler-owned
+  subdirectories are not part of the target.
+- Fact-module and intent-handler manifests live under `src/protocol/` as
+  `fact_modules.rs` and `intent_handlers.rs`.
 - There is no root `src/commands` module. The command context lives in
   `src/core/command_context.rs` as `core::command_context`.
 - There is no `mod.rs` anywhere in the repository.
 - End-state guardrail: `rows.rs`, `layout.rs`, and module-local `cli.rs` stay
   narrow and declarative. They must not become protocol logic sinks.
 - Schema declarations exist in exactly three visible places:
-  `src/core/schema.p8sql`, `src/event_modules/schema.p8sql`, and
-  `src/handlers/schema.p8sql`.
+  `src/core/schema.p8sql`, `src/protocol/fact_modules/schema.p8sql`, and
+  `src/protocol/intent_handlers/schema.p8sql`.
 - The schema declaration surface is the source of truth for storage tables,
   read-model row codecs, and canonical fact wire codecs.
 - Wire layouts are declarative and fixed length. There are no variable payload
@@ -94,10 +94,10 @@ or black-box tests:
 - `src/core/wake_loop.rs` persists and reloads facts, needs, offers, internal
   projection wakes, and intents. It also feeds exact declared fact inputs into
   handlers instead of exposing all facts.
-- Target event modules under `src/event_modules/` are exercised by poc-10 tests
+- Target fact modules under `src/protocol/fact_modules/` are exercised by poc-10 tests
   and are not yet the whole production path.
-- Target handlers under `src/handlers/` are flat files and are registered from
-  `src/handlers/registry.rs`.
+- Target intent handlers under `src/protocol/intent_handlers/` are flat files
+  and are registered from `src/protocol/intent_handlers.rs`.
 - The old handler subdirectory shape has been removed.
 - Target receive transit can open fixed transit frames that carry signed
   key-wrap facts, admit the opened fact, and record local receive provenance.
@@ -138,7 +138,7 @@ Current hard gaps:
   hand routing and explicit "not ported" paths.
 - Transit wrap/unwrap is not fully target-owned. The remaining work is to make
   intent/frame layouts schema-generated and fixed length, finish durable
-  network acknowledgements/cursors, and keep crypto semantics in event-module
+  network acknowledgements/cursors, and keep crypto semantics in fact-module
   constructors instead of handlers.
 - Sync still needs the target context transfer for key dependencies. In-range
   encrypted content must bring relevant out-of-range key wraps or retained key
@@ -159,6 +159,13 @@ src/
   match_app.rs
   core.rs
   protocol.rs
+  protocol/
+    matchers.rs
+    matchers/
+      exact.rs
+      range.rs
+      coverage.rs
+      wrap_source.rs
 
   core/
     schema.p8sql
@@ -177,47 +184,49 @@ src/
     crypto.rs
     schema_dsl.rs
 
-  event_modules/
-    registry.rs
-    schema.p8sql
-    <module>.rs
-    <module>/
-      fact.rs
-      layout.rs
-      create.rs
-      commands.rs
-      cli.rs
-      project.rs
-      queries.rs
-      rows.rs
-      matchers.rs
-
-  handlers/
-    registry.rs
-    schema.p8sql
-    connection.rs
-    connection_response.rs
-    handle_sync.rs
-    materialize_key_wraps.rs
-    network_send.rs
-    purge_event.rs
-    purge_retired_recipient_material.rs
-    receive_transit.rs
-    sync_index_update.rs
-    transit.rs
-    unwrap_key_wrap.rs
+  protocol/
+    fact_modules.rs
+    fact_modules/
+      schema.p8sql
+      <module>.rs
+      <module>/
+        fact.rs
+        layout.rs
+        create.rs
+        commands.rs
+        cli.rs
+        project.rs
+        queries.rs
+        rows.rs
+    intent_handlers.rs
+    intent_handlers/
+      schema.p8sql
+      connection.rs
+      connection_response.rs
+      handle_sync.rs
+      materialize_key_wraps.rs
+      network_send.rs
+      purge_event.rs
+      purge_retired_recipient_material.rs
+      receive_transit.rs
+      sync_index_update.rs
+      transit.rs
+      unwrap_key_wrap.rs
 
 ```
 
-The exact event module names can change. The ownership pattern should not.
-Only `src/core/context.rs` owns context primitives. Protocol-specific
-event-module `context.rs` files are migration debt and a likely dumping
-ground. Projection logic belongs in `project.rs`; role constants and selector
-construction should stay narrow and close to the projector unless a custom
-matcher needs them; role-specific matching belongs in `matchers.rs`, with
-`src/protocol.rs` declaring the role-to-matcher binding.
+The exact fact module names can change. The ownership pattern should not.
+Only `src/core/context.rs` owns context primitives. Protocol context roles,
+selectors, need constructors, offer constructors, and matcher implementations
+belong under `src/protocol/matchers/`, organized by generic matching relation
+such as exact, range, coverage, or wrap-source. Fact modules must not define
+their own `matchers.rs`, `context.rs`, or `selectors.rs` files. Projectors own
+which protocol-defined needs and offers they emit, while matcher modules own
+only candidate-pairing algorithms. Need/offer shapes should be as generic as
+the matching relation allows, using event type plus typed selector parameters
+instead of fact-module-specific matcher vocabulary.
 
-An event module is one fact family. A directory that defines several durable
+A fact module is one fact family. A directory that defines several durable
 fact types is a bundle and should be split before review, even when the facts
 are conceptually related. This rule applies to encryption and sync equally:
 `recipient_key`, `local_recipient_key`, `key_wrap`, `sync_compare`,
@@ -231,21 +240,21 @@ only for fact-family-local helper slices named after validation steps or output
 families. If a `project/` child corresponds to a different fact tag, the module
 is bundled incorrectly and must be split.
 
-`src/lib.rs`, `src/core.rs`, `src/event_modules/registry.rs`, and
-`src/handlers/registry.rs` are manifests. They declare modules and may
-re-export narrow APIs; they should not accumulate behavior. `src/lib.rs` uses
-`#[path = "event_modules/registry.rs"]` and
-`#[path = "handlers/registry.rs"]` so the public namespaces remain
-`topo::event_modules` and `topo::handlers` without root dumping-ground files.
+`src/lib.rs`, `src/core.rs`, `src/protocol.rs`,
+`src/protocol/fact_modules.rs`, and `src/protocol/intent_handlers.rs` are
+manifests. They declare modules and may re-export narrow APIs; they should not
+accumulate behavior. Public concrete protocol namespaces live under
+`topo::protocol::fact_modules` and `topo::protocol::intent_handlers` without
+top-level dumping-ground files.
 
 `src/protocol.rs` is the target protocol registry. It is a declarative table of
 contents across schema sources, fact registrations, context matcher roles,
-intent kinds, and handlers. It does not replace the event-module or handler
-registries: those files define Rust namespaces, while `protocol.rs` declares
-which namespaces make up the concrete `match` protocol.
+intent kinds, and handlers. It does not replace the fact-module or
+intent-handler manifests: those files define Rust namespaces, while
+`protocol.rs` declares which namespaces make up the concrete `match` protocol.
 
 The old legacy source island has been removed. Do not recreate compatibility
-bridges; port behavior into the target runtime, event modules, handlers, and
+bridges; port behavior into the target runtime, fact modules, intent handlers, and
 queries instead.
 
 ### No `mod.rs`
@@ -254,8 +263,8 @@ Rust module declarations live in manifest files:
 
 ```text
 src/core.rs
-src/event_modules/registry.rs
-src/handlers/registry.rs
+src/protocol/fact_modules.rs
+src/protocol/intent_handlers.rs
 ```
 
 Those files should contain declarations and narrow re-exports only.
@@ -302,9 +311,10 @@ queries.rs
 rows.rs
   current migration checkpoint for read-model row shapes
 
-matchers.rs
-  role constants, selector constructors, need/offer constructors, and custom
-  role-specific matching when a core matcher is not enough
+protocol/matchers/*.rs
+  one generic matching relation per file; each matcher module owns the
+  relation's role constants, selector constructors, need/offer constructors,
+  matcher implementation, and relation-specific tests
 
 frame.rs / receive.rs
   transit-specific fixed-frame helpers and receive classification
@@ -343,8 +353,8 @@ There are exactly three durable schema DSL files:
 
 ```text
 src/core/schema.p8sql
-src/event_modules/schema.p8sql
-src/handlers/schema.p8sql
+src/protocol/fact_modules/schema.p8sql
+src/protocol/intent_handlers/schema.p8sql
 ```
 
 `src/core/schema.p8sql` contains core mechanics:
@@ -361,12 +371,12 @@ network_in
 network_out
 ```
 
-`src/event_modules/schema.p8sql` contains projection/read-model state.
+`src/protocol/fact_modules/schema.p8sql` contains projection/read-model state.
 In the end state it also declares fact wire layouts and read-model row
 key/value layouts. Generated codecs use those declarations to produce
 fixed-length fact encoders/decoders and row key/value constructors.
 
-`src/handlers/schema.p8sql` contains handler checkpoint or operational state.
+`src/protocol/intent_handlers/schema.p8sql` contains handler checkpoint or operational state.
 
 The schema DSL may declare tables, indexes, uniqueness, byte lengths, and row
 keys. It should not contain Rust expressions, projection callbacks, or protocol
@@ -385,7 +395,7 @@ struct Fact {
 }
 ```
 
-Core can index by scope, but event modules decide what a scope means:
+Core can index by scope, but fact modules decide what a scope means:
 
 ```rust
 enum FactScope {
@@ -468,8 +478,10 @@ again unless matching offers change.
 
 ## Context Matchers
 
-A `ContextMatcher` matches needs and offers for one role. Core owns lifecycle;
-matchers own efficient role-specific lookup.
+A `ContextMatcher` matches needs and offers for one protocol role. Core owns
+lifecycle; matcher modules under `src/protocol/matchers/` own efficient
+relation-specific lookup plus the generic need/offer constructors projectors
+emit.
 
 ```rust
 trait ContextMatcher {
@@ -489,7 +501,7 @@ trait ContextMatcher {
 }
 ```
 
-The matcher owns both directions of role-specific matching: new need against
+The matcher owns both directions of candidate matching: new need against
 existing offers, and new offer against existing needs. A match only supplies
 candidate context. The target projector must still decode and validate matched
 facts semantically before emitting rows, offers, or intents.
@@ -643,14 +655,15 @@ When translating a legacy projector into the target tree:
    explicit typed deferred intents owned by handlers.
 8. Keep helper functions small, local to the fact family, and named after the
    invariant they validate.
-9. Register any new context role in src/protocol.rs with the matcher that owns
-   both new-need-to-old-offer and new-offer-to-old-need semantics.
+9. Add any new context role, need constructor, offer constructor, and matching
+   behavior to the relation-specific module under src/protocol/matchers/, then
+   register that matcher in src/protocol.rs.
 10. If a port is temporarily a row shell because sibling context is not ready,
     document the exact legacy parity gap in the module docs and remove that gap
     when the sibling context lands.
-11. Do not add a protocol-specific context.rs helper/source-of-truth layer.
-    Keep projection logic in project.rs and role-specific matching in
-    matchers.rs.
+11. Do not add protocol-specific context.rs, selectors.rs, or fact-module
+    matchers.rs helper/source-of-truth files. Keep projection logic in
+    project.rs and relation-specific matching in src/protocol/matchers/.
 ```
 
 ## Intents
@@ -745,7 +758,7 @@ Handler rules:
 
 ```text
 - One handler owns each deferred intent kind.
-- Handlers are flat files under src/handlers/.
+- Handlers are flat files under src/protocol/intent_handlers/.
 - Handlers declare exact fact inputs when they need fact context.
 - Handlers do bounded work per call.
 - Handlers are idempotent by intent key.
@@ -786,7 +799,8 @@ dispatch deferred intents
 repeat until the work budget is exhausted
 ```
 
-`WakeLoop` owns the mechanics. Event modules and handlers own protocol meaning.
+`WakeLoop` owns the mechanics. Fact modules and intent handlers own protocol
+meaning.
 
 ## Wire And Codecs
 
@@ -812,7 +826,7 @@ Ciphertext<N>
 Padding<N>
 ```
 
-Event modules declare fixed fact layouts in `src/event_modules/schema.p8sql`
+Fact modules declare fixed fact layouts in `src/protocol/fact_modules/schema.p8sql`
 and should not hand-roll byte parsing loops. The current checkpoint still has
 per-module layout files; those files should remain declarative and converge on
 generated fixed-layout readers/writers.
@@ -1138,7 +1152,7 @@ adding new compatibility layers:
 ```text
 1. Extend the signed-key-wrap ReceiveTransit path into a general target
    admission path for the remaining shared fact types.
-2. Finish event-module-owned transit frame packaging and send-side
+2. Finish fact-module-owned transit frame packaging and send-side
    classification.
 3. Wire SendOnConnection -> transit packaging -> NetworkSend through facts and
    intents.
@@ -1156,7 +1170,7 @@ adding new compatibility layers:
 
 - Add boundary tests before broad rewrites.
 - Keep root manifests declaration-only.
-- Keep every handler as one flat file under `src/handlers/`.
+- Keep every handler as one flat file under `src/protocol/intent_handlers/`.
 - Register fact types, context roles, intent kinds, handlers, and wire layouts
   in visible manifests.
 - Generate row and wire boilerplate from the three schema declaration files.
@@ -1189,5 +1203,5 @@ WakeLoop coordinates mechanics
 ```
 
 There is one context mechanism, one projection scheduler, and one deferred
-intent queue. Everything else is either event-module projection state, command
+intent queue. Everything else is either fact-module projection state, command
 construction, transport IO, or handler checkpoint state.

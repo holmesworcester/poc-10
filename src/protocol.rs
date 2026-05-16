@@ -2,18 +2,21 @@
 //!
 //! This file names the facts, context matchers, intents, handlers, and schema
 //! sources that make up the poc-10 protocol. It is intentionally a table of
-//! contents, not a runtime. Module manifests (`event_modules.rs` and
-//! `handlers.rs`) keep Rust namespaces visible; this registry says which of
-//! those namespaces are part of the concrete protocol.
+//! contents, not a runtime. `fact_modules.rs` and `intent_handlers.rs` keep
+//! concrete protocol namespaces visible; this registry says which of those
+//! namespaces are part of the concrete protocol.
 
+pub mod fact_modules;
+pub mod intent_handlers;
+pub mod matchers;
 pub mod runtime;
 
 use crate::core::schema_dsl::{
-    CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
+    CORE_SCHEMA_SOURCE, FACT_MODULES_SCHEMA_SOURCE, INTENT_HANDLERS_SCHEMA_SOURCE,
 };
-use crate::event_modules::{
-    connection_ephemeral_secret, connection_request, connection_response, content_event,
-    content_file, content_file_deletion, content_file_slice, content_message,
+use crate::protocol::fact_modules::{
+    cascade_event, connection_ephemeral_secret, connection_request, connection_response,
+    content_event, content_file, content_file_deletion, content_file_slice, content_message,
     content_message_deletion, content_reaction, disappearing_messages_setting, encryption,
     identity_admin, identity_device_invite, identity_endpoint, identity_endpoint_shared,
     identity_invite, identity_invite_accepted, identity_invite_server, identity_user,
@@ -21,7 +24,7 @@ use crate::event_modules::{
     sealed_message, signed_fact, sync_compare, sync_encrypted_root, sync_have_id,
     sync_key_wrap_available, sync_need_id, sync_range_request, sync_shared_event, transit_received,
 };
-use crate::handlers::{
+use crate::protocol::intent_handlers::{
     bootstrap_send, connection, connection_response as connection_response_handler, handle_sync,
     network_send, purge_cascade, receive_transit, retention_expiry, retention_floor,
     sync_index_update, transit,
@@ -96,16 +99,22 @@ pub const SCHEMAS: &[SchemaRegistration] = &[
         source: CORE_SCHEMA_SOURCE,
     },
     SchemaRegistration {
-        name: "event_modules",
-        source: EVENT_MODULES_SCHEMA_SOURCE,
+        name: "fact_modules",
+        source: FACT_MODULES_SCHEMA_SOURCE,
     },
     SchemaRegistration {
-        name: "handlers",
-        source: HANDLERS_SCHEMA_SOURCE,
+        name: "intent_handlers",
+        source: INTENT_HANDLERS_SCHEMA_SOURCE,
     },
 ];
 
 pub const FACTS: &[FactRegistration] = &[
+    FactRegistration {
+        module: "cascade_event",
+        name: "cascade_event",
+        tag: cascade_event::layout::TYPE_CASCADE_EVENT,
+        projector: "CascadeEventProjector",
+    },
     FactRegistration {
         module: "connection_ephemeral_secret",
         name: "connection_ephemeral_secret",
@@ -394,14 +403,6 @@ pub const CONTEXT_MATCHERS: &[ContextMatcherRegistration] = &[
         matcher: "ExactSelectorMatcher",
     },
     ContextMatcherRegistration {
-        role: "disappearing_authority",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "disappearing_previous",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
         role: "content_deleted",
         matcher: "ExactSelectorMatcher",
     },
@@ -474,10 +475,6 @@ pub const CONTEXT_MATCHERS: &[ContextMatcherRegistration] = &[
         matcher: "ExactSelectorMatcher",
     },
     ContextMatcherRegistration {
-        role: "removal_ref",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
         role: "secret_coverage",
         matcher: "SecretCoverageMatcher",
     },
@@ -521,117 +518,117 @@ pub const INTENTS: &[IntentRegistration] = &[
     IntentRegistration {
         kind: bootstrap_send::BOOTSTRAP_SEND_REQUEST,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::bootstrap_send",
+        declared_by: "intent_handlers::bootstrap_send",
     },
     IntentRegistration {
         kind: connection::CONNECTION_MARK_SENT,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::connection",
+        declared_by: "intent_handlers::connection",
     },
     IntentRegistration {
         kind: connection::CONNECTION_SEND_FRAME,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::connection",
+        declared_by: "intent_handlers::connection",
     },
     IntentRegistration {
         kind: connection::CONNECTION_SEND_REQUEST,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::connection",
+        declared_by: "intent_handlers::connection",
     },
     IntentRegistration {
         kind: connection::CONNECTION_SEND_RESPONSE,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::connection",
+        declared_by: "intent_handlers::connection",
     },
     IntentRegistration {
         kind: connection_response_handler::CONNECTION_RESPONSE,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::connection_response",
+        declared_by: "intent_handlers::connection_response",
     },
     IntentRegistration {
         kind: encryption::intent::MATERIALIZE_KEY_WRAPS,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::materialize_key_wraps",
+        declared_by: "intent_handlers::materialize_key_wraps",
     },
     IntentRegistration {
         kind: encryption::intent::PURGE_RETIRED_RECIPIENT_MATERIAL,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::purge_retired_recipient_material",
+        declared_by: "intent_handlers::purge_retired_recipient_material",
     },
     IntentRegistration {
         kind: encryption::intent::UNWRAP_KEY_WRAP,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::unwrap_key_wrap",
+        declared_by: "intent_handlers::unwrap_key_wrap",
     },
     IntentRegistration {
         kind: handle_sync::PROCESS_SYNC_INBOUND,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::handle_sync",
+        declared_by: "intent_handlers::handle_sync",
     },
     IntentRegistration {
         kind: handle_sync::SYNC_NEED_ID,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::handle_sync",
+        declared_by: "intent_handlers::handle_sync",
     },
     IntentRegistration {
         kind: handle_sync::RESPOND_TO_SYNC_COMPARE,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::handle_sync",
+        declared_by: "intent_handlers::handle_sync",
     },
     IntentRegistration {
         kind: handle_sync::REQUEST_SYNC_ID,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::handle_sync",
+        declared_by: "intent_handlers::handle_sync",
     },
     IntentRegistration {
         kind: handle_sync::RESPOND_TO_SYNC_NEED,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::handle_sync",
+        declared_by: "intent_handlers::handle_sync",
     },
     IntentRegistration {
         kind: network_send::NETWORK_SEND_FRAME,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::network_send",
+        declared_by: "intent_handlers::network_send",
     },
     IntentRegistration {
         kind: receive_transit::RECEIVE_TRANSIT_FRAME,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::receive_transit",
+        declared_by: "intent_handlers::receive_transit",
     },
     IntentRegistration {
         kind: sealed_message::intent::PURGE_EVENT,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::purge_event",
+        declared_by: "intent_handlers::purge_event",
     },
     IntentRegistration {
         kind: purge_cascade::CASCADE_CHILD_PURGE,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::purge_cascade",
+        declared_by: "intent_handlers::purge_cascade",
     },
     IntentRegistration {
         kind: retention_expiry::EXPIRE_MESSAGE,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::retention_expiry",
+        declared_by: "intent_handlers::retention_expiry",
     },
     IntentRegistration {
         kind: retention_floor::APPLY_RETENTION_FLOOR,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::retention_floor",
+        declared_by: "intent_handlers::retention_floor",
     },
     IntentRegistration {
         kind: sync_index_update::RECORD_INDEXED_EVENT,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::sync_index_update",
+        declared_by: "intent_handlers::sync_index_update",
     },
     IntentRegistration {
         kind: transit::TRANSIT_SEND_ON_CONNECTION,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::transit",
+        declared_by: "intent_handlers::transit",
     },
     IntentRegistration {
         kind: transit::TRANSIT_WRAP_CONNECTION_BATCH,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "handlers::transit",
+        declared_by: "intent_handlers::transit",
     },
 ];
 

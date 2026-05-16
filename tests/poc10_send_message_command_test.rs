@@ -14,11 +14,13 @@ use topo::core::command_context::{
     WorkspaceId,
 };
 use topo::core::crypto;
-use topo::event_modules::encryption::fact::LocalKeySecretFact;
-use topo::event_modules::sealed_message::create::{associated_data, recover_text, send_message};
-use topo::event_modules::sealed_message::layout::decode_sealed_message;
-use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
-use topo::event_modules::signed_fact::layout::decode_signed_fact;
+use topo::protocol::fact_modules::encryption::fact::LocalKeySecretFact;
+use topo::protocol::fact_modules::sealed_message::create::{
+    associated_data, recover_text, send_message,
+};
+use topo::protocol::fact_modules::sealed_message::layout::decode_sealed_message;
+use topo::protocol::fact_modules::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::fact_modules::signed_fact::layout::decode_signed_fact;
 
 struct FixedClock(Cell<u64>);
 

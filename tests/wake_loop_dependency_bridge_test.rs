@@ -4,10 +4,11 @@ use std::collections::BTreeSet;
 use topo::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use topo::core::facts::{Fact, FactId, FactScope};
 use topo::core::intents::AtomicIntent;
-use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::store::{Schema, Store, TableName, TableRow};
 use topo::core::wake_loop::WakeLoop;
+use topo::protocol::matchers::ExactSelectorMatcher;
 
 const MAX_DEPS: usize = 10;
 const PAYLOAD_BYTES: usize = 16;

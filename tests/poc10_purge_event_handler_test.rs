@@ -1,23 +1,22 @@
 use topo::core::facts::Fact;
-use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
-use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE};
+use topo::core::matchers::ContextMatcher;
+use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACT_MODULES_SCHEMA_SOURCE};
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::sealed_message::fact::{
+use topo::protocol::fact_modules::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES,
 };
-use topo::event_modules::sealed_message::intent::{
+use topo::protocol::fact_modules::sealed_message::intent::{
     self as purge_intent, PurgeEventIntent, PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
 };
-use topo::event_modules::sealed_message::matchers::{
-    self as context, workspace_scope, SecretCoverageMatcher,
-};
-use topo::event_modules::sealed_message::rows::{
+use topo::protocol::fact_modules::sealed_message::rows::{
     message_row, sealed_message_row, MessageRow, SealedMessageRow, MESSAGE_ROWS,
     SEALED_MESSAGE_ROWS,
 };
-use topo::event_modules::sealed_message::{layout, project};
-use topo::handlers::purge_event::PurgeEventHandler;
+use topo::protocol::fact_modules::sealed_message::{layout, project};
+use topo::protocol::intent_handlers::purge_event::PurgeEventHandler;
+use topo::protocol::matchers::ExactSelectorMatcher;
+use topo::protocol::matchers::{self as context, workspace_scope, SecretCoverageMatcher};
 
 const AUTHOR: [u8; 32] = [6; 32];
 
@@ -130,7 +129,7 @@ fn purge_event_handler_does_not_delete_projection_rows() {
     let message = message_fact(workspace, signer, AUTHOR);
     let deletion = deletion_fact(workspace, message.id, AUTHOR);
     let store =
-        Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE]).expect("store");
+        Store::open_memory_with_schema_sources(&[FACT_MODULES_SCHEMA_SOURCE]).expect("store");
     let sealed = sealed_message_row(SealedMessageRow {
         workspace_id: workspace,
         message_id: message.id,

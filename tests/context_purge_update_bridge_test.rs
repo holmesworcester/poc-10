@@ -1,9 +1,10 @@
 use topo::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use topo::core::facts::{Fact, FactId, FactScope, ScopeKind};
 use topo::core::intents::{Intent, IntentExecution, IntentKind};
-use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::wake_loop::WakeLoop;
+use topo::protocol::matchers::ExactSelectorMatcher;
 
 #[test]
 fn deletion_update_offer_wakes_waiting_content_fact_and_emits_purge_intent() {

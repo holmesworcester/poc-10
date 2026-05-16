@@ -38,7 +38,7 @@ fn cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_10k() {
 }
 
 #[test]
-#[ignore = "cutover blocker: generate-deps/replay-deps-reverse cascade perf commands are not ported to the poc-10 match runtime"]
+#[ignore = "large cascade perf fixture is kept manual; 10k coverage exercises the target runtime path"]
 fn cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_50k() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "cascade-50k.db");

@@ -1,13 +1,14 @@
 use topo::core::context::Selector;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::transit_received::fact::{
+use topo::protocol::fact_modules::transit_received::fact::{
     TransitReceivedFact, TRANSIT_KIND_CONNECTION_HANDSHAKE,
 };
-use topo::event_modules::transit_received::matchers as context;
-use topo::event_modules::transit_received::{layout, project};
+use topo::protocol::fact_modules::transit_received::{layout, project};
+use topo::protocol::matchers as context;
+use topo::protocol::matchers::ExactSelectorMatcher;
 
 fn received_fact() -> TransitReceivedFact {
     TransitReceivedFact {

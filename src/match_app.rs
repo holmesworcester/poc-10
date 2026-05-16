@@ -11,10 +11,13 @@ use crate::core::command_context::{
 };
 use crate::core::daemon;
 use crate::core::logical_clock;
-use crate::event_modules::connection_response;
-use crate::event_modules::sealed_message;
-use crate::event_modules::{content_event, identity_invite, identity_user, identity_workspace};
-use crate::event_modules::{encryption, identity_admin, identity_endpoint_shared};
+use crate::protocol::fact_modules::cascade_event;
+use crate::protocol::fact_modules::connection_response;
+use crate::protocol::fact_modules::sealed_message;
+use crate::protocol::fact_modules::{
+    content_event, identity_invite, identity_user, identity_workspace,
+};
+use crate::protocol::fact_modules::{encryption, identity_admin, identity_endpoint_shared};
 use crate::protocol::runtime::ProtocolRuntime;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -50,6 +53,8 @@ pub fn run(argv: Vec<String>) -> Result<(), String> {
         Some("view") => run_view(parsed),
         Some("grant-admin") => run_grant_admin(parsed),
         Some("generate") => run_generate(parsed),
+        Some("generate-deps") => run_generate_deps(parsed),
+        Some("replay-deps-reverse") => run_replay_deps_reverse(parsed),
         Some("content-count") => run_content_count(parsed),
         Some("clock") => run_clock(parsed),
         Some("count") => run_count(parsed),
@@ -87,6 +92,8 @@ fn top_level_usage(reason: &str) -> String {
          match --db PATH {view_usage}\n\
          match --db PATH {grant_admin_usage}\n\
          match --db PATH {generate_usage}\n\
+         match --db PATH {generate_deps_usage}\n\
+         match --db PATH {replay_deps_reverse_usage}\n\
          match --db PATH {content_count_usage}\n\
          match --db PATH clock [set TIMESTAMP|advance DELTA|clear]\n\
          match --db PATH {count_usage}\n\
@@ -115,6 +122,8 @@ fn top_level_usage(reason: &str) -> String {
         view_usage = sealed_message::cli::VIEW_USAGE,
         grant_admin_usage = identity_admin::cli::GRANT_ADMIN_USAGE,
         generate_usage = content_event::cli::GENERATE_USAGE,
+        generate_deps_usage = cascade_event::cli::GENERATE_DEPS_USAGE,
+        replay_deps_reverse_usage = cascade_event::cli::REPLAY_DEPS_REVERSE_USAGE,
         content_count_usage = content_event::cli::CONTENT_COUNT_USAGE,
         count_usage = identity_workspace::cli::COUNT_USAGE
     )
@@ -710,6 +719,36 @@ fn run_generate(parsed: ParsedArgs) -> Result<(), String> {
     runtime.save()?;
 
     for line in content_event::cli::generated_output(&receipt, receipt.generated_events).lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn run_generate_deps(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("generate-deps requires --db PATH"))?;
+    let runtime = ProtocolRuntime::open_disk(db)?;
+    let args = cascade_event::cli::parse_generate_deps_args(CliArgs::new(&parsed.command[1..]))?;
+    let receipt =
+        cascade_event::commands::generate_deps(runtime.store(), args.count, args.deps_per_event)?;
+
+    for line in cascade_event::cli::generate_deps_output(&receipt).lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn run_replay_deps_reverse(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("replay-deps-reverse requires --db PATH"))?;
+    CliArgs::new(&parsed.command[1..])
+        .require_len(0, cascade_event::cli::REPLAY_DEPS_REVERSE_USAGE)?;
+    let mut runtime = ProtocolRuntime::open_disk(db)?;
+    let receipt = cascade_event::commands::replay_deps_reverse(&mut runtime)?;
+
+    for line in cascade_event::cli::replay_deps_reverse_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())

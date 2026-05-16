@@ -6,7 +6,7 @@ use topo::core::wire::{
     fixed_tag, Bool8, Ciphertext, FixedBytes, FixedLayout, FixedSlot, Hash32, Id32, Nonce24,
     PublicKey32, Signature64, SymmetricKey32, Tag, U16be, U32be, U64be, WireError, U8,
 };
-use topo::event_modules::transit::layout::{
+use topo::protocol::fact_modules::transit::layout::{
     TRANSIT_LARGE_CIPHERTEXT_BYTES, TRANSIT_LARGE_PLAINTEXT_BYTES, TRANSIT_SMALL_CIPHERTEXT_BYTES,
     TRANSIT_SMALL_PLAINTEXT_BYTES,
 };

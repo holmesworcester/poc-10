@@ -10,7 +10,7 @@
 //! map to the same row. That gives the boundary a cheap idempotence property
 //! while callers are still free to retry after crashes. If this file starts
 //! parsing the payload, naming protocol concepts, or deciding when a row should
-//! be produced, it has crossed out of core and into an event module.
+//! be produced, it has crossed out of core and into a fact module.
 
 use std::net::SocketAddr;
 use std::str::FromStr;

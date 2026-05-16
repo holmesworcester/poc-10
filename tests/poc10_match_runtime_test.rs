@@ -7,15 +7,17 @@ use topo::core::command_context::{
 };
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
-use topo::event_modules::encryption::{
+use topo::protocol::fact_modules::encryption::{
     fact::{LocalKeySecretFact, RemovalFrontierFact},
     layout as encryption_layout,
 };
-use topo::event_modules::identity_workspace::{commands::create_workspace, rows as workspace_rows};
-use topo::event_modules::sealed_message::{
+use topo::protocol::fact_modules::identity_workspace::{
+    commands::create_workspace, rows as workspace_rows,
+};
+use topo::protocol::fact_modules::sealed_message::{
     create::send_message, fact::SignerPubkeyFact, layout as sealed_layout, rows as sealed_rows,
 };
-use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::fact_modules::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::runtime::ProtocolRuntime;
 use topo::protocol::PROTOCOL;
 

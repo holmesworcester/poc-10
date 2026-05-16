@@ -10,17 +10,21 @@ use std::time::{Duration, Instant};
 
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactId};
-use topo::core::matchers::ExactSelectorMatcher;
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
-use topo::core::schema_dsl::EVENT_MODULES_SCHEMA_SOURCE;
+use topo::core::schema_dsl::FACT_MODULES_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wake_loop::{DrainReport, WakeLoop};
-use topo::event_modules::content_file::fact::ContentFileFact;
-use topo::event_modules::content_file::{layout as file_layout, matchers as file_context};
-use topo::event_modules::content_file_slice::fact::ContentFileSliceFact;
-use topo::event_modules::content_file_slice::{layout as slice_layout, rows as slice_rows};
-use topo::event_modules::content_message::fact::{unix_minute_for, ContentMessageFact};
-use topo::event_modules::content_message::{layout as message_layout, matchers as message_context};
+use topo::protocol::fact_modules::content_file::fact::ContentFileFact;
+use topo::protocol::fact_modules::content_file::layout as file_layout;
+use topo::protocol::fact_modules::content_file_slice::fact::ContentFileSliceFact;
+use topo::protocol::fact_modules::content_file_slice::{
+    layout as slice_layout, rows as slice_rows,
+};
+use topo::protocol::fact_modules::content_message::fact::{unix_minute_for, ContentMessageFact};
+use topo::protocol::fact_modules::content_message::layout as message_layout;
+use topo::protocol::matchers as file_context;
+use topo::protocol::matchers as message_context;
+use topo::protocol::matchers::ExactSelectorMatcher;
 
 const MIB: usize = 1024 * 1024;
 const MESSAGE_BATCH: usize = 4096;
@@ -39,7 +43,7 @@ struct PerfFixture {
 impl PerfFixture {
     fn new() -> Self {
         Self {
-            store: Store::open_memory_with_schema_sources(&[EVENT_MODULES_SCHEMA_SOURCE])
+            store: Store::open_memory_with_schema_sources(&[FACT_MODULES_SCHEMA_SOURCE])
                 .expect("open target schema"),
             bus: WakeLoop::new(),
             workspace_id: [1; 32],
@@ -132,8 +136,8 @@ impl PerfFixture {
                 &[&message_matcher, &file_matcher],
                 &self.store,
                 &[
-                    topo::event_modules::content_message::rows::CONTENT_MESSAGE_ROWS,
-                    topo::event_modules::content_file::rows::FILE_ROWS,
+                    topo::protocol::fact_modules::content_message::rows::CONTENT_MESSAGE_ROWS,
+                    topo::protocol::fact_modules::content_file::rows::FILE_ROWS,
                     slice_rows::FILE_SLICE_ROWS,
                 ],
                 usize::MAX,
@@ -142,13 +146,13 @@ impl PerfFixture {
     }
 
     fn message_exists(&self, message_id: FactId) -> bool {
-        let key = topo::event_modules::content_message::rows::content_message_key(
+        let key = topo::protocol::fact_modules::content_message::rows::content_message_key(
             self.workspace_id,
             message_id,
         );
         self.store
             .table_row(
-                topo::event_modules::content_message::rows::CONTENT_MESSAGE_ROWS,
+                topo::protocol::fact_modules::content_message::rows::CONTENT_MESSAGE_ROWS,
                 &key,
             )
             .expect("load message row")
@@ -156,12 +160,15 @@ impl PerfFixture {
     }
 
     fn file_exists(&self, file_event_id: FactId) -> bool {
-        let key = topo::event_modules::content_file::rows::content_file_key(
+        let key = topo::protocol::fact_modules::content_file::rows::content_file_key(
             &self.workspace_id,
             &file_event_id,
         );
         self.store
-            .table_row(topo::event_modules::content_file::rows::FILE_ROWS, &key)
+            .table_row(
+                topo::protocol::fact_modules::content_file::rows::FILE_ROWS,
+                &key,
+            )
             .expect("load file row")
             .is_some()
     }
@@ -360,15 +367,15 @@ impl Projector for ProjectionPerfProjector {
     ) -> Result<ProjectionOutput, String> {
         match fact.bytes.first().copied() {
             Some(message_layout::TYPE_CONTENT_MESSAGE) => {
-                topo::event_modules::content_message::project::ContentMessageProjector::new()
+                topo::protocol::fact_modules::content_message::project::ContentMessageProjector::new()
                     .project(fact, context)
             }
             Some(file_layout::TYPE_CONTENT_FILE) => {
-                topo::event_modules::content_file::project::ContentFileProjector::new()
+                topo::protocol::fact_modules::content_file::project::ContentFileProjector::new()
                     .project(fact, context)
             }
             Some(slice_layout::TYPE_CONTENT_FILE_SLICE) => {
-                topo::event_modules::content_file_slice::project::ContentFileSliceProjector::new()
+                topo::protocol::fact_modules::content_file_slice::project::ContentFileSliceProjector::new()
                     .project(fact, context)
             }
             _ => Err("unknown projection perf fact".to_string()),

@@ -4,9 +4,10 @@ use topo::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use topo::core::facts::{Fact, FactId, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
 use topo::core::intents::{Intent, IntentExecution, IntentKind};
-use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::wake_loop::WakeLoop;
+use topo::protocol::matchers::ExactSelectorMatcher;
 
 #[test]
 fn target_admission_tracks_fact_ids_and_drains_local_batch_directly() {

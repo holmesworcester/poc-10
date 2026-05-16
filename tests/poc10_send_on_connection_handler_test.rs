@@ -4,21 +4,22 @@ use topo::core::crypto;
 use topo::core::facts::Fact;
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
 use topo::core::schema_dsl::{
-    CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
+    CORE_SCHEMA_SOURCE, FACT_MODULES_SCHEMA_SOURCE, INTENT_HANDLERS_SCHEMA_SOURCE,
 };
 use topo::core::store::Store;
-use topo::event_modules::connection_response::fact::ConnectionResponseFact;
-use topo::event_modules::connection_response::layout as connection_response_layout;
-use topo::event_modules::identity_endpoint::fact::EndpointFact;
-use topo::event_modules::identity_endpoint::rows as endpoint_rows;
-use topo::event_modules::sync;
-use topo::event_modules::sync_shared_event::{
+use topo::protocol::fact_modules::connection_response::fact::ConnectionResponseFact;
+use topo::protocol::fact_modules::connection_response::layout as connection_response_layout;
+use topo::protocol::fact_modules::identity_endpoint::fact::EndpointFact;
+use topo::protocol::fact_modules::identity_endpoint::rows as endpoint_rows;
+use topo::protocol::fact_modules::sync_shared_event::{
     fact::SharedEventFact, layout as shared_event_layout,
 };
-use topo::event_modules::transit::frame as transit_frame;
-use topo::handlers::network_send;
-use topo::handlers::transit::TransitSendOnConnectionHandler;
-use topo::handlers::transit::{send_on_connection_intent, TransitSendOnConnection};
+use topo::protocol::fact_modules::transit::frame as transit_frame;
+use topo::protocol::intent_handlers::network_send;
+use topo::protocol::intent_handlers::transit::TransitSendOnConnectionHandler;
+use topo::protocol::intent_handlers::transit::{
+    send_on_connection_intent, TransitSendOnConnection,
+};
 
 fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionResponseFact) {
     let connection = ConnectionResponseFact {
@@ -46,7 +47,7 @@ fn well_formed_send_intent_packs_fixed_frame_for_network_send() {
     let local_endpoint = local_endpoint();
     let (connection_fact, connection) = connection_fact(local_endpoint.endpoint);
     let fact = Fact::new(
-        sync::matchers::workspace_scope([7; 32]),
+        topo::protocol::matchers::workspace_scope([7; 32]),
         1,
         shared_event_layout::encode_fact(&SharedEventFact {
             workspace_id: [7; 32],
@@ -85,8 +86,8 @@ fn well_formed_send_intent_packs_fixed_frame_for_network_send() {
 fn store_with_local_endpoint() -> Store {
     let store = Store::open_memory_with_schema_sources(&[
         CORE_SCHEMA_SOURCE,
-        EVENT_MODULES_SCHEMA_SOURCE,
-        HANDLERS_SCHEMA_SOURCE,
+        FACT_MODULES_SCHEMA_SOURCE,
+        INTENT_HANDLERS_SCHEMA_SOURCE,
     ])
     .expect("store");
     store

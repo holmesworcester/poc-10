@@ -2,15 +2,15 @@ use std::collections::BTreeSet;
 
 use rusqlite::Connection;
 use topo::core::schema_dsl::{
-    parse_schema, CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
+    parse_schema, CORE_SCHEMA_SOURCE, FACT_MODULES_SCHEMA_SOURCE, INTENT_HANDLERS_SCHEMA_SOURCE,
 };
 use topo::core::store::{Store, TableName, TableRow};
 
 fn checked_schema_sources() -> [&'static str; 3] {
     [
         CORE_SCHEMA_SOURCE,
-        EVENT_MODULES_SCHEMA_SOURCE,
-        HANDLERS_SCHEMA_SOURCE,
+        FACT_MODULES_SCHEMA_SOURCE,
+        INTENT_HANDLERS_SCHEMA_SOURCE,
     ]
 }
 

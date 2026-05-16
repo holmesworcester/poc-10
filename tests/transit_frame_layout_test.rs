@@ -6,10 +6,10 @@
 
 use topo::core::crypto::{XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES};
 use topo::core::wire::{Ciphertext, FixedBytes, FixedLayout, WireError};
-use topo::event_modules::transit::frame::{
+use topo::protocol::fact_modules::transit::frame::{
     self as transit_frame, SealConnectionFrame, TransitFactBundle,
 };
-use topo::event_modules::transit::layout::{
+use topo::protocol::fact_modules::transit::layout::{
     decode_frame_parts, peek_frame_header, TransitFrameHeader, TransitLargeV1, TransitSmallV1,
     TRANSIT_FRAME_SIZE_CLASS_LARGE, TRANSIT_FRAME_SIZE_CLASS_SMALL, TRANSIT_FRAME_TAG,
     TRANSIT_FRAME_VERSION, TRANSIT_HEADER_BYTES, TRANSIT_LARGE_CIPHERTEXT_BYTES,
@@ -366,7 +366,7 @@ fn sealed_large_connection_frame_fills_fixed_ciphertext_slot() {
 
 #[test]
 fn opening_rejects_variable_length_ciphertext_slot() {
-    let frame = topo::event_modules::transit::layout::encode_frame_bytes(
+    let frame = topo::protocol::fact_modules::transit::layout::encode_frame_bytes(
         TRANSIT_FRAME_SIZE_CLASS_SMALL,
         FixedBytes(SENDER),
         FixedBytes(RECEIVER),

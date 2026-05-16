@@ -10,16 +10,16 @@ use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
 use topo::core::schema_dsl::{
-    CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
+    CORE_SCHEMA_SOURCE, FACT_MODULES_SCHEMA_SOURCE, INTENT_HANDLERS_SCHEMA_SOURCE,
 };
 use topo::core::store::Store;
-use topo::event_modules::connection_request::fact::ConnectionRequestFact;
-use topo::event_modules::connection_request::layout as connection_request_layout;
-use topo::event_modules::connection_response::fact::ConnectionResponseFact;
-use topo::event_modules::connection_response::layout as connection_response_layout;
-use topo::event_modules::identity_endpoint::fact::EndpointFact;
-use topo::event_modules::identity_endpoint::rows as endpoint_rows;
-use topo::handlers::network_send::{
+use topo::protocol::fact_modules::connection_request::fact::ConnectionRequestFact;
+use topo::protocol::fact_modules::connection_request::layout as connection_request_layout;
+use topo::protocol::fact_modules::connection_response::fact::ConnectionResponseFact;
+use topo::protocol::fact_modules::connection_response::layout as connection_response_layout;
+use topo::protocol::fact_modules::identity_endpoint::fact::EndpointFact;
+use topo::protocol::fact_modules::identity_endpoint::rows as endpoint_rows;
+use topo::protocol::intent_handlers::network_send::{
     network_send_frame_intent, NetworkSendFrame, NetworkSendHandler, NETWORK_SEND_FRAME,
 };
 
@@ -37,8 +37,8 @@ fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
     });
     let store = Store::open_memory_with_schema_sources(&[
         CORE_SCHEMA_SOURCE,
-        EVENT_MODULES_SCHEMA_SOURCE,
-        HANDLERS_SCHEMA_SOURCE,
+        FACT_MODULES_SCHEMA_SOURCE,
+        INTENT_HANDLERS_SCHEMA_SOURCE,
     ])
     .expect("store");
     let local_endpoint = local_endpoint();

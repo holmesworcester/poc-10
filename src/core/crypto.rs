@@ -2,7 +2,7 @@
 //!
 //! Callers pass semantic context and canonical bytes into this facade.
 //! The facade owns primitive selection and low-level library calls, keeping
-//! event modules from growing their own hash or signature implementations.
+//! fact modules from growing their own hash or signature implementations.
 
 use std::io::{Cursor, Read, Write};
 

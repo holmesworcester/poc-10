@@ -34,6 +34,15 @@ fn role_names_declared_in(text: &str) -> Vec<String> {
         roles.push(after_start[..end].to_string());
         rest = &after_start[end + 1..];
     }
+    let mut rest = text;
+    while let Some(start) = rest.find("_ROLE: &str = \"") {
+        let after_start = &rest[start + "_ROLE: &str = \"".len()..];
+        let Some(end) = after_start.find('"') else {
+            break;
+        };
+        roles.push(after_start[..end].to_string());
+        rest = &after_start[end + 1..];
+    }
     roles
 }
 
@@ -69,7 +78,7 @@ fn protocol_registry_names_the_target_surfaces() {
 #[test]
 fn target_context_roles_are_registered() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let declared_roles = rust_files(&root.join("src/event_modules"))
+    let declared_roles = rust_files(&root.join("src/protocol/matchers"))
         .into_iter()
         .flat_map(|path| {
             let text = source_text(&path);
@@ -88,8 +97,58 @@ fn target_context_roles_are_registered() {
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "every target ContextNeed/ContextOffer role introduced by event modules needs a protocol registry matcher:\n{}",
+        "every target ContextNeed/ContextOffer role introduced by fact modules needs a protocol registry matcher:\n{}",
         missing.join("\n")
+    );
+}
+
+#[test]
+fn context_matcher_plumbing_is_centralized_by_matching_relation() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let forbidden_fact_module_files = rust_files(&root.join("src/protocol/fact_modules"))
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| matches!(name, "matchers.rs" | "context.rs" | "selectors.rs"))
+        })
+        .map(|path| {
+            path.strip_prefix(root)
+                .expect("repo-relative path")
+                .display()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        forbidden_fact_module_files.is_empty(),
+        "fact modules must emit protocol-defined needs/offers, not own matcher/context/selector files:\n{}",
+        forbidden_fact_module_files.join("\n")
+    );
+
+    let matcher_files = rust_files(&root.join("src/protocol/matchers"))
+        .into_iter()
+        .filter_map(|path| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .collect::<BTreeSet<_>>();
+    let expected = BTreeSet::from([
+        "coverage".to_string(),
+        "exact".to_string(),
+        "range".to_string(),
+        "wrap_source".to_string(),
+    ]);
+
+    assert_eq!(
+        matcher_files, expected,
+        "protocol matchers should stay organized by generic matching relation"
+    );
+
+    assert!(
+        root.join("src/protocol/matchers.rs").is_file(),
+        "protocol matchers need a root manifest file instead of a mod.rs"
     );
 }
 

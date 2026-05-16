@@ -1,0 +1,77 @@
+use crate::core::facts::FactId;
+
+use super::fact::{CascadeEventFact, MAX_DEPS, PAYLOAD_BYTES};
+
+pub const TYPE_CASCADE_EVENT: u8 = 2;
+pub const ENCODED_BYTES: usize = 1 + 8 + 1 + (MAX_DEPS * 32) + PAYLOAD_BYTES;
+
+pub fn encode_fact(event: &CascadeEventFact) -> Result<Vec<u8>, String> {
+    if event.dependencies.len() > MAX_DEPS {
+        return Err("cascade event dependency count exceeds fixed fields".to_string());
+    }
+
+    let mut out = vec![0; ENCODED_BYTES];
+    out[0] = TYPE_CASCADE_EVENT;
+    out[1..9].copy_from_slice(&event.timestamp.to_be_bytes());
+    out[9] = event.dependencies.len() as u8;
+    let mut offset = 10;
+    for idx in 0..MAX_DEPS {
+        let dependency = event.dependencies.get(idx).copied().unwrap_or([0; 32]);
+        out[offset..offset + 32].copy_from_slice(&dependency);
+        offset += 32;
+    }
+    out[offset..offset + PAYLOAD_BYTES].copy_from_slice(&event.payload);
+    Ok(out)
+}
+
+pub fn decode_fact(bytes: &[u8]) -> Result<CascadeEventFact, String> {
+    if bytes.len() != ENCODED_BYTES {
+        return Err("cascade event length mismatch".to_string());
+    }
+    if bytes[0] != TYPE_CASCADE_EVENT {
+        return Err("unknown cascade event type".to_string());
+    }
+
+    let timestamp = u64::from_be_bytes(bytes[1..9].try_into().unwrap());
+    let dependency_count = bytes[9] as usize;
+    if dependency_count > MAX_DEPS {
+        return Err("cascade event dependency count exceeds fixed fields".to_string());
+    }
+
+    let mut dependencies = Vec::with_capacity(dependency_count);
+    let mut offset = 10;
+    for idx in 0..MAX_DEPS {
+        let dependency: FactId = bytes[offset..offset + 32].try_into().unwrap();
+        if idx < dependency_count {
+            dependencies.push(dependency);
+        } else if dependency != [0; 32] {
+            return Err("cascade event unused dependency field is nonzero".to_string());
+        }
+        offset += 32;
+    }
+
+    Ok(CascadeEventFact {
+        timestamp,
+        dependencies,
+        payload: bytes[offset..offset + PAYLOAD_BYTES].try_into().unwrap(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cascade_event_roundtrips_fixed_width() {
+        let fact = CascadeEventFact {
+            timestamp: 42,
+            dependencies: vec![[1; 32], [2; 32]],
+            payload: [7; PAYLOAD_BYTES],
+        };
+
+        let bytes = encode_fact(&fact).expect("encode");
+
+        assert_eq!(bytes.len(), ENCODED_BYTES);
+        assert_eq!(decode_fact(&bytes).expect("decode"), fact);
+    }
+}

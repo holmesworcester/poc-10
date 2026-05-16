@@ -1,16 +1,14 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::encryption::fact::{
+use topo::protocol::fact_modules::encryption::fact::{
     LocalKeySecretFact, RecipientKeyFact, WrappedSecretKind, NO_PREVIOUS_RECIPIENT_KEY,
 };
-use topo::event_modules::encryption::intent;
-use topo::event_modules::encryption::layout;
-use topo::event_modules::encryption::matchers::{
-    workspace_scope, WrapSourceKind, WrapSourceSelector,
-};
-use topo::event_modules::signed_fact::{self, fact::LocalSignerSecretFact};
-use topo::handlers::materialize_key_wraps::MaterializeKeyWrapsHandler;
+use topo::protocol::fact_modules::encryption::intent;
+use topo::protocol::fact_modules::encryption::layout;
+use topo::protocol::fact_modules::signed_fact::{self, fact::LocalSignerSecretFact};
+use topo::protocol::intent_handlers::materialize_key_wraps::MaterializeKeyWrapsHandler;
+use topo::protocol::matchers::{workspace_scope, WrapSourceKind, WrapSourceSelector};
 
 #[test]
 fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {

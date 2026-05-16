@@ -1,32 +1,35 @@
 use topo::core::crypto;
 use topo::core::facts::Fact;
 use topo::core::intents::AtomicIntent;
-use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
-use topo::event_modules::encryption::{
-    layout as encryption_layout, matchers as encryption_context,
+use topo::protocol::fact_modules::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
+use topo::protocol::fact_modules::encryption::layout as encryption_layout;
+use topo::protocol::fact_modules::sealed_message::create as sealed_create;
+use topo::protocol::fact_modules::sealed_message::fact::{
+    SealedMessageFact, SignerPubkeyFact, NONCE_BYTES,
 };
-use topo::event_modules::sealed_message::create as sealed_create;
-use topo::event_modules::sealed_message::fact::{SealedMessageFact, SignerPubkeyFact, NONCE_BYTES};
-use topo::event_modules::sealed_message::matchers::SecretCoverageMatcher;
-use topo::event_modules::sealed_message::rows::{
+use topo::protocol::fact_modules::sealed_message::layout as sealed_layout;
+use topo::protocol::fact_modules::sealed_message::rows::{
     decode_sealed_message_row, message_key, SEALED_MESSAGE_ROWS,
 };
-use topo::event_modules::sealed_message::{layout as sealed_layout, matchers as sealed_context};
-use topo::event_modules::sync::matchers::{self as context, RangeEventMatcher};
-use topo::event_modules::sync_encrypted_root::fact::EncryptedRootFact;
-use topo::event_modules::sync_encrypted_root::layout as encrypted_root_layout;
-use topo::event_modules::sync_key_wrap_available::fact::KeyWrapAvailableFact;
-use topo::event_modules::sync_key_wrap_available::layout as key_wrap_available_layout;
-use topo::event_modules::sync_range_request::fact::SyncRangeRequestFact;
-use topo::event_modules::sync_range_request::{
+use topo::protocol::fact_modules::sync_encrypted_root::fact::EncryptedRootFact;
+use topo::protocol::fact_modules::sync_encrypted_root::layout as encrypted_root_layout;
+use topo::protocol::fact_modules::sync_key_wrap_available::fact::KeyWrapAvailableFact;
+use topo::protocol::fact_modules::sync_key_wrap_available::layout as key_wrap_available_layout;
+use topo::protocol::fact_modules::sync_range_request::fact::SyncRangeRequestFact;
+use topo::protocol::fact_modules::sync_range_request::{
     layout as sync_range_request_layout, project as sync_range_request_project,
 };
-use topo::event_modules::sync_shared_event::fact::SharedEventFact;
-use topo::event_modules::sync_shared_event::layout as shared_event_layout;
-use topo::handlers::transit;
+use topo::protocol::fact_modules::sync_shared_event::fact::SharedEventFact;
+use topo::protocol::fact_modules::sync_shared_event::layout as shared_event_layout;
+use topo::protocol::intent_handlers::transit;
+use topo::protocol::matchers as encryption_context;
+use topo::protocol::matchers as sealed_context;
+use topo::protocol::matchers::ExactSelectorMatcher;
+use topo::protocol::matchers::SecretCoverageMatcher;
+use topo::protocol::matchers::{self as context, RangeEventMatcher};
 use topo::protocol::runtime::ProtocolProjector;
 
 const DISPLAY_SECRET: [u8; 32] = [0x66; 32];

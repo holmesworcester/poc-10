@@ -1,22 +1,21 @@
 use topo::core::crypto;
 use topo::core::facts::Fact;
 use topo::core::intents::AtomicIntent;
-use topo::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{ProjectionContext, Projector};
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
-use topo::event_modules::encryption::layout as encryption_layout;
-use topo::event_modules::sealed_message::fact::{
+use topo::protocol::fact_modules::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
+use topo::protocol::fact_modules::encryption::layout as encryption_layout;
+use topo::protocol::fact_modules::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact, NONCE_BYTES,
 };
-use topo::event_modules::sealed_message::matchers::{
-    self as context, workspace_scope, SecretCoverageMatcher,
-};
-use topo::event_modules::sealed_message::rows::{
+use topo::protocol::fact_modules::sealed_message::rows::{
     decode_message_tombstone_row, decode_sealed_message_row, message_key, MESSAGE_ROWS,
     MESSAGE_TOMBSTONE_ROWS, SEALED_MESSAGE_ROWS,
 };
-use topo::event_modules::sealed_message::{create as sealed_create, layout, project};
+use topo::protocol::fact_modules::sealed_message::{create as sealed_create, layout, project};
+use topo::protocol::matchers::ExactSelectorMatcher;
+use topo::protocol::matchers::{self as context, workspace_scope, SecretCoverageMatcher};
 use topo::protocol::runtime::ProtocolProjector;
 
 const DEFAULT_AUTHOR: [u8; 32] = [6; 32];
@@ -35,8 +34,7 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
     let mut prefix = [0; 32];
     prefix[0] = 0b1010_1111;
     let secret_internal = secret_node_fact(workspace, frontier_id, 40, 50, 1, prefix);
-    let frontier_matcher =
-        ExactSelectorMatcher::new(topo::event_modules::encryption::matchers::frontier_role());
+    let frontier_matcher = ExactSelectorMatcher::new(topo::protocol::matchers::frontier_role());
     let signer_matcher = ExactSelectorMatcher::new(context::signer_role());
     let deletion_matcher = ExactSelectorMatcher::new(context::deletion_role());
     let secret_matcher = SecretCoverageMatcher::new();
@@ -185,8 +183,7 @@ fn non_author_deletion_does_not_purge_or_wake_message() {
     let signer_matcher = ExactSelectorMatcher::new(context::signer_role());
     let deletion_matcher = ExactSelectorMatcher::new(context::deletion_role());
     let secret_matcher = SecretCoverageMatcher::new();
-    let frontier_matcher =
-        ExactSelectorMatcher::new(topo::event_modules::encryption::matchers::frontier_role());
+    let frontier_matcher = ExactSelectorMatcher::new(topo::protocol::matchers::frontier_role());
     let matchers = [
         &frontier_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,

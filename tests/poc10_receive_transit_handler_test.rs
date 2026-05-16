@@ -5,23 +5,27 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
 use topo::core::wake_loop::WakeLoop;
 use topo::core::wire::FixedBytes;
-use topo::event_modules::connection_response::fact::ConnectionResponseFact;
-use topo::event_modules::connection_response::layout as connection_response_layout;
-use topo::event_modules::encryption::fact::{
+use topo::protocol::fact_modules::connection_response::fact::ConnectionResponseFact;
+use topo::protocol::fact_modules::connection_response::layout as connection_response_layout;
+use topo::protocol::fact_modules::encryption::fact::{
     KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
-use topo::event_modules::encryption::{create as encryption_create, layout as encryption_layout};
-use topo::event_modules::signed_fact;
-use topo::event_modules::sync_compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
-use topo::event_modules::sync_compare::layout as sync_compare_layout;
-use topo::event_modules::transit::frame::{
+use topo::protocol::fact_modules::encryption::{
+    create as encryption_create, layout as encryption_layout,
+};
+use topo::protocol::fact_modules::signed_fact;
+use topo::protocol::fact_modules::sync_compare::fact::{
+    RangeSummary, SyncCompareFact, TimestampRange,
+};
+use topo::protocol::fact_modules::sync_compare::layout as sync_compare_layout;
+use topo::protocol::fact_modules::transit::frame::{
     self as transit_frame, SealConnectionFrame, TransitFactBundle,
 };
-use topo::event_modules::transit::layout::{
+use topo::protocol::fact_modules::transit::layout::{
     self as transit_layout, TRANSIT_FRAME_SIZE_CLASS_LARGE,
 };
-use topo::event_modules::transit_received;
-use topo::handlers::receive_transit::{
+use topo::protocol::fact_modules::transit_received;
+use topo::protocol::intent_handlers::receive_transit::{
     receive_transit_frame_intent, ReceiveTransitFrame, ReceiveTransitHandler, RECEIVE_TRANSIT_FRAME,
 };
 

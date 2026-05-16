@@ -8,34 +8,34 @@ use crate::core::context::Role;
 use crate::core::daemon::TickReport;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::handler_dispatch::HandlerContext;
-use crate::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use crate::core::matchers::ContextMatcher;
 use crate::core::network_queues;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::core::runtime::{RuntimeHandlers, RuntimeMatchers, RuntimeProtocol};
 use crate::core::schema_dsl::{
-    CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
+    CORE_SCHEMA_SOURCE, FACT_MODULES_SCHEMA_SOURCE, INTENT_HANDLERS_SCHEMA_SOURCE,
 };
 use crate::core::store::Store;
 use crate::core::store::TableName;
 use crate::core::tcp;
 use crate::core::wake_loop::{DispatchReport, WakeLoop};
-use crate::event_modules::{
-    connection_ephemeral_secret, connection_request, connection_response, content_event,
-    content_file, content_file_deletion, content_file_slice, content_message,
+use crate::protocol::fact_modules::{
+    cascade_event, connection_ephemeral_secret, connection_request, connection_response,
+    content_event, content_file, content_file_deletion, content_file_slice, content_message,
     content_message_deletion, content_reaction, disappearing_messages_setting, encryption,
     identity_admin, identity_device_invite, identity_endpoint, identity_endpoint_shared,
-    identity_invite, identity_invite_accepted, identity_invite_server, identity_matchers,
-    identity_user, identity_user_invite, identity_workspace, local_history_node_secret,
-    removal_frontier, sealed_message, signed_fact, sync, sync_compare, sync_encrypted_root,
-    sync_have_id, sync_key_wrap_available, sync_need_id, sync_range_request, sync_shared_event,
-    transit_received,
+    identity_invite, identity_invite_accepted, identity_invite_server, identity_user,
+    identity_user_invite, identity_workspace, local_history_node_secret, removal_frontier,
+    sealed_message, signed_fact, sync_compare, sync_encrypted_root, sync_have_id,
+    sync_key_wrap_available, sync_need_id, sync_range_request, sync_shared_event, transit_received,
 };
-use crate::handlers::{
+use crate::protocol::intent_handlers::{
     bootstrap_send, connection_response as connection_response_handler, handle_sync,
     materialize_key_wraps, network_send, purge_cascade, purge_event,
     purge_retired_recipient_material, receive_transit, retention_expiry, retention_floor,
     sync_index_update, transit, unwrap_key_wrap,
 };
+use crate::protocol::matchers::ExactSelectorMatcher;
 use std::collections::BTreeSet;
 
 pub type ProtocolRuntime = crate::core::runtime::Runtime<super::Protocol>;
@@ -167,7 +167,7 @@ pub(crate) fn is_sync_seed_fact(fact: &Fact) -> bool {
     ) {
         return false;
     }
-    crate::event_modules::transit::create::require_sendable_fact(fact).is_ok()
+    crate::protocol::fact_modules::transit::create::require_sendable_fact(fact).is_ok()
 }
 
 fn remote_endpoint_for_connection(
@@ -212,11 +212,12 @@ fn may_seed_fact_to_endpoint(
 
 const SCHEMA_SOURCES: &[&str] = &[
     CORE_SCHEMA_SOURCE,
-    EVENT_MODULES_SCHEMA_SOURCE,
-    HANDLERS_SCHEMA_SOURCE,
+    FACT_MODULES_SCHEMA_SOURCE,
+    INTENT_HANDLERS_SCHEMA_SOURCE,
 ];
 
 const ATOMIC_ROW_TABLES: &[TableName] = &[
+    cascade_event::rows::CASCADE_STAGED_EVENT_ROWS,
     connection_ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection_request::rows::CONNECTION_REQUEST_ROWS,
     connection_response::rows::CONNECTION_RESPONSE_ROWS,
@@ -292,6 +293,9 @@ impl Projector for ProtocolProjector {
             return Err("cannot project empty fact bytes".to_string());
         };
         match tag {
+            cascade_event::layout::TYPE_CASCADE_EVENT => {
+                cascade_event::project::CascadeEventProjector::new().project(fact, context)
+            }
             connection_ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET => {
                 connection_ephemeral_secret::project::ConnectionEphemeralSecretProjector::new()
                     .project(fact, context)
@@ -464,43 +468,38 @@ pub struct ProtocolContextMatchers {
 
 impl ProtocolContextMatchers {
     fn new() -> Self {
-        let roles = [
-            connection_ephemeral_secret::matchers::connection_ephemeral_secret_role(),
-            connection_request::matchers::connection_invite_secret_role(),
-            connection_request::matchers::connection_request_role(),
-            content_file::matchers::file_role(),
-            content_message::matchers::message_role(),
-            content_message::matchers::deletion_role(),
-            encryption::matchers::recipient_key_role(),
-            encryption::matchers::frontier_role(),
-            encryption::matchers::recipient_superseded_role(),
-            encryption::matchers::local_recipient_key_role(),
-            identity_matchers::matchers::workspace_role(),
-            identity_matchers::matchers::invite_secret_role(),
-            identity_matchers::matchers::user_invite_role(),
-            identity_matchers::matchers::user_invite_key_role(),
-            identity_matchers::matchers::invite_server_role(),
-            identity_matchers::matchers::invite_server_key_role(),
-            identity_matchers::matchers::user_role(),
-            identity_matchers::matchers::device_invite_role(),
-            identity_matchers::matchers::device_invite_key_role(),
-            identity_matchers::matchers::endpoint_shared_role(),
-            identity_matchers::matchers::admin_role(),
-            local_history_node_secret::matchers::source_secret_role(),
-            sealed_message::matchers::signer_role(),
-            sealed_message::matchers::deletion_role(),
-            signed_fact::matchers::local_signer_secret_role(),
-            sync::matchers::exact_event_role(),
-            sync::matchers::key_wrap_role(),
-            transit_received::matchers::transit_received_role(),
-        ];
+        let mut exact_roles = BTreeSet::<Role>::new();
+        let mut custom_matcher_names = BTreeSet::<&'static str>::new();
+        for registration in super::CONTEXT_MATCHERS {
+            match registration.matcher {
+                "ExactSelectorMatcher" => {
+                    exact_roles.insert(
+                        Role::new(registration.role).expect("registered exact matcher role"),
+                    );
+                }
+                "RangeEventMatcher" | "SecretCoverageMatcher" | "WrapSourceMatcher" => {
+                    custom_matcher_names.insert(registration.matcher);
+                }
+                other => panic!("unknown context matcher {other}"),
+            }
+        }
+
         let mut matchers: Vec<Box<dyn ContextMatcher>> =
-            roles.into_iter().map(exact_matcher).collect();
-        matchers.push(Box::new(encryption::matchers::WrapSourceMatcher::new()));
-        matchers.push(Box::new(
-            sealed_message::matchers::SecretCoverageMatcher::new(),
-        ));
-        matchers.push(Box::new(sync::matchers::RangeEventMatcher::new()));
+            exact_roles.into_iter().map(exact_matcher).collect();
+        for matcher in custom_matcher_names {
+            match matcher {
+                "RangeEventMatcher" => {
+                    matchers.push(Box::new(super::matchers::RangeEventMatcher::new()));
+                }
+                "SecretCoverageMatcher" => {
+                    matchers.push(Box::new(super::matchers::SecretCoverageMatcher::new()));
+                }
+                "WrapSourceMatcher" => {
+                    matchers.push(Box::new(super::matchers::WrapSourceMatcher::new()));
+                }
+                other => panic!("unknown context matcher {other}"),
+            }
+        }
         Self { matchers }
     }
 
@@ -729,5 +728,33 @@ impl RuntimeHandlers for ProtocolHandlers {
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String> {
         self.dispatch_all(wake_loop, store, limit_per_handler)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::runtime::RuntimeProtocol;
+    use crate::protocol::{Protocol, CONTEXT_MATCHERS};
+
+    #[test]
+    fn protocol_runtime_matchers_follow_registry_exact_roles() {
+        let runtime_matchers = <Protocol as RuntimeProtocol>::matchers();
+        let runtime_roles = runtime_matchers
+            .matcher_refs()
+            .into_iter()
+            .filter_map(|matcher| {
+                matcher
+                    .exact_selector_role()
+                    .map(|role| role.as_str().to_string())
+            })
+            .collect::<BTreeSet<_>>();
+        let registry_roles = CONTEXT_MATCHERS
+            .iter()
+            .filter(|registration| registration.matcher == "ExactSelectorMatcher")
+            .map(|registration| registration.role.to_string())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(runtime_roles, registry_roles);
     }
 }

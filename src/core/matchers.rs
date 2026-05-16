@@ -14,73 +14,36 @@ pub struct ContextMatch {
 pub trait ContextMatcher {
     fn role(&self) -> &Role;
 
-    fn match_new_need(
-        &self,
-        need: &ContextNeed,
-        existing_offers: &[ContextOffer],
-    ) -> Vec<ContextMatch>;
-
-    fn match_new_offer(
-        &self,
-        offer: &ContextOffer,
-        existing_needs: &[ContextNeed],
-    ) -> Vec<ContextMatch>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExactSelectorMatcher {
-    role: Role,
-}
-
-impl ExactSelectorMatcher {
-    pub fn new(role: Role) -> Self {
-        Self { role }
-    }
-}
-
-impl ContextMatcher for ExactSelectorMatcher {
-    fn role(&self) -> &Role {
-        &self.role
-    }
-
-    fn match_new_need(
-        &self,
-        need: &ContextNeed,
-        existing_offers: &[ContextOffer],
-    ) -> Vec<ContextMatch> {
-        if need.role != self.role {
-            return Vec::new();
-        }
-        existing_offers
-            .iter()
-            .filter_map(|offer| exact_selector_match(need, offer))
-            .collect()
-    }
-
-    fn match_new_offer(
-        &self,
-        offer: &ContextOffer,
-        existing_needs: &[ContextNeed],
-    ) -> Vec<ContextMatch> {
-        if offer.role != self.role {
-            return Vec::new();
-        }
-        existing_needs
-            .iter()
-            .filter_map(|need| exact_selector_match(need, offer))
-            .collect()
-    }
-}
-
-pub fn exact_selector_match(need: &ContextNeed, offer: &ContextOffer) -> Option<ContextMatch> {
-    if need.role == offer.role && need.scope == offer.scope && need.selector == offer.selector {
-        Some(ContextMatch {
-            need_owner: need.owner,
-            offer_owner: offer.owner,
-            payload_ref: offer.payload_ref,
-        })
-    } else {
+    fn exact_selector_role(&self) -> Option<&Role> {
         None
+    }
+
+    fn match_new_need(
+        &self,
+        need: &ContextNeed,
+        existing_offers: &[ContextOffer],
+    ) -> Vec<ContextMatch>;
+
+    fn match_new_offer(
+        &self,
+        offer: &ContextOffer,
+        existing_needs: &[ContextNeed],
+    ) -> Vec<ContextMatch>;
+
+    fn match_delta(
+        &self,
+        delta: &ContextSetDelta,
+        available_needs: &[ContextNeed],
+        available_offers: &[ContextOffer],
+    ) -> Vec<ContextMatch> {
+        let mut matches = Vec::new();
+        for need in &delta.added_needs {
+            matches.extend(self.match_new_need(need, available_offers));
+        }
+        for offer in &delta.added_offers {
+            matches.extend(self.match_new_offer(offer, available_needs));
+        }
+        matches
     }
 }
 
@@ -91,27 +54,10 @@ pub fn match_context_delta(
     matchers: &[&dyn ContextMatcher],
 ) -> Vec<ContextMatch> {
     let mut matches = BTreeSet::new();
-    for need in &delta.added_needs {
-        for matcher in matchers_for_role(matchers, &need.role) {
-            matches.extend(matcher.match_new_need(need, available_offers));
-        }
-    }
-    for offer in &delta.added_offers {
-        for matcher in matchers_for_role(matchers, &offer.role) {
-            matches.extend(matcher.match_new_offer(offer, available_needs));
-        }
+    for matcher in matchers {
+        matches.extend(matcher.match_delta(delta, available_needs, available_offers));
     }
     matches.into_iter().collect()
-}
-
-fn matchers_for_role<'a>(
-    matchers: &'a [&'a dyn ContextMatcher],
-    role: &'a Role,
-) -> impl Iterator<Item = &'a dyn ContextMatcher> + 'a {
-    matchers
-        .iter()
-        .copied()
-        .filter(move |matcher| matcher.role() == role)
 }
 
 #[cfg(test)]
@@ -120,88 +66,58 @@ mod tests {
     use crate::core::context::{Role, Selector};
     use crate::core::facts::FactScope;
 
-    #[test]
-    fn exact_selector_match_requires_role_scope_and_selector() {
-        let role = Role::new("exact").unwrap();
-        let need = ContextNeed {
-            owner: [1; 32],
-            role: role.clone(),
-            scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
-        };
-        let offer = ContextOffer {
-            owner: [3; 32],
-            role,
-            scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
-            payload_ref: [4; 32],
-        };
-
-        let matched = exact_selector_match(&need, &offer).unwrap();
-        assert_eq!(matched.need_owner, [1; 32]);
-        assert_eq!(matched.offer_owner, [3; 32]);
-        assert_eq!(matched.payload_ref, [4; 32]);
+    struct EchoMatcher {
+        role: Role,
     }
 
-    #[test]
-    fn exact_selector_matcher_finds_new_need_matches() {
-        let role = Role::new("exact").unwrap();
-        let matcher = ExactSelectorMatcher::new(role.clone());
-        let need = ContextNeed {
-            owner: [1; 32],
-            role: role.clone(),
-            scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
-        };
-        let offers = vec![
-            ContextOffer {
-                owner: [3; 32],
-                role: role.clone(),
-                scope: FactScope::Global,
-                selector: Selector::from_bytes([2; 32]),
-                payload_ref: [4; 32],
-            },
-            ContextOffer {
-                owner: [5; 32],
-                role,
-                scope: FactScope::Local,
-                selector: Selector::from_bytes([2; 32]),
-                payload_ref: [6; 32],
-            },
-        ];
-
-        let matches = matcher.match_new_need(&need, &offers);
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].payload_ref, [4; 32]);
+    impl EchoMatcher {
+        fn new(role: Role) -> Self {
+            Self { role }
+        }
     }
 
-    #[test]
-    fn exact_selector_matcher_finds_new_offer_matches() {
-        let role = Role::new("exact").unwrap();
-        let matcher = ExactSelectorMatcher::new(role.clone());
-        let offer = ContextOffer {
-            owner: [3; 32],
-            role: role.clone(),
-            scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
-            payload_ref: [4; 32],
-        };
-        let needs = vec![ContextNeed {
-            owner: [1; 32],
-            role,
-            scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
-        }];
+    impl ContextMatcher for EchoMatcher {
+        fn role(&self) -> &Role {
+            &self.role
+        }
 
-        let matches = matcher.match_new_offer(&offer, &needs);
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].need_owner, [1; 32]);
+        fn match_new_need(
+            &self,
+            need: &ContextNeed,
+            existing_offers: &[ContextOffer],
+        ) -> Vec<ContextMatch> {
+            existing_offers
+                .iter()
+                .filter(|offer| offer.role == self.role && need.role == self.role)
+                .map(|offer| ContextMatch {
+                    need_owner: need.owner,
+                    offer_owner: offer.owner,
+                    payload_ref: offer.payload_ref,
+                })
+                .collect()
+        }
+
+        fn match_new_offer(
+            &self,
+            offer: &ContextOffer,
+            existing_needs: &[ContextNeed],
+        ) -> Vec<ContextMatch> {
+            existing_needs
+                .iter()
+                .filter(|need| need.role == self.role && offer.role == self.role)
+                .map(|need| ContextMatch {
+                    need_owner: need.owner,
+                    offer_owner: offer.owner,
+                    payload_ref: offer.payload_ref,
+                })
+                .collect()
+        }
     }
 
     #[test]
     fn context_delta_matching_only_wakes_added_relationships() {
         let role = Role::new("exact").unwrap();
-        let matcher = ExactSelectorMatcher::new(role.clone());
+        let matcher = EchoMatcher::new(role.clone());
         let stable_need = ContextNeed {
             owner: [1; 32],
             role: role.clone(),
@@ -249,7 +165,7 @@ mod tests {
     #[test]
     fn context_delta_matching_deduplicates_symmetric_new_matches() {
         let role = Role::new("exact").unwrap();
-        let matcher = ExactSelectorMatcher::new(role.clone());
+        let matcher = EchoMatcher::new(role.clone());
         let need = ContextNeed {
             owner: [1; 32],
             role: role.clone(),

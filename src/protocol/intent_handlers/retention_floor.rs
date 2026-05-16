@@ -1,0 +1,114 @@
+//! Bounded retention-floor handler.
+//!
+//! The intent names one disappearing-messages setting fact and one sealed
+//! message fact. The handler purges only when the message minute is below the
+//! setting's monotonic retire floor.
+
+use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::protocol::fact_modules::{disappearing_messages_setting, sealed_message};
+
+pub const APPLY_RETENTION_FLOOR: &str = "apply_retention_floor";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyRetentionFloor {
+    pub workspace_id: HandlerFactId,
+    pub setting_id: HandlerFactId,
+    pub target_id: HandlerFactId,
+}
+
+pub fn apply_retention_floor_intent(input: ApplyRetentionFloor) -> Intent {
+    Intent::new(
+        IntentKind::new(APPLY_RETENTION_FLOOR).expect("valid apply_retention_floor kind"),
+        IntentExecution::Deferred,
+        apply_retention_floor_key(&input),
+        encode_apply_retention_floor(&input),
+    )
+}
+
+pub fn decode_apply_retention_floor(intent: &Intent) -> Result<ApplyRetentionFloor, String> {
+    if intent.kind.as_str() != APPLY_RETENTION_FLOOR
+        || intent.execution != IntentExecution::Deferred
+    {
+        return Err("expected apply_retention_floor deferred intent".to_string());
+    }
+    let input = decode_apply_floor_payload(&intent.payload)?;
+    if intent.key != apply_retention_floor_key(&input) {
+        return Err("apply_retention_floor key does not match payload".to_string());
+    }
+    Ok(input)
+}
+
+fn apply_retention_floor_key(input: &ApplyRetentionFloor) -> Vec<u8> {
+    let mut key = Vec::with_capacity(96);
+    key.extend_from_slice(&input.workspace_id);
+    key.extend_from_slice(&input.setting_id);
+    key.extend_from_slice(&input.target_id);
+    key
+}
+
+fn encode_apply_retention_floor(input: &ApplyRetentionFloor) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(97);
+    payload.push(1);
+    payload.extend_from_slice(&input.workspace_id);
+    payload.extend_from_slice(&input.setting_id);
+    payload.extend_from_slice(&input.target_id);
+    payload
+}
+
+fn decode_apply_floor_payload(payload: &[u8]) -> Result<ApplyRetentionFloor, String> {
+    if payload.len() != 97 || payload[0] != 1 {
+        return Err("invalid apply_retention_floor payload".to_string());
+    }
+    Ok(ApplyRetentionFloor {
+        workspace_id: payload[1..33].try_into().unwrap(),
+        setting_id: payload[33..65].try_into().unwrap(),
+        target_id: payload[65..97].try_into().unwrap(),
+    })
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RetentionFloorHandler;
+
+impl RetentionFloorHandler {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl IntentHandler for RetentionFloorHandler {
+    fn accepts(&self, intent: &Intent) -> bool {
+        intent.kind.as_str() == APPLY_RETENTION_FLOOR
+    }
+
+    fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        let input = decode_apply_retention_floor(raw_intent)?;
+        Ok(vec![input.setting_id, input.target_id])
+    }
+
+    fn handle(
+        &self,
+        raw_intent: &Intent,
+        context: &HandlerContext,
+    ) -> Result<HandlerOutput, String> {
+        let input = decode_apply_retention_floor(raw_intent)?;
+        let setting = disappearing_messages_setting::layout::decode_fact(
+            &context.require_fact(&input.setting_id)?.bytes,
+        )?;
+        let message = sealed_message::layout::decode_sealed_message(
+            &context.require_fact(&input.target_id)?.bytes,
+        )?;
+
+        if setting.workspace_id != input.workspace_id {
+            return Err("apply_retention_floor setting workspace mismatch".to_string());
+        }
+        if message.workspace_id != input.workspace_id {
+            return Err("apply_retention_floor target workspace mismatch".to_string());
+        }
+        if message.minute >= setting.retire_minute {
+            return Err("apply_retention_floor target is not below floor".to_string());
+        }
+
+        Ok(HandlerOutput::new().purge_fact(input.target_id))
+    }
+}

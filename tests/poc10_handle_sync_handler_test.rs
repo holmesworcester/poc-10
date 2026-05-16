@@ -4,15 +4,17 @@ use topo::core::intents::IntentExecution;
 use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::event_modules::sync_compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
-use topo::event_modules::sync_compare::layout as sync_compare_layout;
-use topo::event_modules::sync_have_id::layout as sync_have_id_layout;
-use topo::handlers::handle_sync as sync_intent;
-use topo::handlers::handle_sync::HandleSyncHandler;
-use topo::handlers::handle_sync::RespondToSyncCompareHandler;
-use topo::handlers::sync_index_update as index_intent;
-use topo::handlers::sync_index_update::SyncIndexUpdateHandler;
-use topo::handlers::transit;
+use topo::protocol::fact_modules::sync_compare::fact::{
+    RangeSummary, SyncCompareFact, TimestampRange,
+};
+use topo::protocol::fact_modules::sync_compare::layout as sync_compare_layout;
+use topo::protocol::fact_modules::sync_have_id::layout as sync_have_id_layout;
+use topo::protocol::intent_handlers::handle_sync as sync_intent;
+use topo::protocol::intent_handlers::handle_sync::HandleSyncHandler;
+use topo::protocol::intent_handlers::handle_sync::RespondToSyncCompareHandler;
+use topo::protocol::intent_handlers::sync_index_update as index_intent;
+use topo::protocol::intent_handlers::sync_index_update::SyncIndexUpdateHandler;
+use topo::protocol::intent_handlers::transit;
 
 #[test]
 fn handle_sync_emits_need_id_for_missing_dependency() {

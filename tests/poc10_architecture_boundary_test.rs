@@ -113,7 +113,7 @@ fn source_code_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&st
 }
 
 fn target_projector_files(root: &Path) -> Vec<PathBuf> {
-    let event_modules = root.join("src/event_modules");
+    let event_modules = root.join("src/protocol/fact_modules");
     source_files(&event_modules)
         .into_iter()
         .filter(|path| {
@@ -148,13 +148,13 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         "There is no `mod.rs` anywhere in the repository.",
         "There is no root `src/commands` module",
         "src/core/command_context.rs",
-        "src/event_modules/registry.rs",
-        "src/handlers/registry.rs",
+        "src/protocol/fact_modules.rs",
+        "src/protocol/intent_handlers.rs",
         "There is no product `demo` or `smoke` command",
         "generic runtime/app mechanics",
         "src/core/schema.p8sql",
-        "src/event_modules/schema.p8sql",
-        "src/handlers/schema.p8sql",
+        "src/protocol/fact_modules/schema.p8sql",
+        "src/protocol/intent_handlers/schema.p8sql",
         "### Projector Style",
         "### Intent Handler Style",
         "### Wire And Codec Style",
@@ -200,39 +200,36 @@ fn poc10_core_contract_files_are_present() {
 }
 
 #[test]
-fn poc10_root_uses_registry_path_exports_not_root_manifests() {
+fn poc10_root_exports_protocol_owned_manifests() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
     for forbidden in [
         "src/commands.rs",
         "src/commands",
         "src/event_modules.rs",
+        "src/event_modules",
         "src/handlers.rs",
+        "src/handlers",
     ] {
         assert!(
             !root.join(forbidden).exists(),
-            "{forbidden} should not exist; command context belongs in core and module manifests live in registry.rs files"
+            "{forbidden} should not exist; command context belongs in core and concrete protocol modules live under src/protocol"
         );
     }
 
     for required in [
         "src/core/command_context.rs",
-        "src/event_modules/registry.rs",
-        "src/handlers/registry.rs",
+        "src/protocol/fact_modules.rs",
+        "src/protocol/intent_handlers.rs",
     ] {
         assert!(root.join(required).is_file(), "missing {required}");
     }
 
     let lib = source_text(&root.join("src/lib.rs"));
-    for required in [
-        r#"#[path = "event_modules/registry.rs"]"#,
-        "pub mod event_modules;",
-        r#"#[path = "handlers/registry.rs"]"#,
-        "pub mod handlers;",
-    ] {
+    for required in ["pub mod core;", "pub mod match_app;", "pub mod protocol;"] {
         assert!(
             lib.contains(required),
-            "src/lib.rs must export registry files with #[path]: missing {required}"
+            "src/lib.rs must expose only root crate manifests: missing {required}"
         );
     }
 }
@@ -446,10 +443,14 @@ fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
         "context_updates",
         "updates",
     ];
-    let target_paths = ["src/core", "src/event_modules", "src/handlers"]
-        .into_iter()
-        .flat_map(|path| source_files(&root.join(path)))
-        .collect::<Vec<_>>();
+    let target_paths = [
+        "src/core",
+        "src/protocol/fact_modules",
+        "src/protocol/intent_handlers",
+    ]
+    .into_iter()
+    .flat_map(|path| source_files(&root.join(path)))
+    .collect::<Vec<_>>();
     let offenders = source_matches_in_paths(root, target_paths, &forbidden);
 
     assert!(
@@ -483,10 +484,14 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
         "pending_connection_attempts",
         "pending_connection_responses",
     ];
-    let target_paths = ["src/core", "src/event_modules", "src/handlers"]
-        .into_iter()
-        .flat_map(|path| source_files(&root.join(path)))
-        .collect::<Vec<_>>();
+    let target_paths = [
+        "src/core",
+        "src/protocol/fact_modules",
+        "src/protocol/intent_handlers",
+    ]
+    .into_iter()
+    .flat_map(|path| source_files(&root.join(path)))
+    .collect::<Vec<_>>();
     let offenders = source_code_matches_in_paths(root, target_paths, &forbidden);
 
     assert!(
@@ -522,7 +527,7 @@ fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
     let projector_paths = target_projector_files(root);
     assert!(
         !projector_paths.is_empty(),
-        "scan target src/event_modules/**/project.rs files"
+        "scan target src/protocol/fact_modules/**/project.rs files"
     );
     let forbidden = [
         "ProjectionOutput::rows",
@@ -586,8 +591,8 @@ fn poc10_target_has_exactly_three_schema_dsl_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let expected = [
         "src/core/schema.p8sql",
-        "src/event_modules/schema.p8sql",
-        "src/handlers/schema.p8sql",
+        "src/protocol/fact_modules/schema.p8sql",
+        "src/protocol/intent_handlers/schema.p8sql",
     ];
 
     for path in expected {
@@ -651,8 +656,8 @@ fn poc10_target_root_manifests_are_declarations_only() {
     let manifests = [
         "src/lib.rs",
         "src/core.rs",
-        "src/event_modules/registry.rs",
-        "src/handlers/registry.rs",
+        "src/protocol/fact_modules.rs",
+        "src/protocol/intent_handlers.rs",
     ];
 
     for manifest in manifests {

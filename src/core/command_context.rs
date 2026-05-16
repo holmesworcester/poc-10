@@ -27,8 +27,8 @@
 
 use crate::core::facts::FactId;
 use crate::core::store::Store;
-use crate::event_modules::encryption::fact::LocalKeySecretFact;
-use crate::event_modules::signed_fact::fact::LocalSignerSecretFact;
+use crate::protocol::fact_modules::encryption::fact::LocalKeySecretFact;
+use crate::protocol::fact_modules::signed_fact::fact::LocalSignerSecretFact;
 
 pub type WorkspaceId = FactId;
 

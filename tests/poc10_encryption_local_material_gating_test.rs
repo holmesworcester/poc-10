@@ -1,12 +1,14 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
-use topo::event_modules::encryption::fact::{
+use topo::protocol::fact_modules::encryption::fact::{
     LocalHistoryNodeSecretFact, LocalKeySecretFact, RemovalFrontierFact,
 };
-use topo::event_modules::encryption::matchers as encryption_context;
-use topo::event_modules::encryption::{layout as encryption_layout, project::EncryptionProjector};
-use topo::event_modules::local_history_node_secret::matchers as history_context;
-use topo::event_modules::sealed_message::matchers as message_context;
+use topo::protocol::fact_modules::encryption::{
+    layout as encryption_layout, project::EncryptionProjector,
+};
+use topo::protocol::matchers as encryption_context;
+use topo::protocol::matchers as history_context;
+use topo::protocol::matchers as message_context;
 
 #[test]
 fn local_key_secret_waits_for_frontier_then_offers_root_material() {

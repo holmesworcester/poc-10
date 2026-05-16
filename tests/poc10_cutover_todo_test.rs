@@ -114,7 +114,7 @@ fn matching_lines_with_comment_mode(
 }
 
 fn project_files(root: &Path) -> Vec<PathBuf> {
-    rust_files_under(&root.join("src/event_modules"))
+    rust_files_under(&root.join("src/protocol/fact_modules"))
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "project.rs"))
         .collect()
@@ -388,7 +388,7 @@ fn cutover_projector_output_guardrail_is_real_and_enabled() {
     let body = &test[start..];
     assert!(
         body.contains("project.rs"),
-        "{fn_name} must scan target src/event_modules/**/project.rs files"
+        "{fn_name} must scan target src/protocol/fact_modules/**/project.rs files"
     );
     assert!(
         !body.contains("projector.rs"),
@@ -401,9 +401,9 @@ fn cutover_projector_output_guardrail_is_real_and_enabled() {
 fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
     let root = root();
     let paths = vec![
-        root.join("src/handlers/transit.rs"),
-        root.join("src/event_modules/transit/frame.rs"),
-        root.join("src/event_modules/transit/create.rs"),
+        root.join("src/protocol/intent_handlers/transit.rs"),
+        root.join("src/protocol/fact_modules/transit/frame.rs"),
+        root.join("src/protocol/fact_modules/transit/create.rs"),
     ];
     let offenders = matching_lines_including_comments(
         &root,
@@ -426,9 +426,9 @@ fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
 #[test]
 fn cutover_sync_has_no_legacy_sync_index_escape_hatch() {
     let root = root();
-    let mut paths = rust_files_under(&root.join("src/handlers"));
+    let mut paths = rust_files_under(&root.join("src/protocol/intent_handlers"));
     paths.extend(
-        rust_files_under(&root.join("src/event_modules"))
+        rust_files_under(&root.join("src/protocol/fact_modules"))
             .into_iter()
             .filter(|path| {
                 path.components()
@@ -460,7 +460,7 @@ fn cutover_sync_compare_response_uses_bounded_durable_range_index() {
     let root = root();
     let offenders = matching_lines_including_comments(
         &root,
-        vec![root.join("src/handlers/handle_sync.rs")],
+        vec![root.join("src/protocol/intent_handlers/handle_sync.rs")],
         &[
             "SYNC_COMPARE_RANGE_INDEX_NOT_READY",
             "sync_compare_range_index_not_ready",
@@ -498,7 +498,7 @@ fn cutover_dep_aware_sync_has_encrypted_out_of_range_display_perf_proof() {
 #[ignore = "cutover todo: purge must be decomposed into bounded target handlers"]
 fn cutover_purge_cascade_secret_retirement_sync_and_expiry_are_target_handlers() {
     let root = root();
-    let handlers = files_under(&root.join("src/handlers"))
+    let handlers = files_under(&root.join("src/protocol/intent_handlers"))
         .into_iter()
         .filter_map(|path| {
             path.file_stem()
@@ -606,17 +606,17 @@ fn cutover_imported_black_box_tests_have_no_extra_ignores() {
 fn cutover_encryption_is_not_a_multi_fact_bundle() {
     let root = root();
     let bundled_paths = [
-        "src/event_modules/encryption/fact.rs",
-        "src/event_modules/encryption/layout.rs",
-        "src/event_modules/encryption/create.rs",
-        "src/event_modules/encryption/commands.rs",
-        "src/event_modules/encryption/project.rs",
-        "src/event_modules/encryption/recipient_key.rs",
-        "src/event_modules/encryption/local_recipient_key.rs",
-        "src/event_modules/encryption/removal_frontier.rs",
-        "src/event_modules/encryption/key_request.rs",
-        "src/event_modules/encryption/local_material.rs",
-        "src/event_modules/encryption/signed_key_wrap.rs",
+        "src/protocol/fact_modules/encryption/fact.rs",
+        "src/protocol/fact_modules/encryption/layout.rs",
+        "src/protocol/fact_modules/encryption/create.rs",
+        "src/protocol/fact_modules/encryption/commands.rs",
+        "src/protocol/fact_modules/encryption/project.rs",
+        "src/protocol/fact_modules/encryption/recipient_key.rs",
+        "src/protocol/fact_modules/encryption/local_recipient_key.rs",
+        "src/protocol/fact_modules/encryption/removal_frontier.rs",
+        "src/protocol/fact_modules/encryption/key_request.rs",
+        "src/protocol/fact_modules/encryption/local_material.rs",
+        "src/protocol/fact_modules/encryption/signed_key_wrap.rs",
     ];
     let remaining = bundled_paths
         .into_iter()
@@ -624,7 +624,7 @@ fn cutover_encryption_is_not_a_multi_fact_bundle() {
         .collect::<Vec<_>>();
     assert!(
         remaining.is_empty(),
-        "encryption is still a multi-fact event-module bundle; split recipient keys, local recipient keys, removal frontiers, local key secrets, key requests, key wraps, and retained/history-node material into fact-family modules with their own fact/layout/project/create/commands/rows files:\n{}",
+        "encryption is still a multi-fact fact-module bundle; split recipient keys, local recipient keys, removal frontiers, local key secrets, key requests, key wraps, and retained/history-node material into fact-family modules with their own fact/layout/project/create/commands/rows files:\n{}",
         remaining.join("\n")
     );
 }
@@ -632,7 +632,7 @@ fn cutover_encryption_is_not_a_multi_fact_bundle() {
 #[test]
 fn cutover_sync_is_not_a_multi_fact_project_bundle() {
     let root = root();
-    let sync_dir = root.join("src/event_modules/sync");
+    let sync_dir = root.join("src/protocol/fact_modules/sync");
     let project_subdir = sync_dir.join("project");
     let fact_file = sync_dir.join("fact.rs");
 
@@ -653,7 +653,7 @@ fn cutover_sync_is_not_a_multi_fact_project_bundle() {
             .collect::<Vec<_>>();
         if fact_structs.len() > 1 {
             offenders.push(format!(
-                "src/event_modules/sync/fact.rs defines multiple fact families: {}",
+                "src/protocol/fact_modules/sync/fact.rs defines multiple fact families: {}",
                 fact_structs.join(", ")
             ));
         }
@@ -669,7 +669,7 @@ fn cutover_sync_is_not_a_multi_fact_project_bundle() {
 #[test]
 fn cutover_queries_are_not_context_capability_or_cross_module_dumping_grounds() {
     let root = root();
-    let query_files = rust_files_under(&root.join("src/event_modules"))
+    let query_files = rust_files_under(&root.join("src/protocol/fact_modules"))
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "queries.rs"))
         .collect::<Vec<_>>();
@@ -697,7 +697,7 @@ fn cutover_queries_are_not_context_capability_or_cross_module_dumping_grounds() 
     for path in query_files {
         let relative = path.strip_prefix(&root).unwrap().display().to_string();
         let text = source_text(&path);
-        if relative.ends_with("queries.rs") && text.contains("crate::event_modules::{") {
+        if relative.ends_with("queries.rs") && text.contains("crate::protocol::fact_modules::{") {
             offenders.push(format!(
                 "{relative} imports a grouped cross-module event_modules namespace"
             ));
@@ -783,7 +783,7 @@ fn cutover_projector_unit_tests_are_inline_with_fact_modules() {
     offenders.sort();
     assert!(
         offenders.is_empty(),
-        "move target projector unit tests into #[cfg(test)] modules beside the relevant event module code; reserve tests/ for black-box CLI/daemon/runtime integration tests and architecture guardrails:\n{}",
+        "move target projector unit tests into #[cfg(test)] modules beside the relevant fact module code; reserve tests/ for black-box CLI/daemon/runtime integration tests and architecture guardrails:\n{}",
         offenders.join("\n")
     );
 }

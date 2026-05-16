@@ -21,7 +21,7 @@ use crate::core::context::{
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
 use crate::core::handler_dispatch::{HandlerContext, IntentHandler};
 use crate::core::intents::{AtomicIntent, Intent, IntentExecution, IntentKind, TableDelete};
-use crate::core::matchers::{match_context_delta, ContextMatcher};
+use crate::core::matchers::{match_context_delta, ContextMatch, ContextMatcher};
 use crate::core::projection::{
     run_projection_with_context, MatchedContext, ProjectionContext, Projector,
 };
@@ -33,6 +33,8 @@ pub const NEEDS: TableName = TableName::new("needs");
 pub const OFFERS: TableName = TableName::new("offers");
 pub const PENDING_PROJECTION: TableName = TableName::new("pending_projection");
 pub const INTENTS: TableName = TableName::new("intents");
+
+type ExactContextKey = (Role, FactScope, Selector);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DrainReport {
@@ -53,6 +55,8 @@ pub struct DispatchReport {
 pub struct WakeLoop {
     facts: BTreeMap<FactId, Fact>,
     context_by_owner: BTreeMap<FactId, ContextSet>,
+    needs_by_exact_key: BTreeMap<ExactContextKey, BTreeSet<ContextNeed>>,
+    offers_by_exact_key: BTreeMap<ExactContextKey, BTreeSet<ContextOffer>>,
     pending_projection: VecDeque<FactId>,
     pending_owners: BTreeSet<FactId>,
     intents: Vec<Intent>,
@@ -104,6 +108,7 @@ impl WakeLoop {
         for context in bus.context_by_owner.values_mut() {
             *context = std::mem::take(context).normalized();
         }
+        bus.rebuild_context_indexes();
         for (key, _) in store
             .table_rows(PENDING_PROJECTION)
             .map_err(|err| format!("load pending projection: {err}"))?
@@ -462,9 +467,13 @@ impl WakeLoop {
     }
 
     fn replace_context(&mut self, owner: FactId, context: ContextSet) {
+        if let Some(previous) = self.context_by_owner.get(&owner).cloned() {
+            self.remove_context_from_indexes(&previous);
+        }
         if context.needs.is_empty() && context.offers.is_empty() {
             self.context_by_owner.remove(&owner);
         } else {
+            self.insert_context_into_indexes(&context);
             self.context_by_owner.insert(owner, context);
         }
         self.dirty_context_owners.insert(owner);
@@ -476,7 +485,8 @@ impl WakeLoop {
             self.dirty_facts.remove(&owner);
             self.deleted_facts.insert(owner);
         }
-        if self.context_by_owner.remove(&owner).is_some() {
+        if let Some(context) = self.context_by_owner.remove(&owner) {
+            self.remove_context_from_indexes(&context);
             self.dirty_context_owners.insert(owner);
             changed = true;
         }
@@ -502,6 +512,9 @@ impl WakeLoop {
         });
         for context_owner in dirty_context_owners {
             self.dirty_context_owners.insert(context_owner);
+        }
+        if changed {
+            self.rebuild_context_indexes();
         }
         changed
     }
@@ -593,9 +606,66 @@ impl WakeLoop {
         matchers: &[&dyn ContextMatcher],
         report: &mut DrainReport,
     ) -> usize {
-        let needs = self.all_needs();
-        let offers = self.all_offers();
-        let matches = match_context_delta(delta, &needs, &offers, matchers);
+        let mut matches = BTreeSet::new();
+        let exact_roles = exact_matcher_roles(matchers);
+        for need in delta
+            .added_needs
+            .iter()
+            .filter(|need| exact_roles.contains(&need.role))
+        {
+            let key = exact_context_key(&need.role, &need.scope, &need.selector);
+            if let Some(offers) = self.offers_by_exact_key.get(&key) {
+                for offer in offers {
+                    matches.insert(ContextMatch {
+                        need_owner: need.owner,
+                        offer_owner: offer.owner,
+                        payload_ref: offer.payload_ref,
+                    });
+                }
+            }
+        }
+        for offer in delta
+            .added_offers
+            .iter()
+            .filter(|offer| exact_roles.contains(&offer.role))
+        {
+            let key = exact_context_key(&offer.role, &offer.scope, &offer.selector);
+            if let Some(needs) = self.needs_by_exact_key.get(&key) {
+                for need in needs {
+                    matches.insert(ContextMatch {
+                        need_owner: need.owner,
+                        offer_owner: offer.owner,
+                        payload_ref: offer.payload_ref,
+                    });
+                }
+            }
+        }
+
+        let custom_matchers = matchers
+            .iter()
+            .copied()
+            .filter(|matcher| matcher.exact_selector_role().is_none())
+            .collect::<Vec<_>>();
+        if !custom_matchers.is_empty() {
+            let needs = self.all_needs();
+            let offers = self.all_offers();
+            matches.extend(match_context_delta(
+                delta,
+                &needs,
+                &offers,
+                &custom_matchers,
+            ));
+        }
+        let mut matches = matches.into_iter().collect::<Vec<_>>();
+        matches.sort_by_key(|matched| {
+            (
+                self.facts
+                    .get(&matched.need_owner)
+                    .map(|fact| fact.timestamp)
+                    .unwrap_or(u64::MAX),
+                matched.need_owner,
+            )
+        });
         for matched in &matches {
             if self.wake(matched.need_owner) {
                 report.wakes += 1;
@@ -612,16 +682,50 @@ impl WakeLoop {
         let Some(context) = self.context_by_owner.get(owner) else {
             return Ok(ProjectionContext::new(Vec::new()));
         };
-        let offers = self.all_offers();
+        let exact_roles = exact_matcher_roles(matchers);
+        let custom_matchers = matchers
+            .iter()
+            .copied()
+            .filter(|matcher| matcher.exact_selector_role().is_none())
+            .collect::<Vec<_>>();
+        let custom_offers = (!custom_matchers.is_empty()).then(|| self.all_offers());
         let mut matched = Vec::new();
         let mut seen = BTreeSet::new();
         for need in &context.needs {
-            for matcher in matchers
+            if exact_roles.contains(&need.role) {
+                let key = exact_context_key(&need.role, &need.scope, &need.selector);
+                if let Some(offers) = self.offers_by_exact_key.get(&key) {
+                    for offer in offers {
+                        if !seen.insert((need.clone(), offer.clone())) {
+                            continue;
+                        }
+                        let payload = self
+                            .facts
+                            .get(&offer.payload_ref)
+                            .ok_or_else(|| {
+                                "context offer payload references unknown fact".to_string()
+                            })?
+                            .clone();
+                        matched.push(MatchedContext {
+                            need: need.clone(),
+                            offer: offer.clone(),
+                            payload,
+                        });
+                    }
+                }
+            }
+
+            for matcher in custom_matchers
                 .iter()
                 .copied()
                 .filter(|matcher| matcher.role() == &need.role)
             {
-                for offer in offers.iter().filter(|offer| offer.role == need.role) {
+                for offer in custom_offers
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|offers| offers.iter())
+                    .filter(|offer| offer.role == need.role)
+                {
                     let offer_matches = matcher
                         .match_new_need(need, std::slice::from_ref(offer))
                         .into_iter()
@@ -647,6 +751,61 @@ impl WakeLoop {
             }
         }
         Ok(ProjectionContext::from_matches(matched))
+    }
+
+    fn rebuild_context_indexes(&mut self) {
+        self.needs_by_exact_key.clear();
+        self.offers_by_exact_key.clear();
+        let contexts = self.context_by_owner.values().cloned().collect::<Vec<_>>();
+        for context in &contexts {
+            self.insert_context_into_indexes(context);
+        }
+    }
+
+    fn insert_context_into_indexes(&mut self, context: &ContextSet) {
+        for need in &context.needs {
+            self.needs_by_exact_key
+                .entry(exact_context_key(&need.role, &need.scope, &need.selector))
+                .or_default()
+                .insert(need.clone());
+        }
+        for offer in &context.offers {
+            self.offers_by_exact_key
+                .entry(exact_context_key(
+                    &offer.role,
+                    &offer.scope,
+                    &offer.selector,
+                ))
+                .or_default()
+                .insert(offer.clone());
+        }
+    }
+
+    fn remove_context_from_indexes(&mut self, context: &ContextSet) {
+        for need in &context.needs {
+            let key = exact_context_key(&need.role, &need.scope, &need.selector);
+            let should_remove = if let Some(needs) = self.needs_by_exact_key.get_mut(&key) {
+                needs.remove(need);
+                needs.is_empty()
+            } else {
+                false
+            };
+            if should_remove {
+                self.needs_by_exact_key.remove(&key);
+            }
+        }
+        for offer in &context.offers {
+            let key = exact_context_key(&offer.role, &offer.scope, &offer.selector);
+            let should_remove = if let Some(offers) = self.offers_by_exact_key.get_mut(&key) {
+                offers.remove(offer);
+                offers.is_empty()
+            } else {
+                false
+            };
+            if should_remove {
+                self.offers_by_exact_key.remove(&key);
+            }
+        }
     }
 
     fn all_needs(&self) -> Vec<ContextNeed> {
@@ -699,6 +858,17 @@ impl WakeLoop {
         self.dirty_intent_keys.clear();
         self.deleted_intent_keys.clear();
     }
+}
+
+fn exact_context_key(role: &Role, scope: &FactScope, selector: &Selector) -> ExactContextKey {
+    (role.clone(), scope.clone(), selector.clone())
+}
+
+fn exact_matcher_roles(matchers: &[&dyn ContextMatcher]) -> BTreeSet<Role> {
+    matchers
+        .iter()
+        .filter_map(|matcher| matcher.exact_selector_role().cloned())
+        .collect()
 }
 
 fn replace_context_owner_rows(
@@ -1109,9 +1279,9 @@ mod tests {
     use crate::core::facts::FactScope;
     use crate::core::handler_dispatch::HandlerOutput;
     use crate::core::intents::{IntentExecution, IntentKind};
-    use crate::core::matchers::ExactSelectorMatcher;
     use crate::core::projection::{ProjectionContext, ProjectionOutput};
     use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
+    use crate::protocol::matchers::ExactSelectorMatcher;
     use std::cell::Cell;
 
     #[test]
