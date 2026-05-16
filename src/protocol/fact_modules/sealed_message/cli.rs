@@ -37,10 +37,15 @@ pub fn messages(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput
     let workspace_id = decode_hex_32(args.get(0).expect("length checked"))?;
     let messages = queries::opened_messages(ctx.store(), workspace_id)?;
     let mut lines = vec![format!("messages: {}", messages.len())];
-    for message in messages {
+    for (index, message) in messages.into_iter().enumerate() {
         let author = author_name(ctx.store(), workspace_id, message.signer_id)?
             .unwrap_or_else(|| short_hex(&message.signer_id));
-        lines.push(format!("{author}: {}", message.text));
+        lines.push(format!(
+            "{}. [{}] {author}: {}",
+            index + 1,
+            message.created_at_ms,
+            message.text
+        ));
     }
     Ok(CliOutput::lines(lines))
 }

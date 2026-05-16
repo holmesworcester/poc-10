@@ -62,6 +62,12 @@ impl Projector for AdminProjector {
                 fact.id,
                 crate::protocol::matchers::admin_role(),
             ))
+            .offer(crate::protocol::matchers::scoped_key_offer(
+                fact.id,
+                crate::protocol::matchers::admin_role(),
+                admin.workspace_id,
+                admin.user_fact_id.to_vec(),
+            ))
             .intent(AtomicIntent::PutRow(admin_row(fact.id, &admin)?).into_intent()))
     }
 }

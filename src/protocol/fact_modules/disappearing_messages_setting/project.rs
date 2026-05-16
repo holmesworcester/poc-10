@@ -8,6 +8,7 @@ use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::fact_modules::identity_admin;
 use crate::protocol::fact_modules::identity_workspace;
+use crate::protocol::fact_modules::signed_fact;
 
 use super::fact::DisappearingMessagesSettingFact;
 use super::layout;
@@ -99,7 +100,7 @@ fn validate_authority(
     authority_fact: &Fact,
     setting: &DisappearingMessagesSettingFact,
 ) -> Result<(), String> {
-    if let Ok(admin) = identity_admin::layout::decode_fact(&authority_fact.bytes) {
+    if let Ok(admin) = decode_admin_payload(authority_fact) {
         if admin.workspace_id != setting.workspace_id {
             return Err("disappearing setting authority admin workspace mismatch".to_string());
         }
@@ -118,6 +119,22 @@ fn validate_authority(
     }
 
     Err("disappearing setting authority context is not valid admin authority".to_string())
+}
+
+fn decode_admin_payload(fact: &Fact) -> Result<identity_admin::fact::AdminFact, String> {
+    match fact.bytes.first().copied() {
+        Some(identity_admin::layout::TYPE_ADMIN) => {
+            identity_admin::layout::decode_fact(&fact.bytes)
+        }
+        Some(signed_fact::layout::TYPE_SIGNED_FACT) => {
+            let envelope = signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+            if envelope.inner_type != identity_admin::layout::TYPE_ADMIN {
+                return Err("expected signed admin".to_string());
+            }
+            identity_admin::layout::decode_fact(&envelope.payload)
+        }
+        _ => Err("expected admin".to_string()),
+    }
 }
 
 fn validate_previous(

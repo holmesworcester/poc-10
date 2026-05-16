@@ -8,6 +8,7 @@ use crate::core::context::Role;
 use crate::core::daemon::TickReport;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::handler_dispatch::HandlerContext;
+use crate::core::logical_clock;
 use crate::core::matchers::ContextMatcher;
 use crate::core::network_queues;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
@@ -63,6 +64,7 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         network_queues::delete_inbound(self.store(), &inbound)?;
 
         let projection_before_handlers = self.drain_projection_until_idle(4, work_limit)?;
+        let queued_retention = self.enqueue_due_retention(work_limit)?;
         let dispatched = self.dispatch_intents(work_limit)?;
         let seeded_sync = self.seed_sync_have_ids(work_limit)?;
         let projection_after_seed = self.drain_projection_until_idle(4, work_limit)?;
@@ -78,8 +80,57 @@ impl crate::core::runtime::Runtime<super::Protocol> {
                 + projection_after_handlers.projections,
             handled_intents: dispatched.handled + dispatched_after_seed.handled,
             emitted_facts: dispatched.facts + dispatched_after_seed.facts + seeded_sync,
-            emitted_intents: dispatched.intents + dispatched_after_seed.intents,
+            emitted_intents: dispatched.intents + dispatched_after_seed.intents + queued_retention,
         })
+    }
+
+    pub fn enqueue_due_retention(&mut self, limit: usize) -> Result<usize, String> {
+        let Some(now_ms) = logical_clock::logical_time(self.store())? else {
+            return Ok(0);
+        };
+        let now_minute = now_ms / 60_000;
+        let sealed_rows = self
+            .store()
+            .table_rows(sealed_message::rows::SEALED_MESSAGE_ROWS)
+            .map_err(|err| format!("load sealed message rows for retention: {err}"))?
+            .into_iter()
+            .map(|(key, value)| sealed_message::rows::decode_sealed_message_row(&key, &value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut queued = 0usize;
+        for row in sealed_rows {
+            if queued >= limit {
+                break;
+            }
+            if row.expires_at_minute != u64::MAX && row.expires_at_minute <= now_minute {
+                if self.submit_intent(retention_expiry::expire_message_intent(
+                    retention_expiry::ExpireMessage {
+                        workspace_id: row.workspace_id,
+                        target_id: row.message_id,
+                        now_minute,
+                    },
+                ))? {
+                    queued += 1;
+                }
+                continue;
+            }
+            let Some(active) = disappearing_messages_setting::queries::active_for_workspace(
+                self.store(),
+                row.workspace_id,
+            )?
+            .filter(|setting| row.minute < setting.retire_minute) else {
+                continue;
+            };
+            if self.submit_intent(retention_floor::apply_retention_floor_intent(
+                retention_floor::ApplyRetentionFloor {
+                    workspace_id: row.workspace_id,
+                    setting_id: active.setting_id,
+                    target_id: row.message_id,
+                },
+            ))? {
+                queued += 1;
+            }
+        }
+        Ok(queued)
     }
 
     fn seed_sync_have_ids(&mut self, limit: usize) -> Result<usize, String> {

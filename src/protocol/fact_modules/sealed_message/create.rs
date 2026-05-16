@@ -15,6 +15,7 @@ use crate::core::command_context::{CommandContext, CommandOutput, WorkspaceId};
 use crate::core::crypto::{self, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_TAG_BYTES};
 use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::wire;
+use crate::protocol::fact_modules::disappearing_messages_setting;
 use crate::protocol::fact_modules::sealed_message::fact::{
     SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
 };
@@ -75,6 +76,21 @@ pub fn send_message(
 
     let created_at_ms = ctx.next_timestamp();
     let minute = created_at_ms / UNIX_MINUTE_MS;
+    let active_setting =
+        disappearing_messages_setting::queries::active_for_workspace(ctx.store(), workspace_id)?;
+    if let Some(setting) = &active_setting {
+        if minute < setting.retire_minute {
+            return Err("send_message minute is below the active disappearing floor".to_string());
+        }
+    }
+    let expires_at_minute = active_setting
+        .as_ref()
+        .map(|setting| minute.saturating_add(u64::from(setting.ttl_minutes)))
+        .unwrap_or(u64::MAX);
+    let disappearing_setting_id = active_setting
+        .as_ref()
+        .map(|setting| setting.setting_id)
+        .unwrap_or([0; 32]);
 
     let nonce = deterministic_nonce(workspace_id, signing.fact.signer_id, created_at_ms);
     let plaintext = pad_plaintext(text.as_bytes())?;
@@ -103,8 +119,8 @@ pub fn send_message(
         signer_id: signing.fact.signer_id,
         frontier_id: encryption.fact.frontier_id,
         local_history_node_secret_id: [0; 32],
-        expires_at_minute: u64::MAX,
-        disappearing_setting_id: [0; 32],
+        expires_at_minute,
+        disappearing_setting_id,
         minute,
         leaf_id: [0; 32],
         nonce,
