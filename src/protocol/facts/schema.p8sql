@@ -187,6 +187,12 @@ table sync_need_id_rows {
   row_key (key);
 }
 
+table sync_shareable_fact_rows {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
 table message_deletion_rows {
   column key bytes;
   column value bytes;

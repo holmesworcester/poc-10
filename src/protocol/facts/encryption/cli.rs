@@ -1,6 +1,10 @@
 //! CLI adapter for encryption key commands.
+//!
+//! This file owns only argv parsing and text formatting. Key construction and
+//! read-model decisions live in `commands.rs`; runtime draining, handler
+//! dispatch, and persistence stay at the root app/runtime boundary.
 
-use crate::core::cli::{CliArgs, CliOutput};
+use crate::core::cli::{decode_hex_32_named as core_decode_hex_32, encode_hex, CliArgs, CliOutput};
 use crate::core::command_context::{CommandContext, CommandOutput};
 
 use super::commands;
@@ -212,34 +216,5 @@ pub fn key_access_output(
 }
 
 fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
-    if value.len() != 64 {
-        return Err("workspace id must be 64 hex characters".to_string());
-    }
-    let mut out = [0u8; 32];
-    let bytes = value.as_bytes();
-    for index in 0..32 {
-        let hi = hex_nibble(bytes[index * 2])?;
-        let lo = hex_nibble(bytes[index * 2 + 1])?;
-        out[index] = (hi << 4) | lo;
-    }
-    Ok(out)
-}
-
-fn hex_nibble(byte: u8) -> Result<u8, String> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err("hex value contains non-hex character".to_string()),
-    }
-}
-
-fn encode_hex(bytes: &[u8; 32]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        out.push(DIGITS[(byte >> 4) as usize] as char);
-        out.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    out
+    core_decode_hex_32(value, "workspace id")
 }

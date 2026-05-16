@@ -3,6 +3,7 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::layout;
 use super::rows::workspace_row;
@@ -28,7 +29,8 @@ impl Projector for WorkspaceProjector {
         let workspace = layout::decode_fact(&fact.bytes)?;
         Ok(ProjectionOutput::new()
             .offer(crate::protocol::matchers::workspace_offer(fact.id))
-            .intent(AtomicIntent::PutRow(workspace_row(fact.id, &workspace)?).into_intent()))
+            .intent(AtomicIntent::PutRow(workspace_row(fact.id, &workspace)?).into_intent())
+            .intent(share_fact_with_workspace_intent_for_fact(fact.id, fact)))
     }
 }
 
@@ -70,8 +72,8 @@ mod projector_tests {
             )
             .expect("project workspace");
         assert_eq!(projected.projections, 1);
-        assert_eq!(projected.intents, 1);
-        assert!(bus.intents().is_empty());
+        assert_eq!(projected.intents, 2);
+        assert_eq!(bus.intents().len(), 1);
         let rows = store
             .table_rows(rows::WORKSPACE_ROWS)
             .expect("workspace rows");
@@ -95,6 +97,6 @@ mod projector_tests {
             )
             .expect("duplicate drain");
         assert_eq!(duplicate.projections, 0);
-        assert!(bus.intents().is_empty());
+        assert_eq!(bus.intents().len(), 1);
     }
 }

@@ -1,43 +1,284 @@
-//! CLI adapter for sealed message commands and queries.
+//! CLI adapter for opened content commands and queries.
+//!
+//! This file owns CLI-facing concerns for the message surface: argv parsing,
+//! selector resolution, and text formatting. Runtime draining,
+//! projection, handler dispatch, and persistence stay in the root app/runtime
+//! boundary. Local payload file reads/writes go through core helpers; they do
+//! not happen through direct `std::fs` calls here.
 
-use crate::core::cli::{CliArgs, CliOutput};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use crate::core::cli::{
+    decode_hex_32, encode_hex_32, read_file_bytes, write_file_bytes, CliArgs, CliOutput,
+};
 use crate::core::command_context::{CommandContext, CommandOutput};
-use crate::core::facts::FactId;
+use crate::core::crypto;
+use crate::core::facts::{Fact, FactId};
 use crate::core::store::Store;
+use crate::protocol::facts::content::{file, file_slice, reaction};
 use crate::protocol::facts::identity;
+use crate::protocol::matchers;
 
-use super::{create, queries};
+use super::{create, layout, queries};
 
 pub const SEND_USAGE: &str = "send WORKSPACE_ID_HEX TEXT";
+pub const REACT_USAGE: &str = "react WORKSPACE_ID_HEX MESSAGE_SELECTOR EMOJI";
+pub const SEND_FILE_USAGE: &str = "send-file WORKSPACE_ID_HEX TEXT --file PATH [--mime MIME]";
+pub const FILES_USAGE: &str = "files WORKSPACE_ID_HEX [LIMIT]";
+pub const SAVE_FILE_USAGE: &str = "save-file WORKSPACE_ID_HEX FILE_SELECTOR OUT_PATH";
+pub const DELETE_MESSAGE_USAGE: &str = "delete-message WORKSPACE_ID_HEX MESSAGE_SELECTOR";
 pub const MESSAGES_USAGE: &str = "messages WORKSPACE_ID_HEX";
 pub const VIEW_USAGE: &str = "view [WORKSPACE_ID_HEX]";
+
+const FILE_SLICE_BYTES: usize = 256 * 1024;
+const DEFAULT_MIME: &str = "application/octet-stream";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactReceipt {
+    pub workspace_id: FactId,
+    pub reaction_fact_id: FactId,
+    pub target_message_id: FactId,
+    pub emoji: String,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendFileReceipt {
+    pub workspace_id: FactId,
+    pub message_fact_id: FactId,
+    pub file_fact_id: FactId,
+    pub file_id: FactId,
+    pub filename: String,
+    pub mime: String,
+    pub blob_bytes: u64,
+    pub total_slices: u32,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteMessageReceipt {
+    pub workspace_id: FactId,
+    pub deletion_fact_id: FactId,
+    pub target_message_id: FactId,
+}
 
 pub fn send(
     ctx: &CommandContext<'_>,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<create::SendReceipt>, String> {
     args.require_len(2, SEND_USAGE)?;
-    let workspace_id = decode_hex_32(args.get(0).expect("length checked"))?;
+    let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let text = args.get(1).expect("length checked");
     create::send_message(ctx, workspace_id, text)
 }
 
 pub fn send_output(receipt: &create::SendReceipt, text: &str) -> CliOutput {
     CliOutput::lines(vec![
-        format!("workspace_id: {}", encode_hex(&receipt.workspace_id)),
-        format!("message_id: {}", encode_hex(&receipt.message_fact_id)),
+        format!("workspace_id: {}", encode_hex_32(&receipt.workspace_id)),
+        format!("fact_id: {}", encode_hex_32(&receipt.message_fact_id)),
+        format!("message_id: {}", encode_hex_32(&receipt.message_fact_id)),
         format!("created_at_ms: {}", receipt.created_at_ms),
         format!("text: {text}"),
     ])
 }
 
+pub fn react(
+    ctx: &CommandContext<'_>,
+    args: CliArgs<'_>,
+) -> Result<CommandOutput<ReactReceipt>, String> {
+    args.require_len(3, REACT_USAGE)?;
+    let workspace_id = decode_id(args.get(0).expect("length checked"))?;
+    let target = resolve_message_selector(ctx.store(), workspace_id, args.get(1).unwrap())?;
+    let emoji = args.get(2).unwrap().trim();
+    if emoji.is_empty() {
+        return Err("reaction emoji must not be empty".to_string());
+    }
+    if emoji.as_bytes().len() > reaction::fact::REACTION_CIPHERTEXT_BYTES {
+        return Err("reaction emoji is too long".to_string());
+    }
+
+    let author_user_id = local_author_user_id(ctx.store(), workspace_id)?;
+    let created_at_ms = ctx.next_timestamp();
+    let reaction = reaction::fact::ContentReactionFact {
+        workspace_id,
+        created_at_ms,
+        target_message_id: target.message_id,
+        author_user_id,
+        nonce: deterministic_nonce(b"topo:reaction-nonce:v1", workspace_id, created_at_ms),
+        ciphertext: emoji.as_bytes().to_vec(),
+    };
+    let fact = Fact::new(
+        matchers::workspace_scope(workspace_id),
+        created_at_ms,
+        reaction::layout::encode_fact(&reaction)?,
+    );
+    Ok(CommandOutput::new(ReactReceipt {
+        workspace_id,
+        reaction_fact_id: fact.id,
+        target_message_id: target.message_id,
+        emoji: emoji.to_string(),
+        created_at_ms,
+    })
+    .with_facts(vec![fact]))
+}
+
+pub fn react_output(receipt: &ReactReceipt) -> CliOutput {
+    CliOutput::lines(vec![
+        format!("workspace_id: {}", encode_hex_32(&receipt.workspace_id)),
+        format!("reaction_id: {}", encode_hex_32(&receipt.reaction_fact_id)),
+        format!(
+            "target_message_id: {}",
+            encode_hex_32(&receipt.target_message_id)
+        ),
+        format!("created_at_ms: {}", receipt.created_at_ms),
+        format!("emoji: {}", receipt.emoji),
+    ])
+}
+
+pub fn send_file(
+    ctx: &CommandContext<'_>,
+    args: CliArgs<'_>,
+) -> Result<CommandOutput<SendFileReceipt>, String> {
+    let parsed = parse_send_file_args(args)?;
+    let payload = read_file_bytes(&parsed.path)?;
+    let filename = parsed
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "file path must have a utf-8 filename".to_string())?
+        .to_string();
+    let message_output = create::send_message(ctx, parsed.workspace_id, &parsed.text)?;
+    let message_receipt = message_output.receipt.clone();
+    let author_user_id = local_author_user_id(ctx.store(), parsed.workspace_id)?;
+    let created_at_ms = message_receipt.created_at_ms.saturating_add(1);
+    let root_hash = crypto::hash(&payload);
+    let total_slices = if payload.is_empty() {
+        0
+    } else {
+        payload.len().div_ceil(FILE_SLICE_BYTES) as u32
+    };
+    let file_id = file_id_for(
+        parsed.workspace_id,
+        message_receipt.message_fact_id,
+        created_at_ms,
+        &filename,
+        &root_hash,
+    );
+    let descriptor = file::fact::ContentFileFact {
+        workspace_id: parsed.workspace_id,
+        created_at_ms,
+        message_id: message_receipt.message_fact_id,
+        author_user_id,
+        file_id,
+        blob_bytes: payload.len() as u64,
+        total_slices,
+        slice_bytes: FILE_SLICE_BYTES as u32,
+        root_hash,
+        sealed_metadata: encode_file_metadata(&filename, &parsed.mime)?,
+    };
+    let descriptor_fact = Fact::new(
+        matchers::workspace_scope(parsed.workspace_id),
+        created_at_ms,
+        file::layout::encode_fact(&descriptor)?,
+    );
+    let mut facts = message_output.facts;
+    facts.push(descriptor_fact.clone());
+    for (slice_index, chunk) in payload.chunks(FILE_SLICE_BYTES).enumerate() {
+        let slice = file_slice::fact::ContentFileSliceFact {
+            workspace_id: parsed.workspace_id,
+            created_at_ms: created_at_ms.saturating_add(1 + slice_index as u64),
+            file_id,
+            slice_index: slice_index as u32,
+            ciphertext: chunk.to_vec(),
+        };
+        facts.push(Fact::new(
+            matchers::workspace_scope(parsed.workspace_id),
+            slice.created_at_ms,
+            file_slice::layout::encode_fact(&slice)?,
+        ));
+    }
+
+    Ok(CommandOutput::new(SendFileReceipt {
+        workspace_id: parsed.workspace_id,
+        message_fact_id: message_receipt.message_fact_id,
+        file_fact_id: descriptor_fact.id,
+        file_id,
+        filename,
+        mime: parsed.mime,
+        blob_bytes: payload.len() as u64,
+        total_slices,
+        created_at_ms,
+    })
+    .with_facts(facts))
+}
+
+pub fn send_file_output(receipt: &SendFileReceipt) -> CliOutput {
+    CliOutput::lines(vec![
+        format!("workspace_id: {}", encode_hex_32(&receipt.workspace_id)),
+        format!("message_id: {}", encode_hex_32(&receipt.message_fact_id)),
+        format!("file_fact_id: {}", encode_hex_32(&receipt.file_fact_id)),
+        format!("file_id: {}", encode_hex_32(&receipt.file_id)),
+        format!("created_at_ms: {}", receipt.created_at_ms),
+        format!("filename: {}", receipt.filename),
+        format!("mime: {}", receipt.mime),
+        format!("blob_bytes: {}", receipt.blob_bytes),
+        format!("total_slices: {}", receipt.total_slices),
+    ])
+}
+
+pub fn delete_message(
+    ctx: &CommandContext<'_>,
+    args: CliArgs<'_>,
+) -> Result<CommandOutput<DeleteMessageReceipt>, String> {
+    args.require_len(2, DELETE_MESSAGE_USAGE)?;
+    let workspace_id = decode_id(args.get(0).expect("length checked"))?;
+    let target = resolve_message_selector(ctx.store(), workspace_id, args.get(1).unwrap())?;
+    let created_at_ms = ctx.next_timestamp();
+    let deletion = super::fact::MessageDeletionFact {
+        workspace_id,
+        created_at_ms,
+        target_id: target.message_id,
+        author_user_id: target.author_user_id,
+    };
+    let fact = Fact::new(
+        matchers::workspace_scope(workspace_id),
+        created_at_ms,
+        layout::encode_message_deletion(&deletion)?,
+    );
+    Ok(CommandOutput::new(DeleteMessageReceipt {
+        workspace_id,
+        deletion_fact_id: fact.id,
+        target_message_id: target.message_id,
+    })
+    .with_facts(vec![fact]))
+}
+
+pub fn delete_message_output(receipt: &DeleteMessageReceipt) -> CliOutput {
+    CliOutput::lines(vec![
+        format!("workspace_id: {}", encode_hex_32(&receipt.workspace_id)),
+        format!("fact_id: {}", encode_hex_32(&receipt.deletion_fact_id)),
+        format!(
+            "target_message_id: {}",
+            encode_hex_32(&receipt.target_message_id)
+        ),
+    ])
+}
+
 pub fn messages(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(1, MESSAGES_USAGE)?;
-    let workspace_id = decode_hex_32(args.get(0).expect("length checked"))?;
+    let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let messages = queries::opened_messages(ctx.store(), workspace_id)?;
+    let reactions = reactions_by_message(ctx.store(), workspace_id)?;
+    let files = files_by_message(ctx.store(), workspace_id)?;
     let mut lines = vec![format!("messages: {}", messages.len())];
     for (index, message) in messages.into_iter().enumerate() {
         let author = author_name(ctx.store(), workspace_id, message.signer_id)?
+            .or_else(|| {
+                user_name(ctx.store(), workspace_id, message.author_user_id)
+                    .ok()
+                    .flatten()
+            })
             .unwrap_or_else(|| short_hex(&message.signer_id));
         lines.push(format!(
             "{}. [{}] {author}: {}",
@@ -45,14 +286,94 @@ pub fn messages(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput
             message.created_at_ms,
             message.text
         ));
+        lines.push(format!("   id: {}", encode_hex_32(&message.message_id)));
+        if let Some(reactions) = reactions.get(&message.message_id) {
+            let emojis = reactions
+                .iter()
+                .map(|reaction| reaction.emoji.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            lines.push(format!("   reactions: {emojis}"));
+        }
+        if let Some(files) = files.get(&message.message_id) {
+            for file in files {
+                lines.push(format!(
+                    "   file: {} ({})",
+                    file.filename,
+                    format_bytes(file.blob_bytes)
+                ));
+            }
+        }
     }
     Ok(CliOutput::lines(lines))
+}
+
+pub fn files(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    if args.values().is_empty() || args.values().len() > 2 {
+        return Err(FILES_USAGE.to_string());
+    }
+    let workspace_id = decode_id(args.get(0).expect("length checked"))?;
+    let limit = args
+        .get(1)
+        .map(|value| value.parse::<usize>().map_err(|_| FILES_USAGE.to_string()))
+        .transpose()?
+        .unwrap_or(usize::MAX);
+    let mut rows = visible_files(ctx.store(), workspace_id)?;
+    rows.truncate(limit);
+    let mut lines = vec![format!("FILES ({} total):", rows.len())];
+    for (index, row) in rows.iter().enumerate() {
+        let status = if row.slices_received >= row.total_slices {
+            "\u{2714}"
+        } else {
+            "\u{23f3}"
+        };
+        let suffix = if row.slices_received >= row.total_slices {
+            format!("({})", format_bytes(row.blob_bytes))
+        } else {
+            let pct = if row.total_slices == 0 {
+                100
+            } else {
+                row.slices_received.saturating_mul(100) / row.total_slices
+            };
+            format!("({}, {pct}%)", format_bytes(row.blob_bytes))
+        };
+        lines.push(format!(
+            "  {}. {status}  {} {suffix}",
+            index + 1,
+            row.filename
+        ));
+    }
+    Ok(CliOutput::lines(lines))
+}
+
+pub fn save_file(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    args.require_len(3, SAVE_FILE_USAGE)?;
+    let workspace_id = decode_id(args.get(0).expect("length checked"))?;
+    let file = resolve_file_selector(ctx.store(), workspace_id, args.get(1).unwrap())?;
+    if file.slices_received < file.total_slices {
+        return Err(format!(
+            "file incomplete: have {}/{} slices",
+            file.slices_received, file.total_slices
+        ));
+    }
+    let mut bytes = Vec::new();
+    for slice in file_slices(ctx.store(), workspace_id, file.file_id)? {
+        bytes.extend_from_slice(&slice.ciphertext);
+    }
+    bytes.truncate(file.blob_bytes as usize);
+    write_file_bytes(args.get(2).unwrap(), &bytes)?;
+    Ok(CliOutput::lines(vec![
+        format!("workspace_id: {}", encode_hex_32(&workspace_id)),
+        format!("file_fact_id: {}", encode_hex_32(&file.file_fact_id)),
+        format!("filename: {}", file.filename),
+        format!("bytes_written: {}", bytes.len()),
+    ]))
 }
 
 pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let workspace_id = match args.values() {
         [] => selected_workspace_id(ctx)?,
-        [value] => decode_hex_32(value)?,
+        [value] => decode_id(value)?,
         _ => return Err(VIEW_USAGE.to_string()),
     };
 
@@ -70,12 +391,14 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
     let users = identity::user::queries::users_in_workspace(ctx.store(), workspace_id)?;
     let peers = identity::endpoint_shared::queries::peers_in_workspace(ctx.store(), workspace_id)?;
     let messages = queries::opened_messages(ctx.store(), workspace_id)?;
+    let reactions = reactions_by_message(ctx.store(), workspace_id)?;
+    let files = files_by_message(ctx.store(), workspace_id)?;
 
-    let mut username_by_user = std::collections::BTreeMap::new();
+    let mut username_by_user = BTreeMap::new();
     for user in &users {
         username_by_user.insert(user.user_id, user.username.clone());
     }
-    let mut username_by_endpoint = std::collections::BTreeMap::new();
+    let mut username_by_endpoint = BTreeMap::new();
     for peer in &peers {
         if let Some(username) = username_by_user.get(&peer.user_authority_fact_id) {
             username_by_endpoint.insert(peer.endpoint_id, username.clone());
@@ -84,10 +407,10 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
 
     let mut lines = Vec::new();
     lines.push("IDENTITY:".to_string());
-    lines.push(format!("  endpoint_id: {}", encode_hex(&local.endpoint)));
+    lines.push(format!("  endpoint_id: {}", encode_hex_32(&local.endpoint)));
     lines.push(format!(
         "  signing_public_key: {}",
-        encode_hex(&local.signing_public_key)
+        encode_hex_32(&local.signing_public_key)
     ));
     lines.push(String::new());
     lines.push("WORKSPACE:".to_string());
@@ -132,6 +455,29 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
                 last_author = Some(message.signer_id);
             }
             lines.push(format!("      {}. {}", index + 1, message.text));
+            if let Some(reactions) = reactions.get(&message.message_id) {
+                for reaction in reactions {
+                    let author = username_by_user
+                        .get(&reaction.author_user_id)
+                        .cloned()
+                        .unwrap_or_else(|| short_hex(&reaction.author_user_id));
+                    lines.push(format!("         {} {author}", reaction.emoji));
+                }
+            }
+            if let Some(files) = files.get(&message.message_id) {
+                for file in files {
+                    let status = if file.slices_received >= file.total_slices {
+                        "\u{2714}"
+                    } else {
+                        "\u{23f3}"
+                    };
+                    lines.push(format!(
+                        "         {status}  {} ({})",
+                        file.filename,
+                        format_bytes(file.blob_bytes)
+                    ));
+                }
+            }
         }
     }
 
@@ -156,51 +502,378 @@ fn author_name(
         if peer.endpoint_id != signer_endpoint_id {
             continue;
         }
-        let user_key = identity::user::rows::user_key(&workspace_id, &peer.user_authority_fact_id);
-        let Some(value) = store
-            .table_row(identity::user::rows::USER_ROWS, &user_key)
-            .map_err(|err| format!("read user row: {err}"))?
-        else {
-            return Ok(None);
-        };
-        let row = identity::user::rows::decode_user_row(&user_key, &value)?;
-        return Ok(Some(row.username));
+        return user_name(store, workspace_id, peer.user_authority_fact_id);
     }
     Ok(None)
 }
 
-fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
-    if value.len() != 64 {
-        return Err("id must be 64 hex characters".to_string());
+fn user_name(
+    store: &Store,
+    workspace_id: FactId,
+    user_id: FactId,
+) -> Result<Option<String>, String> {
+    let user_key = identity::user::rows::user_key(&workspace_id, &user_id);
+    let Some(value) = store
+        .table_row(identity::user::rows::USER_ROWS, &user_key)
+        .map_err(|err| format!("read user row: {err}"))?
+    else {
+        return Ok(None);
+    };
+    let row = identity::user::rows::decode_user_row(&user_key, &value)?;
+    Ok(Some(row.username))
+}
+
+fn local_author_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, String> {
+    identity::workspace::local_membership::local_membership(store, workspace_id)?
+        .map(|membership| membership.user_authority_fact_id)
+        .ok_or_else(|| "local endpoint has not joined this workspace".to_string())
+}
+
+#[derive(Debug, Clone)]
+struct MessageSelection {
+    message_id: FactId,
+    author_user_id: FactId,
+}
+
+fn resolve_message_selector(
+    store: &Store,
+    workspace_id: FactId,
+    selector: &str,
+) -> Result<MessageSelection, String> {
+    if let Some(index) = selector.strip_prefix('#') {
+        let index = index
+            .parse::<usize>()
+            .map_err(|_| "message selector must be #N or a message id".to_string())?;
+        if index == 0 {
+            return Err("message selector index starts at #1".to_string());
+        }
+        let messages = queries::opened_messages(store, workspace_id)?;
+        let message = messages
+            .get(index - 1)
+            .ok_or_else(|| "message selector is out of range".to_string())?;
+        return Ok(MessageSelection {
+            message_id: message.message_id,
+            author_user_id: message.author_user_id,
+        });
     }
-    let mut out = [0u8; 32];
-    let bytes = value.as_bytes();
-    for index in 0..32 {
-        let hi = hex_nibble(bytes[index * 2])?;
-        let lo = hex_nibble(bytes[index * 2 + 1])?;
-        out[index] = (hi << 4) | lo;
+    let message_id = decode_id(selector)?;
+    let key = super::rows::message_key(workspace_id, message_id);
+    if let Some(value) = store
+        .table_row(super::rows::OPENED_MESSAGE_ROWS, &key)
+        .map_err(|err| format!("read opened message row: {err}"))?
+    {
+        let row = super::rows::decode_opened_message_row(&key, &value)?;
+        return Ok(MessageSelection {
+            message_id,
+            author_user_id: row.author_user_id,
+        });
     }
+    if let Some(value) = store
+        .table_row(super::rows::SEALED_MESSAGE_ROWS, &key)
+        .map_err(|err| format!("read sealed message row: {err}"))?
+    {
+        let row = super::rows::decode_sealed_message_row(&key, &value)?;
+        return Ok(MessageSelection {
+            message_id,
+            author_user_id: row.author_user_id,
+        });
+    }
+    Err("message selector did not match a visible message".to_string())
+}
+
+#[derive(Debug, Clone)]
+struct ParsedSendFile {
+    workspace_id: FactId,
+    text: String,
+    path: std::path::PathBuf,
+    mime: String,
+}
+
+fn parse_send_file_args(args: CliArgs<'_>) -> Result<ParsedSendFile, String> {
+    let values = args.values();
+    if values.len() < 4 {
+        return Err(SEND_FILE_USAGE.to_string());
+    }
+    let workspace_id = decode_id(&values[0])?;
+    let text = values[1].clone();
+    let mut path = None;
+    let mut mime = DEFAULT_MIME.to_string();
+    let mut idx = 2;
+    while idx < values.len() {
+        match values[idx].as_str() {
+            "--file" => {
+                let value = values
+                    .get(idx + 1)
+                    .ok_or_else(|| SEND_FILE_USAGE.to_string())?;
+                path = Some(Path::new(value).to_path_buf());
+                idx += 2;
+            }
+            "--mime" => {
+                let value = values
+                    .get(idx + 1)
+                    .ok_or_else(|| SEND_FILE_USAGE.to_string())?;
+                mime = value.clone();
+                idx += 2;
+            }
+            _ => return Err(SEND_FILE_USAGE.to_string()),
+        }
+    }
+    let path = path.ok_or_else(|| SEND_FILE_USAGE.to_string())?;
+    Ok(ParsedSendFile {
+        workspace_id,
+        text,
+        path,
+        mime,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct FileDisplayRow {
+    file_fact_id: FactId,
+    file_id: FactId,
+    message_id: FactId,
+    created_at_ms: u64,
+    filename: String,
+    blob_bytes: u64,
+    total_slices: u32,
+    slices_received: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ReactionDisplayRow {
+    created_at_ms: u64,
+    reaction_id: FactId,
+    author_user_id: FactId,
+    emoji: String,
+}
+
+fn reactions_by_message(
+    store: &Store,
+    workspace_id: FactId,
+) -> Result<BTreeMap<FactId, Vec<ReactionDisplayRow>>, String> {
+    let mut grouped: BTreeMap<FactId, Vec<ReactionDisplayRow>> = BTreeMap::new();
+    for (key, value) in store
+        .table_rows_with_key_prefix(reaction::rows::REACTION_ROWS, &workspace_id, usize::MAX)
+        .map_err(|err| format!("load reaction rows: {err}"))?
+    {
+        let row = reaction::rows::decode_reaction_row(&key, &value)?;
+        let emoji = String::from_utf8(row.ciphertext.clone())
+            .map_err(|err| format!("reaction emoji is not utf8: {err}"))?;
+        grouped
+            .entry(row.target_message_id)
+            .or_default()
+            .push(ReactionDisplayRow {
+                created_at_ms: row.created_at_ms,
+                reaction_id: row.reaction_id,
+                author_user_id: row.author_user_id,
+                emoji,
+            });
+    }
+    for rows in grouped.values_mut() {
+        rows.sort_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| left.reaction_id.cmp(&right.reaction_id))
+        });
+    }
+    Ok(grouped)
+}
+
+fn files_by_message(
+    store: &Store,
+    workspace_id: FactId,
+) -> Result<BTreeMap<FactId, Vec<FileDisplayRow>>, String> {
+    let mut grouped: BTreeMap<FactId, Vec<FileDisplayRow>> = BTreeMap::new();
+    for row in visible_files(store, workspace_id)? {
+        grouped.entry(row.message_id).or_default().push(row);
+    }
+    Ok(grouped)
+}
+
+fn visible_files(store: &Store, workspace_id: FactId) -> Result<Vec<FileDisplayRow>, String> {
+    let mut rows = store
+        .table_rows_with_key_prefix(file::rows::FILE_ROWS, &workspace_id, usize::MAX)
+        .map_err(|err| format!("load file rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| {
+            let row = file::rows::decode_content_file_row(&key, &value)?;
+            if !message_is_visible(store, workspace_id, row.message_id)? {
+                return Ok(None);
+            }
+            let metadata = decode_file_metadata(&row.sealed_metadata)?;
+            let slices_received = file_slices(store, workspace_id, row.file_id)?.len() as u32;
+            Ok(Some(FileDisplayRow {
+                file_fact_id: row.file_fact_id,
+                file_id: row.file_id,
+                message_id: row.message_id,
+                created_at_ms: row.created_at_ms,
+                filename: metadata.filename,
+                blob_bytes: row.blob_bytes,
+                total_slices: row.total_slices,
+                slices_received,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.created_at_ms
+            .cmp(&right.created_at_ms)
+            .then_with(|| left.file_fact_id.cmp(&right.file_fact_id))
+    });
+    Ok(rows)
+}
+
+fn message_is_visible(
+    store: &Store,
+    workspace_id: FactId,
+    message_id: FactId,
+) -> Result<bool, String> {
+    let key = super::rows::message_key(workspace_id, message_id);
+    Ok(store
+        .table_row(super::rows::OPENED_MESSAGE_ROWS, &key)
+        .map_err(|err| format!("read opened message row: {err}"))?
+        .is_some()
+        || store
+            .table_row(super::rows::SEALED_MESSAGE_ROWS, &key)
+            .map_err(|err| format!("read sealed message row: {err}"))?
+            .is_some())
+}
+
+fn file_slices(
+    store: &Store,
+    workspace_id: FactId,
+    file_id: FactId,
+) -> Result<Vec<file_slice::rows::ContentFileSliceRow>, String> {
+    let mut prefix = Vec::with_capacity(64);
+    prefix.extend_from_slice(&workspace_id);
+    prefix.extend_from_slice(&file_id);
+    let mut rows = store
+        .table_rows_with_key_prefix(file_slice::rows::FILE_SLICE_ROWS, &prefix, usize::MAX)
+        .map_err(|err| format!("load file slices: {err}"))?
+        .into_iter()
+        .map(|(key, value)| file_slice::rows::decode_content_file_slice_row(&key, &value))
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.sort_by_key(|row| row.slice_index);
+    Ok(rows)
+}
+
+fn resolve_file_selector(
+    store: &Store,
+    workspace_id: FactId,
+    selector: &str,
+) -> Result<FileDisplayRow, String> {
+    let files = visible_files(store, workspace_id)?;
+    if let Some(index) = selector.strip_prefix('#') {
+        let index = index
+            .parse::<usize>()
+            .map_err(|_| "file selector must be #N or a file id".to_string())?;
+        if index == 0 {
+            return Err("file selector index starts at #1".to_string());
+        }
+        return files
+            .get(index - 1)
+            .cloned()
+            .ok_or_else(|| "file selector is out of range".to_string());
+    }
+    let file_fact_id = decode_id(selector)?;
+    files
+        .into_iter()
+        .find(|row| row.file_fact_id == file_fact_id || row.file_id == file_fact_id)
+        .ok_or_else(|| "file selector did not match a visible file".to_string())
+}
+
+struct FileMetadata {
+    filename: String,
+    _mime: String,
+}
+
+fn encode_file_metadata(filename: &str, mime: &str) -> Result<Vec<u8>, String> {
+    if filename.is_empty() {
+        return Err("filename must not be empty".to_string());
+    }
+    let filename = filename.as_bytes();
+    let mime = mime.as_bytes();
+    let filename_len: u16 = filename
+        .len()
+        .try_into()
+        .map_err(|_| "filename is too long".to_string())?;
+    let mime_len: u16 = mime
+        .len()
+        .try_into()
+        .map_err(|_| "mime type is too long".to_string())?;
+    let mut out = Vec::with_capacity(5 + filename.len() + mime.len());
+    out.push(1);
+    out.extend_from_slice(&filename_len.to_be_bytes());
+    out.extend_from_slice(&mime_len.to_be_bytes());
+    out.extend_from_slice(filename);
+    out.extend_from_slice(mime);
     Ok(out)
 }
 
-fn hex_nibble(byte: u8) -> Result<u8, String> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err("hex value contains non-hex character".to_string()),
+fn decode_file_metadata(bytes: &[u8]) -> Result<FileMetadata, String> {
+    if bytes.len() < 5 || bytes[0] != 1 {
+        return Err("file metadata is malformed".to_string());
+    }
+    let filename_len = u16::from_be_bytes(bytes[1..3].try_into().unwrap()) as usize;
+    let mime_len = u16::from_be_bytes(bytes[3..5].try_into().unwrap()) as usize;
+    if bytes.len() != 5 + filename_len + mime_len {
+        return Err("file metadata length is malformed".to_string());
+    }
+    let filename = String::from_utf8(bytes[5..5 + filename_len].to_vec())
+        .map_err(|err| format!("filename is not utf8: {err}"))?;
+    let mime = String::from_utf8(bytes[5 + filename_len..].to_vec())
+        .map_err(|err| format!("mime is not utf8: {err}"))?;
+    Ok(FileMetadata {
+        filename,
+        _mime: mime,
+    })
+}
+
+fn file_id_for(
+    workspace_id: FactId,
+    message_id: FactId,
+    created_at_ms: u64,
+    filename: &str,
+    root_hash: &[u8; 32],
+) -> FactId {
+    let mut input = Vec::with_capacity(32 + 32 + 8 + filename.len() + 32);
+    input.extend_from_slice(&workspace_id);
+    input.extend_from_slice(&message_id);
+    input.extend_from_slice(&created_at_ms.to_be_bytes());
+    input.extend_from_slice(filename.as_bytes());
+    input.extend_from_slice(root_hash);
+    crypto::hash(&input)
+}
+
+fn deterministic_nonce(
+    domain: &[u8],
+    workspace_id: FactId,
+    created_at_ms: u64,
+) -> [u8; reaction::fact::REACTION_NONCE_BYTES] {
+    let mut input = Vec::with_capacity(domain.len() + 32 + 8);
+    input.extend_from_slice(domain);
+    input.extend_from_slice(&workspace_id);
+    input.extend_from_slice(&created_at_ms.to_be_bytes());
+    let hash = crypto::hash(&input);
+    let mut nonce = [0; reaction::fact::REACTION_NONCE_BYTES];
+    nonce.copy_from_slice(&hash[..reaction::fact::REACTION_NONCE_BYTES]);
+    nonce
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes == 1 {
+        "1 B".to_string()
+    } else {
+        format!("{bytes} B")
     }
 }
 
-fn encode_hex(bytes: &[u8; 32]) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+fn decode_id(value: &str) -> Result<[u8; 32], String> {
+    decode_hex_32(value).map_err(|_| "id must be 64 hex characters".to_string())
 }
 
 fn short_hex(bytes: &[u8; 32]) -> String {
-    encode_hex(bytes)[..12].to_string()
+    encode_hex_32(bytes)[..12].to_string()
 }

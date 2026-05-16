@@ -4,15 +4,12 @@
 //! `file_slice_rows`. The slice event id used in the row value is the fact id;
 //! the key is workspace/file/slice-index so range scans return slices in order.
 //!
-//! Parity gaps (intentional, deferred to later slices):
-//! - Signed-envelope verification (separate fact module).
-//! - BAO proof verification against the parent descriptor's root hash —
-//!   depends on the file-send command wave reintroducing the proof slot.
+//! Current boundaries:
+//! - Signed-envelope verification is owned by `identity::signed_fact`.
 //! - Parent descriptor existence and slice-index bounds are validated from
-//!   matched file context; broader slice-budget enforcement remains in the
-//!   file-send command wave.
-//! - Per-slice nonce derivation and AEAD opening — owned by the encryption
-//!   module, surfaces alongside the per-file content key.
+//!   matched file context.
+//! - Per-slice nonce derivation and AEAD opening belong to the encryption
+//!   layer alongside the per-file content key.
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
@@ -20,8 +17,9 @@ use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::facts::content::file::layout as file_layout;
-use crate::protocol::matchers as message_matchers;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers as file_matchers;
+use crate::protocol::matchers as message_matchers;
 
 use super::layout;
 use super::rows::{content_file_slice_key, content_file_slice_row, FILE_SLICE_ROWS};
@@ -86,7 +84,11 @@ impl Projector for ContentFileSliceProjector {
         Ok(ProjectionOutput::new()
             .need(file_need)
             .need(file_deletion_need)
-            .intent(AtomicIntent::PutRow(content_file_slice_row(fact.id, &slice)?).into_intent()))
+            .intent(AtomicIntent::PutRow(content_file_slice_row(fact.id, &slice)?).into_intent())
+            .intent(share_fact_with_workspace_intent_for_fact(
+                slice.workspace_id,
+                fact,
+            )))
     }
 }
 
@@ -158,8 +160,10 @@ mod projector_tests {
     };
     use topo::protocol::facts::content::file_slice::fact::ContentFileSliceFact;
     use topo::protocol::facts::content::file_slice::{layout, project, rows};
-    use topo::protocol::facts::content::message::fact::ContentMessageFact;
-    use topo::protocol::facts::content::message::layout as message_layout;
+    use topo::protocol::facts::content::sealed_message::{
+        fact::{SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS},
+        layout as sealed_message_layout,
+    };
     use topo::protocol::matchers::ExactSelectorMatcher;
 
     use topo::protocol::facts::identity::user::{fact::UserFact, layout as user_layout};
@@ -170,22 +174,9 @@ mod projector_tests {
     fn content_file_slice_projector_materializes_row_through_atomic_intent() {
         let parent_author = user_fact([9; 32], [8; 32], "parent-author");
         let file_author = user_fact([9; 32], [12; 32], "file-author");
-        let parent = ContentMessageFact {
-            workspace_id: [9; 32],
-            author_user_id: parent_author.id,
-            created_at_ms: 1000,
-            frontier_id: [7; 32],
-            minute: 0,
-            leaf_id: [6; 32],
-            sealed_body_ref: [5; 32],
-        };
-        let parent_fact = Fact::new(
-            message_context::workspace_scope(parent.workspace_id),
-            parent.created_at_ms,
-            message_layout::encode_fact(&parent).expect("encode parent message"),
-        );
+        let parent_fact = sealed_parent_fact([9; 32], parent_author.id, 1000);
         let file = ContentFileFact {
-            workspace_id: parent.workspace_id,
+            workspace_id: [9; 32],
             created_at_ms: 1234,
             message_id: parent_fact.id,
             file_id: [11; 32],
@@ -234,14 +225,13 @@ mod projector_tests {
                 &[
                     rows::FILE_SLICE_ROWS,
                     topo::protocol::facts::content::file::rows::FILE_ROWS,
-                    topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
                 ],
                 10,
             )
             .expect("project slice");
         assert!(projected.projections >= 5);
-        assert_eq!(projected.intents, 3);
-        assert!(bus.intents().is_empty());
+        assert_eq!(projected.intents, 4);
+        assert_eq!(bus.intents().len(), 2);
 
         let table = store
             .table_rows(rows::FILE_SLICE_ROWS)
@@ -300,22 +290,9 @@ mod projector_tests {
     fn content_file_slice_file_offer_before_need_wakes_slice() {
         let parent_author = user_fact([9; 32], [8; 32], "parent-author");
         let file_author = user_fact([9; 32], [12; 32], "file-author");
-        let parent = ContentMessageFact {
-            workspace_id: [9; 32],
-            author_user_id: parent_author.id,
-            created_at_ms: 1000,
-            frontier_id: [7; 32],
-            minute: 0,
-            leaf_id: [6; 32],
-            sealed_body_ref: [5; 32],
-        };
-        let parent_fact = Fact::new(
-            message_context::workspace_scope(parent.workspace_id),
-            parent.created_at_ms,
-            message_layout::encode_fact(&parent).expect("encode parent message"),
-        );
+        let parent_fact = sealed_parent_fact([9; 32], parent_author.id, 1000);
         let file = ContentFileFact {
-            workspace_id: parent.workspace_id,
+            workspace_id: [9; 32],
             created_at_ms: 1234,
             message_id: parent_fact.id,
             file_id: [11; 32],
@@ -361,7 +338,6 @@ mod projector_tests {
             &[
                 rows::FILE_SLICE_ROWS,
                 topo::protocol::facts::content::file::rows::FILE_ROWS,
-                topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
             ],
             10,
         )
@@ -376,14 +352,13 @@ mod projector_tests {
                 &[
                     rows::FILE_SLICE_ROWS,
                     topo::protocol::facts::content::file::rows::FILE_ROWS,
-                    topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
                 ],
                 10,
             )
             .expect("file offer wakes slice need");
 
         assert!(projected.projections >= 2);
-        assert_eq!(projected.intents, 1);
+        assert_eq!(projected.intents, 2);
         let table = store
             .table_rows(rows::FILE_SLICE_ROWS)
             .expect("file slice rows");
@@ -501,10 +476,12 @@ mod projector_tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             match fact.bytes.first().copied() {
-                Some(message_layout::TYPE_CONTENT_MESSAGE) => {
-                    topo::protocol::facts::content::message::project::ContentMessageProjector::new()
-                        .project(fact, context)
-                }
+                Some(sealed_message_layout::TYPE_SEALED_MESSAGE) => Ok(ProjectionOutput::new()
+                    .offer(message_context::message_offer(
+                        fact.id,
+                        fact.scope.clone(),
+                        fact.id,
+                    ))),
                 Some(file_layout::TYPE_CONTENT_FILE) => {
                     topo::protocol::facts::content::file::project::ContentFileProjector::new()
                         .project(fact, context)
@@ -533,6 +510,33 @@ mod projector_tests {
             FactScope::Global,
             user.created_at_ms,
             user_layout::encode_fact(&user).expect("encode user"),
+        )
+    }
+
+    fn sealed_parent_fact(
+        workspace_id: [u8; 32],
+        author_user_id: [u8; 32],
+        created_at_ms: u64,
+    ) -> Fact {
+        let message = SealedMessageFact {
+            workspace_id,
+            created_at_ms,
+            author_user_id,
+            signer_id: [6; 32],
+            frontier_id: [7; 32],
+            local_history_node_secret_id: [0; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [0; 32],
+            minute: created_at_ms / UNIX_MINUTE_MS,
+            leaf_id: [8; 32],
+            nonce: [9; NONCE_BYTES],
+            ciphertext: vec![0xaa; CIPHERTEXT_BYTES],
+        };
+        Fact::new(
+            message_context::workspace_scope(workspace_id),
+            created_at_ms,
+            sealed_message_layout::encode_sealed_message(&message)
+                .expect("encode sealed parent message"),
         )
     }
 }

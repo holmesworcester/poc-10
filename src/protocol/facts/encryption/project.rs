@@ -11,6 +11,7 @@ use super::recipient_key::recipient_key;
 use super::signed_key_wrap::signed_key_wrap;
 use super::validation::require_fact_scope;
 use crate::protocol::facts::identity;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
 #[derive(Debug, Clone, Default)]
@@ -47,5 +48,10 @@ fn removal_frontier(fact: &Fact) -> Result<ProjectionOutput, String> {
     let frontier = layout::decode_removal_frontier(&fact.bytes)?;
     let scope = matchers::workspace_scope(frontier.workspace_id);
     require_fact_scope(fact, &scope)?;
-    Ok(ProjectionOutput::new().offer(matchers::frontier_offer(fact.id, scope, fact.id)))
+    Ok(ProjectionOutput::new()
+        .offer(matchers::frontier_offer(fact.id, scope, fact.id))
+        .intent(share_fact_with_workspace_intent_for_fact(
+            frontier.workspace_id,
+            fact,
+        )))
 }

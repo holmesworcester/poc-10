@@ -2,6 +2,7 @@ use crate::core::facts::Fact;
 use crate::core::projection::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::intent::create_key_wrap_intent;
 use crate::protocol::facts::encryption::layout;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
 use super::validation::{
@@ -32,7 +33,11 @@ pub(super) fn key_request(
     let mut output = ProjectionOutput::new()
         .need(recipient_need)
         .need(frontier_need)
-        .need(source_need.clone());
+        .need(source_need.clone())
+        .intent(share_fact_with_workspace_intent_for_fact(
+            request.workspace_id,
+            fact,
+        ));
 
     if let (Some(recipient_fact), Some(frontier_fact)) = (recipient_fact, frontier_fact) {
         if recipient_fact.id != request.recipient_key_id {

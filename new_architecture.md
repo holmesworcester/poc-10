@@ -51,19 +51,19 @@ The migration succeeds when:
   `MatchRuntime`-specific product logic.
 - There is no product `demo` or `smoke` command. Smoke coverage belongs in
   black-box CLI tests against the real `match` binary.
-- Every intent handler is a flat `src/protocol/intent_handlers/<name>.rs`
-  file declared from `src/protocol/intent_handlers.rs`; handler-owned
-  subdirectories are not part of the target.
-- Fact-module and intent-handler manifests live under `src/protocol/` as
-  `fact_modules.rs` and `intent_handlers.rs`.
+- Intent handlers are themed files under `src/protocol/intents/<theme>/...`
+  and declared from `src/protocol/intents.rs`; broad driver or catch-all
+  intent submodules are not part of the target.
+- Fact and intent manifests live under `src/protocol/` as `facts.rs` and
+  `intents.rs`.
 - There is no root `src/commands` module. The command context lives in
   `src/core/command_context.rs` as `core::command_context`.
 - There is no `mod.rs` anywhere in the repository.
 - End-state guardrail: `rows.rs`, `layout.rs`, and module-local `cli.rs` stay
   narrow and declarative. They must not become protocol logic sinks.
 - Schema declarations exist in exactly three visible places:
-  `src/core/schema.p8sql`, `src/protocol/fact_modules/schema.p8sql`, and
-  `src/protocol/intent_handlers/schema.p8sql`.
+  `src/core/schema.p8sql`, `src/protocol/facts/schema.p8sql`, and
+  `src/protocol/intents/schema.p8sql`.
 - The schema declaration surface is the source of truth for storage tables,
   read-model row codecs, and canonical fact wire codecs.
 - Wire layouts are declarative and fixed length. There are no variable payload
@@ -94,11 +94,11 @@ or black-box tests:
 - `src/core/wake_loop.rs` persists and reloads facts, needs, offers, internal
   projection wakes, and intents. It also feeds exact declared fact inputs into
   handlers instead of exposing all facts.
-- Target fact modules under `src/protocol/fact_modules/` are exercised by poc-10 tests
+- Target fact modules under `src/protocol/facts/` are exercised by poc-10 tests
   and are not yet the whole production path.
-- Target intent handlers under `src/protocol/intent_handlers/` are flat files
-  and are registered from `src/protocol/intent_handlers.rs`.
-- The old handler subdirectory shape has been removed.
+- Target intent handlers under `src/protocol/intents/` are themed files and
+  are registered from `src/protocol/intents.rs`.
+- Broad handler driver submodules have been removed.
 - Target receive transit can open fixed transit frames that carry signed
   key-wrap facts, admit the opened fact, and record local receive provenance.
   Send-side flow now emits send-on-connection and network-send intents and can
@@ -185,8 +185,8 @@ src/
     schema_dsl.rs
 
   protocol/
-    fact_modules.rs
-    fact_modules/
+    facts.rs
+    facts/
       schema.p8sql
       <module>.rs
       <module>/
@@ -198,20 +198,35 @@ src/
         project.rs
         queries.rs
         rows.rs
-    intent_handlers.rs
-    intent_handlers/
+    intents.rs
+    intents/
       schema.p8sql
       connection.rs
-      connection_response.rs
-      handle_sync.rs
-      materialize_key_wraps.rs
-      network_send.rs
-      purge_event.rs
-      purge_retired_recipient_material.rs
-      receive_transit.rs
-      sync_index_update.rs
-      transit.rs
-      unwrap_key_wrap.rs
+      connection/
+        create_response.rs
+        send_bootstrap_request.rs
+      content.rs
+      content/
+        purge_below_retention_floor.rs
+        purge_deleted_message.rs
+        purge_expired_message.rs
+        purge_message_child.rs
+      encryption.rs
+      encryption/
+        create_key_wrap.rs
+        purge_retired_recipient_material.rs
+        unwrap_key_wrap.rs
+      sync.rs
+      sync/
+        record_indexed_fact.rs
+        send_compare_response.rs
+        send_needed_fact_id.rs
+        send_requested_fact.rs
+      transport.rs
+      transport/
+        receive_transit_frame.rs
+        send_facts_on_connection.rs
+        send_network_frame.rs
 
 ```
 
@@ -240,12 +255,12 @@ only for fact-family-local helper slices named after validation steps or output
 families. If a `project/` child corresponds to a different fact tag, the module
 is bundled incorrectly and must be split.
 
-`src/lib.rs`, `src/core.rs`, `src/protocol.rs`,
-`src/protocol/fact_modules.rs`, and `src/protocol/intent_handlers.rs` are
+`src/lib.rs`, `src/core.rs`, `src/protocol.rs`, `src/protocol/facts.rs`, and
+`src/protocol/intents.rs` are
 manifests. They declare modules and may re-export narrow APIs; they should not
 accumulate behavior. Public concrete protocol namespaces live under
-`topo::protocol::fact_modules` and `topo::protocol::intent_handlers` without
-top-level dumping-ground files.
+`topo::protocol::facts` and `topo::protocol::intents` without top-level
+dumping-ground files.
 
 `src/protocol.rs` is the target protocol registry. It is a declarative table of
 contents across schema sources, fact registrations, context matcher roles,
@@ -254,8 +269,8 @@ intent-handler manifests: those files define Rust namespaces, while
 `protocol.rs` declares which namespaces make up the concrete `match` protocol.
 
 The old legacy source island has been removed. Do not recreate compatibility
-bridges; port behavior into the target runtime, fact modules, intent handlers, and
-queries instead.
+bridges; port behavior into the target runtime, fact modules, intent handlers,
+and queries instead.
 
 ### No `mod.rs`
 
@@ -263,8 +278,8 @@ Rust module declarations live in manifest files:
 
 ```text
 src/core.rs
-src/protocol/fact_modules.rs
-src/protocol/intent_handlers.rs
+src/protocol/facts.rs
+src/protocol/intents.rs
 ```
 
 Those files should contain declarations and narrow re-exports only.
@@ -353,8 +368,8 @@ There are exactly three durable schema DSL files:
 
 ```text
 src/core/schema.p8sql
-src/protocol/fact_modules/schema.p8sql
-src/protocol/intent_handlers/schema.p8sql
+src/protocol/facts/schema.p8sql
+src/protocol/intents/schema.p8sql
 ```
 
 `src/core/schema.p8sql` contains core mechanics:
@@ -371,12 +386,12 @@ network_in
 network_out
 ```
 
-`src/protocol/fact_modules/schema.p8sql` contains projection/read-model state.
+`src/protocol/facts/schema.p8sql` contains projection/read-model state.
 In the end state it also declares fact wire layouts and read-model row
 key/value layouts. Generated codecs use those declarations to produce
 fixed-length fact encoders/decoders and row key/value constructors.
 
-`src/protocol/intent_handlers/schema.p8sql` contains handler checkpoint or operational state.
+`src/protocol/intents/schema.p8sql` contains handler checkpoint or operational state.
 
 The schema DSL may declare tables, indexes, uniqueness, byte lengths, and row
 keys. It should not contain Rust expressions, projection callbacks, or protocol
@@ -758,7 +773,7 @@ Handler rules:
 
 ```text
 - One handler owns each deferred intent kind.
-- Handlers are flat files under src/protocol/intent_handlers/.
+- Handlers are themed, self-contained files under src/protocol/intents/.
 - Handlers declare exact fact inputs when they need fact context.
 - Handlers do bounded work per call.
 - Handlers are idempotent by intent key.
@@ -826,7 +841,7 @@ Ciphertext<N>
 Padding<N>
 ```
 
-Fact modules declare fixed fact layouts in `src/protocol/fact_modules/schema.p8sql`
+Fact modules declare fixed fact layouts in `src/protocol/facts/schema.p8sql`
 and should not hand-roll byte parsing loops. The current checkpoint still has
 per-module layout files; those files should remain declarative and converge on
 generated fixed-layout readers/writers.
@@ -1170,7 +1185,8 @@ adding new compatibility layers:
 
 - Add boundary tests before broad rewrites.
 - Keep root manifests declaration-only.
-- Keep every handler as one flat file under `src/protocol/intent_handlers/`.
+- Keep every handler as a themed, self-contained file under
+  `src/protocol/intents/`.
 - Register fact types, context roles, intent kinds, handlers, and wire layouts
   in visible manifests.
 - Generate row and wire boilerplate from the three schema declaration files.

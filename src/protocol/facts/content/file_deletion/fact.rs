@@ -7,10 +7,9 @@
 //! this payload lives in the `identity::signed_fact` fact module and is intentionally
 //! not represented here.
 //!
-//! Parity gaps (intentional, deferred to later slices):
-//! - Legacy validates a signed envelope binding an endpoint_shared signer to
-//!   the named author; the target signed-fact envelope and identity
-//!   dependency context are separate fact modules and not consulted here.
+//! Current boundary: signed envelope verification and signer-to-author
+//! authority live in `identity::signed_fact` and identity context modules, not
+//! in this narrow deletion payload.
 
 use crate::core::facts::FactId;
 

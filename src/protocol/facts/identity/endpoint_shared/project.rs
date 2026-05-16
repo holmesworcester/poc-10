@@ -12,6 +12,7 @@ use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::device_invite::layout as device_invite_layout;
 use crate::protocol::facts::identity::invite_server::layout as invite_server_layout;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::fact::EndpointRole;
 use super::layout;
@@ -68,7 +69,11 @@ impl Projector for EndpointSharedProjector {
                 fact.id,
                 crate::protocol::matchers::endpoint_shared_role(),
             ))
-            .intent(AtomicIntent::PutRow(endpoint_shared_row(fact.id, &event)?).into_intent()))
+            .intent(AtomicIntent::PutRow(endpoint_shared_row(fact.id, &event)?).into_intent())
+            .intent(share_fact_with_workspace_intent_for_fact(
+                event.workspace_id,
+                fact,
+            )))
     }
 }
 
@@ -230,10 +235,14 @@ mod projector_tests {
             .offers
             .iter()
             .any(|offer| offer.role == crate::protocol::matchers::endpoint_shared_role()));
-        assert_eq!(output.intents.len(), 1);
-        let row_intent =
-            AtomicIntent::from_intent(&output.intents[0], &[rows::ENDPOINT_SHARED_ROWS])
-                .expect("row intent");
+        assert_eq!(output.intents.len(), 2);
+        let row_intent = output
+            .intents
+            .iter()
+            .find_map(|intent| {
+                AtomicIntent::from_intent(intent, &[rows::ENDPOINT_SHARED_ROWS]).ok()
+            })
+            .expect("row intent");
         let AtomicIntent::PutRow(stored) = row_intent else {
             panic!("expected put row");
         };
@@ -425,7 +434,7 @@ mod projector_tests {
             .expect("signed device_invite context authorizes device endpoint_shared");
 
         assert_eq!(output.needs.len(), 1);
-        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.intents.len(), 2);
     }
 
     fn invite_server_endpoint_shared() -> (EndpointSharedFact, Fact, Fact) {

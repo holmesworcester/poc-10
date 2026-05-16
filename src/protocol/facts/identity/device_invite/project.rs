@@ -12,6 +12,7 @@ use crate::protocol::facts::identity::endpoint_shared::layout as endpoint_shared
 use crate::protocol::facts::identity::user::layout as user_layout;
 use crate::protocol::facts::identity::user_invite::layout as user_invite_layout;
 use crate::protocol::facts::identity::workspace::layout as workspace_layout;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::layout;
 use super::rows::device_invite_row;
@@ -69,6 +70,10 @@ impl Projector for DeviceInviteProjector {
                     device_invite.user_authority_fact_id,
                     device_invite.public_key,
                 ),
+            ))
+            .intent(share_fact_with_workspace_intent_for_fact(
+                device_invite.workspace_id,
+                fact,
             )))
     }
 }
@@ -337,8 +342,11 @@ mod projector_tests {
             .project(&scenario.fact, &context)
             .expect("project device_invite");
         assert_eq!(output.needs.len(), 3);
-        assert_eq!(output.intents.len(), 1);
-        let row_intent = AtomicIntent::from_intent(&output.intents[0], &[rows::DEVICE_INVITE_ROWS])
+        assert_eq!(output.intents.len(), 2);
+        let row_intent = output
+            .intents
+            .iter()
+            .find_map(|intent| AtomicIntent::from_intent(intent, &[rows::DEVICE_INVITE_ROWS]).ok())
             .expect("row intent");
         let AtomicIntent::PutRow(stored) = row_intent else {
             panic!("expected put row");
@@ -425,7 +433,7 @@ mod projector_tests {
             .expect("signed endpoint_shared context should authorize device_invite");
 
         assert_eq!(output.needs.len(), 2);
-        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.intents.len(), 2);
     }
 
     #[test]

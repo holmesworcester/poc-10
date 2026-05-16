@@ -13,6 +13,8 @@
 //! unknown CLI commands with the registry's usage lines, and returns text lines for
 //! the binary to print.
 
+use std::path::Path;
+
 /// Positional arguments passed to a command after its command name.
 #[derive(Debug, Clone, Copy)]
 pub struct CliArgs<'a> {
@@ -115,4 +117,101 @@ pub fn usage<C>(commands: &[CliCommand<C>], reason: &str) -> String {
         lines.push(format!("  match --db PATH {}", command.usage));
     }
     lines.join("\n")
+}
+
+pub fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
+    decode_hex_32_named(value, "hex id")
+}
+
+pub fn decode_hex_32_named(value: &str, label: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64 {
+        return Err(format!("{label} must be 64 hex characters"));
+    }
+    let mut out = [0; 32];
+    let bytes = value.as_bytes();
+    for idx in 0..32 {
+        out[idx] =
+            (hex_nibble(bytes[idx * 2], label)? << 4) | hex_nibble(bytes[idx * 2 + 1], label)?;
+    }
+    Ok(out)
+}
+
+pub fn encode_hex_32(id: &[u8; 32]) -> String {
+    encode_hex(id)
+}
+
+pub fn encode_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+pub fn read_file_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|err| format!("read file {}: {err}", path.display()))
+}
+
+pub fn write_file_bytes(path: impl AsRef<Path>, bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(path.as_ref(), bytes).map_err(|err| format!("write output file: {err}"))
+}
+
+fn hex_nibble(byte: u8, label: &str) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(format!("{label} contains a non-hex character")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_hex_32, encode_hex, encode_hex_32};
+
+    #[test]
+    fn decode_hex_32_accepts_lowercase_and_uppercase() {
+        let parsed =
+            decode_hex_32("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+                .expect("valid hex");
+
+        assert_eq!(
+            parsed,
+            [
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 31,
+            ]
+        );
+        assert_eq!(
+            decode_hex_32(&"A".repeat(64)).expect("valid hex"),
+            [0xaa; 32]
+        );
+    }
+
+    #[test]
+    fn decode_hex_32_rejects_wrong_length() {
+        assert_eq!(
+            decode_hex_32("00").expect_err("too short"),
+            "hex id must be 64 hex characters"
+        );
+    }
+
+    #[test]
+    fn decode_hex_32_rejects_non_hex() {
+        let mut value = "0".repeat(64);
+        value.replace_range(12..13, "x");
+
+        assert_eq!(
+            decode_hex_32(&value).expect_err("not hex"),
+            "hex id contains a non-hex character"
+        );
+    }
+
+    #[test]
+    fn encode_hex_uses_lowercase() {
+        assert_eq!(encode_hex(&[0, 1, 10, 15, 16, 255]), "00010a0f10ff");
+        assert_eq!(encode_hex_32(&[0xab; 32]), "ab".repeat(32));
+    }
 }

@@ -222,6 +222,7 @@ fn deletion_fact(workspace_id: [u8; 32], target_id: [u8; 32], author_user_id: [u
         43,
         layout::encode_message_deletion(&MessageDeletionFact {
             workspace_id,
+            created_at_ms: 43,
             target_id,
             author_user_id,
         })

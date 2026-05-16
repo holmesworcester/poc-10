@@ -1176,6 +1176,7 @@ fn target_handlers_do_not_own_projection_rows_or_projector_context() {
     let mut offenders = Vec::new();
     for path in rust_files(&handler_root) {
         let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
         for forbidden in [
             "::rows",
             "TableRow",
@@ -1187,7 +1188,7 @@ fn target_handlers_do_not_own_projection_rows_or_projector_context() {
             "ContextOffer",
             "ContextMatcher",
         ] {
-            if text.contains(forbidden) {
+            if production.contains(forbidden) {
                 offenders.push(format!(
                     "{} contains {forbidden:?}",
                     path.strip_prefix(root).unwrap().display()

@@ -18,7 +18,7 @@ use crate::core::wire;
 use crate::protocol::facts::content::sealed_message::fact::{
     SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
 };
-use crate::protocol::facts::content::sealed_message::layout;
+use crate::protocol::facts::content::sealed_message::{layout, rows};
 use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity::signed_fact::create as signed_fact_create;
 use crate::protocol::facts::identity::signed_fact::layout as signed_fact_layout;
@@ -84,6 +84,9 @@ pub fn send_message(
         if minute < setting.retire_minute {
             return Err("send_message minute is below the active disappearing floor".to_string());
         }
+    }
+    if minute < retained_floor_from_tombstones(ctx, workspace_id)? {
+        return Err("no retained ancestor covers message minute".to_string());
     }
     let expires_at_minute = active_setting
         .as_ref()
@@ -155,6 +158,22 @@ pub fn send_message(
         created_at_ms,
     })
     .with_facts(vec![fact]))
+}
+
+fn retained_floor_from_tombstones(
+    ctx: &CommandContext<'_>,
+    workspace_id: WorkspaceId,
+) -> Result<u64, String> {
+    let tombstones = ctx
+        .store()
+        .table_rows_with_key_prefix(rows::MESSAGE_TOMBSTONE_ROWS, &workspace_id, usize::MAX)
+        .map_err(|err| format!("load message tombstones for send: {err}"))?;
+    tombstones
+        .into_iter()
+        .map(|(key, value)| rows::decode_message_tombstone_row(&key, &value))
+        .try_fold(0, |floor, row| {
+            row.map(|row| floor.max(row.authored_minute.saturating_add(1)))
+        })
 }
 
 /// Pad caller text into the fixed plaintext slot.

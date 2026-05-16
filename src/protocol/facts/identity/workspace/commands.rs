@@ -97,12 +97,6 @@ pub fn create_workspace_with_identity(
         endpoint_output.facts.first(),
         ctx.store(),
     )?;
-    let initial_setting = initial_disappearing_setting_fact(
-        created_at_ms + 7,
-        workspace_id,
-        identity.ttl_minutes.unwrap_or(60),
-    )?;
-
     let mut facts = vec![
         workspace,
         user_invite,
@@ -111,8 +105,14 @@ pub fn create_workspace_with_identity(
         creator_admin,
         device_invite,
         endpoint_shared,
-        initial_setting,
     ];
+    if identity.ttl_minutes != Some(0) {
+        facts.push(initial_disappearing_setting_fact(
+            created_at_ms + 7,
+            workspace_id,
+            identity.ttl_minutes.unwrap_or(60),
+        )?);
+    }
     facts.extend(endpoint_output.facts);
     Ok(CommandOutput::new(CreateWorkspaceReceipt {
         workspace_fact_id: workspace_id,

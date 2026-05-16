@@ -1,26 +1,19 @@
-//! Poc-10 content-file projector.
+//! Content-file projector.
 //!
-//! Decodes a content-file fact and emits a single `PutRow` into `file_rows`.
-//! The file event id used in the row key is the fact id.
-//!
-//! Parity gaps (intentional, deferred to later slices):
-//! - Signed-envelope verification (separate fact module).
-//! - Endpoint signer validation (separate signed-fact/identity surface).
-//! - Parent-message and author-user authority are validated through context
-//!   before rows are materialized. Parent or file deletion context purges the
-//!   descriptor row instead of recreating it.
-//! - Per-file leaf-coord / frontier derivation — depends on per-message FS.
-//! - Sealed-metadata AEAD opening — depends on encryption module surfacing the
-//!   per-file content key.
+//! Files attach to sealed messages only. The projector waits for the sealed
+//! parent, validates signed author context, and materializes descriptor rows
+//! through atomic intents. Raw file bytes are carried by slice facts; this
+//! projector never opens local files.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
-use crate::protocol::facts::content::message::layout as message_layout;
+use crate::protocol::facts::content::sealed_message::layout as sealed_message_layout;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user::layout as user_layout;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 use crate::protocol::matchers as message_matchers;
 
@@ -80,7 +73,7 @@ impl Projector for ContentFileProjector {
             validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
             return Ok(delete_file_projection(file.workspace_id, fact.id).need(file_deletion_need));
         }
-        let Some(parent) = payload_for_need(context, &parent_need, "file parent")? else {
+        let Some(parent_payload) = payload_for_need(context, &parent_need, "file parent")? else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(parent_need),
@@ -89,16 +82,18 @@ impl Projector for ContentFileProjector {
                 None,
             ]));
         };
-        validate_parent_message(parent, &scope, file.workspace_id, file.message_id)?;
-        let parent_payload =
-            maybe_signed_payload(parent, message_layout::TYPE_CONTENT_MESSAGE, "file parent")?;
-        let parent_message = message_layout::decode_fact(&parent_payload.payload)
-            .map_err(|_| "file parent context is not a content message".to_string())?;
+        let parent = parent_message_context(
+            parent_payload,
+            &scope,
+            file.workspace_id,
+            file.message_id,
+            "file parent",
+        )?;
         let parent_deletion_need = message_matchers::deletion_need(
             fact.id,
             scope.clone(),
             file.message_id,
-            parent_message.author_user_id,
+            parent.message.author_user_id,
         );
         if let Some(deletion) =
             payload_for_need(context, &parent_deletion_need, "file parent deletion")?
@@ -107,7 +102,7 @@ impl Projector for ContentFileProjector {
                 deletion,
                 file.workspace_id,
                 file.message_id,
-                parent_message.author_user_id,
+                parent.message.author_user_id,
             )?;
             return Ok(delete_file_projection(file.workspace_id, fact.id)
                 .need(file_deletion_need)
@@ -138,7 +133,11 @@ impl Projector for ContentFileProjector {
             fact.id,
             fact.id,
         ))
-        .intent(AtomicIntent::PutRow(content_file_row(fact.id, &file)?).into_intent()))
+        .intent(AtomicIntent::PutRow(content_file_row(fact.id, &file)?).into_intent())
+        .intent(share_fact_with_workspace_intent_for_fact(
+            file.workspace_id,
+            fact,
+        )))
     }
 }
 
@@ -213,26 +212,27 @@ fn validate_id(name: &str, id: &[u8; 32]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_parent_message(
-    payload: &Fact,
+fn parent_message_context<'a>(
+    payload: &'a Fact,
     expected_scope: &FactScope,
     workspace_id: crate::core::facts::FactId,
     message_id: crate::core::facts::FactId,
-) -> Result<(), String> {
+    label: &str,
+) -> Result<ParentMessageContext<'a>, String> {
     if payload.id != message_id {
         return Err("file parent context payload id mismatch".to_string());
     }
     if &payload.scope != expected_scope {
         return Err("file parent context scope does not match file workspace".to_string());
     }
-    let parent_payload =
-        maybe_signed_payload(payload, message_layout::TYPE_CONTENT_MESSAGE, "file parent")?;
-    let parent = message_layout::decode_fact(&parent_payload.payload)
-        .map_err(|_| "file parent context is not a content message".to_string())?;
+    let parent = decode_parent_message_payload(payload, label)?;
     if parent.workspace_id != workspace_id {
         return Err("file parent message workspace does not match file".to_string());
     }
-    Ok(())
+    Ok(ParentMessageContext {
+        _payload: payload,
+        message: parent,
+    })
 }
 
 fn validate_author_user(
@@ -287,23 +287,42 @@ fn validate_message_deletion(
 ) -> Result<(), String> {
     let deletion_payload = maybe_signed_payload(
         payload,
-        crate::protocol::facts::content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION,
+        sealed_message_layout::TYPE_MESSAGE_DELETION,
         "parent deletion",
     )?;
-    let deletion = crate::protocol::facts::content::message_deletion::layout::decode_fact(
-        &deletion_payload.payload,
-    )
-    .map_err(|_| "parent deletion context is not a content message deletion".to_string())?;
+    let deletion = sealed_message_layout::decode_message_deletion(&deletion_payload.payload)
+        .map_err(|_| "parent deletion context is not a sealed message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("parent deletion workspace does not match file".to_string());
     }
-    if deletion.target_message_id != target_message_id {
+    if deletion.target_id != target_message_id {
         return Err("parent deletion target does not match file parent".to_string());
     }
     if deletion.author_user_id != author_user_id {
         return Err("parent deletion author does not match parent message author".to_string());
     }
     Ok(())
+}
+
+struct ParentMessageContext<'a> {
+    _payload: &'a Fact,
+    message: ParentMessage,
+}
+
+struct ParentMessage {
+    workspace_id: crate::core::facts::FactId,
+    author_user_id: crate::core::facts::FactId,
+}
+
+fn decode_parent_message_payload(payload: &Fact, label: &str) -> Result<ParentMessage, String> {
+    let sealed_payload =
+        maybe_signed_payload(payload, sealed_message_layout::TYPE_SEALED_MESSAGE, label)?;
+    let sealed = sealed_message_layout::decode_sealed_message(&sealed_payload.payload)
+        .map_err(|_| format!("{label} context is not a sealed message"))?;
+    Ok(ParentMessage {
+        workspace_id: sealed.workspace_id,
+        author_user_id: sealed.author_user_id,
+    })
 }
 
 fn maybe_signed_payload(
@@ -340,8 +359,10 @@ mod projector_tests {
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::content::file::fact::{ContentFileFact, FILE_ROOT_HASH_BYTES};
     use topo::protocol::facts::content::file::{layout, project, rows};
-    use topo::protocol::facts::content::message::fact::ContentMessageFact;
-    use topo::protocol::facts::content::message::layout as message_layout;
+    use topo::protocol::facts::content::sealed_message::{
+        fact::{SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS},
+        layout as sealed_message_layout,
+    };
     use topo::protocol::matchers::ExactSelectorMatcher;
 
     use topo::protocol::facts::identity::user::{fact::UserFact, layout as user_layout};
@@ -351,20 +372,7 @@ mod projector_tests {
     fn content_file_projector_materializes_row_through_atomic_intent() {
         let parent_author = user_fact([9; 32], [44; 32], "parent-author");
         let file_author = user_fact([9; 32], [22; 32], "file-author");
-        let parent = ContentMessageFact {
-            workspace_id: [9; 32],
-            author_user_id: parent_author.id,
-            created_at_ms: 12_000,
-            frontier_id: [55; 32],
-            minute: 0,
-            leaf_id: [66; 32],
-            sealed_body_ref: [77; 32],
-        };
-        let parent_fact = Fact::new(
-            message_context::workspace_scope(parent.workspace_id),
-            parent.created_at_ms,
-            message_layout::encode_fact(&parent).expect("encode parent message"),
-        );
+        let parent_fact = sealed_parent_fact([9; 32], parent_author.id, 12_000);
         let file = ContentFileFact {
             workspace_id: [9; 32],
             created_at_ms: 12345,
@@ -398,16 +406,13 @@ mod projector_tests {
                 &CombinedProjector,
                 &[&matcher, &user_matcher],
                 &store,
-                &[
-                    rows::FILE_ROWS,
-                    topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
-                ],
+                &[rows::FILE_ROWS],
                 10,
             )
             .expect("project file");
         assert!(projected.projections >= 4);
         assert_eq!(projected.intents, 2);
-        assert!(bus.intents().is_empty());
+        assert_eq!(bus.intents().len(), 1);
 
         let table = store.table_rows(rows::FILE_ROWS).expect("file rows");
         assert_eq!(table.len(), 1);
@@ -484,20 +489,7 @@ mod projector_tests {
     fn content_file_parent_offer_before_need_wakes_file() {
         let parent_author = user_fact([9; 32], [44; 32], "parent-author");
         let file_author = user_fact([9; 32], [22; 32], "file-author");
-        let parent = ContentMessageFact {
-            workspace_id: [9; 32],
-            author_user_id: parent_author.id,
-            created_at_ms: 12_000,
-            frontier_id: [55; 32],
-            minute: 0,
-            leaf_id: [66; 32],
-            sealed_body_ref: [77; 32],
-        };
-        let parent_fact = Fact::new(
-            message_context::workspace_scope(parent.workspace_id),
-            parent.created_at_ms,
-            message_layout::encode_fact(&parent).expect("encode parent message"),
-        );
+        let parent_fact = sealed_parent_fact([9; 32], parent_author.id, 12_000);
         let file = ContentFileFact {
             workspace_id: [9; 32],
             created_at_ms: 12345,
@@ -527,10 +519,7 @@ mod projector_tests {
             &CombinedProjector,
             &[&matcher, &user_matcher],
             &store,
-            &[
-                rows::FILE_ROWS,
-                topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
-            ],
+            &[rows::FILE_ROWS],
             10,
         )
         .expect("project parent first");
@@ -542,16 +531,13 @@ mod projector_tests {
                 &CombinedProjector,
                 &[&matcher, &user_matcher],
                 &store,
-                &[
-                    rows::FILE_ROWS,
-                    topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
-                ],
+                &[rows::FILE_ROWS],
                 10,
             )
             .expect("parent offer wakes file need");
 
         assert!(projected.projections >= 2);
-        assert_eq!(projected.intents, 1);
+        assert_eq!(projected.intents, 2);
         let table = store.table_rows(rows::FILE_ROWS).expect("file rows");
         assert_eq!(table.len(), 1);
         let row = rows::decode_content_file_row(&table[0].0, &table[0].1).expect("decode file row");
@@ -581,10 +567,12 @@ mod projector_tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             match fact.bytes.first().copied() {
-                Some(message_layout::TYPE_CONTENT_MESSAGE) => {
-                    topo::protocol::facts::content::message::project::ContentMessageProjector::new()
-                        .project(fact, context)
-                }
+                Some(sealed_message_layout::TYPE_SEALED_MESSAGE) => Ok(ProjectionOutput::new()
+                    .offer(message_context::message_offer(
+                        fact.id,
+                        fact.scope.clone(),
+                        fact.id,
+                    ))),
                 Some(layout::TYPE_CONTENT_FILE) => {
                     project::ContentFileProjector::new().project(fact, context)
                 }
@@ -609,6 +597,33 @@ mod projector_tests {
             FactScope::Global,
             user.created_at_ms,
             user_layout::encode_fact(&user).expect("encode user"),
+        )
+    }
+
+    fn sealed_parent_fact(
+        workspace_id: [u8; 32],
+        author_user_id: [u8; 32],
+        created_at_ms: u64,
+    ) -> Fact {
+        let message = SealedMessageFact {
+            workspace_id,
+            created_at_ms,
+            author_user_id,
+            signer_id: [6; 32],
+            frontier_id: [7; 32],
+            local_history_node_secret_id: [0; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [0; 32],
+            minute: created_at_ms / UNIX_MINUTE_MS,
+            leaf_id: [8; 32],
+            nonce: [9; NONCE_BYTES],
+            ciphertext: vec![0xaa; CIPHERTEXT_BYTES],
+        };
+        Fact::new(
+            message_context::workspace_scope(workspace_id),
+            created_at_ms,
+            sealed_message_layout::encode_sealed_message(&message)
+                .expect("encode sealed parent message"),
         )
     }
 }

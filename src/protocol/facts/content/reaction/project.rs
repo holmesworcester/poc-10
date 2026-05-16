@@ -1,30 +1,18 @@
-//! Poc-10 content-reaction projector.
+//! Content-reaction projector.
 //!
-//! Decodes a content-reaction fact, waits for the target message when needed,
-//! and emits a single `PutRow` into `reaction_rows` only after the target
-//! message context is matched and validated. The reaction id used in the row
-//! key is the fact id.
-//!
-//! Parity gaps (intentional, deferred to later slices):
-//! - Legacy validates a signed envelope around the payload; the target
-//!   signed-fact envelope is a separate fact module.
-//! - Legacy admit-check drops reactions whose parent message is already
-//!   tombstoned. This projector watches the parent deletion context and
-//!   removes its row when the authorized parent delete is visible.
-//! - Legacy derives a deterministic leaf coordinate from author+target+
-//!   frontier+ts so duplicate reactions collapse on admission. The target
-//!   per-message FS isn't ported yet, so this slice keys rows by fact id.
-//! - Legacy decrypts the emoji into a plaintext `content.reactions` row;
-//!   per-message decryption secrets aren't surfaced in this slice.
+//! Reactions attach to sealed messages only. The projector waits for the
+//! target sealed-message context, validates author/signing context, and writes
+//! reaction rows through atomic intents.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
-use crate::protocol::facts::content::message::layout as message_layout;
+use crate::protocol::facts::content::sealed_message::layout as sealed_message_layout;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user::layout as user_layout;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers as message_matchers;
 
 use super::layout;
@@ -83,24 +71,18 @@ impl Projector for ContentReactionProjector {
                 None,
             ]));
         };
-        validate_target_message(
+        let target_context = target_message_context(
             target,
             &scope,
             reaction.workspace_id,
             reaction.target_message_id,
-        )?;
-        let target_payload = maybe_signed_payload(
-            target,
-            message_layout::TYPE_CONTENT_MESSAGE,
             "reaction target",
         )?;
-        let target_message = message_layout::decode_fact(&target_payload.payload)
-            .map_err(|_| "reaction target context is not a content message".to_string())?;
         let target_deletion_need = message_matchers::deletion_need(
             fact.id,
             scope.clone(),
             reaction.target_message_id,
-            target_message.author_user_id,
+            target_context.message.author_user_id,
         );
         if let Some(deletion) =
             payload_for_need(context, &target_deletion_need, "reaction target deletion")?
@@ -109,7 +91,7 @@ impl Projector for ContentReactionProjector {
                 deletion,
                 reaction.workspace_id,
                 reaction.target_message_id,
-                target_message.author_user_id,
+                target_context.message.author_user_id,
             )?;
             return Ok(delete_reaction_projection(reaction.workspace_id, fact.id)
                 .need(target_need)
@@ -140,7 +122,11 @@ impl Projector for ContentReactionProjector {
             Some(target_deletion_need),
             Some(author_need),
         ])
-        .intent(AtomicIntent::PutRow(row).into_intent()))
+        .intent(AtomicIntent::PutRow(row).into_intent())
+        .intent(share_fact_with_workspace_intent_for_fact(
+            reaction.workspace_id,
+            fact,
+        )))
     }
 }
 
@@ -161,29 +147,27 @@ fn output_with_needs(
         .fold(ProjectionOutput::new(), |output, need| output.need(need))
 }
 
-fn validate_target_message(
-    payload: &Fact,
+fn target_message_context<'a>(
+    payload: &'a Fact,
     expected_scope: &FactScope,
     workspace_id: crate::core::facts::FactId,
     target_message_id: crate::core::facts::FactId,
-) -> Result<(), String> {
+    label: &str,
+) -> Result<TargetMessageContext<'a>, String> {
     if payload.id != target_message_id {
         return Err("reaction target context payload id mismatch".to_string());
     }
     if &payload.scope != expected_scope {
         return Err("reaction target context scope does not match reaction workspace".to_string());
     }
-    let target_payload = maybe_signed_payload(
-        payload,
-        message_layout::TYPE_CONTENT_MESSAGE,
-        "reaction target",
-    )?;
-    let target = message_layout::decode_fact(&target_payload.payload)
-        .map_err(|_| "reaction target context is not a content message".to_string())?;
+    let target = decode_target_message_payload(payload, label)?;
     if target.workspace_id != workspace_id {
         return Err("reaction target message workspace does not match reaction".to_string());
     }
-    Ok(())
+    Ok(TargetMessageContext {
+        _payload: payload,
+        message: target,
+    })
 }
 
 fn validate_author_user(
@@ -224,23 +208,42 @@ fn validate_message_deletion(
 ) -> Result<(), String> {
     let deletion_payload = maybe_signed_payload(
         payload,
-        crate::protocol::facts::content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION,
+        sealed_message_layout::TYPE_MESSAGE_DELETION,
         "target deletion",
     )?;
-    let deletion = crate::protocol::facts::content::message_deletion::layout::decode_fact(
-        &deletion_payload.payload,
-    )
-    .map_err(|_| "target deletion context is not a content message deletion".to_string())?;
+    let deletion = sealed_message_layout::decode_message_deletion(&deletion_payload.payload)
+        .map_err(|_| "target deletion context is not a sealed message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("target deletion workspace does not match reaction".to_string());
     }
-    if deletion.target_message_id != target_message_id {
+    if deletion.target_id != target_message_id {
         return Err("target deletion target does not match reaction parent".to_string());
     }
     if deletion.author_user_id != author_user_id {
         return Err("target deletion author does not match target message author".to_string());
     }
     Ok(())
+}
+
+struct TargetMessageContext<'a> {
+    _payload: &'a Fact,
+    message: TargetMessage,
+}
+
+struct TargetMessage {
+    workspace_id: crate::core::facts::FactId,
+    author_user_id: crate::core::facts::FactId,
+}
+
+fn decode_target_message_payload(payload: &Fact, label: &str) -> Result<TargetMessage, String> {
+    let sealed_payload =
+        maybe_signed_payload(payload, sealed_message_layout::TYPE_SEALED_MESSAGE, label)?;
+    let sealed = sealed_message_layout::decode_sealed_message(&sealed_payload.payload)
+        .map_err(|_| format!("{label} context is not a sealed message"))?;
+    Ok(TargetMessage {
+        workspace_id: sealed.workspace_id,
+        author_user_id: sealed.author_user_id,
+    })
 }
 
 fn maybe_signed_payload(
@@ -275,12 +278,14 @@ mod projector_tests {
     use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
-    use topo::protocol::facts::content::message::fact::ContentMessageFact;
-    use topo::protocol::facts::content::message::layout as message_layout;
     use topo::protocol::facts::content::reaction::fact::{
         ContentReactionFact, REACTION_NONCE_BYTES,
     };
     use topo::protocol::facts::content::reaction::{layout, project, rows};
+    use topo::protocol::facts::content::sealed_message::{
+        fact::{SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS},
+        layout as sealed_message_layout,
+    };
     use topo::protocol::matchers::ExactSelectorMatcher;
 
     use topo::protocol::facts::identity::user::{fact::UserFact, layout as user_layout};
@@ -298,20 +303,7 @@ mod projector_tests {
             nonce: [7; REACTION_NONCE_BYTES],
             ciphertext: b"sealed-emoji".to_vec(),
         };
-        let target_message = ContentMessageFact {
-            workspace_id: reaction.workspace_id,
-            author_user_id: target_author.id,
-            created_at_ms: 12_000,
-            frontier_id: [55; 32],
-            minute: 0,
-            leaf_id: [66; 32],
-            sealed_body_ref: [77; 32],
-        };
-        let message_fact = Fact::new(
-            message_context::workspace_scope(target_message.workspace_id),
-            target_message.created_at_ms,
-            message_layout::encode_fact(&target_message).expect("encode message"),
-        );
+        let message_fact = sealed_parent_fact(reaction.workspace_id, target_author.id, 12_000);
         reaction.target_message_id = message_fact.id;
         let reaction_fact = Fact::new(
             message_context::workspace_scope(reaction.workspace_id),
@@ -333,16 +325,13 @@ mod projector_tests {
                 &CombinedProjector,
                 &[&matcher, &user_matcher],
                 &store,
-                &[
-                    rows::REACTION_ROWS,
-                    topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
-                ],
+                &[rows::REACTION_ROWS],
                 10,
             )
             .expect("project reaction");
         assert!(projected.projections >= 4);
         assert_eq!(projected.intents, 2);
-        assert!(bus.intents().is_empty());
+        assert_eq!(bus.intents().len(), 1);
 
         let table = store
             .table_rows(rows::REACTION_ROWS)
@@ -419,20 +408,7 @@ mod projector_tests {
             nonce: [7; REACTION_NONCE_BYTES],
             ciphertext: b"sealed-emoji".to_vec(),
         };
-        let target_message = ContentMessageFact {
-            workspace_id: reaction.workspace_id,
-            author_user_id: target_author.id,
-            created_at_ms: 12_000,
-            frontier_id: [55; 32],
-            minute: 0,
-            leaf_id: [66; 32],
-            sealed_body_ref: [77; 32],
-        };
-        let message_fact = Fact::new(
-            message_context::workspace_scope(target_message.workspace_id),
-            target_message.created_at_ms,
-            message_layout::encode_fact(&target_message).expect("encode message"),
-        );
+        let message_fact = sealed_parent_fact(reaction.workspace_id, target_author.id, 12_000);
         reaction.target_message_id = message_fact.id;
         let reaction_fact = Fact::new(
             message_context::workspace_scope(reaction.workspace_id),
@@ -451,10 +427,7 @@ mod projector_tests {
             &CombinedProjector,
             &[&matcher, &user_matcher],
             &store,
-            &[
-                rows::REACTION_ROWS,
-                topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
-            ],
+            &[rows::REACTION_ROWS],
             10,
         )
         .expect("project target first");
@@ -466,16 +439,13 @@ mod projector_tests {
                 &CombinedProjector,
                 &[&matcher, &user_matcher],
                 &store,
-                &[
-                    rows::REACTION_ROWS,
-                    topo::protocol::facts::content::message::rows::CONTENT_MESSAGE_ROWS,
-                ],
+                &[rows::REACTION_ROWS],
                 10,
             )
             .expect("target offer wakes reaction need");
 
         assert!(projected.projections >= 2);
-        assert_eq!(projected.intents, 1);
+        assert_eq!(projected.intents, 2);
         let table = store
             .table_rows(rows::REACTION_ROWS)
             .expect("reaction rows");
@@ -507,10 +477,12 @@ mod projector_tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             match fact.bytes.first().copied() {
-                Some(message_layout::TYPE_CONTENT_MESSAGE) => {
-                    topo::protocol::facts::content::message::project::ContentMessageProjector::new()
-                        .project(fact, context)
-                }
+                Some(sealed_message_layout::TYPE_SEALED_MESSAGE) => Ok(ProjectionOutput::new()
+                    .offer(message_context::message_offer(
+                        fact.id,
+                        fact.scope.clone(),
+                        fact.id,
+                    ))),
                 Some(layout::TYPE_CONTENT_REACTION) => {
                     project::ContentReactionProjector::new().project(fact, context)
                 }
@@ -535,6 +507,33 @@ mod projector_tests {
             FactScope::Global,
             user.created_at_ms,
             user_layout::encode_fact(&user).expect("encode user"),
+        )
+    }
+
+    fn sealed_parent_fact(
+        workspace_id: [u8; 32],
+        author_user_id: [u8; 32],
+        created_at_ms: u64,
+    ) -> Fact {
+        let message = SealedMessageFact {
+            workspace_id,
+            created_at_ms,
+            author_user_id,
+            signer_id: [6; 32],
+            frontier_id: [7; 32],
+            local_history_node_secret_id: [0; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [0; 32],
+            minute: created_at_ms / UNIX_MINUTE_MS,
+            leaf_id: [8; 32],
+            nonce: [9; NONCE_BYTES],
+            ciphertext: vec![0xaa; CIPHERTEXT_BYTES],
+        };
+        Fact::new(
+            message_context::workspace_scope(workspace_id),
+            created_at_ms,
+            sealed_message_layout::encode_sealed_message(&message)
+                .expect("encode sealed target message"),
         )
     }
 }

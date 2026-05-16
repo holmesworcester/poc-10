@@ -9,17 +9,11 @@
 //! reference their predecessor via `supersedes_setting_id` so projection
 //! can chain them.
 //!
-//! Legacy parity gaps (intentional, deferred to later slices) -- see
-//! `project.rs` for the runtime equivalent of this list:
-//!  - Legacy validates a signed envelope around the payload; the target
-//!    `identity::signed_fact` envelope is a separate fact module not yet wired in.
-//!  - Legacy resolves an authority-admin dependency and checks the signer
-//!    public key against the workspace admin set. The admin module is not
-//!    yet ported to the target tree.
-//!  - Legacy validates monotonic floor against the predecessor setting's
-//!    `expires_at_or_before_minute`. The chain dependency lookup against
-//!    sibling encryption events is not available here, so the field is
-//!    carried but not cross-checked.
+//! Current boundaries:
+//! - Signed envelope verification is owned by `identity::signed_fact`.
+//! - Workspace-admin authority is validated by the projector context.
+//! - Monotonic floor checks are enforced through the supersedes chain in the
+//!   setting projector.
 
 use crate::core::facts::FactId;
 

@@ -37,6 +37,7 @@ pub struct SignerPubkeyFact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageDeletionFact {
     pub workspace_id: WorkspaceId,
+    pub created_at_ms: u64,
     pub target_id: FactId,
     pub author_user_id: AuthorId,
 }

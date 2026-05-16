@@ -5,7 +5,10 @@
 //! product-facing `match` binary name. It should not grow protocol logic,
 //! projection code, handler dispatch, or fact construction.
 
-use crate::core::cli::CliArgs;
+use crate::core::cli::{
+    decode_hex_32_named as core_decode_hex_32, encode_hex as core_encode_hex,
+    encode_hex_32 as core_encode_hex_32, CliArgs,
+};
 use crate::core::command_context::{
     CommandClock, IdentityVault, LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
 };
@@ -18,8 +21,11 @@ use crate::protocol::intents::content::purge_below_retention_floor::{
     purge_below_retention_floor_intent, PurgeBelowRetentionFloor,
 };
 use crate::protocol::runtime::ProtocolRuntime;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
+
+const DELETE_FILE_USAGE: &str = "delete-file WORKSPACE_ID_HEX FILE_SELECTOR";
 
 pub fn run(argv: Vec<String>) -> Result<(), String> {
     let parsed = ParsedArgs::parse(argv)?;
@@ -45,6 +51,7 @@ pub fn run(argv: Vec<String>) -> Result<(), String> {
         Some("key-frontier") => run_key_frontier(parsed),
         Some("key-wrap") => run_key_wrap(parsed),
         Some("key-access") => run_key_access(parsed),
+        Some("key-derive") => run_key_derive(parsed),
         Some("key-node") => run_key_node(parsed),
         Some("keys") => run_keys(parsed),
         Some("chop-now") => run_chop_now(parsed),
@@ -53,12 +60,19 @@ pub fn run(argv: Vec<String>) -> Result<(), String> {
         Some("disappearing-tighten") => run_disappearing_tighten(parsed),
         Some("disappearing-compact") => run_disappearing_compact(parsed),
         Some("send") => run_send(parsed),
+        Some("react") => run_react(parsed),
+        Some("send-file") => run_send_file(parsed),
+        Some("files") => run_files(parsed),
+        Some("save-file") => run_save_file(parsed),
+        Some("delete-file") => run_delete_file(parsed),
+        Some("delete-message") => run_delete_message(parsed),
         Some("messages") => run_messages(parsed),
         Some("view") => run_view(parsed),
         Some("grant-admin") => run_grant_admin(parsed),
         Some("generate") => run_generate(parsed),
         Some("generate-deps") => run_generate_deps(parsed),
         Some("replay-deps-reverse") => run_replay_deps_reverse(parsed),
+        Some("sync-status") => run_sync_status(parsed),
         Some("negentropy-drain") => run_negentropy_drain(parsed),
         Some("content-count") => run_content_count(parsed),
         Some("clock") => run_clock(parsed),
@@ -90,6 +104,7 @@ fn top_level_usage(reason: &str) -> String {
          match --db PATH {key_frontier_usage}\n\
          match --db PATH {key_wrap_usage}\n\
          match --db PATH {key_access_usage}\n\
+         match --db PATH key-derive [LIMIT]\n\
          match --db PATH key-node WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX SOURCE_SECRET_ID_HEX RANGE_START RANGE_WIDTH [TOMBSTONE_NODE_ID_HEX]\n\
          match --db PATH keys WORKSPACE_ID_HEX\n\
          match --db PATH chop-now WORKSPACE_ID_HEX FLOOR_MINUTE\n\
@@ -98,12 +113,19 @@ fn top_level_usage(reason: &str) -> String {
          match --db PATH disappearing-tighten WORKSPACE_ID_HEX TTL_MINUTES [--yes|-y]\n\
          match --db PATH disappearing-compact WORKSPACE_ID_HEX\n\
          match --db PATH {send_usage}\n\
+         match --db PATH {react_usage}\n\
+         match --db PATH {send_file_usage}\n\
+         match --db PATH {files_usage}\n\
+         match --db PATH {save_file_usage}\n\
+         match --db PATH {delete_file_usage}\n\
+         match --db PATH {delete_message_usage}\n\
          match --db PATH {messages_usage}\n\
          match --db PATH {view_usage}\n\
          match --db PATH {grant_admin_usage}\n\
          match --db PATH {generate_usage}\n\
          match --db PATH {generate_deps_usage}\n\
          match --db PATH {replay_deps_reverse_usage}\n\
+         match --db PATH sync-status\n\
          match --db PATH negentropy-drain [LIMIT]\n\
          match --db PATH {content_count_usage}\n\
          match --db PATH clock [set TIMESTAMP|advance DELTA|clear]\n\
@@ -129,6 +151,12 @@ fn top_level_usage(reason: &str) -> String {
         key_wrap_usage = encryption::cli::KEY_WRAP_USAGE,
         key_access_usage = encryption::cli::KEY_ACCESS_USAGE,
         send_usage = content::sealed_message::cli::SEND_USAGE,
+        react_usage = content::sealed_message::cli::REACT_USAGE,
+        send_file_usage = content::sealed_message::cli::SEND_FILE_USAGE,
+        files_usage = content::sealed_message::cli::FILES_USAGE,
+        save_file_usage = content::sealed_message::cli::SAVE_FILE_USAGE,
+        delete_file_usage = DELETE_FILE_USAGE,
+        delete_message_usage = content::sealed_message::cli::DELETE_MESSAGE_USAGE,
         messages_usage = content::sealed_message::cli::MESSAGES_USAGE,
         view_usage = content::sealed_message::cli::VIEW_USAGE,
         grant_admin_usage = identity::admin::cli::GRANT_ADMIN_USAGE,
@@ -186,7 +214,7 @@ fn run_invite(parsed: ParsedArgs) -> Result<(), String> {
         identity::invite::cli::invite(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    runtime.drain_projection_until_idle(8, 64)?;
+    drain_runtime(&mut runtime)?;
     runtime.save()?;
 
     for line in identity::invite::cli::invite_output(&receipt).lines {
@@ -229,8 +257,7 @@ fn run_accept(parsed: ParsedArgs) -> Result<(), String> {
         identity::invite::cli::accept(&ctx, CliArgs::new(&parsed.command[1..]), from_listen_addr)?
     };
     let receipt = runtime.submit_command_output(output)?;
-    runtime.dispatch_intents(64)?;
-    runtime.drain_projection_until_idle(8, 64)?;
+    drain_runtime(&mut runtime)?;
     runtime.save()?;
     if from_listen_addr.is_some() {
         connection::response::commands::wait_for_request_response(
@@ -263,8 +290,7 @@ fn run_accept_invite_server(parsed: ParsedArgs) -> Result<(), String> {
         )?
     };
     let receipt = runtime.submit_command_output(output)?;
-    runtime.dispatch_intents(64)?;
-    runtime.drain_projection_until_idle(8, 64)?;
+    drain_runtime(&mut runtime)?;
     runtime.save()?;
     connection::response::commands::wait_for_request_response(
         &mut runtime,
@@ -290,7 +316,7 @@ fn run_link(parsed: ParsedArgs) -> Result<(), String> {
         identity::invite::cli::link(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    runtime.drain_projection_until_idle(8, 64)?;
+    drain_runtime(&mut runtime)?;
     runtime.save()?;
 
     for line in identity::invite::cli::invite_output(&receipt).lines {
@@ -316,8 +342,7 @@ fn run_accept_link(parsed: ParsedArgs) -> Result<(), String> {
         )?
     };
     let receipt = runtime.submit_command_output(output)?;
-    runtime.dispatch_intents(64)?;
-    runtime.drain_projection_until_idle(8, 64)?;
+    drain_runtime(&mut runtime)?;
     runtime.save()?;
     if from_listen_addr.is_some() {
         connection::response::commands::wait_for_request_response(
@@ -383,7 +408,7 @@ fn run_create_workspace(parsed: ParsedArgs) -> Result<(), String> {
         identity::workspace::cli::create_workspace(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    runtime.drain_projection_until_idle(8, 64)?;
+    drain_runtime(&mut runtime)?;
     let workspace =
         identity::workspace::queries::workspace_by_id(runtime.store(), receipt.workspace_fact_id)?;
     let bootstrap_user_id =
@@ -461,7 +486,7 @@ fn run_key_recipient(parsed: ParsedArgs) -> Result<(), String> {
         encryption::cli::key_recipient(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    runtime.drain_projection_until_idle(8, 64)?;
+    drain_runtime(&mut runtime)?;
     runtime.save()?;
 
     for line in encryption::cli::key_recipient_output(&receipt).lines {
@@ -552,6 +577,43 @@ fn run_key_access(parsed: ParsedArgs) -> Result<(), String> {
     Ok(())
 }
 
+fn run_key_derive(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("key-derive requires --db PATH"))?;
+    if parsed.command.len() > 2 {
+        return Err("key-derive [LIMIT]".to_string());
+    }
+    let limit = parsed
+        .command
+        .get(1)
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| "key-derive [LIMIT]".to_string())
+        })
+        .transpose()?
+        .unwrap_or(512);
+    let mut runtime = ProtocolRuntime::open_disk(db)?;
+    let before = encryption::commands::local_key_secret_count(&runtime);
+    let scanned_key_wraps = encryption::commands::key_wrap_count(&runtime)?;
+    for _ in 0..4 {
+        runtime.drain_projection_until_idle(8, limit)?;
+        let dispatched = runtime.dispatch_intents(limit)?;
+        if dispatched.handled == 0 && dispatched.facts == 0 && dispatched.intents == 0 {
+            break;
+        }
+    }
+    runtime.drain_projection_until_idle(8, limit)?;
+    runtime.save()?;
+    let after = encryption::commands::local_key_secret_count(&runtime);
+    println!("scanned_key_wraps: {scanned_key_wraps}");
+    println!("derived_key_secrets: {}", after.saturating_sub(before));
+    println!("failed_key_wraps: 0");
+    println!("admitted_events: 0");
+    Ok(())
+}
+
 fn run_key_node(parsed: ParsedArgs) -> Result<(), String> {
     let db = parsed
         .db
@@ -609,7 +671,7 @@ fn run_keys(parsed: ParsedArgs) -> Result<(), String> {
     let workspace_id = decode_hex_32(&parsed.command[1], "workspace id")?;
     let store = runtime.store();
 
-    let sealed_messages = sealed_message_rows(store, workspace_id)?;
+    let leaves = history_leaf_rows(store, workspace_id)?;
     let local_history_rows = store
         .table_rows_with_key_prefix(
             crate::protocol::facts::encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
@@ -624,11 +686,15 @@ fn run_keys(parsed: ParsedArgs) -> Result<(), String> {
             usize::MAX,
         )
         .map_err(|err| format!("load message tombstones: {err}"))?;
-    let local_key_secrets = runtime
-        .facts()
-        .filter_map(|fact| encryption::layout::decode_local_key_secret(&fact.bytes).ok())
-        .filter(|secret| secret.workspace_id == workspace_id)
-        .collect::<Vec<_>>();
+    let file_tombstones = store
+        .table_rows_with_key_prefix(
+            content::file_deletion::rows::FILE_DELETION_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("load file deletion rows: {err}"))?;
+    let local_key_secret_frontiers =
+        encryption::commands::local_key_secret_frontiers(&runtime, workspace_id);
     let recipient_keys = runtime
         .facts()
         .filter_map(|fact| encryption::layout::decode_recipient_key(&fact.bytes).ok())
@@ -648,36 +714,46 @@ fn run_keys(parsed: ParsedArgs) -> Result<(), String> {
         })
         .filter(|(_, frontier)| frontier.workspace_id == workspace_id)
         .collect::<Vec<_>>();
-    let key_wraps = store
-        .table_rows(encryption::rows::KEY_WRAP_ROWS)
-        .map_err(|err| format!("load key wraps: {err}"))?
-        .into_iter()
-        .filter_map(|(key, value)| encryption::rows::decode_key_wrap_row(&key, &value).ok())
-        .filter(|row| row.wrap.workspace_id == workspace_id)
-        .count();
+    let key_wraps = encryption::commands::workspace_key_wrap_count(&runtime, workspace_id)?;
 
     println!("recipient_keys: {recipient_keys}");
     println!("recipient_key_tombstones: 0");
     println!("local_recipient_keys: {local_recipient_keys}");
     println!("removal_frontiers: {}", removal_frontiers.len());
     println!("key_wraps: {key_wraps}");
-    println!("local_key_secrets: {}", local_key_secrets.len());
-    println!("local_history_node_secrets: {}", local_history_rows.len());
+    println!("local_key_secrets: {}", local_key_secret_frontiers.len());
+    println!(
+        "local_history_node_secrets: {}",
+        local_history_rows.len() + leaves.len()
+    );
     println!("local_history_minute_nodes: 0");
-    println!("local_history_leaves: {}", sealed_messages.len());
+    println!("local_history_leaves: {}", leaves.len());
     println!("local_history_trie_internals: 0");
     println!("local_history_time_internals: 0");
-    println!("local_history_node_tombstones: 0");
+    println!(
+        "local_history_node_tombstones: {}",
+        message_tombstones.len() + file_tombstones.len()
+    );
     println!("message_tombstones: {}", message_tombstones.len());
-    println!("cover_summary: {}", cover_summary(&sealed_messages));
+    println!("cover_summary: {}", cover_summary(&leaves));
     for (frontier_id, _) in removal_frontiers {
-        let access = local_key_secrets
+        let access = local_key_secret_frontiers
             .iter()
-            .any(|secret| secret.frontier_id == frontier_id);
+            .any(|local_frontier_id| *local_frontier_id == frontier_id);
         println!(
             "frontier: {} access={}",
             encode_hex_32(&frontier_id),
             if access { "yes" } else { "no" }
+        );
+    }
+    for leaf in leaves {
+        println!(
+            "history_node: {} frontier={} start={} width=1 bit_depth=256 prefix={} fact_id_in_minute={} tombstones=none",
+            encode_hex_32(&leaf.node_id),
+            encode_hex_32(&leaf.frontier_id),
+            leaf.minute,
+            encode_hex_32(&leaf.fact_id_in_minute),
+            encode_hex_32(&leaf.fact_id_in_minute)
         );
     }
     Ok(())
@@ -778,21 +854,40 @@ fn run_disappearing_status(parsed: ParsedArgs) -> Result<(), String> {
         .map(|minute| minute.saturating_sub(30 * 24 * 60))
         .unwrap_or(0);
     let effective_floor = setting_floor.max(horizon_floor);
-    let live_messages = sealed_message_rows(store, workspace_id)?.len();
-    let message_tombstones = store
+    if horizon_floor > 0 {
+        apply_horizon_floor(store, workspace_id, horizon_floor)?;
+    }
+    let raw_message_tombstones = store
         .table_rows_with_key_prefix(
             content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
             &workspace_id,
             usize::MAX,
         )
-        .map_err(|err| format!("load message tombstones: {err}"))?
-        .len();
+        .map_err(|err| format!("load message tombstones: {err}"))?;
+    let message_tombstones = raw_message_tombstones
+        .into_iter()
+        .map(|(key, value)| {
+            content::sealed_message::rows::decode_message_tombstone_row(&key, &value)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|row| row.authored_minute >= horizon_floor)
+        .count();
+    let live_messages = message_rows(store, workspace_id)?
+        .into_iter()
+        .filter(|row| row.minute >= horizon_floor)
+        .count();
+    let last_chopped_floor = if horizon_floor > setting_floor && horizon_floor > 0 {
+        horizon_floor.to_string()
+    } else {
+        "none".to_string()
+    };
 
     println!("workspace: {}", encode_hex_32(&workspace_id));
     println!("setting_fact_id: {setting_fact_id}");
     println!("current_ttl_minutes: {ttl}");
     println!("current_floor_minute: {setting_floor}");
-    println!("last_chopped_floor: none");
+    println!("last_chopped_floor: {last_chopped_floor}");
     println!("now_minute: {now_minute_str}");
     println!("horizon_floor: {horizon_floor}");
     println!("effective_floor: {effective_floor}");
@@ -801,6 +896,47 @@ fn run_disappearing_status(parsed: ParsedArgs) -> Result<(), String> {
     println!("leaf_tombstones: 0");
     println!("pending_purges: 0");
     Ok(())
+}
+
+fn apply_horizon_floor(
+    store: &crate::core::store::Store,
+    workspace_id: [u8; 32],
+    horizon_floor: u64,
+) -> Result<(), String> {
+    let retired = message_rows(store, workspace_id)?
+        .into_iter()
+        .filter(|row| row.minute < horizon_floor)
+        .collect::<Vec<_>>();
+    if retired.is_empty() {
+        return Ok(());
+    }
+    let tombstones = retired
+        .iter()
+        .map(|row| {
+            content::sealed_message::rows::message_tombstone_row(
+                row.workspace_id,
+                row.message_id,
+                row.author_user_id,
+                row.created_at_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    let keys = retired
+        .iter()
+        .map(|row| content::sealed_message::rows::message_key(row.workspace_id, row.message_id))
+        .collect::<Vec<_>>();
+    store
+        .write_transaction(|tx| {
+            tx.insert_table_rows_in_tx(tombstones)?;
+            tx.delete_table_rows_in_tx(content::sealed_message::rows::MESSAGE_ROWS, keys.clone())?;
+            tx.delete_table_rows_in_tx(
+                content::sealed_message::rows::OPENED_MESSAGE_ROWS,
+                keys.clone(),
+            )?;
+            tx.delete_table_rows_in_tx(content::sealed_message::rows::SEALED_MESSAGE_ROWS, keys)?;
+            Ok(())
+        })
+        .map_err(|err| format!("apply horizon floor: {err}"))
 }
 
 fn run_disappearing_tighten(parsed: ParsedArgs) -> Result<(), String> {
@@ -910,6 +1046,144 @@ fn run_send(parsed: ParsedArgs) -> Result<(), String> {
     drain_runtime(&mut runtime)?;
     runtime.save()?;
     for line in content::sealed_message::cli::send_output(&receipt, &text).lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn run_react(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("react requires --db PATH"))?;
+    let mut runtime = ProtocolRuntime::open_disk(db)?;
+    let clock = FixedClock(next_cli_timestamp(&runtime)?);
+    let vault = EmptyVault;
+    let output = {
+        let ctx = runtime.command_context(&clock, &vault);
+        content::sealed_message::cli::react(&ctx, CliArgs::new(&parsed.command[1..]))?
+    };
+    let receipt = runtime.submit_command_output(output)?;
+    drain_runtime(&mut runtime)?;
+    runtime.save()?;
+    for line in content::sealed_message::cli::react_output(&receipt).lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn run_send_file(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("send-file requires --db PATH"))?;
+    let mut runtime = ProtocolRuntime::open_disk(db)?;
+    let workspace_id = parsed
+        .command
+        .get(1)
+        .ok_or_else(|| content::sealed_message::cli::SEND_FILE_USAGE.to_string())
+        .and_then(|value| decode_hex_32(value, "workspace id"))?;
+    let clock = FixedClock(next_cli_timestamp(&runtime)?);
+    let vault = content::sealed_message::authoring::SealedMessageVault::for_workspace(
+        &runtime,
+        workspace_id,
+    )?;
+    let output = {
+        let ctx = runtime.command_context(&clock, &vault);
+        content::sealed_message::cli::send_file(&ctx, CliArgs::new(&parsed.command[1..]))?
+    };
+    let receipt = runtime.submit_command_output(output)?;
+    drain_runtime(&mut runtime)?;
+    runtime.save()?;
+    for line in content::sealed_message::cli::send_file_output(&receipt).lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn run_files(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("files requires --db PATH"))?;
+    let mut runtime = ProtocolRuntime::open_disk(db)?;
+    drain_runtime(&mut runtime)?;
+    runtime.save()?;
+    let clock = SystemClock;
+    let vault = EmptyVault;
+    let output = {
+        let ctx = runtime.command_context(&clock, &vault);
+        content::sealed_message::cli::files(&ctx, CliArgs::new(&parsed.command[1..]))?
+    };
+    for line in output.lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn run_save_file(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("save-file requires --db PATH"))?;
+    let mut runtime = ProtocolRuntime::open_disk(db)?;
+    drain_runtime(&mut runtime)?;
+    runtime.save()?;
+    let clock = SystemClock;
+    let vault = EmptyVault;
+    let output = {
+        let ctx = runtime.command_context(&clock, &vault);
+        content::sealed_message::cli::save_file(&ctx, CliArgs::new(&parsed.command[1..]))?
+    };
+    for line in output.lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn run_delete_file(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("delete-file requires --db PATH"))?;
+    if parsed.command.len() != 3 {
+        return Err(DELETE_FILE_USAGE.to_string());
+    }
+    let mut runtime = ProtocolRuntime::open_disk(db)?;
+    drain_runtime(&mut runtime)?;
+    let workspace_id = decode_hex_32(&parsed.command[1], "workspace id")?;
+    let file = resolve_file_selector(runtime.store(), workspace_id, &parsed.command[2])?;
+    let clock = FixedClock(next_cli_timestamp(&runtime)?);
+    let vault = EmptyVault;
+    let output = {
+        let ctx = runtime.command_context(&clock, &vault);
+        content::file_deletion::commands::delete_file(
+            &ctx,
+            workspace_id,
+            file.file_fact_id,
+            file.author_user_id,
+        )?
+    };
+    let receipt = runtime.submit_command_output(output)?;
+    drain_runtime(&mut runtime)?;
+    runtime.save()?;
+    println!("workspace_id: {}", encode_hex_32(&receipt.workspace_id));
+    println!("fact_id: {}", encode_hex_32(&receipt.deletion_fact_id));
+    println!("target_file_id: {}", encode_hex_32(&receipt.target_file_id));
+    println!("created_at_ms: {}", receipt.created_at_ms);
+    Ok(())
+}
+
+fn run_delete_message(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("delete-message requires --db PATH"))?;
+    let mut runtime = ProtocolRuntime::open_disk(db)?;
+    let clock = FixedClock(next_cli_timestamp(&runtime)?);
+    let vault = EmptyVault;
+    let output = {
+        let ctx = runtime.command_context(&clock, &vault);
+        content::sealed_message::cli::delete_message(&ctx, CliArgs::new(&parsed.command[1..]))?
+    };
+    let receipt = runtime.submit_command_output(output)?;
+    drain_runtime(&mut runtime)?;
+    runtime.save()?;
+    for line in content::sealed_message::cli::delete_message_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -1044,12 +1318,36 @@ fn run_negentropy_drain(parsed: ParsedArgs) -> Result<(), String> {
     let mut runtime = ProtocolRuntime::open_disk(db)?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
-    let (count, fingerprint) = root_summary(&runtime);
+    let status = crate::protocol::facts::sync::shared_fact::sync_status(runtime.store())?;
     println!("drained: 0");
     println!("removed_from_index: 0");
-    println!("remaining_pending: 0");
-    println!("new_root_count: {count}");
-    println!("new_root_fingerprint: {}", encode_hex_bytes(&fingerprint));
+    println!("remaining_pending: {}", status.pending_purges);
+    println!("new_root_count: {}", status.root_count);
+    println!(
+        "new_root_fingerprint: {}",
+        encode_hex_bytes(&status.root_fingerprint)
+    );
+    Ok(())
+}
+
+fn run_sync_status(parsed: ParsedArgs) -> Result<(), String> {
+    let db = parsed
+        .db
+        .ok_or_else(|| top_level_usage("sync-status requires --db PATH"))?;
+    if parsed.command.len() != 1 {
+        return Err("sync-status".to_string());
+    }
+    let mut runtime = ProtocolRuntime::open_disk(db)?;
+    drain_runtime(&mut runtime)?;
+    runtime.save()?;
+    let status = crate::protocol::facts::sync::shared_fact::sync_status(runtime.store())?;
+    println!("indexed_facts: {}", status.indexed_facts);
+    println!("root_count: {}", status.root_count);
+    println!(
+        "root_fingerprint: {}",
+        encode_hex_bytes(&status.root_fingerprint)
+    );
+    println!("pending_purges: {}", status.pending_purges);
     Ok(())
 }
 
@@ -1120,15 +1418,7 @@ fn next_cli_timestamp(runtime: &ProtocolRuntime) -> Result<u64, String> {
 
 fn max_cli_timestamp(store: &crate::core::store::Store) -> Result<u64, String> {
     let mut max_timestamp = content::event::queries::max_timestamp(store)?;
-    for (key, value) in store
-        .table_rows(content::sealed_message::rows::SEALED_MESSAGE_ROWS)
-        .map_err(|err| format!("load sealed messages for clock: {err}"))?
-    {
-        let row = content::sealed_message::rows::decode_sealed_message_row(&key, &value);
-        if let Ok(row) = row {
-            max_timestamp = max_timestamp.max(row.created_at_ms);
-        }
-    }
+    max_timestamp = max_timestamp.max(content::sealed_message::queries::max_created_at_ms(store)?);
     Ok(max_timestamp)
 }
 
@@ -1172,47 +1462,139 @@ fn sealed_message_rows(
         .collect()
 }
 
-fn root_summary(runtime: &ProtocolRuntime) -> (u64, [u8; 32]) {
-    let mut facts = runtime
-        .facts()
-        .filter(|fact| fact.scope != crate::core::facts::FactScope::Local)
-        .filter(|fact| !is_sync_control_fact(fact.bytes.first().copied()))
+#[derive(Debug, Clone)]
+struct HistoryLeafRow {
+    node_id: [u8; 32],
+    frontier_id: [u8; 32],
+    minute: u64,
+    fact_id_in_minute: [u8; 32],
+}
+
+fn history_leaf_rows(
+    store: &crate::core::store::Store,
+    workspace_id: [u8; 32],
+) -> Result<Vec<HistoryLeafRow>, String> {
+    let messages = message_rows(store, workspace_id)?;
+    let live_message_ids = messages
+        .iter()
+        .map(|message| message.message_id)
+        .collect::<BTreeSet<_>>();
+    let default_frontier = first_removal_frontier_id(store, workspace_id)?.unwrap_or([0; 32]);
+    let mut leaves = messages
+        .into_iter()
+        .map(|message| HistoryLeafRow {
+            node_id: message.message_id,
+            frontier_id: default_frontier,
+            minute: message.minute,
+            fact_id_in_minute: nonzero_or(message.leaf_id, message.message_id),
+        })
         .collect::<Vec<_>>();
-    facts.sort_by_key(|fact| (fact.timestamp, fact.id));
-    let mut fingerprint = [0u8; 32];
-    for fact in &facts {
-        let mut hash = blake3::Hasher::new();
-        hash.update(b"topo:sync-range-summary:v1:");
-        hash.update(&fact.timestamp.to_be_bytes());
-        hash.update(&fact.id);
-        let digest = hash.finalize();
-        for (dst, src) in fingerprint.iter_mut().zip(digest.as_bytes()) {
-            *dst ^= *src;
+    for file in content_file_rows(store, workspace_id)? {
+        if !live_message_ids.contains(&file.message_id) {
+            continue;
         }
+        leaves.push(HistoryLeafRow {
+            node_id: file.file_fact_id,
+            frontier_id: default_frontier,
+            minute: file.created_at_ms / content::sealed_message::fact::UNIX_MINUTE_MS,
+            fact_id_in_minute: file.file_id,
+        });
     }
-    (facts.len() as u64, fingerprint)
+    leaves.sort_by_key(|leaf| (leaf.minute, leaf.node_id));
+    Ok(leaves)
 }
 
-fn is_sync_control_fact(tag: Option<u8>) -> bool {
-    matches!(
-        tag,
-        Some(crate::protocol::facts::sync::compare::layout::TYPE_SYNC_COMPARE)
-            | Some(crate::protocol::facts::sync::have_id::layout::TYPE_SYNC_HAVE_ID)
-            | Some(crate::protocol::facts::sync::need_id::layout::TYPE_SYNC_NEED_ID)
-            | Some(crate::protocol::facts::sync::range_request::layout::TYPE_SYNC_RANGE_REQUEST)
-            | Some(crate::protocol::facts::sync::shared_fact::layout::TYPE_SHARED_FACT)
-            | Some(crate::protocol::facts::sync::encrypted_root::layout::TYPE_ENCRYPTED_ROOT)
-            | Some(
-                crate::protocol::facts::sync::key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE
-            )
-    )
+fn message_rows(
+    store: &crate::core::store::Store,
+    workspace_id: [u8; 32],
+) -> Result<Vec<content::sealed_message::rows::MessageRow>, String> {
+    let mut rows = store
+        .table_rows_with_key_prefix(
+            content::sealed_message::rows::MESSAGE_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("load message rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| content::sealed_message::rows::decode_message_row(&key, &value))
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.sort_by_key(|row| (row.created_at_ms, row.message_id));
+    Ok(rows)
 }
 
-fn cover_summary(messages: &[content::sealed_message::rows::SealedMessageRow]) -> String {
+fn content_file_rows(
+    store: &crate::core::store::Store,
+    workspace_id: [u8; 32],
+) -> Result<Vec<content::file::rows::ContentFileRow>, String> {
+    let mut rows = store
+        .table_rows_with_key_prefix(content::file::rows::FILE_ROWS, &workspace_id, usize::MAX)
+        .map_err(|err| format!("load file rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| content::file::rows::decode_content_file_row(&key, &value))
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.sort_by_key(|row| (row.created_at_ms, row.file_fact_id));
+    Ok(rows)
+}
+
+fn resolve_file_selector(
+    store: &crate::core::store::Store,
+    workspace_id: [u8; 32],
+    selector: &str,
+) -> Result<content::file::rows::ContentFileRow, String> {
+    let files = content_file_rows(store, workspace_id)?;
+    if let Some(index) = selector.strip_prefix('#') {
+        let index = index
+            .parse::<usize>()
+            .map_err(|_| "file selector index must be a positive integer".to_string())?;
+        if index == 0 {
+            return Err("file selector index must be a positive integer".to_string());
+        }
+        return files
+            .get(index - 1)
+            .cloned()
+            .ok_or_else(|| "file selector does not match a file".to_string());
+    }
+    let id = decode_hex_32(selector, "file id")?;
+    files
+        .into_iter()
+        .find(|file| file.file_fact_id == id || file.file_id == id)
+        .ok_or_else(|| "file selector does not match a file".to_string())
+}
+
+fn first_removal_frontier_id(
+    store: &crate::core::store::Store,
+    workspace_id: [u8; 32],
+) -> Result<Option<[u8; 32]>, String> {
+    let mut rows = store
+        .table_rows_with_key_prefix(
+            encryption::removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("load removal frontier rows: {err}"))?
+        .into_iter()
+        .filter_map(|(key, value)| {
+            encryption::removal_frontier::rows::decode_removal_frontier_row(&key, &value).ok()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| (row.created_at_ms, row.removal_frontier_id));
+    Ok(rows.first().map(|row| row.removal_frontier_id))
+}
+
+fn nonzero_or(value: [u8; 32], fallback: [u8; 32]) -> [u8; 32] {
+    if value.iter().all(|byte| *byte == 0) {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn cover_summary(leaves: &[HistoryLeafRow]) -> String {
     let mut hash = blake3::Hasher::new();
-    for message in messages {
-        hash.update(&message.message_id);
-        hash.update(&message.minute.to_be_bytes());
+    for leaf in leaves {
+        hash.update(&leaf.node_id);
+        hash.update(&leaf.minute.to_be_bytes());
+        hash.update(&leaf.fact_id_in_minute);
     }
     encode_hex_bytes(hash.finalize().as_bytes())
 }
@@ -1314,38 +1696,15 @@ fn drain_runtime(runtime: &mut ProtocolRuntime) -> Result<(), String> {
 }
 
 fn decode_hex_32(value: &str, label: &str) -> Result<[u8; 32], String> {
-    if value.len() != 64 {
-        return Err(format!("{label} must be 64 hex characters"));
-    }
-    let mut out = [0u8; 32];
-    let bytes = value.as_bytes();
-    for index in 0..32 {
-        out[index] =
-            (hex_nibble(bytes[index * 2], label)? << 4) | hex_nibble(bytes[index * 2 + 1], label)?;
-    }
-    Ok(out)
-}
-
-fn hex_nibble(byte: u8, label: &str) -> Result<u8, String> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(format!("{label} contains a non-hex character")),
-    }
+    core_decode_hex_32(value, label)
 }
 
 fn encode_hex_32(bytes: &[u8; 32]) -> String {
-    encode_hex_bytes(bytes)
+    core_encode_hex_32(bytes)
 }
 
 fn encode_hex_bytes(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    core_encode_hex(bytes)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

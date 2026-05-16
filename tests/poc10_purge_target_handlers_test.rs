@@ -213,6 +213,7 @@ fn deletion_fact(target_id: [u8; 32]) -> Fact {
         1,
         content::sealed_message::layout::encode_message_deletion(&MessageDeletionFact {
             workspace_id: WORKSPACE,
+            created_at_ms: 1,
             target_id,
             author_user_id: AUTHOR,
         })

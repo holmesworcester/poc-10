@@ -92,3 +92,54 @@ impl IntentHandler for SendNeededFactIdHandler {
             })))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::facts::{Fact, FactScope};
+    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
+    use crate::core::store::Store;
+    use crate::protocol::facts::sync::have_id::fact::SyncHaveIdFact;
+    use crate::protocol::facts::sync::have_id::layout as sync_have_id_layout;
+    use crate::protocol::facts::sync::need_id::layout as sync_need_id_layout;
+    use crate::protocol::intents::transport::send_facts_on_connection;
+
+    #[test]
+    fn send_needed_fact_id_emits_need_fact_for_missing_fact() {
+        let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("store");
+        let have_fact = sync_have_id_fact([4; 32], [8; 32], 777);
+        let intent = send_needed_fact_id_intent(SendNeededFactId {
+            have_fact_id: have_fact.id,
+        });
+
+        let output = SendNeededFactIdHandler::new()
+            .handle(
+                &intent,
+                &HandlerContext::with_facts([have_fact.clone()]).with_store(&store),
+            )
+            .expect("send need id");
+
+        assert_eq!(output.facts.len(), 1);
+        let need = sync_need_id_layout::decode_fact(&output.facts[0].bytes).expect("need fact");
+        assert_eq!(need.connection_id, [4; 32]);
+        assert_eq!(need.fact_id, [8; 32]);
+        assert_eq!(output.intents.len(), 1);
+        let send = send_facts_on_connection::decode_send_facts_on_connection(&output.intents[0])
+            .expect("transport send");
+        assert_eq!(send.connection_id, [4; 32]);
+        assert_eq!(send.fact_ids, vec![output.facts[0].id]);
+    }
+
+    fn sync_have_id_fact(connection_id: [u8; 32], fact_id: [u8; 32], timestamp: u64) -> Fact {
+        let have = SyncHaveIdFact {
+            connection_id,
+            timestamp,
+            fact_id,
+        };
+        Fact::new(
+            FactScope::Global,
+            timestamp,
+            sync_have_id_layout::encode_fact(&have).expect("encode have-id"),
+        )
+    }
+}

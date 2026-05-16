@@ -6,7 +6,8 @@
 
 use crate::protocol::facts::connection;
 use crate::protocol::facts::identity;
-use crate::protocol::runtime::{is_sync_seed_fact, ProtocolRuntime};
+use crate::protocol::facts::sync::shared_fact;
+use crate::protocol::runtime::ProtocolRuntime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeCountReport {
@@ -25,10 +26,7 @@ pub fn runtime_count_report(runtime: &ProtocolRuntime) -> Result<RuntimeCountRep
         .table_row_count(super::rows::WORKSPACE_ROWS)
         .map_err(|err| format!("count workspace rows: {err}"))?;
     let facts = runtime.facts().count();
-    let sync_facts = runtime
-        .facts()
-        .filter(|fact| is_sync_seed_fact(fact))
-        .count();
+    let sync_facts = shared_fact::sync_status(runtime.store())?.indexed_facts;
     let applied_facts = facts.saturating_sub(runtime.wake_loop().pending_len());
     let connections = runtime
         .store()

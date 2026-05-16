@@ -8,6 +8,7 @@ use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::identity;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::layout;
 use super::rows::removal_frontier_row;
@@ -88,7 +89,11 @@ impl Projector for RemovalFrontierProjector {
                 fact.id,
                 fact.id,
             ))
-            .intent(AtomicIntent::PutRow(removal_frontier_row(fact.id, &frontier)?).into_intent()))
+            .intent(AtomicIntent::PutRow(removal_frontier_row(fact.id, &frontier)?).into_intent())
+            .intent(share_fact_with_workspace_intent_for_fact(
+                frontier.workspace_id,
+                fact,
+            )))
     }
 }
 
@@ -116,6 +121,7 @@ mod projector_tests {
     use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::identity::admin::fact::AdminFact;
     use topo::protocol::facts::identity::admin::layout as admin_layout;
+    use topo::protocol::intents::sync::share_fact_with_workspace;
 
     use topo::protocol::facts::encryption::removal_frontier::fact::RemovalFrontierFact;
     use topo::protocol::facts::encryption::removal_frontier::{layout, project, rows};
@@ -197,8 +203,9 @@ mod projector_tests {
         let projected = projector
             .project(&fact, &context)
             .expect("matched context projects");
-        assert_eq!(projected.intents.len(), 1);
+        assert_eq!(projected.intents.len(), 2);
         assert_eq!(projected.offers.len(), 1);
+        assert_share_intent(&projected.intents, frontier.workspace_id, fact.id);
 
         let row = decode_single_put_row(&projected.intents[0]);
         assert_eq!(row.workspace_id, [1; 32]);
@@ -266,5 +273,23 @@ mod projector_tests {
             }
             AtomicIntent::DeleteRow(_) => panic!("expected put row"),
         }
+    }
+
+    fn assert_share_intent(
+        intents: &[topo::core::intents::Intent],
+        workspace_id: [u8; 32],
+        fact_id: [u8; 32],
+    ) {
+        let found = intents.iter().any(|intent| {
+            if intent.kind.as_str() != "share_fact_with_workspace" {
+                return false;
+            }
+            let Ok(input) = share_fact_with_workspace::decode_share_fact_with_workspace(intent)
+            else {
+                return false;
+            };
+            input.workspace_id == workspace_id && input.fact_id == fact_id
+        });
+        assert!(found, "missing share_fact_with_workspace intent");
     }
 }

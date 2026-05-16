@@ -17,7 +17,7 @@ pub const SEALED_MESSAGE_BYTES: usize =
     1 + 32 + 8 + 32 + 32 + 32 + 32 + 8 + 32 + 8 + 32 + NONCE_BYTES + 4 + CIPHERTEXT_BYTES;
 pub const SIGNER_PUBKEY_BYTES: usize = 1 + 32 + 32;
 pub const SECRET_NODE_BYTES: usize = 1 + 32 + 32 + 8 + 8 + 1 + 32;
-pub const MESSAGE_DELETION_BYTES: usize = 1 + 32 + 32 + 32;
+pub const MESSAGE_DELETION_BYTES: usize = 1 + 32 + 8 + 32 + 32;
 
 pub fn encode_sealed_message(fact: &SealedMessageFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; SEALED_MESSAGE_BYTES];
@@ -83,8 +83,9 @@ pub fn encode_message_deletion(fact: &MessageDeletionFact) -> Result<Vec<u8>, St
     let mut out = vec![0; MESSAGE_DELETION_BYTES];
     wire::put_u8(TYPE_MESSAGE_DELETION, &mut out[0..1]).map_err(wire_err)?;
     out[1..33].copy_from_slice(&fact.workspace_id);
-    out[33..65].copy_from_slice(&fact.target_id);
-    out[65..97].copy_from_slice(&fact.author_user_id);
+    wire::put_u64be(fact.created_at_ms, &mut out[33..41]).map_err(wire_err)?;
+    out[41..73].copy_from_slice(&fact.target_id);
+    out[73..105].copy_from_slice(&fact.author_user_id);
     Ok(out)
 }
 
@@ -93,8 +94,9 @@ pub fn decode_message_deletion(bytes: &[u8]) -> Result<MessageDeletionFact, Stri
     expect_tag(bytes, TYPE_MESSAGE_DELETION, "message deletion")?;
     Ok(MessageDeletionFact {
         workspace_id: bytes[1..33].try_into().unwrap(),
-        target_id: bytes[33..65].try_into().unwrap(),
-        author_user_id: bytes[65..97].try_into().unwrap(),
+        created_at_ms: wire::take_u64be(&bytes[33..41]).map_err(wire_err)?,
+        target_id: bytes[41..73].try_into().unwrap(),
+        author_user_id: bytes[73..105].try_into().unwrap(),
     })
 }
 
@@ -169,6 +171,20 @@ mod tests {
 
         assert_eq!(encoded.len(), SEALED_MESSAGE_BYTES);
         assert_eq!(decode_sealed_message(&encoded).expect("decode"), fact);
+    }
+
+    #[test]
+    fn message_deletion_roundtrips_created_timestamp() {
+        let fact = MessageDeletionFact {
+            workspace_id: [1; 32],
+            created_at_ms: 42_000,
+            target_id: [2; 32],
+            author_user_id: [3; 32],
+        };
+        let encoded = encode_message_deletion(&fact).expect("encode deletion");
+
+        assert_eq!(encoded.len(), MESSAGE_DELETION_BYTES);
+        assert_eq!(decode_message_deletion(&encoded).expect("decode"), fact);
     }
 
     #[test]

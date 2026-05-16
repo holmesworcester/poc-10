@@ -3,6 +3,7 @@ use crate::core::projection::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::fact::NO_PREVIOUS_RECIPIENT_KEY;
 use crate::protocol::facts::encryption::intent::create_key_wrap_intent;
 use crate::protocol::facts::encryption::layout;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
 use super::validation::{
@@ -48,11 +49,16 @@ pub(super) fn recipient_key(
         ));
     }
 
-    output = output.offer(matchers::recipient_key_offer(
-        fact.id,
-        scope.clone(),
-        fact.id,
-    ));
+    output = output
+        .offer(matchers::recipient_key_offer(
+            fact.id,
+            scope.clone(),
+            fact.id,
+        ))
+        .intent(share_fact_with_workspace_intent_for_fact(
+            recipient.workspace_id,
+            fact,
+        ));
 
     if is_superseded {
         return Ok(output);

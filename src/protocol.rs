@@ -146,18 +146,6 @@ pub const FACTS: &[FactRegistration] = &[
         projector: "ContentFileSliceProjector",
     },
     FactRegistration {
-        module: "content::message",
-        name: "message",
-        tag: content::message::layout::TYPE_CONTENT_MESSAGE,
-        projector: "ContentMessageProjector",
-    },
-    FactRegistration {
-        module: "content::message_deletion",
-        name: "message_deletion",
-        tag: content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION,
-        projector: "ContentMessageDeletionProjector",
-    },
-    FactRegistration {
         module: "content::reaction",
         name: "reaction",
         tag: content::reaction::layout::TYPE_CONTENT_REACTION,
@@ -544,9 +532,9 @@ pub const INTENTS: &[IntentRegistration] = &[
         declared_by: "intents::sync::send_requested_fact",
     },
     IntentRegistration {
-        kind: sync_intents::record_indexed_fact::RECORD_INDEXED_FACT,
+        kind: sync_intents::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE,
         execution: IntentExecutionKind::Deferred,
-        declared_by: "intents::sync::record_indexed_fact",
+        declared_by: "intents::sync::share_fact_with_workspace",
     },
     IntentRegistration {
         kind: transport_intents::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
@@ -617,10 +605,10 @@ pub const HANDLERS: &[HandlerRegistration] = &[
         intents: &[sync_intents::send_requested_fact::SEND_REQUESTED_FACT],
     },
     HandlerRegistration {
-        module: "sync::record_indexed_fact",
-        handler: "RecordIndexedFactHandler",
-        runtime_field: "record_indexed_fact",
-        intents: &[sync_intents::record_indexed_fact::RECORD_INDEXED_FACT],
+        module: "sync::share_fact_with_workspace",
+        handler: "ShareFactWithWorkspaceHandler",
+        runtime_field: "share_fact_with_workspace",
+        intents: &[sync_intents::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE],
     },
     HandlerRegistration {
         module: "encryption::create_key_wrap",

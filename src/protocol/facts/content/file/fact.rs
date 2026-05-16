@@ -8,12 +8,12 @@
 //! ride inside an opaque `sealed_metadata` slot whose AEAD framing is owned by
 //! the encryption module in a later wave.
 //!
-//! Deferred (legacy parity gaps):
-//! - Signed-fact envelope wrapping (separate fact module).
-//! - Per-file leaf-coordinate derivation and content-key context — the
-//!   `local_history_node_secret_id` and frontier id will land with the
-//!   per-message FS wave.
-//! - Bao proof verification for slices (see `content::file_slice`).
+//! Current boundaries:
+//! - Signed envelope verification is owned by `identity::signed_fact`.
+//! - Descriptor secrecy is limited to the opaque sealed metadata slot here;
+//!   key selection and per-file content-key context belong to the encryption
+//!   wave.
+//! - Slice integrity is checked by the file-slice admit pipeline.
 
 use crate::core::facts::FactId;
 
@@ -24,7 +24,7 @@ pub type AuthorId = FactId;
 pub const FILE_ROOT_HASH_BYTES: usize = 32;
 pub type RootHash = [u8; FILE_ROOT_HASH_BYTES];
 
-/// Hard cap on declared blob size. Mirrors the legacy 10 GiB ceiling.
+/// Product hard cap on declared blob size.
 pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -233,22 +233,6 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 bytes,
             ));
         }
-        content::message::layout::TYPE_CONTENT_MESSAGE => {
-            let message = content::message::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(
-                workspace_scope(message.workspace_id),
-                message.created_at_ms,
-                bytes,
-            ));
-        }
-        content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION => {
-            let deletion = content::message_deletion::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(
-                workspace_scope(deletion.workspace_id),
-                deletion.created_at_ms,
-                bytes,
-            ));
-        }
         content::reaction::layout::TYPE_CONTENT_REACTION => {
             let reaction = content::reaction::layout::decode_fact(&bytes)?;
             return Ok(Fact::new(
@@ -349,7 +333,11 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             }
             content::sealed_message::layout::TYPE_MESSAGE_DELETION => {
                 let deletion = content::sealed_message::layout::decode_message_deletion(&bytes)?;
-                return Ok(Fact::new(workspace_scope(deletion.workspace_id), 0, bytes));
+                return Ok(Fact::new(
+                    workspace_scope(deletion.workspace_id),
+                    deletion.created_at_ms,
+                    bytes,
+                ));
             }
             _ => unreachable!(),
         },
@@ -468,5 +456,29 @@ fn require_connection_endpoints(
         Ok(())
     } else {
         Err("transport::transit frame endpoints do not match connection fact".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::facts::content::sealed_message::fact::MessageDeletionFact;
+
+    #[test]
+    fn admitted_message_deletion_uses_payload_created_timestamp() {
+        let deletion = MessageDeletionFact {
+            workspace_id: [9; 32],
+            created_at_ms: 12_345,
+            target_id: [10; 32],
+            author_user_id: [11; 32],
+        };
+        let bytes = content::sealed_message::layout::encode_message_deletion(&deletion)
+            .expect("encode deletion");
+
+        let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit deletion");
+
+        assert_eq!(admitted.scope, workspace_scope(deletion.workspace_id));
+        assert_eq!(admitted.timestamp, deletion.created_at_ms);
+        assert_eq!(admitted.bytes, bytes);
     }
 }

@@ -4,6 +4,7 @@ use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity::signed_fact;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::super::fact::SealedMessageFact;
 use super::super::intent::{
@@ -54,6 +55,7 @@ fn project_decoded_message(
     let signer_need = matchers::signer_need(fact.id, scope.clone(), message.signer_id);
     let deletion_need =
         matchers::deletion_need(fact.id, scope.clone(), fact.id, message.author_user_id);
+    let message_offer = matchers::message_offer(fact.id, scope.clone(), fact.id);
     let secret_need = matchers::secret_need(
         fact.id,
         scope,
@@ -140,6 +142,7 @@ fn project_decoded_message(
         return Ok(ProjectionOutput::new()
             .need(signer_need)
             .need(deletion_need)
+            .offer(message_offer)
             .intent(sealed_row)
             .intent(
                 AtomicIntent::PutRow(message_row(MessageRow {
@@ -163,14 +166,23 @@ fn project_decoded_message(
                     text,
                 }))
                 .into_intent(),
-            ));
+            )
+            .intent(share_fact_with_workspace_intent_for_fact(
+                message.workspace_id,
+                fact,
+            )));
     }
 
     Ok(ProjectionOutput::new()
         .need(signer_need)
         .need(secret_need)
         .need(deletion_need)
-        .intent(sealed_row))
+        .offer(message_offer)
+        .intent(sealed_row)
+        .intent(share_fact_with_workspace_intent_for_fact(
+            message.workspace_id,
+            fact,
+        )))
 }
 
 fn decrypt_text(message: &SealedMessageFact, secret_payload: &Fact) -> Result<String, String> {

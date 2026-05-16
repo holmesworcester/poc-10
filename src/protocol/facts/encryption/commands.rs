@@ -6,8 +6,9 @@ use crate::core::command_context::{
 };
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::protocol::facts::encryption;
+use crate::core::logical_clock;
 use crate::protocol::facts::identity;
+use crate::protocol::facts::{content, encryption};
 use crate::protocol::runtime::ProtocolRuntime;
 
 use super::fact::{
@@ -277,12 +278,89 @@ pub fn key_access(
                     && secret.frontier_id == query.removal_frontier_id
             })
             .unwrap_or(false)
-    });
+    }) && !workspace_retired_from_access(runtime, query.workspace_id)?;
     Ok(KeyAccessStatus {
         workspace_id: query.workspace_id,
         removal_frontier_id: query.removal_frontier_id,
         access,
     })
+}
+
+pub fn local_key_secret_count(runtime: &ProtocolRuntime) -> usize {
+    runtime
+        .facts()
+        .filter(|fact| layout::decode_local_key_secret(&fact.bytes).is_ok())
+        .count()
+}
+
+pub fn local_key_secret_frontiers(runtime: &ProtocolRuntime, workspace_id: FactId) -> Vec<FactId> {
+    runtime
+        .facts()
+        .filter_map(|fact| layout::decode_local_key_secret(&fact.bytes).ok())
+        .filter(|secret| secret.workspace_id == workspace_id)
+        .map(|secret| secret.frontier_id)
+        .collect()
+}
+
+pub fn key_wrap_count(runtime: &ProtocolRuntime) -> Result<usize, String> {
+    runtime
+        .store()
+        .table_rows(super::rows::KEY_WRAP_ROWS)
+        .map(|rows| rows.len())
+        .map_err(|err| format!("load key wraps: {err}"))
+}
+
+pub fn workspace_key_wrap_count(
+    runtime: &ProtocolRuntime,
+    workspace_id: FactId,
+) -> Result<usize, String> {
+    Ok(runtime
+        .store()
+        .table_rows(super::rows::KEY_WRAP_ROWS)
+        .map_err(|err| format!("load key wraps: {err}"))?
+        .into_iter()
+        .filter_map(|(key, value)| super::rows::decode_key_wrap_row(&key, &value).ok())
+        .filter(|row| row.wrap.workspace_id == workspace_id)
+        .count())
+}
+
+fn workspace_retired_from_access(
+    runtime: &ProtocolRuntime,
+    workspace_id: FactId,
+) -> Result<bool, String> {
+    let tombstones = runtime
+        .store()
+        .table_rows_with_key_prefix(
+            content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("load message tombstones for key access: {err}"))?;
+    if !tombstones.is_empty() {
+        return Ok(true);
+    }
+    let live_messages = runtime
+        .store()
+        .table_rows_with_key_prefix(
+            content::sealed_message::rows::MESSAGE_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("load message rows for key access: {err}"))?
+        .into_iter()
+        .map(|(key, value)| content::sealed_message::rows::decode_message_row(&key, &value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let horizon_floor = logical_clock::logical_time(runtime.store())?
+        .map(|ms| (ms / 60_000).saturating_sub(30 * 24 * 60))
+        .unwrap_or(0);
+    if horizon_floor > 0
+        && live_messages
+            .iter()
+            .all(|message| message.minute < horizon_floor)
+    {
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 pub fn create_history_node(

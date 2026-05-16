@@ -1,6 +1,10 @@
 //! CLI formatting for local identity and workspace peers.
+//!
+//! This file owns only argv parsing and text formatting for projected identity
+//! reads. Runtime draining, handler dispatch, and persistence stay at the root
+//! app/runtime boundary.
 
-use crate::core::cli::{CliArgs, CliOutput};
+use crate::core::cli::{decode_hex_32_named, encode_hex, CliArgs, CliOutput};
 use crate::core::command_context::CommandContext;
 use crate::protocol::facts::identity;
 
@@ -35,7 +39,7 @@ pub fn identity(ctx: &CommandContext<'_>, _args: CliArgs<'_>) -> Result<CliOutpu
 
 pub fn peers(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let workspace = args.get(0).ok_or_else(|| PEERS_USAGE.to_string())?;
-    let workspace_id = decode_hex_32(workspace)?;
+    let workspace_id = decode_hex_32_named(workspace, "workspace id")?;
     let lines = queries::peers_in_workspace(ctx.store(), workspace_id)?
         .into_iter()
         .map(|peer| {
@@ -55,38 +59,5 @@ fn role_name(role: EndpointRole) -> &'static str {
     match role {
         EndpointRole::Device => "device",
         EndpointRole::InviteServer => "invite-server",
-    }
-}
-
-pub fn encode_hex(bytes: &[u8; 32]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        out.push(DIGITS[(byte >> 4) as usize] as char);
-        out.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
-    if value.len() != 64 {
-        return Err("workspace id must be 64 hex characters".to_string());
-    }
-    let mut out = [0u8; 32];
-    let bytes = value.as_bytes();
-    for index in 0..32 {
-        let hi = hex_nibble(bytes[index * 2])?;
-        let lo = hex_nibble(bytes[index * 2 + 1])?;
-        out[index] = (hi << 4) | lo;
-    }
-    Ok(out)
-}
-
-fn hex_nibble(byte: u8) -> Result<u8, String> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err("hex value contains non-hex character".to_string()),
     }
 }

@@ -1,6 +1,6 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::intents::AtomicIntent;
+use topo::core::intents::{AtomicIntent, Intent};
 use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{MatchedContext, ProjectionContext, ProjectionOutput, Projector};
 use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
@@ -22,7 +22,7 @@ use topo::protocol::facts::encryption::fact::{
 };
 use topo::protocol::facts::encryption::intent::{
     decode_create_key_wrap_intent, decode_purge_retired_recipient_material_intent,
-    decode_unwrap_key_wrap_intent, purge_retired_recipient_material_intent,
+    decode_unwrap_key_wrap_intent, purge_retired_recipient_material_intent, CreateKeyWrapIntent,
     PurgeRetiredRecipientMaterialIntent,
 };
 use topo::protocol::facts::encryption::{
@@ -65,10 +65,10 @@ fn recipient_key_triggers_proactive_deterministic_wrap_when_frontier_source_appe
     ];
 
     bus.submit_fact(recipient.clone());
-    let waiting = bus
+    let _waiting = bus
         .drain(&projector, &matchers, 10)
         .expect("recipient waits for source");
-    assert_eq!(waiting.intents, 0);
+    assert!(create_key_wrap_intents(bus.intents()).is_empty());
     assert_eq!(bus.context(&recipient.id).unwrap().needs.len(), 2);
 
     bus.submit_fact(frontier.clone());
@@ -117,7 +117,7 @@ fn recipient_key_waits_for_local_signer_secret_before_materializing_wrap() {
     bus.drain(&projector, &matchers, 20)
         .expect("source without signer");
 
-    assert!(bus.intents().is_empty());
+    assert!(create_key_wrap_intents(bus.intents()).is_empty());
     assert!(bus
         .context(&recipient.id)
         .unwrap()
@@ -159,7 +159,7 @@ fn rotated_recipient_key_does_not_receive_old_frontier_sources() {
     bus.submit_fact(old_root);
     bus.drain(&projector, &matchers, 100)
         .expect("old root is not eligible");
-    assert!(bus.intents().is_empty());
+    assert!(create_key_wrap_intents(bus.intents()).is_empty());
 
     let new_root_id = new_root.id;
     let new_frontier_id = new_frontier.id;
@@ -293,12 +293,13 @@ fn duplicate_key_requests_converge_on_one_wrap_intent_without_request_entropy() 
     bus.drain(&projector, &matchers, 100)
         .expect("duplicate requests drain");
 
+    let wrap_intents = create_key_wrap_intents(bus.intents());
     assert_eq!(
-        bus.intents().len(),
+        wrap_intents.len(),
         1,
         "duplicate request facts and proactive reconcile must converge on one edge"
     );
-    let intent = decode_create_key_wrap_intent(&bus.intents()[0]).expect("wrap intent");
+    let intent = &wrap_intents[0];
     assert_eq!(
         intent.recipient_key_id,
         recipient_key_fact(workspace, requester, NO_PREVIOUS_RECIPIENT_KEY, 50).id
@@ -358,15 +359,16 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     }
     bus.drain(&projector, &matchers, 100)
         .expect("key request emits materialize intent");
-    assert_eq!(bus.intents().len(), 1);
-    let intent = decode_create_key_wrap_intent(&bus.intents()[0]).expect("wrap intent");
+    let wrap_intents = create_key_wrap_intents(bus.intents());
+    assert_eq!(wrap_intents.len(), 1);
+    let intent = &wrap_intents[0];
     assert_eq!(intent.recipient_key_id, recipient.id);
     assert_eq!(intent.source_fact_id, root.id);
     assert_eq!(intent.signer_secret_fact_id, signer.id);
     bus.save(&store).expect("save bus with pending wrap intent");
 
     let mut restarted = WakeLoop::load(&store).expect("load bus with wrap intent");
-    assert_eq!(restarted.intents().len(), 1);
+    assert_eq!(create_key_wrap_intents(restarted.intents()).len(), 1);
     let expected_signed_wrap =
         encryption_create::create_signed_key_wrap_fact(&intent, &recipient, &root, &signer)
             .expect("materialize expected signed wrap");
@@ -376,7 +378,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
 
     assert_eq!(dispatch.handled, 1);
     assert_eq!(dispatch.facts, 1);
-    assert!(restarted.intents().is_empty());
+    assert!(create_key_wrap_intents(restarted.intents()).is_empty());
     assert!(restarted.has_fact(&expected_signed_wrap.id));
 
     restarted
@@ -442,7 +444,9 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
         .save(&store)
         .expect("save after dispatch and projection");
     let loaded = WakeLoop::load(&store).expect("reload after dispatch");
-    assert_eq!(loaded.intents().len(), 1);
+    assert!(loaded.intents().iter().any(|intent| {
+        AtomicIntent::from_intent(intent, &[encryption_rows::KEY_WRAP_ROWS]).is_ok()
+    }));
     assert!(loaded.context(&expected_signed_wrap.id).is_some());
 }
 
@@ -532,13 +536,12 @@ fn post_deletion_key_request_wraps_retained_nodes_without_resurrecting_root() {
         .project(&request, &context)
         .expect("retained nodes satisfy request");
 
-    assert_eq!(output.intents.len(), 2);
     let intents = output
         .intents
         .iter()
-        .map(decode_create_key_wrap_intent)
-        .collect::<Result<Vec<_>, _>>()
-        .expect("decode wrap intents");
+        .filter_map(|intent| decode_create_key_wrap_intent(intent).ok())
+        .collect::<Vec<_>>();
+    assert_eq!(intents.len(), 2);
     assert!(intents
         .iter()
         .all(|intent| matches!(intent.source, WrapSourceKind::HistoryNode { .. })));
@@ -581,7 +584,7 @@ fn key_request_rejects_recipient_that_is_not_requester() {
         .expect_err("recipient mismatch rejects request");
 
     assert!(err.contains("recipient is not requester"), "{err}");
-    assert!(bus.intents().is_empty());
+    assert!(create_key_wrap_intents(bus.intents()).is_empty());
 }
 
 #[test]
@@ -621,7 +624,7 @@ fn key_request_rejects_frontier_that_is_not_responder_owned() {
         .expect_err("frontier mismatch rejects request");
 
     assert!(err.contains("frontier is not owned by responder"), "{err}");
-    assert!(bus.intents().is_empty());
+    assert!(create_key_wrap_intents(bus.intents()).is_empty());
 }
 
 #[test]
@@ -695,7 +698,10 @@ fn key_request_ignores_wrap_source_from_non_responder() {
         .project(&request, &context)
         .expect("wrong source owner is ignored, not wrapped");
 
-    assert!(output.intents.is_empty());
+    assert!(output
+        .intents
+        .iter()
+        .all(|intent| decode_create_key_wrap_intent(intent).is_err()));
 }
 
 #[test]
@@ -1388,6 +1394,13 @@ impl Projector for CombinedProjector {
             _ => message_project::SealedMessageProjector::new().project(fact, context),
         }
     }
+}
+
+fn create_key_wrap_intents(intents: &[Intent]) -> Vec<CreateKeyWrapIntent> {
+    intents
+        .iter()
+        .filter_map(|intent| decode_create_key_wrap_intent(intent).ok())
+        .collect()
 }
 
 fn recipient_key_fact(

@@ -994,6 +994,7 @@ fn join_workspace_on_daemons(
     assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
     wait_for_local_workspace_join(joiner, workspace_id, username);
     wait_for_users_contains(host, workspace_id, username);
+    wait_for_peers_contains(host, workspace_id, device_name);
 }
 
 fn join_workspace(
@@ -1014,6 +1015,7 @@ fn join_workspace(
     assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
     wait_for_local_workspace_join(joiner, workspace_id, username);
     wait_for_users_contains(host, workspace_id, username);
+    wait_for_peers_contains(host, workspace_id, device_name);
 }
 
 fn workspace_invite_for_addr(db: &str, workspace_id: &str, port: u16) -> String {
@@ -1069,6 +1071,24 @@ fn wait_for_users_contains(db: &str, workspace_id: &str, username: &str) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("user {username} never appeared in {db}: {last}");
+}
+
+fn wait_for_peers_contains(db: &str, workspace_id: &str, device_name: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let peers = topo(&["--db", db, "peers", workspace_id]);
+        if peers.status.success() {
+            let peers = stdout(&peers);
+            if peers.contains(device_name) {
+                return;
+            }
+            last = peers;
+        } else {
+            last = stderr(&peers);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("peer device {device_name} never appeared in {db}: {last}");
 }
 
 fn try_accept_with_identity_retry(

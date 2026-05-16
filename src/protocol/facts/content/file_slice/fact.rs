@@ -5,13 +5,12 @@
 //! opaque length-prefixed blob; the encryption module owns the AEAD framing
 //! and per-slice nonce derivation in a later wave.
 //!
-//! Deferred (legacy parity gaps):
-//! - Signed-fact envelope wrapping (separate fact module).
-//! - Bao proof slot — legacy carries a fixed-width BAO proof verified against
-//!   the parent descriptor's root hash. The target tree will reintroduce this
-//!   slot once the file-send command wave can compute proofs.
-//! - Parent-descriptor existence check on admission (depends on file_rows
-//!   projection ordering — handled by the admit pipeline, not this projector).
+//! Current boundaries:
+//! - Signed envelope verification is owned by `identity::signed_fact`.
+//! - Slice proof material is handled by the file-send/admit path, not this
+//!   narrow fact shape.
+//! - Parent-descriptor existence is enforced by the admit pipeline before
+//!   projection materializes rows.
 
 use crate::core::facts::FactId;
 

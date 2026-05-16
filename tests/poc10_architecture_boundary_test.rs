@@ -579,6 +579,114 @@ fn poc10_target_projectors_do_not_write_store_rows_directly() {
 }
 
 #[test]
+fn poc10_runtime_does_not_synthesize_shareable_facts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let runtime = root.join("src/protocol/runtime.rs");
+    let offenders = source_code_matches_in_paths(
+        root,
+        vec![runtime],
+        &[
+            "shareable_workspace_id",
+            "share_fact_with_workspace_intent_for_fact",
+            "share_fact_with_workspace_intent(",
+            "ShareFactWithWorkspace {",
+        ],
+    );
+
+    assert!(
+        offenders.is_empty(),
+        "runtime routing must not decide which facts are workspace-shareable; projectors emit share_fact_with_workspace intents at the fact boundary:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let paths = [
+        "src/protocol/runtime.rs",
+        "src/protocol/intents/sync/send_compare_response.rs",
+        "src/protocol/intents/sync/send_requested_fact.rs",
+    ]
+    .into_iter()
+    .map(|path| root.join(path))
+    .collect::<Vec<_>>();
+    let offenders = source_code_matches_in_paths(
+        root,
+        paths,
+        &[
+            "persisted_facts(",
+            "is_sync_seed_fact",
+            "may_seed_fact_to_endpoint",
+        ],
+    );
+
+    assert!(
+        offenders.is_empty(),
+        "sync advertisement and response paths must use sync_shareable_fact_rows, not persisted fact scans or runtime shareability filters:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn poc10_concrete_protocol_routes_only_sealed_messages() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let paths = [
+        "src/protocol.rs",
+        "src/protocol/runtime.rs",
+        "src/protocol/facts/transport/transit/receive.rs",
+    ]
+    .into_iter()
+    .map(|path| root.join(path))
+    .collect::<Vec<_>>();
+    let offenders = source_code_matches_in_paths(
+        root,
+        paths,
+        &[
+            "TYPE_CONTENT_MESSAGE",
+            "TYPE_CONTENT_MESSAGE_DELETION",
+            "ContentMessageProjector",
+            "ContentMessageDeletionProjector",
+            "CONTENT_MESSAGE_ROWS",
+            "MESSAGE_DELETION_ROWS",
+        ],
+    );
+
+    assert!(
+        offenders.is_empty(),
+        "normal poc-10 messages must route through content::sealed_message only; unsealed message facts must not be registered, projected, transported, or row-applied by the concrete protocol:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn poc10_protocol_cli_files_do_not_touch_filesystem_directly() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cli_files = rust_files(&root.join("src/protocol/facts"))
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
+        .collect::<Vec<_>>();
+    let offenders = source_code_matches_in_paths(
+        root,
+        cli_files,
+        &[
+            "std::fs",
+            "fs::read",
+            "fs::write",
+            "File::",
+            ".read_to_end(",
+            ".write_all(",
+        ],
+    );
+
+    assert!(
+        offenders.is_empty(),
+        "protocol CLI adapters parse arguments and format output; local file IO must go through core-owned helpers or intent handlers:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn poc10_target_has_exactly_three_schema_dsl_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let expected = [

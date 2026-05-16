@@ -9,6 +9,7 @@ use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::facts::content::message::authority;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
 use super::layout;
@@ -49,7 +50,11 @@ impl Projector for ContentEventProjector {
         }
 
         Ok(output_with_signer_need(signer_need)
-            .intent(AtomicIntent::PutRow(content_event_row(fact.id, &event)?).into_intent()))
+            .intent(AtomicIntent::PutRow(content_event_row(fact.id, &event)?).into_intent())
+            .intent(share_fact_with_workspace_intent_for_fact(
+                event.workspace_id,
+                fact,
+            )))
     }
 }
 
@@ -110,8 +115,8 @@ mod projector_tests {
             )
             .expect("project content event");
         assert_eq!(projected.projections, 1);
-        assert_eq!(projected.intents, 1);
-        assert!(bus.intents().is_empty());
+        assert_eq!(projected.intents, 2);
+        assert_eq!(bus.intents().len(), 1);
 
         let table = store
             .table_rows(rows::CONTENT_EVENT_ROWS)

@@ -677,6 +677,7 @@ mod tests {
                 "sync_compare_rows",
                 "sync_have_id_rows",
                 "sync_need_id_rows",
+                "sync_shareable_fact_rows",
                 "message_deletion_rows",
                 "file_deletion_rows",
                 "removal_frontier_rows",

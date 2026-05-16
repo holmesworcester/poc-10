@@ -11,6 +11,7 @@ use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user::layout as user_layout;
 use crate::protocol::facts::identity::workspace::layout as workspace_layout;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::layout;
 use super::rows::admin_row;
@@ -68,7 +69,11 @@ impl Projector for AdminProjector {
                 admin.workspace_id,
                 admin.user_fact_id.to_vec(),
             ))
-            .intent(AtomicIntent::PutRow(admin_row(fact.id, &admin)?).into_intent()))
+            .intent(AtomicIntent::PutRow(admin_row(fact.id, &admin)?).into_intent())
+            .intent(share_fact_with_workspace_intent_for_fact(
+                admin.workspace_id,
+                fact,
+            )))
     }
 }
 
@@ -259,9 +264,12 @@ mod projector_tests {
             .project(&fact, &context)
             .expect("project admin");
         assert_eq!(output.needs.len(), 1);
-        assert_eq!(output.intents.len(), 1);
-        let row_intent =
-            AtomicIntent::from_intent(&output.intents[0], &[rows::ADMIN_ROWS]).expect("row intent");
+        assert_eq!(output.intents.len(), 2);
+        let row_intent = output
+            .intents
+            .iter()
+            .find_map(|intent| AtomicIntent::from_intent(intent, &[rows::ADMIN_ROWS]).ok())
+            .expect("row intent");
         let AtomicIntent::PutRow(stored) = row_intent else {
             panic!("expected put row");
         };

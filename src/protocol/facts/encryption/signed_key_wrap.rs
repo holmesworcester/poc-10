@@ -5,6 +5,7 @@ use crate::protocol::facts::encryption::intent::{unwrap_key_wrap_intent, UnwrapK
 use crate::protocol::facts::encryption::layout;
 use crate::protocol::facts::encryption::rows::{key_wrap_row, KeyWrapRow};
 use crate::protocol::facts::identity::signed_fact;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
 use super::validation::{has_matching_signer_public_key, matched_payload_fact, require_fact_scope};
@@ -88,6 +89,10 @@ pub(super) fn signed_key_wrap(
         ))
         .offer(crate::protocol::matchers::key_wrap_offer(
             fact.id, scope, fact.id,
+        ))
+        .intent(share_fact_with_workspace_intent_for_fact(
+            wrap.workspace_id,
+            fact,
         ));
 
     if let Some(local_recipient_fact) = local_recipient_fact {

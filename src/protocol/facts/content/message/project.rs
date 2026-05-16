@@ -1,24 +1,16 @@
-//! Poc-10 content-message projector.
+//! Retired unsealed content-message projector.
 //!
-//! Decodes a content-message fact and emits a single `PutRow` into
-//! `content_message_rows`. The message id used in the row key is the fact id.
-//!
-//! Parity gaps (intentional, deferred to later slices):
-//!  - Legacy binds the message to a per-message leaf event dependency and
-//!    recomputes the deterministic leaf coordinate from canonical fields.
-//!    The target leaf module isn't surfaced here; the projector trusts the
-//!    `leaf_id`/`minute` hints inside the fact.
-//!  - Legacy resolves the referenced disappearing-messages setting and
-//!    rejects `expires_at_minute` mismatches; the setting module is not
-//!    ported.
-//!  - Legacy writes tombstone rows on self-deletion labels; the deletion
-//!    projector is a separate fact module.
+//! Normal poc-10 messages are sealed-message facts. The concrete protocol
+//! registry and runtime no longer route `TYPE_CONTENT_MESSAGE`; this module
+//! remains only to keep older migration tests compiling until those fixtures
+//! are rewritten around sealed-message facts.
 
 use crate::core::facts::Fact;
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user::layout as user_layout;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
 use super::authority::{self, DecodedPayload};
@@ -96,7 +88,11 @@ impl Projector for ContentMessageProjector {
         Ok(
             output_with_needs([signer_need, Some(deletion_need), Some(author_need)])
                 .offer(matchers::message_offer(fact.id, scope, fact.id))
-                .intent(AtomicIntent::PutRow(row).into_intent()),
+                .intent(AtomicIntent::PutRow(row).into_intent())
+                .intent(share_fact_with_workspace_intent_for_fact(
+                    message.workspace_id,
+                    fact,
+                )),
         )
     }
 }
@@ -237,8 +233,8 @@ mod projector_tests {
             )
             .expect("project content message");
         assert_eq!(projected.projections, 3);
-        assert_eq!(projected.intents, 1);
-        assert!(bus.intents().is_empty());
+        assert_eq!(projected.intents, 2);
+        assert_eq!(bus.intents().len(), 1);
 
         let table = store
             .table_rows(rows::CONTENT_MESSAGE_ROWS)

@@ -17,6 +17,7 @@ use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::content::message::layout as message_layout;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user::layout as user_layout;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers as message_matchers;
 
 use super::layout;
@@ -102,7 +103,11 @@ impl Projector for ContentMessageDeletionProjector {
                     deletion.target_message_id,
                     deletion.author_user_id,
                 ))
-                .intent(AtomicIntent::PutRow(row).into_intent()),
+                .intent(AtomicIntent::PutRow(row).into_intent())
+                .intent(share_fact_with_workspace_intent_for_fact(
+                    deletion.workspace_id,
+                    fact,
+                )),
         )
     }
 }
@@ -224,11 +229,15 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 2);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, message_context::deletion_role());
-        assert_eq!(output.intents.len(), 1);
-        let AtomicIntent::PutRow(stored) =
-            AtomicIntent::from_intent(&output.intents[0], &[rows::MESSAGE_DELETION_ROWS])
-                .expect("row intent")
-        else {
+        assert_eq!(output.intents.len(), 2);
+        let row_intent = output
+            .intents
+            .iter()
+            .find_map(|intent| {
+                AtomicIntent::from_intent(intent, &[rows::MESSAGE_DELETION_ROWS]).ok()
+            })
+            .expect("row intent");
+        let AtomicIntent::PutRow(stored) = row_intent else {
             panic!("expected put row intent");
         };
         let row = rows::decode_message_deletion_row(&stored.key, &stored.value)

@@ -1,6 +1,10 @@
 //! CLI adapter for projected user reads.
+//!
+//! This file owns only argv parsing and text formatting for projected user
+//! rows. Runtime draining, handler dispatch, and persistence stay at the root
+//! app/runtime boundary.
 
-use crate::core::cli::{CliArgs, CliOutput};
+use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex, CliArgs, CliOutput};
 use crate::core::command_context::CommandContext;
 
 use super::queries;
@@ -28,35 +32,4 @@ pub fn users_output(users: &[UserRow]) -> CliOutput {
         ));
     }
     CliOutput::lines(lines)
-}
-
-fn decode_hex_32(value: &str, label: &str) -> Result<[u8; 32], String> {
-    if value.len() != 64 {
-        return Err(format!("{label} must be 64 hex characters"));
-    }
-    let mut out = [0; 32];
-    let bytes = value.as_bytes();
-    for index in 0..32 {
-        out[index] =
-            (hex_nibble(bytes[index * 2], label)? << 4) | hex_nibble(bytes[index * 2 + 1], label)?;
-    }
-    Ok(out)
-}
-
-fn hex_nibble(byte: u8, label: &str) -> Result<u8, String> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(format!("{label} contains a non-hex character")),
-    }
-}
-
-fn encode_hex(bytes: &[u8; 32]) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }

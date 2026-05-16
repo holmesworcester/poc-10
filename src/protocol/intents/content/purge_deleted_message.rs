@@ -4,7 +4,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::Intent;
-use crate::protocol::facts::content::sealed_message::{intent, layout};
+use crate::protocol::facts::content::sealed_message::{intent, layout, retention};
 
 #[derive(Debug, Clone, Default)]
 pub struct PurgeDeletedMessageHandler;
@@ -40,7 +40,7 @@ impl IntentHandler for PurgeDeletedMessageHandler {
 
         let target = context.require_fact(&input.target_id)?;
         let reason = context.require_fact(&input.reason_fact_id)?;
-        let message = layout::decode_sealed_message(&target.bytes)?;
+        let message = retention::decode_sealed_message_fact(target)?;
         let deletion = layout::decode_message_deletion(&reason.bytes)?;
         if message.workspace_id != input.workspace_id {
             return Ok(HandlerOutput::new());

@@ -131,12 +131,6 @@ impl crate::core::runtime::Runtime<super::Protocol> {
 
     fn seed_sync_have_ids(&mut self, limit: usize) -> Result<usize, String> {
         let mut seeded = 0usize;
-        let Some(local_endpoint) =
-            identity::endpoint::local_endpoint::local_endpoint(self.store())?
-        else {
-            return Ok(0);
-        };
-        let endpoint_memberships = endpoint_memberships(self.store())?;
         let connections = self
             .store()
             .table_rows(connection::response::rows::CONNECTION_RESPONSE_ROWS)
@@ -144,25 +138,16 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         if connections.is_empty() {
             return Ok(0);
         }
-        let facts = self.facts().cloned().collect::<Vec<_>>();
         for (connection_key, connection_value) in connections {
             let row = connection::response::rows::decode_connection_response_row(
                 &connection_key,
                 &connection_value,
             )?;
-            let Some(remote_endpoint) =
-                remote_endpoint_for_connection(&row, local_endpoint.endpoint)
-            else {
-                continue;
-            };
-            for fact in &facts {
+            let facts =
+                sync::shared_fact::shareable_facts_for_connection(self.store(), row.connection_id)?;
+            for fact in facts {
                 if seeded >= limit {
                     return Ok(seeded);
-                }
-                if !is_sync_seed_fact(fact)
-                    || !may_seed_fact_to_endpoint(fact, remote_endpoint, &endpoint_memberships)
-                {
-                    continue;
                 }
                 let have = sync::have_id::fact::SyncHaveIdFact {
                     connection_id: row.connection_id,
@@ -196,68 +181,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn is_sync_seed_fact(fact: &Fact) -> bool {
-    if fact.scope == FactScope::Local {
-        return false;
-    }
-    let Some(tag) = fact.bytes.first().copied() else {
-        return false;
-    };
-    if matches!(
-        tag,
-        sync::compare::layout::TYPE_SYNC_COMPARE
-            | sync::have_id::layout::TYPE_SYNC_HAVE_ID
-            | sync::need_id::layout::TYPE_SYNC_NEED_ID
-            | sync::range_request::layout::TYPE_SYNC_RANGE_REQUEST
-            | sync::shared_fact::layout::TYPE_SHARED_FACT
-            | sync::encrypted_root::layout::TYPE_ENCRYPTED_ROOT
-            | sync::key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE
-    ) {
-        return false;
-    }
-    crate::protocol::facts::transport::transit::create::require_sendable_fact(fact).is_ok()
-}
-
-fn remote_endpoint_for_connection(
-    row: &connection::response::rows::ConnectionResponseRow,
-    local_endpoint: [u8; 32],
-) -> Option<[u8; 32]> {
-    if row.from_endpoint == local_endpoint {
-        Some(row.to_endpoint)
-    } else if row.to_endpoint == local_endpoint {
-        Some(row.from_endpoint)
-    } else {
-        None
-    }
-}
-
-fn endpoint_memberships(store: &Store) -> Result<BTreeSet<([u8; 32], [u8; 32])>, String> {
-    let rows = store
-        .table_rows(identity::endpoint_shared::rows::ENDPOINT_SHARED_ROWS)
-        .map_err(|err| format!("load endpoint membership rows for sync seed: {err}"))?;
-    rows.into_iter()
-        .map(|(key, value)| {
-            identity::endpoint_shared::rows::decode_endpoint_shared_row(&key, &value)
-                .map(|row| (row.workspace_id, row.endpoint_id))
-        })
-        .collect()
-}
-
-fn may_seed_fact_to_endpoint(
-    fact: &Fact,
-    remote_endpoint: [u8; 32],
-    endpoint_memberships: &BTreeSet<([u8; 32], [u8; 32])>,
-) -> bool {
-    match &fact.scope {
-        FactScope::Global => true,
-        FactScope::Local => false,
-        FactScope::Scoped { kind, id } if kind.as_str() == "workspace" => {
-            endpoint_memberships.contains(&(*id, remote_endpoint))
-        }
-        FactScope::Scoped { .. } => false,
-    }
-}
-
 const SCHEMA_SOURCES: &[&str] = &[
     CORE_SCHEMA_SOURCE,
     FACTS_SCHEMA_SOURCE,
@@ -273,8 +196,6 @@ const ATOMIC_ROW_TABLES: &[TableName] = &[
     content::file::rows::FILE_ROWS,
     content::file_deletion::rows::FILE_DELETION_ROWS,
     content::file_slice::rows::FILE_SLICE_ROWS,
-    content::message::rows::CONTENT_MESSAGE_ROWS,
-    content::message_deletion::rows::MESSAGE_DELETION_ROWS,
     content::reaction::rows::REACTION_ROWS,
     encryption::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
     encryption::rows::KEY_WRAP_ROWS,
@@ -368,13 +289,6 @@ impl Projector for ProtocolProjector {
             }
             content::file_slice::layout::TYPE_CONTENT_FILE_SLICE => {
                 content::file_slice::project::ContentFileSliceProjector::new().project(fact, context)
-            }
-            content::message::layout::TYPE_CONTENT_MESSAGE => {
-                content::message::project::ContentMessageProjector::new().project(fact, context)
-            }
-            content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION => {
-                content::message_deletion::project::ContentMessageDeletionProjector::new()
-                    .project(fact, context)
             }
             content::reaction::layout::TYPE_CONTENT_REACTION => {
                 content::reaction::project::ContentReactionProjector::new().project(fact, context)
@@ -578,7 +492,8 @@ pub struct ProtocolHandlers {
     send_sync_compare_response: sync_intents::send_compare_response::SendSyncCompareResponseHandler,
     send_needed_fact_id: sync_intents::send_needed_fact_id::SendNeededFactIdHandler,
     send_requested_fact: sync_intents::send_requested_fact::SendRequestedFactHandler,
-    record_indexed_fact: sync_intents::record_indexed_fact::RecordIndexedFactHandler,
+    share_fact_with_workspace:
+        sync_intents::share_fact_with_workspace::ShareFactWithWorkspaceHandler,
     create_key_wrap: encryption_intents::create_key_wrap::CreateKeyWrapHandler,
     purge_retired_recipient_material:
         encryption_intents::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler,
@@ -606,8 +521,8 @@ impl ProtocolHandlers {
             send_needed_fact_id: sync_intents::send_needed_fact_id::SendNeededFactIdHandler::new(),
             send_requested_fact:
                 sync_intents::send_requested_fact::SendRequestedFactHandler::new(),
-            record_indexed_fact:
-                sync_intents::record_indexed_fact::RecordIndexedFactHandler::new(),
+            share_fact_with_workspace:
+                sync_intents::share_fact_with_workspace::ShareFactWithWorkspaceHandler::new(),
             create_key_wrap: encryption_intents::create_key_wrap::CreateKeyWrapHandler::new(),
             purge_retired_recipient_material:
                 encryption_intents::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler::new(),
@@ -673,7 +588,7 @@ impl ProtocolHandlers {
         )?;
         self.dispatch_one(
             wake_loop,
-            &self.record_indexed_fact,
+            &self.share_fact_with_workspace,
             store,
             limit_per_handler,
             &mut total,

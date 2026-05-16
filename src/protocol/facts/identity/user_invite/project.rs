@@ -11,6 +11,7 @@ use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::admin::layout as admin_layout;
 use crate::protocol::facts::identity::endpoint_shared::layout as endpoint_shared_layout;
 use crate::protocol::facts::identity::workspace::layout as workspace_layout;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::layout;
 use super::rows::user_invite_row;
@@ -61,7 +62,11 @@ impl Projector for UserInviteProjector {
                 user_invite.workspace_id,
                 user_invite.public_key,
             ))
-            .intent(AtomicIntent::PutRow(user_invite_row(fact.id, &user_invite)?).into_intent()))
+            .intent(AtomicIntent::PutRow(user_invite_row(fact.id, &user_invite)?).into_intent())
+            .intent(share_fact_with_workspace_intent_for_fact(
+                user_invite.workspace_id,
+                fact,
+            )))
     }
 }
 
@@ -248,8 +253,11 @@ mod projector_tests {
             .project(&fact, &context)
             .expect("project user_invite");
         assert_eq!(output.needs.len(), 1);
-        assert_eq!(output.intents.len(), 1);
-        let row_intent = AtomicIntent::from_intent(&output.intents[0], &[rows::USER_INVITE_ROWS])
+        assert_eq!(output.intents.len(), 2);
+        let row_intent = output
+            .intents
+            .iter()
+            .find_map(|intent| AtomicIntent::from_intent(intent, &[rows::USER_INVITE_ROWS]).ok())
             .expect("row intent");
         let AtomicIntent::PutRow(stored) = row_intent else {
             panic!("expected put row");
@@ -331,7 +339,7 @@ mod projector_tests {
             )
             .expect("user invite reprojects");
         assert_eq!(projected.projections, 1);
-        assert_eq!(projected.intents, 1);
+        assert_eq!(projected.intents, 2);
     }
 
     fn workspace_fact(workspace_id: [u8; 32], private_key: [u8; 32]) -> Fact {

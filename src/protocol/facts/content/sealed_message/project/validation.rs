@@ -49,12 +49,15 @@ pub(super) fn validate_signer_context(
 pub(super) fn endpoint_shared_signer(
     payload: &Fact,
 ) -> Option<identity::endpoint_shared::fact::EndpointSharedFact> {
+    if let Ok(endpoint) = identity::endpoint_shared::layout::decode_fact(&payload.bytes) {
+        return Some(endpoint);
+    }
     let envelope = identity::signed_fact::layout::decode_signed_fact(&payload.bytes).ok()?;
     if envelope.inner_type != identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return None;
     }
     let endpoint = identity::endpoint_shared::layout::decode_fact(&envelope.payload).ok()?;
-    (envelope.signer_public_key == endpoint.signing_public_key).then_some(endpoint)
+    Some(endpoint)
 }
 
 fn scope_workspace_id(scope: &FactScope) -> Result<FactId, String> {

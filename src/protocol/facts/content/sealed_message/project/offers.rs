@@ -3,6 +3,7 @@ use crate::core::projection::ProjectionOutput;
 
 use super::super::layout;
 use super::validation::require_fact_scope;
+use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
 pub(super) fn project_signer_pubkey(fact: &Fact) -> Result<ProjectionOutput, String> {
@@ -34,10 +35,15 @@ pub(super) fn project_message_deletion(fact: &Fact) -> Result<ProjectionOutput, 
     let deletion = layout::decode_message_deletion(&fact.bytes)?;
     let scope = matchers::workspace_scope(deletion.workspace_id);
     require_fact_scope(fact, &scope)?;
-    Ok(ProjectionOutput::new().offer(matchers::deletion_offer(
-        fact.id,
-        scope,
-        deletion.target_id,
-        deletion.author_user_id,
-    )))
+    Ok(ProjectionOutput::new()
+        .offer(matchers::deletion_offer(
+            fact.id,
+            scope,
+            deletion.target_id,
+            deletion.author_user_id,
+        ))
+        .intent(share_fact_with_workspace_intent_for_fact(
+            deletion.workspace_id,
+            fact,
+        )))
 }
