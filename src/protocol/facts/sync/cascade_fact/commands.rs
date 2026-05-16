@@ -1,5 +1,8 @@
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::matchers::ContextMatcher;
 use crate::core::store::Store;
+use crate::core::wake_loop::WakeLoop;
+use crate::protocol::matchers::{exact_fact_role, ExactSelectorMatcher};
 use crate::protocol::runtime::ProtocolRuntime;
 
 use super::fact::{CascadeFact, MAX_DEPS, PAYLOAD_BYTES};
@@ -83,18 +86,26 @@ pub fn replay_deps_reverse(runtime: &mut ProtocolRuntime) -> Result<ReplayDepsRe
     rows.sort_by_key(|(index, _, _)| *index);
     rows.reverse();
 
+    let mut wake_loop = WakeLoop::load(runtime.store())?;
     for (_, timestamp, bytes) in &rows {
-        runtime.submit_fact(Fact::new(FactScope::Global, *timestamp, bytes.clone()));
+        wake_loop.submit_fact(Fact::new(FactScope::Global, *timestamp, bytes.clone()));
     }
 
+    let matcher = ExactSelectorMatcher::new(exact_fact_role());
+    let matchers = [&matcher as &dyn ContextMatcher];
     let limit = rows.len().max(1);
     for _ in 0..=rows.len() {
-        let report = runtime.drain_projection(limit)?;
-        if runtime.wake_loop().pending_len() == 0 || report.projections == 0 {
+        let report = wake_loop.drain(
+            &super::project::CascadeFactProjector::new(),
+            &matchers,
+            limit,
+        )?;
+        if wake_loop.pending_len() == 0 || report.projections == 0 {
             break;
         }
     }
-    runtime.save()?;
+    wake_loop.save(runtime.store())?;
+    runtime.reload_wake_loop()?;
 
     Ok(ReplayDepsReceipt {
         replayed_facts: rows.len(),

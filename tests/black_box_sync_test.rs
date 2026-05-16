@@ -204,6 +204,94 @@ fn cli_two_long_running_daemons_converge_messages_without_manual_sync() {
 }
 
 #[test]
+fn cli_two_long_running_daemons_download_multislice_file_without_manual_sync() {
+    // This is the poc-10 replacement for the basic simulated download proof:
+    // drive only the product CLI plus daemon transport, then assert the peer
+    // can save the exact multi-slice bytes without any manual sync command.
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice-file.db");
+    let bob = temp_db(&tmp, "bob-file.db");
+    let alice_port = free_port();
+    let bob_port = free_port();
+
+    let workspace = create_workspace(&alice, "file-shared", "alice", "alice-laptop");
+    let invite = workspace_invite_for_addr(&alice, &workspace, alice_port);
+
+    let mut alice_daemon = spawn_daemon(&alice, alice_port);
+    let mut bob_daemon = spawn_daemon(&bob, bob_port);
+    let accepted = accept_with_identity_retry(&bob, &invite, "bob", "bob-phone");
+    assert_eq!(line_value(&accepted, "workspace_id"), workspace);
+    alice_daemon.assert_running();
+    bob_daemon.assert_running();
+
+    poll_for_workspace_member(&bob, &workspace, "bob", 10_000);
+
+    let bob_recipient_id = line_value(
+        &assert_success(topo(&["--db", &bob, "key-recipient", &workspace])),
+        "recipient_key_id",
+    );
+    let removal_frontier_id = line_value(
+        &assert_success(topo(&["--db", &alice, "key-frontier", &workspace])),
+        "removal_frontier_id",
+    );
+    poll_for_wrap_eligibility(
+        &alice,
+        &workspace,
+        &removal_frontier_id,
+        &bob_recipient_id,
+        10_000,
+    );
+    poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 10_000);
+
+    const SLICE_BYTES: usize = 256 * 1024;
+    const NUM_SLICES: usize = 4;
+    let mut payload = Vec::with_capacity(SLICE_BYTES * NUM_SLICES);
+    for slice_idx in 0..NUM_SLICES as u8 {
+        for offset in 0..SLICE_BYTES {
+            payload.push(
+                slice_idx
+                    .wrapping_mul(17)
+                    .wrapping_add((offset % 251) as u8),
+            );
+        }
+    }
+    let in_path = tmp.path().join("network-download.bin");
+    std::fs::write(&in_path, &payload).expect("write source payload");
+
+    let sent = assert_success(topo(&[
+        "--db",
+        &alice,
+        "send-file",
+        &workspace,
+        "network download",
+        "--file",
+        in_path.to_str().expect("source path"),
+    ]));
+    assert_eq!(line_value(&sent, "blob_bytes"), payload.len().to_string());
+
+    let listing = poll_for_file_complete(&bob, &workspace, "network-download.bin", 30_000);
+    assert!(listing.contains("\u{2714}"), "{listing}");
+
+    let out_path = tmp.path().join("saved-network-download.bin");
+    let saved = poll_for_saved_file(
+        &bob,
+        &workspace,
+        "#1",
+        out_path.to_str().expect("output path"),
+        30_000,
+    );
+    assert_eq!(line_value(&saved, "filename"), "network-download.bin");
+    assert_eq!(
+        line_value(&saved, "bytes_written"),
+        payload.len().to_string()
+    );
+    assert_eq!(
+        std::fs::read(&out_path).expect("read saved payload"),
+        payload
+    );
+}
+
+#[test]
 #[ignore = "asymmetric three-peer late-joiner convergence still has a transport::transit \
 admission race when alice processes bob's sync compares while accepting carol's \
 bootstrap stream; tracked as a follow-on \
@@ -438,6 +526,50 @@ fn poll_for_message_text(db: &str, workspace_id: &str, expected_text: &str, time
         thread::sleep(Duration::from_millis(250));
     }
     panic!("messages in {db} never contained {expected_text}; last output:\n{last}");
+}
+
+fn poll_for_file_complete(
+    db: &str,
+    workspace_id: &str,
+    expected_filename: &str,
+    timeout_ms: u64,
+) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        let out = topo(&["--db", db, "files", workspace_id]);
+        if out.status.success() {
+            let text = stdout(&out);
+            if text.contains(expected_filename) && text.contains("\u{2714}") {
+                return text;
+            }
+            last = text;
+        } else {
+            last = stderr(&out);
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    panic!("files in {db} never completed {expected_filename}; last output:\n{last}");
+}
+
+fn poll_for_saved_file(
+    db: &str,
+    workspace_id: &str,
+    selector: &str,
+    out_path: &str,
+    timeout_ms: u64,
+) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        let out = topo(&["--db", db, "save-file", workspace_id, selector, out_path]);
+        if out.status.success() {
+            return stdout(&out);
+        }
+        last = stderr(&out);
+        thread::sleep(Duration::from_millis(250));
+    }
+    panic!("save-file in {db} never completed {selector}; last error:\n{last}");
 }
 
 #[test]
