@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::process::Child;
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cli_harness::*;
 
@@ -243,18 +243,7 @@ fn cli_two_long_running_daemons_download_multislice_file_without_manual_sync() {
     );
     poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 10_000);
 
-    const SLICE_BYTES: usize = 256 * 1024;
-    const NUM_SLICES: usize = 4;
-    let mut payload = Vec::with_capacity(SLICE_BYTES * NUM_SLICES);
-    for slice_idx in 0..NUM_SLICES as u8 {
-        for offset in 0..SLICE_BYTES {
-            payload.push(
-                slice_idx
-                    .wrapping_mul(17)
-                    .wrapping_add((offset % 251) as u8),
-            );
-        }
-    }
+    let payload = patterned_payload(4);
     let in_path = tmp.path().join("network-download.bin");
     std::fs::write(&in_path, &payload).expect("write source payload");
 
@@ -287,6 +276,95 @@ fn cli_two_long_running_daemons_download_multislice_file_without_manual_sync() {
     );
     assert_eq!(
         std::fs::read(&out_path).expect("read saved payload"),
+        payload
+    );
+}
+
+#[test]
+#[ignore = "download throughput fixture is manual; run with --ignored when measuring daemon transfer speed"]
+fn cli_daemon_download_perf_times_send_to_peer_receipt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice-download-perf.db");
+    let bob = temp_db(&tmp, "bob-download-perf.db");
+    let alice_port = free_port();
+    let bob_port = free_port();
+
+    let workspace = create_workspace(&alice, "download-perf", "alice", "alice-laptop");
+    let invite = workspace_invite_for_addr(&alice, &workspace, alice_port);
+
+    let mut alice_daemon = spawn_daemon(&alice, alice_port);
+    let mut bob_daemon = spawn_daemon(&bob, bob_port);
+    let accepted = accept_with_identity_retry(&bob, &invite, "bob", "bob-phone");
+    assert_eq!(line_value(&accepted, "workspace_id"), workspace);
+    alice_daemon.assert_running();
+    bob_daemon.assert_running();
+
+    poll_for_workspace_member(&bob, &workspace, "bob", 10_000);
+
+    let bob_recipient_id = line_value(
+        &assert_success(topo(&["--db", &bob, "key-recipient", &workspace])),
+        "recipient_key_id",
+    );
+    let removal_frontier_id = line_value(
+        &assert_success(topo(&["--db", &alice, "key-frontier", &workspace])),
+        "removal_frontier_id",
+    );
+    poll_for_wrap_eligibility(
+        &alice,
+        &workspace,
+        &removal_frontier_id,
+        &bob_recipient_id,
+        10_000,
+    );
+    poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 10_000);
+
+    let payload = patterned_payload(32);
+    let in_path = tmp.path().join("download-perf.bin");
+    std::fs::write(&in_path, &payload).expect("write perf payload");
+
+    let started = Instant::now();
+    let sent = assert_success(topo(&[
+        "--db",
+        &alice,
+        "send-file",
+        &workspace,
+        "download perf",
+        "--file",
+        in_path.to_str().expect("source path"),
+    ]));
+    let send_elapsed = started.elapsed();
+    assert_eq!(line_value(&sent, "blob_bytes"), payload.len().to_string());
+
+    let listing = poll_for_file_complete(&bob, &workspace, "download-perf.bin", 60_000);
+    let receive_elapsed = started.elapsed();
+    assert!(listing.contains("\u{2714}"), "{listing}");
+
+    let seconds = receive_elapsed.as_secs_f64().max(0.001);
+    let mib_per_second = payload.len() as f64 / seconds / (1024.0 * 1024.0);
+    eprintln!(
+        "black_box_download_perf bytes={} send_command_ms={} send_to_receive_ms={} mib_per_s={:.2}",
+        payload.len(),
+        send_elapsed.as_millis(),
+        receive_elapsed.as_millis(),
+        mib_per_second
+    );
+    assert!(mib_per_second.is_finite() && mib_per_second > 0.0);
+
+    let out_path = tmp.path().join("saved-download-perf.bin");
+    let saved = poll_for_saved_file(
+        &bob,
+        &workspace,
+        "#1",
+        out_path.to_str().expect("output path"),
+        30_000,
+    );
+    assert_eq!(line_value(&saved, "filename"), "download-perf.bin");
+    assert_eq!(
+        line_value(&saved, "bytes_written"),
+        payload.len().to_string()
+    );
+    assert_eq!(
+        std::fs::read(&out_path).expect("read saved perf payload"),
         payload
     );
 }
@@ -570,6 +648,21 @@ fn poll_for_saved_file(
         thread::sleep(Duration::from_millis(250));
     }
     panic!("save-file in {db} never completed {selector}; last error:\n{last}");
+}
+
+fn patterned_payload(slices: usize) -> Vec<u8> {
+    const SLICE_BYTES: usize = 256 * 1024;
+    let mut payload = Vec::with_capacity(SLICE_BYTES * slices);
+    for slice_idx in 0..slices as u8 {
+        for offset in 0..SLICE_BYTES {
+            payload.push(
+                slice_idx
+                    .wrapping_mul(17)
+                    .wrapping_add((offset % 251) as u8),
+            );
+        }
+    }
+    payload
 }
 
 #[test]

@@ -641,14 +641,11 @@ impl WakeLoop {
             }
         }
 
-        let custom_matchers = matchers
-            .iter()
-            .copied()
-            .filter(|matcher| matcher.exact_selector_role().is_none())
-            .collect::<Vec<_>>();
+        let custom_matchers = relevant_custom_matchers_for_delta(matchers, delta);
         if !custom_matchers.is_empty() {
-            let needs = self.all_needs();
-            let offers = self.all_offers();
+            let custom_roles = matcher_roles(&custom_matchers);
+            let needs = self.all_needs_for_roles(&custom_roles);
+            let offers = self.all_offers_for_roles(&custom_roles);
             matches.extend(match_context_delta(
                 delta,
                 &needs,
@@ -686,9 +683,18 @@ impl WakeLoop {
         let custom_matchers = matchers
             .iter()
             .copied()
-            .filter(|matcher| matcher.exact_selector_role().is_none())
+            .filter(|matcher| {
+                matcher.exact_selector_role().is_none()
+                    && context
+                        .needs
+                        .iter()
+                        .any(|need| &need.role == matcher.role())
+            })
             .collect::<Vec<_>>();
-        let custom_offers = (!custom_matchers.is_empty()).then(|| self.all_offers());
+        let custom_offers = (!custom_matchers.is_empty()).then(|| {
+            let custom_roles = matcher_roles(&custom_matchers);
+            self.all_offers_for_roles(&custom_roles)
+        });
         let mut matched = Vec::new();
         let mut seen = BTreeSet::new();
         for need in &context.needs {
@@ -808,17 +814,29 @@ impl WakeLoop {
         }
     }
 
-    fn all_needs(&self) -> Vec<ContextNeed> {
+    fn all_needs_for_roles(&self, roles: &BTreeSet<Role>) -> Vec<ContextNeed> {
         self.context_by_owner
             .values()
-            .flat_map(|context| context.needs.iter().cloned())
+            .flat_map(|context| {
+                context
+                    .needs
+                    .iter()
+                    .filter(|need| roles.contains(&need.role))
+                    .cloned()
+            })
             .collect()
     }
 
-    fn all_offers(&self) -> Vec<ContextOffer> {
+    fn all_offers_for_roles(&self, roles: &BTreeSet<Role>) -> Vec<ContextOffer> {
         self.context_by_owner
             .values()
-            .flat_map(|context| context.offers.iter().cloned())
+            .flat_map(|context| {
+                context
+                    .offers
+                    .iter()
+                    .filter(|offer| roles.contains(&offer.role))
+                    .cloned()
+            })
             .collect()
     }
 
@@ -868,6 +886,34 @@ fn exact_matcher_roles(matchers: &[&dyn ContextMatcher]) -> BTreeSet<Role> {
     matchers
         .iter()
         .filter_map(|matcher| matcher.exact_selector_role().cloned())
+        .collect()
+}
+
+fn relevant_custom_matchers_for_delta<'a>(
+    matchers: &[&'a dyn ContextMatcher],
+    delta: &ContextSetDelta,
+) -> Vec<&'a dyn ContextMatcher> {
+    matchers
+        .iter()
+        .copied()
+        .filter(|matcher| {
+            matcher.exact_selector_role().is_none()
+                && (delta
+                    .added_needs
+                    .iter()
+                    .any(|need| &need.role == matcher.role())
+                    || delta
+                        .added_offers
+                        .iter()
+                        .any(|offer| &offer.role == matcher.role()))
+        })
+        .collect()
+}
+
+fn matcher_roles(matchers: &[&dyn ContextMatcher]) -> BTreeSet<Role> {
+    matchers
+        .iter()
+        .map(|matcher| matcher.role().clone())
         .collect()
 }
 
@@ -1361,6 +1407,44 @@ mod tests {
         assert_eq!(report.wakes, 1);
         assert_eq!(bus.pending_len(), 0);
         assert_eq!(bus.intents().len(), 1);
+    }
+
+    #[test]
+    fn unrelated_custom_matcher_is_not_scanned_for_exact_only_delta() {
+        let exact_role = Role::new("exact").unwrap();
+        let custom_role = Role::new("custom").unwrap();
+        let exact_matcher = ExactSelectorMatcher::new(exact_role.clone());
+        let custom_matcher = CountingMatcher::new(custom_role);
+        let projector = NeedOfferProjector::new(exact_role, Selector::from_bytes([8; 32]));
+        let need = Fact::new(FactScope::Global, 1, b"need".to_vec());
+        let offer = Fact::new(FactScope::Global, 2, b"offer".to_vec());
+        let mut bus = WakeLoop::new();
+
+        bus.submit_fact(need);
+        bus.drain(
+            &projector,
+            &[
+                &exact_matcher as &dyn ContextMatcher,
+                &custom_matcher as &dyn ContextMatcher,
+            ],
+            10,
+        )
+        .expect("need drain");
+        bus.submit_fact(offer);
+        let report = bus
+            .drain(
+                &projector,
+                &[
+                    &exact_matcher as &dyn ContextMatcher,
+                    &custom_matcher as &dyn ContextMatcher,
+                ],
+                10,
+            )
+            .expect("offer drain");
+
+        assert_eq!(report.context_matches, 1);
+        assert_eq!(custom_matcher.need_calls.get(), 0);
+        assert_eq!(custom_matcher.offer_calls.get(), 0);
     }
 
     #[test]
@@ -1923,6 +2007,46 @@ mod tests {
                 fact.id,
                 context.payload_refs().next().unwrap_or(fact.id),
             )))
+        }
+    }
+
+    struct CountingMatcher {
+        role: Role,
+        need_calls: Cell<usize>,
+        offer_calls: Cell<usize>,
+    }
+
+    impl CountingMatcher {
+        fn new(role: Role) -> Self {
+            Self {
+                role,
+                need_calls: Cell::new(0),
+                offer_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl ContextMatcher for CountingMatcher {
+        fn role(&self) -> &Role {
+            &self.role
+        }
+
+        fn match_new_need(
+            &self,
+            _need: &ContextNeed,
+            _existing_offers: &[ContextOffer],
+        ) -> Vec<ContextMatch> {
+            self.need_calls.set(self.need_calls.get() + 1);
+            Vec::new()
+        }
+
+        fn match_new_offer(
+            &self,
+            _offer: &ContextOffer,
+            _existing_needs: &[ContextNeed],
+        ) -> Vec<ContextMatch> {
+            self.offer_calls.set(self.offer_calls.get() + 1);
+            Vec::new()
         }
     }
 
