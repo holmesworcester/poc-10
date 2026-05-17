@@ -34,7 +34,7 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         work_limit: usize,
     ) -> Result<TickReport, String> {
         self.reload_wake_loop()?;
-        let accepted = listener.accept_available(self.store())?;
+        let accepted = listener.accept_available(self.store(), work_limit)?;
         let inbound = network_queues::claim_inbound(self.store(), work_limit)?;
         for row in &inbound {
             self.submit_intent(

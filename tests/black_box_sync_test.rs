@@ -317,12 +317,14 @@ fn cli_daemon_download_perf_times_send_to_peer_receipt() {
         10_000,
     );
     poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 10_000);
+    drop(alice_daemon);
+    drop(bob_daemon);
 
     let payload = patterned_payload(32);
     let in_path = tmp.path().join("download-perf.bin");
     std::fs::write(&in_path, &payload).expect("write perf payload");
 
-    let started = Instant::now();
+    let authoring_started = Instant::now();
     let sent = assert_success(topo(&[
         "--db",
         &alice,
@@ -332,21 +334,38 @@ fn cli_daemon_download_perf_times_send_to_peer_receipt() {
         "--file",
         in_path.to_str().expect("source path"),
     ]));
-    let send_elapsed = started.elapsed();
+    let authoring_elapsed = authoring_started.elapsed();
     assert_eq!(line_value(&sent, "blob_bytes"), payload.len().to_string());
 
+    let before_sync = assert_success(topo(&["--db", &bob, "files", &workspace]));
+    assert!(
+        !before_sync.contains("download-perf.bin"),
+        "file arrived before sync was enabled:\n{before_sync}"
+    );
+
+    let sync_started = Instant::now();
+    let mut alice_daemon = spawn_daemon(&alice, alice_port);
+    let mut bob_daemon = spawn_daemon(&bob, bob_port);
+    let daemons_ready_at = Instant::now();
+    alice_daemon.assert_running();
+    bob_daemon.assert_running();
+
     let listing = poll_for_file_complete(&bob, &workspace, "download-perf.bin", 60_000);
-    let receive_elapsed = started.elapsed();
+    let sync_elapsed = sync_started.elapsed();
+    let ready_elapsed = daemons_ready_at.elapsed();
     assert!(listing.contains("\u{2714}"), "{listing}");
 
-    let seconds = receive_elapsed.as_secs_f64().max(0.001);
+    let seconds = sync_elapsed.as_secs_f64().max(0.001);
     let mib_per_second = payload.len() as f64 / seconds / (1024.0 * 1024.0);
+    let mbit_per_second = payload.len() as f64 * 8.0 / seconds / 1_000_000.0;
     eprintln!(
-        "black_box_download_perf bytes={} send_command_ms={} send_to_receive_ms={} mib_per_s={:.2}",
+        "black_box_download_perf bytes={} authoring_ms={} sync_enable_to_receive_ms={} daemons_ready_to_receive_ms={} mib_per_s={:.2} mbit_per_s={:.2}",
         payload.len(),
-        send_elapsed.as_millis(),
-        receive_elapsed.as_millis(),
-        mib_per_second
+        authoring_elapsed.as_millis(),
+        sync_elapsed.as_millis(),
+        ready_elapsed.as_millis(),
+        mib_per_second,
+        mbit_per_second
     );
     assert!(mib_per_second.is_finite() && mib_per_second > 0.0);
 

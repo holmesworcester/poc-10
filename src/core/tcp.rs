@@ -63,31 +63,39 @@ impl Listener {
         self.local_addr
     }
 
-    /// Accept and pump at most one available inbound stream.
+    /// Accept and pump available inbound streams up to `max_streams`.
     ///
     /// If no stream is ready, the returned report has zero accepted
     /// connections. This gives higher-level schedulers a nonblocking accept
-    /// step without moving any byte interpretation into core.
-    pub fn accept_available(&self, store: &Store) -> Result<AcceptReport<StreamReport>, String> {
-        let (mut stream, source_addr) = match self.listener.accept() {
-            Ok(accepted) => accepted,
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                return Ok(AcceptReport {
-                    accepted_connections: 0,
-                    value: StreamReport::default(),
-                })
-            }
-            Err(err) => return Err(format!("accept tcp stream: {err}")),
-        };
-        stream
-            .set_nonblocking(false)
-            .map_err(|err| format!("set stream blocking: {err}"))?;
-        stream
-            .set_nodelay(true)
-            .map_err(|err| format!("set stream nodelay: {err}"))?;
-        let value = read_inbound_frames(store, &mut stream, NetworkSource::new(source_addr))?;
+    /// step without moving any byte interpretation into core. Draining more
+    /// than one stream matters because higher layers may intentionally send
+    /// many short streams as independent idempotent work items.
+    pub fn accept_available(
+        &self,
+        store: &Store,
+        max_streams: usize,
+    ) -> Result<AcceptReport<StreamReport>, String> {
+        let mut accepted_connections = 0;
+        let mut value = StreamReport::default();
+        for _ in 0..max_streams {
+            let (mut stream, source_addr) = match self.listener.accept() {
+                Ok(accepted) => accepted,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(err) => return Err(format!("accept tcp stream: {err}")),
+            };
+            stream
+                .set_nonblocking(false)
+                .map_err(|err| format!("set stream blocking: {err}"))?;
+            stream
+                .set_nodelay(true)
+                .map_err(|err| format!("set stream nodelay: {err}"))?;
+            let report = read_inbound_frames(store, &mut stream, NetworkSource::new(source_addr))?;
+            accepted_connections += 1;
+            value.sent_frames += report.sent_frames;
+            value.received_frames += report.received_frames;
+        }
         Ok(AcceptReport {
-            accepted_connections: 1,
+            accepted_connections,
             value,
         })
     }
@@ -329,6 +337,8 @@ fn is_stream_closed(err: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
+    use crate::core::store::Store;
     use std::thread;
 
     #[test]
@@ -365,5 +375,46 @@ mod tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         reader.join().expect("reader thread");
+    }
+
+    #[test]
+    fn accept_available_drains_ready_streams_up_to_limit() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let listener = listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
+        let addr = listener.local_addr();
+        let writers = (0..3)
+            .map(|idx| {
+                thread::spawn(move || {
+                    let mut stream = TcpStream::connect(addr).expect("connect");
+                    let body = vec![idx as u8; idx + 1];
+                    write_frame_with_budget(&mut stream, &body, Duration::from_secs(1))
+                        .expect("write frame");
+                    stream.shutdown(Shutdown::Write).expect("shutdown write");
+                })
+            })
+            .collect::<Vec<_>>();
+        thread::sleep(Duration::from_millis(50));
+
+        let first = listener
+            .accept_available(&store, 2)
+            .expect("accept first batch");
+        let second = listener
+            .accept_available(&store, 2)
+            .expect("accept second batch");
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+
+        assert_eq!(first.accepted_connections, 2);
+        assert_eq!(first.value.received_frames, 2);
+        assert_eq!(second.accepted_connections, 1);
+        assert_eq!(second.value.received_frames, 1);
+        assert_eq!(
+            network_queues::claim_inbound(&store, 10)
+                .expect("claim inbound")
+                .len(),
+            3
+        );
     }
 }
