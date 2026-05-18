@@ -150,6 +150,31 @@ fn schema_sources_create_typed_table_declarations() {
 }
 
 #[test]
+fn schema_sources_require_explicit_row_table_declarations() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("typed-key-value-store.db");
+    let source = r#"
+        table legacy_key_value_shape {
+          column key bytes;
+          column value bytes;
+          row_key (key);
+        }
+    "#;
+
+    Store::open_disk_with_schema_sources(&path, &[source])
+        .expect("key/value table block creates a typed table");
+    let conn = Connection::open(&path).expect("open sqlite");
+    let columns = conn
+        .prepare("PRAGMA table_info(legacy_key_value_shape)")
+        .expect("prepare table info")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query table info")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect columns");
+    assert_eq!(columns, vec!["key".to_string(), "value".to_string()]);
+}
+
+#[test]
 fn schema_sources_reject_existing_typed_table_with_wrong_shape() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("typed-schema-store.db");

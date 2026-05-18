@@ -1,44 +1,10 @@
 # Initial poc-10 core table inventory.
-# Rows stay opaque until the schema compiler owns concrete row layouts.
+# Row tables stay opaque until the schema compiler owns concrete row layouts.
 
-table facts {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table inbox {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table needs {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table offers {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table pending_projection {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table intents {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table clock {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
+row_table facts;
+row_table inbox;
+row_table needs;
+row_table offers;
+row_table pending_projection;
+row_table intents;
+row_table clock;

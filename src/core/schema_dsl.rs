@@ -25,6 +25,7 @@ impl SchemaDocument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableDeclaration {
     pub name: String,
+    pub kind: TableKind,
     pub columns: Vec<ColumnDeclaration>,
     pub row_key: RowKeyDeclaration,
     pub indexes: Vec<IndexDeclaration>,
@@ -38,6 +39,12 @@ impl TableDeclaration {
     pub fn index(&self, name: &str) -> Option<&IndexDeclaration> {
         self.indexes.iter().find(|index| index.name == name)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableKind {
+    Row,
+    Typed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,7 +135,10 @@ impl<'a> Parser<'a> {
         let mut table_names = BTreeSet::new();
 
         while !matches!(self.lookahead.kind, TokenKind::Eof) {
-            let table = self.parse_table()?;
+            let table = match &self.lookahead.kind {
+                TokenKind::Ident(keyword) if keyword == "row_table" => self.parse_row_table()?,
+                _ => self.parse_table()?,
+            };
             if !table_names.insert(table.name.clone()) {
                 return Err(self.error(format!("duplicate table declaration `{}`", table.name)));
             }
@@ -227,9 +237,35 @@ impl<'a> Parser<'a> {
 
         Ok(TableDeclaration {
             name,
+            kind: TableKind::Typed,
             columns,
             row_key,
             indexes,
+        })
+    }
+
+    fn parse_row_table(&mut self) -> Result<TableDeclaration, ParseError> {
+        self.expect_keyword("row_table")?;
+        let name = self.parse_name()?;
+        self.expect_symbol(';')?;
+
+        Ok(TableDeclaration {
+            name,
+            kind: TableKind::Row,
+            columns: vec![
+                ColumnDeclaration {
+                    name: "key".to_string(),
+                    ty: ColumnType::Bytes { len: None },
+                },
+                ColumnDeclaration {
+                    name: "value".to_string(),
+                    ty: ColumnType::Bytes { len: None },
+                },
+            ],
+            row_key: RowKeyDeclaration {
+                columns: vec!["key".to_string()],
+            },
+            indexes: Vec::new(),
         })
     }
 
@@ -590,7 +626,9 @@ mod tests {
     fn parses_tables_row_keys_indexes_and_byte_lengths() {
         let schema = parse_schema(
             r#"
-            table facts {
+            row_table facts;
+
+            table facts_typed {
               column id bytes(32);
               column scope text;
               column timestamp u64;
@@ -603,14 +641,23 @@ mod tests {
         )
         .expect("schema parses");
 
-        let facts = schema.table("facts").expect("facts table");
-        assert_eq!(facts.row_key.columns, vec!["id"]);
+        let opaque_facts = schema.table("facts").expect("row table");
+        assert_eq!(opaque_facts.kind, TableKind::Row);
+        assert_eq!(opaque_facts.row_key.columns, vec!["key"]);
         assert_eq!(
-            facts.column("id").map(|column| &column.ty),
+            opaque_facts.column("key").map(|column| &column.ty),
+            Some(&ColumnType::Bytes { len: None })
+        );
+
+        let typed_facts = schema.table("facts_typed").expect("typed facts table");
+        assert_eq!(typed_facts.kind, TableKind::Typed);
+        assert_eq!(typed_facts.row_key.columns, vec!["id"]);
+        assert_eq!(
+            typed_facts.column("id").map(|column| &column.ty),
             Some(&ColumnType::Bytes { len: Some(32) })
         );
         assert_eq!(
-            facts.index("by_scope_time"),
+            typed_facts.index("by_scope_time"),
             Some(&IndexDeclaration {
                 name: "by_scope_time".to_string(),
                 unique: false,
@@ -618,7 +665,7 @@ mod tests {
             })
         );
         assert_eq!(
-            facts.index("by_scope_id").map(|index| index.unique),
+            typed_facts.index("by_scope_id").map(|index| index.unique),
             Some(true)
         );
     }
@@ -698,22 +745,30 @@ mod tests {
 
         for document in [&core, &facts, &handlers] {
             for table in &document.tables {
-                if matches!(
-                    table.name.as_str(),
-                    "content_messages" | "content_reactions" | "content_files"
-                ) {
-                    continue;
+                match table.kind {
+                    TableKind::Row => {
+                        assert_eq!(table.row_key.columns, vec!["key"]);
+                        assert_eq!(
+                            table.column("key").map(|column| &column.ty),
+                            Some(&ColumnType::Bytes { len: None })
+                        );
+                        assert_eq!(
+                            table.column("value").map(|column| &column.ty),
+                            Some(&ColumnType::Bytes { len: None })
+                        );
+                        assert!(table.indexes.is_empty());
+                    }
+                    TableKind::Typed => {
+                        assert!(
+                            matches!(
+                                table.name.as_str(),
+                                "content_messages" | "content_reactions" | "content_files"
+                            ),
+                            "unexpected typed table {}",
+                            table.name
+                        );
+                    }
                 }
-                assert_eq!(table.row_key.columns, vec!["key"]);
-                assert_eq!(
-                    table.column("key").map(|column| &column.ty),
-                    Some(&ColumnType::Bytes { len: None })
-                );
-                assert_eq!(
-                    table.column("value").map(|column| &column.ty),
-                    Some(&ColumnType::Bytes { len: None })
-                );
-                assert!(table.indexes.is_empty());
             }
         }
     }

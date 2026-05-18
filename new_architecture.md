@@ -382,8 +382,6 @@ offers
 pending_projection
 intents
 clock
-network_in
-network_out
 ```
 
 `src/protocol/facts/schema.p8sql` contains projection/read-model state.
@@ -393,9 +391,9 @@ fixed-length fact encoders/decoders and row key/value constructors.
 
 `src/protocol/intents/schema.p8sql` contains handler checkpoint or operational state.
 
-The schema DSL may declare tables, indexes, uniqueness, byte lengths, and row
-keys. It should not contain Rust expressions, projection callbacks, or protocol
-validation logic.
+The schema DSL may declare opaque row tables, typed tables, indexes,
+uniqueness, byte lengths, and row keys. It should not contain Rust expressions,
+projection callbacks, or protocol validation logic.
 
 ## Facts
 
