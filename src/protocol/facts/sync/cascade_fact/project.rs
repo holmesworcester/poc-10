@@ -1,4 +1,13 @@
-use crate::core::context::ContextNeed;
+//! Poc-10 sync cascade projector.
+//!
+//! POLICY. A cascade_fact is admitted iff:
+//!   1. STRUCTURAL. The body decodes and its timestamp matches the outer fact
+//!      timestamp.
+//!   2. CONTEXT. Every declared dependency must be present as an exact-fact
+//!      matched payload in the same scope.
+//!   3. MATERIALIZE. Once dependencies are ready, publish this fact as exact
+//!      context for downstream sync work.
+
 use crate::core::facts::Fact;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::matchers;
@@ -20,19 +29,22 @@ impl Projector for CascadeFactProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let decoded = layout::decode_fact(fact.body())?;
         if decoded.timestamp != fact.timestamp {
             return Err("cascade fact timestamp does not match fact timestamp".to_string());
         }
 
+        // 2. Context.
         let mut output = ProjectionOutput::new();
         for dependency_id in decoded.dependencies {
             let need = matchers::exact_fact_need(fact.id, fact.scope.clone(), dependency_id);
-            if !has_matched_dependency(context, &need, dependency_id) {
+            if !has_matched_dependency(context, &need, dependency_id)? {
                 output = output.need(need);
             }
         }
 
+        // 3. Materialize.
         if output.needs.is_empty() {
             output = output.offer(matchers::exact_fact_offer(
                 fact.id,
@@ -47,16 +59,16 @@ impl Projector for CascadeFactProjector {
 
 fn has_matched_dependency(
     context: &ProjectionContext,
-    need: &ContextNeed,
+    need: &crate::core::context::ContextNeed,
     dependency_id: crate::core::facts::FactId,
-) -> bool {
-    context.offers().iter().any(|offer| {
-        let crate::core::context::ContextOffer { payload_ref, .. } = offer;
-        offer.role == need.role
-            && offer.scope == need.scope
-            && offer.selector == need.selector
-            && *payload_ref == dependency_id
-    })
+) -> Result<bool, String> {
+    let Some(payload) = context.payload_for_checked(need, "cascade dependency")? else {
+        return Ok(false);
+    };
+    if payload.id != dependency_id {
+        return Err("cascade dependency payload does not match need".to_string());
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

@@ -1,15 +1,19 @@
 //! Poc-10 connection-response projector.
 //!
-//! A response projects only after its exact request and invite-secret context
-//! are present. Local responses additionally require the responder ephemeral
-//! secret; received responses require transport::transit receive provenance and the local
-//! initiator ephemeral secret. Network and route effects stay in handlers.
+//! POLICY. A connection_response is admitted iff:
+//!   1. STRUCTURAL. The fact is local-only, response fields are non-empty, and
+//!      the response references a different request fact.
+//!   2. CONTEXT. Projection validates exact request and invite-secret context.
+//!      Received responses additionally require transit provenance plus local
+//!      initiator secret; local responses require responder secret.
+//!   3. MATERIALIZE. Valid responses write the connection_response row. Network
+//!      effects stay in intent handlers.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
-use crate::protocol::facts::connection::ephemeral_secret::layout as ephemeral_layout;
+use crate::protocol::facts::connection::ephemeral_secret;
 use crate::protocol::facts::connection::request;
 use crate::protocol::facts::identity::invite;
 use crate::protocol::facts::transport::transit_received::{
@@ -39,6 +43,7 @@ impl Projector for ConnectionResponseProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("connection response fact must have local scope".to_string());
         }
@@ -51,6 +56,7 @@ impl Projector for ConnectionResponseProjector {
             return Err("connection response cannot answer itself".to_string());
         }
 
+        // 2. Shared request and invite context.
         let request_need = request_matchers::connection_request_need(fact.id, response.request_id);
         let Some(request_context) = projection_context.payload_for(&request_need) else {
             return Ok(waiting_output([request_need]));
@@ -109,6 +115,7 @@ impl Projector for ConnectionResponseProjector {
             .map(|(_, fact)| fact)
             .min_by_key(|fact| fact.id)
         {
+            // 2a. Received response path.
             if receive.scope != FactScope::Local {
                 return Err("connection response receive context must be local".to_string());
             }
@@ -131,11 +138,12 @@ impl Projector for ConnectionResponseProjector {
                     receive_need,
                 ]));
             };
-            let initiator_secret = ephemeral_layout::decode_fact(initiator_ephemeral.body())
-                .map_err(|_| {
-                    "connection response initiator dependency is not an ephemeral secret"
-                        .to_string()
-                })?;
+            let initiator_secret = ephemeral_secret::decode_fact_payload(
+                initiator_ephemeral.body(),
+            )
+            .map_err(|_| {
+                "connection response initiator dependency is not an ephemeral secret".to_string()
+            })?;
             if initiator_ephemeral.id != response.initiator_ephemeral_secret_fact_id {
                 return Err(
                     "connection response initiator ephemeral context id does not match response"
@@ -157,9 +165,11 @@ impl Projector for ConnectionResponseProjector {
             if response.connection_secret != material.connection_secret {
                 return Err("connection response secret does not match handshake".to_string());
             }
+            // 3. Materialize received response.
             return materialized_output(fact.id, &response);
         }
 
+        // 2b. Local response path.
         let Some(responder_ephemeral) = projection_context.payload_for(&responder_ephemeral_need)
         else {
             return Ok(waiting_output([
@@ -169,8 +179,8 @@ impl Projector for ConnectionResponseProjector {
                 receive_need,
             ]));
         };
-        let responder_secret =
-            ephemeral_layout::decode_fact(responder_ephemeral.body()).map_err(|_| {
+        let responder_secret = ephemeral_secret::decode_fact_payload(responder_ephemeral.body())
+            .map_err(|_| {
                 "connection response responder dependency is not an ephemeral secret".to_string()
             })?;
         if responder_ephemeral.id != response.responder_ephemeral_secret_fact_id {
@@ -195,6 +205,7 @@ impl Projector for ConnectionResponseProjector {
                     .to_string(),
             );
         }
+        // 3. Materialize local response.
         materialized_output(fact.id, &response)
     }
 }

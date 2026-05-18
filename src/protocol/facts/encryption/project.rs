@@ -1,4 +1,12 @@
 //! Poc-10 encryption projector for key healing and wrap requests.
+//!
+//! POLICY. An encryption-family fact is admitted iff:
+//!   1. DISPATCH. The first byte selects a known encryption payload or signed
+//!      key-wrap envelope.
+//!   2. CONTEXT. Subprojectors validate local secrets, recipients, requests,
+//!      signer authority, and workspace scope for their specific fact type.
+//!   3. MATERIALIZE. Subprojectors publish wrap/secret/frontier offers, share
+//!      workspace facts, or emit key-healing work.
 
 use crate::core::facts::Fact;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
@@ -29,6 +37,7 @@ impl Projector for EncryptionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Dispatch.
         match fact.bytes.first().copied() {
             Some(layout::TYPE_RECIPIENT_KEY) => recipient_key(fact, context),
             Some(layout::TYPE_REMOVAL_FRONTIER) => removal_frontier(fact),
@@ -38,16 +47,18 @@ impl Projector for EncryptionProjector {
             }
             Some(layout::TYPE_LOCAL_RECIPIENT_KEY) => local_recipient_key(fact, context),
             Some(layout::TYPE_KEY_REQUEST) => key_request(fact, context),
-            Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) => signed_key_wrap(fact, context),
+            Some(identity::signed_fact::TYPE_SIGNED_FACT) => signed_key_wrap(fact, context),
             _ => Err("unknown encryption fact type".to_string()),
         }
     }
 }
 
 fn removal_frontier(fact: &Fact) -> Result<ProjectionOutput, String> {
+    // 1. Structural.
     let frontier = layout::decode_removal_frontier(fact.body())?;
     let scope = matchers::workspace_scope(frontier.workspace_id);
     require_fact_scope(fact, &scope)?;
+    // 3. Materialize.
     Ok(ProjectionOutput::new()
         .offer(matchers::frontier_offer(fact.id, scope, fact.id))
         .intent(share_fact_with_workspace_intent_for_fact(

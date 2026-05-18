@@ -1,7 +1,11 @@
 //! Poc-10 sync need-id projector.
 //!
-//! Decodes the need-id fact, records it, and asks the sync handler to answer
-//! with the requested fact bytes if this store has them.
+//! POLICY. A sync_need_id fact is admitted iff:
+//!   1. STRUCTURAL. The request payload decodes.
+//!   2. CONTEXT. No matched context is required; idempotent handler work decides
+//!      whether this store can answer.
+//!   3. MATERIALIZE. Write the need-id row and emit deferred send-requested-fact
+//!      work.
 
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
@@ -28,7 +32,9 @@ impl Projector for SyncNeedIdProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let need = layout::decode_fact(fact.body())?;
+        // 3. Materialize.
         Ok(ProjectionOutput::new()
             .intent(AtomicIntent::PutRow(sync_need_id_row(fact.id, &need)?).into_intent())
             .intent(send_requested_fact_intent(SendRequestedFact {

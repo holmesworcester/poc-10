@@ -1,16 +1,17 @@
 //! Poc-10 invite-accepted projector.
 //!
-//! Validates that no event id field in the fact is zero and emits a single
-//! `PutRow` atomic intent.
-//!
-//! Legacy parity gap (intentional): this validates the invite-secret context
-//! that the target tree can request exactly, but it still does not perform any
-//! broader legacy transport::transit/bootstrap side effects.
+//! POLICY. An invite_accepted fact is admitted iff:
+//!   1. STRUCTURAL. The fact is local-only and all event id/hash fields are
+//!      non-zero.
+//!   2. CONTEXT. Matched invite_secret context must be local and scoped to the
+//!      same workspace/invite/bootstrap hash.
+//!   3. MATERIALIZE. Write the invite_accepted row; broader transport effects
+//!      remain explicit intent-handler work.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
-use crate::protocol::facts::identity::invite::layout as invite_layout;
+use crate::protocol::facts::identity::invite;
 
 use super::layout;
 use super::rows::invite_accepted_row;
@@ -30,6 +31,7 @@ impl Projector for InviteAcceptedProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("invite_accepted fact must have local scope".to_string());
         }
@@ -43,6 +45,7 @@ impl Projector for InviteAcceptedProjector {
             return Err("invite_accepted fact has empty event id field".to_string());
         }
 
+        // 2. Context.
         let secret_need = crate::protocol::matchers::exact_need(
             fact.id,
             crate::protocol::matchers::invite_secret_role(),
@@ -57,7 +60,7 @@ impl Projector for InviteAcceptedProjector {
         if secret_fact.scope != FactScope::Local {
             return Err("invite_accepted invite_secret context must be local".to_string());
         }
-        let secret = invite_layout::decode_fact(secret_fact.body())
+        let secret = invite::decode_fact_payload(secret_fact.body())
             .map_err(|_| "invite_accepted dependency is not an invite_secret fact".to_string())?;
         if secret.bootstrap_hash != accepted.bootstrap_hash {
             return Err("invite_accepted bootstrap hash does not match invite_secret".to_string());
@@ -69,6 +72,7 @@ impl Projector for InviteAcceptedProjector {
                 "invite_accepted invite_secret scope does not match acceptance".to_string(),
             );
         }
+        // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(secret_need)
             .intent(AtomicIntent::PutRow(invite_accepted_row(fact.id, &accepted)?).into_intent()))

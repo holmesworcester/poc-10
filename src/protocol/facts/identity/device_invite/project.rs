@@ -15,10 +15,7 @@ use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::device_invite::fact::DeviceInviteFact;
-use crate::protocol::facts::identity::endpoint_shared::layout as endpoint_shared_layout;
-use crate::protocol::facts::identity::user::layout as user_layout;
-use crate::protocol::facts::identity::user_invite::layout as user_invite_layout;
-use crate::protocol::facts::identity::workspace::layout as workspace_layout;
+use crate::protocol::facts::identity::{endpoint_shared, user, user_invite, workspace};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
@@ -44,7 +41,7 @@ impl Projector for DeviceInviteProjector {
         if fact.scope != FactScope::Global {
             return Err("device_invite fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())
+        let envelope = identity::signed_fact::decode_envelope(fact.body())
             .map_err(|_| "device_invite fact must be signed".to_string())?;
         if envelope.inner_type != layout::TYPE_DEVICE_INVITE {
             return Err("signed fact does not contain a device_invite".to_string());
@@ -105,12 +102,12 @@ fn project_user_signed(
     if user_fact.id != invite.user_authority_fact_id {
         return Err("device_invite user context payload id mismatch".to_string());
     }
-    let user_envelope = identity::signed_fact::layout::decode_signed_fact(user_fact.body())
+    let user_envelope = identity::signed_fact::decode_envelope(user_fact.body())
         .map_err(|_| "device_invite signer must be user or endpoint_shared".to_string())?;
-    if user_envelope.inner_type != user_layout::TYPE_USER {
+    if user_envelope.inner_type != user::TYPE_USER {
         return Err("device_invite signer must be user or endpoint_shared".to_string());
     }
-    let user = user_layout::decode_fact(&user_envelope.payload)
+    let user = user::decode_fact_payload(&user_envelope.payload)
         .map_err(|_| "device_invite user signer payload is invalid".to_string())?;
     if envelope.signer_public_key != user.public_key {
         return Err("device_invite signer public key does not match user".to_string());
@@ -125,14 +122,12 @@ fn project_user_signed(
     if user_invite_fact.id != user_invite_fact_id {
         return Err("device_invite user_invite context payload id mismatch".to_string());
     }
-    let invite_envelope = identity::signed_fact::layout::decode_signed_fact(
-        user_invite_fact.body(),
-    )
-    .map_err(|_| "device_invite user_invite context is not a user_invite fact".to_string())?;
-    if invite_envelope.inner_type != user_invite_layout::TYPE_USER_INVITE {
+    let invite_envelope = identity::signed_fact::decode_envelope(user_invite_fact.body())
+        .map_err(|_| "device_invite user_invite context is not a user_invite fact".to_string())?;
+    if invite_envelope.inner_type != user_invite::TYPE_USER_INVITE {
         return Err("device_invite user_invite dependency is not a user_invite".to_string());
     }
-    let user_invite = user_invite_layout::decode_fact(&invite_envelope.payload)
+    let user_invite = user_invite::decode_fact_payload(&invite_envelope.payload)
         .map_err(|_| "device_invite user_invite context is not a user_invite fact".to_string())?;
     if user_invite.workspace_id != invite.workspace_id {
         return Err("device_invite user_invite belongs to a different workspace".to_string());
@@ -164,12 +159,12 @@ fn project_endpoint_signed(
     if signer_fact.id != envelope.signer_id {
         return Err("device_invite endpoint_shared context payload id mismatch".to_string());
     }
-    let signer_envelope = identity::signed_fact::layout::decode_signed_fact(signer_fact.body())
+    let signer_envelope = identity::signed_fact::decode_envelope(signer_fact.body())
         .map_err(|_| "device_invite signer must be user or endpoint_shared".to_string())?;
-    if signer_envelope.inner_type != endpoint_shared_layout::TYPE_ENDPOINT_SHARED {
+    if signer_envelope.inner_type != endpoint_shared::TYPE_ENDPOINT_SHARED {
         return Err("device_invite signer must be user or endpoint_shared".to_string());
     }
-    let signer = endpoint_shared_layout::decode_fact(&signer_envelope.payload)
+    let signer = endpoint_shared::decode_fact_payload(&signer_envelope.payload)
         .map_err(|_| "device_invite endpoint_shared signer payload is invalid".to_string())?;
     if envelope.signer_public_key != signer.signing_public_key {
         return Err(
@@ -247,7 +242,7 @@ fn validate_workspace_context(workspace_fact: &Fact, workspace_id: FactId) -> Re
     if workspace_fact.id != workspace_id {
         return Err("device_invite workspace context payload id mismatch".to_string());
     }
-    workspace_layout::decode_fact(workspace_fact.body())
+    workspace::decode_fact_payload(workspace_fact.body())
         .map_err(|_| "device_invite workspace dependency is not a workspace".to_string())?;
     Ok(())
 }

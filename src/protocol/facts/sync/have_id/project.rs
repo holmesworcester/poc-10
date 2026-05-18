@@ -1,7 +1,10 @@
 //! Poc-10 sync have-id projector.
 //!
-//! Decodes the have-id fact, records it, and asks the sync handler to request
-//! the advertised fact if it is not already present locally.
+//! POLICY. A sync_have_id fact is admitted iff:
+//!   1. STRUCTURAL. The advertisement payload decodes.
+//!   2. CONTEXT. No matched context is required; idempotent handler work decides
+//!      whether the advertised id is already present.
+//!   3. MATERIALIZE. Write the have-id row and emit deferred need-id work.
 
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
@@ -28,7 +31,9 @@ impl Projector for SyncHaveIdProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let have = layout::decode_fact(fact.body())?;
+        // 3. Materialize.
         Ok(ProjectionOutput::new()
             .intent(AtomicIntent::PutRow(sync_have_id_row(fact.id, &have)?).into_intent())
             .intent(send_needed_fact_id_intent(SendNeededFactId {

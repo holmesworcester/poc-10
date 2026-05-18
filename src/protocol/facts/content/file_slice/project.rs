@@ -1,22 +1,20 @@
 //! Poc-10 content-file-slice projector.
 //!
-//! Decodes a content-file-slice fact and emits a single `PutRow` into
-//! `file_slice_rows`. The slice event id used in the row value is the fact id;
-//! the key is workspace/file/slice-index so range scans return slices in order.
-//!
-//! Current boundaries:
-//! - Signed-envelope verification is owned by `identity::signed_fact`.
-//! - Parent descriptor existence and slice-index bounds are validated from
-//!   matched file context.
-//! - Per-slice nonce derivation and AEAD opening belong to the encryption
-//!   layer alongside the per-file content key.
+//! POLICY. A content_file_slice is admitted iff:
+//!   1. STRUCTURAL. The fact is workspace-scoped and its parent file selector
+//!      and slice index decode from the canonical payload.
+//!   2. CONTEXT. Projection waits for the parent file, rejects out-of-range
+//!      indexes, and watches parent deletion context.
+//!   3. MATERIALIZE. Live slices write one row and share the fact; deleted
+//!      parents delete the slice row. AEAD opening stays in encryption code.
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
-use crate::protocol::facts::content::file::layout as file_layout;
+use crate::protocol::facts::content::file;
+use crate::protocol::facts::content::file_deletion;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers as file_matchers;
 use crate::protocol::matchers as message_matchers;
@@ -39,14 +37,17 @@ impl Projector for ContentFileSliceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let slice = layout::decode_fact(fact.body())?;
         let scope = message_matchers::workspace_scope(slice.workspace_id);
         require_fact_scope(fact, &scope)?;
+
+        // 2. Context and deletion gates.
         let file_need = file_matchers::file_need(fact.id, scope.clone(), slice.file_id);
         let Some(parent) = context_payload(context, &file_need, "file slice parent")? else {
             return Ok(ProjectionOutput::new().need(file_need));
         };
-        let file = file_layout::decode_fact(&parent.bytes)
+        let file = file::decode_fact_payload(&parent.bytes)
             .map_err(|_| "file slice parent context is not a content file".to_string())?;
         if parent.scope != scope {
             return Err("file slice parent scope does not match slice".to_string());
@@ -81,6 +82,8 @@ impl Projector for ContentFileSliceProjector {
                     .into_intent(),
                 ));
         }
+
+        // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(file_need)
             .need(file_deletion_need)
@@ -106,11 +109,9 @@ fn validate_file_deletion(
     target_file_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion =
-        crate::protocol::facts::content::file_deletion::layout::decode_fact(payload.body())
-            .map_err(|_| {
-                "file slice parent deletion context is not a content file deletion".to_string()
-            })?;
+    let deletion = file_deletion::decode_fact_payload(payload.body()).map_err(|_| {
+        "file slice parent deletion context is not a content file deletion".to_string()
+    })?;
     if deletion.workspace_id != workspace_id {
         return Err("file slice parent deletion workspace does not match slice".to_string());
     }

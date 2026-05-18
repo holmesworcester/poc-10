@@ -1,8 +1,12 @@
 //! Poc-10 removal frontier projector.
 //!
-//! Decodes the workspace-scoped fact body, validates fact metadata against the
-//! payload, waits for validated admin/removal-ref context, and only then emits
-//! the row plus a frontier context offer.
+//! POLICY. A removal_frontier is admitted iff:
+//!   1. STRUCTURAL. The body decodes, the outer scope matches the workspace,
+//!      and the authority admin selector is non-zero.
+//!   2. AUTHORITY. Projection waits for the admin grant and every referenced
+//!      removal fact, all in the same workspace scope.
+//!   3. MATERIALIZE. Once validated, write the frontier row, publish exact-fact
+//!      context, and share the frontier fact with the workspace.
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::intents::AtomicIntent;
@@ -30,6 +34,7 @@ impl Projector for RemovalFrontierProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let frontier = layout::decode_fact(fact.body())?;
         let expected_scope = FactScope::Scoped {
             kind: ScopeKind::new(WORKSPACE_SCOPE_KIND).map_err(|err| err.to_string())?,
@@ -42,6 +47,7 @@ impl Projector for RemovalFrontierProjector {
             return Err("removal frontier authority_admin_id must not be empty".to_string());
         }
 
+        // 2. Authority and referenced removal context.
         let authority_need = crate::protocol::matchers::exact_need(
             fact.id,
             crate::protocol::matchers::admin_role(),
@@ -82,6 +88,7 @@ impl Projector for RemovalFrontierProjector {
             }
         }
 
+        // 3. Materialize.
         Ok(waiting
             .offer(crate::protocol::matchers::exact_fact_offer(
                 fact.id,
@@ -104,7 +111,7 @@ fn validate_authority(
     if authority.id != frontier.authority_admin_id {
         return Err("removal frontier authority context payload id mismatch".to_string());
     }
-    let admin = identity::admin::layout::decode_fact(&authority.bytes)
+    let admin = identity::admin::decode_fact_payload(&authority.bytes)
         .map_err(|_| "removal frontier authority context must be an admin fact".to_string())?;
     if admin.workspace_id != frontier.workspace_id {
         return Err("removal frontier authority admin workspace mismatch".to_string());

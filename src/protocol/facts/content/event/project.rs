@@ -1,9 +1,12 @@
 //! Poc-10 content-event projector.
 //!
-//! Validates the fact's declared payload length against its bytes (the layout
-//! decoder already checks this) and emits a single `PutRow` for the
-//! content_event_rows table.
-//!
+//! POLICY. A content_event is admitted iff:
+//!   1. STRUCTURAL. The fact is workspace-scoped and contains either a raw
+//!      content_event payload or a signed envelope for that payload type.
+//!   2. AUTHORITY. Signed events must be signed by a validated endpoint/user
+//!      context in the same workspace; raw events have no signer context.
+//!   3. MATERIALIZE. Once valid, write the content_event row and share the
+//!      fact with the workspace.
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
@@ -30,11 +33,14 @@ impl Projector for ContentEventProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let decoded =
             authority::decode_raw_or_signed(fact, layout::TYPE_CONTENT_EVENT, "content event")?;
         let event = layout::decode_fact(&decoded.payload)?;
         let scope = matchers::workspace_scope(event.workspace_id);
         require_fact_scope(fact, &scope)?;
+
+        // 2. Authority.
         let signer_need = authority::signer_need(fact.id, decoded.signer);
         if let (Some(signer), Some(need)) = (decoded.signer, signer_need.as_ref()) {
             if !authority::validate_signer_context(
@@ -49,6 +55,7 @@ impl Projector for ContentEventProjector {
             }
         }
 
+        // 3. Materialize.
         Ok(output_with_signer_need(signer_need)
             .intent(AtomicIntent::PutRow(content_event_row(fact.id, &event)?).into_intent())
             .intent(share_fact_with_workspace_intent_for_fact(

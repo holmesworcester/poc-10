@@ -1,4 +1,12 @@
 //! Poc-10 sealed-message projector.
+//!
+//! POLICY. A sealed-message-family fact is admitted iff:
+//!   1. DISPATCH. The first byte selects a known sealed message helper type or
+//!      signed sealed-message envelope.
+//!   2. AUTHORITY. Message projection validates workspace, signer, author,
+//!      secret coverage, and deletion context in submodules.
+//!   3. MATERIALIZE. Helpers publish context offers; messages write/open rows
+//!      through atomic intents and share facts with the workspace.
 
 mod message;
 mod offers;
@@ -26,9 +34,10 @@ impl Projector for SealedMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Dispatch.
         match fact.bytes.first().copied() {
             Some(layout::TYPE_SEALED_MESSAGE) => message::project_message(fact, context),
-            Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) => {
+            Some(identity::signed_fact::TYPE_SIGNED_FACT) => {
                 message::project_signed_message(fact, context)
             }
             Some(layout::TYPE_SIGNER_PUBKEY) => offers::project_signer_pubkey(fact),

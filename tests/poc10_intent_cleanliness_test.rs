@@ -284,6 +284,120 @@ fn target_projectors_use_typed_context_lookups_not_direct_match_scans() {
 }
 
 #[test]
+fn target_projectors_use_named_needs_not_positional_authority_flows() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let forbidden = [
+        "authority_needs(",
+        "has_all_context(",
+        "checked by has_all_context",
+        "needs[",
+    ];
+    let mut offenders = Vec::new();
+
+    for path in projector_implementation_files(root) {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        for marker in forbidden {
+            if production.contains(marker) {
+                offenders.push(format!("{relative} contains {marker:?}"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "source projectors should name context dependencies at the proof site. Use branch-specific need structs or locals instead of positional needs[0]/needs[1] authority flows:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_projectors_do_not_read_raw_context_offer_storage_fields() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let forbidden = [".offers()", "payload_ref"];
+    let mut offenders = Vec::new();
+
+    for path in projector_implementation_files(root) {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        for marker in forbidden {
+            if production.contains(marker) {
+                offenders.push(format!("{relative} contains {marker:?}"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "projectors should consume typed matched payloads, not raw standing context rows. Keep offer payload-ref checks in core ProjectionContext helpers and relation decoding in protocol matchers:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_projectors_document_policy_narratives() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        if !production.contains("impl Projector for") {
+            continue;
+        }
+
+        let mut missing = Vec::new();
+        if !production.contains("//! POLICY.") {
+            missing.push("`//! POLICY.`");
+        }
+        if !production.contains("// 1.") {
+            missing.push("numbered projector body markers");
+        }
+        if !missing.is_empty() {
+            offenders.push(format!("{relative} missing {}", missing.join(" and ")));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "fact-module projectors should document their admission policy inline and mirror it in numbered body sections:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_projectors_do_not_decode_foreign_fact_layouts_inline() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        for marker in [
+            "::layout::decode_fact",
+            "signed_fact::layout::",
+            "layout as ",
+            "_layout::decode_fact",
+            "_layout::decode_",
+        ] {
+            if production.contains(marker) {
+                offenders.push(format!("{relative} contains {marker:?}"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "projectors should reason over typed fact helpers from the owning module, not foreign layout codecs. The owning fact module may decode bytes; cross-module projector policy should call named typed helpers/witnesses:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn event_module_context_rs_files_do_not_reappear() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let offenders = rust_files_named(&root.join("src/protocol/facts"), "context.rs")

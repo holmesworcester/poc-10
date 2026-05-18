@@ -1,16 +1,12 @@
 //! Poc-10 invite-secret projector.
 //!
-//! Validates the invite-secret fact (hash matches secret, scope fields are
-//! both present or both absent) and emits a single `PutRow` atomic intent
-//! keyed by the bootstrap hash.
-//!
-//! Legacy parity gap (intentional, see commit message): the legacy invite
-//! triplet also emitted a `SendBootstrapRequest` transport::transit intent that consumed
-//! the optional dial `SocketAddr` carried in the invite link. The target tree
-//! omits the addr field and the bootstrap intent: the transport::transit handlers and
-//! signed-fact wiring needed to send a bootstrap request have not been ported
-//! yet. This will be tightened once `transport::transit` handlers and the
-//! `SendBootstrapRequest` intent are real.
+//! POLICY. An invite_secret fact is admitted iff:
+//!   1. STRUCTURAL. The fact is local-only and the invite-secret payload
+//!      decodes with internally consistent hash/scope fields.
+//!   2. CONTEXT. No remote context is accepted; this is local bootstrap secret
+//!      material.
+//!   3. MATERIALIZE. Write the invite_secret row and publish both identity and
+//!      connection invite-secret context offers.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
@@ -34,10 +30,12 @@ impl Projector for InviteSecretProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("invite_secret fact must have local scope".to_string());
         }
         let invite_secret = layout::decode_fact(fact.body())?;
+        // 3. Materialize.
         Ok(ProjectionOutput::new()
             .offer(crate::protocol::matchers::invite_secret_offer(fact.id))
             .offer(crate::protocol::matchers::connection_invite_secret_offer(

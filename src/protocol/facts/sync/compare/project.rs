@@ -1,8 +1,10 @@
 //! Poc-10 sync compare projector.
 //!
-//! Decodes the compare fact, materializes `sync_compare_rows`, and emits the
-//! bounded deferred response intent when the peer explicitly requests an
-//! answer. Transit can only carry a response after sync has produced one.
+//! POLICY. A sync_compare fact is admitted iff:
+//!   1. STRUCTURAL. The compare payload decodes with its range summary.
+//!   2. CONTEXT. No matched context is required; this is a peer summary.
+//!   3. MATERIALIZE. Write the compare row and emit deferred response work only
+//!      when the peer explicitly requested an answer.
 
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
@@ -29,7 +31,9 @@ impl Projector for SyncCompareProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let compare = layout::decode_fact(fact.body())?;
+        // 3. Materialize.
         let mut output = ProjectionOutput::new()
             .intent(AtomicIntent::PutRow(sync_compare_row(fact.id, &compare)?).into_intent());
         if compare.response_requested {

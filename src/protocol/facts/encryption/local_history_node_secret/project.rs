@@ -1,8 +1,12 @@
 //! Poc-10 local history node secret projector.
 //!
-//! Decodes the local-only fact body, asserts `FactScope::Local`, waits for the
-//! referenced removal frontier and source/tombstone secrets, validates the
-//! tree relationship, and only then emits row/secret context.
+//! POLICY. A local_history_node_secret is admitted iff:
+//!   1. STRUCTURAL. The fact is local-only and the history-node secret payload
+//!      decodes.
+//!   2. CONTEXT. Projection waits for the removal frontier, source secret, and
+//!      optional tombstone source, then validates tree addressing.
+//!   3. MATERIALIZE. Publish exact/source/coverage offers and write the local
+//!      history-node secret row.
 
 mod secret_path;
 
@@ -32,11 +36,14 @@ impl Projector for LocalHistoryNodeSecretProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("local history node secret fact must have FactScope::Local".to_string());
         }
         let node = layout::decode_fact(fact.body())?;
         let workspace_scope = crate::protocol::matchers::workspace_scope(node.workspace_id);
+
+        // 2. Context and path validation.
         let frontier_need = crate::protocol::matchers::exact_fact_need(
             fact.id,
             workspace_scope.clone(),
@@ -104,6 +111,7 @@ impl Projector for LocalHistoryNodeSecretProjector {
             .checked_add(node.range_width - 1)
             .ok_or_else(|| "local history node range end overflow".to_string())?;
 
+        // 3. Materialize.
         Ok(waiting
             .offer(crate::protocol::matchers::exact_fact_offer(
                 fact.id,

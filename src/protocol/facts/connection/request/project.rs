@@ -1,19 +1,20 @@
 //! Poc-10 connection-request projector.
 //!
-//! A request can be local bootstrap work or a received bootstrap request. Both
-//! branches validate the canonical body and exact invite-secret context first.
-//! Local requests additionally require the named local initiator ephemeral
-//! secret; received requests require exact transport::transit receive provenance instead.
-//! Once a received request has both pieces of context, projection emits a
-//! request-scoped deferred response intent. Network attempt/response effects
-//! stay in handlers.
+//! POLICY. A connection_request is admitted iff:
+//!   1. STRUCTURAL. The fact is local or global, the request fields are
+//!      non-empty, and the endpoints differ.
+//!   2. CONTEXT. Both branches require invite-secret context. Local requests
+//!      require initiator ephemeral-secret context; received requests require
+//!      transit receive provenance addressed to this endpoint.
+//!   3. MATERIALIZE. Valid requests write the request row and offer request
+//!      context; received bootstrap requests also emit deferred response work.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
-use crate::protocol::facts::connection::ephemeral_secret::layout as ephemeral_layout;
+use crate::protocol::facts::connection::ephemeral_secret;
 use crate::protocol::facts::identity::invite;
 use crate::protocol::facts::transport::transit_received;
 use crate::protocol::intents::connection::create_response::{
@@ -43,6 +44,7 @@ impl Projector for ConnectionRequestProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         if !matches!(fact.scope, FactScope::Local | FactScope::Global) {
             return Err("connection request fact must be local or global".to_string());
         }
@@ -52,6 +54,7 @@ impl Projector for ConnectionRequestProjector {
             return Err("connection request endpoints must differ".to_string());
         }
 
+        // 2. Shared invite context.
         let invite_need =
             matchers::connection_invite_secret_need(fact.id, request.invite_secret_fact_id);
         let Some(invite) = projection_context.payload_for(&invite_need) else {
@@ -68,6 +71,7 @@ impl Projector for ConnectionRequestProjector {
         validate_invite_signature(&request, &invite_secret)?;
 
         if fact.scope == FactScope::Local {
+            // 2a. Local send path.
             let ephemeral_need = ephemeral_matchers::connection_ephemeral_secret_need(
                 fact.id,
                 request.initiator_ephemeral_secret_fact_id,
@@ -75,8 +79,8 @@ impl Projector for ConnectionRequestProjector {
             let Some(ephemeral) = projection_context.payload_for(&ephemeral_need) else {
                 return Ok(waiting_output([invite_need, ephemeral_need]));
             };
-            let ephemeral_secret =
-                ephemeral_layout::decode_fact(&ephemeral.bytes).map_err(|_| {
+            let ephemeral_secret = ephemeral_secret::decode_fact_payload(&ephemeral.bytes)
+                .map_err(|_| {
                     "connection request dependency is not an ephemeral secret".to_string()
                 })?;
             if ephemeral.id != request.initiator_ephemeral_secret_fact_id {
@@ -95,9 +99,11 @@ impl Projector for ConnectionRequestProjector {
                     "connection request ephemeral public key does not match dependency".to_string(),
                 );
             }
+            // 3. Materialize local request.
             return materialized_output(fact.id, &request);
         }
 
+        // 2b. Received bootstrap path.
         let receive_need = receive_matchers::transit_received_need(fact.id, fact.id);
         let Some(receive) = projection_context
             .matched_payloads_for(&receive_need)
@@ -137,6 +143,7 @@ impl Projector for ConnectionRequestProjector {
             return Err("connection request bootstrap response route is missing".to_string());
         }
 
+        // 3. Materialize received request and schedule response creation.
         received_materialized_output(fact.id, &request, receive.id)
     }
 }

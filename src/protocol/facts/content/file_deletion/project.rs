@@ -1,15 +1,18 @@
 //! Poc-10 content-file-deletion projector.
 //!
-//! Decodes a deletion fact, waits for validated target-file and author-user
-//! context, then emits a deletion row and `content_deleted` offer. Physical
-//! cleanup remains handler work; this projector only materializes authorized
-//! deletion state.
+//! POLICY. A content_file_deletion is admitted iff:
+//!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
+//!      deletion payload for one target file and author user.
+//!   2. AUTHORITY. The signer, target file, and author user contexts must all
+//!      validate against the same workspace and target.
+//!   3. MATERIALIZE. Once authorized, write the deletion row, publish the
+//!      content_deleted offer, and share the deletion fact.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
-use crate::protocol::facts::content::file::layout as file_layout;
+use crate::protocol::facts::content::file;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
@@ -34,6 +37,7 @@ impl Projector for ContentFileDeletionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let decoded = authority::decode_raw_or_signed(
             fact,
             layout::TYPE_CONTENT_FILE_DELETION,
@@ -42,6 +46,8 @@ impl Projector for ContentFileDeletionProjector {
         let deletion = layout::decode_fact(&decoded.payload)?;
         let scope = matchers::workspace_scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
+
+        // 2. Authority.
         let signer_need = authority::signer_need(fact.id, decoded.signer);
         let target_need = crate::protocol::matchers::exact_fact_need(
             fact.id,
@@ -87,6 +93,8 @@ impl Projector for ContentFileDeletionProjector {
         };
         validate_target_file(&deletion, target_fact, &scope)?;
         validate_author_user(&deletion, author_fact)?;
+
+        // 3. Materialize.
         let row = file_deletion_row(FileDeletionRow {
             workspace_id: deletion.workspace_id,
             target_file_id: deletion.target_file_id,
@@ -139,12 +147,9 @@ fn validate_target_file(
     if &target_fact.scope != expected_scope {
         return Err("file deletion target scope does not match deletion".to_string());
     }
-    let target_payload = maybe_signed_payload(
-        target_fact,
-        file_layout::TYPE_CONTENT_FILE,
-        "file deletion target",
-    )?;
-    let target = file_layout::decode_fact(&target_payload.payload)
+    let target_payload =
+        maybe_signed_payload(target_fact, file::TYPE_CONTENT_FILE, "file deletion target")?;
+    let target = file::decode_fact_payload(&target_payload.payload)
         .map_err(|_| "file deletion target context must be a content file".to_string())?;
     if target.workspace_id != deletion.workspace_id {
         return Err("file deletion target workspace does not match deletion".to_string());
@@ -177,7 +182,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
         authority::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {

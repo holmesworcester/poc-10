@@ -1,16 +1,20 @@
 //! Content-file projector.
 //!
-//! Files attach to sealed messages only. The projector waits for the sealed
-//! parent, validates signed author context, and materializes descriptor rows
-//! through atomic intents. Raw file bytes are carried by slice facts; this
-//! projector never opens local files.
+//! POLICY. A content_file is admitted iff:
+//!   1. STRUCTURAL. The fact is workspace-scoped, has valid descriptor fields,
+//!      and contains a raw or signed content_file payload.
+//!   2. CONTEXT. Projection waits for signer, parent sealed message, deletion,
+//!      and author context; deletion context removes the descriptor row.
+//!   3. MATERIALIZE. Live files publish file/exact-fact offers, write the
+//!      descriptor row, and share the fact. File bytes remain slice facts.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
+use crate::protocol::facts::content::file_deletion;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
-use crate::protocol::facts::content::sealed_message::layout as sealed_message_layout;
+use crate::protocol::facts::content::sealed_message;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
@@ -36,12 +40,15 @@ impl Projector for ContentFileProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let decoded =
             authority::decode_raw_or_signed(fact, layout::TYPE_CONTENT_FILE, "content file")?;
         let file = layout::decode_fact(&decoded.payload)?;
         validate_file_fields(&file)?;
         let scope = message_matchers::workspace_scope(file.workspace_id);
         require_fact_scope(fact, &scope)?;
+
+        // 2. Context and deletion gates.
         let signer_need = authority::signer_need(fact.id, decoded.signer);
         let file_deletion_need =
             message_matchers::deletion_need(fact.id, scope.clone(), fact.id, file.author_user_id);
@@ -119,6 +126,8 @@ impl Projector for ContentFileProjector {
             ]));
         };
         validate_author_user(author, file.workspace_id, file.author_user_id)?;
+
+        // 3. Materialize.
         Ok(output_with_needs([
             signer_need,
             Some(file_deletion_need),
@@ -261,13 +270,11 @@ fn validate_file_deletion(
 ) -> Result<(), String> {
     let deletion_payload = maybe_signed_payload(
         payload,
-        crate::protocol::facts::content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION,
+        file_deletion::TYPE_CONTENT_FILE_DELETION,
         "file deletion",
     )?;
-    let deletion = crate::protocol::facts::content::file_deletion::layout::decode_fact(
-        &deletion_payload.payload,
-    )
-    .map_err(|_| "file deletion context is not a content file deletion".to_string())?;
+    let deletion = file_deletion::decode_fact_payload(&deletion_payload.payload)
+        .map_err(|_| "file deletion context is not a content file deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("file deletion workspace does not match file".to_string());
     }
@@ -288,10 +295,10 @@ fn validate_message_deletion(
 ) -> Result<(), String> {
     let deletion_payload = maybe_signed_payload(
         payload,
-        sealed_message_layout::TYPE_MESSAGE_DELETION,
+        sealed_message::TYPE_MESSAGE_DELETION,
         "parent deletion",
     )?;
-    let deletion = sealed_message_layout::decode_message_deletion(&deletion_payload.payload)
+    let deletion = sealed_message::decode_message_deletion_payload(&deletion_payload.payload)
         .map_err(|_| "parent deletion context is not a sealed message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("parent deletion workspace does not match file".to_string());
@@ -316,9 +323,8 @@ struct ParentMessage {
 }
 
 fn decode_parent_message_payload(payload: &Fact, label: &str) -> Result<ParentMessage, String> {
-    let sealed_payload =
-        maybe_signed_payload(payload, sealed_message_layout::TYPE_SEALED_MESSAGE, label)?;
-    let sealed = sealed_message_layout::decode_sealed_message(&sealed_payload.payload)
+    let sealed_payload = maybe_signed_payload(payload, sealed_message::TYPE_SEALED_MESSAGE, label)?;
+    let sealed = sealed_message::decode_sealed_message_payload(&sealed_payload.payload)
         .map_err(|_| format!("{label} context is not a sealed message"))?;
     Ok(ParentMessage {
         workspace_id: sealed.workspace_id,
@@ -331,7 +337,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
         authority::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {

@@ -1,17 +1,21 @@
 //! Poc-10 endpoint-shared projector.
 //!
-//! Endpoint-shared facts are signed by the device invite or invite-server grant
-//! that authorizes one endpoint in one workspace. Projection re-checks the
-//! signer id, signer public key, workspace, user authority, and endpoint role
-//! before materializing the shared endpoint row.
+//! POLICY. An endpoint_shared fact is admitted iff:
+//!   1. STRUCTURAL. The outer fact is global, signed, contains endpoint_shared,
+//!      and endpoint/workspace/signing fields are valid.
+//!   2. AUTHORITY. Device endpoints require device_invite context; invite-server
+//!      endpoints require invite_server context. The signer key, workspace, and
+//!      user authority must match that grant.
+//!   3. MATERIALIZE. Write the endpoint_shared row, publish signer/exact
+//!      context, and share the fact with the workspace.
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::identity;
-use crate::protocol::facts::identity::device_invite::layout as device_invite_layout;
-use crate::protocol::facts::identity::invite_server::layout as invite_server_layout;
+use crate::protocol::facts::identity::device_invite;
+use crate::protocol::facts::identity::invite_server;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::fact::EndpointRole;
@@ -33,10 +37,11 @@ impl Projector for EndpointSharedProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("endpoint shared fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())
+        let envelope = identity::signed_fact::decode_envelope(fact.body())
             .map_err(|_| "endpoint_shared fact must be signed".to_string())?;
         if envelope.inner_type != layout::TYPE_ENDPOINT_SHARED {
             return Err("signed fact does not contain an endpoint_shared".to_string());
@@ -54,10 +59,14 @@ impl Projector for EndpointSharedProjector {
         if event.device_name.as_bytes().contains(&0) {
             return Err("endpoint device name cannot contain NUL".to_string());
         }
+
+        // 2. Authority.
         let authority_need = authority_need(fact, &event, envelope.signer_id);
         if !has_valid_authority(&authority_need, &event, &envelope, context)? {
             return Ok(ProjectionOutput::new().need(authority_need));
         }
+
+        // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(authority_need)
             .offer(crate::protocol::matchers::signer_offer(
@@ -112,16 +121,17 @@ fn has_valid_authority(
         return Err("endpoint_shared authority must have global scope".to_string());
     }
     if event.endpoint_role == EndpointRole::Device {
-        let invite_envelope = identity::signed_fact::layout::decode_signed_fact(
-            authority_fact.body(),
-        )
-        .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
-        if invite_envelope.inner_type != device_invite_layout::TYPE_DEVICE_INVITE {
+        let invite_envelope = identity::signed_fact::decode_envelope(authority_fact.body())
+            .map_err(|_| {
+                "endpoint_shared dependency is not a signed endpoint invite".to_string()
+            })?;
+        if invite_envelope.inner_type != device_invite::TYPE_DEVICE_INVITE {
             return Err("endpoint_shared dependency is not a signed endpoint invite".to_string());
         }
-        let invite = device_invite_layout::decode_fact(&invite_envelope.payload).map_err(|_| {
-            "endpoint_shared dependency is not a signed endpoint invite".to_string()
-        })?;
+        let invite =
+            device_invite::decode_fact_payload(&invite_envelope.payload).map_err(|_| {
+                "endpoint_shared dependency is not a signed endpoint invite".to_string()
+            })?;
         if invite.public_key != envelope.signer_public_key {
             return Err(
                 "endpoint_shared signer public key does not match device_invite".to_string(),
@@ -136,12 +146,12 @@ fn has_valid_authority(
         return Ok(true);
     }
 
-    let invite_envelope = identity::signed_fact::layout::decode_signed_fact(authority_fact.body())
+    let invite_envelope = identity::signed_fact::decode_envelope(authority_fact.body())
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
-    if invite_envelope.inner_type != invite_server_layout::TYPE_INVITE_SERVER {
+    if invite_envelope.inner_type != invite_server::TYPE_INVITE_SERVER {
         return Err("endpoint_shared dependency is not a signed endpoint invite".to_string());
     }
-    let invite_server = invite_server_layout::decode_fact(&invite_envelope.payload)
+    let invite_server = invite_server::decode_fact_payload(&invite_envelope.payload)
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
     if invite_server.workspace_id != event.workspace_id {
         return Err("endpoint_shared workspace does not match invite_server".to_string());

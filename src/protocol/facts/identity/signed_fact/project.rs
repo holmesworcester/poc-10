@@ -1,10 +1,12 @@
 //! Projector for local signing capability facts.
 //!
-//! This projector exposes capability presence, not signing authority policy.
-//! It accepts only local secret facts, then offers the signer under the target
-//! workspace so commands can be woken when identity has already provisioned the
-//! key. Remote signed envelopes should validate signatures elsewhere and must
-//! not create local signer-secret offers here.
+//! POLICY. A signed-fact helper is admitted iff:
+//!   1. DISPATCH. The first byte selects a known helper payload, currently only
+//!      local signer-secret.
+//!   2. CONTEXT. No remote context is accepted; remote signed envelopes validate
+//!      signatures in their owning fact modules.
+//!   3. MATERIALIZE. Local signer secrets publish local signer context under
+//!      their workspace and do not emit row or network work.
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
@@ -27,6 +29,7 @@ impl Projector for SignedFactProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Dispatch.
         match fact.bytes.first().copied() {
             Some(layout::TYPE_LOCAL_SIGNER_SECRET) => project_local_signer_secret(fact),
             _ => Err("unknown signed-fact helper type".to_string()),
@@ -35,9 +38,11 @@ impl Projector for SignedFactProjector {
 }
 
 fn project_local_signer_secret(fact: &Fact) -> Result<ProjectionOutput, String> {
+    // 1. Structural.
     let secret = layout::decode_local_signer_secret(fact.body())?;
     require_local_scope(fact)?;
     let scope = workspace_scope(secret.workspace_id);
+    // 3. Materialize.
     Ok(
         ProjectionOutput::new().offer(matchers::local_signer_secret_offer(
             fact.id,

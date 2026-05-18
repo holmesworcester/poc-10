@@ -1,4 +1,12 @@
 //! Projector for sync shared-fact offers.
+//!
+//! POLICY. A sync shared_fact is admitted iff:
+//!   1. STRUCTURAL. The body decodes and the outer fact scope matches its
+//!      workspace id.
+//!   2. CONTEXT. No incoming context is required; this fact advertises a shared
+//!      payload id that is already present.
+//!   3. MATERIALIZE. Publish an exact-fact offer for range-request dependency
+//!      matching.
 
 use crate::core::facts::Fact;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
@@ -23,9 +31,11 @@ impl Projector for SyncSharedFactProjector {
         fact: &Fact,
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let shared = layout::decode_fact(fact.body())?;
         let scope = matchers::workspace_scope(shared.workspace_id);
         require_fact_scope(fact, &scope)?;
+        // 3. Materialize.
         Ok(ProjectionOutput::new().offer(matchers::exact_fact_offer(
             fact.id,
             scope,

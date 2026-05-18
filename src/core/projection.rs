@@ -85,6 +85,20 @@ impl ProjectionContext {
             .map(|matched| (&matched.offer, &matched.payload))
     }
 
+    pub fn matched_payloads_for_checked<'a>(
+        &'a self,
+        need: &'a ContextNeed,
+        label: &'a str,
+    ) -> impl Iterator<Item = Result<(&'a ContextOffer, &'a Fact), String>> + 'a {
+        self.matched_entries_for(need).map(move |matched| {
+            if matched.offer.payload_ref != matched.payload.id {
+                Err(format!("{label} context offer payload mismatch"))
+            } else {
+                Ok((&matched.offer, &matched.payload))
+            }
+        })
+    }
+
     pub fn offer_payload_refs_matching<'a>(
         &'a self,
         role: &'a crate::core::context::Role,

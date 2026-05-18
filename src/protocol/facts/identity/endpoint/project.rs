@@ -1,7 +1,12 @@
 //! Poc-10 local endpoint projector.
 //!
-//! Decodes the endpoint fact (which re-derives both public keys to detect
-//! corruption) and emits four `PutRow` atomic intents under `b"local"`.
+//! POLICY. A local endpoint fact is admitted iff:
+//!   1. STRUCTURAL. The fact is local-only and endpoint layout re-derives both
+//!      public keys from the stored private keys.
+//!   2. CONTEXT. No remote context is accepted; this is local identity secret
+//!      material.
+//!   3. MATERIALIZE. Write the four local endpoint rows for public/secret and
+//!      signing public/secret material.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
@@ -25,10 +30,13 @@ impl Projector for EndpointProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("local endpoint fact must have local scope".to_string());
         }
         let endpoint = layout::decode_fact(fact.body())?;
+
+        // 3. Materialize.
         let mut output = ProjectionOutput::new();
         for row in endpoint_rows(&endpoint) {
             output = output.intent(AtomicIntent::PutRow(row).into_intent());

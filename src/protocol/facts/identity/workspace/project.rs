@@ -1,4 +1,11 @@
 //! Poc-10 workspace projector.
+//!
+//! POLICY. A workspace fact is admitted iff:
+//!   1. STRUCTURAL. The outer fact is global and the workspace payload decodes.
+//!   2. CONTEXT. No authority context is required; the workspace is the root
+//!      identity object for later grants.
+//!   3. MATERIALIZE. Write the workspace row, publish workspace context, and
+//!      mark the workspace fact shareable with itself.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
@@ -23,10 +30,12 @@ impl Projector for WorkspaceProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("workspace fact must have global scope".to_string());
         }
         let workspace = layout::decode_fact(fact.body())?;
+        // 3. Materialize.
         Ok(ProjectionOutput::new()
             .offer(crate::protocol::matchers::workspace_offer(fact.id))
             .intent(AtomicIntent::PutRow(workspace_row(fact.id, &workspace)?).into_intent())

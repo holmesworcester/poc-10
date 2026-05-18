@@ -1,15 +1,18 @@
 //! Content-reaction projector.
 //!
-//! Reactions attach to sealed messages only. The projector waits for the
-//! target sealed-message context, validates author/signing context, and writes
-//! reaction rows through atomic intents.
+//! POLICY. A content_reaction is admitted iff:
+//!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
+//!      reaction payload.
+//!   2. CONTEXT. Projection waits for signer, target sealed message, target
+//!      deletion, and author context; deleted targets remove the reaction row.
+//!   3. MATERIALIZE. Live reactions write one row and share the fact.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
-use crate::protocol::facts::content::sealed_message::layout as sealed_message_layout;
+use crate::protocol::facts::content::sealed_message;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
@@ -33,11 +36,14 @@ impl Projector for ContentReactionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let decoded =
             authority::decode_raw_or_signed(fact, layout::TYPE_CONTENT_REACTION, "reaction")?;
         let reaction = layout::decode_fact(&decoded.payload)?;
         let scope = message_matchers::workspace_scope(reaction.workspace_id);
         require_fact_scope(fact, &scope)?;
+
+        // 2. Context and deletion gates.
         let signer_need = authority::signer_need(fact.id, decoded.signer);
         let target_need =
             message_matchers::message_need(fact.id, scope.clone(), reaction.target_message_id);
@@ -107,6 +113,7 @@ impl Projector for ContentReactionProjector {
         };
         validate_author_user(author, reaction.workspace_id, reaction.author_user_id)?;
 
+        // 3. Materialize.
         let row = reaction_row(ReactionRow {
             workspace_id: reaction.workspace_id,
             reaction_id: fact.id,
@@ -209,10 +216,10 @@ fn validate_message_deletion(
 ) -> Result<(), String> {
     let deletion_payload = maybe_signed_payload(
         payload,
-        sealed_message_layout::TYPE_MESSAGE_DELETION,
+        sealed_message::TYPE_MESSAGE_DELETION,
         "target deletion",
     )?;
-    let deletion = sealed_message_layout::decode_message_deletion(&deletion_payload.payload)
+    let deletion = sealed_message::decode_message_deletion_payload(&deletion_payload.payload)
         .map_err(|_| "target deletion context is not a sealed message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("target deletion workspace does not match reaction".to_string());
@@ -237,9 +244,8 @@ struct TargetMessage {
 }
 
 fn decode_target_message_payload(payload: &Fact, label: &str) -> Result<TargetMessage, String> {
-    let sealed_payload =
-        maybe_signed_payload(payload, sealed_message_layout::TYPE_SEALED_MESSAGE, label)?;
-    let sealed = sealed_message_layout::decode_sealed_message(&sealed_payload.payload)
+    let sealed_payload = maybe_signed_payload(payload, sealed_message::TYPE_SEALED_MESSAGE, label)?;
+    let sealed = sealed_message::decode_sealed_message_payload(&sealed_payload.payload)
         .map_err(|_| format!("{label} context is not a sealed message"))?;
     Ok(TargetMessage {
         workspace_id: sealed.workspace_id,
@@ -252,7 +258,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
         authority::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {

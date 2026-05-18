@@ -1,13 +1,17 @@
 //! Retired unsealed content-message projector.
 //!
-//! Normal poc-10 messages are sealed-message facts. The concrete protocol
-//! registry and runtime no longer route `TYPE_CONTENT_MESSAGE`; this module
-//! remains only to keep older migration tests compiling until those fixtures
-//! are rewritten around sealed-message facts.
+//! POLICY. A legacy content_message is admitted iff:
+//!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
+//!      legacy message payload.
+//!   2. CONTEXT. Signed messages validate signer/author context and watch a
+//!      matching deletion fact. Live target runtime uses sealed_message.
+//!   3. MATERIALIZE. Live legacy messages write the compatibility row and
+//!      offer message context; deletions remove that row.
 
 use crate::core::facts::Fact;
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::protocol::facts::content::message_deletion;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
@@ -32,11 +36,14 @@ impl Projector for ContentMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let decoded =
             authority::decode_raw_or_signed(fact, layout::TYPE_CONTENT_MESSAGE, "content message")?;
         let message = layout::decode_fact(&decoded.payload)?;
         let scope = matchers::workspace_scope(message.workspace_id);
         require_fact_scope(fact, &scope)?;
+
+        // 2. Context and deletion gates.
         let signer_need = authority::signer_need(fact.id, decoded.signer);
         let deletion_need =
             matchers::deletion_need(fact.id, scope.clone(), fact.id, message.author_user_id);
@@ -84,6 +91,8 @@ impl Projector for ContentMessageProjector {
             ]));
         };
         validate_author_user(author, message.workspace_id, message.author_user_id)?;
+
+        // 3. Materialize.
         let row = content_message_row(fact.id, &message);
         Ok(
             output_with_needs([signer_need, Some(deletion_need), Some(author_need)])
@@ -140,13 +149,11 @@ fn validate_message_deletion(
 ) -> Result<(), String> {
     let deletion_payload = maybe_signed_payload(
         payload,
-        crate::protocol::facts::content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION,
+        message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
         "message deletion context",
     )?;
-    let deletion = crate::protocol::facts::content::message_deletion::layout::decode_fact(
-        &deletion_payload.payload,
-    )
-    .map_err(|_| "message deletion context is not a content message deletion".to_string())?;
+    let deletion = message_deletion::decode_fact_payload(&deletion_payload.payload)
+        .map_err(|_| "message deletion context is not a content message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("message deletion workspace does not match message".to_string());
     }
@@ -164,7 +171,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
         authority::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {

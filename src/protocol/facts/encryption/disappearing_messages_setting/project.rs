@@ -1,7 +1,12 @@
 //! Disappearing-messages setting projector (poc-10 target tree).
 //!
-//! Decodes a setting fact, waits for validated authority and predecessor
-//! context, enforces monotonic `retire_minute`, and emits a single `PutRow`.
+//! POLICY. A disappearing_messages_setting is admitted iff:
+//!   1. STRUCTURAL. The body decodes, TTL/created time are non-zero, and
+//!      workspace-scoped settings name the workspace as their scope id.
+//!   2. AUTHORITY. The authority context is either root workspace bootstrap or
+//!      an admin grant for the author; predecessor context must match scope.
+//!   3. MATERIALIZE. Once monotonicity is validated, write the setting row,
+//!      publish exact-fact context, and share the fact with the workspace.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
@@ -28,6 +33,7 @@ impl Projector for DisappearingMessagesSettingProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let setting = layout::decode_fact(fact.body())?;
         if setting.ttl_minutes == 0 {
             return Err("disappearing setting ttl_minutes must be non-zero".to_string());
@@ -42,6 +48,8 @@ impl Projector for DisappearingMessagesSettingProjector {
                 "disappearing setting workspace-scope id must match workspace_id".to_string(),
             );
         }
+
+        // 2. Authority and predecessor context.
         let authority_need = if setting.supersedes_setting_id.is_none()
             && setting.author_user_id == setting.workspace_id
         {
@@ -83,6 +91,7 @@ impl Projector for DisappearingMessagesSettingProjector {
             validate_previous(previous, &setting)?;
         }
 
+        // 3. Materialize.
         let row = setting_row(fact.id, &setting)?;
         Ok(waiting
             .offer(crate::protocol::matchers::exact_fact_offer(
@@ -116,7 +125,7 @@ fn validate_authority(
     if setting.supersedes_setting_id.is_none()
         && authority_fact.id == setting.workspace_id
         && setting.author_user_id == setting.workspace_id
-        && identity::workspace::layout::decode_fact(&authority_fact.bytes).is_ok()
+        && identity::workspace::decode_fact_payload(&authority_fact.bytes).is_ok()
     {
         return Ok(());
     }
@@ -126,15 +135,13 @@ fn validate_authority(
 
 fn decode_admin_payload(fact: &Fact) -> Result<identity::admin::fact::AdminFact, String> {
     match fact.bytes.first().copied() {
-        Some(identity::admin::layout::TYPE_ADMIN) => {
-            identity::admin::layout::decode_fact(fact.body())
-        }
-        Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) => {
-            let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())?;
-            if envelope.inner_type != identity::admin::layout::TYPE_ADMIN {
+        Some(identity::admin::TYPE_ADMIN) => identity::admin::decode_fact_payload(fact.body()),
+        Some(identity::signed_fact::TYPE_SIGNED_FACT) => {
+            let envelope = identity::signed_fact::decode_envelope(fact.body())?;
+            if envelope.inner_type != identity::admin::TYPE_ADMIN {
                 return Err("expected signed admin".to_string());
             }
-            identity::admin::layout::decode_fact(&envelope.payload)
+            identity::admin::decode_fact_payload(&envelope.payload)
         }
         _ => Err("expected admin".to_string()),
     }

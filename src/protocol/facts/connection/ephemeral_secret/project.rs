@@ -1,11 +1,12 @@
 //! Poc-10 connection ephemeral-secret projector.
 //!
-//! Decodes the canonical body, checks the recorded public key matches the
-//! recorded private key (the legacy invariant), and emits a single `PutRow`
-//! keyed by the secret fact id.
-//!
-//! This fact is local-only (`FactScope::Local`): the ephemeral private key
-//! never leaves the originating node.
+//! POLICY. A connection_ephemeral_secret is admitted iff:
+//!   1. STRUCTURAL. The local-only body decodes and the stored public key
+//!      re-derives from the private key.
+//!   2. CONTEXT. No remote or authority context is accepted; this is local key
+//!      material only.
+//!   3. MATERIALIZE. Publish a local ephemeral-secret offer and write the local
+//!      secret row keyed by this fact id.
 
 use crate::core::crypto;
 use crate::core::facts::Fact;
@@ -31,10 +32,13 @@ impl Projector for ConnectionEphemeralSecretProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let secret = layout::decode_fact(fact.body())?;
         if crypto::x25519_public_key(&secret.ephemeral_private_key) != secret.ephemeral_public_key {
             return Err("connection ephemeral public key does not match private key".to_string());
         }
+
+        // 3. Materialize.
         Ok(ProjectionOutput::new()
             .offer(matchers::connection_ephemeral_secret_offer(
                 fact.id, fact.id,

@@ -1,4 +1,26 @@
 //! Fixed-layout wire primitives.
+//!
+//! This module owns the small, protocol-neutral byte codecs used by fact,
+//! intent, and transport layouts. It provides exact-length fixed byte arrays,
+//! big-endian integers, one-byte booleans, zero-padded bounded slots, and simple
+//! sequential readers and writers for assembling those pieces.
+//!
+//! `wire` guarantees mechanical encoding invariants only:
+//!
+//! - decoders and encoders operate on the exact byte lengths declared by their
+//!   layout type;
+//! - integer byte order is stable and big-endian;
+//! - `Bool8` accepts only `0` and `1`;
+//! - `FixedSlot` stores an explicit length and rejects non-zero padding after
+//!   the logical payload;
+//! - `Reader::finish` rejects trailing bytes when a caller asks for complete
+//!   consumption.
+//!
+//! This module deliberately does not know protocol tags, fact kinds, table
+//! schemas, context roles, signer authority, cryptographic validity, or semantic
+//! ranges such as "this timestamp is plausible" or "this id is non-empty".
+//! Owning fact and intent modules must layer those checks on top of these
+//! primitives after decoding.
 
 use crate::core::crypto::{
     ED25519_PUBLIC_KEY_BYTES, ED25519_SIGNATURE_BYTES, HASH_BYTES, XCHACHA20_POLY1305_KEY_BYTES,

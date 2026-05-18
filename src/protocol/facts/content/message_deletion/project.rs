@@ -1,20 +1,19 @@
 //! Poc-10 content-message-deletion projector.
 //!
-//! Decodes a deletion fact, waits for the target message and named author as
-//! matched context, then emits a `PutRow` into `message_deletion_rows`.
-//!
-//! Poc-8 only authorizes message deletion when the deletion author is the
-//! target message author. There is no admin/moderator delete path in poc-8.
-//! The signed endpoint binding is handled by the signed-fact/identity slices;
-//! this projector enforces the target-message authorization that belongs to
-//! deletion semantics.
+//! POLICY. A content_message_deletion is admitted iff:
+//!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
+//!      deletion payload for one message and author user.
+//!   2. AUTHORITY. The signer, target message, and author contexts prove the
+//!      deletion author is the target message author in the same workspace.
+//!   3. MATERIALIZE. Once authorized, write the deletion row, publish the
+//!      content_deleted offer, and share the deletion fact.
 
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
+use crate::protocol::facts::content::message;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
-use crate::protocol::facts::content::message::layout as message_layout;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
@@ -38,6 +37,7 @@ impl Projector for ContentMessageDeletionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         let decoded = authority::decode_raw_or_signed(
             fact,
             layout::TYPE_CONTENT_MESSAGE_DELETION,
@@ -46,6 +46,8 @@ impl Projector for ContentMessageDeletionProjector {
         let deletion = layout::decode_fact(&decoded.payload)?;
         let scope = message_matchers::workspace_scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
+
+        // 2. Authority.
         let signer_need = authority::signer_need(fact.id, decoded.signer);
         let target_need =
             message_matchers::message_need(fact.id, scope.clone(), deletion.target_message_id);
@@ -88,6 +90,8 @@ impl Projector for ContentMessageDeletionProjector {
         };
         validate_target_message(&deletion, target_fact)?;
         validate_author_user(&deletion, author_fact)?;
+
+        // 3. Materialize.
         let row = message_deletion_row(MessageDeletionRow {
             workspace_id: deletion.workspace_id,
             target_message_id: deletion.target_message_id,
@@ -138,10 +142,10 @@ fn validate_target_message(
     }
     let target_payload = maybe_signed_payload(
         target_fact,
-        message_layout::TYPE_CONTENT_MESSAGE,
+        message::TYPE_CONTENT_MESSAGE,
         "message deletion target",
     )?;
-    let target = message_layout::decode_fact(&target_payload.payload)
+    let target = message::decode_fact_payload(&target_payload.payload)
         .map_err(|_| "message deletion target context must be a content message".to_string())?;
     if target.workspace_id != deletion.workspace_id {
         return Err("message deletion target workspace does not match deletion".to_string());
@@ -174,7 +178,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
         authority::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
