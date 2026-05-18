@@ -431,8 +431,10 @@ struct ContextOffer {
     role: Role,
     scope: FactScope,
     selector: Selector,
-    payload_ref: FactId,
 }
+// The wake loop enforces `offer.owner == projected_fact.id`, so the payload
+// passed to consumers is always the offering fact itself — no separate
+// payload field for a projector to point at someone else's fact.
 ```
 
 Core does not decide whether a need is required or optional. The projector
@@ -925,7 +927,6 @@ Offer(
     owner = transit_received_fact_id,
     role = "transit_received",
     selector = received_fact_id,
-    payload_ref = transit_received_fact_id,
 )
 ```
 

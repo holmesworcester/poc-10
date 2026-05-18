@@ -113,7 +113,8 @@ exact matcher returns only same role, scope, and selector
 context replacement preserves ownership boundaries
 unchanged needs/offers do not create new wakes
 new matching offers wake only need owners
-matched payloads are loaded from offer.payload_ref
+matched payloads are loaded from offer.owner (the projector that emitted
+the offer is constrained to set owner = projected_fact.id)
 ```
 
 These core proofs intentionally do not know protocol roles such as
@@ -152,7 +153,7 @@ Matcher proof obligations:
 ```text
 1. A returned match has the requested role.
 2. A returned match satisfies the role's selector relation.
-3. A returned match preserves need owner, offer owner, and payload_ref exactly.
+3. A returned match preserves need owner and offer owner exactly.
 4. The matcher does not claim protocol authority.
 ```
 
@@ -163,7 +164,7 @@ Proof composition should use offer predicates as certificates.
 For a producer projector:
 
 ```text
-projector emits Offer(role = R, payload_ref = F)
+projector P projecting fact F emits Offer(role = R, owner = F)
   -> valid_R_offer(offer, F, graph)
 ```
 
