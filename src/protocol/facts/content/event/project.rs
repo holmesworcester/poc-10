@@ -9,13 +9,14 @@
 //!      fact with the workspace.
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
 use crate::protocol::facts::content::message::authority;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
-use super::layout;
 use super::rows::content_event_row;
 
 #[derive(Debug, Clone, Default)]
@@ -33,10 +34,19 @@ impl Projector for ContentEventProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for ContentEventProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        decoded: authority::DecodedFact<super::fact::ContentEventFact>,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let decoded =
-            authority::decode_raw_or_signed(fact, layout::TYPE_CONTENT_EVENT, "content event")?;
-        let event = layout::decode_fact(&decoded.payload)?;
+        let event = decoded.payload;
         let scope = matchers::workspace_scope(event.workspace_id);
         require_fact_scope(fact, &scope)?;
 

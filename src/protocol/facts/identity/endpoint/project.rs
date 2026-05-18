@@ -10,9 +10,10 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
-use super::layout;
 use super::rows::endpoint_rows;
 
 #[derive(Debug, Clone, Default)]
@@ -28,13 +29,23 @@ impl Projector for EndpointProjector {
     fn project(
         &self,
         fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for EndpointProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        endpoint: super::fact::EndpointFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("local endpoint fact must have local scope".to_string());
         }
-        let endpoint = layout::decode_fact(fact.body())?;
 
         // 3. Materialize.
         let mut output = ProjectionOutput::new();

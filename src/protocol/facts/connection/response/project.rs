@@ -11,7 +11,9 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
 use crate::protocol::facts::connection::ephemeral_secret;
 use crate::protocol::facts::connection::request;
@@ -25,7 +27,6 @@ use crate::protocol::matchers as request_matchers;
 
 use super::create;
 use super::fact::ConnectionResponseFact;
-use super::layout;
 use super::rows::connection_response_row;
 
 #[derive(Debug, Clone, Default)]
@@ -43,11 +44,21 @@ impl Projector for ConnectionResponseProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, projection_context)
+    }
+}
+
+impl TypedProjector<super::Codec> for ConnectionResponseProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        response: ConnectionResponseFact,
+        projection_context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("connection response fact must have local scope".to_string());
         }
-        let response = layout::decode_fact(fact.body())?;
         validate_response_fields(&response)?;
         if response.from_endpoint == response.to_endpoint {
             return Err("connection response endpoints must differ".to_string());

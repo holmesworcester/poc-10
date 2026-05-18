@@ -9,10 +9,12 @@
 //!      their workspace and do not emit row or network work.
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::matchers;
 
-use super::layout;
+use super::fact::LocalSignerSecretFact;
 
 #[derive(Debug, Clone, Default)]
 pub struct SignedFactProjector;
@@ -27,19 +29,34 @@ impl Projector for SignedFactProjector {
     fn project(
         &self,
         fact: &Fact,
-        _context: &ProjectionContext,
+        context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Dispatch.
         match fact.bytes.first().copied() {
-            Some(layout::TYPE_LOCAL_SIGNER_SECRET) => project_local_signer_secret(fact),
+            Some(super::layout::TYPE_LOCAL_SIGNER_SECRET) => {
+                project_typed::<super::Codec, _>(self, fact, context)
+            }
             _ => Err("unknown signed-fact helper type".to_string()),
         }
     }
 }
 
-fn project_local_signer_secret(fact: &Fact) -> Result<ProjectionOutput, String> {
+impl TypedProjector<super::Codec> for SignedFactProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        secret: LocalSignerSecretFact,
+        _context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_local_signer_secret(fact, secret)
+    }
+}
+
+fn project_local_signer_secret(
+    fact: &Fact,
+    secret: LocalSignerSecretFact,
+) -> Result<ProjectionOutput, String> {
     // 1. Structural.
-    let secret = layout::decode_local_signer_secret(fact.body())?;
     require_local_scope(fact)?;
     let scope = workspace_scope(secret.workspace_id);
     // 3. Materialize.

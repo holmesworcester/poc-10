@@ -8,12 +8,13 @@
 
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::intents::sync::send_needed_fact_id::{
     send_needed_fact_id_intent, SendNeededFactId,
 };
 
-use super::layout;
 use super::rows::sync_have_id_row;
 
 #[derive(Debug, Clone, Default)]
@@ -29,10 +30,20 @@ impl Projector for SyncHaveIdProjector {
     fn project(
         &self,
         fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for SyncHaveIdProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        have: super::fact::SyncHaveIdFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let have = layout::decode_fact(fact.body())?;
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .intent(AtomicIntent::PutRow(sync_have_id_row(fact.id, &have)?).into_intent())

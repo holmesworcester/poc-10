@@ -7,6 +7,7 @@
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::projection::FactCodec;
 use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
 
 use super::frame;
@@ -50,11 +51,11 @@ pub struct OpenBootstrapResponse<'a> {
 pub fn bootstrap_frame_kind(frame: &[u8]) -> Result<BootstrapFrameKind, String> {
     match frame.first().copied() {
         Some(connection::request::layout::TYPE_CONNECTION_REQUEST) => {
-            connection::request::layout::decode_fact(frame)
+            typed_payload_from_bytes::<connection::request::Codec>(frame)
                 .map(BootstrapFrameKind::ConnectionRequest)
         }
         Some(connection::response::layout::TYPE_CONNECTION_RESPONSE) => {
-            connection::response::layout::decode_fact(frame)
+            typed_payload_from_bytes::<connection::response::Codec>(frame)
                 .map(BootstrapFrameKind::ConnectionResponse)
         }
         _ => Ok(BootstrapFrameKind::ConnectionFrame),
@@ -64,13 +65,13 @@ pub fn bootstrap_frame_kind(frame: &[u8]) -> Result<BootstrapFrameKind, String> 
 pub fn open_bootstrap_request(
     input: OpenBootstrapRequest<'_>,
 ) -> Result<OpenedBootstrapRequest, String> {
-    let request = connection::request::layout::decode_fact(input.frame)?;
+    let request = typed_payload_from_bytes::<connection::request::Codec>(input.frame)?;
     let request_fact = Fact::new(
         FactScope::Global,
         input.received_at_local_ms,
         input.frame.to_vec(),
     );
-    let invite = identity::invite::layout::decode_fact(&input.invite_fact.bytes)?;
+    let invite = identity::invite::Codec::decode_fact(input.invite_fact)?;
     connection::request::create::validate_invite_signature(&request, &invite)?;
 
     if input.local_endpoint.endpoint != request.to_endpoint {
@@ -98,7 +99,7 @@ pub fn open_bootstrap_request(
 }
 
 pub fn open_bootstrap_response(input: OpenBootstrapResponse<'_>) -> Result<Vec<Fact>, String> {
-    let response = connection::response::layout::decode_fact(input.frame)?;
+    let response = typed_payload_from_bytes::<connection::response::Codec>(input.frame)?;
     let response_fact = Fact::new(
         FactScope::Local,
         input.received_at_local_ms,
@@ -119,7 +120,7 @@ pub fn open_bootstrap_response(input: OpenBootstrapResponse<'_>) -> Result<Vec<F
 }
 
 pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, String> {
-    let connection = connection::response::layout::decode_fact(&input.connection_fact.bytes)?;
+    let connection = connection::response::Codec::decode_fact(input.connection_fact)?;
     let opened = frame::open_connection_frame(input.frame, &connection.connection_secret)?;
     if input.connection_fact.id != opened.connection_id {
         return Err(
@@ -157,171 +158,132 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         .copied()
         .ok_or_else(|| "received transport::transit fact bytes are empty".to_string())?;
     match tag {
-        identity::workspace::layout::TYPE_WORKSPACE => {
-            let workspace = identity::workspace::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, workspace.created_at_ms, bytes));
+        identity::workspace::TYPE_WORKSPACE => {
+            return admit_with_codec::<identity::workspace::Codec>(bytes, |workspace| {
+                Ok(Admission::global(workspace.created_at_ms))
+            });
         }
-        identity::user_invite::layout::TYPE_USER_INVITE => {
-            let invite = identity::user_invite::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, invite.created_at_ms, bytes));
-        }
-        identity::user::layout::TYPE_USER => {
-            let user = identity::user::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, user.created_at_ms, bytes));
-        }
-        identity::admin::layout::TYPE_ADMIN => {
-            let admin = identity::admin::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, admin.created_at_ms, bytes));
-        }
-        identity::device_invite::layout::TYPE_DEVICE_INVITE => {
-            let invite = identity::device_invite::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, invite.created_at_ms, bytes));
-        }
-        identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED => {
-            let shared = identity::endpoint_shared::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, shared.created_at_ms, bytes));
-        }
-        identity::invite_server::layout::TYPE_INVITE_SERVER => {
-            let server = identity::invite_server::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, server.created_at_ms, bytes));
-        }
-        encryption::disappearing_messages_setting::layout::TYPE_DISAPPEARING_MESSAGES_SETTING => {
-            let setting = encryption::disappearing_messages_setting::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(
-                workspace_scope(setting.workspace_id),
-                setting.created_at_ms,
+        identity::user_invite::TYPE_USER_INVITE => {
+            return admit_with_decoder(
                 bytes,
-            ));
+                identity::user_invite::decode_fact_payload,
+                |invite| Ok(Admission::global(invite.created_at_ms)),
+            );
         }
-        content::event::layout::TYPE_CONTENT_EVENT => {
-            let event = content::event::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(
-                workspace_scope(event.workspace_id),
-                event.timestamp,
-                bytes,
-            ));
+        identity::user::TYPE_USER => {
+            return admit_with_decoder(bytes, identity::user::decode_fact_payload, |user| {
+                Ok(Admission::global(user.created_at_ms))
+            });
         }
-        content::reaction::layout::TYPE_CONTENT_REACTION => {
-            let reaction = content::reaction::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(
-                workspace_scope(reaction.workspace_id),
-                reaction.created_at_ms,
-                bytes,
-            ));
+        identity::admin::TYPE_ADMIN => {
+            return admit_with_decoder(bytes, identity::admin::decode_fact_payload, |admin| {
+                Ok(Admission::global(admin.created_at_ms))
+            });
         }
-        content::file::layout::TYPE_CONTENT_FILE => {
-            let file = content::file::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(
-                workspace_scope(file.workspace_id),
-                file.created_at_ms,
+        identity::device_invite::TYPE_DEVICE_INVITE => {
+            return admit_with_decoder(
                 bytes,
-            ));
+                identity::device_invite::decode_fact_payload,
+                |invite| Ok(Admission::global(invite.created_at_ms)),
+            );
         }
-        content::file_slice::layout::TYPE_CONTENT_FILE_SLICE => {
-            let slice = content::file_slice::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(
-                workspace_scope(slice.workspace_id),
-                slice.created_at_ms,
+        identity::endpoint_shared::TYPE_ENDPOINT_SHARED => {
+            return admit_with_decoder(
                 bytes,
-            ));
+                identity::endpoint_shared::decode_fact_payload,
+                |shared| Ok(Admission::global(shared.created_at_ms)),
+            );
         }
-        content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION => {
-            let deletion = content::file_deletion::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(
-                workspace_scope(deletion.workspace_id),
-                deletion.created_at_ms,
+        identity::invite_server::TYPE_INVITE_SERVER => {
+            return admit_with_decoder(
                 bytes,
-            ));
+                identity::invite_server::decode_fact_payload,
+                |server| Ok(Admission::global(server.created_at_ms)),
+            );
+        }
+        encryption::disappearing_messages_setting::TYPE_DISAPPEARING_MESSAGES_SETTING => {
+            return admit_with_codec::<encryption::disappearing_messages_setting::Codec>(
+                bytes,
+                |setting| {
+                    Ok(Admission::workspace(
+                        setting.workspace_id,
+                        setting.created_at_ms,
+                    ))
+                },
+            );
+        }
+        content::event::TYPE_CONTENT_EVENT => {
+            return admit_with_codec::<content::event::Codec>(bytes, |decoded| {
+                Ok(Admission::workspace(
+                    decoded.payload.workspace_id,
+                    decoded.payload.timestamp,
+                ))
+            });
+        }
+        content::reaction::TYPE_CONTENT_REACTION => {
+            return admit_with_codec::<content::reaction::Codec>(bytes, |decoded| {
+                Ok(Admission::workspace(
+                    decoded.payload.workspace_id,
+                    decoded.payload.created_at_ms,
+                ))
+            });
+        }
+        content::file::TYPE_CONTENT_FILE => {
+            return admit_with_codec::<content::file::Codec>(bytes, |decoded| {
+                Ok(Admission::workspace(
+                    decoded.payload.workspace_id,
+                    decoded.payload.created_at_ms,
+                ))
+            });
+        }
+        content::file_slice::TYPE_CONTENT_FILE_SLICE => {
+            return admit_with_codec::<content::file_slice::Codec>(bytes, |slice| {
+                Ok(Admission::workspace(
+                    slice.workspace_id,
+                    slice.created_at_ms,
+                ))
+            });
+        }
+        content::file_deletion::TYPE_CONTENT_FILE_DELETION => {
+            return admit_with_codec::<content::file_deletion::Codec>(bytes, |decoded| {
+                Ok(Admission::workspace(
+                    decoded.payload.workspace_id,
+                    decoded.payload.created_at_ms,
+                ))
+            });
         }
         encryption::layout::TYPE_RECIPIENT_KEY
         | encryption::layout::TYPE_REMOVAL_FRONTIER
-        | encryption::layout::TYPE_KEY_REQUEST => match tag {
-            encryption::layout::TYPE_RECIPIENT_KEY => {
-                let recipient = encryption::layout::decode_recipient_key(&bytes)?;
-                return Ok(Fact::new(
-                    workspace_scope(recipient.workspace_id),
-                    recipient.created_at_ms,
-                    bytes,
-                ));
-            }
-            encryption::layout::TYPE_REMOVAL_FRONTIER => {
-                let frontier = encryption::layout::decode_removal_frontier(&bytes)?;
-                return Ok(Fact::new(
-                    workspace_scope(frontier.workspace_id),
-                    frontier.created_at_ms,
-                    bytes,
-                ));
-            }
-            encryption::layout::TYPE_KEY_REQUEST => {
-                let request = encryption::layout::decode_key_request(&bytes)?;
-                return Ok(Fact::new(
-                    workspace_scope(request.workspace_id),
-                    request.created_at_ms,
-                    bytes,
-                ));
-            }
-            _ => unreachable!(),
-        },
-        encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET => {
+        | encryption::layout::TYPE_KEY_REQUEST => return admit_encryption_fact(bytes),
+        encryption::local_history_node_secret::TYPE_LOCAL_HISTORY_NODE_SECRET => {
             return Err(
                 "received transport::transit payload is local history-node secret".to_string(),
             );
         }
-        encryption::removal_frontier::layout::TYPE_REMOVAL_FRONTIER => {
-            let frontier = encryption::removal_frontier::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(
-                workspace_scope(frontier.workspace_id),
-                frontier.created_at_ms,
-                bytes,
-            ));
+        encryption::removal_frontier::TYPE_REMOVAL_FRONTIER => {
+            return admit_with_codec::<encryption::removal_frontier::Codec>(bytes, |frontier| {
+                Ok(Admission::workspace(
+                    frontier.workspace_id,
+                    frontier.created_at_ms,
+                ))
+            });
         }
-        content::sealed_message::layout::TYPE_SEALED_MESSAGE
-        | content::sealed_message::layout::TYPE_SIGNER_PUBKEY
-        | content::sealed_message::layout::TYPE_SECRET_NODE
-        | content::sealed_message::layout::TYPE_MESSAGE_DELETION => match tag {
-            content::sealed_message::layout::TYPE_SEALED_MESSAGE => {
-                let message = content::sealed_message::layout::decode_sealed_message(&bytes)?;
-                return Ok(Fact::new(
-                    workspace_scope(message.workspace_id),
-                    message.created_at_ms,
-                    bytes,
-                ));
-            }
-            content::sealed_message::layout::TYPE_SIGNER_PUBKEY => {
-                content::sealed_message::layout::decode_signer_pubkey(&bytes)?;
-                return Ok(Fact::new(FactScope::Global, 0, bytes));
-            }
-            content::sealed_message::layout::TYPE_SECRET_NODE => {
-                let secret = content::sealed_message::layout::decode_secret_node(&bytes)?;
-                return Ok(Fact::new(
-                    workspace_scope(secret.workspace_id),
-                    secret.start_minute,
-                    bytes,
-                ));
-            }
-            content::sealed_message::layout::TYPE_MESSAGE_DELETION => {
-                let deletion = content::sealed_message::layout::decode_message_deletion(&bytes)?;
-                return Ok(Fact::new(
-                    workspace_scope(deletion.workspace_id),
-                    deletion.created_at_ms,
-                    bytes,
-                ));
-            }
-            _ => unreachable!(),
-        },
-        sync::compare::layout::TYPE_SYNC_COMPARE => {
-            sync::compare::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, 0, bytes));
+        content::sealed_message::TYPE_SEALED_MESSAGE
+        | content::sealed_message::TYPE_SIGNER_PUBKEY
+        | content::sealed_message::TYPE_SECRET_NODE
+        | content::sealed_message::TYPE_MESSAGE_DELETION => {
+            return admit_sealed_message_fact(bytes);
         }
-        sync::have_id::layout::TYPE_SYNC_HAVE_ID => {
-            sync::have_id::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, 0, bytes));
+        sync::compare::TYPE_SYNC_COMPARE => {
+            return admit_with_codec::<sync::compare::Codec>(bytes, |_| Ok(Admission::global(0)));
         }
-        sync::need_id::layout::TYPE_SYNC_NEED_ID => {
-            sync::need_id::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, 0, bytes));
+        sync::have_id::TYPE_SYNC_HAVE_ID => {
+            return admit_with_codec::<sync::have_id::Codec>(bytes, |_| Ok(Admission::global(0)));
         }
-        identity::signed_fact::layout::TYPE_SIGNED_FACT => {}
+        sync::need_id::TYPE_SYNC_NEED_ID => {
+            return admit_with_codec::<sync::need_id::Codec>(bytes, |_| Ok(Admission::global(0)));
+        }
+        identity::signed_fact::TYPE_SIGNED_FACT => {}
         _ => {
             return Err(format!(
                 "unsupported received transport::transit fact type {tag}"
@@ -329,64 +291,151 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         }
     }
 
+    admit_signed_fact_bytes(bytes)
+}
+
+#[derive(Debug, Clone)]
+struct Admission {
+    scope: FactScope,
+    timestamp: u64,
+}
+
+impl Admission {
+    fn global(timestamp: u64) -> Self {
+        Self {
+            scope: FactScope::Global,
+            timestamp,
+        }
+    }
+
+    fn workspace(workspace_id: FactId, timestamp: u64) -> Self {
+        Self {
+            scope: workspace_scope(workspace_id),
+            timestamp,
+        }
+    }
+}
+
+fn typed_payload_from_bytes<C: FactCodec>(bytes: &[u8]) -> Result<C::Payload, String> {
+    let fact = Fact::new(FactScope::Global, 0, bytes.to_vec());
+    C::decode_fact(&fact)
+}
+
+fn admit_with_codec<C: FactCodec>(
+    bytes: Vec<u8>,
+    admit: impl FnOnce(C::Payload) -> Result<Admission, String>,
+) -> Result<Fact, String> {
+    let opened = Fact::new(FactScope::Global, 0, bytes);
+    let payload = C::decode_fact(&opened)?;
+    let admission = admit(payload)?;
+    Ok(Fact::new(
+        admission.scope,
+        admission.timestamp,
+        opened.bytes,
+    ))
+}
+
+fn admit_with_decoder<T>(
+    bytes: Vec<u8>,
+    decode: impl FnOnce(&[u8]) -> Result<T, String>,
+    admit: impl FnOnce(T) -> Result<Admission, String>,
+) -> Result<Fact, String> {
+    let payload = decode(&bytes)?;
+    let admission = admit(payload)?;
+    Ok(Fact::new(admission.scope, admission.timestamp, bytes))
+}
+
+fn admit_encryption_fact(bytes: Vec<u8>) -> Result<Fact, String> {
+    admit_with_codec::<encryption::fact::Codec>(bytes, |payload| match payload {
+        encryption::fact::ProjectionPayload::RecipientKey(recipient) => Ok(Admission::workspace(
+            recipient.workspace_id,
+            recipient.created_at_ms,
+        )),
+        encryption::fact::ProjectionPayload::RemovalFrontier(frontier) => Ok(Admission::workspace(
+            frontier.workspace_id,
+            frontier.created_at_ms,
+        )),
+        encryption::fact::ProjectionPayload::KeyRequest(request) => Ok(Admission::workspace(
+            request.workspace_id,
+            request.created_at_ms,
+        )),
+        _ => unreachable!("dispatch only routes shareable encryption facts"),
+    })
+}
+
+fn admit_sealed_message_fact(bytes: Vec<u8>) -> Result<Fact, String> {
+    admit_with_codec::<content::sealed_message::Codec>(bytes, |payload| match payload {
+        content::sealed_message::ProjectionPayload::Message(message)
+        | content::sealed_message::ProjectionPayload::SignedMessage(
+            identity::signed_fact::SignedPayload {
+                payload: message, ..
+            },
+        ) => Ok(Admission::workspace(
+            message.workspace_id,
+            message.created_at_ms,
+        )),
+        content::sealed_message::ProjectionPayload::SignerPubkey(_) => Ok(Admission::global(0)),
+        content::sealed_message::ProjectionPayload::SecretNode(secret) => Ok(Admission::workspace(
+            secret.workspace_id,
+            secret.start_minute,
+        )),
+        content::sealed_message::ProjectionPayload::MessageDeletion(deletion) => Ok(
+            Admission::workspace(deletion.workspace_id, deletion.created_at_ms),
+        ),
+    })
+}
+
+fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
     let envelope = identity::signed_fact::layout::decode_signed_fact(&bytes)?;
     match envelope.inner_type {
-        identity::user_invite::layout::TYPE_USER_INVITE
-        | identity::user::layout::TYPE_USER
-        | identity::admin::layout::TYPE_ADMIN
-        | identity::device_invite::layout::TYPE_DEVICE_INVITE
-        | identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED
-        | identity::invite_server::layout::TYPE_INVITE_SERVER => Ok(Fact::new(
-            FactScope::Global,
-            signed_identity_created_at_ms(&envelope)?,
-            bytes,
-        )),
-        encryption::layout::TYPE_KEY_WRAP => encryption::create::admit_signed_key_wrap_fact(bytes),
-        content::sealed_message::layout::TYPE_SEALED_MESSAGE => {
-            let message =
-                content::sealed_message::layout::decode_sealed_message(&envelope.payload)?;
-            Ok(Fact::new(
-                workspace_scope(message.workspace_id),
-                message.created_at_ms,
-                bytes,
-            ))
+        identity::user_invite::TYPE_USER_INVITE => {
+            admit_with_codec::<identity::user_invite::Codec>(bytes, |signed| {
+                Ok(Admission::global(signed.payload.created_at_ms))
+            })
         }
+        identity::user::TYPE_USER => admit_with_codec::<identity::user::Codec>(bytes, |signed| {
+            Ok(Admission::global(signed.payload.created_at_ms))
+        }),
+        identity::admin::TYPE_ADMIN => {
+            admit_with_codec::<identity::admin::Codec>(bytes, |signed| {
+                Ok(Admission::global(signed.payload.created_at_ms))
+            })
+        }
+        identity::device_invite::TYPE_DEVICE_INVITE => {
+            admit_with_codec::<identity::device_invite::Codec>(bytes, |signed| {
+                Ok(Admission::global(signed.payload.created_at_ms))
+            })
+        }
+        identity::endpoint_shared::TYPE_ENDPOINT_SHARED => {
+            admit_with_codec::<identity::endpoint_shared::Codec>(bytes, |signed| {
+                Ok(Admission::global(signed.payload.created_at_ms))
+            })
+        }
+        identity::invite_server::TYPE_INVITE_SERVER => {
+            admit_with_codec::<identity::invite_server::Codec>(bytes, |signed| {
+                Ok(Admission::global(signed.payload.created_at_ms))
+            })
+        }
+        encryption::layout::TYPE_KEY_WRAP => admit_signed_key_wrap_fact(bytes),
+        content::sealed_message::TYPE_SEALED_MESSAGE => admit_sealed_message_fact(bytes),
         other => Err(format!(
             "unsupported signed transport::transit payload type {other}"
         )),
     }
 }
 
-fn signed_identity_created_at_ms(
-    envelope: &identity::signed_fact::fact::SignedFactEnvelope,
-) -> Result<u64, String> {
-    match envelope.inner_type {
-        identity::user_invite::layout::TYPE_USER_INVITE => {
-            identity::user_invite::layout::decode_fact(&envelope.payload)
-                .map(|fact| fact.created_at_ms)
+fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
+    admit_with_codec::<encryption::fact::Codec>(bytes, |payload| {
+        let encryption::fact::ProjectionPayload::SignedKeyWrap(signed) = payload else {
+            return Err("signed fact does not contain an encryption key wrap".to_string());
+        };
+        let envelope = signed.envelope;
+        let wrap = signed.payload;
+        if envelope.signer_id != wrap.signer_endpoint_id {
+            return Err("key wrap signer does not match signed envelope signer".to_string());
         }
-        identity::user::layout::TYPE_USER => {
-            identity::user::layout::decode_fact(&envelope.payload).map(|fact| fact.created_at_ms)
-        }
-        identity::admin::layout::TYPE_ADMIN => {
-            identity::admin::layout::decode_fact(&envelope.payload).map(|fact| fact.created_at_ms)
-        }
-        identity::device_invite::layout::TYPE_DEVICE_INVITE => {
-            identity::device_invite::layout::decode_fact(&envelope.payload)
-                .map(|fact| fact.created_at_ms)
-        }
-        identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED => {
-            identity::endpoint_shared::layout::decode_fact(&envelope.payload)
-                .map(|fact| fact.created_at_ms)
-        }
-        identity::invite_server::layout::TYPE_INVITE_SERVER => {
-            identity::invite_server::layout::decode_fact(&envelope.payload)
-                .map(|fact| fact.created_at_ms)
-        }
-        other => Err(format!(
-            "signed identity timestamp unsupported for type {other}"
-        )),
-    }
+        Ok(Admission::workspace(wrap.workspace_id, wrap.created_at_ms))
+    })
 }
 
 fn workspace_scope(workspace_id: FactId) -> FactScope {

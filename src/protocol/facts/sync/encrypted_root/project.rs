@@ -9,12 +9,13 @@
 //!      requests at this encrypted-root payload.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
 use crate::protocol::matchers;
 
 use super::fact::WorkspaceId;
-use super::layout;
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncEncryptedRootProjector;
@@ -29,10 +30,20 @@ impl Projector for SyncEncryptedRootProjector {
     fn project(
         &self,
         fact: &Fact,
+        projection_context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, projection_context)
+    }
+}
+
+impl TypedProjector<super::Codec> for SyncEncryptedRootProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        root: super::fact::EncryptedRootFact,
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let root = layout::decode_fact(fact.body())?;
         let scope = matchers::workspace_scope(root.workspace_id);
         require_fact_scope(fact, &scope)?;
         // 3. Materialize.

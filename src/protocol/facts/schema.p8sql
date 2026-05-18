@@ -5,7 +5,6 @@ row_table message_rows;
 row_table opened_message_rows;
 row_table sealed_message_rows;
 row_table message_tombstone_rows;
-row_table file_rows;
 row_table file_slice_rows;
 row_table workspace_rows;
 row_table recipient_key_rows;
@@ -19,13 +18,15 @@ row_table identity_endpoint_shared_rows;
 row_table content_event_rows;
 row_table cascade_staged_fact_rows;
 row_table admin_rows;
-row_table reaction_rows;
 
 table content_messages {
   column workspace_id bytes(32);
   column message_id bytes(32);
   column author_user_id bytes(32);
   column created_at_ms u64;
+  column frontier_id bytes(32);
+  column minute u64;
+  column leaf_id bytes(32);
   column sealed_message_id bytes(32);
   column deleted bool;
   row_key (workspace_id, message_id);
@@ -34,10 +35,12 @@ table content_messages {
 
 table content_reactions {
   column workspace_id bytes(32);
-  column message_id bytes(32);
   column reaction_id bytes(32);
+  column message_id bytes(32);
   column author_user_id bytes(32);
   column created_at_ms u64;
+  column nonce bytes(24);
+  column ciphertext bytes;
   column deleted bool;
   row_key (workspace_id, reaction_id);
   index by_message (workspace_id, message_id, created_at_ms);
@@ -45,18 +48,22 @@ table content_reactions {
 
 table content_files {
   column workspace_id bytes(32);
+  column file_fact_id bytes(32);
   column message_id bytes(32);
   column file_id bytes(32);
   column author_user_id bytes(32);
   column created_at_ms u64;
   column root_hash bytes(32);
   column byte_len u64;
+  column total_slices u64;
+  column slice_bytes u64;
+  column sealed_metadata bytes;
   column deleted bool;
-  row_key (workspace_id, file_id);
+  row_key (workspace_id, file_fact_id);
   index by_message (workspace_id, message_id, created_at_ms);
+  index by_file_id (workspace_id, file_id);
 }
 
-row_table content_message_rows;
 row_table connection_ephemeral_secret_rows;
 row_table connection_request_rows;
 row_table connection_response_rows;

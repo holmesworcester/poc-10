@@ -13,11 +13,11 @@ mod offers;
 mod validation;
 
 use crate::core::facts::Fact;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
-use crate::protocol::facts::identity;
-
-use super::layout;
+use super::ProjectionPayload;
 
 #[derive(Debug, Clone, Default)]
 pub struct SealedMessageProjector;
@@ -34,16 +34,28 @@ impl Projector for SealedMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for SealedMessageProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        payload: ProjectionPayload,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Dispatch.
-        match fact.bytes.first().copied() {
-            Some(layout::TYPE_SEALED_MESSAGE) => message::project_message(fact, context),
-            Some(identity::signed_fact::TYPE_SIGNED_FACT) => {
-                message::project_signed_message(fact, context)
+        match payload {
+            ProjectionPayload::Message(payload) => message::project_message(fact, context, payload),
+            ProjectionPayload::SignedMessage(signed) => {
+                message::project_signed_message(fact, context, signed)
             }
-            Some(layout::TYPE_SIGNER_PUBKEY) => offers::project_signer_pubkey(fact),
-            Some(layout::TYPE_SECRET_NODE) => offers::project_secret_node(fact),
-            Some(layout::TYPE_MESSAGE_DELETION) => offers::project_message_deletion(fact),
-            _ => Err("unknown sealed-message fact type".to_string()),
+            ProjectionPayload::SignerPubkey(signer) => offers::project_signer_pubkey(fact, signer),
+            ProjectionPayload::SecretNode(node) => offers::project_secret_node(fact, node),
+            ProjectionPayload::MessageDeletion(deletion) => {
+                offers::project_message_deletion(fact, deletion)
+            }
         }
     }
 }

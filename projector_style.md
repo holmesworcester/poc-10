@@ -14,12 +14,14 @@ Avoid comments that restate syntax.
 Write each projector as:
 
 1. A numbered top-of-file policy.
-2. A `project()` body whose major sections use matching `// 1.`, `// 2.`
-   markers.
-3. Named context needs, read through `ProjectionContext` helpers.
-4. Branch-specific path functions when authority or materialization differs by
+2. A `Projector::project()` body that immediately delegates through
+   `core::projection::project_typed::<ModuleCodec, _>()`.
+3. A `TypedProjector<ModuleCodec>::project_typed()` body whose major sections
+   use matching `// 1.`, `// 2.` markers.
+4. Named context needs, read through `ProjectionContext` helpers.
+5. Branch-specific path functions when authority or materialization differs by
    path.
-5. Row materialization through module row helpers and schema-owned tables.
+6. Row materialization through module row helpers and schema-owned tables.
 
 The current model projector is
 `src/protocol/facts/identity/device_invite/project.rs`.
@@ -42,21 +44,47 @@ Every non-trivial projector should explain what it admits:
 Inside the function, keep the same order:
 
 ```rust
-// 1. Structural.
-let envelope = identity::signed_fact::decode_envelope(fact.body())
-    .map_err(|_| "device_invite fact must be signed".to_string())?;
-
-// 2. Authority.
-//
-// `user_invite_fact_id` is the authority-chain discriminator:
-// Some(id) means the device invite must be signed by the user fact
-// authorized by that user_invite; None means it must be signed by an
-// already-trusted endpoint_shared fact for the same user/workspace.
-match device_invite.user_invite_fact_id {
-    Some(user_invite_fact_id) => {
-        project_user_signed(fact, &device_invite, &envelope, user_invite_fact_id, context)
+impl Projector for DeviceInviteProjector {
+    fn project(
+        &self,
+        fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
     }
-    None => project_endpoint_signed(fact, &device_invite, &envelope, context),
+}
+
+impl TypedProjector<super::Codec> for DeviceInviteProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        signed: identity::signed_fact::SignedPayload<DeviceInviteFact>,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
+        if fact.scope != FactScope::Global {
+            return Err("device_invite fact must have global scope".to_string());
+        }
+        let envelope = signed.envelope;
+        let device_invite = signed.payload;
+
+        // 2. Authority.
+        //
+        // `user_invite_fact_id` is the authority-chain discriminator:
+        // Some(id) means the device invite must be signed by the user fact
+        // authorized by that user_invite; None means it must be signed by an
+        // already-trusted endpoint_shared fact for the same user/workspace.
+        match device_invite.user_invite_fact_id {
+            Some(user_invite_fact_id) => project_user_signed(
+                fact,
+                &device_invite,
+                &envelope,
+                user_invite_fact_id,
+                context,
+            ),
+            None => project_endpoint_signed(fact, &device_invite, &envelope, context),
+        }
+    }
 }
 ```
 
@@ -101,17 +129,33 @@ that matched that one need.
 
 ## Typed Facts
 
-Core persists facts as opaque bytes. A projector may decode its own incoming
-fact at the boundary, because that is where the owning fact module turns bytes
-into policy input:
+Core persists facts as opaque bytes, but primary projector input is decoded
+through core's typed adapter. The owning fact module supplies a small codec:
 
 ```rust
-let user_invite = layout::decode_fact(&envelope.payload)?;
+pub(crate) struct Codec;
+
+impl crate::core::projection::FactCodec for Codec {
+    type Payload = identity::signed_fact::SignedPayload<fact::DeviceInviteFact>;
+
+    fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
+        identity::signed_fact::decode_signed_fact_payload(
+            fact,
+            layout::TYPE_DEVICE_INVITE,
+            "device_invite",
+            decode_fact_payload,
+        )
+    }
+}
 ```
 
-Foreign fact bytes are different. A projector should not import another fact
-module's `layout` or call another module's raw layout codec. It should call a
-module-owned typed helper:
+The projector receives that typed payload in `project_typed()`. It should not
+call `layout::decode_fact(fact.body())`, decode a signed envelope from its own
+input fact, or dispatch on raw primary bytes except inside the module codec.
+
+Foreign context fact bytes are different. A projector should not import another
+fact module's `layout` or call another module's raw layout codec. It should call
+a module-owned typed helper:
 
 ```rust
 let endpoint = endpoint_shared::decode_fact_payload(&endpoint_envelope.payload)
@@ -120,8 +164,19 @@ let endpoint = endpoint_shared::decode_fact_payload(&endpoint_envelope.payload)
 
 That keeps wire formatting centralized inside the owning fact module while
 letting projector policy read as typed facts and named witnesses. The same rule
-applies to signed envelopes: use `identity::signed_fact::TYPE_SIGNED_FACT` and
+applies to signed envelopes: use `identity::signed_fact::TYPE_SIGNED_FACT`,
+`identity::signed_fact::SignedPayload<T>`, and
 `identity::signed_fact::decode_envelope`, not the signed-fact layout module.
+
+Family projectors use the same rule with a module-owned enum:
+
+```rust
+pub enum ProjectionPayload {
+    Message(fact::SealedMessageFact),
+    SignedMessage(identity::signed_fact::SignedPayload<fact::SealedMessageFact>),
+    SecretNode(fact::SecretNodeFact),
+}
+```
 
 ## Named Needs
 

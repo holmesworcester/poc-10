@@ -1,5 +1,6 @@
 use crate::core::facts::Fact;
 use crate::core::projection::{ProjectionContext, ProjectionOutput};
+use crate::protocol::facts::encryption::fact::LocalRecipientKeyFact;
 use crate::protocol::facts::encryption::intent::{
     purge_retired_recipient_material_intent, PurgeRetiredRecipientMaterialIntent,
 };
@@ -11,8 +12,8 @@ use super::validation::{matched_payload_fact, require_local_scope};
 pub(super) fn local_recipient_key(
     fact: &Fact,
     projection_context: &ProjectionContext,
+    local: LocalRecipientKeyFact,
 ) -> Result<ProjectionOutput, String> {
-    let local = layout::decode_local_recipient_key(fact.body())?;
     let scope = crate::protocol::matchers::workspace_scope(local.workspace_id);
     require_local_scope(fact)?;
 

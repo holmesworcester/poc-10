@@ -19,7 +19,9 @@
 //! conservative identifier check.
 
 use crate::core::schema_dsl::{self, ColumnType, TableDeclaration, TableKind};
-use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
+use rusqlite::{
+    params, params_from_iter, types::Value, Connection as SqliteConnection, OptionalExtension,
+};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -115,6 +117,7 @@ type MemoryTables = HashMap<TableName, MemoryRows>;
 pub struct Store {
     conn: SqliteConnection,
     table_storage: HashMap<TableName, StorageClass>,
+    typed_tables: HashMap<String, TableDeclaration>,
     memory_tables: RefCell<MemoryTables>,
 }
 
@@ -185,7 +188,7 @@ impl Store {
     }
 
     fn from_connection(conn: SqliteConnection, schemas: &[Schema]) -> rusqlite::Result<Self> {
-        let store = Self::from_connection_parts(conn, table_storage_map(schemas)?)?;
+        let store = Self::from_connection_parts(conn, table_storage_map(schemas)?, HashMap::new())?;
         store.apply_schemas(schemas)?;
         Ok(store)
     }
@@ -196,7 +199,8 @@ impl Store {
         schemas: &[Schema],
     ) -> rusqlite::Result<Self> {
         let tables = table_declarations_from_schema_sources(sources)?;
-        let store = Self::from_connection_parts(conn, table_storage_map(schemas)?)?;
+        let typed_tables = typed_table_map(&tables)?;
+        let store = Self::from_connection_parts(conn, table_storage_map(schemas)?, typed_tables)?;
         store.apply_schemas(schemas)?;
         store.apply_schema_source_tables(&tables)?;
         Ok(store)
@@ -205,6 +209,7 @@ impl Store {
     fn from_connection_parts(
         conn: SqliteConnection,
         table_storage: HashMap<TableName, StorageClass>,
+        typed_tables: HashMap<String, TableDeclaration>,
     ) -> rusqlite::Result<Self> {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
@@ -217,6 +222,7 @@ impl Store {
         let store = Self {
             conn,
             table_storage,
+            typed_tables,
             memory_tables: RefCell::new(memory_tables),
         };
         Ok(store)
@@ -268,6 +274,10 @@ impl Store {
                 inserted += self.insert_memory_row(row)?;
                 continue;
             }
+            if let Some(table) = self.typed_table(row.table) {
+                inserted += self.insert_typed_row(table, row, false)?;
+                continue;
+            }
             let table_name = quoted_table_name(row.table)?;
             let changed = self.conn.execute(
                 &format!(
@@ -305,6 +315,10 @@ impl Store {
             if self.storage_for(row.table) == StorageClass::Memory {
                 self.memory_table_mut(row.table).insert(row.key, row.value);
                 replaced += 1;
+                continue;
+            }
+            if let Some(table) = self.typed_table(row.table) {
+                replaced += self.insert_typed_row(table, row, true)?;
                 continue;
             }
             let table_name = quoted_table_name(row.table)?;
@@ -346,6 +360,12 @@ impl Store {
             }
             return Ok(deleted);
         }
+        if let Some(declared) = self.typed_table(table) {
+            for key in keys {
+                deleted += self.delete_typed_row(declared, &key)?;
+            }
+            return Ok(deleted);
+        }
         let table_name = quoted_table_name(table)?;
         for key in keys {
             deleted += self.conn.execute(
@@ -367,6 +387,11 @@ impl Store {
                 .get(&table)
                 .and_then(|rows| rows.get(key).cloned()));
         }
+        if let Some(declared) = self.typed_table(table) {
+            return self
+                .typed_row_by_key(declared, key)
+                .map(|row| row.map(|(_, value)| value));
+        }
         let table_name = quoted_table_name(table)?;
         self.conn
             .query_row(
@@ -386,6 +411,9 @@ impl Store {
                 .get(&table)
                 .map(BTreeMap::len)
                 .unwrap_or_default());
+        }
+        if let Some(declared) = self.typed_table(table) {
+            return self.typed_row_count(declared);
         }
         let table_name = quoted_table_name(table)?;
         self.conn
@@ -420,6 +448,9 @@ impl Store {
                 })
                 .unwrap_or_default());
         }
+        if let Some(declared) = self.typed_table(table) {
+            return self.typed_rows(declared);
+        }
         let table_name = quoted_table_name(table)?;
         let mut stmt = self.conn.prepare(&format!(
             "SELECT row_key, row_value FROM {table_name}
@@ -441,6 +472,19 @@ impl Store {
         }
         if self.storage_for(table) == StorageClass::Memory {
             return Ok(self.memory_rows_with_key_prefix(table, prefix, limit));
+        }
+        if let Some(declared) = self.typed_table(table) {
+            let mut out = Vec::new();
+            for row in self.typed_rows(declared)? {
+                if !row.0.starts_with(prefix) {
+                    continue;
+                }
+                out.push(row);
+                if out.len() == limit {
+                    break;
+                }
+            }
+            return Ok(out);
         }
         let table_name = quoted_table_name(table)?;
         let Some(upper) = prefix_upper_bound(prefix) else {
@@ -497,6 +541,22 @@ impl Store {
                 upper_exclusive,
                 limit,
             ));
+        }
+        if let Some(declared) = self.typed_table(table) {
+            let mut out = Vec::new();
+            for row in self.typed_rows(declared)? {
+                if row.0.as_slice() < lower_inclusive {
+                    continue;
+                }
+                if upper_exclusive.is_some_and(|upper| row.0.as_slice() >= upper) {
+                    continue;
+                }
+                out.push(row);
+                if out.len() == limit {
+                    break;
+                }
+            }
+            return Ok(out);
         }
         let table_name = quoted_table_name(table)?;
         match upper_exclusive {
@@ -639,6 +699,96 @@ impl Store {
             .unwrap_or(StorageClass::Durable)
     }
 
+    fn typed_table(&self, table: TableName) -> Option<&TableDeclaration> {
+        self.typed_tables.get(table.as_str())
+    }
+
+    fn insert_typed_row(
+        &self,
+        table: &TableDeclaration,
+        row: TableRow,
+        replace: bool,
+    ) -> rusqlite::Result<usize> {
+        let values = decode_typed_row_values(table, &row)?;
+        let quoted = quoted_table_name_str(&table.name)?;
+        let columns = table_column_list(table)?;
+        let placeholders = placeholders(table.columns.len());
+        let insert = if replace {
+            "INSERT OR REPLACE"
+        } else {
+            "INSERT OR IGNORE"
+        };
+        let changed = self.conn.execute(
+            &format!("{insert} INTO {quoted} ({columns}) VALUES ({placeholders})"),
+            params_from_iter(values.iter()),
+        )?;
+
+        if !replace && changed == 0 {
+            match self.typed_row_by_key(table, &row.key)? {
+                Some((_, existing)) if existing == row.value => {}
+                _ => {
+                    return Err(rusqlite::Error::InvalidParameterName(format!(
+                        "conflicting row for {}",
+                        row.table.as_str()
+                    )));
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    fn delete_typed_row(&self, table: &TableDeclaration, key: &[u8]) -> rusqlite::Result<usize> {
+        let key_values = decode_typed_key_values(table, key)?;
+        let quoted = quoted_table_name_str(&table.name)?;
+        self.conn.execute(
+            &format!(
+                "DELETE FROM {quoted} WHERE {}",
+                row_key_where_clause(table)?
+            ),
+            params_from_iter(key_values.iter()),
+        )
+    }
+
+    fn typed_row_by_key(
+        &self,
+        table: &TableDeclaration,
+        key: &[u8],
+    ) -> rusqlite::Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let key_values = decode_typed_key_values(table, key)?;
+        let quoted = quoted_table_name_str(&table.name)?;
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM {quoted} WHERE {}",
+                    table_column_list(table)?,
+                    row_key_where_clause(table)?
+                ),
+                params_from_iter(key_values.iter()),
+                |row| sqlite_row_to_table_row(table, row),
+            )
+            .optional()
+    }
+
+    fn typed_row_count(&self, table: &TableDeclaration) -> rusqlite::Result<usize> {
+        let quoted = quoted_table_name_str(&table.name)?;
+        self.conn
+            .query_row(&format!("SELECT COUNT(*) FROM {quoted}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as usize)
+    }
+
+    fn typed_rows(&self, table: &TableDeclaration) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let quoted = quoted_table_name_str(&table.name)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM {quoted} ORDER BY {}",
+            table_column_list(table)?,
+            quoted_identifier_list(&table.row_key.columns)?
+        ))?;
+        let rows = stmt.query_map([], |row| sqlite_row_to_table_row(table, row))?;
+        rows.collect()
+    }
+
     fn memory_table_mut(
         &self,
         table: TableName,
@@ -753,8 +903,297 @@ fn table_declarations_from_schema_sources(
     Ok(out)
 }
 
+fn typed_table_map(
+    tables: &[TableDeclaration],
+) -> rusqlite::Result<HashMap<String, TableDeclaration>> {
+    let mut out = HashMap::new();
+    for table in tables {
+        if table.kind == TableKind::Typed {
+            if out.insert(table.name.clone(), table.clone()).is_some() {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "duplicate typed schema table {}",
+                    table.name
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn is_row_table_declaration(table: &TableDeclaration) -> bool {
     table.kind == TableKind::Row
+}
+
+fn decode_typed_row_values(
+    table: &TableDeclaration,
+    row: &TableRow,
+) -> rusqlite::Result<Vec<Value>> {
+    let key_values = decode_typed_key_values_named(table, &row.key)?;
+    let mut value_offset = 0;
+    let mut values = Vec::with_capacity(table.columns.len());
+
+    for column in &table.columns {
+        if let Some((_, value)) = key_values
+            .iter()
+            .find(|(name, _)| name.as_str() == column.name)
+        {
+            values.push(value.clone());
+        } else {
+            values.push(decode_column_value(
+                &column.ty,
+                &row.value,
+                &mut value_offset,
+                &format!("{}.{}", table.name, column.name),
+            )?);
+        }
+    }
+
+    if value_offset != row.value.len() {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "typed row for {} has trailing value bytes",
+            table.name
+        )));
+    }
+    Ok(values)
+}
+
+fn decode_typed_key_values(table: &TableDeclaration, key: &[u8]) -> rusqlite::Result<Vec<Value>> {
+    decode_typed_key_values_named(table, key).map(|values| {
+        values
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>()
+    })
+}
+
+fn decode_typed_key_values_named(
+    table: &TableDeclaration,
+    key: &[u8],
+) -> rusqlite::Result<Vec<(String, Value)>> {
+    let mut offset = 0;
+    let mut values = Vec::with_capacity(table.row_key.columns.len());
+    for column_name in &table.row_key.columns {
+        let column = table.column(column_name).ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "typed table {} row key references unknown column {}",
+                table.name, column_name
+            ))
+        })?;
+        values.push((
+            column.name.clone(),
+            decode_column_value(
+                &column.ty,
+                key,
+                &mut offset,
+                &format!("{}.{}", table.name, column.name),
+            )?,
+        ));
+    }
+    if offset != key.len() {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "typed row for {} has trailing key bytes",
+            table.name
+        )));
+    }
+    Ok(values)
+}
+
+fn sqlite_row_to_table_row(
+    table: &TableDeclaration,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(Vec<u8>, Vec<u8>)> {
+    let mut key = Vec::new();
+    let mut value = Vec::new();
+    for (index, column) in table.columns.iter().enumerate() {
+        let column_value = sqlite_column_value(row, index, &column.ty)?;
+        if table
+            .row_key
+            .columns
+            .iter()
+            .any(|name| name == &column.name)
+        {
+            encode_column_value(&column.ty, &column_value, &mut key, &column.name)?;
+        } else {
+            encode_column_value(&column.ty, &column_value, &mut value, &column.name)?;
+        }
+    }
+    Ok((key, value))
+}
+
+fn decode_column_value(
+    ty: &ColumnType,
+    bytes: &[u8],
+    offset: &mut usize,
+    label: &str,
+) -> rusqlite::Result<Value> {
+    match ty {
+        ColumnType::Bytes { len: Some(len) } => {
+            let out = take_exact(bytes, offset, *len, label)?;
+            Ok(Value::Blob(out.to_vec()))
+        }
+        ColumnType::Bytes { len: None } => {
+            let len = take_u32(bytes, offset, label)? as usize;
+            let out = take_exact(bytes, offset, len, label)?;
+            Ok(Value::Blob(out.to_vec()))
+        }
+        ColumnType::U64 => {
+            let raw = take_exact(bytes, offset, 8, label)?;
+            let value = u64::from_be_bytes(raw.try_into().unwrap());
+            let value = i64::try_from(value).map_err(|_| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed column {label} exceeds SQLite integer range"
+                ))
+            })?;
+            Ok(Value::Integer(value))
+        }
+        ColumnType::I64 => {
+            let raw = take_exact(bytes, offset, 8, label)?;
+            Ok(Value::Integer(i64::from_be_bytes(raw.try_into().unwrap())))
+        }
+        ColumnType::Text => {
+            let len = take_u32(bytes, offset, label)? as usize;
+            let raw = take_exact(bytes, offset, len, label)?;
+            let text = String::from_utf8(raw.to_vec()).map_err(|err| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed column {label} is not utf8: {err}"
+                ))
+            })?;
+            Ok(Value::Text(text))
+        }
+        ColumnType::Bool => {
+            let raw = take_exact(bytes, offset, 1, label)?[0];
+            match raw {
+                0 => Ok(Value::Integer(0)),
+                1 => Ok(Value::Integer(1)),
+                _ => Err(rusqlite::Error::InvalidParameterName(format!(
+                    "typed column {label} has invalid bool byte {raw}"
+                ))),
+            }
+        }
+    }
+}
+
+fn encode_column_value(
+    ty: &ColumnType,
+    value: &Value,
+    out: &mut Vec<u8>,
+    label: &str,
+) -> rusqlite::Result<()> {
+    match (ty, value) {
+        (ColumnType::Bytes { len: Some(len) }, Value::Blob(bytes)) => {
+            if bytes.len() != *len {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "typed column {label} has {} bytes, expected {len}",
+                    bytes.len()
+                )));
+            }
+            out.extend_from_slice(bytes);
+        }
+        (ColumnType::Bytes { len: None }, Value::Blob(bytes)) => {
+            put_sized_u32(out, bytes, label)?;
+        }
+        (ColumnType::U64, Value::Integer(value)) => {
+            let value = u64::try_from(*value).map_err(|_| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed column {label} has negative u64 value"
+                ))
+            })?;
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        (ColumnType::I64, Value::Integer(value)) => {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        (ColumnType::Text, Value::Text(text)) => {
+            put_sized_u32(out, text.as_bytes(), label)?;
+        }
+        (ColumnType::Bool, Value::Integer(0)) => out.push(0),
+        (ColumnType::Bool, Value::Integer(1)) => out.push(1),
+        (ColumnType::Bool, Value::Integer(value)) => {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "typed column {label} has invalid bool integer {value}"
+            )));
+        }
+        _ => {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "typed column {label} value does not match declared type"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_column_value(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+    ty: &ColumnType,
+) -> rusqlite::Result<Value> {
+    match ty {
+        ColumnType::Bytes { .. } => row.get::<_, Vec<u8>>(index).map(Value::Blob),
+        ColumnType::U64 | ColumnType::I64 | ColumnType::Bool => {
+            row.get::<_, i64>(index).map(Value::Integer)
+        }
+        ColumnType::Text => row.get::<_, String>(index).map(Value::Text),
+    }
+}
+
+fn take_exact<'a>(
+    bytes: &'a [u8],
+    offset: &mut usize,
+    len: usize,
+    label: &str,
+) -> rusqlite::Result<&'a [u8]> {
+    let end = offset.checked_add(len).ok_or_else(|| {
+        rusqlite::Error::InvalidParameterName(format!("typed column {label} length overflows"))
+    })?;
+    if end > bytes.len() {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "typed column {label} is truncated"
+        )));
+    }
+    let out = &bytes[*offset..end];
+    *offset = end;
+    Ok(out)
+}
+
+fn take_u32(bytes: &[u8], offset: &mut usize, label: &str) -> rusqlite::Result<u32> {
+    let raw = take_exact(bytes, offset, 4, label)?;
+    Ok(u32::from_be_bytes(raw.try_into().unwrap()))
+}
+
+fn put_sized_u32(out: &mut Vec<u8>, bytes: &[u8], label: &str) -> rusqlite::Result<()> {
+    let len = u32::try_from(bytes.len()).map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("typed column {label} exceeds u32 length"))
+    })?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn table_column_list(table: &TableDeclaration) -> rusqlite::Result<String> {
+    let columns = table
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    quoted_identifier_list(&columns)
+}
+
+fn row_key_where_clause(table: &TableDeclaration) -> rusqlite::Result<String> {
+    table
+        .row_key
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| Ok(format!("{} = ?{}", quoted_identifier(column)?, index + 1)))
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map(|clauses| clauses.join(" AND "))
+}
+
+fn placeholders(count: usize) -> String {
+    (1..=count)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// One column returned by SQLite's `PRAGMA table_info`.

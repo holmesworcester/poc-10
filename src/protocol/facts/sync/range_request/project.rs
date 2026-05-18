@@ -10,7 +10,9 @@
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactId};
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
 use crate::protocol::facts::sync::{
     encrypted_root, encrypted_root::project as encrypted_root_project, key_wrap_available,
@@ -20,8 +22,6 @@ use crate::protocol::intents::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
 use crate::protocol::matchers;
-
-use super::layout;
 
 type KeyWrapId = FactId;
 
@@ -40,8 +40,18 @@ impl Projector for SyncRangeRequestProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, projection_context)
+    }
+}
+
+impl TypedProjector<super::Codec> for SyncRangeRequestProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        request: super::fact::SyncRangeRequestFact,
+        projection_context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let request = layout::decode_fact(fact.body())?;
         let scope = matchers::workspace_scope(request.workspace_id);
         encrypted_root_project::require_fact_scope(fact, &scope)?;
 
@@ -95,10 +105,10 @@ fn matched_range_roots(
     need: &ContextNeed,
 ) -> Result<Vec<matchers::RangeOfferSelector>, String> {
     projection_context
-        .matched_payloads_for_checked(need, "sync range")
+        .matched_payloads_as_checked::<encrypted_root::Codec>(need, "sync range")
         .map(|matched| {
-            let (offer, payload) = matched?;
-            validate_range_match(offer, payload)
+            let (offer, payload, root) = matched?;
+            validate_range_match(offer, payload, root)
         })
         .collect()
 }
@@ -106,10 +116,10 @@ fn matched_range_roots(
 fn validate_range_match(
     offer: &ContextOffer,
     payload: &Fact,
+    root: encrypted_root::fact::EncryptedRootFact,
 ) -> Result<matchers::RangeOfferSelector, String> {
     let selector = matchers::decode_range_offer_selector(&offer.selector)
         .ok_or_else(|| "sync range context offer selector is malformed".to_string())?;
-    let root = encrypted_root::decode_fact_payload(payload.body())?;
     encrypted_root_project::validate_sync_fact_workspace(payload, root.workspace_id)?;
     if offer.scope != matchers::workspace_scope(root.workspace_id) {
         return Err("sync range context offer scope does not match payload".to_string());
@@ -135,7 +145,7 @@ fn has_matched_exact_fact(
     if payload.scope != need.scope {
         return Err("sync exact-fact context scope does not match payload".to_string());
     }
-    let provided = exact_fact_id_from_payload(payload, fact_id)?;
+    let provided = exact_fact_id_from_payload(projection_context, need, payload, fact_id)?;
     if provided != fact_id {
         return Err("sync exact-fact context payload does not match need".to_string());
     }
@@ -153,27 +163,44 @@ fn has_matched_key_wrap(
     if payload.scope != need.scope {
         return Err("sync key-wrap context scope does not match payload".to_string());
     }
-    let provided = key_wrap_id_from_payload(payload, key_wrap_id)?;
+    let provided = key_wrap_id_from_payload(projection_context, need, payload, key_wrap_id)?;
     if provided != key_wrap_id {
         return Err("sync key-wrap context payload does not match need".to_string());
     }
     Ok(true)
 }
 
-fn exact_fact_id_from_payload(fact: &Fact, expected: FactId) -> Result<FactId, String> {
+fn exact_fact_id_from_payload(
+    projection_context: &ProjectionContext,
+    need: &ContextNeed,
+    fact: &Fact,
+    expected: FactId,
+) -> Result<FactId, String> {
     match fact.bytes.first().copied() {
         Some(encrypted_root::TYPE_ENCRYPTED_ROOT) => {
-            let root = encrypted_root::decode_fact_payload(fact.body())?;
+            let root = require_payload_as::<encrypted_root::Codec>(
+                projection_context,
+                need,
+                "sync exact-fact context payload does not identify requested fact",
+            )?;
             encrypted_root_project::validate_sync_fact_workspace(fact, root.workspace_id)?;
             Ok(root.fact_id)
         }
         Some(shared_fact::TYPE_SHARED_FACT) => {
-            let shared = shared_fact::decode_fact_payload(fact.body())?;
+            let shared = require_payload_as::<shared_fact::Codec>(
+                projection_context,
+                need,
+                "sync exact-fact context payload does not identify requested fact",
+            )?;
             encrypted_root_project::validate_sync_fact_workspace(fact, shared.workspace_id)?;
             Ok(shared.fact_id)
         }
         Some(key_wrap_available::TYPE_KEY_WRAP_AVAILABLE) => {
-            let key = key_wrap_available::decode_fact_payload(fact.body())?;
+            let key = require_payload_as::<key_wrap_available::Codec>(
+                projection_context,
+                need,
+                "sync exact-fact context payload does not identify requested fact",
+            )?;
             encrypted_root_project::validate_sync_fact_workspace(fact, key.workspace_id)?;
             Ok(key.key_wrap_id)
         }
@@ -182,14 +209,36 @@ fn exact_fact_id_from_payload(fact: &Fact, expected: FactId) -> Result<FactId, S
     }
 }
 
-fn key_wrap_id_from_payload(fact: &Fact, expected: KeyWrapId) -> Result<KeyWrapId, String> {
+fn key_wrap_id_from_payload(
+    projection_context: &ProjectionContext,
+    need: &ContextNeed,
+    fact: &Fact,
+    expected: KeyWrapId,
+) -> Result<KeyWrapId, String> {
     match fact.bytes.first().copied() {
         Some(key_wrap_available::TYPE_KEY_WRAP_AVAILABLE) => {
-            let key = key_wrap_available::decode_fact_payload(fact.body())?;
+            let key = require_payload_as::<key_wrap_available::Codec>(
+                projection_context,
+                need,
+                "sync key-wrap context payload does not identify requested key wrap",
+            )?;
             encrypted_root_project::validate_sync_fact_workspace(fact, key.workspace_id)?;
             Ok(key.key_wrap_id)
         }
         _ if fact.id == expected => Ok(fact.id),
         _ => Err("sync key-wrap context payload does not identify requested key wrap".to_string()),
     }
+}
+
+fn require_payload_as<C>(
+    projection_context: &ProjectionContext,
+    need: &ContextNeed,
+    missing: &str,
+) -> Result<C::Payload, String>
+where
+    C: crate::core::projection::FactCodec,
+{
+    projection_context
+        .payload_as::<C>(need)?
+        .ok_or_else(|| missing.to_string())
 }

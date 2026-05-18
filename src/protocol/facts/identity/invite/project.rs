@@ -10,9 +10,10 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
-use super::layout;
 use super::rows::invite_secret_row;
 
 #[derive(Debug, Clone, Default)]
@@ -28,13 +29,23 @@ impl Projector for InviteSecretProjector {
     fn project(
         &self,
         fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for InviteSecretProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        invite_secret: super::fact::InviteSecretFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("invite_secret fact must have local scope".to_string());
         }
-        let invite_secret = layout::decode_fact(fact.body())?;
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .offer(crate::protocol::matchers::invite_secret_offer(fact.id))

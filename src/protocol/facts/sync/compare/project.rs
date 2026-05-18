@@ -8,12 +8,13 @@
 
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::intents::sync::send_compare_response::{
     send_sync_compare_response_intent, SendSyncCompareResponse,
 };
 
-use super::layout;
 use super::rows::sync_compare_row;
 
 #[derive(Debug, Clone, Default)]
@@ -29,10 +30,20 @@ impl Projector for SyncCompareProjector {
     fn project(
         &self,
         fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for SyncCompareProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        compare: super::fact::SyncCompareFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let compare = layout::decode_fact(fact.body())?;
         // 3. Materialize.
         let mut output = ProjectionOutput::new()
             .intent(AtomicIntent::PutRow(sync_compare_row(fact.id, &compare)?).into_intent());

@@ -12,14 +12,15 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::invite_server::fact::InviteServerFact;
 use crate::protocol::facts::identity::{admin, endpoint_shared, workspace};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
-use super::layout;
 use super::rows::invite_server_row;
 
 #[derive(Debug, Clone, Default)]
@@ -37,16 +38,23 @@ impl Projector for InviteServerProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for InviteServerProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        signed: identity::signed_fact::SignedPayload<InviteServerFact>,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("invite_server fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::decode_envelope(fact.body())
-            .map_err(|_| "invite_server fact must be signed".to_string())?;
-        if envelope.inner_type != layout::TYPE_INVITE_SERVER {
-            return Err("signed fact does not contain an invite_server".to_string());
-        }
-        let invite_server = layout::decode_fact(&envelope.payload)?;
+        let envelope = signed.envelope;
+        let invite_server = signed.payload;
         if invite_server.workspace_id == [0; 32] {
             return Err("invite_server fact has empty workspace_id".to_string());
         }

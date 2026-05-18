@@ -369,6 +369,42 @@ fn target_projectors_document_policy_narratives() {
 }
 
 #[test]
+fn target_projectors_route_primary_decode_through_core_typed_adapter() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        if !production.contains("impl Projector for") {
+            continue;
+        }
+
+        let mut missing = Vec::new();
+        if !production.contains("project_typed::<super::Codec, _>(self, fact,")
+            && !production.contains("project_typed::<super::fact::Codec, _>(self, fact,")
+        {
+            missing.push("Projector::project core typed-adapter delegation");
+        }
+        if !production.contains("impl TypedProjector<super::Codec>")
+            && !production.contains("impl TypedProjector<super::fact::Codec>")
+        {
+            missing.push("TypedProjector<super::Codec> implementation");
+        }
+        if !missing.is_empty() {
+            offenders.push(format!("{relative} missing {}", missing.join(" and ")));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "fact-module projectors should let core own primary decode timing: Projector::project delegates to project_typed::<super::Codec, _>(), while the owning module codec decodes bytes into typed policy input:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn target_projectors_do_not_decode_foreign_fact_layouts_inline() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();

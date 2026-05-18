@@ -9,10 +9,10 @@
 //!      context for downstream sync work.
 
 use crate::core::facts::Fact;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::matchers;
-
-use super::layout;
 
 #[derive(Debug, Clone, Default)]
 pub struct CascadeFactProjector;
@@ -29,8 +29,18 @@ impl Projector for CascadeFactProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for CascadeFactProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        decoded: super::fact::CascadeFact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let decoded = layout::decode_fact(fact.body())?;
         if decoded.timestamp != fact.timestamp {
             return Err("cascade fact timestamp does not match fact timestamp".to_string());
         }
@@ -78,6 +88,7 @@ mod tests {
     use crate::core::wake_loop::WakeLoop;
 
     use super::*;
+    use crate::protocol::facts::sync::cascade_fact::layout;
     use crate::protocol::matchers::exact_fact_role;
     use crate::protocol::matchers::ExactSelectorMatcher;
 

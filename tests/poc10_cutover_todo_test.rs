@@ -752,7 +752,6 @@ fn cutover_match_app_does_not_own_command_business_logic() {
 }
 
 #[test]
-#[ignore = "cutover todo: facts should be decoded once at typed module boundaries"]
 fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
     let root = root();
     let mut paths = project_files(&root);
@@ -782,7 +781,6 @@ fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
 }
 
 #[test]
-#[ignore = "cutover todo: context needs-met checks should be typed predicates"]
 fn cutover_context_predicates_replace_manual_payload_matching() {
     let root = root();
     let mut paths = project_files(&root);
@@ -807,7 +805,6 @@ fn cutover_context_predicates_replace_manual_payload_matching() {
 }
 
 #[test]
-#[ignore = "cutover todo: content layouts should use one centralized schema/wire codec"]
 fn cutover_content_wire_layouts_use_central_schema_codec() {
     let root = root();
     let paths = [
@@ -851,7 +848,6 @@ fn cutover_content_wire_layouts_use_central_schema_codec() {
 }
 
 #[test]
-#[ignore = "cutover todo: content needs typed query tables, not only key/value row stores"]
 fn cutover_content_read_models_have_normal_sqlite_tables() {
     fn table_body<'a>(schema: &'a str, table: &str) -> Option<&'a str> {
         let marker = format!("table {table} {{");
@@ -994,7 +990,6 @@ fn cutover_network_queue_storage_class_is_not_ambiguous() {
 }
 
 #[test]
-#[ignore = "cutover todo: fact scopes should expose typed interfaces, not foreign layouts"]
 fn cutover_scope_projectors_do_not_import_foreign_fact_layouts_or_rows() {
     let root = root();
     let facts_root = root.join("src/protocol/facts");

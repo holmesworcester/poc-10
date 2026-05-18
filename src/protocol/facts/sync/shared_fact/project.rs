@@ -9,12 +9,12 @@
 //!      matching.
 
 use crate::core::facts::Fact;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
 use crate::protocol::facts::sync::encrypted_root::project::require_fact_scope;
 use crate::protocol::matchers;
-
-use super::layout;
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncSharedFactProjector;
@@ -29,10 +29,20 @@ impl Projector for SyncSharedFactProjector {
     fn project(
         &self,
         fact: &Fact,
+        projection_context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, projection_context)
+    }
+}
+
+impl TypedProjector<super::Codec> for SyncSharedFactProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        shared: super::fact::SharedFact,
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let shared = layout::decode_fact(fact.body())?;
         let scope = matchers::workspace_scope(shared.workspace_id);
         require_fact_scope(fact, &scope)?;
         // 3. Materialize.

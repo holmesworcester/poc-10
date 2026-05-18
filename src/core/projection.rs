@@ -77,6 +77,26 @@ impl ProjectionContext {
         Ok(Some(&matched.payload))
     }
 
+    pub fn payload_as<C>(&self, need: &ContextNeed) -> Result<Option<C::Payload>, String>
+    where
+        C: FactCodec,
+    {
+        self.payload_for(need).map(C::decode_fact).transpose()
+    }
+
+    pub fn payload_as_checked<C>(
+        &self,
+        need: &ContextNeed,
+        label: &str,
+    ) -> Result<Option<C::Payload>, String>
+    where
+        C: FactCodec,
+    {
+        self.payload_for_checked(need, label)?
+            .map(C::decode_fact)
+            .transpose()
+    }
+
     pub fn matched_payloads_for<'a>(
         &'a self,
         need: &'a ContextNeed,
@@ -97,6 +117,21 @@ impl ProjectionContext {
                 Ok((&matched.offer, &matched.payload))
             }
         })
+    }
+
+    pub fn matched_payloads_as_checked<'a, C>(
+        &'a self,
+        need: &'a ContextNeed,
+        label: &'a str,
+    ) -> impl Iterator<Item = Result<(&'a ContextOffer, &'a Fact, C::Payload), String>> + 'a
+    where
+        C: FactCodec + 'a,
+    {
+        self.matched_payloads_for_checked(need, label)
+            .map(|matched| {
+                let (offer, payload) = matched?;
+                C::decode_fact(payload).map(|decoded| (offer, payload, decoded))
+            })
     }
 
     pub fn offer_payload_refs_matching<'a>(
@@ -182,6 +217,45 @@ impl ProjectionOutput {
 pub trait Projector {
     fn project(&self, fact: &Fact, context: &ProjectionContext)
         -> Result<ProjectionOutput, String>;
+}
+
+/// Type-aware decoder supplied by the fact module that owns the wire layout.
+///
+/// Core owns when decoding happens in the projection call path. Protocol fact
+/// modules still own how their bytes become typed payloads, because that
+/// semantic shape belongs with the module boundary rather than the generic
+/// runtime.
+pub trait FactCodec {
+    type Payload;
+
+    fn decode_fact(fact: &Fact) -> Result<Self::Payload, String>;
+}
+
+/// Projector implementation after core has decoded the input fact.
+///
+/// A projector should spend its body on admission policy: scope checks,
+/// context proof checks, offers, rows, and emitted intents. Byte decoding stays
+/// in the codec selected by the `Projector` entry point.
+pub trait TypedProjector<C: FactCodec> {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        payload: C::Payload,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String>;
+}
+
+pub fn project_typed<C, P>(
+    projector: &P,
+    fact: &Fact,
+    context: &ProjectionContext,
+) -> Result<ProjectionOutput, String>
+where
+    C: FactCodec,
+    P: TypedProjector<C>,
+{
+    let payload = C::decode_fact(fact)?;
+    projector.project_typed(fact, payload, context)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +380,82 @@ mod tests {
     }
 
     #[test]
+    fn projection_context_decodes_payload_with_fact_codec() {
+        let role = Role::new("exact").unwrap();
+        let need = ContextNeed {
+            owner: [1; 32],
+            role,
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([10; 32]),
+        };
+        let context = ProjectionContext::from_matches(vec![matched_context(need.clone(), [7; 32])]);
+
+        assert_eq!(context.payload_as::<FirstByteCodec>(&need), Ok(Some(7)));
+        assert_eq!(
+            context.payload_as_checked::<FirstByteCodec>(&need, "typed"),
+            Ok(Some(7))
+        );
+        assert_eq!(
+            context.payload_as::<FirstByteCodec>(&ContextNeed {
+                owner: [2; 32],
+                role: Role::new("exact").unwrap(),
+                scope: FactScope::Global,
+                selector: Selector::from_bytes([20; 32]),
+            }),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn projection_context_decodes_checked_matched_payloads() {
+        let role = Role::new("exact").unwrap();
+        let need = ContextNeed {
+            owner: [1; 32],
+            role,
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([10; 32]),
+        };
+        let context = ProjectionContext::from_matches(vec![
+            matched_context(need.clone(), [7; 32]),
+            matched_context(need.clone(), [8; 32]),
+        ]);
+
+        let payloads = context
+            .matched_payloads_as_checked::<FirstByteCodec>(&need, "typed")
+            .map(|matched| {
+                let (offer, payload, decoded) = matched?;
+                Ok((offer.payload_ref, payload.id, decoded))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .expect("typed matched payloads");
+
+        assert_eq!(payloads, vec![([7; 32], [7; 32], 7), ([8; 32], [8; 32], 8)]);
+    }
+
+    #[test]
+    fn checked_typed_payloads_report_offer_payload_mismatch_before_decode() {
+        let role = Role::new("exact").unwrap();
+        let need = ContextNeed {
+            owner: [1; 32],
+            role,
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([10; 32]),
+        };
+        let mut matched = matched_context(need.clone(), [7; 32]);
+        matched.offer.payload_ref = [8; 32];
+        matched.payload.bytes.clear();
+        let context = ProjectionContext::from_matches(vec![matched]);
+
+        let err = context
+            .matched_payloads_as_checked::<FirstByteCodec>(&need, "typed")
+            .next()
+            .expect("matched payload")
+            .expect_err("payload ref mismatch should fail before decode");
+
+        assert_eq!(err, "typed context offer payload mismatch");
+    }
+
+    #[test]
     fn projection_run_diffs_standing_context_without_self_waking() {
         let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
         let role = Role::new("exact").unwrap();
@@ -363,6 +513,19 @@ mod tests {
         role: Role,
         selector: Selector,
         intent_kind: IntentKind,
+    }
+
+    struct FirstByteCodec;
+
+    impl FactCodec for FirstByteCodec {
+        type Payload = u8;
+
+        fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
+            fact.bytes
+                .first()
+                .copied()
+                .ok_or_else(|| "empty typed payload".to_string())
+        }
     }
 
     fn matched_context(need: ContextNeed, payload_id: FactId) -> MatchedContext {

@@ -12,9 +12,9 @@ use crate::core::wire;
 
 use super::fact::{AuthorId, ContentMessageFact, FrontierId, WorkspaceId};
 
-pub const CONTENT_MESSAGE_ROWS: TableName = TableName::new("content_message_rows");
+pub const CONTENT_MESSAGE_ROWS: TableName = TableName::new("content_messages");
 
-pub const ROW_VALUE_BYTES: usize = 1 + 32 + 8 + 32 + 8 + 32 + 32;
+pub const ROW_VALUE_BYTES: usize = 32 + 8 + 32 + 8 + 32 + 32 + 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentMessageRow {
@@ -37,13 +37,13 @@ pub fn content_message_key(workspace_id: WorkspaceId, message_id: FactId) -> Vec
 
 pub fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> TableRow {
     let mut writer = wire::Writer::with_capacity(ROW_VALUE_BYTES);
-    writer.u8(1);
     writer.fixed(&fact.author_user_id);
     writer.u64be(fact.created_at_ms);
     writer.fixed(&fact.frontier_id);
     writer.u64be(fact.minute);
     writer.fixed(&fact.leaf_id);
     writer.fixed(&fact.sealed_body_ref);
+    writer.u8(0);
     TableRow {
         table: CONTENT_MESSAGE_ROWS,
         key: content_message_key(fact.workspace_id, message_id),
@@ -55,7 +55,7 @@ pub fn decode_content_message_row(key: &[u8], value: &[u8]) -> Result<ContentMes
     if key.len() != 64 {
         return Err("content message row key is malformed".to_string());
     }
-    if value.len() != ROW_VALUE_BYTES || value[0] != 1 {
+    if value.len() != ROW_VALUE_BYTES {
         return Err("content message row value is malformed".to_string());
     }
     let mut key_reader = wire::Reader::new(key);
@@ -63,10 +63,6 @@ pub fn decode_content_message_row(key: &[u8], value: &[u8]) -> Result<ContentMes
     let message_id = key_reader.array().map_err(wire_err)?;
     key_reader.finish().map_err(wire_err)?;
     let mut value_reader = wire::Reader::new(value);
-    let version = value_reader.u8().map_err(wire_err)?;
-    if version != 1 {
-        return Err("content message row value is malformed".to_string());
-    }
     let row = ContentMessageRow {
         workspace_id,
         message_id,
@@ -77,6 +73,10 @@ pub fn decode_content_message_row(key: &[u8], value: &[u8]) -> Result<ContentMes
         leaf_id: value_reader.array().map_err(wire_err)?,
         sealed_body_ref: value_reader.array().map_err(wire_err)?,
     };
+    let deleted = value_reader.u8().map_err(wire_err)?;
+    if deleted > 1 {
+        return Err("content message row deleted flag is malformed".to_string());
+    }
     value_reader.finish().map_err(wire_err)?;
     Ok(row)
 }

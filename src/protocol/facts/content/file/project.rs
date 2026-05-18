@@ -10,7 +10,9 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{AtomicIntent, TableDelete};
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
 use crate::protocol::facts::content::file_deletion;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
@@ -22,7 +24,6 @@ use crate::protocol::matchers;
 use crate::protocol::matchers as message_matchers;
 
 use super::fact::MAX_FILE_BYTES;
-use super::layout;
 use super::rows::{content_file_key, content_file_row, FILE_ROWS};
 
 #[derive(Debug, Clone, Default)]
@@ -40,10 +41,19 @@ impl Projector for ContentFileProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for ContentFileProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        decoded: authority::DecodedFact<super::fact::ContentFileFact>,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let decoded =
-            authority::decode_raw_or_signed(fact, layout::TYPE_CONTENT_FILE, "content file")?;
-        let file = layout::decode_fact(&decoded.payload)?;
+        let file = decoded.payload;
         validate_file_fields(&file)?;
         let scope = message_matchers::workspace_scope(file.workspace_id);
         require_fact_scope(fact, &scope)?;

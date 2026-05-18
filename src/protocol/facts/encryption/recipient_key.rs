@@ -1,5 +1,6 @@
 use crate::core::facts::Fact;
 use crate::core::projection::{ProjectionContext, ProjectionOutput};
+use crate::protocol::facts::encryption::fact::RecipientKeyFact;
 use crate::protocol::facts::encryption::fact::NO_PREVIOUS_RECIPIENT_KEY;
 use crate::protocol::facts::encryption::intent::create_key_wrap_intent;
 use crate::protocol::facts::encryption::layout;
@@ -14,8 +15,8 @@ use super::validation::{
 pub(super) fn recipient_key(
     fact: &Fact,
     projection_context: &ProjectionContext,
+    recipient: RecipientKeyFact,
 ) -> Result<ProjectionOutput, String> {
-    let recipient = layout::decode_recipient_key(fact.body())?;
     let scope = crate::protocol::matchers::workspace_scope(recipient.workspace_id);
     require_fact_scope(fact, &scope)?;
     if recipient.previous_recipient_key_id == fact.id {
