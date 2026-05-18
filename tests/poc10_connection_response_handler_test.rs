@@ -1,112 +1,148 @@
 //! Behavioural tests for the target `connection::response` handler.
 //!
-//! Synthesises a connection::request + invite_secret + local endpoint fact
-//! context, drives the handler, and verifies the emitted response fact
-//! decodes into a `ConnectionResponseFact` with the request's dependency
-//! edges copied through and a non-degenerate connection secret. A second
-//! case exercises the endpoint-mismatch rejection. A third pins the
-//! placeholder-ephemeral sentinel that keeps the handler retryable until
-//! the ephemeral secret fact lane lands.
+//! The request projector schedules this handler only after exact invite and
+//! receive-provenance context exists. The handler rechecks that context,
+//! creates local responder ephemeral material, emits the response fact, and
+//! sends the response bytes back to the request's bootstrap return address.
+
+use std::io::Read;
+use std::net::TcpListener;
+use std::thread;
 
 use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
+use topo::core::network_queues;
+use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+use topo::core::store::Store;
+use topo::protocol::facts::connection::ephemeral_secret::layout as ephemeral_layout;
 use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::facts::connection::request::layout as request_layout;
 use topo::protocol::facts::connection::response::layout as response_layout;
 use topo::protocol::facts::identity::endpoint::fact::EndpointFact;
-use topo::protocol::facts::identity::endpoint::layout as endpoint_layout;
+use topo::protocol::facts::identity::endpoint::rows as endpoint_rows;
 use topo::protocol::facts::identity::invite::fact::InviteSecretFact;
 use topo::protocol::facts::identity::invite::layout as invite_layout;
-use topo::protocol::intents::connection::create_response::{
-    create_connection_response_intent, CreateConnectionResponse,
+use topo::protocol::facts::transport::transit_received::fact::{
+    TransitReceivedFact, TRANSIT_KIND_BOOTSTRAP,
 };
+use topo::protocol::facts::transport::transit_received::layout as received_layout;
 use topo::protocol::intents::connection::create_response::{
-    CreateConnectionResponseHandler, DEPENDENCY_NOT_WIRED,
+    create_connection_response_intent, CreateConnectionResponse, CreateConnectionResponseHandler,
 };
 
 #[test]
-fn handler_emits_decodable_response_fact_for_addressed_request() {
-    let scenario = synthesize_scenario(SynthOpts::default());
+fn handler_emits_responder_material_response_fact_and_sends_response_bytes() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let return_addr = listener.local_addr().expect("listener addr");
+    let reader = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept response");
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).expect("read len");
+        let mut body = vec![0; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut body).expect("read body");
+        body
+    });
+    let scenario = synthesize_scenario(SynthOpts {
+        request_return_addr: Some(return_addr),
+        ..SynthOpts::default()
+    });
+    let store = test_store();
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(&scenario.endpoint))
+        .expect("seed local endpoint");
     let handler = CreateConnectionResponseHandler::new();
     let context = HandlerContext::with_facts([
         scenario.request_fact.clone(),
         scenario.invite_fact.clone(),
-        scenario.endpoint_fact.clone(),
-    ]);
+        scenario.receive_fact.clone(),
+    ])
+    .with_store(&store);
 
     let output = handler
         .handle(&scenario.intent, &context)
         .expect("handler produces response fact");
 
-    assert_eq!(output.facts.len(), 1);
-    let response = response_layout::decode_fact(&output.facts[0].bytes).expect("decode response");
+    assert_eq!(output.facts.len(), 2);
+    let ephemeral_fact = output
+        .facts
+        .iter()
+        .find(|fact| {
+            fact.body().first().copied() == Some(ephemeral_layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
+        })
+        .expect("responder ephemeral fact");
+    let response_fact = output
+        .facts
+        .iter()
+        .find(|fact| {
+            fact.body().first().copied() == Some(response_layout::TYPE_CONNECTION_RESPONSE)
+        })
+        .expect("connection response fact");
+    let ephemeral = ephemeral_layout::decode_fact(ephemeral_fact.body()).expect("ephemeral");
+    let response = response_layout::decode_fact(response_fact.body()).expect("decode response");
+
+    assert_eq!(ephemeral.owner_endpoint, scenario.responder_endpoint);
+    assert_eq!(ephemeral.created_at_ms, scenario.received_at);
+    assert_ne!(ephemeral.ephemeral_private_key, [0u8; 32]);
+    assert_eq!(
+        response.responder_ephemeral_secret_fact_id,
+        ephemeral_fact.id
+    );
+    assert_eq!(
+        response.responder_ephemeral_public_key,
+        ephemeral.ephemeral_public_key
+    );
     assert_eq!(response.request_id, scenario.request_fact.id);
     assert_eq!(response.from_endpoint, scenario.responder_endpoint);
     assert_eq!(response.to_endpoint, scenario.initiator_endpoint);
-    assert_eq!(
-        response.responder_ephemeral_public_key,
-        crypto::x25519_public_key(&scenario.responder_ephemeral_private_key)
-    );
     assert_ne!(response.handshake_hash, [0u8; 32]);
     assert_ne!(response.connection_secret, [0u8; 32]);
+    assert_eq!(reader.join().expect("reader"), response_fact.bytes);
 }
 
 #[test]
 fn handler_rejects_request_addressed_to_a_different_endpoint() {
     let scenario = synthesize_scenario(SynthOpts {
         request_to_endpoint: Some(crypto::x25519_public_key(&[77u8; 32])),
-        ..SynthOpts::default()
+        request_return_addr: Some("127.0.0.1:41099".parse().expect("addr")),
     });
+    let store = test_store();
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(&scenario.endpoint))
+        .expect("seed local endpoint");
     let handler = CreateConnectionResponseHandler::new();
     let context = HandlerContext::with_facts([
         scenario.request_fact.clone(),
         scenario.invite_fact.clone(),
-        scenario.endpoint_fact.clone(),
-    ]);
+        scenario.receive_fact.clone(),
+    ])
+    .with_store(&store);
 
     let err = handler
         .handle(&scenario.intent, &context)
         .expect_err("handler rejects mismatched request");
     assert!(
-        err.contains("endpoint does not match request"),
+        err.contains("endpoint does not match request")
+            || err.contains("endpoint does not match receive"),
         "unexpected error: {err}"
     );
-}
-
-#[test]
-fn handler_stops_at_placeholder_ephemeral_sentinel_so_intent_stays_queued() {
-    let scenario = synthesize_scenario(SynthOpts {
-        zero_responder_ephemeral: true,
-        ..SynthOpts::default()
-    });
-    let handler = CreateConnectionResponseHandler::new();
-    let context = HandlerContext::with_facts([
-        scenario.request_fact.clone(),
-        scenario.invite_fact.clone(),
-        scenario.endpoint_fact.clone(),
-    ]);
-
-    let err = handler
-        .handle(&scenario.intent, &context)
-        .expect_err("placeholder ephemeral must keep the intent queued");
-    assert_eq!(err, DEPENDENCY_NOT_WIRED);
 }
 
 struct Scenario {
     request_fact: Fact,
     invite_fact: Fact,
-    endpoint_fact: Fact,
+    receive_fact: Fact,
     intent: topo::core::intents::Intent,
+    endpoint: EndpointFact,
     initiator_endpoint: [u8; 32],
     responder_endpoint: [u8; 32],
-    responder_ephemeral_private_key: [u8; 32],
+    received_at: u64,
 }
 
 #[derive(Default)]
 struct SynthOpts {
     request_to_endpoint: Option<[u8; 32]>,
-    zero_responder_ephemeral: bool,
+    request_return_addr: Option<std::net::SocketAddr>,
 }
 
 fn synthesize_scenario(opts: SynthOpts) -> Scenario {
@@ -116,11 +152,6 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
     let responder_endpoint = crypto::x25519_public_key(&responder_static);
     let initiator_ephemeral_private = [33u8; 32];
     let initiator_ephemeral_public = crypto::x25519_public_key(&initiator_ephemeral_private);
-    let responder_ephemeral_private = if opts.zero_responder_ephemeral {
-        [0u8; 32]
-    } else {
-        [44u8; 32]
-    };
 
     let bootstrap_secret = [55u8; 32];
     let invite = InviteSecretFact::new(bootstrap_secret)
@@ -139,13 +170,8 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         signing_public_key: crypto::ed25519_public_key(&signing_secret),
         signing_secret,
     };
-    let endpoint_fact = Fact::new(
-        FactScope::Local,
-        100,
-        endpoint_layout::encode_fact(&endpoint).expect("encode endpoint"),
-    );
 
-    let request = ConnectionRequestFact {
+    let mut request = ConnectionRequestFact {
         from_endpoint: initiator_endpoint,
         to_endpoint: opts.request_to_endpoint.unwrap_or(responder_endpoint),
         nonce: [77u8; 32],
@@ -155,36 +181,64 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         invite_secret_fact_id: invite_fact.id,
         initiator_ephemeral_secret_fact_id: [99u8; 32],
         initiator_ephemeral_public_key: initiator_ephemeral_public,
-        from_listen_addr: None,
+        from_listen_addr: opts.request_return_addr,
         to_listen_addr: None,
     };
+    request.invite_signature = crypto::ed25519_sign(
+        &invite.bootstrap_secret,
+        &topo::protocol::facts::connection::request::create::invite_signing_transcript(&request)
+            .expect("transcript"),
+    );
     let request_fact = Fact::new(
         FactScope::Global,
         100,
         request_layout::encode_fact(&request).expect("encode request"),
     );
 
-    let responder_ephemeral_secret_fact_id = if opts.zero_responder_ephemeral {
-        [0u8; 32]
-    } else {
-        *blake3::hash(&crypto::x25519_public_key(&responder_ephemeral_private)).as_bytes()
+    let received_at = 1_700_000_333;
+    let received = TransitReceivedFact {
+        received_fact_id: request_fact.id,
+        origin_addr: b"127.0.0.1:41001".to_vec(),
+        local_endpoint_id: request.to_endpoint,
+        sender_endpoint_id: request.from_endpoint,
+        transit_kind: TRANSIT_KIND_BOOTSTRAP,
+        connection_id: None,
+        request_id: Some(request_fact.id),
+        frame_hash: crypto::hash(&request_fact.bytes),
+        received_at_local_ms: received_at,
     };
+    let receive_fact = Fact::new(
+        FactScope::Local,
+        received_at,
+        received_layout::encode_fact(&received).expect("encode receive"),
+    );
 
     let intent = create_connection_response_intent(CreateConnectionResponse {
         request_id: request_fact.id,
         invite_secret_id: invite_fact.id,
-        local_endpoint_id: endpoint_fact.id,
-        responder_ephemeral_secret_fact_id,
-        responder_ephemeral_private_key: responder_ephemeral_private,
+        receive_id: receive_fact.id,
     });
 
     Scenario {
         request_fact,
         invite_fact,
-        endpoint_fact,
+        receive_fact,
         intent,
+        endpoint,
         initiator_endpoint,
         responder_endpoint,
-        responder_ephemeral_private_key: responder_ephemeral_private,
+        received_at,
     }
+}
+
+fn test_store() -> Store {
+    Store::open_memory_with_schema_sources_and_schemas(
+        &[
+            CORE_SCHEMA_SOURCE,
+            FACTS_SCHEMA_SOURCE,
+            INTENTS_SCHEMA_SOURCE,
+        ],
+        network_queues::SCHEMAS,
+    )
+    .expect("store")
 }

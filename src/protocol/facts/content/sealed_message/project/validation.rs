@@ -1,6 +1,6 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::projection::{MatchedContext, ProjectionContext};
+use crate::core::projection::ProjectionContext;
 use crate::protocol::facts::identity;
 
 use super::super::fact::{SealedMessageFact, SignerId};
@@ -89,43 +89,35 @@ pub(super) fn validate_deletion_context(
 
 pub(super) fn matched_secret_payload<'a>(
     context: &'a ProjectionContext,
-    need: &ContextNeed,
+    need: &'a ContextNeed,
 ) -> Result<Option<&'a Fact>, String> {
-    let mut payload = None;
-    for matched in context
-        .matched_context()
-        .iter()
-        .filter(|matched| matched.need == *need)
-    {
-        validate_secret_context(matched, need)?;
-        payload = Some(&matched.payload);
-        break;
+    for (offer, payload) in context.matched_payloads_for(need) {
+        validate_secret_context(offer, payload, need)?;
+        return Ok(Some(payload));
     }
-    Ok(payload)
+    Ok(None)
 }
 
-fn validate_secret_context(matched: &MatchedContext, need: &ContextNeed) -> Result<(), String> {
-    if matched.offer.payload_ref != matched.payload.id {
-        return Err("sealed-message secret context offer payload mismatch".to_string());
-    }
-    if !matchers::secret_offer_matches_need(need, &matched.offer) {
+fn validate_secret_context(
+    offer: &crate::core::context::ContextOffer,
+    payload: &Fact,
+    need: &ContextNeed,
+) -> Result<(), String> {
+    if !matchers::secret_offer_matches_need(need, offer) {
         return Err("sealed-message secret context offer does not match need".to_string());
     }
-    if let Ok(secret) = layout::decode_secret_node(matched.payload.body()) {
-        require_fact_scope(
-            &matched.payload,
-            &matchers::workspace_scope(secret.workspace_id),
-        )?;
-        let offer =
-            matchers::decode_secret_offer_selector(&matched.offer.selector).ok_or_else(|| {
+    if let Ok(secret) = layout::decode_secret_node(payload.body()) {
+        require_fact_scope(payload, &matchers::workspace_scope(secret.workspace_id))?;
+        let offer_selector =
+            matchers::decode_secret_offer_selector(&offer.selector).ok_or_else(|| {
                 "sealed-message secret context offer selector is malformed".to_string()
             })?;
-        if secret.workspace_id != offer.workspace_id
-            || secret.frontier_id != offer.frontier_id
-            || secret.start_minute != offer.start_minute
-            || secret.end_minute != offer.end_minute
-            || secret.prefix_bytes != offer.prefix_bytes
-            || secret.leaf_prefix != offer.leaf_prefix
+        if secret.workspace_id != offer_selector.workspace_id
+            || secret.frontier_id != offer_selector.frontier_id
+            || secret.start_minute != offer_selector.start_minute
+            || secret.end_minute != offer_selector.end_minute
+            || secret.prefix_bytes != offer_selector.prefix_bytes
+            || secret.leaf_prefix != offer_selector.leaf_prefix
         {
             return Err("sealed-message secret context payload does not match offer".to_string());
         }

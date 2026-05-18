@@ -11,8 +11,6 @@ use crate::protocol::facts::{connection, content, encryption, identity, sync, tr
 
 use super::frame;
 
-const RESPONDER_EPHEMERAL_DERIVATION: &[u8] = b"topo-bootstrap-responder-ephemeral-v1";
-
 #[derive(Debug, Clone)]
 pub struct OpenReceivedFrame<'a> {
     pub frame: &'a [u8],
@@ -40,8 +38,6 @@ pub struct OpenBootstrapRequest<'a> {
 #[derive(Debug, Clone)]
 pub struct OpenedBootstrapRequest {
     pub facts: Vec<Fact>,
-    pub response_bytes: Vec<u8>,
-    pub return_addr: std::net::SocketAddr,
 }
 
 #[derive(Debug, Clone)]
@@ -80,36 +76,9 @@ pub fn open_bootstrap_request(
     if input.local_endpoint.endpoint != request.to_endpoint {
         return Err("bootstrap request addressed to a different endpoint".to_string());
     }
-    let responder_private = deterministic_responder_ephemeral_private_key(
-        &input.local_endpoint.secret,
-        request_fact.id,
-    );
-    let responder_created_at_ms = deterministic_bootstrap_time_ms(request_fact.id);
-    let responder_ephemeral = connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact {
-        owner_endpoint: input.local_endpoint.endpoint,
-        ephemeral_private_key: responder_private,
-        ephemeral_public_key: crypto::x25519_public_key(&responder_private),
-        created_at_ms: responder_created_at_ms,
-    };
-    let responder_ephemeral_fact = Fact::new(
-        FactScope::Local,
-        responder_created_at_ms,
-        connection::ephemeral_secret::layout::encode_fact(&responder_ephemeral)?,
-    );
-    let built = connection::response::create::build_responder_response(
-        connection::response::create::BuildResponderResponse {
-            request_id: request_fact.id,
-            request: &request,
-            invite: &invite,
-            endpoint: input.local_endpoint,
-            responder_ephemeral_private_key: responder_private,
-            responder_ephemeral_secret_fact_id: responder_ephemeral_fact.id,
-            created_at_ms: input.received_at_local_ms,
-        },
-    )?;
-    let Some(return_addr) = request.from_listen_addr else {
+    if request.from_listen_addr.is_none() {
         return Err("bootstrap request did not advertise a return listener".to_string());
-    };
+    }
 
     let provenance = received_provenance_fact_for_kind(
         request_fact.id,
@@ -124,30 +93,8 @@ pub fn open_bootstrap_request(
     )?;
 
     Ok(OpenedBootstrapRequest {
-        facts: vec![
-            request_fact,
-            provenance,
-            responder_ephemeral_fact,
-            built.fact.clone(),
-        ],
-        response_bytes: built.fact.bytes,
-        return_addr,
+        facts: vec![request_fact, provenance],
     })
-}
-
-fn deterministic_responder_ephemeral_private_key(
-    local_endpoint_secret: &[u8; 32],
-    request_id: FactId,
-) -> [u8; 32] {
-    crypto::blake3_keyed_hash(
-        local_endpoint_secret,
-        RESPONDER_EPHEMERAL_DERIVATION,
-        &request_id,
-    )
-}
-
-fn deterministic_bootstrap_time_ms(request_id: FactId) -> u64 {
-    u64::from_be_bytes(request_id[0..8].try_into().unwrap())
 }
 
 pub fn open_bootstrap_response(input: OpenBootstrapResponse<'_>) -> Result<Vec<Fact>, String> {
@@ -590,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_bootstrap_request_delivery_reuses_responder_material() {
+    fn duplicate_bootstrap_request_delivery_emits_only_request_and_provenance() {
         let invite = InviteSecretFact::new([33; 32]);
         let invite_fact = Fact::new(
             FactScope::Local,
@@ -642,13 +589,19 @@ mod tests {
         })
         .expect("duplicate delivery");
 
-        assert_eq!(
-            first.response_bytes, second.response_bytes,
-            "duplicate bootstrap delivery must resend the same response, not mint another connection"
-        );
+        assert_eq!(first.facts.len(), 2);
+        assert_eq!(second.facts.len(), 2);
         let stable_first = non_provenance_fact_ids(&first.facts);
         let stable_second = non_provenance_fact_ids(&second.facts);
         assert_eq!(stable_first, stable_second);
+        assert_eq!(stable_first.len(), 1);
+        assert!(first.facts.iter().all(|fact| {
+            !matches!(
+                fact.body().first().copied(),
+                Some(connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
+                    | Some(connection::response::layout::TYPE_CONNECTION_RESPONSE)
+            )
+        }));
     }
 
     fn non_provenance_fact_ids(facts: &[Fact]) -> Vec<FactId> {

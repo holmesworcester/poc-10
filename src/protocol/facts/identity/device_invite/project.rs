@@ -141,7 +141,7 @@ fn validate_authority(
     if workspace_fact.id != invite.workspace_id {
         return Err("device_invite workspace context payload id mismatch".to_string());
     }
-    workspace_layout::decode_fact(&workspace_fact.bytes)
+    workspace_layout::decode_fact(workspace_fact.body())
         .map_err(|_| "device_invite workspace dependency is not a workspace".to_string())?;
 
     if invite.user_invite_fact_id.is_none() {
@@ -158,7 +158,7 @@ fn validate_authority(
     if user_fact.id != invite.user_authority_fact_id {
         return Err("device_invite user context payload id mismatch".to_string());
     }
-    let user_envelope = identity::signed_fact::layout::decode_signed_fact(&user_fact.bytes)
+    let user_envelope = identity::signed_fact::layout::decode_signed_fact(user_fact.body())
         .map_err(|_| "device_invite signer must be user or endpoint_shared".to_string())?;
     if user_envelope.inner_type != user_layout::TYPE_USER {
         return Err("device_invite signer must be user or endpoint_shared".to_string());
@@ -185,7 +185,7 @@ fn validate_authority(
         if invite_fact.id != user_invite_fact_id {
             return Err("device_invite user_invite context payload id mismatch".to_string());
         }
-        let invite_envelope = identity::signed_fact::layout::decode_signed_fact(&invite_fact.bytes)
+        let invite_envelope = identity::signed_fact::layout::decode_signed_fact(invite_fact.body())
             .map_err(|_| {
                 "device_invite user_invite context is not a user_invite fact".to_string()
             })?;
@@ -218,7 +218,7 @@ fn validate_endpoint_shared_authority(
     if signer_fact.id != envelope.signer_id {
         return Err("device_invite endpoint_shared context payload id mismatch".to_string());
     }
-    let signer_envelope = identity::signed_fact::layout::decode_signed_fact(&signer_fact.bytes)
+    let signer_envelope = identity::signed_fact::layout::decode_signed_fact(signer_fact.body())
         .map_err(|_| "device_invite signer must be user or endpoint_shared".to_string())?;
     if signer_envelope.inner_type != endpoint_shared_layout::TYPE_ENDPOINT_SHARED {
         return Err("device_invite signer must be user or endpoint_shared".to_string());

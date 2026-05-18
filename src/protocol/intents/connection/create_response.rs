@@ -1,31 +1,23 @@
 //! Target create_connection_response handler.
 //!
 //! Drives the responder side of the connection handshake: given a validated
-//! inbound connection request fact and the local responder material, produce
-//! the canonical connection response fact using the legacy native key
+//! inbound connection request fact, invite secret, receive provenance, and the
+//! local endpoint capability, create fresh responder ephemeral material and
+//! produce the canonical connection response fact using the legacy native key
 //! schedule (DH(eph_r, eph_i), DH(static_r, eph_i), invite bootstrap secret,
-//! transcript-bound HKDF). The fact is then admitted through the usual fact
-//! pipeline; transit framing belongs to the transport handler lane and is not
-//! produced here.
+//! transcript-bound HKDF). The response bytes are sent back over the bootstrap
+//! return route; the emitted facts are admitted through the usual fact pipeline.
 
 //! Intent codec for the target `create_connection_response` handler.
 //!
-//! Payload layout (fixed-width, length-prefix style with each id explicitly
-//! tagged by position): five 32-byte fields concatenated in order:
+//! Payload layout (fixed-width, with each id explicitly tagged by position):
+//! three 32-byte fields concatenated in order:
 //!
 //! 1. `request_id` — fact id of the inbound connection request fact.
 //! 2. `invite_secret_id` — fact id of the local `invite_secret` fact whose
 //!    `bootstrap_hash` matches the request.
-//! 3. `local_endpoint_id` — fact id of the local `endpoint` fact (carries the
-//!    responder static x25519 secret).
-//! 4. `responder_ephemeral_secret_fact_id` — id pinned into the response so
-//!    downstream replays can locate the ephemeral. Wave-local responder
-//!    ephemeral facts are not yet emitted; callers may pass the hash of the
-//!    ephemeral public key as a stable stand-in until the ephemeral fact
-//!    lane lands.
-//! 5. `responder_ephemeral_private_key` — x25519 private key bytes for the
-//!    responder ephemeral. Threaded inline because the target tree has no
-//!    connection ephemeral-secret fact yet.
+//! 3. `receive_id` — fact id of the `transport::transit_received`
+//!    provenance fact proving the request was observed locally.
 //!
 //! This module intentionally does not pull in the core wire vocabulary:
 //! the layout is a simple concatenation of fixed-width 32-byte ids.
@@ -39,16 +31,14 @@ pub type FactId = [u8; 32];
 pub const CREATE_CONNECTION_RESPONSE: &str = "create_connection_response";
 
 const FIELD_BYTES: usize = 32;
-const FIELD_COUNT: usize = 5;
+const FIELD_COUNT: usize = 3;
 const PAYLOAD_BYTES: usize = FIELD_BYTES * FIELD_COUNT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateConnectionResponse {
     pub request_id: FactId,
     pub invite_secret_id: FactId,
-    pub local_endpoint_id: FactId,
-    pub responder_ephemeral_secret_fact_id: FactId,
-    pub responder_ephemeral_private_key: [u8; 32],
+    pub receive_id: FactId,
 }
 
 pub fn create_connection_response_intent(input: CreateConnectionResponse) -> Intent {
@@ -78,9 +68,7 @@ pub fn decode_create_connection_response_intent(
     let input = CreateConnectionResponse {
         request_id: take_id(&intent.payload, 0),
         invite_secret_id: take_id(&intent.payload, 1),
-        local_endpoint_id: take_id(&intent.payload, 2),
-        responder_ephemeral_secret_fact_id: take_id(&intent.payload, 3),
-        responder_ephemeral_private_key: take_id(&intent.payload, 4),
+        receive_id: take_id(&intent.payload, 2),
     };
     if intent.key != idempotence_key(&input) {
         return Err(
@@ -94,23 +82,17 @@ fn encode_payload(input: &CreateConnectionResponse) -> Vec<u8> {
     let mut out = vec![0u8; PAYLOAD_BYTES];
     out[0..32].copy_from_slice(&input.request_id);
     out[32..64].copy_from_slice(&input.invite_secret_id);
-    out[64..96].copy_from_slice(&input.local_endpoint_id);
-    out[96..128].copy_from_slice(&input.responder_ephemeral_secret_fact_id);
-    out[128..160].copy_from_slice(&input.responder_ephemeral_private_key);
+    out[64..96].copy_from_slice(&input.receive_id);
     out
 }
 
 fn idempotence_key(input: &CreateConnectionResponse) -> Vec<u8> {
-    // Idempotence key binds the request + responder ephemeral commitment so
-    // repeated submissions for the same request and ephemeral collapse, while
-    // a different responder ephemeral produces a distinct intent.
+    // The request fact id is the bootstrap-response unit of work. Duplicate
+    // deliveries may produce different provenance fact ids, but only one
+    // response should be created for a request.
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"topo:create-connection-response-intent:v1:");
     hasher.update(&input.request_id);
-    hasher.update(&input.invite_secret_id);
-    hasher.update(&input.local_endpoint_id);
-    hasher.update(&input.responder_ephemeral_secret_fact_id);
-    hasher.update(&input.responder_ephemeral_private_key);
     hasher.finalize().as_bytes().to_vec()
 }
 
@@ -129,9 +111,7 @@ mod tests {
         CreateConnectionResponse {
             request_id: [1; 32],
             invite_secret_id: [2; 32],
-            local_endpoint_id: [3; 32],
-            responder_ephemeral_secret_fact_id: [4; 32],
-            responder_ephemeral_private_key: [5; 32],
+            receive_id: [3; 32],
         }
     }
 
@@ -162,33 +142,48 @@ mod tests {
         intent.execution = IntentExecution::Atomic;
         assert!(decode_create_connection_response_intent(&intent).is_err());
     }
+
+    #[test]
+    fn idempotence_key_is_request_scoped() {
+        let mut duplicate_receive = sample();
+        duplicate_receive.receive_id = [9; 32];
+
+        assert_eq!(
+            create_connection_response_intent(sample()).key,
+            create_connection_response_intent(duplicate_receive).key
+        );
+    }
 }
 
 // Handler for the target `create_connection_response` handler.
 //
 // The handler decodes its intent, loads the three dependency facts (the
 // inbound connection request, the local invite secret it matches, and the
-// local endpoint that owns the responder static material), runs the
-// cross-checks that depend on those decoded shapes, and then delegates
-// the actual handshake key schedule plus response-fact construction to
-// `facts::connection::response::create`. The cleanliness guardrail
-// keeps fact construction and AEAD / HKDF helpers under
-// `src/protocol/facts/`; the handler stays a bounded effect that wires
-// intent dispatch to the constructor.
+// receive-provenance fact), reloads the local endpoint capability from the
+// store, and runs the cross-checks that depend on those decoded shapes. It then
+// delegates the handshake key schedule plus response-fact construction to
+// `facts::connection::response::create`. The cleanliness guardrail keeps fact
+// construction and AEAD / HKDF helpers under `src/protocol/facts/`; the handler
+// stays a bounded effect that wires intent dispatch to the constructor.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::crypto;
+use crate::core::facts::{Fact, FactScope};
+use crate::core::handler_dispatch::{
+    retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
+};
+use crate::core::network_queues::{NetworkTarget, OutboundNetworkRow};
+use crate::core::tcp;
+use crate::protocol::facts::connection::ephemeral_secret::{
+    fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
+};
+use crate::protocol::facts::connection::request::create as request_create;
 use crate::protocol::facts::connection::request::layout as request_layout;
 use crate::protocol::facts::connection::response::create::{
     build_responder_response, BuildResponderResponse,
 };
-use crate::protocol::facts::identity::endpoint::layout as endpoint_layout;
+use crate::protocol::facts::identity::endpoint::local_endpoint;
 use crate::protocol::facts::identity::invite::layout as invite_layout;
-
-/// Sentinel returned when the intent carries a zero responder ephemeral
-/// (the stand-in caller signal for "I have no ephemeral fact yet"). Real
-/// connection ephemeral-secret facts have to flow through before the
-/// handler can compute the response.
-pub const DEPENDENCY_NOT_WIRED: &str = "create_connection_response_dependency_not_wired";
+use crate::protocol::facts::transport::transit_received;
 
 #[derive(Debug, Clone, Default)]
 pub struct CreateConnectionResponseHandler;
@@ -209,7 +204,7 @@ impl IntentHandler for CreateConnectionResponseHandler {
         Ok(vec![
             input.request_id,
             input.invite_secret_id,
-            input.local_endpoint_id,
+            input.receive_id,
         ])
     }
 
@@ -217,33 +212,99 @@ impl IntentHandler for CreateConnectionResponseHandler {
         let input = decode_create_connection_response_intent(intent)?;
         let request_fact = context.require_fact(&input.request_id)?;
         let invite_fact = context.require_fact(&input.invite_secret_id)?;
-        let endpoint_fact = context.require_fact(&input.local_endpoint_id)?;
+        let receive_fact = context.require_fact(&input.receive_id)?;
 
         let request = request_layout::decode_fact(request_fact.body())?;
         let invite = invite_layout::decode_fact(&invite_fact.bytes)?;
-        let endpoint = endpoint_layout::decode_fact(&endpoint_fact.bytes)?;
+        let received =
+            transit_received::decode_fact_payload(receive_fact.body()).map_err(|_| {
+                "create_connection_response receive context is not transport::transit provenance"
+                    .to_string()
+            })?;
 
-        if invite.bootstrap_hash != request.bootstrap_hash {
-            return Err("create_connection_response invite does not match request".to_string());
+        if request.invite_secret_fact_id != input.invite_secret_id {
+            return Err(
+                "create_connection_response invite context id does not match request".to_string(),
+            );
         }
-        if endpoint.endpoint != request.to_endpoint {
+        if invite_fact.scope != FactScope::Local {
+            return Err("create_connection_response invite context must be local".to_string());
+        }
+        if receive_fact.scope != FactScope::Local {
+            return Err("create_connection_response receive context must be local".to_string());
+        }
+        request_create::validate_invite_signature(&request, &invite)?;
+        validate_receive_provenance(input.request_id, &request, &received)?;
+        let endpoint = local_endpoint::local_endpoint(context.store()?)?.ok_or_else(|| {
+            "create_connection_response requires local endpoint state".to_string()
+        })?;
+        if endpoint.endpoint != request.to_endpoint
+            || endpoint.endpoint != received.local_endpoint_id
+        {
             return Err("create_connection_response endpoint does not match request".to_string());
         }
-        if input.responder_ephemeral_private_key == [0u8; 32]
-            && input.responder_ephemeral_secret_fact_id == [0u8; 32]
-        {
-            return Err(DEPENDENCY_NOT_WIRED.to_string());
-        }
+
+        let responder_ephemeral_private_key = crypto::random_x25519_private_key();
+        let responder_ephemeral = ConnectionEphemeralSecretFact {
+            owner_endpoint: endpoint.endpoint,
+            ephemeral_private_key: responder_ephemeral_private_key,
+            ephemeral_public_key: crypto::x25519_public_key(&responder_ephemeral_private_key),
+            created_at_ms: received.received_at_local_ms,
+        };
+        let responder_ephemeral_fact = Fact::new(
+            FactScope::Local,
+            received.received_at_local_ms,
+            ephemeral_layout::encode_fact(&responder_ephemeral)?,
+        );
 
         let built = build_responder_response(BuildResponderResponse {
             request_id: input.request_id,
             request: &request,
             invite: &invite,
             endpoint: &endpoint,
-            responder_ephemeral_private_key: input.responder_ephemeral_private_key,
-            responder_ephemeral_secret_fact_id: input.responder_ephemeral_secret_fact_id,
-            created_at_ms: request_fact.timestamp,
+            responder_ephemeral_private_key,
+            responder_ephemeral_secret_fact_id: responder_ephemeral_fact.id,
+            created_at_ms: received.received_at_local_ms,
         })?;
-        Ok(HandlerOutput::new().fact(built.fact))
+        let return_addr = request
+            .from_listen_addr
+            .ok_or_else(|| "create_connection_response response route is missing".to_string())?;
+        let target = NetworkTarget::new(return_addr);
+        let row = OutboundNetworkRow::new(target, built.fact.bytes.clone());
+        tcp::send_once(context.store()?, target, vec![row], (), |_, _| Ok(()))
+            .map_err(|err| retry_intent(format!("create_connection_response tcp send: {err}")))?;
+
+        Ok(HandlerOutput::new()
+            .fact(responder_ephemeral_fact)
+            .fact(built.fact))
     }
+}
+
+fn validate_receive_provenance(
+    request_id: [u8; 32],
+    request: &crate::protocol::facts::connection::request::fact::ConnectionRequestFact,
+    received: &crate::protocol::facts::transport::transit_received::fact::TransitReceivedFact,
+) -> Result<(), String> {
+    if received.received_fact_id != request_id {
+        return Err("create_connection_response receive context targets another fact".to_string());
+    }
+    if received.transit_kind
+        != crate::protocol::facts::transport::transit_received::fact::TRANSIT_KIND_BOOTSTRAP
+    {
+        return Err("create_connection_response requires bootstrap receive provenance".to_string());
+    }
+    if received.local_endpoint_id != request.to_endpoint {
+        return Err(
+            "create_connection_response request endpoint does not match receive".to_string(),
+        );
+    }
+    if received.sender_endpoint_id != request.from_endpoint {
+        return Err("create_connection_response sender does not match receive".to_string());
+    }
+    if received.request_id != Some(request_id) {
+        return Err(
+            "create_connection_response receive provenance names another request".to_string(),
+        );
+    }
+    Ok(())
 }

@@ -57,7 +57,7 @@ impl Projector for InviteAcceptedProjector {
         if secret_fact.scope != FactScope::Local {
             return Err("invite_accepted invite_secret context must be local".to_string());
         }
-        let secret = invite_layout::decode_fact(&secret_fact.bytes)
+        let secret = invite_layout::decode_fact(secret_fact.body())
             .map_err(|_| "invite_accepted dependency is not an invite_secret fact".to_string())?;
         if secret.bootstrap_hash != accepted.bootstrap_hash {
             return Err("invite_accepted bootstrap hash does not match invite_secret".to_string());

@@ -624,6 +624,12 @@ emitted and returns `matched.payload`. It does not query the store, run matcher
 logic, or decide authorization; core already built the context from matched
 needs/offers before invoking the projector.
 
+When a projector needs offer metadata as well as the fact payload, it should use
+`matched_payloads_for(&need)` so the lookup is still anchored to the concrete
+`ContextNeed`. Direct `matched_context()` iteration bypasses the typed/indexed
+context surface and is allowed only as an explicitly documented compatibility
+exception.
+
 The `waiting` output is not a blocked state. It is the fact's current standing
 context surface. If either matching offer already exists from an earlier pass,
 the matcher will wake this fact and core will supply that matched context on
@@ -660,8 +666,10 @@ When translating a legacy projector into the target tree:
 2. For each requirement, inspect supplied ProjectionContext first. If matched
    context is absent, emit a stable target ContextNeed unless the fact is
    local-only or truly dependency-free.
-3. Decode matched context inside the target projector and re-check type, scope,
-   workspace, signer/author authority, and endpoint role before writing rows.
+3. Retrieve matched context through `payload_for`, `payload_for_checked`, or
+   `matched_payloads_for` for the exact need; then decode and re-check type,
+   scope, workspace, signer/author authority, and endpoint role before writing
+   rows.
 4. Emit ContextOffers only after the fact is valid context for that role.
 5. If required context is missing, return stable needs and no materialized rows
    or intents for that branch.

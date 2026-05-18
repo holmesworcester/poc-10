@@ -128,7 +128,7 @@ fn validate_authority(
         if workspace_fact.id != invite.workspace_id {
             return Err("invite_server workspace context payload id mismatch".to_string());
         }
-        let workspace = workspace_layout::decode_fact(&workspace_fact.bytes)
+        let workspace = workspace_layout::decode_fact(workspace_fact.body())
             .map_err(|_| "invite_server authority is not a workspace fact".to_string())?;
         if workspace.public_key != envelope.signer_public_key {
             return Err(
@@ -144,7 +144,7 @@ fn validate_authority(
     if endpoint_fact.id != envelope.signer_id {
         return Err("invite_server signer endpoint context payload id mismatch".to_string());
     }
-    let endpoint_envelope = identity::signed_fact::layout::decode_signed_fact(&endpoint_fact.bytes)
+    let endpoint_envelope = identity::signed_fact::layout::decode_signed_fact(endpoint_fact.body())
         .map_err(|_| "invite_server signer must be workspace or endpoint_shared".to_string())?;
     if endpoint_envelope.inner_type != endpoint_shared_layout::TYPE_ENDPOINT_SHARED {
         return Err("invite_server signer must be workspace or endpoint_shared".to_string());

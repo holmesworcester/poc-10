@@ -73,6 +73,9 @@ Reviewer instructions:
   offers/intents.
 - [ ] A projector that needs another fact emits a `ContextNeed` and returns
   without materializing state until matching context is supplied.
+- [ ] Projectors inspect context through typed/indexed `ProjectionContext`
+  lookups (`payload_for`, `payload_for_checked`, or `matched_payloads_for`),
+  not ad hoc `matched_context()` scans.
 - [ ] A projector that can be re-run by later updates keeps standing needs for
   those updates.
 - [ ] Projectors never query SQLite directly and never call handlers, workers,

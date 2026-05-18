@@ -127,7 +127,7 @@ fn validate_authority(
     if workspace_fact.id != admin.workspace_id {
         return Err("admin workspace context payload id mismatch".to_string());
     }
-    let workspace = workspace_layout::decode_fact(&workspace_fact.bytes)
+    let workspace = workspace_layout::decode_fact(workspace_fact.body())
         .map_err(|_| "admin workspace dependency must be a workspace fact".to_string())?;
 
     if admin.authority_fact_id == admin.workspace_id {

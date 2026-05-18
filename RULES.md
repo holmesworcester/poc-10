@@ -57,6 +57,11 @@ is fully cut over to the target model.
 - A projector that cannot proceed emits a standing context need. A projector
   that learns useful context emits an offer. Missing context is not a separate
   "blocked" state in target code.
+- Projectors look up matched context by the concrete `ContextNeed` they just
+  constructed, using `ProjectionContext::payload_for`,
+  `payload_for_checked`, or `matched_payloads_for`. Direct
+  `matched_context()` scans are exceptional compatibility code and must be
+  explicitly justified by a guardrail allowlist.
 - Deletion, supersession, receive provenance, key availability, and dependency
   availability are context offers or facts, not labels or side channels.
 

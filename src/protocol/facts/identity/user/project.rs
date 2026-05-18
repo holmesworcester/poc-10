@@ -58,7 +58,7 @@ impl Projector for UserProjector {
         if invite_fact.id != envelope.signer_id {
             return Err("user signer context payload id mismatch".to_string());
         }
-        let invite_envelope = identity::signed_fact::layout::decode_signed_fact(&invite_fact.bytes)
+        let invite_envelope = identity::signed_fact::layout::decode_signed_fact(invite_fact.body())
             .map_err(|_| "user signer context must be a signed user_invite fact".to_string())?;
         if invite_envelope.inner_type != user_invite_layout::TYPE_USER_INVITE {
             return Err("user signer context must be a signed user_invite fact".to_string());

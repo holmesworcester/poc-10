@@ -93,6 +93,22 @@ fn strip_line_comments(text: &str) -> String {
         .join("\n")
 }
 
+fn projector_implementation_files(root: &Path) -> Vec<PathBuf> {
+    let facts_root = root.join("src/protocol/facts");
+    rust_files(&facts_root)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|file_name| file_name == "project.rs")
+                || path
+                    .strip_prefix(&facts_root)
+                    .expect("protocol fact file")
+                    .components()
+                    .any(|component| component.as_os_str() == "project")
+        })
+        .collect()
+}
+
 fn contains_context_matcher_logic(text: &str) -> bool {
     let production = strip_line_comments(production_text_before_unit_tests(text));
     [
@@ -200,7 +216,7 @@ fn purge_deleted_message_handler_must_be_real_retention_work_when_it_exists() {
 fn target_projectors_stay_pure_context_to_intents() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
+    for path in projector_implementation_files(root) {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
@@ -229,6 +245,41 @@ fn target_projectors_stay_pure_context_to_intents() {
         offenders.is_empty(),
         "target projectors must stay pure fact+context -> needs/offers/intents:\n{}",
         offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_projectors_use_typed_context_lookups_not_direct_match_scans() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let allowed_direct_scans: [&str; 0] = [];
+    let mut offenders = Vec::new();
+    let mut seen_allowed = BTreeSet::new();
+
+    for path in projector_implementation_files(root) {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        if !production.contains("matched_context") {
+            continue;
+        }
+
+        if allowed_direct_scans.contains(&relative.as_str()) {
+            seen_allowed.insert(relative);
+        } else {
+            offenders.push(relative);
+        }
+    }
+
+    let stale_allowlist = allowed_direct_scans
+        .into_iter()
+        .filter(|path| !seen_allowed.contains(*path))
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty() && stale_allowlist.is_empty(),
+        "source projectors must look up context by concrete ContextNeed with ProjectionContext::payload_for, payload_for_checked, or matched_payloads_for. Direct matched_context scans are exceptional and must not spread.\nnew offenders:\n{}\nstale allowlist entries to remove:\n{}",
+        offenders.join("\n"),
+        stale_allowlist.join("\n")
     );
 }
 

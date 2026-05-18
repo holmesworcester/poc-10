@@ -113,7 +113,7 @@ fn has_valid_authority(
     }
     if event.endpoint_role == EndpointRole::Device {
         let invite_envelope = identity::signed_fact::layout::decode_signed_fact(
-            &authority_fact.bytes,
+            authority_fact.body(),
         )
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
         if invite_envelope.inner_type != device_invite_layout::TYPE_DEVICE_INVITE {
@@ -136,7 +136,7 @@ fn has_valid_authority(
         return Ok(true);
     }
 
-    let invite_envelope = identity::signed_fact::layout::decode_signed_fact(&authority_fact.bytes)
+    let invite_envelope = identity::signed_fact::layout::decode_signed_fact(authority_fact.body())
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
     if invite_envelope.inner_type != invite_server_layout::TYPE_INVITE_SERVER {
         return Err("endpoint_shared dependency is not a signed endpoint invite".to_string());

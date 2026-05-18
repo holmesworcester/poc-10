@@ -5,11 +5,13 @@ use crate::core::context::{
 };
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::Intent;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionContext {
     offers: Vec<ContextOffer>,
     matched: Vec<MatchedContext>,
+    matched_by_need: BTreeMap<ContextNeed, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +26,7 @@ impl ProjectionContext {
         Self {
             offers,
             matched: Vec::new(),
+            matched_by_need: BTreeMap::new(),
         }
     }
 
@@ -34,7 +37,12 @@ impl ProjectionContext {
             .collect::<Vec<_>>();
         offers.sort();
         offers.dedup();
-        Self { offers, matched }
+        let matched_by_need = index_matches_by_need(&matched);
+        Self {
+            offers,
+            matched,
+            matched_by_need,
+        }
     }
 
     pub fn offers(&self) -> &[ContextOffer] {
@@ -50,9 +58,8 @@ impl ProjectionContext {
     /// This is a lookup over context core already matched and loaded before
     /// projection. It does not query storage or run matcher logic.
     pub fn payload_for(&self, need: &ContextNeed) -> Option<&Fact> {
-        self.matched
-            .iter()
-            .find(|matched| matched.need == *need)
+        self.matched_entries_for(need)
+            .next()
             .map(|matched| &matched.payload)
     }
 
@@ -61,7 +68,7 @@ impl ProjectionContext {
         need: &ContextNeed,
         label: &str,
     ) -> Result<Option<&Fact>, String> {
-        let Some(matched) = self.matched.iter().find(|matched| matched.need == *need) else {
+        let Some(matched) = self.matched_entries_for(need).next() else {
             return Ok(None);
         };
         if matched.offer.payload_ref != matched.payload.id {
@@ -74,9 +81,7 @@ impl ProjectionContext {
         &'a self,
         need: &'a ContextNeed,
     ) -> impl Iterator<Item = (&'a ContextOffer, &'a Fact)> + 'a {
-        self.matched
-            .iter()
-            .filter(move |matched| matched.need == *need)
+        self.matched_entries_for(need)
             .map(|matched| (&matched.offer, &matched.payload))
     }
 
@@ -101,6 +106,27 @@ impl ProjectionContext {
     pub fn payload_facts(&self) -> impl Iterator<Item = &Fact> + '_ {
         self.matched.iter().map(|matched| &matched.payload)
     }
+
+    fn matched_entries_for<'a>(
+        &'a self,
+        need: &ContextNeed,
+    ) -> impl Iterator<Item = &'a MatchedContext> + 'a {
+        self.matched_by_need
+            .get(need)
+            .into_iter()
+            .flat_map(|indexes| indexes.iter().map(|index| &self.matched[*index]))
+    }
+}
+
+fn index_matches_by_need(matched: &[MatchedContext]) -> BTreeMap<ContextNeed, Vec<usize>> {
+    let mut matched_by_need = BTreeMap::<ContextNeed, Vec<usize>>::new();
+    for (index, matched) in matched.iter().enumerate() {
+        matched_by_need
+            .entry(matched.need.clone())
+            .or_default()
+            .push(index);
+    }
+    matched_by_need
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -231,6 +257,41 @@ mod tests {
     }
 
     #[test]
+    fn projection_context_indexes_matched_payloads_by_need() {
+        let role = Role::new("exact").unwrap();
+        let need_a = ContextNeed {
+            owner: [1; 32],
+            role: role.clone(),
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([10; 32]),
+        };
+        let need_b = ContextNeed {
+            owner: [2; 32],
+            role: role.clone(),
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([20; 32]),
+        };
+        let context = ProjectionContext::from_matches(vec![
+            matched_context(need_a.clone(), [11; 32]),
+            matched_context(need_b.clone(), [22; 32]),
+            matched_context(need_a.clone(), [33; 32]),
+        ]);
+
+        assert_eq!(context.matched_by_need.get(&need_a), Some(&vec![0, 2]));
+        assert_eq!(context.matched_by_need.get(&need_b), Some(&vec![1]));
+
+        let payload_ids = context
+            .matched_payloads_for(&need_a)
+            .map(|(_offer, payload)| payload.id)
+            .collect::<Vec<_>>();
+        assert_eq!(payload_ids, vec![[11; 32], [33; 32]]);
+        assert_eq!(
+            context.payload_for(&need_b).map(|payload| payload.id),
+            Some([22; 32])
+        );
+    }
+
+    #[test]
     fn projection_run_diffs_standing_context_without_self_waking() {
         let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
         let role = Role::new("exact").unwrap();
@@ -288,6 +349,26 @@ mod tests {
         role: Role,
         selector: Selector,
         intent_kind: IntentKind,
+    }
+
+    fn matched_context(need: ContextNeed, payload_id: FactId) -> MatchedContext {
+        let payload = Fact {
+            id: payload_id,
+            scope: need.scope.clone(),
+            timestamp: 1,
+            bytes: payload_id.to_vec(),
+        };
+        MatchedContext {
+            offer: ContextOffer {
+                owner: payload_id,
+                role: need.role.clone(),
+                scope: need.scope.clone(),
+                selector: need.selector.clone(),
+                payload_ref: payload_id,
+            },
+            need,
+            payload,
+        }
     }
 
     impl Projector for NeedUntilOffer {

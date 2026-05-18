@@ -136,8 +136,6 @@ impl<'a> Reader<'a> {
 // core should admit.
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
-use crate::core::network_queues::{NetworkTarget, OutboundNetworkRow};
-use crate::core::tcp;
 use crate::protocol::facts::{
     identity::endpoint,
     transport::transit::{
@@ -196,9 +194,6 @@ impl IntentHandler for ReceiveTransitFrameHandler {
                     origin_addr: &input.origin_addr,
                     received_at_local_ms: input.received_at_local_ms,
                 })?;
-                let target = NetworkTarget::new(opened.return_addr);
-                let row = OutboundNetworkRow::new(target, opened.response_bytes);
-                tcp::send_once(context.store()?, target, vec![row], (), |_, _| Ok(()))?;
                 opened.facts
             }
             BootstrapFrameKind::ConnectionResponse(_) => {

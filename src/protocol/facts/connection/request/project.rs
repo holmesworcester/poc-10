@@ -4,7 +4,9 @@
 //! branches validate the canonical body and exact invite-secret context first.
 //! Local requests additionally require the named local initiator ephemeral
 //! secret; received requests require exact transport::transit receive provenance instead.
-//! Network attempt/response effects stay in handlers.
+//! Once a received request has both pieces of context, projection emits a
+//! request-scoped deferred response intent. Network attempt/response effects
+//! stay in handlers.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
@@ -14,6 +16,9 @@ use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::connection::ephemeral_secret::layout as ephemeral_layout;
 use crate::protocol::facts::identity::invite;
 use crate::protocol::facts::transport::transit_received;
+use crate::protocol::intents::connection::create_response::{
+    create_connection_response_intent, CreateConnectionResponse,
+};
 use crate::protocol::matchers;
 use crate::protocol::matchers as ephemeral_matchers;
 use crate::protocol::matchers as receive_matchers;
@@ -94,7 +99,11 @@ impl Projector for ConnectionRequestProjector {
         }
 
         let receive_need = receive_matchers::transit_received_need(fact.id, fact.id);
-        let Some(receive) = projection_context.payload_for(&receive_need) else {
+        let Some(receive) = projection_context
+            .matched_payloads_for(&receive_need)
+            .map(|(_, fact)| fact)
+            .min_by_key(|fact| fact.id)
+        else {
             return Ok(waiting_output([invite_need, receive_need]));
         };
         if receive.scope != FactScope::Local {
@@ -124,8 +133,11 @@ impl Projector for ConnectionRequestProjector {
                 );
             }
         }
+        if request.from_listen_addr.is_none() {
+            return Err("connection request bootstrap response route is missing".to_string());
+        }
 
-        materialized_output(fact.id, &request)
+        received_materialized_output(fact.id, &request, receive.id)
     }
 }
 
@@ -165,6 +177,22 @@ fn materialized_output(
     Ok(ProjectionOutput::new()
         .offer(matchers::connection_request_offer(request_id, request_id))
         .intent(AtomicIntent::PutRow(connection_request_row(request_id, request)?).into_intent()))
+}
+
+fn received_materialized_output(
+    request_id: [u8; 32],
+    request: &ConnectionRequestFact,
+    receive_id: [u8; 32],
+) -> Result<ProjectionOutput, String> {
+    Ok(
+        materialized_output(request_id, request)?.intent(create_connection_response_intent(
+            CreateConnectionResponse {
+                request_id,
+                invite_secret_id: request.invite_secret_fact_id,
+                receive_id,
+            },
+        )),
+    )
 }
 
 fn waiting_output<const N: usize>(
@@ -237,6 +265,9 @@ mod projector_tests {
         fact::{TransitReceivedFact, TRANSIT_KIND_BOOTSTRAP},
         layout as received_layout,
     };
+    use topo::protocol::intents::connection::create_response::{
+        decode_create_connection_response_intent, CREATE_CONNECTION_RESPONSE,
+    };
     use topo::protocol::matchers as ephemeral_matchers;
     use topo::protocol::matchers as received_matchers;
     use topo::protocol::matchers as request_matchers;
@@ -280,7 +311,7 @@ mod projector_tests {
             invite_secret_fact_id: invite_fact.id,
             initiator_ephemeral_secret_fact_id: ephemeral_fact.id,
             initiator_ephemeral_public_key: ephemeral.ephemeral_public_key,
-            from_listen_addr: None,
+            from_listen_addr: Some("127.0.0.1:41001".parse().expect("listen addr")),
             to_listen_addr: None,
         };
         request.invite_signature = crypto::ed25519_sign(
@@ -320,6 +351,7 @@ mod projector_tests {
         owner: [u8; 32],
         request: &ConnectionRequestFact,
         request_id: [u8; 32],
+        received_at_local_ms: u64,
     ) -> MatchedContext {
         let received = TransitReceivedFact {
             received_fact_id: request_id,
@@ -330,7 +362,7 @@ mod projector_tests {
             connection_id: None,
             request_id: Some(request_id),
             frame_hash: [9; 32],
-            received_at_local_ms: 1_700_000_000,
+            received_at_local_ms,
         };
         let fact = Fact::new(
             FactScope::Local,
@@ -427,17 +459,51 @@ mod projector_tests {
         let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
         let context = ProjectionContext::from_matches(vec![
             invite_match(request_fact.id, invite_fact),
-            receive_match(request_fact.id, &request, request_fact.id),
+            receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
         ]);
 
         let output = project::ConnectionRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project received request");
 
-        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.intents.len(), 2);
         assert_eq!(
             output.offers[0].role.as_str(),
             request_matchers::CONNECTION_REQUEST_ROLE
+        );
+        let response_intent = output
+            .intents
+            .iter()
+            .find(|intent| intent.kind.as_str() == CREATE_CONNECTION_RESPONSE)
+            .expect("create response intent");
+        let decoded =
+            decode_create_connection_response_intent(response_intent).expect("decode intent");
+        assert_eq!(decoded.request_id, request_fact.id);
+        assert_eq!(decoded.invite_secret_id, request.invite_secret_fact_id);
+    }
+
+    #[test]
+    fn received_request_duplicate_provenance_emits_one_response_intent() {
+        let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
+            receive_match(request_fact.id, &request, request_fact.id, 1_700_000_250),
+        ]);
+
+        let output = project::ConnectionRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project received request");
+
+        let response_intents = output
+            .intents
+            .iter()
+            .filter(|intent| intent.kind.as_str() == CREATE_CONNECTION_RESPONSE)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            response_intents.len(),
+            1,
+            "duplicate receive provenance for one request must collapse to one response intent"
         );
     }
 

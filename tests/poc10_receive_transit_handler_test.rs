@@ -3,8 +3,12 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
+use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
 use topo::core::wire::FixedBytes;
+use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
+use topo::protocol::facts::connection::request::layout as connection_request_layout;
 use topo::protocol::facts::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::facts::connection::response::layout as connection_response_layout;
 use topo::protocol::facts::encryption::fact::{
@@ -12,6 +16,10 @@ use topo::protocol::facts::encryption::fact::{
 };
 use topo::protocol::facts::encryption::{create as encryption_create, layout as encryption_layout};
 use topo::protocol::facts::identity;
+use topo::protocol::facts::identity::endpoint::fact::EndpointFact;
+use topo::protocol::facts::identity::endpoint::rows as endpoint_rows;
+use topo::protocol::facts::identity::invite::fact::InviteSecretFact;
+use topo::protocol::facts::identity::invite::layout as invite_layout;
 use topo::protocol::facts::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 use topo::protocol::facts::sync::compare::layout as sync_compare_layout;
 use topo::protocol::facts::transport;
@@ -104,6 +112,74 @@ fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionResponseFact, Vec<u8>) {
     })
     .expect("seal transport::transit frame");
     (frame, connection_fact, connection, signed_wrap)
+}
+
+#[test]
+fn bootstrap_request_receive_admits_request_and_provenance_only() {
+    let invite = InviteSecretFact::new([33; 32]);
+    let invite_fact = Fact::new(
+        FactScope::Local,
+        10,
+        invite_layout::encode_fact(&invite).expect("invite"),
+    );
+    let endpoint = local_endpoint();
+    let store = test_store();
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(&endpoint))
+        .expect("seed endpoint");
+    let mut request = ConnectionRequestFact {
+        from_endpoint: crypto::x25519_public_key(&[55; 32]),
+        to_endpoint: endpoint.endpoint,
+        nonce: [56; 32],
+        invite_fact_id: [57; 32],
+        bootstrap_hash: invite.bootstrap_hash,
+        invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+        invite_secret_fact_id: invite_fact.id,
+        initiator_ephemeral_secret_fact_id: [58; 32],
+        initiator_ephemeral_public_key: crypto::x25519_public_key(&[59; 32]),
+        from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
+        to_listen_addr: None,
+    };
+    request.invite_signature = crypto::ed25519_sign(
+        &invite.bootstrap_secret,
+        &topo::protocol::facts::connection::request::create::invite_signing_transcript(&request)
+            .expect("request transcript"),
+    );
+    let frame = connection_request_layout::encode_fact(&request).expect("request");
+    let expected_request = Fact::new(FactScope::Global, RECEIVED_AT, frame.clone());
+
+    let output = ReceiveTransitFrameHandler::new()
+        .handle(
+            &receive_intent(frame.clone()),
+            &HandlerContext::with_facts([invite_fact]).with_store(&store),
+        )
+        .expect("receive bootstrap request");
+
+    assert_eq!(output.facts.len(), 2);
+    assert!(output.facts.iter().any(|fact| *fact == expected_request));
+    assert!(output.intents.is_empty());
+    assert!(output.facts.iter().all(|fact| {
+        !matches!(
+            fact.body().first().copied(),
+            Some(connection_response_layout::TYPE_CONNECTION_RESPONSE)
+                | Some(topo::protocol::facts::connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
+        )
+    }));
+    let provenance_fact = output
+        .facts
+        .iter()
+        .find(|fact| {
+            fact.body().first().copied()
+                == Some(transport::transit_received::layout::TYPE_TRANSIT_RECEIVED)
+        })
+        .expect("provenance fact");
+    let provenance = transport::transit_received::layout::decode_fact(provenance_fact.body())
+        .expect("decode provenance");
+    assert_eq!(provenance.received_fact_id, expected_request.id);
+    assert_eq!(provenance.local_endpoint_id, request.to_endpoint);
+    assert_eq!(provenance.sender_endpoint_id, request.from_endpoint);
+    assert_eq!(provenance.request_id, Some(expected_request.id));
+    assert_eq!(provenance.frame_hash, crypto::hash(&frame));
 }
 
 #[test]
@@ -276,4 +352,24 @@ fn truncated_small_frame_after_valid_header_is_rejected() {
         err.contains("WrongLength"),
         "truncated frames must be rejected at envelope decode: {err}"
     );
+}
+
+fn local_endpoint() -> EndpointFact {
+    let secret = [23; 32];
+    let signing_secret = [24; 32];
+    EndpointFact {
+        endpoint: crypto::x25519_public_key(&secret),
+        secret,
+        signing_public_key: crypto::ed25519_public_key(&signing_secret),
+        signing_secret,
+    }
+}
+
+fn test_store() -> Store {
+    Store::open_memory_with_schema_sources(&[
+        CORE_SCHEMA_SOURCE,
+        FACTS_SCHEMA_SOURCE,
+        INTENTS_SCHEMA_SOURCE,
+    ])
+    .expect("store")
 }

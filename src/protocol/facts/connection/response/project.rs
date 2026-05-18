@@ -104,7 +104,11 @@ impl Projector for ConnectionResponseProjector {
         );
         let receive_need = receive_matchers::transit_received_need(fact.id, fact.id);
 
-        if let Some(receive) = projection_context.payload_for(&receive_need) {
+        if let Some(receive) = projection_context
+            .matched_payloads_for(&receive_need)
+            .map(|(_, fact)| fact)
+            .min_by_key(|fact| fact.id)
+        {
             if receive.scope != FactScope::Local {
                 return Err("connection response receive context must be local".to_string());
             }
@@ -127,7 +131,7 @@ impl Projector for ConnectionResponseProjector {
                     receive_need,
                 ]));
             };
-            let initiator_secret = ephemeral_layout::decode_fact(&initiator_ephemeral.bytes)
+            let initiator_secret = ephemeral_layout::decode_fact(initiator_ephemeral.body())
                 .map_err(|_| {
                     "connection response initiator dependency is not an ephemeral secret"
                         .to_string()
@@ -166,7 +170,7 @@ impl Projector for ConnectionResponseProjector {
             ]));
         };
         let responder_secret =
-            ephemeral_layout::decode_fact(&responder_ephemeral.bytes).map_err(|_| {
+            ephemeral_layout::decode_fact(responder_ephemeral.body()).map_err(|_| {
                 "connection response responder dependency is not an ephemeral secret".to_string()
             })?;
         if responder_ephemeral.id != response.responder_ephemeral_secret_fact_id {
