@@ -71,6 +71,7 @@ impl Projector for ContentMessageDeletionProjector {
                 ]));
             }
         }
+        authority::verify_signature(&decoded, "message deletion")?;
         let Some(target_fact) = payload_for_need(context, &target_need) else {
             return Ok(output_with_needs([
                 signer_need,
@@ -177,6 +178,7 @@ fn maybe_signed_payload(
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),
             signer: None,
+            envelope: None,
         })
     }
 }

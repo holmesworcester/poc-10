@@ -11,11 +11,9 @@
 //!
 //! Legacy parity gaps (intentional, deferred to later slices) -- see
 //! `project.rs` for the runtime equivalent of this list:
-//!  - Legacy validates a signed envelope around the payload; the target
-//!    `signed_fact` envelope is a separate event module not yet wired in.
-//!  - Legacy resolves an authority-admin dependency and checks the signer
-//!    public key against the workspace admin set. The admin module is not
-//!    yet ported to the target tree.
+//!  - Setting facts are still raw payloads in this slice. If they move into
+//!    signed envelopes, the projector should parse before needs and verify
+//!    after authority context is present.
 //!  - Legacy validates monotonic floor against the predecessor setting's
 //!    `expires_at_or_before_minute`. The chain dependency lookup against
 //!    sibling encryption events is not available here, so the field is

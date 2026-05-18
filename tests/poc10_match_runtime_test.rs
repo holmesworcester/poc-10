@@ -1,6 +1,6 @@
 //! Target runtime facade tests.
 
-use std::{cell::Cell, collections::BTreeSet, path::Path};
+use std::{cell::Cell, collections::BTreeSet};
 
 use topo::core::command_context::{
     CommandClock, IdentityVault, LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
@@ -16,7 +16,8 @@ use topo::event_modules::sealed_message::{
     create::send_message, fact::SignerPubkeyFact, layout as sealed_layout, rows as sealed_rows,
 };
 use topo::event_modules::signed_fact::fact::LocalSignerSecretFact;
-use topo::protocol::runtime::ProtocolRuntime;
+use topo::handlers::sync_index_update;
+use topo::protocol::runtime::{protocol_handler_route_names, ProtocolRuntime};
 use topo::protocol::PROTOCOL;
 
 struct FixedClock(Cell<u64>);
@@ -96,7 +97,11 @@ fn runtime_submits_command_output_and_projects_workspace_rows() {
 
     assert_eq!(receipt.created_at_ms, 123_000);
     assert_eq!(report.projections, 1);
-    assert!(runtime.wake_loop().intents().is_empty());
+    assert_eq!(runtime.wake_loop().intents().len(), 1);
+    assert_eq!(
+        runtime.wake_loop().intents()[0].kind.as_str(),
+        sync_index_update::RECORD_INDEXED_EVENT
+    );
 
     let rows = runtime
         .store()
@@ -178,7 +183,9 @@ fn runtime_dispatches_every_protocol_handler_registration() {
         .iter()
         .map(|handler| handler.runtime_field.to_string())
         .collect::<BTreeSet<_>>();
-    let dispatched = runtime_dispatch_handler_fields();
+    let dispatched = protocol_handler_route_names()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
 
     for required in ["purge_cascade", "retention_expiry", "retention_floor"] {
         assert!(
@@ -187,7 +194,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
         );
         assert!(
             dispatched.contains(required),
-            "{required} must be included by ProtocolHandlers::dispatch_all"
+            "{required} must be included by the runtime handler route set"
         );
     }
 
@@ -202,7 +209,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
 
     assert!(
         missing.is_empty() && unexpected.is_empty(),
-        "ProtocolHandlers::dispatch_all must stay in lockstep with src/protocol.rs handlers\nmissing from runtime dispatch: {missing:?}\nunexpected runtime dispatch handlers: {unexpected:?}"
+        "runtime handler routes must stay in lockstep with src/protocol.rs handlers\nmissing from runtime dispatch: {missing:?}\nunexpected runtime dispatch handlers: {unexpected:?}"
     );
 }
 
@@ -256,38 +263,4 @@ fn workspace_scope(workspace_id: [u8; 32]) -> FactScope {
         kind: ScopeKind::new("workspace").expect("valid workspace scope"),
         id: workspace_id,
     }
-}
-
-fn runtime_dispatch_handler_fields() -> BTreeSet<String> {
-    let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/runtime.rs");
-    let source = std::fs::read_to_string(&runtime_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", runtime_path.display()));
-    let impl_start = source
-        .find("impl ProtocolHandlers")
-        .expect("ProtocolHandlers impl block");
-    let start = source[impl_start..]
-        .find("fn dispatch_all(")
-        .map(|offset| impl_start + offset)
-        .expect("ProtocolHandlers::dispatch_all start");
-    let end = source[start..]
-        .find("    fn dispatch_one(")
-        .map(|offset| start + offset)
-        .expect("ProtocolHandlers::dispatch end");
-    let body = &source[start..end];
-
-    let mut fields = BTreeSet::new();
-    let mut rest = body;
-    while let Some(index) = rest.find("&self.") {
-        let after_prefix = &rest[index + "&self.".len()..];
-        let field_len = after_prefix
-            .chars()
-            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-            .map(char::len_utf8)
-            .sum::<usize>();
-        if field_len > 0 {
-            fields.insert(after_prefix[..field_len].to_string());
-        }
-        rest = &after_prefix[field_len..];
-    }
-    fields
 }

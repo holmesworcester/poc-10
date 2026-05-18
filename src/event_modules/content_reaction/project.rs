@@ -5,9 +5,11 @@
 //! message context is matched and validated. The reaction id used in the row
 //! key is the fact id.
 //!
+//! Signed content-reaction facts are parsed up front so the signer need can be
+//! emitted, but signature verification waits until endpoint signer context is
+//! available.
+//!
 //! Parity gaps (intentional, deferred to later slices):
-//! - Legacy validates a signed envelope around the payload; the target
-//!   signed-fact envelope is a separate event module.
 //! - Legacy admit-check drops reactions whose parent message is already
 //!   tombstoned. This projector watches the parent deletion context and
 //!   removes its row when the authorized parent delete is visible.
@@ -77,6 +79,7 @@ impl Projector for ContentReactionProjector {
                 ]));
             }
         }
+        authority::verify_signature(&decoded, "reaction")?;
         let Some(target) = payload_for_need(context, &target_need) else {
             return Ok(output_with_needs([
                 signer_need,
@@ -253,6 +256,7 @@ fn maybe_signed_payload(
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),
             signer: None,
+            envelope: None,
         })
     }
 }

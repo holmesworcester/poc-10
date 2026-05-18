@@ -9,7 +9,6 @@
 //! the encryption module in a later wave.
 //!
 //! Deferred (legacy parity gaps):
-//! - Signed-fact envelope wrapping (separate event module).
 //! - Per-file leaf-coordinate derivation and content-key context — the
 //!   `local_history_node_secret_id` and frontier id will land with the
 //!   per-message FS wave.

@@ -4,8 +4,11 @@
 //! `file_slice_rows`. The slice event id used in the row value is the fact id;
 //! the key is workspace/file/slice-index so range scans return slices in order.
 //!
+//! File-slice facts are still raw payloads in this slice. If they move into
+//! signed envelopes, the projector should follow the common
+//! parse-before-needs, verify-after-context rule.
+//!
 //! Parity gaps (intentional, deferred to later slices):
-//! - Signed-envelope verification (separate event module).
 //! - BAO proof verification against the parent descriptor's root hash —
 //!   depends on the file-send command wave reintroducing the proof slot.
 //! - Parent descriptor existence and slice-index bounds are validated from
@@ -20,7 +23,8 @@ use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use crate::event_modules::content_file::{layout as file_layout, matchers as file_matchers};
-use crate::event_modules::content_message::matchers as message_matchers;
+use crate::event_modules::content_file_deletion::layout as file_deletion_layout;
+use crate::event_modules::content_message::{authority, matchers as message_matchers};
 
 use super::layout;
 use super::rows::{content_file_slice_key, content_file_slice_row, FILE_SLICE_ROWS};
@@ -47,7 +51,12 @@ impl Projector for ContentFileSliceProjector {
         let Some(parent) = payload_for_need(context, &file_need) else {
             return Ok(ProjectionOutput::new().need(file_need));
         };
-        let file = file_layout::decode_fact(&parent.bytes)
+        let parent_payload = authority::decode_raw_or_signed(
+            parent,
+            file_layout::TYPE_CONTENT_FILE,
+            "file slice parent",
+        )?;
+        let file = file_layout::decode_fact(&parent_payload.payload)
             .map_err(|_| "file slice parent context is not a content file".to_string())?;
         if parent.scope != scope {
             return Err("file slice parent scope does not match slice".to_string());
@@ -99,10 +108,14 @@ fn validate_file_deletion(
     target_file_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = crate::event_modules::content_file_deletion::layout::decode_fact(&payload.bytes)
-        .map_err(|_| {
-            "file slice parent deletion context is not a content file deletion".to_string()
-        })?;
+    let deletion_payload = authority::decode_raw_or_signed(
+        payload,
+        file_deletion_layout::TYPE_CONTENT_FILE_DELETION,
+        "file slice parent deletion",
+    )?;
+    let deletion = file_deletion_layout::decode_fact(&deletion_payload.payload).map_err(|_| {
+        "file slice parent deletion context is not a content file deletion".to_string()
+    })?;
     if deletion.workspace_id != workspace_id {
         return Err("file slice parent deletion workspace does not match slice".to_string());
     }

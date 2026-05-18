@@ -25,6 +25,12 @@ table offers {
   row_key (key);
 }
 
+table time_wakes {
+  column key bytes;
+  column value bytes;
+  row_key (key);
+}
+
 table pending_projection {
   column key bytes;
   column value bytes;

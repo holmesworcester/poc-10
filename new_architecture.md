@@ -550,7 +550,7 @@ module constants where possible so renames fail at compile time.
 ## Projectors
 
 Projectors consume a fact plus matched context and emit only intents, needs,
-and offers:
+offers, and time wakes:
 
 ```rust
 fn project(fact: Fact, context: ProjectionContext) -> ProjectionOutput;
@@ -559,6 +559,7 @@ struct ProjectionOutput {
     intents: Vec<Intent>,
     needs: Vec<ContextNeed>,
     offers: Vec<ContextOffer>,
+    time_wakes: Vec<TimeWake>,
 }
 ```
 
@@ -583,6 +584,9 @@ pub fn project(fact: &Fact, ctx: &ProjectionContext) -> Result<ProjectionOutput,
         return Ok(waiting);
     };
 
+    // Signature verification is deliberately after context collection. The
+    // check is pure and may be repeated on later reprojections, but it should
+    // not run while the fact is still waiting for signer/authority context.
     require_signature(&message, &signer)?;
     require_workspace_membership(&signer, &workspace)?;
 
@@ -606,6 +610,18 @@ the next projection. If the output can be affected by future update/about facts
 such as deletions or key coverage, the projector keeps those stable needs in
 the successful output too.
 
+Signed facts follow the same shape. The signed envelope is not projected as an
+authority event on its own; the semantic projector that owns the inner event
+parses the envelope structure and cheap payload fields early so it can
+determine needs. Signature verification waits until all required
+signer/authority context for that event is present. The rationale is cost and
+determinism: missing-context projections can happen repeatedly while the graph
+converges, and an Ed25519 verification does not change which need should be
+emitted. Once context is present, the projector verifies the signature before
+emitting rows, offers, purge intents, transport intents, or other materialized
+work. The verification may be repeated on future reprojections; it does not
+need a durable "verified once" cache.
+
 Projector rules:
 
 ```text
@@ -618,6 +634,7 @@ Projector rules:
 - Does not read the clock directly.
 - Does not admit nested facts.
 - Emits the full current need/offer surface on every pass.
+- Verifies signatures only after the required signer/authority context exists.
 - Uses atomic intents for bounded row writes and deletes.
 ```
 
@@ -638,19 +655,21 @@ When translating a legacy projector into the target tree:
 3. Decode matched context inside the target projector and re-check type, scope,
    workspace, signer/author authority, and endpoint role before writing rows.
 4. Emit ContextOffers only after the fact is valid context for that role.
-5. If required context is missing, return stable needs and no materialized rows
+5. For signed facts, parse cheaply before needs but verify the signature only
+   after every required authority context item is present.
+6. If required context is missing, return stable needs and no materialized rows
    or intents for that branch.
-6. Convert bounded row writes/deletes to atomic intents.
-7. Convert async, retryable, IO, purge, transit, sync, and key-healing work to
+7. Convert bounded row writes/deletes to atomic intents.
+8. Convert async, retryable, IO, purge, transit, sync, and key-healing work to
    explicit typed deferred intents owned by handlers.
-8. Keep helper functions small, local to the fact family, and named after the
+9. Keep helper functions small, local to the fact family, and named after the
    invariant they validate.
-9. Register any new context role in src/protocol.rs with the matcher that owns
+10. Register any new context role in src/protocol.rs with the matcher that owns
    both new-need-to-old-offer and new-offer-to-old-need semantics.
-10. If a port is temporarily a row shell because sibling context is not ready,
+11. If a port is temporarily a row shell because sibling context is not ready,
     document the exact legacy parity gap in the module docs and remove that gap
     when the sibling context lands.
-11. Do not add a protocol-specific context.rs helper/source-of-truth layer.
+12. Do not add a protocol-specific context.rs helper/source-of-truth layer.
     Keep projection logic in project.rs and role-specific matching in
     matchers.rs.
 ```

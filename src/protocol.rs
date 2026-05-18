@@ -589,6 +589,11 @@ pub const INTENTS: &[IntentRegistration] = &[
         declared_by: "handlers::handle_sync",
     },
     IntentRegistration {
+        kind: handle_sync::SEED_SYNC_CONNECTION,
+        execution: IntentExecutionKind::Deferred,
+        declared_by: "handlers::handle_sync",
+    },
+    IntentRegistration {
         kind: network_send::NETWORK_SEND_FRAME,
         execution: IntentExecutionKind::Deferred,
         declared_by: "handlers::network_send",
@@ -671,6 +676,12 @@ pub const HANDLERS: &[HandlerRegistration] = &[
         handler: "RespondToSyncNeedHandler",
         runtime_field: "respond_to_sync_need",
         intents: &[handle_sync::RESPOND_TO_SYNC_NEED],
+    },
+    HandlerRegistration {
+        module: "handle_sync",
+        handler: "SeedSyncConnectionHandler",
+        runtime_field: "seed_sync_connection",
+        intents: &[handle_sync::SEED_SYNC_CONNECTION],
     },
     HandlerRegistration {
         module: "materialize_key_wraps",

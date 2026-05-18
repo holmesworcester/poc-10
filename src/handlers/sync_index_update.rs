@@ -145,6 +145,14 @@ impl IntentHandler for SyncIndexUpdateHandler {
         if fact.timestamp != input.timestamp_ms {
             return Err("record_indexed_event timestamp does not match fact".to_string());
         }
-        Ok(HandlerOutput::new())
+        match context.store() {
+            Ok(store) => {
+                if crate::core::wake_loop::persisted_fact(store, &input.event_id)?.is_none() {
+                    return Err(format!("handler context missing fact {:?}", input.event_id));
+                }
+                crate::handlers::handle_sync::advertise_indexed_fact_to_connections(store, fact)
+            }
+            Err(_) => Ok(HandlerOutput::new()),
+        }
     }
 }

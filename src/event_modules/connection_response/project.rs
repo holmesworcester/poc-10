@@ -8,6 +8,7 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::handlers::handle_sync::{self, SeedSyncConnection};
 
 use crate::event_modules::connection_ephemeral_secret::{
     layout as ephemeral_layout, matchers as ephemeral_matchers,
@@ -283,9 +284,14 @@ fn materialized_output(
     response_id: [u8; 32],
     response: &ConnectionResponseFact,
 ) -> Result<ProjectionOutput, String> {
-    Ok(ProjectionOutput::new().intent(
-        AtomicIntent::PutRow(connection_response_row(response_id, response)?).into_intent(),
-    ))
+    Ok(ProjectionOutput::new()
+        .intent(AtomicIntent::PutRow(connection_response_row(response_id, response)?).into_intent())
+        .intent(handle_sync::seed_sync_connection_intent(
+            SeedSyncConnection {
+                connection_id: response_id,
+                after_event_id: None,
+            },
+        )))
 }
 
 fn waiting_output<const N: usize>(
@@ -498,7 +504,7 @@ mod projector_tests {
             .project(&scenario.response_fact, &context)
             .expect("project response");
 
-        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.intents.len(), 2);
         let AtomicIntent::PutRow(row) =
             AtomicIntent::from_intent(&output.intents[0], &[rows::CONNECTION_RESPONSE_ROWS])
                 .expect("row intent")
@@ -543,7 +549,7 @@ mod projector_tests {
             .project(&scenario.response_fact, &context)
             .expect("project received response");
 
-        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.intents.len(), 2);
         let AtomicIntent::PutRow(row) =
             AtomicIntent::from_intent(&output.intents[0], &[rows::CONNECTION_RESPONSE_ROWS])
                 .expect("row intent")

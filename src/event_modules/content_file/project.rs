@@ -3,12 +3,13 @@
 //! Decodes a content-file fact and emits a single `PutRow` into `file_rows`.
 //! The file event id used in the row key is the fact id.
 //!
+//! Signed content-file facts are parsed up front so the signer need can be
+//! emitted, but signature verification waits until endpoint signer context is
+//! available. Parent-message and author-user authority are validated through
+//! context before rows are materialized. Parent or file deletion context purges
+//! the descriptor row instead of recreating it.
+//!
 //! Parity gaps (intentional, deferred to later slices):
-//! - Signed-envelope verification (separate event module).
-//! - Endpoint signer validation (separate signed-fact/identity surface).
-//! - Parent-message and author-user authority are validated through context
-//!   before rows are materialized. Parent or file deletion context purges the
-//!   descriptor row instead of recreating it.
 //! - Per-file leaf-coord / frontier derivation — depends on per-message FS.
 //! - Sealed-metadata AEAD opening — depends on encryption module surfacing the
 //!   per-file content key.
@@ -79,6 +80,7 @@ impl Projector for ContentFileProjector {
                 ]));
             }
         }
+        authority::verify_signature(&decoded, "file")?;
         if let Some(deletion) = payload_for_need(context, &file_deletion_need) {
             validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
             return Ok(delete_file_projection(file.workspace_id, fact.id).need(file_deletion_need));
@@ -315,6 +317,7 @@ fn maybe_signed_payload(
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),
             signer: None,
+            envelope: None,
         })
     }
 }

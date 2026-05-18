@@ -706,7 +706,7 @@ fn run_generate(parsed: ParsedArgs) -> Result<(), String> {
         content_event::cli::generate(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    let _report = runtime.drain_projection_until_idle(8, 1024)?;
+    drain_runtime(&mut runtime)?;
     runtime.save()?;
 
     for line in content_event::cli::generated_output(&receipt, receipt.generated_events).lines {

@@ -3,14 +3,9 @@
 //! A file deletion is a workspace-scoped, author-bound declaration that the
 //! named `author_user_id` wants the file fact identified by
 //! `target_file_id` removed. The canonical fact body carries only the public
-//! envelope (workspace, timestamp, target, author); the signed envelope around
-//! this payload lives in the `signed_fact` event module and is intentionally
-//! not represented here.
-//!
-//! Parity gaps (intentional, deferred to later slices):
-//! - Legacy validates a signed envelope binding an endpoint_shared signer to
-//!   the named author; the target signed-fact envelope and identity
-//!   dependency context are separate event modules and not consulted here.
+//! envelope (workspace, timestamp, target, author); if the fact is carried in a
+//! signed envelope, the projector validates the signature after the signer
+//! context proves endpoint authority for the named author.
 
 use crate::core::facts::FactId;
 

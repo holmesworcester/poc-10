@@ -54,6 +54,7 @@ impl Projector for UserInviteProjector {
         if !has_all_context(&needs, context) {
             return Ok(output);
         }
+        signed_fact::layout::verify_signed_fact(&envelope)?;
         validate_authority(&needs, &user_invite, &envelope, context)?;
         Ok(output
             .offer(identity_matchers::user_invite_offer(fact.id))

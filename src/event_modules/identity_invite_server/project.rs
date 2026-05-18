@@ -55,6 +55,7 @@ impl Projector for InviteServerProjector {
         if !has_all_context(&needs, context) {
             return Ok(output);
         }
+        signed_fact::layout::verify_signed_fact(&envelope)?;
         validate_authority(&needs, &invite_server, &envelope, context)?;
         Ok(output
             .offer(identity_matchers::invite_server_offer(fact.id))

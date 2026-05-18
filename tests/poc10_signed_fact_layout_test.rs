@@ -57,13 +57,15 @@ fn signed_fact_rejects_tampered_payload_and_signature_context() {
 
     let payload_start = 66 + 4;
     encoded[payload_start + 12] ^= 1;
-    assert!(layout::decode_signed_fact(&encoded).is_err());
+    let decoded = layout::decode_signed_fact(&encoded).expect("parse tampered envelope");
+    assert!(layout::verify_signed_fact(&decoded).is_err());
 
     let payload = key_wrap_layout::encode_key_wrap(&key_wrap()).expect("key wrap payload");
     let mut encoded =
         create::sign_payload_bytes(signer_id, &private_key, payload).expect("signed bytes");
     encoded[1] ^= 1;
-    assert!(layout::decode_signed_fact(&encoded).is_err());
+    let decoded = layout::decode_signed_fact(&encoded).expect("parse tampered signer context");
+    assert!(layout::verify_signed_fact(&decoded).is_err());
 }
 
 #[test]

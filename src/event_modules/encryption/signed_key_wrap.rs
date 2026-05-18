@@ -49,6 +49,7 @@ pub(super) fn signed_key_wrap(
     if !signer_ready || recipient_fact.is_none() || frontier_fact.is_none() {
         return Ok(output);
     }
+    signed_fact::layout::verify_signed_fact(&envelope)?;
 
     let recipient_fact = recipient_fact.expect("checked");
     if recipient_fact.id != wrap.recipient_key_id {

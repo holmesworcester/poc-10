@@ -55,6 +55,7 @@ impl Projector for UserProjector {
         let Some(invite_fact) = context.payload_for(&invite_need) else {
             return Ok(ProjectionOutput::new().need(invite_need));
         };
+        signed_fact::layout::verify_signed_fact(&envelope)?;
         if invite_fact.id != envelope.signer_id {
             return Err("user signer context payload id mismatch".to_string());
         }

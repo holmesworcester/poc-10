@@ -15,8 +15,9 @@ use super::frame::{self, SealConnectionFrame, TransitFactBundle};
 /// Return the bytes that may be packaged into a transit frame.
 ///
 /// Local facts and private/local fact tags are never transport payloads. A
-/// signed envelope is decoded here as a defensive check that the envelope
-/// itself is valid and does not hide a private local payload type.
+/// signed envelope is parsed here as a defensive check that the envelope is
+/// well-formed and does not hide a private local payload type. Signature
+/// verification belongs to the semantic projector once signer context exists.
 pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
     if fact.scope == FactScope::Local {
         return Err(format!("transit send refused local fact {:?}", fact.id));
