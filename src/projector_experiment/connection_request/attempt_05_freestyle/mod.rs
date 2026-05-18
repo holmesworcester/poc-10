@@ -1,4 +1,14 @@
-//! Slot placeholder. Replace `project.rs`; add a `#[cfg(test)] mod tests { ... }`
-//! block here that calls `shared::run_all_invariants(&YourProjector::new())`.
+//! Freestyle attempt: a narrated security checklist. See `project.rs`.
 
 pub mod project;
+
+#[cfg(test)]
+mod tests {
+    use super::project::ConnectionRequestProjector;
+    use crate::projector_experiment::connection_request::shared;
+
+    #[test]
+    fn freestyle_passes_all_invariants() {
+        shared::run_all_invariants(&ConnectionRequestProjector::new());
+    }
+}
