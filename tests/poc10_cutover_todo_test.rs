@@ -752,6 +752,310 @@ fn cutover_match_app_does_not_own_command_business_logic() {
 }
 
 #[test]
+#[ignore = "cutover todo: facts should be decoded once at typed module boundaries"]
+fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
+    let root = root();
+    let mut paths = project_files(&root);
+    paths.extend(rust_files_under(&root.join("src/protocol/intents")));
+    paths.push(root.join("src/protocol/facts/transport/transit/receive.rs"));
+
+    let offenders = matching_code_lines(
+        &root,
+        paths,
+        &[
+            "decode_fact(&fact.bytes",
+            "decode_fact(&payload.bytes",
+            "decode_fact(&matched.payload.bytes",
+            "decode_fact(&receive.bytes",
+            "decode_fact(&request_context.bytes",
+            "decode_fact(&invite_context.bytes",
+            "decode_fact(&connection_fact.bytes",
+            "decode_fact(&request_fact.bytes",
+            "decode_fact(&child.bytes",
+        ],
+    );
+    assert!(
+        offenders.is_empty(),
+        "projectors and handlers should receive typed fact/context variables from module-owned decoders instead of repeatedly decoding opaque Fact.bytes payloads:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "cutover todo: context needs-met checks should be typed predicates"]
+fn cutover_context_predicates_replace_manual_payload_matching() {
+    let root = root();
+    let mut paths = project_files(&root);
+    paths.push(root.join("src/protocol/facts/encryption/validation.rs"));
+
+    let offenders = matching_code_lines(
+        &root,
+        paths,
+        &[
+            "matched_context()",
+            "payload_for_need(",
+            "matched.payload",
+            "matched.need",
+            "offer.payload_ref",
+        ],
+    );
+    assert!(
+        offenders.is_empty(),
+        "projectors should ask scope-local typed predicates whether context needs are met instead of manually walking matched payload rows:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "cutover todo: content layouts should use one centralized schema/wire codec"]
+fn cutover_content_wire_layouts_use_central_schema_codec() {
+    let root = root();
+    let paths = [
+        "src/protocol/facts/content/event/layout.rs",
+        "src/protocol/facts/content/file/layout.rs",
+        "src/protocol/facts/content/file/rows.rs",
+        "src/protocol/facts/content/file_deletion/layout.rs",
+        "src/protocol/facts/content/file_slice/layout.rs",
+        "src/protocol/facts/content/file_slice/rows.rs",
+        "src/protocol/facts/content/message/layout.rs",
+        "src/protocol/facts/content/message/rows.rs",
+        "src/protocol/facts/content/message_deletion/layout.rs",
+        "src/protocol/facts/content/reaction/layout.rs",
+        "src/protocol/facts/content/reaction/rows.rs",
+        "src/protocol/facts/content/sealed_message/layout.rs",
+        "src/protocol/facts/content/sealed_message/rows.rs",
+    ]
+    .into_iter()
+    .map(|path| root.join(path))
+    .filter(|path| path.is_file())
+    .collect::<Vec<_>>();
+
+    let offenders = matching_code_lines(
+        &root,
+        paths,
+        &[
+            "copy_from_slice",
+            "try_into().unwrap()",
+            "vec![0;",
+            "[1..",
+            "[9..",
+            "HEADER_BYTES",
+            "ROW_HEADER_BYTES",
+        ],
+    );
+    assert!(
+        offenders.is_empty(),
+        "content wire/layout/row codecs still hand-code field offsets; move the slot math into one core schema/wire codec and keep fact modules on typed fields:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "cutover todo: content needs typed query tables, not only key/value row stores"]
+fn cutover_content_read_models_have_normal_sqlite_tables() {
+    fn table_body<'a>(schema: &'a str, table: &str) -> Option<&'a str> {
+        let marker = format!("table {table} {{");
+        let start = schema.find(&marker)?;
+        let rest = &schema[start + marker.len()..];
+        let end = rest.find("\n}")?;
+        Some(&rest[..end])
+    }
+
+    let root = root();
+    let schema = source_text(&root.join("src/protocol/facts/schema.p8sql"));
+    let required = [
+        (
+            "content_messages",
+            &[
+                "workspace_id",
+                "message_id",
+                "author_user_id",
+                "created_at_ms",
+            ] as &[&str],
+        ),
+        (
+            "content_reactions",
+            &[
+                "workspace_id",
+                "message_id",
+                "reaction_id",
+                "author_user_id",
+            ],
+        ),
+        (
+            "content_files",
+            &["workspace_id", "message_id", "file_id", "root_hash"],
+        ),
+    ];
+
+    let mut missing = Vec::new();
+    for (table, columns) in required {
+        match table_body(&schema, table) {
+            Some(body) => {
+                for column in columns {
+                    if !body.contains(&format!("column {column} ")) {
+                        missing.push(format!("missing {table}.{column}"));
+                    }
+                }
+            }
+            None => missing.push(format!("missing table {table}")),
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "content projections should expose normal SQLite tables for queryable message/reaction/file state while canonical fact bytes remain separately durable:\n{}",
+        missing.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "cutover todo: runtime side effects must commit atomically or fail visibly"]
+fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically() {
+    let root = root();
+    let wake_loop = source_text(&root.join("src/core/wake_loop.rs"));
+    let runtime = source_text(&root.join("src/protocol/runtime.rs"));
+    let send_network_frame =
+        source_text(&root.join("src/protocol/intents/transport/send_network_frame.rs"));
+
+    let mut offenders = Vec::new();
+    if wake_loop.contains("apply_atomic_row_intents(&run.intents, store, allowed_tables)") {
+        offenders.push(
+            "src/core/wake_loop.rs applies protocol row writes after the projector run instead of inside one durable step"
+                .to_string(),
+        );
+    }
+    if wake_loop.contains("fn apply_atomic_row_intents(") {
+        offenders.push(
+            "src/core/wake_loop.rs still has a separate atomic-row-intent transaction path"
+                .to_string(),
+        );
+    }
+    if runtime.contains("network_queues::delete_inbound(self.store(), &inbound)?;") {
+        offenders.push(
+            "src/protocol/runtime.rs deletes inbound network bytes before the protocol receive effect is proven durable"
+                .to_string(),
+        );
+    }
+    if send_network_frame.contains("tcp::send_once")
+        && send_network_frame.contains(".is_err()")
+        && send_network_frame.contains("return Ok(HandlerOutput::new())")
+    {
+        offenders.push(
+            "src/protocol/intents/transport/send_network_frame.rs swallows TCP send failures as an empty successful handler output"
+                .to_string(),
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "local writes and intent side effects must be all-or-visible-failure; these paths can lose or hide protocol work:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "cutover todo: network queue storage class must be explicit and consistent"]
+fn cutover_network_queue_storage_class_is_not_ambiguous() {
+    let root = root();
+    let core_schema = source_text(&root.join("src/core/schema.p8sql"));
+    let network_queues = source_text(&root.join("src/core/network_queues.rs"));
+    let runtime = source_text(&root.join("src/protocol/runtime.rs"));
+
+    let durable_in_core_schema =
+        core_schema.contains("table network_in {") || core_schema.contains("table network_out {");
+    let memory_in_queue_module = network_queues.contains("memory-local")
+        || network_queues.contains("restart-local")
+        || network_queues.contains("Schema::memory_row_table");
+    let runtime_loads_queue_schema = runtime.contains("network_queues::SCHEMAS");
+
+    let mut offenders = Vec::new();
+    if durable_in_core_schema && memory_in_queue_module {
+        offenders.push(
+            "network_in/network_out are declared both as durable core schema tables and restart-local network_queues memory tables",
+        );
+    }
+    if memory_in_queue_module && !runtime_loads_queue_schema {
+        offenders.push(
+            "network_queues declares memory schemas, but ProtocolRuntime does not load network_queues::SCHEMAS",
+        );
+    }
+    if durable_in_core_schema == memory_in_queue_module {
+        offenders.push(
+            "network queues should have exactly one explicit storage contract: durable schema table or restart-local memory table",
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "network queue persistence is ambiguous; choose one storage contract and make runtime/schema/docs/tests agree:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "cutover todo: fact scopes should expose typed interfaces, not foreign layouts"]
+fn cutover_scope_projectors_do_not_import_foreign_fact_layouts_or_rows() {
+    let root = root();
+    let facts_root = root.join("src/protocol/facts");
+    let scope_names = [
+        "connection",
+        "content",
+        "encryption",
+        "identity",
+        "sync",
+        "transport",
+    ];
+    let mut offenders = Vec::new();
+
+    for path in rust_files_under(&facts_root) {
+        let relative = path.strip_prefix(&facts_root).unwrap();
+        let current_scope = relative
+            .components()
+            .next()
+            .and_then(|component| component.as_os_str().to_str())
+            .unwrap_or("");
+        if !scope_names.contains(&current_scope) {
+            continue;
+        }
+
+        let text = source_text(&path);
+        for (index, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let code = line.split_once("//").map_or(line, |(code, _)| code);
+            if !(code.contains("::layout") || code.contains("::rows")) {
+                continue;
+            }
+            for prefix in ["crate::protocol::facts::", "topo::protocol::facts::"] {
+                let Some(rest) = code.split(prefix).nth(1) else {
+                    continue;
+                };
+                let imported_scope = rest.split("::").next().unwrap_or("");
+                if scope_names.contains(&imported_scope) && imported_scope != current_scope {
+                    offenders.push(format!(
+                        "{}:{} imports {imported_scope} internals: {}",
+                        path.strip_prefix(&root).unwrap().display(),
+                        index + 1,
+                        code.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    offenders.sort();
+    offenders.dedup();
+    assert!(
+        offenders.is_empty(),
+        "fact scopes should depend on each other through the smallest public typed interface, not by importing another scope's layout.rs or rows.rs internals:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 #[ignore = "cutover todo: projectors should not become dumping grounds during translation"]
 fn cutover_projector_files_stay_small_and_split_by_fact_family() {
     let root = root();
