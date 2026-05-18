@@ -10,4 +10,6 @@ pub mod event_modules;
 #[path = "handlers/registry.rs"]
 pub mod handlers;
 pub mod match_app;
+#[cfg(test)]
+pub mod projector_experiment;
 pub mod protocol;
