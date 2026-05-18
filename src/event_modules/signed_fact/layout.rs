@@ -76,14 +76,19 @@ pub fn decode_signed_fact(bytes: &[u8]) -> Result<SignedFactEnvelope, String> {
             .unwrap(),
     };
     validate_payload(envelope.inner_type, &envelope.payload)?;
-    if !crypto::ed25519_verify(
+    Ok(envelope)
+}
+
+pub fn verify_signed_fact(envelope: &SignedFactEnvelope) -> Result<(), String> {
+    if crypto::ed25519_verify(
         &envelope.signer_public_key,
-        &signing_bytes(&envelope)?,
+        &signing_bytes(envelope)?,
         &envelope.signature,
     ) {
-        return Err("signed fact signature verification failed".to_string());
+        Ok(())
+    } else {
+        Err("signed fact signature verification failed".to_string())
     }
-    Ok(envelope)
 }
 
 pub fn signing_bytes(envelope: &SignedFactEnvelope) -> Result<Vec<u8>, String> {

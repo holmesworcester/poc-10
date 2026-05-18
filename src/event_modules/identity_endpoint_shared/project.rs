@@ -59,6 +59,7 @@ impl Projector for EndpointSharedProjector {
         if !has_valid_authority(&authority_need, &event, &envelope, context)? {
             return Ok(ProjectionOutput::new().need(authority_need));
         }
+        signed_fact::layout::verify_signed_fact(&envelope)?;
         Ok(ProjectionOutput::new()
             .need(authority_need)
             .offer(sealed_message::matchers::signer_offer(

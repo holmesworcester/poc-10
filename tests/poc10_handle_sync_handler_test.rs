@@ -1,9 +1,16 @@
+use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
 use topo::core::intents::IntentExecution;
-use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
+use topo::core::schema_dsl::{
+    CORE_SCHEMA_SOURCE, EVENT_MODULES_SCHEMA_SOURCE, HANDLERS_SCHEMA_SOURCE,
+};
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
+use topo::event_modules::connection_response;
+use topo::event_modules::identity_endpoint;
+use topo::event_modules::identity_endpoint_shared;
+use topo::event_modules::signed_fact;
 use topo::event_modules::sync_compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 use topo::event_modules::sync_compare::layout as sync_compare_layout;
 use topo::event_modules::sync_have_id::layout as sync_have_id_layout;
@@ -141,6 +148,111 @@ fn sync_index_update_handler_queues_until_durable_fact_lands() {
     let decoded = index_intent::decode_record_indexed_event(&intent).expect("round trip");
     assert_eq!(decoded.event_id, [7; 32]);
     assert_eq!(decoded.timestamp_ms, 1_234_567);
+}
+
+#[test]
+fn sync_index_update_with_store_waits_until_fact_is_persisted() {
+    let fact = Fact::new(FactScope::Global, 88, vec![1, 2, 3]);
+    let intent = index_intent::record_indexed_event_intent(index_intent::RecordIndexedEvent {
+        event_id: fact.id,
+        timestamp_ms: fact.timestamp,
+    });
+    let store = Store::open_memory_with_schema_sources(&[
+        CORE_SCHEMA_SOURCE,
+        EVENT_MODULES_SCHEMA_SOURCE,
+        HANDLERS_SCHEMA_SOURCE,
+    ])
+    .expect("store");
+    let mut bus = WakeLoop::new();
+    bus.submit_fact(fact);
+    bus.submit_intent(intent).expect("submit update");
+
+    let handler = SyncIndexUpdateHandler::new();
+    let report = bus
+        .dispatch_deferred_intents_with_fact_context_and_store(&handler, &store, 10)
+        .expect("unpersisted fact keeps update queued");
+    assert_eq!(report.handled, 0);
+    assert_eq!(bus.intents().len(), 1);
+
+    bus.save(&store).expect("persist fact and update");
+    let report = bus
+        .dispatch_deferred_intents_with_fact_context_and_store(&handler, &store, 10)
+        .expect("persisted fact lets update run");
+    assert_eq!(report.handled, 1);
+    assert!(bus.intents().is_empty());
+}
+
+#[test]
+fn sync_index_update_seeds_connection_when_endpoint_membership_arrives() {
+    let store = Store::open_memory_with_schema_sources(&[
+        CORE_SCHEMA_SOURCE,
+        EVENT_MODULES_SCHEMA_SOURCE,
+        HANDLERS_SCHEMA_SOURCE,
+    ])
+    .expect("store");
+    let local_secret = [3; 32];
+    let local_endpoint = crypto::x25519_public_key(&local_secret);
+    let local_signing_secret = [4; 32];
+    let remote_endpoint = [5; 32];
+    let workspace_id = [6; 32];
+    let connection_id = [7; 32];
+    let endpoint_shared = identity_endpoint_shared::fact::EndpointSharedFact {
+        created_at_ms: 99,
+        workspace_id,
+        user_authority_event_id: [8; 32],
+        endpoint_id: remote_endpoint,
+        signing_public_key: [9; 32],
+        endpoint_role: identity_endpoint_shared::fact::EndpointRole::Device,
+        device_name: "remote".to_string(),
+    };
+    let endpoint_shared_fact = Fact::new(
+        FactScope::Global,
+        endpoint_shared.created_at_ms,
+        signed_fact::create::sign_payload_bytes(
+            endpoint_shared.user_authority_event_id,
+            &[10; 32],
+            identity_endpoint_shared::layout::encode_fact(&endpoint_shared)
+                .expect("encode endpoint_shared"),
+        )
+        .expect("sign endpoint_shared"),
+    );
+    let connection = connection_response::fact::ConnectionResponseFact {
+        from_endpoint: local_endpoint,
+        to_endpoint: remote_endpoint,
+        request_id: [11; 32],
+        invite_secret_event_id: [12; 32],
+        initiator_ephemeral_secret_event_id: [13; 32],
+        responder_ephemeral_secret_event_id: [14; 32],
+        responder_ephemeral_public_key: [15; 32],
+        handshake_hash: [16; 32],
+        connection_secret: [17; 32],
+    };
+    let mut rows = identity_endpoint::rows::endpoint_rows(&identity_endpoint::fact::EndpointFact {
+        endpoint: local_endpoint,
+        secret: local_secret,
+        signing_public_key: crypto::ed25519_public_key(&local_signing_secret),
+        signing_secret: local_signing_secret,
+    });
+    rows.push(
+        connection_response::rows::connection_response_row(connection_id, &connection)
+            .expect("connection row"),
+    );
+    rows.push(
+        identity_endpoint_shared::rows::endpoint_shared_row(
+            endpoint_shared_fact.id,
+            &endpoint_shared,
+        )
+        .expect("endpoint_shared row"),
+    );
+    store.insert_table_rows(rows).expect("insert rows");
+
+    let output = sync_intent::advertise_indexed_fact_to_connections(&store, &endpoint_shared_fact)
+        .expect("advertise endpoint membership");
+
+    assert!(output.intents.iter().any(|intent| {
+        sync_intent::decode_seed_sync_connection(intent)
+            .is_ok_and(|decoded| decoded.connection_id == connection_id)
+    }));
 }
 
 #[test]

@@ -55,6 +55,7 @@ impl Projector for DeviceInviteProjector {
         if !has_all_context(&needs, context) {
             return Ok(output);
         }
+        signed_fact::layout::verify_signed_fact(&envelope)?;
         validate_authority(&needs, &device_invite, &envelope, context)?;
         Ok(output
             .intent(AtomicIntent::PutRow(device_invite_row(fact.id, &device_invite)?).into_intent())

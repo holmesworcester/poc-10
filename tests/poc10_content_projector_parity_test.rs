@@ -46,6 +46,42 @@ fn signed_content_event_waits_for_endpoint_shared_signer_context() {
 }
 
 #[test]
+fn signed_content_event_defers_signature_check_until_signer_context_exists() {
+    let signer = endpoint_shared_fact(WORKSPACE, [22; 32], CONTENT_SIGNING_KEY);
+    let event = content_event::fact::ContentEventFact {
+        workspace_id: WORKSPACE,
+        timestamp: 12,
+        payload: b"hello".to_vec(),
+    };
+    let mut fact = signed_fact_in_workspace(
+        signer.id,
+        CONTENT_SIGNING_KEY,
+        content_event::layout::encode_fact(&event).expect("encode event"),
+        event.timestamp,
+    );
+    tamper_signature(&mut fact);
+
+    let waiting = content_event::project::ContentEventProjector::new()
+        .project(&fact, &ProjectionContext::default())
+        .expect("missing signer context should still wait");
+    assert!(waiting.intents.is_empty());
+    assert!(waiting.offers.is_empty());
+    assert!(waiting.needs.contains(&identity_matchers::exact_need(
+        fact.id,
+        identity_matchers::endpoint_shared_role(),
+        signer.id
+    )));
+
+    let err = content_event::project::ContentEventProjector::new()
+        .project(
+            &fact,
+            &ProjectionContext::from_matches(vec![signer_match(&fact, &signer)]),
+        )
+        .expect_err("signature must fail once signer context is present");
+    assert!(err.contains("signature verification failed"), "{err}");
+}
+
+#[test]
 fn signed_content_event_rejects_signer_public_key_mismatch() {
     let signer = endpoint_shared_fact(WORKSPACE, [22; 32], [10; 32]);
     let event = content_event::fact::ContentEventFact {
@@ -355,6 +391,15 @@ fn signed_fact_in_workspace(
         signed_fact::create::sign_payload_bytes(signer_id, &private_key, payload)
             .expect("sign content fact"),
     )
+}
+
+fn tamper_signature(fact: &mut Fact) {
+    let last = fact
+        .bytes
+        .last_mut()
+        .expect("signed fact bytes include a signature");
+    *last ^= 1;
+    fact.id = crypto::hash(&fact.bytes);
 }
 
 fn signer_match(owner: &Fact, signer: &Fact) -> MatchedContext {

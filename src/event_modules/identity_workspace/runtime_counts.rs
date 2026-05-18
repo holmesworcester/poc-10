@@ -5,7 +5,8 @@
 //! accepted invites for one user-facing diagnostic report.
 
 use crate::event_modules::{connection_request, connection_response, identity_invite_accepted};
-use crate::protocol::runtime::{is_sync_seed_fact, ProtocolRuntime};
+use crate::handlers::handle_sync::is_sync_seed_fact;
+use crate::protocol::runtime::ProtocolRuntime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeCountReport {

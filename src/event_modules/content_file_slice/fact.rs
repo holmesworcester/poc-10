@@ -6,7 +6,9 @@
 //! and per-slice nonce derivation in a later wave.
 //!
 //! Deferred (legacy parity gaps):
-//! - Signed-fact envelope wrapping (separate event module).
+//! - Slice signing. Slices are raw payloads in this slice; if they move into
+//!   signed envelopes, verification belongs in the slice projector after signer
+//!   context is available.
 //! - Bao proof slot — legacy carries a fixed-width BAO proof verified against
 //!   the parent descriptor's root hash. The target tree will reintroduce this
 //!   slot once the file-send command wave can compute proofs.

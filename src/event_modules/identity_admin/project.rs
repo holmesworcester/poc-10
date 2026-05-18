@@ -57,6 +57,7 @@ impl Projector for AdminProjector {
         if !has_all_context(&needs, context) {
             return Ok(output);
         }
+        signed_fact::layout::verify_signed_fact(&envelope)?;
         validate_authority(&needs, &admin, &envelope, context)?;
         Ok(output
             .offer(identity_matchers::exact_offer(

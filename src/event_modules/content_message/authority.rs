@@ -9,6 +9,7 @@ use crate::event_modules::signed_fact;
 pub struct DecodedPayload {
     pub payload: Vec<u8>,
     pub signer: Option<SignedSigner>,
+    pub envelope: Option<signed_fact::fact::SignedFactEnvelope>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,18 +30,28 @@ pub fn decode_raw_or_signed(
             return Err(format!("signed fact does not contain a {label}"));
         }
         return Ok(DecodedPayload {
-            payload: envelope.payload,
+            payload: envelope.payload.clone(),
             signer: Some(SignedSigner {
                 signer_id: envelope.signer_id,
                 signer_public_key: envelope.signer_public_key,
             }),
+            envelope: Some(envelope),
         });
     }
 
     Ok(DecodedPayload {
         payload: fact.bytes.clone(),
         signer: None,
+        envelope: None,
     })
+}
+
+pub fn verify_signature(decoded: &DecodedPayload, label: &str) -> Result<(), String> {
+    let Some(envelope) = decoded.envelope.as_ref() else {
+        return Ok(());
+    };
+    signed_fact::layout::verify_signed_fact(envelope)
+        .map_err(|err| format!("{label} signed fact is invalid: {err}"))
 }
 
 pub fn signer_need(owner: FactId, signer: Option<SignedSigner>) -> Option<ContextNeed> {

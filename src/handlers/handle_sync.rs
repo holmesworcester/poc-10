@@ -15,6 +15,7 @@ pub const SYNC_NEED_ID: &str = "sync_need_id";
 pub const RESPOND_TO_SYNC_COMPARE: &str = "respond_to_sync_compare";
 pub const REQUEST_SYNC_ID: &str = "request_sync_id";
 pub const RESPOND_TO_SYNC_NEED: &str = "respond_to_sync_need";
+pub const SEED_SYNC_CONNECTION: &str = "seed_sync_connection";
 
 pub type HandlerId = [u8; 32];
 
@@ -46,6 +47,12 @@ pub struct RequestSyncId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RespondToSyncNeed {
     pub need_fact_id: HandlerId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedSyncConnection {
+    pub connection_id: HandlerId,
+    pub after_event_id: Option<HandlerId>,
 }
 
 pub fn process_sync_inbound_intent(input: ProcessSyncInbound) -> Intent {
@@ -191,6 +198,53 @@ pub fn respond_to_sync_need_intent(input: RespondToSyncNeed) -> Intent {
     )
 }
 
+pub fn seed_sync_connection_intent(input: SeedSyncConnection) -> Intent {
+    let mut payload = Vec::with_capacity(1 + 32 + 1 + 32);
+    payload.push(1);
+    payload.extend_from_slice(&input.connection_id);
+    match input.after_event_id {
+        None => payload.push(0),
+        Some(after) => {
+            payload.push(1);
+            payload.extend_from_slice(&after);
+        }
+    }
+    Intent::new(
+        IntentKind::new(SEED_SYNC_CONNECTION).expect("valid seed_sync_connection kind"),
+        IntentExecution::Deferred,
+        seed_sync_connection_key(&input),
+        payload,
+    )
+}
+
+pub fn decode_seed_sync_connection(intent: &Intent) -> Result<SeedSyncConnection, String> {
+    if intent.kind.as_str() != SEED_SYNC_CONNECTION {
+        return Err("expected seed_sync_connection intent".to_string());
+    }
+    if intent.execution != IntentExecution::Deferred {
+        return Err("seed_sync_connection intent must be deferred".to_string());
+    }
+    let mut reader = Reader::new(&intent.payload);
+    if reader.u8()? != 1 {
+        return Err("seed_sync_connection payload version unsupported".to_string());
+    }
+    let connection_id = reader.id()?;
+    let after_event_id = match reader.u8()? {
+        0 => None,
+        1 => Some(reader.id()?),
+        _ => return Err("seed_sync_connection cursor tag invalid".to_string()),
+    };
+    reader.finish()?;
+    let input = SeedSyncConnection {
+        connection_id,
+        after_event_id,
+    };
+    if intent.key != seed_sync_connection_key(&input) {
+        return Err("seed_sync_connection idempotence key does not match payload".to_string());
+    }
+    Ok(input)
+}
+
 pub fn decode_respond_to_sync_need(intent: &Intent) -> Result<RespondToSyncNeed, String> {
     if intent.kind.as_str() != RESPOND_TO_SYNC_NEED {
         return Err("expected respond_to_sync_need intent".to_string());
@@ -275,6 +329,20 @@ fn respond_to_sync_need_key(input: &RespondToSyncNeed) -> Vec<u8> {
     hash.finalize().as_bytes().to_vec()
 }
 
+fn seed_sync_connection_key(input: &SeedSyncConnection) -> Vec<u8> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"topo:sync:seed-connection:v1:");
+    hash.update(&input.connection_id);
+    match input.after_event_id {
+        None => hash.update(&[0]),
+        Some(after) => {
+            hash.update(&[1]);
+            hash.update(&after)
+        }
+    };
+    hash.finalize().as_bytes().to_vec()
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -324,9 +392,18 @@ impl<'a> Reader<'a> {
 // checked through the same fact context, and a missing dependency emits one
 // deterministic `sync_need_id` follow-up.
 
+use crate::core::facts::{Fact, FactScope};
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
-use crate::event_modules::{sync_have_id, sync_need_id};
+use crate::core::store::Store;
+use crate::event_modules::{
+    connection_response, identity_endpoint, identity_endpoint_shared, sync_compare,
+    sync_encrypted_root, sync_have_id, sync_key_wrap_available, sync_need_id, sync_range_request,
+    sync_shared_event,
+};
 use crate::handlers::transit::{send_on_connection_intent, TransitSendOnConnection};
+use std::collections::BTreeSet;
+
+const SEED_SYNC_BATCH: usize = 64;
 
 #[derive(Debug, Clone, Default)]
 pub struct HandleSyncHandler;
@@ -334,6 +411,259 @@ pub struct HandleSyncHandler;
 impl HandleSyncHandler {
     pub fn new() -> Self {
         Self
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SeedSyncConnectionHandler;
+
+impl SeedSyncConnectionHandler {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl IntentHandler for SeedSyncConnectionHandler {
+    fn accepts(&self, intent: &Intent) -> bool {
+        intent.kind.as_str() == SEED_SYNC_CONNECTION
+    }
+
+    fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        let input = decode_seed_sync_connection(intent)?;
+        Ok(vec![input.connection_id])
+    }
+
+    fn handle(&self, raw: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+        let input = decode_seed_sync_connection(raw)?;
+        context.require_fact(&input.connection_id)?;
+        let store = context.store()?;
+        require_persisted_fact(store, &input.connection_id)?;
+        seed_connection_output(store, input)
+    }
+}
+
+pub fn is_sync_seed_fact(fact: &Fact) -> bool {
+    if fact.scope == FactScope::Local {
+        return false;
+    }
+    let Some(tag) = fact.bytes.first().copied() else {
+        return false;
+    };
+    if matches!(
+        tag,
+        sync_compare::layout::TYPE_SYNC_COMPARE
+            | sync_have_id::layout::TYPE_SYNC_HAVE_ID
+            | sync_need_id::layout::TYPE_SYNC_NEED_ID
+            | sync_range_request::layout::TYPE_SYNC_RANGE_REQUEST
+            | sync_shared_event::layout::TYPE_SHARED_EVENT
+            | sync_encrypted_root::layout::TYPE_ENCRYPTED_ROOT
+            | sync_key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE
+    ) {
+        return false;
+    }
+    crate::event_modules::transit::create::require_sendable_fact(fact).is_ok()
+}
+
+pub fn advertise_indexed_fact_to_connections(
+    store: &Store,
+    fact: &Fact,
+) -> Result<HandlerOutput, String> {
+    if !is_sync_seed_fact(fact) {
+        return Ok(HandlerOutput::new());
+    }
+    let Some(local_endpoint) = identity_endpoint::local_endpoint::local_endpoint(store)? else {
+        return Ok(HandlerOutput::new());
+    };
+    let endpoint_memberships = endpoint_memberships(store)?;
+    let connection_rows = connection_rows(store)?;
+    let mut output = HandlerOutput::new();
+    for row in &connection_rows {
+        let Some(remote_endpoint) = remote_endpoint_for_connection(row, local_endpoint.endpoint)
+        else {
+            continue;
+        };
+        if !may_seed_fact_to_endpoint(fact, remote_endpoint, &endpoint_memberships) {
+            continue;
+        }
+        output = output_with_have(output, row.connection_id, fact)?;
+    }
+    if let Some(indexed_member_endpoint) = indexed_endpoint_shared_member(fact)? {
+        for row in &connection_rows {
+            if remote_endpoint_for_connection(row, local_endpoint.endpoint)
+                == Some(indexed_member_endpoint)
+            {
+                output = output.intent(seed_sync_connection_intent(SeedSyncConnection {
+                    connection_id: row.connection_id,
+                    after_event_id: None,
+                }));
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn seed_connection_output(
+    store: &Store,
+    input: SeedSyncConnection,
+) -> Result<HandlerOutput, String> {
+    let Some(local_endpoint) = identity_endpoint::local_endpoint::local_endpoint(store)? else {
+        return Ok(HandlerOutput::new());
+    };
+    let Some(row) = connection_rows(store)?
+        .into_iter()
+        .find(|row| row.connection_id == input.connection_id)
+    else {
+        return Ok(HandlerOutput::new());
+    };
+    let Some(remote_endpoint) = remote_endpoint_for_connection(&row, local_endpoint.endpoint)
+    else {
+        return Ok(HandlerOutput::new());
+    };
+    let endpoint_memberships = endpoint_memberships(store)?;
+    let mut facts = crate::core::wake_loop::persisted_facts(store)?;
+    facts.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let mut output = HandlerOutput::new();
+    let mut emitted = 0usize;
+    for fact in facts {
+        if input.after_event_id.is_some_and(|after| fact.id <= after) {
+            continue;
+        }
+        if !is_sync_seed_fact(&fact)
+            || !may_seed_fact_to_endpoint(&fact, remote_endpoint, &endpoint_memberships)
+        {
+            continue;
+        }
+        let have_fact = have_fact_for(input.connection_id, &fact)?;
+        if crate::core::wake_loop::persisted_fact(store, &have_fact.id)?.is_some() {
+            continue;
+        }
+        output = output_with_have_fact(output, input.connection_id, have_fact);
+        emitted += 1;
+        if emitted >= SEED_SYNC_BATCH {
+            output = output.intent(seed_sync_connection_intent(SeedSyncConnection {
+                connection_id: input.connection_id,
+                after_event_id: Some(fact.id),
+            }));
+            break;
+        }
+    }
+    Ok(output)
+}
+
+fn output_with_have(
+    output: HandlerOutput,
+    connection_id: HandlerFactId,
+    fact: &Fact,
+) -> Result<HandlerOutput, String> {
+    Ok(output_with_have_fact(
+        output,
+        connection_id,
+        have_fact_for(connection_id, fact)?,
+    ))
+}
+
+fn have_fact_for(connection_id: HandlerFactId, fact: &Fact) -> Result<Fact, String> {
+    let have = sync_have_id::fact::SyncHaveIdFact {
+        connection_id,
+        timestamp: fact.timestamp,
+        event_id: fact.id,
+    };
+    Ok(Fact::new(
+        FactScope::Global,
+        fact.timestamp,
+        sync_have_id::layout::encode_fact(&have)?,
+    ))
+}
+
+fn output_with_have_fact(
+    output: HandlerOutput,
+    connection_id: HandlerFactId,
+    have_fact: Fact,
+) -> HandlerOutput {
+    output
+        .fact(have_fact.clone())
+        .intent(send_on_connection_intent(TransitSendOnConnection {
+            connection_id,
+            fact_ids: vec![have_fact.id],
+        }))
+}
+
+fn connection_rows(
+    store: &Store,
+) -> Result<Vec<connection_response::rows::ConnectionResponseRow>, String> {
+    store
+        .table_rows(connection_response::rows::CONNECTION_RESPONSE_ROWS)
+        .map_err(|err| format!("load connection rows for sync seed: {err}"))?
+        .into_iter()
+        .map(|(key, value)| connection_response::rows::decode_connection_response_row(&key, &value))
+        .collect()
+}
+
+fn remote_endpoint_for_connection(
+    row: &connection_response::rows::ConnectionResponseRow,
+    local_endpoint: [u8; 32],
+) -> Option<[u8; 32]> {
+    if row.from_endpoint == local_endpoint {
+        Some(row.to_endpoint)
+    } else if row.to_endpoint == local_endpoint {
+        Some(row.from_endpoint)
+    } else {
+        None
+    }
+}
+
+fn endpoint_memberships(store: &Store) -> Result<BTreeSet<([u8; 32], [u8; 32])>, String> {
+    let rows = store
+        .table_rows(identity_endpoint_shared::rows::ENDPOINT_SHARED_ROWS)
+        .map_err(|err| format!("load endpoint membership rows for sync seed: {err}"))?;
+    rows.into_iter()
+        .map(|(key, value)| {
+            identity_endpoint_shared::rows::decode_endpoint_shared_row(&key, &value)
+                .map(|row| (row.workspace_id, row.endpoint_id))
+        })
+        .collect()
+}
+
+fn may_seed_fact_to_endpoint(
+    fact: &Fact,
+    remote_endpoint: [u8; 32],
+    endpoint_memberships: &BTreeSet<([u8; 32], [u8; 32])>,
+) -> bool {
+    match &fact.scope {
+        FactScope::Global => true,
+        FactScope::Local => false,
+        FactScope::Scoped { kind, id } if kind.as_str() == "workspace" => {
+            endpoint_memberships.contains(&(*id, remote_endpoint))
+        }
+        FactScope::Scoped { .. } => false,
+    }
+}
+
+fn indexed_endpoint_shared_member(fact: &Fact) -> Result<Option<[u8; 32]>, String> {
+    let Some(tag) = fact.bytes.first().copied() else {
+        return Ok(None);
+    };
+    let payload = if tag == crate::event_modules::signed_fact::layout::TYPE_SIGNED_FACT {
+        let envelope = crate::event_modules::signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+        if envelope.inner_type != identity_endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
+            return Ok(None);
+        }
+        envelope.payload
+    } else if tag == identity_endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
+        fact.bytes.clone()
+    } else {
+        return Ok(None);
+    };
+    let endpoint = identity_endpoint_shared::layout::decode_fact(&payload)?;
+    Ok(Some(endpoint.endpoint_id))
+}
+
+fn require_persisted_fact(store: &Store, id: &HandlerFactId) -> Result<(), String> {
+    if crate::core::wake_loop::persisted_fact(store, id)?.is_some() {
+        Ok(())
+    } else {
+        Err(format!("handler context missing fact {id:?}"))
     }
 }
 

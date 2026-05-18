@@ -8,6 +8,7 @@
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
+use crate::core::projection::Timeline;
 
 use super::fact::{FrontierId, SignerId, WorkspaceId};
 
@@ -21,6 +22,10 @@ pub fn secret_role() -> Role {
 
 pub fn deletion_role() -> Role {
     Role::new("content_deleted").expect("valid deletion role")
+}
+
+pub fn expiration_timeline() -> Timeline {
+    Timeline::new("sealed_message_expiry").expect("valid sealed-message expiry timeline")
 }
 
 pub fn workspace_scope(workspace_id: WorkspaceId) -> FactScope {

@@ -6,9 +6,11 @@
 //! sealed payload) plus the canonical fields the projector needs to materialize
 //! a row keyed by `(workspace_id, message_id)`.
 //!
+//! Signed content-message facts are parsed up front so signer needs can be
+//! emitted, but signature verification waits until endpoint signer context is
+//! available.
+//!
 //! Legacy parity gaps (intentional, deferred to later slices):
-//!  - Legacy validates a signed envelope around the payload; the target
-//!    `signed_fact` envelope is a separate event module.
 //!  - Legacy resolves a disappearing-messages policy and stamps
 //!    `expires_at_minute`; that policy module is not ported.
 //!  - Legacy binds the leaf coordinate via a per-message leaf event dependency;

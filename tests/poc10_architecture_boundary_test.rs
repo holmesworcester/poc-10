@@ -267,15 +267,17 @@ fn poc10_has_no_product_demo_or_smoke_command_surface() {
 }
 
 #[test]
-fn poc10_projector_output_contract_emits_only_needs_offers_and_intents() {
+fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
     let topo::core::projection::ProjectionOutput {
         needs,
         offers,
+        time_wakes,
         intents,
     } = topo::core::projection::ProjectionOutput::default();
 
     assert!(needs.is_empty());
     assert!(offers.is_empty());
+    assert!(time_wakes.is_empty());
     assert!(intents.is_empty());
 }
 

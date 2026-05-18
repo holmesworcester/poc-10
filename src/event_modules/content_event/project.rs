@@ -46,6 +46,7 @@ impl Projector for ContentEventProjector {
                 return Ok(output_with_signer_need(signer_need));
             }
         }
+        authority::verify_signature(&decoded, "content event")?;
 
         Ok(output_with_signer_need(signer_need)
             .intent(AtomicIntent::PutRow(content_event_row(fact.id, &event)?).into_intent()))
