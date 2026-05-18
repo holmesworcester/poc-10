@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use topo::core::schema_dsl::{
     parse_schema, CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE,
 };
 use topo::core::store::{Store, TableName, TableRow};
+use topo::protocol::facts::content::{file, message, reaction};
 
 fn checked_schema_sources() -> [&'static str; 3] {
     [
@@ -147,6 +148,237 @@ fn schema_sources_create_typed_table_declarations() {
     assert_eq!(index_count, 1);
 
     Store::open_disk_with_schema_sources(&path, &[source]).expect("reopen validates typed table");
+}
+
+#[test]
+fn content_read_model_rows_materialize_into_typed_tables() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("content-read-models.db");
+    let store = Store::open_disk_with_schema_sources(&path, &[FACTS_SCHEMA_SOURCE])
+        .expect("open content schema store");
+
+    let message_fact = message::fact::ContentMessageFact {
+        workspace_id: [1; 32],
+        author_user_id: [2; 32],
+        created_at_ms: 60_000,
+        frontier_id: [3; 32],
+        minute: 1,
+        leaf_id: [4; 32],
+        sealed_body_ref: [5; 32],
+    };
+    let message_row = message::rows::content_message_row([9; 32], &message_fact);
+
+    let reaction_row = reaction::rows::reaction_row(reaction::rows::ReactionRow {
+        workspace_id: [1; 32],
+        reaction_id: [10; 32],
+        created_at_ms: 60_001,
+        target_message_id: [9; 32],
+        author_user_id: [2; 32],
+        nonce: [6; reaction::fact::REACTION_NONCE_BYTES],
+        ciphertext: b"+1".to_vec(),
+    })
+    .expect("reaction row");
+
+    let file_fact = file::fact::ContentFileFact {
+        workspace_id: [1; 32],
+        created_at_ms: 60_002,
+        message_id: [9; 32],
+        author_user_id: [2; 32],
+        file_id: [11; 32],
+        blob_bytes: 4096,
+        total_slices: 2,
+        slice_bytes: 2048,
+        root_hash: [7; file::fact::FILE_ROOT_HASH_BYTES],
+        sealed_metadata: b"meta".to_vec(),
+    };
+    let file_row = file::rows::content_file_row([12; 32], &file_fact).expect("file row");
+
+    store
+        .insert_table_rows(vec![
+            message_row.clone(),
+            reaction_row.clone(),
+            file_row.clone(),
+        ])
+        .expect("insert typed content rows");
+    assert_eq!(
+        store
+            .table_row(message::rows::CONTENT_MESSAGE_ROWS, &message_row.key)
+            .expect("read message row"),
+        Some(message_row.value.clone())
+    );
+    assert_eq!(
+        store
+            .table_row(reaction::rows::REACTION_ROWS, &reaction_row.key)
+            .expect("read reaction row"),
+        Some(reaction_row.value.clone())
+    );
+    assert_eq!(
+        store
+            .table_row(file::rows::FILE_ROWS, &file_row.key)
+            .expect("read file row"),
+        Some(file_row.value.clone())
+    );
+    drop(store);
+
+    let conn = Connection::open(&path).expect("open sqlite");
+    let message_columns = conn
+        .query_row(
+            "SELECT author_user_id, created_at_ms, sealed_message_id, deleted
+             FROM content_messages
+             WHERE workspace_id = ?1 AND message_id = ?2",
+            params![&[1u8; 32][..], &[9u8; 32][..]],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .expect("query content_messages");
+    assert_eq!(message_columns, (vec![2; 32], 60_000, vec![5; 32], 0));
+
+    let reaction_columns = conn
+        .query_row(
+            "SELECT message_id, author_user_id, created_at_ms, nonce, ciphertext, deleted
+             FROM content_reactions
+             WHERE workspace_id = ?1 AND reaction_id = ?2",
+            params![&[1u8; 32][..], &[10u8; 32][..]],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .expect("query content_reactions");
+    assert_eq!(
+        reaction_columns,
+        (
+            vec![9; 32],
+            vec![2; 32],
+            60_001,
+            vec![6; 24],
+            b"+1".to_vec(),
+            0
+        )
+    );
+
+    let file_columns = conn
+        .query_row(
+            "SELECT file_fact_id, message_id, file_id, root_hash, byte_len, total_slices,
+                    slice_bytes, sealed_metadata, deleted
+             FROM content_files
+             WHERE workspace_id = ?1 AND file_fact_id = ?2",
+            params![&[1u8; 32][..], &[12u8; 32][..]],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            },
+        )
+        .expect("query content_files");
+    assert_eq!(
+        file_columns,
+        (
+            vec![12; 32],
+            vec![9; 32],
+            vec![11; 32],
+            vec![7; 32],
+            4096,
+            2,
+            2048,
+            b"meta".to_vec(),
+            0
+        )
+    );
+
+    let opaque_table_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('content_message_rows', 'reaction_rows', 'file_rows')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query old opaque tables");
+    assert_eq!(opaque_table_count, 0);
+}
+
+#[test]
+fn schema_source_typed_tables_are_written_as_queryable_columns() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("typed-row-store.db");
+    let source = r#"
+        table typed_messages {
+          column workspace_id bytes(32);
+          column message_id bytes(32);
+          column created_at_ms u64;
+          column deleted bool;
+          row_key (workspace_id, message_id);
+          index by_workspace_created (workspace_id, created_at_ms);
+        }
+    "#;
+    let store = Store::open_disk_with_schema_sources(&path, &[source]).expect("open store");
+    let workspace_id = [1u8; 32];
+    let message_id = [2u8; 32];
+    let key = [workspace_id.as_slice(), message_id.as_slice()].concat();
+    let mut value = 123u64.to_be_bytes().to_vec();
+    value.push(1);
+
+    assert_eq!(
+        store
+            .insert_table_rows(vec![TableRow {
+                table: TableName::new("typed_messages"),
+                key: key.clone(),
+                value: value.clone(),
+            }])
+            .expect("insert typed row"),
+        1
+    );
+    assert_eq!(
+        store
+            .table_row(TableName::new("typed_messages"), &key)
+            .expect("read typed row"),
+        Some(value.clone())
+    );
+    assert_eq!(
+        store
+            .table_rows_with_key_prefix(TableName::new("typed_messages"), &workspace_id, 10)
+            .expect("scan typed rows"),
+        vec![(key.clone(), value)]
+    );
+
+    let conn = Connection::open(&path).expect("open sqlite");
+    let row = conn
+        .query_row(
+            "SELECT workspace_id, message_id, created_at_ms, deleted FROM typed_messages",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .expect("read typed sqlite row");
+    assert_eq!(row, (workspace_id.to_vec(), message_id.to_vec(), 123, 1));
 }
 
 #[test]

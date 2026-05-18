@@ -12,10 +12,11 @@ mod secret_path;
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::matchers as history_matchers;
 
-use super::layout;
 use super::rows::local_history_node_secret_row;
 use secret_path::{
     validate_child_addressing, validate_frontier, validate_source, validate_tombstone, SourceKind,
@@ -36,11 +37,21 @@ impl Projector for LocalHistoryNodeSecretProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, projection_context)
+    }
+}
+
+impl TypedProjector<super::Codec> for LocalHistoryNodeSecretProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        node: super::fact::LocalHistoryNodeSecretFact,
+        projection_context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("local history node secret fact must have FactScope::Local".to_string());
         }
-        let node = layout::decode_fact(fact.body())?;
         let workspace_scope = crate::protocol::matchers::workspace_scope(node.workspace_id);
 
         // 2. Context and path validation.

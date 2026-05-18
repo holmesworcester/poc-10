@@ -11,10 +11,11 @@
 use crate::core::crypto;
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::matchers;
 
-use super::layout;
 use super::rows::connection_ephemeral_secret_row;
 
 #[derive(Debug, Clone, Default)]
@@ -30,10 +31,20 @@ impl Projector for ConnectionEphemeralSecretProjector {
     fn project(
         &self,
         fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for ConnectionEphemeralSecretProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        secret: super::fact::ConnectionEphemeralSecretFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let secret = layout::decode_fact(fact.body())?;
         if crypto::x25519_public_key(&secret.ephemeral_private_key) != secret.ephemeral_public_key {
             return Err("connection ephemeral public key does not match private key".to_string());
         }

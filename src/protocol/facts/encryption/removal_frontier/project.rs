@@ -10,11 +10,12 @@
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::facts::identity;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
-use super::layout;
 use super::rows::removal_frontier_row;
 
 pub const WORKSPACE_SCOPE_KIND: &str = "workspace";
@@ -34,8 +35,18 @@ impl Projector for RemovalFrontierProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, projection_context)
+    }
+}
+
+impl TypedProjector<super::Codec> for RemovalFrontierProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        frontier: super::fact::RemovalFrontierFact,
+        projection_context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let frontier = layout::decode_fact(fact.body())?;
         let expected_scope = FactScope::Scoped {
             kind: ScopeKind::new(WORKSPACE_SCOPE_KIND).map_err(|err| err.to_string())?,
             id: frontier.workspace_id,

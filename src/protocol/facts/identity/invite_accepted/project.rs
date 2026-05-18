@@ -10,10 +10,11 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::facts::identity::invite;
 
-use super::layout;
 use super::rows::invite_accepted_row;
 
 #[derive(Debug, Clone, Default)]
@@ -31,11 +32,21 @@ impl Projector for InviteAcceptedProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for InviteAcceptedProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        accepted: super::fact::InviteAcceptedFact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("invite_accepted fact must have local scope".to_string());
         }
-        let accepted = layout::decode_fact(fact.body())?;
         if accepted.workspace_id == [0; 32]
             || accepted.invite_fact_id == [0; 32]
             || accepted.invite_secret_fact_id == [0; 32]

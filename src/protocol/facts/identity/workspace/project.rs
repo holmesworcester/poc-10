@@ -9,10 +9,11 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
-use super::layout;
 use super::rows::workspace_row;
 
 #[derive(Debug, Clone, Default)]
@@ -28,13 +29,23 @@ impl Projector for WorkspaceProjector {
     fn project(
         &self,
         fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for WorkspaceProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        workspace: super::fact::WorkspaceFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("workspace fact must have global scope".to_string());
         }
-        let workspace = layout::decode_fact(fact.body())?;
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .offer(crate::protocol::matchers::workspace_offer(fact.id))

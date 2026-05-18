@@ -12,14 +12,15 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user_invite::fact::UserInviteFact;
 use crate::protocol::facts::identity::{admin, endpoint_shared, workspace};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
-use super::layout;
 use super::rows::user_invite_row;
 
 #[derive(Debug, Clone, Default)]
@@ -37,16 +38,23 @@ impl Projector for UserInviteProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for UserInviteProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        signed: identity::signed_fact::SignedPayload<UserInviteFact>,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("user_invite fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::decode_envelope(fact.body())
-            .map_err(|_| "user_invite fact must be signed".to_string())?;
-        if envelope.inner_type != layout::TYPE_USER_INVITE {
-            return Err("signed fact does not contain a user_invite".to_string());
-        }
-        let user_invite = layout::decode_fact(&envelope.payload)?;
+        let envelope = signed.envelope;
+        let user_invite = signed.payload;
         if user_invite.workspace_id == [0; 32] {
             return Err("user_invite fact has empty workspace_id".to_string());
         }

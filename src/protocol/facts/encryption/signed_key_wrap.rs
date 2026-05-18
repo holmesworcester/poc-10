@@ -13,12 +13,10 @@ use super::validation::{has_matching_signer_public_key, matched_payload_fact, re
 pub(super) fn signed_key_wrap(
     fact: &Fact,
     projection_context: &ProjectionContext,
+    signed: signed_fact::SignedPayload<crate::protocol::facts::encryption::fact::KeyWrapFact>,
 ) -> Result<ProjectionOutput, String> {
-    let envelope = signed_fact::layout::decode_signed_fact(fact.body())?;
-    if envelope.inner_type != layout::TYPE_KEY_WRAP {
-        return Err("signed fact does not contain an encryption key wrap".to_string());
-    }
-    let wrap = layout::decode_key_wrap(&envelope.payload)?;
+    let envelope = signed.envelope;
+    let wrap = signed.payload;
     let scope = crate::protocol::matchers::workspace_scope(wrap.workspace_id);
     require_fact_scope(fact, &scope)?;
     if envelope.signer_id != wrap.signer_endpoint_id {

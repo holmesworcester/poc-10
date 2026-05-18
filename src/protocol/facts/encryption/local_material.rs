@@ -13,8 +13,8 @@ use super::validation::{matched_payload_fact, require_local_scope};
 pub(super) fn project_local_key_secret(
     fact: &Fact,
     projection_context: &ProjectionContext,
+    secret: LocalKeySecretFact,
 ) -> Result<ProjectionOutput, String> {
-    let secret = layout::decode_local_key_secret(fact.body())?;
     let scope = crate::protocol::matchers::workspace_scope(secret.workspace_id);
     require_local_scope(fact)?;
     let frontier_need = matchers::frontier_need(fact.id, scope.clone(), secret.frontier_id);
@@ -49,8 +49,8 @@ pub(super) fn project_local_key_secret(
 pub(super) fn project_local_history_node_secret(
     fact: &Fact,
     projection_context: &ProjectionContext,
+    node: LocalHistoryNodeSecretFact,
 ) -> Result<ProjectionOutput, String> {
-    let node = layout::decode_local_history_node_secret(fact.body())?;
     let scope = crate::protocol::matchers::workspace_scope(node.workspace_id);
     require_local_scope(fact)?;
     let frontier_need = matchers::frontier_need(fact.id, scope.clone(), node.frontier_id);

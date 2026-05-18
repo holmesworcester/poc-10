@@ -11,7 +11,9 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
 use crate::core::intents::{AtomicIntent, TableDelete};
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
 use crate::protocol::facts::content::file;
 use crate::protocol::facts::content::file_deletion;
@@ -19,7 +21,6 @@ use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_w
 use crate::protocol::matchers as file_matchers;
 use crate::protocol::matchers as message_matchers;
 
-use super::layout;
 use super::rows::{content_file_slice_key, content_file_slice_row, FILE_SLICE_ROWS};
 
 #[derive(Debug, Clone, Default)]
@@ -37,8 +38,18 @@ impl Projector for ContentFileSliceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for ContentFileSliceProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        slice: super::fact::ContentFileSliceFact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let slice = layout::decode_fact(fact.body())?;
         let scope = message_matchers::workspace_scope(slice.workspace_id);
         require_fact_scope(fact, &scope)?;
 

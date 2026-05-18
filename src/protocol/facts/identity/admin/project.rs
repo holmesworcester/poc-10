@@ -12,7 +12,9 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::admin::fact::AdminFact;
 use crate::protocol::facts::identity::user;
@@ -39,16 +41,23 @@ impl Projector for AdminProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for AdminProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        signed: identity::signed_fact::SignedPayload<AdminFact>,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("admin fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::decode_envelope(fact.body())
-            .map_err(|_| "admin fact must be signed".to_string())?;
-        if envelope.inner_type != layout::TYPE_ADMIN {
-            return Err("signed fact does not contain an admin".to_string());
-        }
-        let admin = layout::decode_fact(&envelope.payload)?;
+        let envelope = signed.envelope;
+        let admin = signed.payload;
         if admin.workspace_id == [0u8; 32] {
             return Err("admin workspace_id must not be zero".to_string());
         }

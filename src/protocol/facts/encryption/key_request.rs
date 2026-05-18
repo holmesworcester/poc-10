@@ -1,5 +1,6 @@
 use crate::core::facts::Fact;
 use crate::core::projection::{ProjectionContext, ProjectionOutput};
+use crate::protocol::facts::encryption::fact::KeyRequestFact;
 use crate::protocol::facts::encryption::intent::create_key_wrap_intent;
 use crate::protocol::facts::encryption::layout;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
@@ -13,8 +14,8 @@ use super::validation::{
 pub(super) fn key_request(
     fact: &Fact,
     projection_context: &ProjectionContext,
+    request: KeyRequestFact,
 ) -> Result<ProjectionOutput, String> {
-    let request = layout::decode_key_request(fact.body())?;
     let scope = crate::protocol::matchers::workspace_scope(request.workspace_id);
     require_fact_scope(fact, &scope)?;
 

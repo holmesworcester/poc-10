@@ -12,10 +12,9 @@ use crate::core::wire;
 
 use super::fact::{AuthorId, WorkspaceId, REACTION_CIPHERTEXT_BYTES, REACTION_NONCE_BYTES};
 
-pub const REACTION_ROWS: TableName = TableName::new("reaction_rows");
+pub const REACTION_ROWS: TableName = TableName::new("content_reactions");
 
-pub const ROW_VALUE_BYTES: usize =
-    1 + 8 + 32 + 32 + REACTION_NONCE_BYTES + 4 + REACTION_CIPHERTEXT_BYTES;
+pub const ROW_PREFIX_BYTES: usize = 32 + 32 + 8 + REACTION_NONCE_BYTES + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionRow {
@@ -36,15 +35,17 @@ pub fn reaction_key(workspace_id: WorkspaceId, reaction_id: FactId) -> Vec<u8> {
 }
 
 pub fn reaction_row(input: ReactionRow) -> Result<TableRow, String> {
-    let mut writer = wire::Writer::with_capacity(ROW_VALUE_BYTES);
-    writer.u8(1);
-    writer.u64be(input.created_at_ms);
+    if input.ciphertext.len() > REACTION_CIPHERTEXT_BYTES {
+        return Err("reaction row ciphertext exceeds fixed slot".to_string());
+    }
+    let mut writer = wire::Writer::with_capacity(ROW_PREFIX_BYTES + input.ciphertext.len() + 1);
     writer.fixed(&input.target_message_id);
     writer.fixed(&input.author_user_id);
+    writer.u64be(input.created_at_ms);
     writer.fixed(&input.nonce);
-    writer
-        .fixed_slot::<REACTION_CIPHERTEXT_BYTES>(&input.ciphertext)
-        .map_err(wire_err)?;
+    writer.u32be(input.ciphertext.len() as u32);
+    writer.bytes(&input.ciphertext);
+    writer.u8(0);
     Ok(TableRow {
         table: REACTION_ROWS,
         key: reaction_key(input.workspace_id, input.reaction_id),
@@ -56,7 +57,7 @@ pub fn decode_reaction_row(key: &[u8], value: &[u8]) -> Result<ReactionRow, Stri
     if key.len() != 64 {
         return Err("reaction row key is malformed".to_string());
     }
-    if value.len() != ROW_VALUE_BYTES || value[0] != 1 {
+    if value.len() < ROW_PREFIX_BYTES + 1 {
         return Err("reaction row value is malformed".to_string());
     }
     let mut key_reader = wire::Reader::new(key);
@@ -64,20 +65,33 @@ pub fn decode_reaction_row(key: &[u8], value: &[u8]) -> Result<ReactionRow, Stri
     let reaction_id = key_reader.array().map_err(wire_err)?;
     key_reader.finish().map_err(wire_err)?;
     let mut value_reader = wire::Reader::new(value);
-    let version = value_reader.u8().map_err(wire_err)?;
-    if version != 1 {
+    let target_message_id = value_reader.array().map_err(wire_err)?;
+    let author_user_id = value_reader.array().map_err(wire_err)?;
+    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
+    let nonce = value_reader.array().map_err(wire_err)?;
+    let ciphertext_len = value_reader.u32be().map_err(wire_err)? as usize;
+    if ciphertext_len > REACTION_CIPHERTEXT_BYTES {
+        return Err("reaction row ciphertext exceeds fixed slot".to_string());
+    }
+    if value.len() != ROW_PREFIX_BYTES + ciphertext_len + 1 {
         return Err("reaction row value is malformed".to_string());
+    }
+    let ciphertext = value_reader
+        .bytes(ciphertext_len)
+        .map_err(wire_err)?
+        .to_vec();
+    let deleted = value_reader.u8().map_err(wire_err)?;
+    if deleted > 1 {
+        return Err("reaction row deleted flag is malformed".to_string());
     }
     let row = ReactionRow {
         workspace_id,
         reaction_id,
-        created_at_ms: value_reader.u64be().map_err(wire_err)?,
-        target_message_id: value_reader.array().map_err(wire_err)?,
-        author_user_id: value_reader.array().map_err(wire_err)?,
-        nonce: value_reader.array().map_err(wire_err)?,
-        ciphertext: value_reader
-            .fixed_slot::<REACTION_CIPHERTEXT_BYTES>()
-            .map_err(wire_err)?,
+        created_at_ms,
+        target_message_id,
+        author_user_id,
+        nonce,
+        ciphertext,
     };
     value_reader.finish().map_err(wire_err)?;
     Ok(row)

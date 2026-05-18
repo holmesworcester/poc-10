@@ -10,12 +10,13 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user_invite;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
-use super::layout;
 use super::rows::user_row;
 
 #[derive(Debug, Clone, Default)]
@@ -33,16 +34,23 @@ impl Projector for UserProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for UserProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        signed: identity::signed_fact::SignedPayload<super::fact::UserFact>,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("user fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::decode_envelope(fact.body())
-            .map_err(|_| "user fact must be signed".to_string())?;
-        if envelope.inner_type != layout::TYPE_USER {
-            return Err("signed fact does not contain a user".to_string());
-        }
-        let user = layout::decode_fact(&envelope.payload)?;
+        let envelope = signed.envelope;
+        let user = signed.payload;
         if user.workspace_id == [0; 32] {
             return Err("user workspace_id must not be empty".to_string());
         }

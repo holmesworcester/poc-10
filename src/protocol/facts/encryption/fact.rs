@@ -114,3 +114,57 @@ pub struct KeyWrapFact {
     pub nonce: XChaCha20Poly1305Nonce,
     pub ciphertext: KeyWrapCiphertext,
 }
+
+pub enum ProjectionPayload {
+    RecipientKey(RecipientKeyFact),
+    RemovalFrontier(RemovalFrontierFact),
+    LocalKeySecret(LocalKeySecretFact),
+    LocalHistoryNodeSecret(LocalHistoryNodeSecretFact),
+    LocalRecipientKey(LocalRecipientKeyFact),
+    KeyRequest(KeyRequestFact),
+    SignedKeyWrap(crate::protocol::facts::identity::signed_fact::SignedPayload<KeyWrapFact>),
+}
+
+pub(crate) struct Codec;
+
+impl crate::core::projection::FactCodec for Codec {
+    type Payload = ProjectionPayload;
+
+    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
+        match fact.bytes.first().copied() {
+            Some(super::layout::TYPE_RECIPIENT_KEY) => {
+                super::layout::decode_recipient_key(fact.body())
+                    .map(ProjectionPayload::RecipientKey)
+            }
+            Some(super::layout::TYPE_REMOVAL_FRONTIER) => {
+                super::layout::decode_removal_frontier(fact.body())
+                    .map(ProjectionPayload::RemovalFrontier)
+            }
+            Some(super::layout::TYPE_LOCAL_KEY_SECRET) => {
+                super::layout::decode_local_key_secret(fact.body())
+                    .map(ProjectionPayload::LocalKeySecret)
+            }
+            Some(super::layout::TYPE_LOCAL_HISTORY_NODE_SECRET) => {
+                super::layout::decode_local_history_node_secret(fact.body())
+                    .map(ProjectionPayload::LocalHistoryNodeSecret)
+            }
+            Some(super::layout::TYPE_LOCAL_RECIPIENT_KEY) => {
+                super::layout::decode_local_recipient_key(fact.body())
+                    .map(ProjectionPayload::LocalRecipientKey)
+            }
+            Some(super::layout::TYPE_KEY_REQUEST) => {
+                super::layout::decode_key_request(fact.body()).map(ProjectionPayload::KeyRequest)
+            }
+            Some(crate::protocol::facts::identity::signed_fact::TYPE_SIGNED_FACT) => {
+                crate::protocol::facts::identity::signed_fact::decode_signed_fact_payload(
+                    fact,
+                    super::layout::TYPE_KEY_WRAP,
+                    "encryption key wrap",
+                    super::layout::decode_key_wrap,
+                )
+                .map(ProjectionPayload::SignedKeyWrap)
+            }
+            _ => Err("unknown encryption fact type".to_string()),
+        }
+    }
+}

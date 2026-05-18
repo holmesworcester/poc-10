@@ -10,12 +10,13 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::facts::identity;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::fact::DisappearingMessagesSettingFact;
-use super::layout;
 use super::rows::setting_row;
 
 #[derive(Debug, Clone, Default)]
@@ -33,8 +34,18 @@ impl Projector for DisappearingMessagesSettingProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, projection_context)
+    }
+}
+
+impl TypedProjector<super::Codec> for DisappearingMessagesSettingProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        setting: DisappearingMessagesSettingFact,
+        projection_context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let setting = layout::decode_fact(fact.body())?;
         if setting.ttl_minutes == 0 {
             return Err("disappearing setting ttl_minutes must be non-zero".to_string());
         }
@@ -154,7 +165,7 @@ fn validate_previous(
     if Some(previous_fact.id) != setting.supersedes_setting_id {
         return Err("disappearing setting previous context payload id mismatch".to_string());
     }
-    let previous = layout::decode_fact(&previous_fact.bytes)
+    let previous = super::decode_fact_payload(&previous_fact.bytes)
         .map_err(|_| "disappearing setting previous context must be a setting fact".to_string())?;
     if previous.workspace_id != setting.workspace_id
         || previous.scope_kind != setting.scope_kind

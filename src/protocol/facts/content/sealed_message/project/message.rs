@@ -10,7 +10,6 @@ use super::super::fact::SealedMessageFact;
 use super::super::intent::{
     self, PurgeDeletedMessage, PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
 };
-use super::super::layout;
 use super::super::rows::{
     message_key, message_row, message_tombstone_row, opened_message_row, sealed_message_row,
     MessageRow, OpenedMessageRow, SealedMessageRow, MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
@@ -24,20 +23,18 @@ use crate::protocol::matchers;
 pub(super) fn project_message(
     fact: &Fact,
     context: &ProjectionContext,
+    message: SealedMessageFact,
 ) -> Result<ProjectionOutput, String> {
-    let message = layout::decode_sealed_message(fact.body())?;
     project_decoded_message(fact, context, message, None)
 }
 
 pub(super) fn project_signed_message(
     fact: &Fact,
     context: &ProjectionContext,
+    signed: signed_fact::SignedPayload<SealedMessageFact>,
 ) -> Result<ProjectionOutput, String> {
-    let envelope = signed_fact::layout::decode_signed_fact(fact.body())?;
-    if envelope.inner_type != layout::TYPE_SEALED_MESSAGE {
-        return Err("signed fact does not contain a sealed message".to_string());
-    }
-    let message = layout::decode_sealed_message(&envelope.payload)?;
+    let envelope = signed.envelope;
+    let message = signed.payload;
     if envelope.signer_id != message.signer_id {
         return Err("sealed message signer does not match signed envelope signer".to_string());
     }

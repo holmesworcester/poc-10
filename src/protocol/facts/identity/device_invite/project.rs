@@ -12,14 +12,15 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::device_invite::fact::DeviceInviteFact;
 use crate::protocol::facts::identity::{endpoint_shared, user, user_invite, workspace};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
-use super::layout;
 use super::rows::device_invite_row;
 
 #[derive(Debug, Clone, Default)]
@@ -37,16 +38,23 @@ impl Projector for DeviceInviteProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for DeviceInviteProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        signed: identity::signed_fact::SignedPayload<DeviceInviteFact>,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("device_invite fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::decode_envelope(fact.body())
-            .map_err(|_| "device_invite fact must be signed".to_string())?;
-        if envelope.inner_type != layout::TYPE_DEVICE_INVITE {
-            return Err("signed fact does not contain a device_invite".to_string());
-        }
-        let device_invite = layout::decode_fact(&envelope.payload)?;
+        let envelope = signed.envelope;
+        let device_invite = signed.payload;
         if device_invite.workspace_id == [0; 32] {
             return Err("device_invite fact has empty workspace_id".to_string());
         }

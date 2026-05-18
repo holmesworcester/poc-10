@@ -12,9 +12,8 @@ use crate::core::wire;
 
 use super::fact::{AuthorId, ContentFileFact, RootHash, WorkspaceId, FILE_ROOT_HASH_BYTES};
 
-pub const FILE_ROWS: TableName = TableName::new("file_rows");
-pub const ROW_PREFIX_BYTES: usize = 1 + 8 + 32 + 32 + 32 + 8 + 4 + 4 + FILE_ROOT_HASH_BYTES + 4;
-const ROW_VERSION: u8 = 1;
+pub const FILE_ROWS: TableName = TableName::new("content_files");
+pub const ROW_PREFIX_BYTES: usize = 32 + 32 + 32 + 8 + FILE_ROOT_HASH_BYTES + 8 + 8 + 8 + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentFileRow {
@@ -44,18 +43,18 @@ pub fn content_file_row(file_fact_id: FactId, fact: &ContentFileFact) -> Result<
         .len()
         .try_into()
         .map_err(|_| "content file row sealed metadata exceeds u32".to_string())?;
-    let mut writer = wire::Writer::with_capacity(ROW_PREFIX_BYTES + fact.sealed_metadata.len());
-    writer.u8(ROW_VERSION);
-    writer.u64be(fact.created_at_ms);
+    let mut writer = wire::Writer::with_capacity(ROW_PREFIX_BYTES + fact.sealed_metadata.len() + 1);
     writer.fixed(&fact.message_id);
-    writer.fixed(&fact.author_user_id);
     writer.fixed(&fact.file_id);
-    writer.u64be(fact.blob_bytes);
-    writer.u32be(fact.total_slices);
-    writer.u32be(fact.slice_bytes);
+    writer.fixed(&fact.author_user_id);
+    writer.u64be(fact.created_at_ms);
     writer.fixed(&fact.root_hash);
+    writer.u64be(fact.blob_bytes);
+    writer.u64be(u64::from(fact.total_slices));
+    writer.u64be(u64::from(fact.slice_bytes));
     writer.u32be(sealed_len);
     writer.bytes(&fact.sealed_metadata);
+    writer.u8(0);
     Ok(TableRow {
         table: FILE_ROWS,
         key: content_file_key(&fact.workspace_id, &file_fact_id),
@@ -67,27 +66,35 @@ pub fn decode_content_file_row(key: &[u8], value: &[u8]) -> Result<ContentFileRo
     if key.len() != 64 {
         return Err("content file row key is malformed".to_string());
     }
-    if value.len() < ROW_PREFIX_BYTES || value[0] != ROW_VERSION {
+    if value.len() < ROW_PREFIX_BYTES + 1 {
         return Err("content file row value is malformed".to_string());
     }
     let mut value_reader = wire::Reader::new(value);
-    let version = value_reader.u8().map_err(wire_err)?;
-    if version != ROW_VERSION {
-        return Err("content file row value is malformed".to_string());
-    }
-    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
     let message_id = value_reader.array().map_err(wire_err)?;
-    let author_user_id = value_reader.array().map_err(wire_err)?;
     let file_id = value_reader.array().map_err(wire_err)?;
-    let blob_bytes = value_reader.u64be().map_err(wire_err)?;
-    let total_slices = value_reader.u32be().map_err(wire_err)?;
-    let slice_bytes = value_reader.u32be().map_err(wire_err)?;
+    let author_user_id = value_reader.array().map_err(wire_err)?;
+    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
     let root_hash = value_reader.array().map_err(wire_err)?;
+    let blob_bytes = value_reader.u64be().map_err(wire_err)?;
+    let total_slices = value_reader
+        .u64be()
+        .map_err(wire_err)?
+        .try_into()
+        .map_err(|_| "content file row total_slices exceeds u32".to_string())?;
+    let slice_bytes = value_reader
+        .u64be()
+        .map_err(wire_err)?
+        .try_into()
+        .map_err(|_| "content file row slice_bytes exceeds u32".to_string())?;
     let sealed_len = value_reader.u32be().map_err(wire_err)? as usize;
-    if value.len() != ROW_PREFIX_BYTES + sealed_len {
+    if value.len() != ROW_PREFIX_BYTES + sealed_len + 1 {
         return Err("content file row value length does not match metadata".to_string());
     }
     let sealed_metadata = value_reader.bytes(sealed_len).map_err(wire_err)?.to_vec();
+    let deleted = value_reader.u8().map_err(wire_err)?;
+    if deleted > 1 {
+        return Err("content file row deleted flag is malformed".to_string());
+    }
     value_reader.finish().map_err(wire_err)?;
     let mut key_reader = wire::Reader::new(key);
     let workspace_id = key_reader.array().map_err(wire_err)?;

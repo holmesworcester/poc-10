@@ -8,10 +8,10 @@
 //!      fact so the owning projector can continue.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::matchers;
-
-use super::layout;
 
 #[derive(Debug, Clone, Default)]
 pub struct TransitReceivedProjector;
@@ -26,13 +26,23 @@ impl Projector for TransitReceivedProjector {
     fn project(
         &self,
         fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for TransitReceivedProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        received: super::fact::TransitReceivedFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("transport::transit received fact must have FactScope::Local".to_string());
         }
-        let received = layout::decode_fact(fact.body())?;
         // 3. Materialize.
         Ok(
             ProjectionOutput::new().offer(matchers::transit_received_offer(

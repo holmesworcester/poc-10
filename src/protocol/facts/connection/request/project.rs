@@ -12,7 +12,9 @@
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 
 use crate::protocol::facts::connection::ephemeral_secret;
 use crate::protocol::facts::identity::invite;
@@ -26,7 +28,6 @@ use crate::protocol::matchers as receive_matchers;
 
 use super::addr::encode_optional_addr;
 use super::fact::ConnectionRequestFact;
-use super::layout;
 use super::rows::connection_request_row;
 
 #[derive(Debug, Clone, Default)]
@@ -44,11 +45,21 @@ impl Projector for ConnectionRequestProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, projection_context)
+    }
+}
+
+impl TypedProjector<super::Codec> for ConnectionRequestProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        request: ConnectionRequestFact,
+        projection_context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if !matches!(fact.scope, FactScope::Local | FactScope::Global) {
             return Err("connection request fact must be local or global".to_string());
         }
-        let request = layout::decode_fact(fact.body())?;
         validate_request_fields(&request)?;
         if request.from_endpoint == request.to_endpoint {
             return Err("connection request endpoints must differ".to_string());

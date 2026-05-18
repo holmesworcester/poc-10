@@ -10,7 +10,9 @@
 
 use crate::core::facts::Fact;
 use crate::core::intents::{AtomicIntent, TableDelete};
-use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+};
 use crate::protocol::facts::content::message_deletion;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
@@ -18,7 +20,6 @@ use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_w
 use crate::protocol::matchers;
 
 use super::authority::{self, DecodedPayload};
-use super::layout;
 use super::rows::{content_message_key, content_message_row, CONTENT_MESSAGE_ROWS};
 
 #[derive(Debug, Clone, Default)]
@@ -36,10 +37,19 @@ impl Projector for ContentMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        project_typed::<super::Codec, _>(self, fact, context)
+    }
+}
+
+impl TypedProjector<super::Codec> for ContentMessageProjector {
+    fn project_typed(
+        &self,
+        fact: &Fact,
+        decoded: authority::DecodedFact<super::fact::ContentMessageFact>,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let decoded =
-            authority::decode_raw_or_signed(fact, layout::TYPE_CONTENT_MESSAGE, "content message")?;
-        let message = layout::decode_fact(&decoded.payload)?;
+        let message = decoded.payload;
         let scope = matchers::workspace_scope(message.workspace_id);
         require_fact_scope(fact, &scope)?;
 

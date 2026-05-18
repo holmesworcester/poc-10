@@ -9,6 +9,12 @@ pub struct DecodedPayload {
     pub signer: Option<SignedSigner>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedFact<T> {
+    pub payload: T,
+    pub signer: Option<SignedSigner>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignedSigner {
     pub signer_id: FactId,
@@ -38,6 +44,20 @@ pub fn decode_raw_or_signed(
     Ok(DecodedPayload {
         payload: fact.bytes.clone(),
         signer: None,
+    })
+}
+
+pub fn decode_raw_or_signed_fact<T>(
+    fact: &Fact,
+    expected_type: u8,
+    label: &str,
+    decode: impl FnOnce(&[u8]) -> Result<T, String>,
+) -> Result<DecodedFact<T>, String> {
+    let decoded = decode_raw_or_signed(fact, expected_type, label)?;
+    let payload = decode(&decoded.payload)?;
+    Ok(DecodedFact {
+        payload,
+        signer: decoded.signer,
     })
 }
 
