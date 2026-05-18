@@ -61,6 +61,11 @@ impl Projector for DeviceInviteProjector {
         }
 
         // 2. Authority.
+        //
+        // `user_invite_fact_id` is the authority-chain discriminator:
+        // Some(id) means the device invite must be signed by the user fact
+        // authorized by that user_invite; None means it must be signed by an
+        // already-trusted endpoint_shared fact for the same user/workspace.
         match device_invite.user_invite_fact_id {
             Some(user_invite_fact_id) => project_user_signed(
                 fact,
