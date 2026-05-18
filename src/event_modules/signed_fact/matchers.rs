@@ -2,9 +2,10 @@
 //!
 //! The offer is local by construction even though the match scope is the
 //! workspace. That split matters: commands may ask "can this workspace sign?"
-//! without learning or syncing a private key. The payload ref remains the local
-//! secret fact that a command or handler must explicitly load through its own
-//! capability boundary.
+//! without learning or syncing a private key. The matched payload is always
+//! the offering local secret fact (the wake loop enforces that the offer's
+//! `owner` is its own payload), which a command or handler must explicitly
+//! load through its own capability boundary.
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};

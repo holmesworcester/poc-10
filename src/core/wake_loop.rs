@@ -876,9 +876,16 @@ fn decode_need(value: &[u8]) -> Result<ContextNeed, String> {
     })
 }
 
+// Offer-row layout versions:
+//   1 -> historical: owner, role, scope, selector, payload_ref (FactId)
+//   2 -> current: owner, role, scope, selector (payload_ref dropped; payload
+//        is always the owner fact)
+const OFFER_ROW_VERSION_LEGACY_PAYLOAD_REF: u8 = 1;
+const OFFER_ROW_VERSION_CURRENT: u8 = 2;
+
 fn encode_offer(offer: &ContextOffer) -> Vec<u8> {
     let mut out = Vec::new();
-    put_u8(&mut out, 1);
+    put_u8(&mut out, OFFER_ROW_VERSION_CURRENT);
     put_id(&mut out, &offer.owner);
     put_string_u16(&mut out, offer.role.as_str());
     encode_scope(&mut out, &offer.scope);
@@ -888,11 +895,26 @@ fn encode_offer(offer: &ContextOffer) -> Vec<u8> {
 
 fn decode_offer(value: &[u8]) -> Result<ContextOffer, String> {
     let mut reader = Reader::new(value);
-    reader.expect_u8(1)?;
+    let version = reader.take_u8()?;
     let owner = reader.take_id()?;
     let role = Role::new(reader.take_string_u16()?)?;
     let scope = decode_scope(&mut reader)?;
     let selector = Selector::from_bytes(reader.take_bytes_u32()?.to_vec());
+    match version {
+        OFFER_ROW_VERSION_CURRENT => {}
+        OFFER_ROW_VERSION_LEGACY_PAYLOAD_REF => {
+            // v1 carried an extra trailing FactId for payload_ref. The current
+            // model requires it to equal `owner`; refuse the row otherwise so
+            // we surface any pre-cleanup row that was emitted incorrectly.
+            let legacy_payload_ref = reader.take_id()?;
+            if legacy_payload_ref != owner {
+                return Err(format!(
+                    "legacy offer row payload_ref {legacy_payload_ref:x?} does not equal owner {owner:x?}",
+                ));
+            }
+        }
+        other => return Err(format!("unknown context offer row version {other}")),
+    }
     reader.finish()?;
     Ok(ContextOffer {
         owner,
@@ -1099,6 +1121,58 @@ mod tests {
     use crate::core::projection::{ProjectionContext, ProjectionOutput};
     use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
     use std::cell::Cell;
+
+    /// Build a v1 offer row by hand: same shape as current encode_offer but
+    /// with the trailing payload_ref FactId restored.
+    fn encode_v1_offer(offer: &ContextOffer, payload_ref: [u8; 32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_u8(&mut out, OFFER_ROW_VERSION_LEGACY_PAYLOAD_REF);
+        put_id(&mut out, &offer.owner);
+        put_string_u16(&mut out, offer.role.as_str());
+        encode_scope(&mut out, &offer.scope);
+        put_bytes_u32(&mut out, offer.selector.as_bytes());
+        put_id(&mut out, &payload_ref);
+        out
+    }
+
+    #[test]
+    fn decode_offer_accepts_legacy_v1_row_when_payload_ref_equals_owner() {
+        let offer = ContextOffer {
+            owner: [1; 32],
+            role: Role::new("exact").unwrap(),
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([2; 32]),
+        };
+        let bytes = encode_v1_offer(&offer, offer.owner);
+        let decoded = decode_offer(&bytes).expect("legacy row should decode");
+        assert_eq!(decoded, offer);
+    }
+
+    #[test]
+    fn decode_offer_rejects_legacy_v1_row_when_payload_ref_differs() {
+        let offer = ContextOffer {
+            owner: [1; 32],
+            role: Role::new("exact").unwrap(),
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([2; 32]),
+        };
+        let bytes = encode_v1_offer(&offer, [9; 32]);
+        let err = decode_offer(&bytes).expect_err("mismatched payload_ref must fail");
+        assert!(err.contains("payload_ref"), "got error: {err}");
+    }
+
+    #[test]
+    fn decode_offer_rejects_unknown_version() {
+        let mut bytes = encode_offer(&ContextOffer {
+            owner: [1; 32],
+            role: Role::new("exact").unwrap(),
+            scope: FactScope::Global,
+            selector: Selector::from_bytes([2; 32]),
+        });
+        bytes[0] = 99;
+        let err = decode_offer(&bytes).expect_err("unknown version must fail");
+        assert!(err.contains("version"), "got error: {err}");
+    }
 
     #[test]
     fn standing_need_does_not_create_a_reproject_loop() {

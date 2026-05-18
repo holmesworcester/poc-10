@@ -77,9 +77,10 @@ pub struct ContextNeed {
 /// A standing statement that one fact can provide context to matching needs.
 ///
 /// `owner` is the fact that emitted this relationship and also the fact core
-/// will load and pass to the woken projector when this offer matches. A
-/// projector can only offer its own fact — there is no separate payload field
-/// for it to point at someone else's.
+/// will load and pass to the woken projector when this offer matches. The
+/// wake loop's `run_projection_with_context` rejects any offer whose `owner`
+/// is not the projected fact's id, so this single-field shape is structurally
+/// guaranteed: a projector cannot speak for any fact but its own.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextOffer {
     pub owner: FactId,

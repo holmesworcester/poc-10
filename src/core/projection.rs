@@ -137,6 +137,7 @@ pub fn run_projection_with_context(
     context: ProjectionContext,
 ) -> Result<ProjectionRun, String> {
     let output = projector.project(fact, &context)?;
+    enforce_owner_is_self(fact, &output)?;
     let context = output.context_set();
     let context_delta = diff_context_sets(previous_context, &context);
     Ok(ProjectionRun {
@@ -144,6 +145,31 @@ pub fn run_projection_with_context(
         context_delta,
         intents: output.intents,
     })
+}
+
+/// Reject any projected need or offer whose `owner` is not the fact being
+/// projected. Combined with `payload == owner` in the wake loop, this
+/// structurally guarantees that a projector cannot speak for any other fact:
+/// the matched-context payload a downstream projector sees is always the
+/// upstream projector's own fact.
+fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
+    for need in &output.needs {
+        if need.owner != fact.id {
+            return Err(format!(
+                "projector emitted need with owner {:x?} that is not the projected fact {:x?}",
+                need.owner, fact.id
+            ));
+        }
+    }
+    for offer in &output.offers {
+        if offer.owner != fact.id {
+            return Err(format!(
+                "projector emitted offer with owner {:x?} that is not the projected fact {:x?}",
+                offer.owner, fact.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -275,5 +301,86 @@ mod tests {
                 )))
             }
         }
+    }
+
+    /// Regression test: the wake loop must reject any projector output that
+    /// emits a need or offer with `owner != fact.id`. Otherwise a buggy or
+    /// malicious projector could publish offers on behalf of another fact.
+    #[test]
+    fn run_projection_rejects_offer_with_foreign_owner() {
+        struct ForeignOwnerProjector;
+        impl Projector for ForeignOwnerProjector {
+            fn project(
+                &self,
+                _fact: &Fact,
+                _ctx: &ProjectionContext,
+            ) -> Result<ProjectionOutput, String> {
+                Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: [0xff; 32],
+                    role: Role::new("exact").unwrap(),
+                    scope: FactScope::Global,
+                    selector: Selector::from_bytes([1; 32]),
+                }))
+            }
+        }
+        let fact = Fact::new(FactScope::Global, 1, b"body".to_vec());
+        let err = run_projection(
+            &ForeignOwnerProjector,
+            &fact,
+            &ContextSet::new(),
+            Vec::new(),
+        )
+        .expect_err("foreign-owner offer must be rejected");
+        assert!(err.contains("owner"), "expected owner error, got {err}");
+    }
+
+    #[test]
+    fn run_projection_rejects_need_with_foreign_owner() {
+        struct ForeignOwnerProjector;
+        impl Projector for ForeignOwnerProjector {
+            fn project(
+                &self,
+                _fact: &Fact,
+                _ctx: &ProjectionContext,
+            ) -> Result<ProjectionOutput, String> {
+                Ok(ProjectionOutput::new().need(ContextNeed {
+                    owner: [0xff; 32],
+                    role: Role::new("exact").unwrap(),
+                    scope: FactScope::Global,
+                    selector: Selector::from_bytes([1; 32]),
+                }))
+            }
+        }
+        let fact = Fact::new(FactScope::Global, 1, b"body".to_vec());
+        let err = run_projection(
+            &ForeignOwnerProjector,
+            &fact,
+            &ContextSet::new(),
+            Vec::new(),
+        )
+        .expect_err("foreign-owner need must be rejected");
+        assert!(err.contains("owner"), "expected owner error, got {err}");
+    }
+
+    #[test]
+    fn run_projection_accepts_self_owned_offer() {
+        struct SelfOwnerProjector;
+        impl Projector for SelfOwnerProjector {
+            fn project(
+                &self,
+                fact: &Fact,
+                _ctx: &ProjectionContext,
+            ) -> Result<ProjectionOutput, String> {
+                Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: Role::new("exact").unwrap(),
+                    scope: FactScope::Global,
+                    selector: Selector::from_bytes([1; 32]),
+                }))
+            }
+        }
+        let fact = Fact::new(FactScope::Global, 1, b"body".to_vec());
+        run_projection(&SelfOwnerProjector, &fact, &ContextSet::new(), Vec::new())
+            .expect("self-owned offer must be accepted");
     }
 }
