@@ -30,7 +30,7 @@ impl Projector for RemovalFrontierProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let frontier = layout::decode_fact(&fact.bytes)?;
+        let frontier = layout::decode_fact(fact.body())?;
         let expected_scope = FactScope::Scoped {
             kind: ScopeKind::new(WORKSPACE_SCOPE_KIND).map_err(|err| err.to_string())?,
             id: frontier.workspace_id,
@@ -119,8 +119,8 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope, ScopeKind};
     use topo::core::intents::AtomicIntent;
     use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
+    use topo::protocol::facts::identity::admin;
     use topo::protocol::facts::identity::admin::fact::AdminFact;
-    use topo::protocol::facts::identity::admin::layout as admin_layout;
     use topo::protocol::intents::sync::share_fact_with_workspace;
 
     use topo::protocol::facts::encryption::removal_frontier::fact::RemovalFrontierFact;
@@ -238,7 +238,7 @@ mod projector_tests {
         Fact::new(
             FactScope::Global,
             1,
-            admin_layout::encode_fact(&AdminFact {
+            admin::encode_fact_payload(&AdminFact {
                 created_at_ms: 1,
                 workspace_id,
                 public_key: [9; 32],

@@ -14,6 +14,8 @@ use topo::core::command_context::{
     WorkspaceId,
 };
 use topo::core::crypto;
+use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
+use topo::core::store::Store;
 use topo::protocol::facts::content::sealed_message::create::{
     associated_data, recover_text, send_message,
 };
@@ -104,9 +106,14 @@ fn seeded_vault(workspace_id: WorkspaceId) -> TestVault {
     }
 }
 
+fn open_store() -> Store {
+    Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+        .expect("open protocol memory store")
+}
+
 #[test]
 fn send_message_happy_path_emits_one_sealed_message_fact() {
-    let store = topo::core::store::Store::open_memory().expect("open memory store");
+    let store = open_store();
     let workspace_id = [1u8; 32];
     let vault = seeded_vault(workspace_id);
     let clock = FixedClock::new(60_000);
@@ -131,7 +138,7 @@ fn send_message_happy_path_emits_one_sealed_message_fact() {
 
 #[test]
 fn send_message_rejects_blank_or_empty_text() {
-    let store = topo::core::store::Store::open_memory().expect("open memory store");
+    let store = open_store();
     let workspace_id = [1u8; 32];
     let vault = seeded_vault(workspace_id);
     let clock = FixedClock::new(60_000);
@@ -146,7 +153,7 @@ fn send_message_rejects_blank_or_empty_text() {
 
 #[test]
 fn send_message_fact_round_trips_through_decode_sealed_message() {
-    let store = topo::core::store::Store::open_memory().expect("open memory store");
+    let store = open_store();
     let workspace_id = [42u8; 32];
     let vault = seeded_vault(workspace_id);
     let clock = FixedClock::new(120_000);

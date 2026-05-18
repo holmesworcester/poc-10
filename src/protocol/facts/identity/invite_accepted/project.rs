@@ -33,7 +33,7 @@ impl Projector for InviteAcceptedProjector {
         if fact.scope != FactScope::Local {
             return Err("invite_accepted fact must have local scope".to_string());
         }
-        let accepted = layout::decode_fact(&fact.bytes)?;
+        let accepted = layout::decode_fact(fact.body())?;
         if accepted.workspace_id == [0; 32]
             || accepted.invite_fact_id == [0; 32]
             || accepted.invite_secret_fact_id == [0; 32]
@@ -82,7 +82,7 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::AtomicIntent;
     use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::identity::invite::{
@@ -182,8 +182,9 @@ mod projector_tests {
             1,
             layout::encode_fact(&accepted).expect("encode"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));
@@ -207,8 +208,9 @@ mod projector_tests {
             1,
             layout::encode_fact(&accepted).expect("encode"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));

@@ -11,6 +11,8 @@ use crate::protocol::facts::{connection, content, encryption, identity, sync, tr
 
 use super::frame;
 
+const RESPONDER_EPHEMERAL_DERIVATION: &[u8] = b"topo-bootstrap-responder-ephemeral-v1";
+
 #[derive(Debug, Clone)]
 pub struct OpenReceivedFrame<'a> {
     pub frame: &'a [u8],
@@ -78,16 +80,20 @@ pub fn open_bootstrap_request(
     if input.local_endpoint.endpoint != request.to_endpoint {
         return Err("bootstrap request addressed to a different endpoint".to_string());
     }
-    let responder_private = crypto::random_x25519_private_key();
+    let responder_private = deterministic_responder_ephemeral_private_key(
+        &input.local_endpoint.secret,
+        request_fact.id,
+    );
+    let responder_created_at_ms = deterministic_bootstrap_time_ms(request_fact.id);
     let responder_ephemeral = connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact {
         owner_endpoint: input.local_endpoint.endpoint,
         ephemeral_private_key: responder_private,
         ephemeral_public_key: crypto::x25519_public_key(&responder_private),
-        created_at_ms: input.received_at_local_ms,
+        created_at_ms: responder_created_at_ms,
     };
     let responder_ephemeral_fact = Fact::new(
         FactScope::Local,
-        input.received_at_local_ms,
+        responder_created_at_ms,
         connection::ephemeral_secret::layout::encode_fact(&responder_ephemeral)?,
     );
     let built = connection::response::create::build_responder_response(
@@ -127,6 +133,21 @@ pub fn open_bootstrap_request(
         response_bytes: built.fact.bytes,
         return_addr,
     })
+}
+
+fn deterministic_responder_ephemeral_private_key(
+    local_endpoint_secret: &[u8; 32],
+    request_id: FactId,
+) -> [u8; 32] {
+    crypto::blake3_keyed_hash(
+        local_endpoint_secret,
+        RESPONDER_EPHEMERAL_DERIVATION,
+        &request_id,
+    )
+}
+
+fn deterministic_bootstrap_time_ms(request_id: FactId) -> u64 {
+    u64::from_be_bytes(request_id[0..8].try_into().unwrap())
 }
 
 pub fn open_bootstrap_response(input: OpenBootstrapResponse<'_>) -> Result<Vec<Fact>, String> {
@@ -190,32 +211,32 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         .ok_or_else(|| "received transport::transit fact bytes are empty".to_string())?;
     match tag {
         identity::workspace::layout::TYPE_WORKSPACE => {
-            identity::workspace::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, 0, bytes));
+            let workspace = identity::workspace::layout::decode_fact(&bytes)?;
+            return Ok(Fact::new(FactScope::Global, workspace.created_at_ms, bytes));
         }
         identity::user_invite::layout::TYPE_USER_INVITE => {
-            identity::user_invite::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, 0, bytes));
+            let invite = identity::user_invite::layout::decode_fact(&bytes)?;
+            return Ok(Fact::new(FactScope::Global, invite.created_at_ms, bytes));
         }
         identity::user::layout::TYPE_USER => {
-            identity::user::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, 0, bytes));
+            let user = identity::user::layout::decode_fact(&bytes)?;
+            return Ok(Fact::new(FactScope::Global, user.created_at_ms, bytes));
         }
         identity::admin::layout::TYPE_ADMIN => {
-            identity::admin::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, 0, bytes));
+            let admin = identity::admin::layout::decode_fact(&bytes)?;
+            return Ok(Fact::new(FactScope::Global, admin.created_at_ms, bytes));
         }
         identity::device_invite::layout::TYPE_DEVICE_INVITE => {
-            identity::device_invite::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, 0, bytes));
+            let invite = identity::device_invite::layout::decode_fact(&bytes)?;
+            return Ok(Fact::new(FactScope::Global, invite.created_at_ms, bytes));
         }
         identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED => {
-            identity::endpoint_shared::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, 0, bytes));
+            let shared = identity::endpoint_shared::layout::decode_fact(&bytes)?;
+            return Ok(Fact::new(FactScope::Global, shared.created_at_ms, bytes));
         }
         identity::invite_server::layout::TYPE_INVITE_SERVER => {
-            identity::invite_server::layout::decode_fact(&bytes)?;
-            return Ok(Fact::new(FactScope::Global, 0, bytes));
+            let server = identity::invite_server::layout::decode_fact(&bytes)?;
+            return Ok(Fact::new(FactScope::Global, server.created_at_ms, bytes));
         }
         encryption::disappearing_messages_setting::layout::TYPE_DISAPPEARING_MESSAGES_SETTING => {
             let setting = encryption::disappearing_messages_setting::layout::decode_fact(&bytes)?;
@@ -368,9 +389,11 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         | identity::admin::layout::TYPE_ADMIN
         | identity::device_invite::layout::TYPE_DEVICE_INVITE
         | identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED
-        | identity::invite_server::layout::TYPE_INVITE_SERVER => {
-            Ok(Fact::new(FactScope::Global, 0, bytes))
-        }
+        | identity::invite_server::layout::TYPE_INVITE_SERVER => Ok(Fact::new(
+            FactScope::Global,
+            signed_identity_created_at_ms(&envelope)?,
+            bytes,
+        )),
         encryption::layout::TYPE_KEY_WRAP => encryption::create::admit_signed_key_wrap_fact(bytes),
         content::sealed_message::layout::TYPE_SEALED_MESSAGE => {
             let message =
@@ -383,6 +406,38 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         }
         other => Err(format!(
             "unsupported signed transport::transit payload type {other}"
+        )),
+    }
+}
+
+fn signed_identity_created_at_ms(
+    envelope: &identity::signed_fact::fact::SignedFactEnvelope,
+) -> Result<u64, String> {
+    match envelope.inner_type {
+        identity::user_invite::layout::TYPE_USER_INVITE => {
+            identity::user_invite::layout::decode_fact(&envelope.payload)
+                .map(|fact| fact.created_at_ms)
+        }
+        identity::user::layout::TYPE_USER => {
+            identity::user::layout::decode_fact(&envelope.payload).map(|fact| fact.created_at_ms)
+        }
+        identity::admin::layout::TYPE_ADMIN => {
+            identity::admin::layout::decode_fact(&envelope.payload).map(|fact| fact.created_at_ms)
+        }
+        identity::device_invite::layout::TYPE_DEVICE_INVITE => {
+            identity::device_invite::layout::decode_fact(&envelope.payload)
+                .map(|fact| fact.created_at_ms)
+        }
+        identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED => {
+            identity::endpoint_shared::layout::decode_fact(&envelope.payload)
+                .map(|fact| fact.created_at_ms)
+        }
+        identity::invite_server::layout::TYPE_INVITE_SERVER => {
+            identity::invite_server::layout::decode_fact(&envelope.payload)
+                .map(|fact| fact.created_at_ms)
+        }
+        other => Err(format!(
+            "signed identity timestamp unsupported for type {other}"
         )),
     }
 }
@@ -462,7 +517,13 @@ fn require_connection_endpoints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::crypto::{ed25519_public_key, ed25519_sign};
     use crate::protocol::facts::content::sealed_message::fact::MessageDeletionFact;
+    use crate::protocol::facts::identity::endpoint::fact::EndpointFact;
+    use crate::protocol::facts::identity::invite::fact::InviteSecretFact;
+    use crate::protocol::facts::identity::signed_fact::fact::SignedFactEnvelope;
+    use crate::protocol::facts::identity::user::fact::UserFact;
+    use crate::protocol::facts::identity::workspace::fact::WorkspaceFact;
 
     #[test]
     fn admitted_message_deletion_uses_payload_created_timestamp() {
@@ -480,5 +541,126 @@ mod tests {
         assert_eq!(admitted.scope, workspace_scope(deletion.workspace_id));
         assert_eq!(admitted.timestamp, deletion.created_at_ms);
         assert_eq!(admitted.bytes, bytes);
+    }
+
+    #[test]
+    fn admitted_workspace_uses_payload_created_timestamp() {
+        let workspace = WorkspaceFact {
+            created_at_ms: 55_555,
+            public_key: [7; 32],
+            name: "workspace".to_string(),
+        };
+        let bytes = identity::workspace::layout::encode_fact(&workspace).expect("workspace");
+
+        let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit workspace");
+
+        assert_eq!(admitted.scope, FactScope::Global);
+        assert_eq!(admitted.timestamp, workspace.created_at_ms);
+        assert_eq!(admitted.bytes, bytes);
+    }
+
+    #[test]
+    fn admitted_signed_identity_uses_payload_created_timestamp() {
+        let user = UserFact {
+            created_at_ms: 66_666,
+            workspace_id: [8; 32],
+            public_key: [9; 32],
+            username: "alice".to_string(),
+        };
+        let payload = identity::user::layout::encode_fact(&user).expect("user payload");
+        let signing_secret = [10; 32];
+        let mut envelope = SignedFactEnvelope {
+            signer_id: [11; 32],
+            signer_public_key: ed25519_public_key(&signing_secret),
+            inner_type: identity::user::layout::TYPE_USER,
+            payload,
+            signature: [0; 64],
+        };
+        let signing_bytes =
+            identity::signed_fact::layout::signing_bytes(&envelope).expect("signing bytes");
+        envelope.signature = ed25519_sign(&signing_secret, &signing_bytes);
+        let bytes =
+            identity::signed_fact::layout::encode_signed_fact(&envelope).expect("signed identity");
+
+        let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit signed user");
+
+        assert_eq!(admitted.scope, FactScope::Global);
+        assert_eq!(admitted.timestamp, user.created_at_ms);
+        assert_eq!(admitted.bytes, bytes);
+    }
+
+    #[test]
+    fn duplicate_bootstrap_request_delivery_reuses_responder_material() {
+        let invite = InviteSecretFact::new([33; 32]);
+        let invite_fact = Fact::new(
+            FactScope::Local,
+            10,
+            identity::invite::layout::encode_fact(&invite).expect("invite"),
+        );
+        let endpoint_secret = [44; 32];
+        let signing_secret = [45; 32];
+        let endpoint = EndpointFact {
+            endpoint: crypto::x25519_public_key(&endpoint_secret),
+            secret: endpoint_secret,
+            signing_public_key: ed25519_public_key(&signing_secret),
+            signing_secret,
+        };
+        let mut request = connection::request::fact::ConnectionRequestFact {
+            from_endpoint: crypto::x25519_public_key(&[55; 32]),
+            to_endpoint: endpoint.endpoint,
+            nonce: [56; 32],
+            invite_fact_id: [57; 32],
+            bootstrap_hash: invite.bootstrap_hash,
+            invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+            invite_secret_fact_id: invite_fact.id,
+            initiator_ephemeral_secret_fact_id: [58; 32],
+            initiator_ephemeral_public_key: crypto::x25519_public_key(&[59; 32]),
+            from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
+            to_listen_addr: None,
+        };
+        request.invite_signature = ed25519_sign(
+            &invite.bootstrap_secret,
+            &connection::request::create::invite_signing_transcript(&request)
+                .expect("request transcript"),
+        );
+        let frame = connection::request::layout::encode_fact(&request).expect("request");
+
+        let first = open_bootstrap_request(OpenBootstrapRequest {
+            frame: &frame,
+            invite_fact: &invite_fact,
+            local_endpoint: &endpoint,
+            origin_addr: b"127.0.0.1:41002",
+            received_at_local_ms: 100,
+        })
+        .expect("first delivery");
+        let second = open_bootstrap_request(OpenBootstrapRequest {
+            frame: &frame,
+            invite_fact: &invite_fact,
+            local_endpoint: &endpoint,
+            origin_addr: b"127.0.0.1:41002",
+            received_at_local_ms: 200,
+        })
+        .expect("duplicate delivery");
+
+        assert_eq!(
+            first.response_bytes, second.response_bytes,
+            "duplicate bootstrap delivery must resend the same response, not mint another connection"
+        );
+        let stable_first = non_provenance_fact_ids(&first.facts);
+        let stable_second = non_provenance_fact_ids(&second.facts);
+        assert_eq!(stable_first, stable_second);
+    }
+
+    fn non_provenance_fact_ids(facts: &[Fact]) -> Vec<FactId> {
+        let mut ids = facts
+            .iter()
+            .filter(|fact| {
+                fact.body().first().copied()
+                    != Some(transport::transit_received::layout::TYPE_TRANSIT_RECEIVED)
+            })
+            .map(|fact| fact.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
     }
 }

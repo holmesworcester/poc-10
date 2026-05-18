@@ -20,7 +20,8 @@ use crate::core::wire;
 use super::fact::{ContentFileFact, FILE_ROOT_HASH_BYTES};
 
 pub const TYPE_CONTENT_FILE: u8 = 54;
-pub const HEADER_BYTES: usize = 1 + 32 + 8 + 32 + 32 + 32 + 8 + 4 + 4 + FILE_ROOT_HASH_BYTES + 4;
+pub const FACT_PREFIX_BYTES: usize =
+    1 + 32 + 8 + 32 + 32 + 32 + 8 + 4 + 4 + FILE_ROOT_HASH_BYTES + 4;
 
 pub fn encode_fact(fact: &ContentFileFact) -> Result<Vec<u8>, String> {
     let sealed_len: u32 = fact
@@ -28,45 +29,57 @@ pub fn encode_fact(fact: &ContentFileFact) -> Result<Vec<u8>, String> {
         .len()
         .try_into()
         .map_err(|_| "content file sealed metadata exceeds u32 length".to_string())?;
-    let mut out = vec![0; HEADER_BYTES + fact.sealed_metadata.len()];
-    wire::put_u8(TYPE_CONTENT_FILE, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.workspace_id);
-    wire::put_u64be(fact.created_at_ms, &mut out[33..41]).map_err(wire_err)?;
-    out[41..73].copy_from_slice(&fact.message_id);
-    out[73..105].copy_from_slice(&fact.author_user_id);
-    out[105..137].copy_from_slice(&fact.file_id);
-    wire::put_u64be(fact.blob_bytes, &mut out[137..145]).map_err(wire_err)?;
-    wire::put_u32be(fact.total_slices, &mut out[145..149]).map_err(wire_err)?;
-    wire::put_u32be(fact.slice_bytes, &mut out[149..153]).map_err(wire_err)?;
-    out[153..185].copy_from_slice(&fact.root_hash);
-    wire::put_u32be(sealed_len, &mut out[185..189]).map_err(wire_err)?;
-    out[HEADER_BYTES..].copy_from_slice(&fact.sealed_metadata);
-    Ok(out)
+    let mut out = wire::Writer::with_capacity(FACT_PREFIX_BYTES + fact.sealed_metadata.len());
+    out.u8(TYPE_CONTENT_FILE);
+    out.fixed(&fact.workspace_id);
+    out.u64be(fact.created_at_ms);
+    out.fixed(&fact.message_id);
+    out.fixed(&fact.author_user_id);
+    out.fixed(&fact.file_id);
+    out.u64be(fact.blob_bytes);
+    out.u32be(fact.total_slices);
+    out.u32be(fact.slice_bytes);
+    out.fixed(&fact.root_hash);
+    out.u32be(sealed_len);
+    out.bytes(&fact.sealed_metadata);
+    Ok(out.finish())
 }
 
 pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileFact, String> {
-    if bytes.len() < HEADER_BYTES {
+    if bytes.len() < FACT_PREFIX_BYTES {
         return Err("content file fact is shorter than its header".to_string());
     }
-    let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+    let mut reader = wire::Reader::new(bytes);
+    let tag = reader.u8().map_err(wire_err)?;
     if tag != TYPE_CONTENT_FILE {
         return Err("expected content file fact".to_string());
     }
-    let sealed_len = wire::take_u32be(&bytes[185..189]).map_err(wire_err)? as usize;
-    if bytes.len() != HEADER_BYTES + sealed_len {
+    let workspace_id = reader.array().map_err(wire_err)?;
+    let created_at_ms = reader.u64be().map_err(wire_err)?;
+    let message_id = reader.array().map_err(wire_err)?;
+    let author_user_id = reader.array().map_err(wire_err)?;
+    let file_id = reader.array().map_err(wire_err)?;
+    let blob_bytes = reader.u64be().map_err(wire_err)?;
+    let total_slices = reader.u32be().map_err(wire_err)?;
+    let slice_bytes = reader.u32be().map_err(wire_err)?;
+    let root_hash = reader.array().map_err(wire_err)?;
+    let sealed_len = reader.u32be().map_err(wire_err)? as usize;
+    if bytes.len() != FACT_PREFIX_BYTES + sealed_len {
         return Err("content file fact length does not match declared metadata".to_string());
     }
+    let sealed_metadata = reader.bytes(sealed_len).map_err(wire_err)?.to_vec();
+    reader.finish().map_err(wire_err)?;
     Ok(ContentFileFact {
-        workspace_id: bytes[1..33].try_into().unwrap(),
-        created_at_ms: wire::take_u64be(&bytes[33..41]).map_err(wire_err)?,
-        message_id: bytes[41..73].try_into().unwrap(),
-        author_user_id: bytes[73..105].try_into().unwrap(),
-        file_id: bytes[105..137].try_into().unwrap(),
-        blob_bytes: wire::take_u64be(&bytes[137..145]).map_err(wire_err)?,
-        total_slices: wire::take_u32be(&bytes[145..149]).map_err(wire_err)?,
-        slice_bytes: wire::take_u32be(&bytes[149..153]).map_err(wire_err)?,
-        root_hash: bytes[153..185].try_into().unwrap(),
-        sealed_metadata: bytes[HEADER_BYTES..].to_vec(),
+        workspace_id,
+        created_at_ms,
+        message_id,
+        author_user_id,
+        file_id,
+        blob_bytes,
+        total_slices,
+        slice_bytes,
+        root_hash,
+        sealed_metadata,
     })
 }
 
@@ -96,7 +109,7 @@ mod tests {
     #[test]
     fn content_file_roundtrips_with_sealed_metadata() {
         let encoded = encode_fact(&fact()).expect("encode");
-        assert_eq!(encoded.len(), HEADER_BYTES + 24);
+        assert_eq!(encoded.len(), FACT_PREFIX_BYTES + 24);
         assert_eq!(decode_fact(&encoded).expect("decode"), fact());
     }
 

@@ -26,7 +26,7 @@ impl Projector for WorkspaceProjector {
         if fact.scope != FactScope::Global {
             return Err("workspace fact must have global scope".to_string());
         }
-        let workspace = layout::decode_fact(&fact.bytes)?;
+        let workspace = layout::decode_fact(fact.body())?;
         Ok(ProjectionOutput::new()
             .offer(crate::protocol::matchers::workspace_offer(fact.id))
             .intent(AtomicIntent::PutRow(workspace_row(fact.id, &workspace)?).into_intent())
@@ -39,7 +39,7 @@ mod projector_tests {
     use crate as topo;
 
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::identity::workspace::fact::WorkspaceFact;
@@ -57,8 +57,9 @@ mod projector_tests {
             workspace.created_at_ms,
             layout::encode_fact(&workspace).expect("encode workspace"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact.clone()));

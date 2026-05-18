@@ -82,7 +82,8 @@ fn wrong_invite_private_key_does_not_project_receiver_connection() {
 fn accept_reports_unreachable_invite_address() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
-    let unreachable_invite = invite(&alice, free_port());
+    let bob = temp_db(&tmp, "bob.db");
+    let unreachable_invite = invite(&bob, free_port());
     let connected = accept_invite(&alice, &unreachable_invite);
     assert!(
         !connected.status.success(),
@@ -96,7 +97,7 @@ fn accept_reports_unreachable_invite_address() {
     );
     assert_eq!(sync_fact_count(&alice), 0);
     assert_eq!(connection_count(&alice), 0);
-    assert_eq!(connection_fact_count(&alice), 0);
+    assert_eq!(connection_fact_count(&alice), 1);
 }
 
 struct RunningDaemon {

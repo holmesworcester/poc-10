@@ -115,7 +115,7 @@ impl IntentHandler for PurgeMessageChildHandler {
         let child = context.require_fact(&input.child_id)?;
         match input.child_kind {
             CASCADE_CHILD_REACTION => {
-                let reaction = reaction::layout::decode_fact(&child.bytes)?;
+                let reaction = reaction::layout::decode_fact(child.body())?;
                 if reaction.workspace_id != input.workspace_id {
                     return Err("cascade reaction workspace mismatch".to_string());
                 }
@@ -124,7 +124,7 @@ impl IntentHandler for PurgeMessageChildHandler {
                 }
             }
             CASCADE_CHILD_FILE => {
-                let file = file::layout::decode_fact(&child.bytes)?;
+                let file = file::layout::decode_fact(child.body())?;
                 if file.workspace_id != input.workspace_id {
                     return Err("cascade file workspace mismatch".to_string());
                 }

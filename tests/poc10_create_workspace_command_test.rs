@@ -6,7 +6,7 @@ use topo::core::command_context::{
     CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
     WorkspaceId,
 };
-use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
 use topo::protocol::facts::identity::workspace::commands::create_workspace;
@@ -80,7 +80,7 @@ fn create_workspace_rejects_blank_or_oversize_name() {
 
 #[test]
 fn create_workspace_fact_projects_through_target_bus() {
-    let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
+    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
         .expect("open store with schema");
     let clock = FixedClock(Cell::new(120_000));
     let vault = EmptyVault;
@@ -100,7 +100,8 @@ fn create_workspace_fact_projects_through_target_bus() {
         )
         .expect("drain");
     assert_eq!(report.projections, 1);
-    assert_eq!(report.intents, 1);
+    assert_eq!(report.intents, 2);
+    assert_eq!(bus.intents().len(), 1);
 
     let rows = store
         .table_rows(workspace_rows::WORKSPACE_ROWS)

@@ -139,7 +139,9 @@ impl<'a> Reader<'a> {
     }
 }
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::handler_dispatch::{
+    retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
+};
 use crate::core::network_queues::{NetworkTarget, OutboundNetworkRow};
 use crate::core::tcp;
 use crate::protocol::facts::{connection, identity::endpoint};
@@ -179,9 +181,8 @@ impl IntentHandler for SendNetworkFrameHandler {
             Err(err) => return Err(err),
         };
         let row = OutboundNetworkRow::new(target, input.frame);
-        if tcp::send_once(context.store()?, target, vec![row], (), |_, _| Ok(())).is_err() {
-            return Ok(HandlerOutput::new());
-        }
+        tcp::send_once(context.store()?, target, vec![row], (), |_, _| Ok(()))
+            .map_err(|err| retry_intent(format!("send_network_frame tcp send: {err}")))?;
         Ok(HandlerOutput::new())
     }
 }
@@ -204,13 +205,13 @@ fn resolve_target(
     context: &HandlerContext,
 ) -> Result<NetworkTarget, String> {
     let connection_fact = context.require_fact(connection_id)?;
-    let connection = connection::response::layout::decode_fact(&connection_fact.bytes)?;
+    let connection = connection::response::layout::decode_fact(connection_fact.body())?;
     let request_fact = match context.fact(&connection.request_id).cloned() {
         Some(fact) => fact,
         None => crate::core::wake_loop::persisted_fact(context.store()?, &connection.request_id)?
             .ok_or_else(|| "send_network_frame missing connection request fact".to_string())?,
     };
-    let request = connection::request::layout::decode_fact(&request_fact.bytes)?;
+    let request = connection::request::layout::decode_fact(request_fact.body())?;
     let local_endpoint = endpoint::local_endpoint::local_endpoint(context.store()?)?
         .ok_or_else(|| "send_network_frame requires local endpoint state".to_string())?;
     let addr = if local_endpoint.endpoint == connection.from_endpoint {

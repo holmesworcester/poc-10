@@ -15,7 +15,7 @@ use crate::core::wire;
 use super::fact::ContentFileSliceFact;
 
 pub const TYPE_CONTENT_FILE_SLICE: u8 = 55;
-pub const HEADER_BYTES: usize = 1 + 32 + 8 + 32 + 4 + 4;
+pub const FACT_PREFIX_BYTES: usize = 1 + 32 + 8 + 32 + 4 + 4;
 
 pub fn encode_fact(fact: &ContentFileSliceFact) -> Result<Vec<u8>, String> {
     let ciphertext_len: u32 = fact
@@ -23,37 +23,44 @@ pub fn encode_fact(fact: &ContentFileSliceFact) -> Result<Vec<u8>, String> {
         .len()
         .try_into()
         .map_err(|_| "content file slice ciphertext exceeds u32 length".to_string())?;
-    let mut out = vec![0; HEADER_BYTES + fact.ciphertext.len()];
-    wire::put_u8(TYPE_CONTENT_FILE_SLICE, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.workspace_id);
-    wire::put_u64be(fact.created_at_ms, &mut out[33..41]).map_err(wire_err)?;
-    out[41..73].copy_from_slice(&fact.file_id);
-    wire::put_u32be(fact.slice_index, &mut out[73..77]).map_err(wire_err)?;
-    wire::put_u32be(ciphertext_len, &mut out[77..81]).map_err(wire_err)?;
-    out[HEADER_BYTES..].copy_from_slice(&fact.ciphertext);
-    Ok(out)
+    let mut out = wire::Writer::with_capacity(FACT_PREFIX_BYTES + fact.ciphertext.len());
+    out.u8(TYPE_CONTENT_FILE_SLICE);
+    out.fixed(&fact.workspace_id);
+    out.u64be(fact.created_at_ms);
+    out.fixed(&fact.file_id);
+    out.u32be(fact.slice_index);
+    out.u32be(ciphertext_len);
+    out.bytes(&fact.ciphertext);
+    Ok(out.finish())
 }
 
 pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileSliceFact, String> {
-    if bytes.len() < HEADER_BYTES {
+    if bytes.len() < FACT_PREFIX_BYTES {
         return Err("content file slice fact is shorter than its header".to_string());
     }
-    let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+    let mut reader = wire::Reader::new(bytes);
+    let tag = reader.u8().map_err(wire_err)?;
     if tag != TYPE_CONTENT_FILE_SLICE {
         return Err("expected content file slice fact".to_string());
     }
-    let ciphertext_len = wire::take_u32be(&bytes[77..81]).map_err(wire_err)? as usize;
-    if bytes.len() != HEADER_BYTES + ciphertext_len {
+    let workspace_id = reader.array().map_err(wire_err)?;
+    let created_at_ms = reader.u64be().map_err(wire_err)?;
+    let file_id = reader.array().map_err(wire_err)?;
+    let slice_index = reader.u32be().map_err(wire_err)?;
+    let ciphertext_len = reader.u32be().map_err(wire_err)? as usize;
+    if bytes.len() != FACT_PREFIX_BYTES + ciphertext_len {
         return Err(
             "content file slice fact length does not match declared ciphertext".to_string(),
         );
     }
+    let ciphertext = reader.bytes(ciphertext_len).map_err(wire_err)?.to_vec();
+    reader.finish().map_err(wire_err)?;
     Ok(ContentFileSliceFact {
-        workspace_id: bytes[1..33].try_into().unwrap(),
-        created_at_ms: wire::take_u64be(&bytes[33..41]).map_err(wire_err)?,
-        file_id: bytes[41..73].try_into().unwrap(),
-        slice_index: wire::take_u32be(&bytes[73..77]).map_err(wire_err)?,
-        ciphertext: bytes[HEADER_BYTES..].to_vec(),
+        workspace_id,
+        created_at_ms,
+        file_id,
+        slice_index,
+        ciphertext,
     })
 }
 
@@ -78,7 +85,7 @@ mod tests {
     #[test]
     fn content_file_slice_roundtrips_with_ciphertext() {
         let encoded = encode_fact(&fact()).expect("encode");
-        assert_eq!(encoded.len(), HEADER_BYTES + 128);
+        assert_eq!(encoded.len(), FACT_PREFIX_BYTES + 128);
         assert_eq!(decode_fact(&encoded).expect("decode"), fact());
     }
 

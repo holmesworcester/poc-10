@@ -16,7 +16,7 @@ use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::content::message::layout as message_layout;
 use crate::protocol::facts::identity;
-use crate::protocol::facts::identity::user::layout as user_layout;
+use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers as message_matchers;
 
@@ -70,7 +70,7 @@ impl Projector for ContentMessageDeletionProjector {
                 ]));
             }
         }
-        let Some(target_fact) = payload_for_need(context, &target_need, "message deletion target")?
+        let Some(target_fact) = context_payload(context, &target_need, "message deletion target")?
         else {
             return Ok(output_with_needs([
                 signer_need,
@@ -78,7 +78,7 @@ impl Projector for ContentMessageDeletionProjector {
                 Some(author_need),
             ]));
         };
-        let Some(author_fact) = payload_for_need(context, &author_need, "message deletion author")?
+        let Some(author_fact) = context_payload(context, &author_need, "message deletion author")?
         else {
             return Ok(output_with_needs([
                 signer_need,
@@ -112,12 +112,12 @@ impl Projector for ContentMessageDeletionProjector {
     }
 }
 
-fn payload_for_need<'a>(
+fn context_payload<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    authority::payload_for_need(context, need, label)
+    authority::context_payload(context, need, label)
 }
 
 fn output_with_needs(
@@ -159,12 +159,9 @@ fn validate_author_user(
     if author_fact.id != deletion.author_user_id {
         return Err("message deletion author context payload id mismatch".to_string());
     }
-    let author_payload = maybe_signed_payload(
-        author_fact,
-        user_layout::TYPE_USER,
-        "message deletion author",
-    )?;
-    let author = user_layout::decode_fact(&author_payload.payload)
+    let author_payload =
+        maybe_signed_payload(author_fact, user::TYPE_USER, "message deletion author")?;
+    let author = user::decode_fact_payload(&author_payload.payload)
         .map_err(|_| "message deletion author context must be an identity user".to_string())?;
     if author.workspace_id != deletion.workspace_id {
         return Err("message deletion author workspace does not match deletion".to_string());

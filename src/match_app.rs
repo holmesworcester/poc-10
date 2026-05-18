@@ -263,7 +263,7 @@ fn run_accept(parsed: ParsedArgs) -> Result<(), String> {
         connection::response::commands::wait_for_request_response(
             &mut runtime,
             receipt.request_id,
-            Duration::from_secs(10),
+            Duration::from_secs(30),
         )?;
     }
 

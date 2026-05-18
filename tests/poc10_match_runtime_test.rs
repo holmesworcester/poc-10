@@ -18,6 +18,7 @@ use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::facts::identity::workspace::{
     commands::create_workspace, rows as workspace_rows,
 };
+use topo::protocol::intents::sync::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE;
 use topo::protocol::runtime::ProtocolRuntime;
 use topo::protocol::PROTOCOL;
 
@@ -98,7 +99,11 @@ fn runtime_submits_command_output_and_projects_workspace_rows() {
 
     assert_eq!(receipt.created_at_ms, 123_000);
     assert_eq!(report.projections, 1);
-    assert!(runtime.wake_loop().intents().is_empty());
+    assert_eq!(runtime.wake_loop().intents().len(), 1);
+    assert_eq!(
+        runtime.wake_loop().intents()[0].kind.as_str(),
+        SHARE_FACT_WITH_WORKSPACE
+    );
 
     let rows = runtime
         .store()

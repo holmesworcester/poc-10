@@ -8,11 +8,8 @@ use topo::core::store::Store;
 #[test]
 fn network_queues_are_opaque_and_idempotent_rows() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open_disk_with_schemas(
-        tmp.path().join("network-queues.db"),
-        network_queues::SCHEMAS,
-    )
-    .unwrap();
+    let path = tmp.path().join("network-queues.db");
+    let store = Store::open_disk_with_schemas(&path, network_queues::SCHEMAS).unwrap();
     let addr: SocketAddr = "127.0.0.1:41000".parse().unwrap();
     let other_addr: SocketAddr = "127.0.0.1:41001".parse().unwrap();
     let target = NetworkTarget::new(addr);
@@ -41,11 +38,23 @@ fn network_queues_are_opaque_and_idempotent_rows() {
         network_queues::claim_outbound_for_target(&store, target, 16).unwrap(),
         vec![outbound.clone()]
     );
+    let later_outbound = OutboundNetworkRow::new(target, b"later target bytes".to_vec());
+    network_queues::enqueue_outbound(&store, std::slice::from_ref(&later_outbound)).unwrap();
+    assert_eq!(
+        network_queues::claim_outbound_for_target(&store, target, 1).unwrap(),
+        vec![outbound.clone()]
+    );
+    assert_eq!(
+        network_queues::claim_exact_outbound(&store, std::slice::from_ref(&later_outbound))
+            .unwrap(),
+        vec![later_outbound.clone()]
+    );
     assert_eq!(
         network_queues::claim_outbound_for_target(&store, other_target, 16).unwrap(),
         vec![other_outbound]
     );
-    network_queues::delete_outbound(&store, &[outbound]).expect("delete queued outbound bytes");
+    network_queues::delete_outbound(&store, &[outbound, later_outbound])
+        .expect("delete queued outbound bytes");
     assert!(
         network_queues::claim_outbound_for_target(&store, target, 16)
             .unwrap()
@@ -63,4 +72,12 @@ fn network_queues_are_opaque_and_idempotent_rows() {
         vec![inbound.clone()]
     );
     network_queues::delete_inbound(&store, &[inbound]).expect("delete queued inbound bytes");
+
+    let reopened = Store::open_disk_with_schemas(&path, network_queues::SCHEMAS).unwrap();
+    assert!(
+        network_queues::claim_outbound_for_target(&reopened, target, 16)
+            .unwrap()
+            .is_empty(),
+        "network queues are process-local IO staging, not restart-durable protocol truth"
+    );
 }

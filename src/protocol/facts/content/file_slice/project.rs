@@ -39,11 +39,11 @@ impl Projector for ContentFileSliceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let slice = layout::decode_fact(&fact.bytes)?;
+        let slice = layout::decode_fact(fact.body())?;
         let scope = message_matchers::workspace_scope(slice.workspace_id);
         require_fact_scope(fact, &scope)?;
         let file_need = file_matchers::file_need(fact.id, scope.clone(), slice.file_id);
-        let Some(parent) = payload_for_need(context, &file_need, "file slice parent")? else {
+        let Some(parent) = context_payload(context, &file_need, "file slice parent")? else {
             return Ok(ProjectionOutput::new().need(file_need));
         };
         let file = file_layout::decode_fact(&parent.bytes)
@@ -63,7 +63,7 @@ impl Projector for ContentFileSliceProjector {
         let file_deletion_need =
             message_matchers::deletion_need(fact.id, scope, parent.id, file.author_user_id);
         if let Some(deletion) =
-            payload_for_need(context, &file_deletion_need, "file slice parent deletion")?
+            context_payload(context, &file_deletion_need, "file slice parent deletion")?
         {
             validate_file_deletion(deletion, file.workspace_id, parent.id, file.author_user_id)?;
             return Ok(ProjectionOutput::new()
@@ -92,22 +92,12 @@ impl Projector for ContentFileSliceProjector {
     }
 }
 
-fn payload_for_need<'a>(
+fn context_payload<'a>(
     context: &'a ProjectionContext,
     need: &ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    let Some(matched) = context
-        .matched_context()
-        .iter()
-        .find(|matched| matched.need == *need)
-    else {
-        return Ok(None);
-    };
-    if matched.offer.payload_ref != matched.payload.id {
-        return Err(format!("{label} context offer payload mismatch"));
-    }
-    Ok(Some(&matched.payload))
+    context.payload_for_checked(need, label)
 }
 
 fn validate_file_deletion(
@@ -117,7 +107,7 @@ fn validate_file_deletion(
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
     let deletion =
-        crate::protocol::facts::content::file_deletion::layout::decode_fact(&payload.bytes)
+        crate::protocol::facts::content::file_deletion::layout::decode_fact(payload.body())
             .map_err(|_| {
                 "file slice parent deletion context is not a content file deletion".to_string()
             })?;
@@ -150,7 +140,7 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::AtomicIntent;
     use topo::core::projection::{MatchedContext, ProjectionContext, ProjectionOutput, Projector};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::content::file::fact::{ContentFileFact, FILE_ROOT_HASH_BYTES};
@@ -204,8 +194,9 @@ mod projector_tests {
             slice.created_at_ms,
             layout::encode_fact(&slice).expect("encode slice"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         let message_matcher = ExactSelectorMatcher::new(message_context::message_role());
@@ -261,8 +252,9 @@ mod projector_tests {
             slice.created_at_ms,
             layout::encode_fact(&slice).expect("encode slice"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact.clone()));
@@ -320,8 +312,9 @@ mod projector_tests {
             slice.created_at_ms,
             layout::encode_fact(&slice).expect("encode slice"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
         let message_matcher = ExactSelectorMatcher::new(message_context::message_role());
         let file_matcher = ExactSelectorMatcher::new(file_context::file_role());
@@ -489,7 +482,7 @@ mod projector_tests {
                 Some(layout::TYPE_CONTENT_FILE_SLICE) => {
                     project::ContentFileSliceProjector::new().project(fact, context)
                 }
-                _ if user_layout::decode_fact(&fact.bytes).is_ok() => Ok(ProjectionOutput::new()
+                _ if user_layout::decode_fact(fact.body()).is_ok() => Ok(ProjectionOutput::new()
                     .offer(crate::protocol::matchers::exact_offer(
                         fact.id,
                         crate::protocol::matchers::user_role(),

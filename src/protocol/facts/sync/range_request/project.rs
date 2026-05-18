@@ -1,8 +1,8 @@
 //! Projector for sync range requests.
 
-use crate::core::context::ContextNeed;
+use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactId};
-use crate::core::projection::{MatchedContext, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::facts::sync::encrypted_root::{
     layout as encrypted_root_layout, project as encrypted_root_project,
@@ -33,7 +33,7 @@ impl Projector for SyncRangeRequestProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let request = layout::decode_fact(&fact.bytes)?;
+        let request = layout::decode_fact(fact.body())?;
         let scope = matchers::workspace_scope(request.workspace_id);
         encrypted_root_project::require_fact_scope(fact, &scope)?;
         let range_need =
@@ -84,26 +84,27 @@ fn matched_range_roots(
     need: &ContextNeed,
 ) -> Result<Vec<matchers::RangeOfferSelector>, String> {
     projection_context
-        .matched_context()
-        .iter()
-        .filter(|matched| matched.need == *need)
-        .map(validate_range_match)
+        .matched_payloads_for(need)
+        .map(|(offer, payload)| validate_range_match(offer, payload))
         .collect()
 }
 
-fn validate_range_match(matched: &MatchedContext) -> Result<matchers::RangeOfferSelector, String> {
-    let selector = matchers::decode_range_offer_selector(&matched.offer.selector)
+fn validate_range_match(
+    offer: &ContextOffer,
+    payload: &Fact,
+) -> Result<matchers::RangeOfferSelector, String> {
+    let selector = matchers::decode_range_offer_selector(&offer.selector)
         .ok_or_else(|| "sync range context offer selector is malformed".to_string())?;
-    let root = encrypted_root_layout::decode_fact(&matched.payload.bytes)?;
-    encrypted_root_project::validate_sync_fact_workspace(&matched.payload, root.workspace_id)?;
-    if matched.offer.owner != matched.payload.id || matched.offer.payload_ref != matched.payload.id
-    {
+    let root = encrypted_root_layout::decode_fact(payload.body())?;
+    encrypted_root_project::validate_sync_fact_workspace(payload, root.workspace_id)?;
+    let ContextOffer { payload_ref, .. } = offer;
+    if offer.owner != payload.id || *payload_ref != payload.id {
         return Err("sync range context offer must point at its encrypted-root fact".to_string());
     }
-    if matched.offer.scope != matchers::workspace_scope(root.workspace_id) {
+    if offer.scope != matchers::workspace_scope(root.workspace_id) {
         return Err("sync range context offer scope does not match payload".to_string());
     }
-    if matched.payload.timestamp != selector.timestamp
+    if payload.timestamp != selector.timestamp
         || root.fact_id != selector.fact_id
         || root.dependency_id != selector.dependency_id
         || root.key_wrap_id != selector.key_wrap_id
@@ -152,17 +153,17 @@ fn has_matched_key_wrap(
 fn exact_fact_id_from_payload(fact: &Fact, expected: FactId) -> Result<FactId, String> {
     match fact.bytes.first().copied() {
         Some(encrypted_root_layout::TYPE_ENCRYPTED_ROOT) => {
-            let root = encrypted_root_layout::decode_fact(&fact.bytes)?;
+            let root = encrypted_root_layout::decode_fact(fact.body())?;
             encrypted_root_project::validate_sync_fact_workspace(fact, root.workspace_id)?;
             Ok(root.fact_id)
         }
         Some(shared_fact_layout::TYPE_SHARED_FACT) => {
-            let shared = shared_fact_layout::decode_fact(&fact.bytes)?;
+            let shared = shared_fact_layout::decode_fact(fact.body())?;
             encrypted_root_project::validate_sync_fact_workspace(fact, shared.workspace_id)?;
             Ok(shared.fact_id)
         }
         Some(key_wrap_available_layout::TYPE_KEY_WRAP_AVAILABLE) => {
-            let key = key_wrap_available_layout::decode_fact(&fact.bytes)?;
+            let key = key_wrap_available_layout::decode_fact(fact.body())?;
             encrypted_root_project::validate_sync_fact_workspace(fact, key.workspace_id)?;
             Ok(key.key_wrap_id)
         }
@@ -174,7 +175,7 @@ fn exact_fact_id_from_payload(fact: &Fact, expected: FactId) -> Result<FactId, S
 fn key_wrap_id_from_payload(fact: &Fact, expected: KeyWrapId) -> Result<KeyWrapId, String> {
     match fact.bytes.first().copied() {
         Some(key_wrap_available_layout::TYPE_KEY_WRAP_AVAILABLE) => {
-            let key = key_wrap_available_layout::decode_fact(&fact.bytes)?;
+            let key = key_wrap_available_layout::decode_fact(fact.body())?;
             encrypted_root_project::validate_sync_fact_workspace(fact, key.workspace_id)?;
             Ok(key.key_wrap_id)
         }

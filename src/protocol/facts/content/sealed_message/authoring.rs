@@ -72,7 +72,7 @@ fn latest_local_key_secret(
     runtime
         .facts()
         .filter_map(|fact| {
-            encryption::layout::decode_local_key_secret(&fact.bytes)
+            encryption::layout::decode_local_key_secret(fact.body())
                 .ok()
                 .filter(|secret| secret.workspace_id == workspace_id)
         })

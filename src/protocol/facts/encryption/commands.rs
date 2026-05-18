@@ -217,7 +217,7 @@ pub fn latest_local_recipient_key(
 ) -> Result<Option<FactId>, String> {
     let mut latest = None;
     for fact in runtime.facts() {
-        let Ok(local) = layout::decode_local_recipient_key(&fact.bytes) else {
+        let Ok(local) = layout::decode_local_recipient_key(fact.body()) else {
             continue;
         };
         if local.workspace_id != workspace_id {
@@ -272,7 +272,7 @@ pub fn key_access(
     query: KeyAccessQuery,
 ) -> Result<KeyAccessStatus, String> {
     let access = runtime.facts().any(|fact| {
-        layout::decode_local_key_secret(&fact.bytes)
+        layout::decode_local_key_secret(fact.body())
             .map(|secret| {
                 secret.workspace_id == query.workspace_id
                     && secret.frontier_id == query.removal_frontier_id
@@ -289,14 +289,14 @@ pub fn key_access(
 pub fn local_key_secret_count(runtime: &ProtocolRuntime) -> usize {
     runtime
         .facts()
-        .filter(|fact| layout::decode_local_key_secret(&fact.bytes).is_ok())
+        .filter(|fact| layout::decode_local_key_secret(fact.body()).is_ok())
         .count()
 }
 
 pub fn local_key_secret_frontiers(runtime: &ProtocolRuntime, workspace_id: FactId) -> Vec<FactId> {
     runtime
         .facts()
-        .filter_map(|fact| layout::decode_local_key_secret(&fact.bytes).ok())
+        .filter_map(|fact| layout::decode_local_key_secret(fact.body()).ok())
         .filter(|secret| secret.workspace_id == workspace_id)
         .map(|secret| secret.frontier_id)
         .collect()
@@ -443,7 +443,7 @@ pub fn chop_now(runtime: &mut ProtocolRuntime, input: ChopNow) -> Result<ChopNow
     let local_key_secret_ids = runtime
         .facts()
         .filter_map(|fact| {
-            layout::decode_local_key_secret(&fact.bytes)
+            layout::decode_local_key_secret(fact.body())
                 .ok()
                 .filter(|secret| secret.workspace_id == input.workspace_id)
                 .map(|_| fact.id)
@@ -475,7 +475,7 @@ fn recipient_key_is_superseded(
         if fact.id != recipient_key_id {
             continue;
         }
-        let recipient = layout::decode_recipient_key(&fact.bytes)?;
+        let recipient = layout::decode_recipient_key(fact.body())?;
         if recipient.workspace_id == workspace_id {
             target_endpoint = Some(recipient.endpoint_id);
         }
@@ -484,7 +484,7 @@ fn recipient_key_is_superseded(
         return Ok(false);
     };
     for fact in runtime.facts() {
-        let Ok(recipient) = layout::decode_recipient_key(&fact.bytes) else {
+        let Ok(recipient) = layout::decode_recipient_key(fact.body()) else {
             continue;
         };
         if recipient.workspace_id == workspace_id
@@ -502,13 +502,13 @@ fn history_source_material(
     workspace_id: FactId,
     frontier_id: FactId,
 ) -> Result<(FactId, [u8; 32]), String> {
-    if let Ok(root) = layout::decode_local_key_secret(&fact.bytes) {
+    if let Ok(root) = layout::decode_local_key_secret(fact.body()) {
         if root.workspace_id != workspace_id || root.frontier_id != frontier_id {
             return Err("history node source workspace or frontier mismatch".to_string());
         }
         return Ok((root.owner_endpoint_id, root.key_secret));
     }
-    let node = layout::decode_local_history_node_secret(&fact.bytes)
+    let node = layout::decode_local_history_node_secret(fact.body())
         .map_err(|_| "history node source event is missing".to_string())?;
     if node.workspace_id != workspace_id || node.frontier_id != frontier_id {
         return Err("history node source workspace or frontier mismatch".to_string());
@@ -521,7 +521,7 @@ fn history_source_is_tombstoned(
     source_secret_id: FactId,
 ) -> Result<bool, String> {
     for fact in runtime.facts() {
-        let Ok(node) = layout::decode_local_history_node_secret(&fact.bytes) else {
+        let Ok(node) = layout::decode_local_history_node_secret(fact.body()) else {
             continue;
         };
         if node.tombstone_node_id == source_secret_id {

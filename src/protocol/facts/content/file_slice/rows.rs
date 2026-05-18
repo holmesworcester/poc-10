@@ -11,7 +11,7 @@ use crate::core::wire;
 use super::fact::{ContentFileSliceFact, WorkspaceId};
 
 pub const FILE_SLICE_ROWS: TableName = TableName::new("file_slice_rows");
-pub const ROW_HEADER_BYTES: usize = 1 + 8 + 32 + 4;
+pub const ROW_PREFIX_BYTES: usize = 1 + 8 + 32 + 4;
 const ROW_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,16 +45,16 @@ pub fn content_file_slice_row(
         .len()
         .try_into()
         .map_err(|_| "content file slice row ciphertext exceeds u32".to_string())?;
-    let mut value = vec![0; ROW_HEADER_BYTES + fact.ciphertext.len()];
-    value[0] = ROW_VERSION;
-    wire::put_u64be(fact.created_at_ms, &mut value[1..9]).map_err(wire_err)?;
-    value[9..41].copy_from_slice(&slice_fact_id);
-    wire::put_u32be(ciphertext_len, &mut value[41..45]).map_err(wire_err)?;
-    value[ROW_HEADER_BYTES..].copy_from_slice(&fact.ciphertext);
+    let mut writer = wire::Writer::with_capacity(ROW_PREFIX_BYTES + fact.ciphertext.len());
+    writer.u8(ROW_VERSION);
+    writer.u64be(fact.created_at_ms);
+    writer.fixed(&slice_fact_id);
+    writer.u32be(ciphertext_len);
+    writer.bytes(&fact.ciphertext);
     Ok(TableRow {
         table: FILE_SLICE_ROWS,
         key: content_file_slice_key(&fact.workspace_id, &fact.file_id, fact.slice_index),
-        value,
+        value: writer.finish(),
     })
 }
 
@@ -65,25 +65,37 @@ pub fn decode_content_file_slice_row(
     if key.len() != 32 + 32 + 4 {
         return Err("content file slice row key is malformed".to_string());
     }
-    if value.len() < ROW_HEADER_BYTES || value[0] != ROW_VERSION {
+    if value.len() < ROW_PREFIX_BYTES || value[0] != ROW_VERSION {
         return Err("content file slice row value is malformed".to_string());
     }
-    let ciphertext_len = wire::take_u32be(&value[41..45]).map_err(wire_err)? as usize;
-    if value.len() != ROW_HEADER_BYTES + ciphertext_len {
+    let mut value_reader = wire::Reader::new(value);
+    let version = value_reader.u8().map_err(wire_err)?;
+    if version != ROW_VERSION {
+        return Err("content file slice row value is malformed".to_string());
+    }
+    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
+    let slice_fact_id = value_reader.array().map_err(wire_err)?;
+    let ciphertext_len = value_reader.u32be().map_err(wire_err)? as usize;
+    if value.len() != ROW_PREFIX_BYTES + ciphertext_len {
         return Err("content file slice row value length does not match ciphertext".to_string());
     }
-    let mut workspace_id = [0; 32];
-    workspace_id.copy_from_slice(&key[..32]);
-    let mut file_id = [0; 32];
-    file_id.copy_from_slice(&key[32..64]);
-    let slice_index = u32::from_be_bytes(key[64..68].try_into().unwrap());
+    let ciphertext = value_reader
+        .bytes(ciphertext_len)
+        .map_err(wire_err)?
+        .to_vec();
+    value_reader.finish().map_err(wire_err)?;
+    let mut key_reader = wire::Reader::new(key);
+    let workspace_id = key_reader.array().map_err(wire_err)?;
+    let file_id = key_reader.array().map_err(wire_err)?;
+    let slice_index = key_reader.u32be().map_err(wire_err)?;
+    key_reader.finish().map_err(wire_err)?;
     Ok(ContentFileSliceRow {
         workspace_id,
         file_id,
         slice_index,
-        slice_fact_id: value[9..41].try_into().unwrap(),
-        created_at_ms: wire::take_u64be(&value[1..9]).map_err(wire_err)?,
-        ciphertext: value[ROW_HEADER_BYTES..].to_vec(),
+        slice_fact_id,
+        created_at_ms,
+        ciphertext,
     })
 }
 

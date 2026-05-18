@@ -20,8 +20,7 @@ use crate::protocol::facts::content::sealed_message::fact::{
 };
 use crate::protocol::facts::content::sealed_message::{layout, rows};
 use crate::protocol::facts::encryption;
-use crate::protocol::facts::identity::signed_fact::create as signed_fact_create;
-use crate::protocol::facts::identity::signed_fact::layout as signed_fact_layout;
+use crate::protocol::facts::identity::signed_fact::{self, create as signed_fact_create};
 
 /// The maximum text byte length that fits the fixed sealed-message slot.
 ///
@@ -140,7 +139,7 @@ pub fn send_message(
         &signing.fact.private_key,
         payload,
     )?;
-    debug_assert_eq!(envelope_bytes.len(), signed_fact_layout::SIGNED_FACT_BYTES);
+    debug_assert_eq!(envelope_bytes.len(), signed_fact::SIGNED_FACT_BYTES);
 
     let scope = FactScope::Scoped {
         kind: ScopeKind::new("workspace").expect("valid workspace scope"),

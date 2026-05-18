@@ -2,7 +2,7 @@
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};
-use crate::core::wire::{FixedLayout, FixedSlot};
+use crate::core::wire;
 
 use super::fact::{
     AuthorId, FrontierId, SignerId, WorkspaceId, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
@@ -60,30 +60,27 @@ pub struct MessageTombstoneRow {
 }
 
 pub fn sealed_message_row(input: SealedMessageRow) -> Result<TableRow, String> {
-    let mut value = Vec::with_capacity(
+    let mut writer = wire::Writer::with_capacity(
         1 + 8 + 32 + 32 + 32 + 32 + 8 + 32 + 8 + 32 + NONCE_BYTES + 4 + CIPHERTEXT_BYTES,
     );
-    value.push(1);
-    value.extend_from_slice(&input.created_at_ms.to_be_bytes());
-    value.extend_from_slice(&input.author_user_id);
-    value.extend_from_slice(&input.signer_id);
-    value.extend_from_slice(&input.frontier_id);
-    value.extend_from_slice(&input.local_history_node_secret_id);
-    value.extend_from_slice(&input.expires_at_minute.to_be_bytes());
-    value.extend_from_slice(&input.disappearing_setting_id);
-    value.extend_from_slice(&input.minute.to_be_bytes());
-    value.extend_from_slice(&input.leaf_id);
-    value.extend_from_slice(&input.nonce);
-    let slot =
-        FixedSlot::<CIPHERTEXT_BYTES>::new(&input.ciphertext).map_err(|err| format!("{err:?}"))?;
-    let mut encoded = vec![0; 4 + CIPHERTEXT_BYTES];
-    slot.encode(&mut encoded)
-        .map_err(|err| format!("{err:?}"))?;
-    value.extend_from_slice(&encoded);
+    writer.u8(1);
+    writer.u64be(input.created_at_ms);
+    writer.fixed(&input.author_user_id);
+    writer.fixed(&input.signer_id);
+    writer.fixed(&input.frontier_id);
+    writer.fixed(&input.local_history_node_secret_id);
+    writer.u64be(input.expires_at_minute);
+    writer.fixed(&input.disappearing_setting_id);
+    writer.u64be(input.minute);
+    writer.fixed(&input.leaf_id);
+    writer.fixed(&input.nonce);
+    writer
+        .fixed_slot::<CIPHERTEXT_BYTES>(&input.ciphertext)
+        .map_err(wire_err)?;
     Ok(TableRow {
         table: SEALED_MESSAGE_ROWS,
         key: message_key(input.workspace_id, input.message_id),
-        value,
+        value: writer.finish(),
     })
 }
 
@@ -95,25 +92,28 @@ pub fn decode_sealed_message_row(key: &[u8], value: &[u8]) -> Result<SealedMessa
     {
         return Err("invalid sealed message value".to_string());
     }
-    let ciphertext_offset = 1 + 8 + 32 + 32 + 32 + 32 + 8 + 32 + 8 + 32 + NONCE_BYTES;
-    Ok(SealedMessageRow {
+    let mut reader = wire::Reader::new(value);
+    let version = reader.u8().map_err(wire_err)?;
+    if version != 1 {
+        return Err("invalid sealed message value".to_string());
+    }
+    let row = SealedMessageRow {
         workspace_id,
         message_id,
-        created_at_ms: u64::from_be_bytes(value[1..9].try_into().unwrap()),
-        author_user_id: value[9..41].try_into().unwrap(),
-        signer_id: value[41..73].try_into().unwrap(),
-        frontier_id: value[73..105].try_into().unwrap(),
-        local_history_node_secret_id: value[105..137].try_into().unwrap(),
-        expires_at_minute: u64::from_be_bytes(value[137..145].try_into().unwrap()),
-        disappearing_setting_id: value[145..177].try_into().unwrap(),
-        minute: u64::from_be_bytes(value[177..185].try_into().unwrap()),
-        leaf_id: value[185..217].try_into().unwrap(),
-        nonce: value[217..241].try_into().unwrap(),
-        ciphertext: FixedSlot::<CIPHERTEXT_BYTES>::decode(&value[ciphertext_offset..])
-            .map_err(|err| format!("{err:?}"))?
-            .bytes()
-            .to_vec(),
-    })
+        created_at_ms: reader.u64be().map_err(wire_err)?,
+        author_user_id: reader.array().map_err(wire_err)?,
+        signer_id: reader.array().map_err(wire_err)?,
+        frontier_id: reader.array().map_err(wire_err)?,
+        local_history_node_secret_id: reader.array().map_err(wire_err)?,
+        expires_at_minute: reader.u64be().map_err(wire_err)?,
+        disappearing_setting_id: reader.array().map_err(wire_err)?,
+        minute: reader.u64be().map_err(wire_err)?,
+        leaf_id: reader.array().map_err(wire_err)?,
+        nonce: reader.array().map_err(wire_err)?,
+        ciphertext: reader.fixed_slot::<CIPHERTEXT_BYTES>().map_err(wire_err)?,
+    };
+    reader.finish().map_err(wire_err)?;
+    Ok(row)
 }
 
 pub fn message_key(workspace_id: WorkspaceId, message_id: FactId) -> Vec<u8> {
@@ -124,17 +124,17 @@ pub fn message_key(workspace_id: WorkspaceId, message_id: FactId) -> Vec<u8> {
 }
 
 pub fn message_row(input: MessageRow) -> TableRow {
-    let mut value = Vec::with_capacity(113);
-    value.push(1);
-    value.extend_from_slice(&input.created_at_ms.to_be_bytes());
-    value.extend_from_slice(&input.author_user_id);
-    value.extend_from_slice(&input.signer_id);
-    value.extend_from_slice(&input.minute.to_be_bytes());
-    value.extend_from_slice(&input.leaf_id);
+    let mut writer = wire::Writer::with_capacity(113);
+    writer.u8(1);
+    writer.u64be(input.created_at_ms);
+    writer.fixed(&input.author_user_id);
+    writer.fixed(&input.signer_id);
+    writer.u64be(input.minute);
+    writer.fixed(&input.leaf_id);
     TableRow {
         table: MESSAGE_ROWS,
         key: message_key(input.workspace_id, input.message_id),
-        value,
+        value: writer.finish(),
     }
 }
 
@@ -143,30 +143,37 @@ pub fn decode_message_row(key: &[u8], value: &[u8]) -> Result<MessageRow, String
     if value.len() != 113 || value[0] != 1 {
         return Err("invalid message row value".to_string());
     }
-    Ok(MessageRow {
+    let mut reader = wire::Reader::new(value);
+    let version = reader.u8().map_err(wire_err)?;
+    if version != 1 {
+        return Err("invalid message row value".to_string());
+    }
+    let row = MessageRow {
         workspace_id,
         message_id,
-        created_at_ms: u64::from_be_bytes(value[1..9].try_into().unwrap()),
-        author_user_id: value[9..41].try_into().unwrap(),
-        signer_id: value[41..73].try_into().unwrap(),
-        minute: u64::from_be_bytes(value[73..81].try_into().unwrap()),
-        leaf_id: value[81..113].try_into().unwrap(),
-    })
+        created_at_ms: reader.u64be().map_err(wire_err)?,
+        author_user_id: reader.array().map_err(wire_err)?,
+        signer_id: reader.array().map_err(wire_err)?,
+        minute: reader.u64be().map_err(wire_err)?,
+        leaf_id: reader.array().map_err(wire_err)?,
+    };
+    reader.finish().map_err(wire_err)?;
+    Ok(row)
 }
 
 pub fn opened_message_row(input: OpenedMessageRow) -> TableRow {
     let text = input.text.as_bytes();
-    let mut value = Vec::with_capacity(1 + 8 + 32 + 32 + 4 + text.len());
-    value.push(1);
-    value.extend_from_slice(&input.created_at_ms.to_be_bytes());
-    value.extend_from_slice(&input.author_user_id);
-    value.extend_from_slice(&input.signer_id);
-    value.extend_from_slice(&(text.len() as u32).to_be_bytes());
-    value.extend_from_slice(text);
+    let mut writer = wire::Writer::with_capacity(1 + 8 + 32 + 32 + 4 + text.len());
+    writer.u8(1);
+    writer.u64be(input.created_at_ms);
+    writer.fixed(&input.author_user_id);
+    writer.fixed(&input.signer_id);
+    writer.u32be(text.len() as u32);
+    writer.bytes(text);
     TableRow {
         table: OPENED_MESSAGE_ROWS,
         key: message_key(input.workspace_id, input.message_id),
-        value,
+        value: writer.finish(),
     }
 }
 
@@ -175,18 +182,27 @@ pub fn decode_opened_message_row(key: &[u8], value: &[u8]) -> Result<OpenedMessa
     if value.len() < 77 || value[0] != 1 {
         return Err("invalid opened message value".to_string());
     }
-    let text_len = u32::from_be_bytes(value[73..77].try_into().unwrap()) as usize;
+    let mut reader = wire::Reader::new(value);
+    let version = reader.u8().map_err(wire_err)?;
+    if version != 1 {
+        return Err("invalid opened message value".to_string());
+    }
+    let created_at_ms = reader.u64be().map_err(wire_err)?;
+    let author_user_id = reader.array().map_err(wire_err)?;
+    let signer_id = reader.array().map_err(wire_err)?;
+    let text_len = reader.u32be().map_err(wire_err)? as usize;
     if value.len() != 77 + text_len {
         return Err("opened message text length does not match value".to_string());
     }
-    let text = String::from_utf8(value[77..].to_vec())
+    let text = String::from_utf8(reader.bytes(text_len).map_err(wire_err)?.to_vec())
         .map_err(|err| format!("opened message text is not utf8: {err}"))?;
+    reader.finish().map_err(wire_err)?;
     Ok(OpenedMessageRow {
         workspace_id,
         message_id,
-        created_at_ms: u64::from_be_bytes(value[1..9].try_into().unwrap()),
-        author_user_id: value[9..41].try_into().unwrap(),
-        signer_id: value[41..73].try_into().unwrap(),
+        created_at_ms,
+        author_user_id,
+        signer_id,
         text,
     })
 }
@@ -197,14 +213,14 @@ pub fn message_tombstone_row(
     author_user_id: AuthorId,
     created_at_ms: u64,
 ) -> TableRow {
-    let mut value = Vec::with_capacity(41);
-    value.push(1);
-    value.extend_from_slice(&author_user_id);
-    value.extend_from_slice(&(created_at_ms / UNIX_MINUTE_MS).to_be_bytes());
+    let mut writer = wire::Writer::with_capacity(41);
+    writer.u8(1);
+    writer.fixed(&author_user_id);
+    writer.u64be(created_at_ms / UNIX_MINUTE_MS);
     TableRow {
         table: MESSAGE_TOMBSTONE_ROWS,
         key: message_key(workspace_id, message_id),
-        value,
+        value: writer.finish(),
     }
 }
 
@@ -216,22 +232,34 @@ pub fn decode_message_tombstone_row(
     if value.len() != 41 || value[0] != 1 {
         return Err("invalid message tombstone value".to_string());
     }
-    Ok(MessageTombstoneRow {
+    let mut reader = wire::Reader::new(value);
+    let version = reader.u8().map_err(wire_err)?;
+    if version != 1 {
+        return Err("invalid message tombstone value".to_string());
+    }
+    let row = MessageTombstoneRow {
         workspace_id,
         message_id,
-        author_user_id: value[1..33].try_into().unwrap(),
-        authored_minute: u64::from_be_bytes(value[33..41].try_into().unwrap()),
-    })
+        author_user_id: reader.array().map_err(wire_err)?,
+        authored_minute: reader.u64be().map_err(wire_err)?,
+    };
+    reader.finish().map_err(wire_err)?;
+    Ok(row)
 }
 
 fn decode_message_key(key: &[u8], label: &str) -> Result<(WorkspaceId, FactId), String> {
     if key.len() != 64 {
         return Err(format!("{label} must be workspace id plus message id"));
     }
-    Ok((
-        key[..32].try_into().unwrap(),
-        key[32..64].try_into().unwrap(),
-    ))
+    let mut reader = wire::Reader::new(key);
+    let workspace_id = reader.array().map_err(wire_err)?;
+    let message_id = reader.array().map_err(wire_err)?;
+    reader.finish().map_err(wire_err)?;
+    Ok((workspace_id, message_id))
+}
+
+fn wire_err(err: wire::WireError) -> String {
+    format!("{err:?}")
 }
 
 #[cfg(test)]

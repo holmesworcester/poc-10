@@ -42,15 +42,3 @@ table clock {
   column value bytes;
   row_key (key);
 }
-
-table network_in {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table network_out {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}

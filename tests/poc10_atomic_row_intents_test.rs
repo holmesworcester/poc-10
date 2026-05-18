@@ -1,7 +1,7 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{AtomicIntent, TableDelete};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
-use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
 use topo::protocol::facts::content::sealed_message::rows::{
@@ -11,8 +11,8 @@ use topo::protocol::facts::content::sealed_message::rows::{
 
 #[test]
 fn projection_drain_applies_atomic_put_and_delete_rows_without_queueing_them() {
-    let store =
-        Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE]).expect("open target schema");
+    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+        .expect("open target schema");
     let fact = Fact::new(FactScope::Global, 1, b"sealed-row".to_vec());
     let mut bus = WakeLoop::new();
 
@@ -30,6 +30,8 @@ fn projection_drain_applies_atomic_put_and_delete_rows_without_queueing_them() {
     assert_eq!(report.projections, 1);
     assert_eq!(report.intents, 1);
     assert!(bus.intents().is_empty());
+    bus.save_applying_atomic_rows(&store, &[SEALED_MESSAGE_ROWS])
+        .expect("commit atomic row with wake-loop state");
     assert_eq!(
         decode_sealed_message_row(
             &message_key([1; 32], fact.id),
@@ -60,6 +62,8 @@ fn projection_drain_applies_atomic_put_and_delete_rows_without_queueing_them() {
     assert_eq!(delete_report.projections, 1);
     assert_eq!(delete_report.intents, 1);
     assert!(bus.intents().is_empty());
+    bus.save_applying_atomic_rows(&store, &[SEALED_MESSAGE_ROWS])
+        .expect("commit atomic delete with wake-loop state");
     assert!(store
         .table_rows(SEALED_MESSAGE_ROWS)
         .expect("sealed rows after delete")

@@ -14,7 +14,7 @@ pub(super) fn key_request(
     fact: &Fact,
     projection_context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
-    let request = layout::decode_key_request(&fact.bytes)?;
+    let request = layout::decode_key_request(fact.body())?;
     let scope = crate::protocol::matchers::workspace_scope(request.workspace_id);
     require_fact_scope(fact, &scope)?;
 

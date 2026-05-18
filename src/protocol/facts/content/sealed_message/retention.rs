@@ -9,10 +9,10 @@ pub fn decode_sealed_message_fact(
 ) -> Result<sealed_message::fact::SealedMessageFact, String> {
     match fact.bytes.first().copied() {
         Some(sealed_message::layout::TYPE_SEALED_MESSAGE) => {
-            sealed_message::layout::decode_sealed_message(&fact.bytes)
+            sealed_message::layout::decode_sealed_message(fact.body())
         }
         Some(signed_fact::layout::TYPE_SIGNED_FACT) => {
-            let envelope = signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+            let envelope = signed_fact::layout::decode_signed_fact(fact.body())?;
             if envelope.inner_type != sealed_message::layout::TYPE_SEALED_MESSAGE {
                 return Err("signed fact does not contain a sealed message".to_string());
             }

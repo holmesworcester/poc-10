@@ -9,7 +9,7 @@ use crate::core::wire;
 use super::fact::ContentEventFact;
 
 pub const TYPE_CONTENT_EVENT: u8 = 41;
-pub const HEADER_BYTES: usize = 1 + 32 + 8 + 4;
+pub const FACT_PREFIX_BYTES: usize = 1 + 32 + 8 + 4;
 
 pub fn encode_fact(fact: &ContentEventFact) -> Result<Vec<u8>, String> {
     let payload_len_u32: u32 = fact
@@ -17,32 +17,32 @@ pub fn encode_fact(fact: &ContentEventFact) -> Result<Vec<u8>, String> {
         .len()
         .try_into()
         .map_err(|_| "content payload exceeds u32 length".to_string())?;
-    let mut out = Vec::with_capacity(HEADER_BYTES + fact.payload.len());
-    out.resize(HEADER_BYTES, 0);
-    wire::put_u8(TYPE_CONTENT_EVENT, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.workspace_id);
-    wire::put_u64be(fact.timestamp, &mut out[33..41]).map_err(wire_err)?;
-    wire::put_u32be(payload_len_u32, &mut out[41..45]).map_err(wire_err)?;
-    out.extend_from_slice(&fact.payload);
-    Ok(out)
+    let mut out = wire::Writer::with_capacity(FACT_PREFIX_BYTES + fact.payload.len());
+    out.u8(TYPE_CONTENT_EVENT);
+    out.fixed(&fact.workspace_id);
+    out.u64be(fact.timestamp);
+    out.u32be(payload_len_u32);
+    out.bytes(&fact.payload);
+    Ok(out.finish())
 }
 
 pub fn decode_fact(bytes: &[u8]) -> Result<ContentEventFact, String> {
-    if bytes.len() < HEADER_BYTES {
+    if bytes.len() < FACT_PREFIX_BYTES {
         return Err("content event fact is shorter than its header".to_string());
     }
-    let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+    let mut reader = wire::Reader::new(bytes);
+    let tag = reader.u8().map_err(wire_err)?;
     if tag != TYPE_CONTENT_EVENT {
         return Err("expected content event fact".to_string());
     }
-    let mut workspace_id = [0; 32];
-    workspace_id.copy_from_slice(&bytes[1..33]);
-    let timestamp = wire::take_u64be(&bytes[33..41]).map_err(wire_err)?;
-    let payload_len = wire::take_u32be(&bytes[41..45]).map_err(wire_err)? as usize;
-    if bytes.len() != HEADER_BYTES + payload_len {
+    let workspace_id = reader.array().map_err(wire_err)?;
+    let timestamp = reader.u64be().map_err(wire_err)?;
+    let payload_len = reader.u32be().map_err(wire_err)? as usize;
+    if bytes.len() != FACT_PREFIX_BYTES + payload_len {
         return Err("content event fact length does not match declared payload".to_string());
     }
-    let payload = bytes[HEADER_BYTES..].to_vec();
+    let payload = reader.bytes(payload_len).map_err(wire_err)?.to_vec();
+    reader.finish().map_err(wire_err)?;
     Ok(ContentEventFact {
         workspace_id,
         timestamp,
@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn content_event_roundtrips_with_payload() {
         let bytes = encode_fact(&fact()).expect("encode");
-        assert_eq!(bytes.len(), HEADER_BYTES + 3);
+        assert_eq!(bytes.len(), FACT_PREFIX_BYTES + 3);
         assert_eq!(decode_fact(&bytes).expect("decode"), fact());
     }
 

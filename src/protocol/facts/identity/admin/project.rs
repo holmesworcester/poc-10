@@ -34,7 +34,7 @@ impl Projector for AdminProjector {
         if fact.scope != FactScope::Global {
             return Err("admin fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)
+        let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())
             .map_err(|_| "admin fact must be signed".to_string())?;
         if envelope.inner_type != layout::TYPE_ADMIN {
             return Err("signed fact does not contain an admin".to_string());
@@ -187,9 +187,9 @@ fn validate_authority(
 
 fn decode_admin_payload(fact: &Fact) -> Result<super::fact::AdminFact, String> {
     match fact.bytes.first().copied() {
-        Some(layout::TYPE_ADMIN) => layout::decode_fact(&fact.bytes),
+        Some(layout::TYPE_ADMIN) => layout::decode_fact(fact.body()),
         Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) => {
-            let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+            let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())?;
             if envelope.inner_type != layout::TYPE_ADMIN {
                 return Err("expected signed admin".to_string());
             }
@@ -203,9 +203,9 @@ fn decode_user_payload(
     fact: &Fact,
 ) -> Result<crate::protocol::facts::identity::user::fact::UserFact, String> {
     match fact.bytes.first().copied() {
-        Some(user_layout::TYPE_USER) => user_layout::decode_fact(&fact.bytes),
+        Some(user_layout::TYPE_USER) => user_layout::decode_fact(fact.body()),
         Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) => {
-            let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+            let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())?;
             if envelope.inner_type != user_layout::TYPE_USER {
                 return Err("expected signed user".to_string());
             }
@@ -223,7 +223,7 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::AtomicIntent;
     use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::identity;
@@ -338,8 +338,9 @@ mod projector_tests {
             user_fact_id: [1; 32],
         };
         let fact = signed_admin_fact(&admin, [1; 32], WORKSPACE_PRIVATE_KEY);
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));

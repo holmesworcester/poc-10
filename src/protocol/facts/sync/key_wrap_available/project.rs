@@ -23,7 +23,7 @@ impl Projector for SyncKeyWrapAvailableProjector {
         fact: &Fact,
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let key = layout::decode_fact(&fact.bytes)?;
+        let key = layout::decode_fact(fact.body())?;
         let scope = matchers::workspace_scope(key.workspace_id);
         require_fact_scope(fact, &scope)?;
         Ok(ProjectionOutput::new()

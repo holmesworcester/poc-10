@@ -29,7 +29,7 @@ impl Projector for SyncCompareProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let compare = layout::decode_fact(&fact.bytes)?;
+        let compare = layout::decode_fact(fact.body())?;
         let mut output = ProjectionOutput::new()
             .intent(AtomicIntent::PutRow(sync_compare_row(fact.id, &compare)?).into_intent());
         if compare.response_requested {
@@ -46,7 +46,7 @@ mod projector_tests {
     use crate as topo;
 
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::sync::compare::fact::{
@@ -78,8 +78,9 @@ mod projector_tests {
             0,
             layout::encode_fact(&compare).expect("encode sync compare"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact.clone()));
@@ -123,8 +124,9 @@ mod projector_tests {
             0,
             layout::encode_fact(&fact).expect("encode sync compare"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));

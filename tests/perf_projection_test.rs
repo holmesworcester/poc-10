@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactId};
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
-use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
 use topo::core::store::Store;
 use topo::core::wake_loop::{DrainReport, WakeLoop};
 use topo::protocol::facts::content::file::fact::ContentFileFact;
@@ -41,8 +41,11 @@ struct PerfFixture {
 impl PerfFixture {
     fn new() -> Self {
         Self {
-            store: Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-                .expect("open target schema"),
+            store: Store::open_memory_with_schema_sources(&[
+                CORE_SCHEMA_SOURCE,
+                FACTS_SCHEMA_SOURCE,
+            ])
+            .expect("open target schema"),
             bus: WakeLoop::new(),
             workspace_id: [1; 32],
             author_user_id: [2; 32],

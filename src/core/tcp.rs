@@ -7,10 +7,10 @@
 //! The protocol boundary is one shape: opaque network queue rows. Receive paths
 //! insert `InboundNetworkRow`s for a worker. Send paths accept
 //! `OutboundNetworkRow`s keyed by one `NetworkTarget`; TCP inserts them into the
-//! outbound queue, claims rows for that same target, writes their opaque bytes
-//! as frames, deletes the sent core rows, and then reports the sent rows back
-//! through `on_sent` so protocol-owned bookkeeping can advance. Core never
-//! interprets or constructs protocol bytes.
+//! outbound queue, claims those exact rows, writes their opaque bytes as frames,
+//! deletes the sent core rows, and then reports the sent rows back through
+//! `on_sent` so protocol-owned bookkeeping can advance. Core never interprets
+//! or constructs protocol bytes.
 //!
 //! The invariant is routing correctness: each outbound row is sent only on the
 //! stream for its `NetworkTarget`, and each inbound row carries the
@@ -222,19 +222,26 @@ fn write_outbound<T>(
     }
     ensure_target(target, &rows)?;
     network_queues::enqueue_outbound(store, &rows)?;
-    let claimed = network_queues::claim_outbound_for_target(store, target, rows.len())?;
-    if rows
-        .iter()
-        .any(|row| !claimed.iter().any(|claimed| claimed.key == row.key))
-    {
-        return Err("queued outbound network row was not claimable for stream target".to_string());
-    }
-    for row in &rows {
+    let claimed = network_queues::claim_exact_outbound(store, &rows)?;
+    write_claimed_outbound(store, stream, target, claimed, value, on_sent, report)
+}
+
+fn write_claimed_outbound<T>(
+    store: &Store,
+    stream: &mut TcpStream,
+    target: NetworkTarget,
+    claimed: Vec<OutboundNetworkRow>,
+    value: &mut T,
+    on_sent: &mut impl FnMut(&[OutboundNetworkRow], &mut T) -> Result<(), String>,
+    report: &mut StreamReport,
+) -> Result<(), String> {
+    ensure_target(target, &claimed)?;
+    for row in &claimed {
         write_frame(stream, &row.bytes).map_err(|err| format!("write frame: {err}"))?;
     }
-    network_queues::delete_outbound(store, &rows)?;
-    on_sent(&rows, value)?;
-    report.sent_frames += rows.len();
+    network_queues::delete_outbound(store, &claimed)?;
+    on_sent(&claimed, value)?;
+    report.sent_frames += claimed.len();
     Ok(())
 }
 
@@ -337,7 +344,6 @@ fn is_stream_closed(err: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use std::thread;
 
@@ -379,8 +385,7 @@ mod tests {
 
     #[test]
     fn accept_available_drains_ready_streams_up_to_limit() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let store = Store::open_memory_with_schemas(network_queues::SCHEMAS).expect("open store");
         let listener = listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
         let addr = listener.local_addr();
         let writers = (0..3)

@@ -20,7 +20,7 @@ impl Projector for CascadeFactProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = layout::decode_fact(&fact.bytes)?;
+        let decoded = layout::decode_fact(fact.body())?;
         if decoded.timestamp != fact.timestamp {
             return Err("cascade fact timestamp does not match fact timestamp".to_string());
         }
@@ -51,10 +51,11 @@ fn has_matched_dependency(
     dependency_id: crate::core::facts::FactId,
 ) -> bool {
     context.offers().iter().any(|offer| {
+        let crate::core::context::ContextOffer { payload_ref, .. } = offer;
         offer.role == need.role
             && offer.scope == need.scope
             && offer.selector == need.selector
-            && offer.payload_ref == dependency_id
+            && *payload_ref == dependency_id
     })
 }
 

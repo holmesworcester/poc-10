@@ -7,7 +7,7 @@ use topo::core::intents::AtomicIntent;
 use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::store::{Schema, Store, TableName, TableRow};
-use topo::core::wake_loop::WakeLoop;
+use topo::core::wake_loop::{WakeLoop, FACTS, INTENTS, NEEDS, OFFERS, PENDING_PROJECTION};
 use topo::protocol::matchers::ExactSelectorMatcher;
 
 const MAX_DEPS: usize = 10;
@@ -17,10 +17,17 @@ const TYPE_STAGED_EVENT_WITH_DEPS: u8 = 3;
 const ENCODED_BYTES: usize = 1 + 8 + 1 + (MAX_DEPS * 32) + PAYLOAD_BYTES;
 const STAGED_ENCODED_BYTES: usize = 1 + 8 + ENCODED_BYTES;
 const STAGED_EVENTS_WITH_DEPS: TableName = TableName::new("test_events.staged_event_with_deps");
-const SCHEMAS: &[Schema] = &[Schema::durable_row_table(
-    "test_events.staged_event_with_deps.v1",
-    STAGED_EVENTS_WITH_DEPS,
-)];
+const SCHEMAS: &[Schema] = &[
+    Schema::durable_row_table("core.facts.v1", FACTS),
+    Schema::durable_row_table("core.needs.v1", NEEDS),
+    Schema::durable_row_table("core.offers.v1", OFFERS),
+    Schema::durable_row_table("core.pending_projection.v1", PENDING_PROJECTION),
+    Schema::durable_row_table("core.intents.v1", INTENTS),
+    Schema::durable_row_table(
+        "test_events.staged_event_with_deps.v1",
+        STAGED_EVENTS_WITH_DEPS,
+    ),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EventWithDeps {

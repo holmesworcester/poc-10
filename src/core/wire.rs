@@ -374,6 +374,151 @@ pub fn take_bool8(bytes: &[u8]) -> Result<bool, WireError> {
     Ok(Bool8::decode(bytes)?.0)
 }
 
+#[derive(Debug, Clone)]
+pub struct Writer {
+    bytes: Vec<u8>,
+}
+
+impl Writer {
+    pub fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    pub fn u32be(&mut self, value: u32) {
+        self.bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn u64be(&mut self, value: u64) {
+        self.bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn bytes(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    pub fn fixed<const N: usize>(&mut self, bytes: &[u8; N]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    pub fn fixed_slot<const N: usize>(&mut self, bytes: &[u8]) -> Result<(), WireError> {
+        let slot = FixedSlot::<N>::new(bytes)?;
+        let mut encoded = vec![0; FixedSlot::<N>::LEN];
+        slot.encode(&mut encoded)?;
+        self.bytes.extend_from_slice(&encoded);
+        Ok(())
+    }
+
+    pub fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    pub fn finish_exact(self, expected: usize) -> Result<Vec<u8>, WireError> {
+        expect_len(&self.bytes, expected)?;
+        Ok(self.bytes)
+    }
+}
+
+impl Default for Writer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Reader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Reader<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    pub fn remaining_len(&self) -> usize {
+        self.bytes.len().saturating_sub(self.offset)
+    }
+
+    pub fn expect_len(&self, expected: usize) -> Result<(), WireError> {
+        expect_len(self.bytes, expected)
+    }
+
+    pub fn u8(&mut self) -> Result<u8, WireError> {
+        Ok(U8::decode(self.take(U8::LEN)?)?.0)
+    }
+
+    pub fn expect_u8(&mut self, expected: u8) -> Result<(), WireError> {
+        let actual = self.u8()?;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(WireError::InvalidBool { actual })
+        }
+    }
+
+    pub fn u32be(&mut self) -> Result<u32, WireError> {
+        Ok(U32be::decode(self.take(U32be::LEN)?)?.0)
+    }
+
+    pub fn u64be(&mut self) -> Result<u64, WireError> {
+        Ok(U64be::decode(self.take(U64be::LEN)?)?.0)
+    }
+
+    pub fn array<const N: usize>(&mut self) -> Result<[u8; N], WireError> {
+        Ok(FixedBytes::<N>::decode(self.take(N)?)?.0)
+    }
+
+    pub fn fixed_slot<const N: usize>(&mut self) -> Result<Vec<u8>, WireError> {
+        Ok(FixedSlot::<N>::decode(self.take(FixedSlot::<N>::LEN)?)?
+            .bytes()
+            .to_vec())
+    }
+
+    pub fn bytes(&mut self, len: usize) -> Result<&'a [u8], WireError> {
+        self.take(len)
+    }
+
+    pub fn finish(self) -> Result<(), WireError> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(WireError::WrongLength {
+                expected: self.offset,
+                actual: self.bytes.len(),
+            })
+        }
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8], WireError> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or(WireError::ValueTooLarge {
+                max: usize::MAX,
+                actual: len,
+            })?;
+        if end > self.bytes.len() {
+            return Err(WireError::WrongLength {
+                expected: end,
+                actual: self.bytes.len(),
+            });
+        }
+        let out = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

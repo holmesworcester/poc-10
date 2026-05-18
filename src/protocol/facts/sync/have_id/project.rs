@@ -28,7 +28,7 @@ impl Projector for SyncHaveIdProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let have = layout::decode_fact(&fact.bytes)?;
+        let have = layout::decode_fact(fact.body())?;
         Ok(ProjectionOutput::new()
             .intent(AtomicIntent::PutRow(sync_have_id_row(fact.id, &have)?).into_intent())
             .intent(send_needed_fact_id_intent(SendNeededFactId {
@@ -42,7 +42,7 @@ mod projector_tests {
     use crate as topo;
 
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::sync::have_id::fact::SyncHaveIdFact;
@@ -64,8 +64,9 @@ mod projector_tests {
             0,
             layout::encode_fact(&have_id).expect("encode sync have-id"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact.clone()));

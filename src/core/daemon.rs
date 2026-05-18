@@ -38,6 +38,7 @@ pub struct StartOptions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TickReport {
     pub accepted_connections: usize,
+    pub sent_frames: usize,
     pub received_frames: usize,
     pub projections: usize,
     pub handled_intents: usize,
@@ -48,6 +49,7 @@ pub struct TickReport {
 impl TickReport {
     fn has_activity(&self) -> bool {
         self.accepted_connections > 0
+            || self.sent_frames > 0
             || self.received_frames > 0
             || self.projections > 0
             || self.handled_intents > 0
@@ -61,6 +63,7 @@ pub struct DaemonReport {
     pub local_addr: Option<SocketAddr>,
     pub ticks: usize,
     pub accepted_connections: usize,
+    pub sent_frames: usize,
     pub received_frames: usize,
     pub projections: usize,
     pub handled_intents: usize,
@@ -71,6 +74,7 @@ pub struct DaemonReport {
 impl DaemonReport {
     fn add_tick(&mut self, tick: TickReport) {
         self.accepted_connections += tick.accepted_connections;
+        self.sent_frames += tick.sent_frames;
         self.received_frames += tick.received_frames;
         self.projections += tick.projections;
         self.handled_intents += tick.handled_intents;
@@ -86,6 +90,7 @@ impl DaemonReport {
         out.extend([
             format!("ticks: {}", self.ticks),
             format!("accepted_connections: {}", self.accepted_connections),
+            format!("sent_frames: {}", self.sent_frames),
             format!("received_frames: {}", self.received_frames),
             format!("projections: {}", self.projections),
             format!("handled_intents: {}", self.handled_intents),

@@ -1,7 +1,6 @@
 //! Fixed-width layouts for sealed-message target facts.
 
 use crate::core::wire;
-use crate::core::wire::{FixedLayout, FixedSlot};
 
 use super::fact::{
     MessageDeletionFact, SealedMessageFact, SecretNodeFact, SignerPubkeyFact, CIPHERTEXT_BYTES,
@@ -20,84 +19,90 @@ pub const SECRET_NODE_BYTES: usize = 1 + 32 + 32 + 8 + 8 + 1 + 32;
 pub const MESSAGE_DELETION_BYTES: usize = 1 + 32 + 8 + 32 + 32;
 
 pub fn encode_sealed_message(fact: &SealedMessageFact) -> Result<Vec<u8>, String> {
-    let mut out = vec![0; SEALED_MESSAGE_BYTES];
-    wire::put_u8(TYPE_SEALED_MESSAGE, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.workspace_id);
-    wire::put_u64be(fact.created_at_ms, &mut out[33..41]).map_err(wire_err)?;
-    out[41..73].copy_from_slice(&fact.author_user_id);
-    out[73..105].copy_from_slice(&fact.signer_id);
-    out[105..137].copy_from_slice(&fact.frontier_id);
-    out[137..169].copy_from_slice(&fact.local_history_node_secret_id);
-    wire::put_u64be(fact.expires_at_minute, &mut out[169..177]).map_err(wire_err)?;
-    out[177..209].copy_from_slice(&fact.disappearing_setting_id);
-    wire::put_u64be(fact.minute, &mut out[209..217]).map_err(wire_err)?;
-    out[217..249].copy_from_slice(&fact.leaf_id);
-    out[249..273].copy_from_slice(&fact.nonce);
-    FixedSlot::<CIPHERTEXT_BYTES>::new(&fact.ciphertext)
-        .map_err(wire_err)?
-        .encode(&mut out[273..])
+    let mut out = wire::Writer::with_capacity(SEALED_MESSAGE_BYTES);
+    out.u8(TYPE_SEALED_MESSAGE);
+    out.fixed(&fact.workspace_id);
+    out.u64be(fact.created_at_ms);
+    out.fixed(&fact.author_user_id);
+    out.fixed(&fact.signer_id);
+    out.fixed(&fact.frontier_id);
+    out.fixed(&fact.local_history_node_secret_id);
+    out.u64be(fact.expires_at_minute);
+    out.fixed(&fact.disappearing_setting_id);
+    out.u64be(fact.minute);
+    out.fixed(&fact.leaf_id);
+    out.fixed(&fact.nonce);
+    out.fixed_slot::<CIPHERTEXT_BYTES>(&fact.ciphertext)
         .map_err(wire_err)?;
-    Ok(out)
+    out.finish_exact(SEALED_MESSAGE_BYTES).map_err(wire_err)
 }
 
 pub fn decode_sealed_message(bytes: &[u8]) -> Result<SealedMessageFact, String> {
-    wire::expect_len(bytes, SEALED_MESSAGE_BYTES).map_err(wire_err)?;
-    expect_tag(bytes, TYPE_SEALED_MESSAGE, "sealed message")?;
-    Ok(SealedMessageFact {
-        workspace_id: bytes[1..33].try_into().unwrap(),
-        created_at_ms: wire::take_u64be(&bytes[33..41]).map_err(wire_err)?,
-        author_user_id: bytes[41..73].try_into().unwrap(),
-        signer_id: bytes[73..105].try_into().unwrap(),
-        frontier_id: bytes[105..137].try_into().unwrap(),
-        local_history_node_secret_id: bytes[137..169].try_into().unwrap(),
-        expires_at_minute: wire::take_u64be(&bytes[169..177]).map_err(wire_err)?,
-        disappearing_setting_id: bytes[177..209].try_into().unwrap(),
-        minute: wire::take_u64be(&bytes[209..217]).map_err(wire_err)?,
-        leaf_id: bytes[217..249].try_into().unwrap(),
-        nonce: bytes[249..273].try_into().unwrap(),
-        ciphertext: FixedSlot::<CIPHERTEXT_BYTES>::decode(&bytes[273..])
-            .map_err(wire_err)?
-            .bytes()
-            .to_vec(),
-    })
+    let mut reader = wire::Reader::new(bytes);
+    reader.expect_len(SEALED_MESSAGE_BYTES).map_err(wire_err)?;
+    expect_tag(&mut reader, TYPE_SEALED_MESSAGE, "sealed message")?;
+    let fact = SealedMessageFact {
+        workspace_id: reader.array().map_err(wire_err)?,
+        created_at_ms: reader.u64be().map_err(wire_err)?,
+        author_user_id: reader.array().map_err(wire_err)?,
+        signer_id: reader.array().map_err(wire_err)?,
+        frontier_id: reader.array().map_err(wire_err)?,
+        local_history_node_secret_id: reader.array().map_err(wire_err)?,
+        expires_at_minute: reader.u64be().map_err(wire_err)?,
+        disappearing_setting_id: reader.array().map_err(wire_err)?,
+        minute: reader.u64be().map_err(wire_err)?,
+        leaf_id: reader.array().map_err(wire_err)?,
+        nonce: reader.array().map_err(wire_err)?,
+        ciphertext: reader.fixed_slot::<CIPHERTEXT_BYTES>().map_err(wire_err)?,
+    };
+    reader.finish().map_err(wire_err)?;
+    Ok(fact)
 }
 
 pub fn encode_signer_pubkey(fact: &SignerPubkeyFact) -> Result<Vec<u8>, String> {
-    let mut out = vec![0; SIGNER_PUBKEY_BYTES];
-    wire::put_u8(TYPE_SIGNER_PUBKEY, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.signer_id);
-    out[33..65].copy_from_slice(&fact.public_key);
-    Ok(out)
+    let mut out = wire::Writer::with_capacity(SIGNER_PUBKEY_BYTES);
+    out.u8(TYPE_SIGNER_PUBKEY);
+    out.fixed(&fact.signer_id);
+    out.fixed(&fact.public_key);
+    out.finish_exact(SIGNER_PUBKEY_BYTES).map_err(wire_err)
 }
 
 pub fn decode_signer_pubkey(bytes: &[u8]) -> Result<SignerPubkeyFact, String> {
-    wire::expect_len(bytes, SIGNER_PUBKEY_BYTES).map_err(wire_err)?;
-    expect_tag(bytes, TYPE_SIGNER_PUBKEY, "signer pubkey")?;
-    Ok(SignerPubkeyFact {
-        signer_id: bytes[1..33].try_into().unwrap(),
-        public_key: bytes[33..65].try_into().unwrap(),
-    })
+    let mut reader = wire::Reader::new(bytes);
+    reader.expect_len(SIGNER_PUBKEY_BYTES).map_err(wire_err)?;
+    expect_tag(&mut reader, TYPE_SIGNER_PUBKEY, "signer pubkey")?;
+    let fact = SignerPubkeyFact {
+        signer_id: reader.array().map_err(wire_err)?,
+        public_key: reader.array().map_err(wire_err)?,
+    };
+    reader.finish().map_err(wire_err)?;
+    Ok(fact)
 }
 
 pub fn encode_message_deletion(fact: &MessageDeletionFact) -> Result<Vec<u8>, String> {
-    let mut out = vec![0; MESSAGE_DELETION_BYTES];
-    wire::put_u8(TYPE_MESSAGE_DELETION, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.workspace_id);
-    wire::put_u64be(fact.created_at_ms, &mut out[33..41]).map_err(wire_err)?;
-    out[41..73].copy_from_slice(&fact.target_id);
-    out[73..105].copy_from_slice(&fact.author_user_id);
-    Ok(out)
+    let mut out = wire::Writer::with_capacity(MESSAGE_DELETION_BYTES);
+    out.u8(TYPE_MESSAGE_DELETION);
+    out.fixed(&fact.workspace_id);
+    out.u64be(fact.created_at_ms);
+    out.fixed(&fact.target_id);
+    out.fixed(&fact.author_user_id);
+    out.finish_exact(MESSAGE_DELETION_BYTES).map_err(wire_err)
 }
 
 pub fn decode_message_deletion(bytes: &[u8]) -> Result<MessageDeletionFact, String> {
-    wire::expect_len(bytes, MESSAGE_DELETION_BYTES).map_err(wire_err)?;
-    expect_tag(bytes, TYPE_MESSAGE_DELETION, "message deletion")?;
-    Ok(MessageDeletionFact {
-        workspace_id: bytes[1..33].try_into().unwrap(),
-        created_at_ms: wire::take_u64be(&bytes[33..41]).map_err(wire_err)?,
-        target_id: bytes[41..73].try_into().unwrap(),
-        author_user_id: bytes[73..105].try_into().unwrap(),
-    })
+    let mut reader = wire::Reader::new(bytes);
+    reader
+        .expect_len(MESSAGE_DELETION_BYTES)
+        .map_err(wire_err)?;
+    expect_tag(&mut reader, TYPE_MESSAGE_DELETION, "message deletion")?;
+    let fact = MessageDeletionFact {
+        workspace_id: reader.array().map_err(wire_err)?,
+        created_at_ms: reader.u64be().map_err(wire_err)?,
+        target_id: reader.array().map_err(wire_err)?,
+        author_user_id: reader.array().map_err(wire_err)?,
+    };
+    reader.finish().map_err(wire_err)?;
+    Ok(fact)
 }
 
 pub fn encode_secret_node(fact: &SecretNodeFact) -> Result<Vec<u8>, String> {
@@ -108,34 +113,36 @@ pub fn encode_secret_node(fact: &SecretNodeFact) -> Result<Vec<u8>, String> {
         return Err("secret node prefix is too long".to_string());
     }
 
-    let mut out = vec![0; SECRET_NODE_BYTES];
-    wire::put_u8(TYPE_SECRET_NODE, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.workspace_id);
-    out[33..65].copy_from_slice(&fact.frontier_id);
-    wire::put_u64be(fact.start_minute, &mut out[65..73]).map_err(wire_err)?;
-    wire::put_u64be(fact.end_minute, &mut out[73..81]).map_err(wire_err)?;
-    out[81] = fact.prefix_bytes;
-    out[82..114].copy_from_slice(&fact.leaf_prefix);
-    Ok(out)
+    let mut out = wire::Writer::with_capacity(SECRET_NODE_BYTES);
+    out.u8(TYPE_SECRET_NODE);
+    out.fixed(&fact.workspace_id);
+    out.fixed(&fact.frontier_id);
+    out.u64be(fact.start_minute);
+    out.u64be(fact.end_minute);
+    out.u8(fact.prefix_bytes);
+    out.fixed(&fact.leaf_prefix);
+    out.finish_exact(SECRET_NODE_BYTES).map_err(wire_err)
 }
 
 pub fn decode_secret_node(bytes: &[u8]) -> Result<SecretNodeFact, String> {
-    wire::expect_len(bytes, SECRET_NODE_BYTES).map_err(wire_err)?;
-    expect_tag(bytes, TYPE_SECRET_NODE, "secret node")?;
+    let mut reader = wire::Reader::new(bytes);
+    reader.expect_len(SECRET_NODE_BYTES).map_err(wire_err)?;
+    expect_tag(&mut reader, TYPE_SECRET_NODE, "secret node")?;
     let fact = SecretNodeFact {
-        workspace_id: bytes[1..33].try_into().unwrap(),
-        frontier_id: bytes[33..65].try_into().unwrap(),
-        start_minute: wire::take_u64be(&bytes[65..73]).map_err(wire_err)?,
-        end_minute: wire::take_u64be(&bytes[73..81]).map_err(wire_err)?,
-        prefix_bytes: bytes[81],
-        leaf_prefix: bytes[82..114].try_into().unwrap(),
+        workspace_id: reader.array().map_err(wire_err)?,
+        frontier_id: reader.array().map_err(wire_err)?,
+        start_minute: reader.u64be().map_err(wire_err)?,
+        end_minute: reader.u64be().map_err(wire_err)?,
+        prefix_bytes: reader.u8().map_err(wire_err)?,
+        leaf_prefix: reader.array().map_err(wire_err)?,
     };
+    reader.finish().map_err(wire_err)?;
     encode_secret_node(&fact)?;
     Ok(fact)
 }
 
-fn expect_tag(bytes: &[u8], expected: u8, label: &str) -> Result<(), String> {
-    let actual = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+fn expect_tag(reader: &mut wire::Reader<'_>, expected: u8, label: &str) -> Result<(), String> {
+    let actual = reader.u8().map_err(wire_err)?;
     if actual == expected {
         Ok(())
     } else {

@@ -106,7 +106,7 @@ fn applied_cascade_fact_count(runtime: &ProtocolRuntime) -> usize {
     let role = crate::protocol::matchers::exact_fact_role();
     runtime
         .facts()
-        .filter(|fact| layout::decode_fact(&fact.bytes).is_ok())
+        .filter(|fact| layout::decode_fact(fact.body()).is_ok())
         .filter(|fact| {
             runtime
                 .wake_loop()

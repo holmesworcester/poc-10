@@ -160,7 +160,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
         let input = decode_send_facts_on_connection(intent)?;
         let connection_fact = context.require_fact(&input.connection_id)?;
-        let connection = response::layout::decode_fact(&connection_fact.bytes)?;
+        let connection = response::layout::decode_fact(connection_fact.body())?;
         if connection_fact.id != input.connection_id {
             return Err("send_facts_on_connection connection fact id mismatch".to_string());
         }

@@ -31,7 +31,7 @@ impl Projector for ConnectionEphemeralSecretProjector {
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let secret = layout::decode_fact(&fact.bytes)?;
+        let secret = layout::decode_fact(fact.body())?;
         if crypto::x25519_public_key(&secret.ephemeral_private_key) != secret.ephemeral_public_key {
             return Err("connection ephemeral public key does not match private key".to_string());
         }
@@ -52,7 +52,7 @@ mod projector_tests {
 
     use topo::core::crypto::{self, X25519_PRIVATE_KEY_BYTES, X25519_PUBLIC_KEY_BYTES};
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
@@ -77,8 +77,9 @@ mod projector_tests {
             0,
             layout::encode_fact(&secret).expect("encode secret"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact.clone()));

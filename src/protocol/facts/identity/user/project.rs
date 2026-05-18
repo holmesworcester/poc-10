@@ -32,7 +32,7 @@ impl Projector for UserProjector {
         if fact.scope != FactScope::Global {
             return Err("user fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)
+        let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())
             .map_err(|_| "user fact must be signed".to_string())?;
         if envelope.inner_type != layout::TYPE_USER {
             return Err("signed fact does not contain a user".to_string());
@@ -94,7 +94,7 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::AtomicIntent;
     use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::identity;
@@ -215,8 +215,9 @@ mod projector_tests {
         };
         let invite_fact = signed_user_invite_fact(user.workspace_id, INVITE_PRIVATE_KEY);
         let fact = signed_user_fact(&user, invite_fact.id, INVITE_PRIVATE_KEY);
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));

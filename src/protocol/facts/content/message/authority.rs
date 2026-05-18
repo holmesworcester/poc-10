@@ -2,7 +2,6 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId};
 use crate::core::projection::ProjectionContext;
 use crate::protocol::facts::identity;
-use crate::protocol::facts::identity::endpoint_shared::layout as endpoint_shared_layout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedPayload {
@@ -22,7 +21,7 @@ pub fn decode_raw_or_signed(
     label: &str,
 ) -> Result<DecodedPayload, String> {
     if fact.bytes.first().copied() == Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) {
-        let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)
+        let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())
             .map_err(|err| format!("{label} signed fact is invalid: {err}"))?;
         if envelope.inner_type != expected_type {
             return Err(format!("signed fact does not contain a {label}"));
@@ -60,7 +59,7 @@ pub fn validate_signer_context(
     author_user_id: Option<FactId>,
     label: &str,
 ) -> Result<bool, String> {
-    let Some(payload) = payload_for_need(context, need, &format!("{label} signer"))? else {
+    let Some(payload) = context_payload(context, need, &format!("{label} signer"))? else {
         return Ok(false);
     };
     if payload.id != signer.signer_id {
@@ -68,14 +67,14 @@ pub fn validate_signer_context(
             "{label} signer endpoint context payload id mismatch"
         ));
     }
-    let envelope = identity::signed_fact::layout::decode_signed_fact(&payload.bytes)
+    let envelope = identity::signed_fact::layout::decode_signed_fact(payload.body())
         .map_err(|_| format!("{label} signer context is not a signed endpoint_shared"))?;
-    if envelope.inner_type != endpoint_shared_layout::TYPE_ENDPOINT_SHARED {
+    if envelope.inner_type != identity::endpoint_shared::TYPE_ENDPOINT_SHARED {
         return Err(format!(
             "{label} signer context is not a signed endpoint_shared"
         ));
     }
-    let endpoint = endpoint_shared_layout::decode_fact(&envelope.payload)
+    let endpoint = identity::endpoint_shared::decode_fact_payload(&envelope.payload)
         .map_err(|_| format!("{label} signer context is not an endpoint_shared"))?;
     if endpoint.workspace_id != workspace_id {
         return Err(format!(
@@ -95,20 +94,10 @@ pub fn validate_signer_context(
     Ok(true)
 }
 
-pub fn payload_for_need<'a>(
+pub fn context_payload<'a>(
     context: &'a ProjectionContext,
     need: &ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    let Some(matched) = context
-        .matched_context()
-        .iter()
-        .find(|matched| matched.need == *need)
-    else {
-        return Ok(None);
-    };
-    if matched.offer.payload_ref != matched.payload.id {
-        return Err(format!("{label} context offer payload mismatch"));
-    }
-    Ok(Some(&matched.payload))
+    context.payload_for_checked(need, label)
 }

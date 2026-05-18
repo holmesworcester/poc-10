@@ -12,7 +12,7 @@ pub(super) fn local_recipient_key(
     fact: &Fact,
     projection_context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
-    let local = layout::decode_local_recipient_key(&fact.bytes)?;
+    let local = layout::decode_local_recipient_key(fact.body())?;
     let scope = crate::protocol::matchers::workspace_scope(local.workspace_id);
     require_local_scope(fact)?;
 

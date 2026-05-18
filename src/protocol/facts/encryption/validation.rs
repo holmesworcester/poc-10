@@ -1,4 +1,4 @@
-use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projection::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::content;
@@ -12,24 +12,21 @@ pub(super) fn matching_wrap_sources_with_signer(
     need: &ContextNeed,
 ) -> Result<Vec<(FactId, FactId, WrapSourceSelector)>, String> {
     projection_context
-        .matched_context()
-        .iter()
-        .filter(|matched| matched.need == *need)
-        .filter_map(|matched| {
-            matchers::wrap_source_offer_matches_need(need, &matched.offer)
-                .map(|source| (matched, source))
+        .matched_payloads_for(need)
+        .filter_map(|(offer, payload)| {
+            matchers::wrap_source_offer_matches_need(need, offer)
+                .map(|source| (offer, payload, source))
         })
-        .map(|(matched, source)| {
-            validate_wrap_source_payload(&matched.payload, matched.offer.payload_ref, &source)?;
+        .map(|(offer, payload, source)| {
+            let crate::core::context::ContextOffer { payload_ref, .. } = offer;
+            validate_wrap_source_payload(payload, *payload_ref, &source)?;
             Ok(local_signer_secret_payload_ref(
-                projection_context.offers(),
+                projection_context,
                 need.owner,
                 &need.scope,
                 source.owner_endpoint_id,
             )
-            .map(|signer_secret_fact_id| {
-                (matched.offer.payload_ref, signer_secret_fact_id, source)
-            }))
+            .map(|signer_secret_fact_id| (*payload_ref, signer_secret_fact_id, source)))
         })
         .collect::<Result<Vec<_>, String>>()
         .map(|items| items.into_iter().flatten().collect())
@@ -40,15 +37,12 @@ pub(super) fn add_signer_needs_for_matching_sources(
     projection_context: &ProjectionContext,
     need: &ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    for matched in projection_context
-        .matched_context()
-        .iter()
-        .filter(|matched| matched.need == *need)
-    {
-        let Some(source) = matchers::wrap_source_offer_matches_need(need, &matched.offer) else {
+    for (offer, payload) in projection_context.matched_payloads_for(need) {
+        let Some(source) = matchers::wrap_source_offer_matches_need(need, offer) else {
             continue;
         };
-        validate_wrap_source_payload(&matched.payload, matched.offer.payload_ref, &source)?;
+        let crate::core::context::ContextOffer { payload_ref, .. } = offer;
+        validate_wrap_source_payload(payload, *payload_ref, &source)?;
         output = output.need(crate::protocol::matchers::local_signer_secret_need(
             need.owner,
             need.scope.clone(),
@@ -59,16 +53,14 @@ pub(super) fn add_signer_needs_for_matching_sources(
 }
 
 fn local_signer_secret_payload_ref(
-    offers: &[ContextOffer],
+    projection_context: &ProjectionContext,
     owner: FactId,
     scope: &FactScope,
     signer_id: FactId,
 ) -> Option<FactId> {
     let need = crate::protocol::matchers::local_signer_secret_need(owner, scope.clone(), signer_id);
-    offers
-        .iter()
-        .filter(|offer| offer.role == need.role && offer.selector == need.selector)
-        .map(|offer| offer.payload_ref)
+    projection_context
+        .offer_payload_refs_matching(&need.role, &need.scope, &need.selector)
         .min()
 }
 
@@ -85,18 +77,15 @@ pub(super) fn has_matching_signer_public_key(
     signer_public_key: &[u8; 32],
 ) -> bool {
     projection_context
-        .matched_context()
-        .iter()
-        .filter(|matched| matched.need.role == need.role && matched.need.selector == need.selector)
-        .any(|matched| {
+        .matched_payloads_for(need)
+        .any(|(_, payload)| {
             if let Ok(signer) =
-                content::sealed_message::layout::decode_signer_pubkey(&matched.payload.bytes)
+                content::sealed_message::layout::decode_signer_pubkey(payload.body())
             {
                 return signer.signer_id.as_slice() == need.selector.as_bytes()
                     && signer.public_key == *signer_public_key;
             }
-            let Ok(envelope) =
-                identity::signed_fact::layout::decode_signed_fact(&matched.payload.bytes)
+            let Ok(envelope) = identity::signed_fact::layout::decode_signed_fact(payload.body())
             else {
                 return false;
             };
@@ -141,7 +130,7 @@ fn validate_wrap_source_payload(
     }
     match source.kind {
         WrapSourceKind::FrontierRoot => {
-            let root = layout::decode_local_key_secret(&payload.bytes)
+            let root = layout::decode_local_key_secret(payload.body())
                 .map_err(|_| "wrap source context is not a local root secret".to_string())?;
             if root.workspace_id != source.workspace_id
                 || root.frontier_id != source.frontier_id
@@ -157,7 +146,7 @@ fn validate_wrap_source_payload(
             bit_depth,
             fact_id_prefix,
         } => {
-            let node = layout::decode_local_history_node_secret(&payload.bytes)
+            let node = layout::decode_local_history_node_secret(payload.body())
                 .map_err(|_| "wrap source context is not a local history node".to_string())?;
             if node.workspace_id != source.workspace_id
                 || node.frontier_id != source.frontier_id

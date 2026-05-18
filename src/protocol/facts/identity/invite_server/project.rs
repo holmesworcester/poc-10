@@ -35,7 +35,7 @@ impl Projector for InviteServerProjector {
         if fact.scope != FactScope::Global {
             return Err("invite_server fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)
+        let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())
             .map_err(|_| "invite_server fact must be signed".to_string())?;
         if envelope.inner_type != layout::TYPE_INVITE_SERVER {
             return Err("signed fact does not contain an invite_server".to_string());
@@ -182,9 +182,9 @@ fn decode_admin_payload(
     fact: &Fact,
 ) -> Result<crate::protocol::facts::identity::admin::fact::AdminFact, String> {
     match fact.bytes.first().copied() {
-        Some(admin_layout::TYPE_ADMIN) => admin_layout::decode_fact(&fact.bytes),
+        Some(admin_layout::TYPE_ADMIN) => admin_layout::decode_fact(fact.body()),
         Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) => {
-            let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+            let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())?;
             if envelope.inner_type != admin_layout::TYPE_ADMIN {
                 return Err("expected signed admin".to_string());
             }
@@ -202,7 +202,7 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::AtomicIntent;
     use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::identity;
@@ -317,8 +317,9 @@ mod projector_tests {
         let mut invite_server = sample_fact();
         invite_server.authority_fact_id = [0; 32];
         let fact = signed_invite_server_fact(&invite_server, [2; 32], WORKSPACE_PRIVATE_KEY);
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));

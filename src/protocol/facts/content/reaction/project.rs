@@ -11,7 +11,7 @@ use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::content::sealed_message::layout as sealed_message_layout;
 use crate::protocol::facts::identity;
-use crate::protocol::facts::identity::user::layout as user_layout;
+use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers as message_matchers;
 
@@ -63,7 +63,7 @@ impl Projector for ContentReactionProjector {
                 ]));
             }
         }
-        let Some(target) = payload_for_need(context, &target_need, "reaction target")? else {
+        let Some(target) = context_payload(context, &target_need, "reaction target")? else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(target_need),
@@ -85,7 +85,7 @@ impl Projector for ContentReactionProjector {
             target_context.message.author_user_id,
         );
         if let Some(deletion) =
-            payload_for_need(context, &target_deletion_need, "reaction target deletion")?
+            context_payload(context, &target_deletion_need, "reaction target deletion")?
         {
             validate_message_deletion(
                 deletion,
@@ -97,7 +97,7 @@ impl Projector for ContentReactionProjector {
                 .need(target_need)
                 .need(target_deletion_need));
         }
-        let Some(author) = payload_for_need(context, &author_need, "reaction author")? else {
+        let Some(author) = context_payload(context, &author_need, "reaction author")? else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(target_need),
@@ -130,12 +130,12 @@ impl Projector for ContentReactionProjector {
     }
 }
 
-fn payload_for_need<'a>(
+fn context_payload<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    authority::payload_for_need(context, need, label)
+    authority::context_payload(context, need, label)
 }
 
 fn output_with_needs(
@@ -178,9 +178,10 @@ fn validate_author_user(
     if payload.id != author_user_id {
         return Err("reaction author context payload id mismatch".to_string());
     }
-    let author_payload = maybe_signed_payload(payload, user_layout::TYPE_USER, "reaction author")?;
-    let author = user_layout::decode_fact(&author_payload.payload)
-        .map_err(|_| "reaction author context is not an identity user".to_string())?;
+    let author_payload = maybe_signed_payload(payload, user::TYPE_USER, "reaction author")?;
+    let author =
+        crate::protocol::facts::identity::user::decode_fact_payload(&author_payload.payload)
+            .map_err(|_| "reaction author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("reaction author workspace does not match reaction".to_string());
     }
@@ -275,7 +276,7 @@ mod projector_tests {
 
     use topo::core::facts::{Fact, FactScope};
     use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::content::reaction::fact::{
@@ -310,8 +311,9 @@ mod projector_tests {
             reaction.created_at_ms,
             layout::encode_fact(&reaction).expect("encode reaction"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
         let matcher = ExactSelectorMatcher::new(message_context::message_role());
         let user_matcher = ExactSelectorMatcher::new(crate::protocol::matchers::user_role());
@@ -362,8 +364,9 @@ mod projector_tests {
             reaction.created_at_ms,
             layout::encode_fact(&reaction).expect("encode reaction"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact.clone()));
@@ -415,8 +418,9 @@ mod projector_tests {
             reaction.created_at_ms,
             layout::encode_fact(&reaction).expect("encode reaction"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
         let matcher = ExactSelectorMatcher::new(message_context::message_role());
         let user_matcher = ExactSelectorMatcher::new(crate::protocol::matchers::user_role());
@@ -486,11 +490,16 @@ mod projector_tests {
                 Some(layout::TYPE_CONTENT_REACTION) => {
                     project::ContentReactionProjector::new().project(fact, context)
                 }
-                _ if user_layout::decode_fact(&fact.bytes).is_ok() => Ok(ProjectionOutput::new()
-                    .offer(crate::protocol::matchers::exact_offer(
-                        fact.id,
-                        crate::protocol::matchers::user_role(),
-                    ))),
+                _ if crate::protocol::facts::identity::user::decode_fact_payload(fact.body())
+                    .is_ok() =>
+                {
+                    Ok(
+                        ProjectionOutput::new().offer(crate::protocol::matchers::exact_offer(
+                            fact.id,
+                            crate::protocol::matchers::user_role(),
+                        )),
+                    )
+                }
                 _ => Err("unknown combined test fact".to_string()),
             }
         }

@@ -9,7 +9,7 @@ use crate::core::facts::Fact;
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::identity;
-use crate::protocol::facts::identity::user::layout as user_layout;
+use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
@@ -61,7 +61,7 @@ impl Projector for ContentMessageProjector {
                 ]));
             }
         }
-        if let Some(deletion) = payload_for_need(context, &deletion_need, "message deletion")? {
+        if let Some(deletion) = context_payload(context, &deletion_need, "message deletion")? {
             validate_message_deletion(
                 deletion,
                 message.workspace_id,
@@ -76,7 +76,7 @@ impl Projector for ContentMessageProjector {
                 .into_intent(),
             ));
         }
-        let Some(author) = payload_for_need(context, &author_need, "message author")? else {
+        let Some(author) = context_payload(context, &author_need, "message author")? else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(deletion_need),
@@ -97,12 +97,12 @@ impl Projector for ContentMessageProjector {
     }
 }
 
-fn payload_for_need<'a>(
+fn context_payload<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    authority::payload_for_need(context, need, label)
+    authority::context_payload(context, need, label)
 }
 
 fn output_with_needs(
@@ -122,10 +122,10 @@ fn validate_author_user(
     if payload.id != author_user_id {
         return Err("message author context payload id mismatch".to_string());
     }
-    let author_payload =
-        maybe_signed_payload(payload, user_layout::TYPE_USER, "message author context")?;
-    let author = user_layout::decode_fact(&author_payload.payload)
-        .map_err(|_| "message author context is not an identity user".to_string())?;
+    let author_payload = maybe_signed_payload(payload, user::TYPE_USER, "message author context")?;
+    let author =
+        crate::protocol::facts::identity::user::decode_fact_payload(&author_payload.payload)
+            .map_err(|_| "message author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("message author workspace does not match message".to_string());
     }
@@ -187,7 +187,7 @@ mod projector_tests {
     use crate as topo;
 
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::content::message::fact::ContentMessageFact;
@@ -216,8 +216,9 @@ mod projector_tests {
             message.created_at_ms,
             layout::encode_fact(&message).expect("encode content message"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
         let user_matcher = ExactSelectorMatcher::new(crate::protocol::matchers::user_role());
 
@@ -268,8 +269,9 @@ mod projector_tests {
             message.created_at_ms,
             layout::encode_fact(&message).expect("encode content message"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact.clone()));
@@ -328,8 +330,9 @@ mod projector_tests {
             deletion.created_at_ms,
             deletion_layout::encode_fact(&deletion).expect("encode deletion"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let message_matcher = ExactSelectorMatcher::new(message_context::message_role());
         let deletion_matcher = ExactSelectorMatcher::new(message_context::deletion_role());
         let user_matcher = ExactSelectorMatcher::new(crate::protocol::matchers::user_role());
@@ -404,12 +407,14 @@ mod projector_tests {
             fact: &Fact,
             context: &topo::core::projection::ProjectionContext,
         ) -> Result<topo::core::projection::ProjectionOutput, String> {
-            if deletion_layout::decode_fact(&fact.bytes).is_ok() {
+            if deletion_layout::decode_fact(fact.body()).is_ok() {
                 topo::protocol::facts::content::message_deletion::project::ContentMessageDeletionProjector::new()
                     .project(fact, context)
-            } else if layout::decode_fact(&fact.bytes).is_ok() {
+            } else if layout::decode_fact(fact.body()).is_ok() {
                 project::ContentMessageProjector::new().project(fact, context)
-            } else if user_layout::decode_fact(&fact.bytes).is_ok() {
+            } else if crate::protocol::facts::identity::user::decode_fact_payload(fact.body())
+                .is_ok()
+            {
                 Ok(topo::core::projection::ProjectionOutput::new().offer(
                     crate::protocol::matchers::exact_offer(
                         fact.id,

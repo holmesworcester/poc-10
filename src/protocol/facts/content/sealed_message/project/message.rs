@@ -25,7 +25,7 @@ pub(super) fn project_message(
     fact: &Fact,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
-    let message = layout::decode_sealed_message(&fact.bytes)?;
+    let message = layout::decode_sealed_message(fact.body())?;
     project_decoded_message(fact, context, message, None)
 }
 
@@ -33,7 +33,7 @@ pub(super) fn project_signed_message(
     fact: &Fact,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
-    let envelope = signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+    let envelope = signed_fact::layout::decode_signed_fact(fact.body())?;
     if envelope.inner_type != layout::TYPE_SEALED_MESSAGE {
         return Err("signed fact does not contain a sealed message".to_string());
     }

@@ -35,7 +35,7 @@ impl Projector for LocalHistoryNodeSecretProjector {
         if fact.scope != FactScope::Local {
             return Err("local history node secret fact must have FactScope::Local".to_string());
         }
-        let node = layout::decode_fact(&fact.bytes)?;
+        let node = layout::decode_fact(fact.body())?;
         let workspace_scope = crate::protocol::matchers::workspace_scope(node.workspace_id);
         let frontier_need = crate::protocol::matchers::exact_fact_need(
             fact.id,

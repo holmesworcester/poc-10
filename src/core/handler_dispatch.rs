@@ -7,6 +7,15 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 pub type HandlerFactId = FactId;
+pub const RETRY_INTENT_PREFIX: &str = "retry intent: ";
+
+pub fn retry_intent(reason: impl AsRef<str>) -> String {
+    format!("{RETRY_INTENT_PREFIX}{}", reason.as_ref())
+}
+
+pub fn retry_intent_reason(err: &str) -> Option<&str> {
+    err.strip_prefix(RETRY_INTENT_PREFIX)
+}
 
 #[derive(Clone, Default)]
 pub struct HandlerContext<'a> {

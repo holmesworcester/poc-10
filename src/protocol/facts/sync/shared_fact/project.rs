@@ -23,7 +23,7 @@ impl Projector for SyncSharedFactProjector {
         fact: &Fact,
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let shared = layout::decode_fact(&fact.bytes)?;
+        let shared = layout::decode_fact(fact.body())?;
         let scope = matchers::workspace_scope(shared.workspace_id);
         require_fact_scope(fact, &scope)?;
         Ok(ProjectionOutput::new().offer(matchers::exact_fact_offer(

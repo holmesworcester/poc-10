@@ -115,6 +115,41 @@ table reaction_rows {
   row_key (key);
 }
 
+table content_messages {
+  column workspace_id bytes(32);
+  column message_id bytes(32);
+  column author_user_id bytes(32);
+  column created_at_ms u64;
+  column sealed_message_id bytes(32);
+  column deleted bool;
+  row_key (workspace_id, message_id);
+  index by_workspace_created (workspace_id, created_at_ms);
+}
+
+table content_reactions {
+  column workspace_id bytes(32);
+  column message_id bytes(32);
+  column reaction_id bytes(32);
+  column author_user_id bytes(32);
+  column created_at_ms u64;
+  column deleted bool;
+  row_key (workspace_id, reaction_id);
+  index by_message (workspace_id, message_id, created_at_ms);
+}
+
+table content_files {
+  column workspace_id bytes(32);
+  column message_id bytes(32);
+  column file_id bytes(32);
+  column author_user_id bytes(32);
+  column created_at_ms u64;
+  column root_hash bytes(32);
+  column byte_len u64;
+  column deleted bool;
+  row_key (workspace_id, file_id);
+  index by_message (workspace_id, message_id, created_at_ms);
+}
+
 table content_message_rows {
   column key bytes;
   column value bytes;

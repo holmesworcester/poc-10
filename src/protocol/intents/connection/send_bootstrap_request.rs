@@ -87,7 +87,7 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
         let input = decode_send_bootstrap_connection_request(intent)?;
         let request_fact = context.require_fact(&input.request_id)?;
-        layout::decode_fact(&request_fact.bytes)?;
+        layout::decode_fact(request_fact.body())?;
         let target = NetworkTarget::new(input.addr);
         let row = OutboundNetworkRow::new(target, request_fact.bytes.clone());
         tcp::send_once(context.store()?, target, vec![row], (), |_, _| Ok(()))?;

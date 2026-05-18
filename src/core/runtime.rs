@@ -10,7 +10,7 @@ use crate::core::facts::Fact;
 use crate::core::intents::Intent;
 use crate::core::matchers::ContextMatcher;
 use crate::core::projection::Projector;
-use crate::core::store::{Store, TableName};
+use crate::core::store::{Schema, Store, TableName};
 use crate::core::wake_loop::{DispatchReport, DrainReport, WakeLoop};
 use std::marker::PhantomData;
 use std::path::Path;
@@ -21,6 +21,9 @@ pub trait RuntimeProtocol {
     type Handlers: RuntimeHandlers;
 
     fn schema_sources() -> &'static [&'static str];
+    fn schemas() -> &'static [Schema] {
+        &[]
+    }
     fn atomic_row_tables() -> &'static [TableName];
     fn projector() -> Self::Projector;
     fn matchers() -> Self::Matchers;
@@ -53,14 +56,19 @@ pub struct Runtime<P: RuntimeProtocol> {
 
 impl<P: RuntimeProtocol> Runtime<P> {
     pub fn open_memory() -> Result<Self, String> {
-        let store = Store::open_memory_with_schema_sources(P::schema_sources())
-            .map_err(|err| format!("open target memory store: {err}"))?;
+        let store =
+            Store::open_memory_with_schema_sources_and_schemas(P::schema_sources(), P::schemas())
+                .map_err(|err| format!("open target memory store: {err}"))?;
         Self::from_store(store)
     }
 
     pub fn open_disk(path: impl AsRef<Path>) -> Result<Self, String> {
-        let store = Store::open_disk_with_schema_sources(path, P::schema_sources())
-            .map_err(|err| format!("open target disk store: {err}"))?;
+        let store = Store::open_disk_with_schema_sources_and_schemas(
+            path,
+            P::schema_sources(),
+            P::schemas(),
+        )
+        .map_err(|err| format!("open target disk store: {err}"))?;
         Self::from_store(store)
     }
 
@@ -179,7 +187,8 @@ impl<P: RuntimeProtocol> Runtime<P> {
     }
 
     pub fn save(&mut self) -> Result<(), String> {
-        self.wake_loop.save(&self.store)
+        self.wake_loop
+            .save_applying_atomic_rows(&self.store, P::atomic_row_tables())
     }
 }
 

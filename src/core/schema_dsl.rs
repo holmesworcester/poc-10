@@ -639,8 +639,6 @@ mod tests {
                 "pending_projection",
                 "intents",
                 "clock",
-                "network_in",
-                "network_out",
             ]
         );
         assert_eq!(
@@ -665,6 +663,9 @@ mod tests {
                 "cascade_staged_fact_rows",
                 "admin_rows",
                 "reaction_rows",
+                "content_messages",
+                "content_reactions",
+                "content_files",
                 "content_message_rows",
                 "connection_ephemeral_secret_rows",
                 "connection_request_rows",
@@ -697,6 +698,12 @@ mod tests {
 
         for document in [&core, &facts, &handlers] {
             for table in &document.tables {
+                if matches!(
+                    table.name.as_str(),
+                    "content_messages" | "content_reactions" | "content_files"
+                ) {
+                    continue;
+                }
                 assert_eq!(table.row_key.columns, vec!["key"]);
                 assert_eq!(
                     table.column("key").map(|column| &column.ty),

@@ -36,7 +36,7 @@ impl Projector for EndpointSharedProjector {
         if fact.scope != FactScope::Global {
             return Err("endpoint shared fact must have global scope".to_string());
         }
-        let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)
+        let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())
             .map_err(|_| "endpoint_shared fact must be signed".to_string())?;
         if envelope.inner_type != layout::TYPE_ENDPOINT_SHARED {
             return Err("signed fact does not contain an endpoint_shared".to_string());
@@ -163,7 +163,7 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::AtomicIntent;
     use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::identity::endpoint_shared::fact::{
@@ -266,8 +266,9 @@ mod projector_tests {
             INVITE_SERVER_PRIVATE_KEY,
         );
         fact.scope = FactScope::Local;
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));
@@ -292,8 +293,9 @@ mod projector_tests {
             payload.user_authority_fact_id,
             INVITE_SERVER_PRIVATE_KEY,
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));
@@ -318,8 +320,9 @@ mod projector_tests {
             payload.user_authority_fact_id,
             INVITE_SERVER_PRIVATE_KEY,
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));

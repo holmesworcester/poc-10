@@ -19,33 +19,36 @@ pub const TYPE_CONTENT_MESSAGE: u8 = 50;
 pub const CONTENT_MESSAGE_BYTES: usize = 1 + 32 + 32 + 8 + 32 + 8 + 32 + 32;
 
 pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
-    let mut out = vec![0; CONTENT_MESSAGE_BYTES];
-    wire::put_u8(TYPE_CONTENT_MESSAGE, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.workspace_id);
-    out[33..65].copy_from_slice(&fact.author_user_id);
-    wire::put_u64be(fact.created_at_ms, &mut out[65..73]).map_err(wire_err)?;
-    out[73..105].copy_from_slice(&fact.frontier_id);
-    wire::put_u64be(fact.minute, &mut out[105..113]).map_err(wire_err)?;
-    out[113..145].copy_from_slice(&fact.leaf_id);
-    out[145..177].copy_from_slice(&fact.sealed_body_ref);
-    Ok(out)
+    let mut out = wire::Writer::with_capacity(CONTENT_MESSAGE_BYTES);
+    out.u8(TYPE_CONTENT_MESSAGE);
+    out.fixed(&fact.workspace_id);
+    out.fixed(&fact.author_user_id);
+    out.u64be(fact.created_at_ms);
+    out.fixed(&fact.frontier_id);
+    out.u64be(fact.minute);
+    out.fixed(&fact.leaf_id);
+    out.fixed(&fact.sealed_body_ref);
+    out.finish_exact(CONTENT_MESSAGE_BYTES).map_err(wire_err)
 }
 
 pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageFact, String> {
-    wire::expect_len(bytes, CONTENT_MESSAGE_BYTES).map_err(wire_err)?;
-    let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+    let mut reader = wire::Reader::new(bytes);
+    reader.expect_len(CONTENT_MESSAGE_BYTES).map_err(wire_err)?;
+    let tag = reader.u8().map_err(wire_err)?;
     if tag != TYPE_CONTENT_MESSAGE {
         return Err("expected content message fact".to_string());
     }
-    Ok(ContentMessageFact {
-        workspace_id: bytes[1..33].try_into().unwrap(),
-        author_user_id: bytes[33..65].try_into().unwrap(),
-        created_at_ms: wire::take_u64be(&bytes[65..73]).map_err(wire_err)?,
-        frontier_id: bytes[73..105].try_into().unwrap(),
-        minute: wire::take_u64be(&bytes[105..113]).map_err(wire_err)?,
-        leaf_id: bytes[113..145].try_into().unwrap(),
-        sealed_body_ref: bytes[145..177].try_into().unwrap(),
-    })
+    let fact = ContentMessageFact {
+        workspace_id: reader.array().map_err(wire_err)?,
+        author_user_id: reader.array().map_err(wire_err)?,
+        created_at_ms: reader.u64be().map_err(wire_err)?,
+        frontier_id: reader.array().map_err(wire_err)?,
+        minute: reader.u64be().map_err(wire_err)?,
+        leaf_id: reader.array().map_err(wire_err)?,
+        sealed_body_ref: reader.array().map_err(wire_err)?,
+    };
+    reader.finish().map_err(wire_err)?;
+    Ok(fact)
 }
 
 fn wire_err(err: wire::WireError) -> String {

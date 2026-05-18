@@ -10,7 +10,6 @@
 //!   ciphertext (FixedSlot<REACTION_CIPHERTEXT_BYTES>)
 
 use crate::core::wire;
-use crate::core::wire::{FixedLayout, FixedSlot};
 
 use super::fact::{ContentReactionFact, REACTION_CIPHERTEXT_BYTES, REACTION_NONCE_BYTES};
 
@@ -20,37 +19,39 @@ pub const CONTENT_REACTION_BYTES: usize =
     1 + 32 + 8 + 32 + 32 + REACTION_NONCE_BYTES + 4 + REACTION_CIPHERTEXT_BYTES;
 
 pub fn encode_fact(fact: &ContentReactionFact) -> Result<Vec<u8>, String> {
-    let mut out = vec![0; CONTENT_REACTION_BYTES];
-    wire::put_u8(TYPE_CONTENT_REACTION, &mut out[0..1]).map_err(wire_err)?;
-    out[1..33].copy_from_slice(&fact.workspace_id);
-    wire::put_u64be(fact.created_at_ms, &mut out[33..41]).map_err(wire_err)?;
-    out[41..73].copy_from_slice(&fact.target_message_id);
-    out[73..105].copy_from_slice(&fact.author_user_id);
-    out[105..129].copy_from_slice(&fact.nonce);
-    FixedSlot::<REACTION_CIPHERTEXT_BYTES>::new(&fact.ciphertext)
-        .map_err(wire_err)?
-        .encode(&mut out[129..])
+    let mut out = wire::Writer::with_capacity(CONTENT_REACTION_BYTES);
+    out.u8(TYPE_CONTENT_REACTION);
+    out.fixed(&fact.workspace_id);
+    out.u64be(fact.created_at_ms);
+    out.fixed(&fact.target_message_id);
+    out.fixed(&fact.author_user_id);
+    out.fixed(&fact.nonce);
+    out.fixed_slot::<REACTION_CIPHERTEXT_BYTES>(&fact.ciphertext)
         .map_err(wire_err)?;
-    Ok(out)
+    out.finish_exact(CONTENT_REACTION_BYTES).map_err(wire_err)
 }
 
 pub fn decode_fact(bytes: &[u8]) -> Result<ContentReactionFact, String> {
-    wire::expect_len(bytes, CONTENT_REACTION_BYTES).map_err(wire_err)?;
-    let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+    let mut reader = wire::Reader::new(bytes);
+    reader
+        .expect_len(CONTENT_REACTION_BYTES)
+        .map_err(wire_err)?;
+    let tag = reader.u8().map_err(wire_err)?;
     if tag != TYPE_CONTENT_REACTION {
         return Err("expected content reaction fact".to_string());
     }
-    Ok(ContentReactionFact {
-        workspace_id: bytes[1..33].try_into().unwrap(),
-        created_at_ms: wire::take_u64be(&bytes[33..41]).map_err(wire_err)?,
-        target_message_id: bytes[41..73].try_into().unwrap(),
-        author_user_id: bytes[73..105].try_into().unwrap(),
-        nonce: bytes[105..129].try_into().unwrap(),
-        ciphertext: FixedSlot::<REACTION_CIPHERTEXT_BYTES>::decode(&bytes[129..])
-            .map_err(wire_err)?
-            .bytes()
-            .to_vec(),
-    })
+    let fact = ContentReactionFact {
+        workspace_id: reader.array().map_err(wire_err)?,
+        created_at_ms: reader.u64be().map_err(wire_err)?,
+        target_message_id: reader.array().map_err(wire_err)?,
+        author_user_id: reader.array().map_err(wire_err)?,
+        nonce: reader.array().map_err(wire_err)?,
+        ciphertext: reader
+            .fixed_slot::<REACTION_CIPHERTEXT_BYTES>()
+            .map_err(wire_err)?,
+    };
+    reader.finish().map_err(wire_err)?;
+    Ok(fact)
 }
 
 fn wire_err(err: wire::WireError) -> String {

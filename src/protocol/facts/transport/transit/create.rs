@@ -36,7 +36,7 @@ pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
 
     if tag == identity::signed_fact::layout::TYPE_SIGNED_FACT {
         let envelope =
-            identity::signed_fact::layout::decode_signed_fact(&fact.bytes).map_err(|err| {
+            identity::signed_fact::layout::decode_signed_fact(fact.body()).map_err(|err| {
                 format!(
                     "transport::transit send refused invalid signed fact {:?}: {err}",
                     fact.id
@@ -50,7 +50,7 @@ pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
         }
     }
 
-    Ok(&fact.bytes)
+    Ok(fact.body())
 }
 
 pub fn is_private_local_fact_tag(tag: u8) -> bool {
@@ -84,7 +84,7 @@ pub fn seal_connection_send_frame(
             "send_facts_on_connection fact id list does not match loaded facts".to_string(),
         );
     }
-    let connection = connection::response::layout::decode_fact(&connection_fact.bytes)?;
+    let connection = connection::response::layout::decode_fact(connection_fact.body())?;
 
     let mut bundle = TransitFactBundle::new();
     for (expected_id, fact) in fact_ids.iter().zip(facts.iter().copied()) {

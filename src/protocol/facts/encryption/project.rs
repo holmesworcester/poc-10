@@ -45,7 +45,7 @@ impl Projector for EncryptionProjector {
 }
 
 fn removal_frontier(fact: &Fact) -> Result<ProjectionOutput, String> {
-    let frontier = layout::decode_removal_frontier(&fact.bytes)?;
+    let frontier = layout::decode_removal_frontier(fact.body())?;
     let scope = matchers::workspace_scope(frontier.workspace_id);
     require_fact_scope(fact, &scope)?;
     Ok(ProjectionOutput::new()

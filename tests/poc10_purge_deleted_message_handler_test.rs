@@ -128,7 +128,8 @@ fn purge_deleted_message_handler_does_not_delete_projection_rows() {
     let signer = [16; 32];
     let message = message_fact(workspace, signer, AUTHOR);
     let deletion = deletion_fact(workspace, message.id, AUTHOR);
-    let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE]).expect("store");
+    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+        .expect("store");
     let sealed = sealed_message_row(SealedMessageRow {
         workspace_id: workspace,
         message_id: message.id,

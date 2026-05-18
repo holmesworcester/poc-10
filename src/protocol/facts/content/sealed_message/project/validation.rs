@@ -13,7 +13,7 @@ pub(super) fn validate_signer_context(
     signer_id: SignerId,
     expected_public_key: Option<[u8; 32]>,
 ) -> Result<(), String> {
-    if let Ok(signer) = layout::decode_signer_pubkey(&payload.bytes) {
+    if let Ok(signer) = layout::decode_signer_pubkey(payload.body()) {
         if payload.scope != need.scope {
             return Err("sealed-message signer context scope does not match need".to_string());
         }
@@ -49,10 +49,10 @@ pub(super) fn validate_signer_context(
 pub(super) fn endpoint_shared_signer(
     payload: &Fact,
 ) -> Option<identity::endpoint_shared::fact::EndpointSharedFact> {
-    if let Ok(endpoint) = identity::endpoint_shared::layout::decode_fact(&payload.bytes) {
+    if let Ok(endpoint) = identity::endpoint_shared::layout::decode_fact(payload.body()) {
         return Some(endpoint);
     }
-    let envelope = identity::signed_fact::layout::decode_signed_fact(&payload.bytes).ok()?;
+    let envelope = identity::signed_fact::layout::decode_signed_fact(payload.body()).ok()?;
     if envelope.inner_type != identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED {
         return None;
     }
@@ -75,7 +75,7 @@ pub(super) fn validate_deletion_context(
     if payload.scope != need.scope {
         return Err("sealed-message deletion context scope does not match need".to_string());
     }
-    let deletion = layout::decode_message_deletion(&payload.bytes)
+    let deletion = layout::decode_message_deletion(payload.body())
         .map_err(|_| "sealed-message deletion context must be a message deletion".to_string())?;
     if deletion.workspace_id != message.workspace_id
         || deletion.target_id != need.owner
@@ -111,7 +111,7 @@ fn validate_secret_context(matched: &MatchedContext, need: &ContextNeed) -> Resu
     if !matchers::secret_offer_matches_need(need, &matched.offer) {
         return Err("sealed-message secret context offer does not match need".to_string());
     }
-    if let Ok(secret) = layout::decode_secret_node(&matched.payload.bytes) {
+    if let Ok(secret) = layout::decode_secret_node(matched.payload.body()) {
         require_fact_scope(
             &matched.payload,
             &matchers::workspace_scope(secret.workspace_id),

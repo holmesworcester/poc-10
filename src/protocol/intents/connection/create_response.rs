@@ -219,7 +219,7 @@ impl IntentHandler for CreateConnectionResponseHandler {
         let invite_fact = context.require_fact(&input.invite_secret_id)?;
         let endpoint_fact = context.require_fact(&input.local_endpoint_id)?;
 
-        let request = request_layout::decode_fact(&request_fact.bytes)?;
+        let request = request_layout::decode_fact(request_fact.body())?;
         let invite = invite_layout::decode_fact(&invite_fact.bytes)?;
         let endpoint = endpoint_layout::decode_fact(&endpoint_fact.bytes)?;
 

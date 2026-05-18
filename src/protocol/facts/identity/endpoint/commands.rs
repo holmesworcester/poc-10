@@ -60,7 +60,7 @@ pub fn endpoint_fact(created_at_ms: u64, endpoint: EndpointFact) -> Result<Fact,
 
 #[cfg(test)]
 mod tests {
-    use crate::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use crate::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use crate::core::store::Store;
 
     use super::*;
@@ -68,7 +68,8 @@ mod tests {
     #[test]
     fn local_or_create_returns_local_endpoint_fact_when_missing() {
         let store =
-            Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE]).expect("open store");
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open store");
 
         let output = local_or_create(&store, 10).expect("create endpoint");
 

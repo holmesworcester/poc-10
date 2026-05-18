@@ -15,7 +15,7 @@ pub(super) fn recipient_key(
     fact: &Fact,
     projection_context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
-    let recipient = layout::decode_recipient_key(&fact.bytes)?;
+    let recipient = layout::decode_recipient_key(fact.body())?;
     let scope = crate::protocol::matchers::workspace_scope(recipient.workspace_id);
     require_fact_scope(fact, &scope)?;
     if recipient.previous_recipient_key_id == fact.id {

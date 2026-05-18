@@ -3,8 +3,9 @@
 //! A reaction is a workspace-scoped emoji attached to a target message. The
 //! emoji is sealed in a fixed-width ciphertext slot; the canonical fact body
 //! carries the public envelope (workspace, target, author, nonce, ciphertext).
-//! Per-message encryption metadata (history-node secret, frontier) is intentionally
-//! omitted in this slice — see `project.rs` for the parity-gap notes.
+//! Per-message encryption metadata (history-node secret, frontier) is not part
+//! of this fact body; the reaction carries only the sealed payload envelope
+//! that projectors can authorize and sync idempotently.
 
 use crate::core::facts::FactId;
 

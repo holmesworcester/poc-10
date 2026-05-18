@@ -23,7 +23,7 @@ impl Projector for SyncEncryptedRootProjector {
         fact: &Fact,
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let root = layout::decode_fact(&fact.bytes)?;
+        let root = layout::decode_fact(fact.body())?;
         let scope = matchers::workspace_scope(root.workspace_id);
         require_fact_scope(fact, &scope)?;
         Ok(ProjectionOutput::new()

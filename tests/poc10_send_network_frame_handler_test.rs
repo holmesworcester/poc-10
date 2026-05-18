@@ -8,7 +8,8 @@ use std::thread;
 
 use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use topo::core::facts::{Fact, FactScope};
-use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
+use topo::core::handler_dispatch::{retry_intent_reason, HandlerContext, IntentHandler};
+use topo::core::network_queues;
 use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use topo::core::store::Store;
 use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
@@ -33,12 +34,7 @@ fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
         stream.read_exact(&mut body).expect("read body");
         body
     });
-    let store = Store::open_memory_with_schema_sources(&[
-        CORE_SCHEMA_SOURCE,
-        FACTS_SCHEMA_SOURCE,
-        INTENTS_SCHEMA_SOURCE,
-    ])
-    .expect("store");
+    let store = test_store();
     let local_endpoint = local_endpoint();
     store
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
@@ -80,6 +76,34 @@ fn empty_frame_is_rejected_before_route_lookup() {
     assert!(err.contains("empty"), "{err}");
 }
 
+#[test]
+fn unreachable_peer_requests_retry_without_consuming_intent() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind closed listener");
+    let addr = listener.local_addr().expect("listener addr");
+    drop(listener);
+
+    let store = test_store();
+    let local_endpoint = local_endpoint();
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
+        .expect("seed local endpoint");
+    let (connection_fact, request_fact) = routed_connection(addr, local_endpoint.endpoint);
+    let intent = send_network_frame_intent(SendNetworkFrame {
+        routing_key: connection_fact.id,
+        frame: b"opaque-transport::transit-frame-bytes".to_vec(),
+    });
+
+    let err = SendNetworkFrameHandler::new()
+        .handle(
+            &intent,
+            &HandlerContext::with_facts([connection_fact, request_fact]).with_store(&store),
+        )
+        .expect_err("unreachable peer should request retry");
+
+    assert!(retry_intent_reason(&err).is_some(), "{err}");
+    assert!(err.contains("open tcp stream"), "{err}");
+}
+
 fn local_endpoint() -> EndpointFact {
     let secret = [23; 32];
     let signing_secret = [24; 32];
@@ -89,6 +113,18 @@ fn local_endpoint() -> EndpointFact {
         signing_public_key: crypto::ed25519_public_key(&signing_secret),
         signing_secret,
     }
+}
+
+fn test_store() -> Store {
+    Store::open_memory_with_schema_sources_and_schemas(
+        &[
+            CORE_SCHEMA_SOURCE,
+            FACTS_SCHEMA_SOURCE,
+            INTENTS_SCHEMA_SOURCE,
+        ],
+        network_queues::SCHEMAS,
+    )
+    .expect("store")
 }
 
 fn routed_connection(addr: std::net::SocketAddr, local_endpoint: [u8; 32]) -> (Fact, Fact) {

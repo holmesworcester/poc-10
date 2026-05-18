@@ -146,8 +146,17 @@ impl Store {
         path: impl AsRef<Path>,
         sources: &[&str],
     ) -> rusqlite::Result<Self> {
+        Self::open_disk_with_schema_sources_and_schemas(path, sources, &[])
+    }
+
+    /// Open a disk store and apply p8sql declarations plus explicit core schemas.
+    pub fn open_disk_with_schema_sources_and_schemas(
+        path: impl AsRef<Path>,
+        sources: &[&str],
+        schemas: &[Schema],
+    ) -> rusqlite::Result<Self> {
         let conn = SqliteConnection::open(path)?;
-        Self::from_connection_with_schema_sources(conn, sources)
+        Self::from_connection_with_schema_sources_and_schemas(conn, sources, schemas)
     }
 
     /// Open an in-memory store without creating any protocol tables.
@@ -163,8 +172,16 @@ impl Store {
 
     /// Open an in-memory store and apply row-table declarations parsed from p8sql sources.
     pub fn open_memory_with_schema_sources(sources: &[&str]) -> rusqlite::Result<Self> {
+        Self::open_memory_with_schema_sources_and_schemas(sources, &[])
+    }
+
+    /// Open an in-memory store and apply p8sql declarations plus explicit core schemas.
+    pub fn open_memory_with_schema_sources_and_schemas(
+        sources: &[&str],
+        schemas: &[Schema],
+    ) -> rusqlite::Result<Self> {
         let conn = SqliteConnection::open_in_memory()?;
-        Self::from_connection_with_schema_sources(conn, sources)
+        Self::from_connection_with_schema_sources_and_schemas(conn, sources, schemas)
     }
 
     fn from_connection(conn: SqliteConnection, schemas: &[Schema]) -> rusqlite::Result<Self> {
@@ -173,13 +190,15 @@ impl Store {
         Ok(store)
     }
 
-    fn from_connection_with_schema_sources(
+    fn from_connection_with_schema_sources_and_schemas(
         conn: SqliteConnection,
         sources: &[&str],
+        schemas: &[Schema],
     ) -> rusqlite::Result<Self> {
-        let table_names = row_table_names_from_schema_sources(sources)?;
-        let store = Self::from_connection_parts(conn, HashMap::new())?;
-        store.apply_schema_source_tables(&table_names)?;
+        let tables = table_declarations_from_schema_sources(sources)?;
+        let store = Self::from_connection_parts(conn, table_storage_map(schemas)?)?;
+        store.apply_schemas(schemas)?;
+        store.apply_schema_source_tables(&tables)?;
         Ok(store)
     }
 
@@ -519,9 +538,9 @@ impl Store {
         Ok(())
     }
 
-    fn apply_schema_source_tables(&self, table_names: &[String]) -> rusqlite::Result<()> {
-        for table_name in table_names {
-            self.apply_schema_source_row_table(table_name)?;
+    fn apply_schema_source_tables(&self, tables: &[TableDeclaration]) -> rusqlite::Result<()> {
+        for table in tables {
+            self.apply_schema_source_table(table)?;
         }
         Ok(())
     }
@@ -551,6 +570,13 @@ impl Store {
         ))
     }
 
+    fn apply_schema_source_table(&self, table: &TableDeclaration) -> rusqlite::Result<()> {
+        if is_row_table_declaration(table) {
+            return self.apply_schema_source_row_table(&table.name);
+        }
+        self.apply_schema_source_typed_table(table)
+    }
+
     fn apply_schema_source_row_table(&self, table_name: &str) -> rusqlite::Result<()> {
         let quoted = quoted_table_name_str(table_name)?;
         let existing = sqlite_table_columns(&self.conn, &quoted)?;
@@ -563,6 +589,47 @@ impl Store {
             ));
         }
         validate_sqlite_row_table(table_name, &existing)
+    }
+
+    fn apply_schema_source_typed_table(&self, table: &TableDeclaration) -> rusqlite::Result<()> {
+        let quoted = quoted_table_name_str(&table.name)?;
+        let existing = sqlite_table_columns(&self.conn, &quoted)?;
+        if !existing.is_empty() {
+            return validate_sqlite_typed_table(&self.conn, table, &existing);
+        }
+
+        let mut declarations = table
+            .columns
+            .iter()
+            .map(|column| {
+                Ok(format!(
+                    "{} {} NOT NULL",
+                    quoted_identifier(&column.name)?,
+                    sqlite_type(&column.ty)
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        declarations.push(format!(
+            "PRIMARY KEY ({})",
+            quoted_identifier_list(&table.row_key.columns)?
+        ));
+        self.conn.execute_batch(&format!(
+            "CREATE TABLE {quoted} (
+                {}
+            );",
+            declarations.join(",\n                ")
+        ))?;
+
+        for index in &table.indexes {
+            let index_name = quoted_table_name_str(&format!("{}_{}", table.name, index.name))?;
+            let unique = if index.unique { "UNIQUE " } else { "" };
+            self.conn.execute_batch(&format!(
+                "CREATE {unique}INDEX IF NOT EXISTS {index_name}
+                 ON {quoted} ({});",
+                quoted_identifier_list(&index.columns)?
+            ))?;
+        }
+        Ok(())
     }
 
     fn storage_for(&self, table: TableName) -> StorageClass {
@@ -661,7 +728,9 @@ impl Store {
     }
 }
 
-fn row_table_names_from_schema_sources(sources: &[&str]) -> rusqlite::Result<Vec<String>> {
+fn table_declarations_from_schema_sources(
+    sources: &[&str],
+) -> rusqlite::Result<Vec<TableDeclaration>> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for (source_index, source) in sources.iter().enumerate() {
@@ -672,33 +741,26 @@ fn row_table_names_from_schema_sources(sources: &[&str]) -> rusqlite::Result<Vec
             ))
         })?;
         for table in document.tables {
-            validate_row_table_declaration(&table)?;
             if !seen.insert(table.name.clone()) {
                 return Err(rusqlite::Error::InvalidParameterName(format!(
                     "duplicate schema table {}",
                     table.name
                 )));
             }
-            out.push(table.name);
+            out.push(table);
         }
     }
     Ok(out)
 }
 
-fn validate_row_table_declaration(table: &TableDeclaration) -> rusqlite::Result<()> {
+fn is_row_table_declaration(table: &TableDeclaration) -> bool {
     let valid_columns = table.columns.len() == 2
         && table.columns[0].name == "key"
         && table.columns[0].ty == (ColumnType::Bytes { len: None })
         && table.columns[1].name == "value"
         && table.columns[1].ty == (ColumnType::Bytes { len: None });
     let valid_row_key = table.row_key.columns.len() == 1 && table.row_key.columns[0] == "key";
-    if valid_columns && valid_row_key && table.indexes.is_empty() {
-        return Ok(());
-    }
-    Err(rusqlite::Error::InvalidParameterName(format!(
-        "schema table {} must use row-store shape: `key bytes`, `value bytes`, row_key `(key)`, and no indexes",
-        table.name
-    )))
+    valid_columns && valid_row_key && table.indexes.is_empty()
 }
 
 /// One column returned by SQLite's `PRAGMA table_info`.
@@ -712,6 +774,13 @@ struct SqliteTableColumn {
     declared_type: String,
     not_null: bool,
     primary_key_position: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqliteIndex {
+    name: String,
+    unique: bool,
+    columns: Vec<String>,
 }
 
 fn sqlite_table_columns(
@@ -728,6 +797,38 @@ fn sqlite_table_columns(
         })
     })?;
     rows.collect()
+}
+
+fn sqlite_table_indexes(
+    conn: &SqliteConnection,
+    quoted_table_name: &str,
+) -> rusqlite::Result<Vec<SqliteIndex>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA index_list({quoted_table_name})"))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? != 0,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut indexes = Vec::new();
+    for row in rows {
+        let (name, unique, origin) = row?;
+        if origin == "pk" {
+            continue;
+        }
+        let quoted_index_name = quoted_table_name_str(&name)?;
+        let mut info = conn.prepare(&format!("PRAGMA index_info({quoted_index_name})"))?;
+        let columns = info
+            .query_map([], |row| row.get::<_, String>(2))?
+            .collect::<Result<Vec<_>, _>>()?;
+        indexes.push(SqliteIndex {
+            name,
+            unique,
+            columns,
+        });
+    }
+    Ok(indexes)
 }
 
 fn validate_sqlite_row_table(
@@ -749,6 +850,105 @@ fn validate_sqlite_row_table(
     Err(rusqlite::Error::InvalidParameterName(format!(
         "existing table {table_name} does not match store row-table shape"
     )))
+}
+
+fn validate_sqlite_typed_table(
+    conn: &SqliteConnection,
+    table: &TableDeclaration,
+    columns: &[SqliteTableColumn],
+) -> rusqlite::Result<()> {
+    if columns.len() != table.columns.len() {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "existing table {} column count does not match declared shape",
+            table.name
+        )));
+    }
+    for (idx, declared) in table.columns.iter().enumerate() {
+        let existing = &columns[idx];
+        if existing.name != declared.name {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "existing table {} column {} is {}, expected {}",
+                table.name, idx, existing.name, declared.name
+            )));
+        }
+        if !existing
+            .declared_type
+            .eq_ignore_ascii_case(sqlite_type(&declared.ty))
+        {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "existing table {} column {} has type {}, expected {}",
+                table.name,
+                declared.name,
+                existing.declared_type,
+                sqlite_type(&declared.ty)
+            )));
+        }
+        if !existing.not_null {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "existing table {} column {} is nullable",
+                table.name, declared.name
+            )));
+        }
+        let expected_pk = table
+            .row_key
+            .columns
+            .iter()
+            .position(|column| column == &declared.name)
+            .map(|position| (position + 1) as i64)
+            .unwrap_or(0);
+        if existing.primary_key_position != expected_pk {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "existing table {} column {} has primary-key position {}, expected {}",
+                table.name, declared.name, existing.primary_key_position, expected_pk
+            )));
+        }
+    }
+
+    let quoted = quoted_table_name_str(&table.name)?;
+    let existing_indexes = sqlite_table_indexes(conn, &quoted)?;
+    for declared in &table.indexes {
+        let name = format!("{}_{}", table.name, declared.name);
+        let Some(existing) = existing_indexes.iter().find(|index| index.name == name) else {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "existing table {} is missing index {}",
+                table.name, name
+            )));
+        };
+        if existing.unique != declared.unique {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "existing table {} index {} uniqueness does not match",
+                table.name, name
+            )));
+        }
+        if existing.columns != declared.columns {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "existing table {} index {} columns {:?}, expected {:?}",
+                table.name, name, existing.columns, declared.columns
+            )));
+        }
+    }
+    for existing in &existing_indexes {
+        if !table
+            .indexes
+            .iter()
+            .any(|declared| existing.name == format!("{}_{}", table.name, declared.name))
+        {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "existing table {} has undeclared index {}",
+                table.name, existing.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_type(ty: &ColumnType) -> &'static str {
+    match ty {
+        ColumnType::Bytes { .. } => "BLOB",
+        ColumnType::U64 | ColumnType::I64 => "INTEGER",
+        ColumnType::Text => "TEXT",
+        ColumnType::Bool => "INTEGER",
+    }
 }
 
 fn table_storage_map(schemas: &[Schema]) -> rusqlite::Result<HashMap<TableName, StorageClass>> {
@@ -830,6 +1030,26 @@ fn quoted_table_name_str(name: &str) -> rusqlite::Result<String> {
         )));
     }
     Ok(format!("\"{name}\""))
+}
+
+fn quoted_identifier(name: &str) -> rusqlite::Result<String> {
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "invalid identifier {name}"
+        )));
+    }
+    Ok(format!("\"{name}\""))
+}
+
+fn quoted_identifier_list(columns: &[String]) -> rusqlite::Result<String> {
+    columns
+        .iter()
+        .map(|column| quoted_identifier(column))
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map(|columns| columns.join(", "))
 }
 
 /// Wrap a row-codec error in the `rusqlite::Error` variant the rest of the

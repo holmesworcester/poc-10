@@ -37,7 +37,7 @@ impl Projector for InviteSecretProjector {
         if fact.scope != FactScope::Local {
             return Err("invite_secret fact must have local scope".to_string());
         }
-        let invite_secret = layout::decode_fact(&fact.bytes)?;
+        let invite_secret = layout::decode_fact(fact.body())?;
         Ok(ProjectionOutput::new()
             .offer(crate::protocol::matchers::invite_secret_offer(fact.id))
             .offer(crate::protocol::matchers::connection_invite_secret_offer(
@@ -52,7 +52,7 @@ mod projector_tests {
     use crate as topo;
 
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::identity::invite::fact::InviteSecretFact;
@@ -66,8 +66,9 @@ mod projector_tests {
             1,
             layout::encode_fact(&invite).expect("encode invite_secret"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact.clone()));
@@ -116,8 +117,9 @@ mod projector_tests {
             1,
             layout::encode_fact(&invite).expect("encode"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));
@@ -144,8 +146,9 @@ mod projector_tests {
             1,
             layout::encode_fact(&invite).expect("encode"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));

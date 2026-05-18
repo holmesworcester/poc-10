@@ -8,6 +8,7 @@
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};
+use crate::core::wire;
 
 use super::fact::{AuthorId, ContentMessageFact, FrontierId, WorkspaceId};
 
@@ -35,18 +36,18 @@ pub fn content_message_key(workspace_id: WorkspaceId, message_id: FactId) -> Vec
 }
 
 pub fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> TableRow {
-    let mut value = Vec::with_capacity(ROW_VALUE_BYTES);
-    value.push(1);
-    value.extend_from_slice(&fact.author_user_id);
-    value.extend_from_slice(&fact.created_at_ms.to_be_bytes());
-    value.extend_from_slice(&fact.frontier_id);
-    value.extend_from_slice(&fact.minute.to_be_bytes());
-    value.extend_from_slice(&fact.leaf_id);
-    value.extend_from_slice(&fact.sealed_body_ref);
+    let mut writer = wire::Writer::with_capacity(ROW_VALUE_BYTES);
+    writer.u8(1);
+    writer.fixed(&fact.author_user_id);
+    writer.u64be(fact.created_at_ms);
+    writer.fixed(&fact.frontier_id);
+    writer.u64be(fact.minute);
+    writer.fixed(&fact.leaf_id);
+    writer.fixed(&fact.sealed_body_ref);
     TableRow {
         table: CONTENT_MESSAGE_ROWS,
         key: content_message_key(fact.workspace_id, message_id),
-        value,
+        value: writer.finish(),
     }
 }
 
@@ -57,16 +58,31 @@ pub fn decode_content_message_row(key: &[u8], value: &[u8]) -> Result<ContentMes
     if value.len() != ROW_VALUE_BYTES || value[0] != 1 {
         return Err("content message row value is malformed".to_string());
     }
-    Ok(ContentMessageRow {
-        workspace_id: key[..32].try_into().unwrap(),
-        message_id: key[32..64].try_into().unwrap(),
-        author_user_id: value[1..33].try_into().unwrap(),
-        created_at_ms: u64::from_be_bytes(value[33..41].try_into().unwrap()),
-        frontier_id: value[41..73].try_into().unwrap(),
-        minute: u64::from_be_bytes(value[73..81].try_into().unwrap()),
-        leaf_id: value[81..113].try_into().unwrap(),
-        sealed_body_ref: value[113..145].try_into().unwrap(),
-    })
+    let mut key_reader = wire::Reader::new(key);
+    let workspace_id = key_reader.array().map_err(wire_err)?;
+    let message_id = key_reader.array().map_err(wire_err)?;
+    key_reader.finish().map_err(wire_err)?;
+    let mut value_reader = wire::Reader::new(value);
+    let version = value_reader.u8().map_err(wire_err)?;
+    if version != 1 {
+        return Err("content message row value is malformed".to_string());
+    }
+    let row = ContentMessageRow {
+        workspace_id,
+        message_id,
+        author_user_id: value_reader.array().map_err(wire_err)?,
+        created_at_ms: value_reader.u64be().map_err(wire_err)?,
+        frontier_id: value_reader.array().map_err(wire_err)?,
+        minute: value_reader.u64be().map_err(wire_err)?,
+        leaf_id: value_reader.array().map_err(wire_err)?,
+        sealed_body_ref: value_reader.array().map_err(wire_err)?,
+    };
+    value_reader.finish().map_err(wire_err)?;
+    Ok(row)
+}
+
+fn wire_err(err: wire::WireError) -> String {
+    format!("{err:?}")
 }
 
 #[cfg(test)]

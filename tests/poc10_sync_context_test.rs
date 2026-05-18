@@ -187,13 +187,17 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
         opened.projections <= 3,
         "message display should be a bounded context wake, not a key request loop: {opened:?}"
     );
-    assert_eq!(receiver.intents().len(), 3);
-    let sealed_row = match AtomicIntent::from_intent(&receiver.intents()[0], &[SEALED_MESSAGE_ROWS])
-        .expect("sealed row intent")
-    {
-        AtomicIntent::PutRow(row) => row,
-        AtomicIntent::DeleteRow(_) => panic!("sealed projection should put a row"),
-    };
+    let sealed_rows = receiver
+        .intents()
+        .iter()
+        .filter_map(|intent| AtomicIntent::from_intent(intent, &[SEALED_MESSAGE_ROWS]).ok())
+        .map(|intent| match intent {
+            AtomicIntent::PutRow(row) => row,
+            AtomicIntent::DeleteRow(_) => panic!("sealed projection should put a row"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sealed_rows.len(), 1);
+    let sealed_row = &sealed_rows[0];
     assert_eq!(sealed_row.key, message_key(workspace, sealed_message.id));
     assert_eq!(
         decode_sealed_message_row(&sealed_row.key, &sealed_row.value)

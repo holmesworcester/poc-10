@@ -10,10 +10,10 @@ use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::facts::connection::ephemeral_secret::layout as ephemeral_layout;
-use crate::protocol::facts::connection::request::layout as request_layout;
-use crate::protocol::facts::identity::invite::layout as invite_layout;
+use crate::protocol::facts::connection::request;
+use crate::protocol::facts::identity::invite;
 use crate::protocol::facts::transport::transit_received::{
-    fact::TRANSIT_KIND_CONNECTION_HANDSHAKE, layout as receive_layout,
+    self, fact::TRANSIT_KIND_CONNECTION_HANDSHAKE,
 };
 use crate::protocol::matchers as ephemeral_matchers;
 use crate::protocol::matchers as receive_matchers;
@@ -42,7 +42,7 @@ impl Projector for ConnectionResponseProjector {
         if fact.scope != FactScope::Local {
             return Err("connection response fact must have local scope".to_string());
         }
-        let response = layout::decode_fact(&fact.bytes)?;
+        let response = layout::decode_fact(fact.body())?;
         validate_response_fields(&response)?;
         if response.from_endpoint == response.to_endpoint {
             return Err("connection response endpoints must differ".to_string());
@@ -55,7 +55,7 @@ impl Projector for ConnectionResponseProjector {
         let Some(request_context) = projection_context.payload_for(&request_need) else {
             return Ok(waiting_output([request_need]));
         };
-        let request = request_layout::decode_fact(&request_context.bytes)
+        let request = request::decode_fact_payload(request_context.body())
             .map_err(|_| "connection response context is not a request fact".to_string())?;
         if request_context.id != response.request_id {
             return Err(
@@ -74,7 +74,7 @@ impl Projector for ConnectionResponseProjector {
         let Some(invite_context) = projection_context.payload_for(&invite_need) else {
             return Ok(waiting_output([request_need, invite_need]));
         };
-        let invite = invite_layout::decode_fact(&invite_context.bytes).map_err(|_| {
+        let invite = invite::decode_fact_payload(invite_context.body()).map_err(|_| {
             "connection response invite context is not an invite secret".to_string()
         })?;
         if invite_context.id != response.invite_secret_fact_id {
@@ -108,7 +108,7 @@ impl Projector for ConnectionResponseProjector {
             if receive.scope != FactScope::Local {
                 return Err("connection response receive context must be local".to_string());
             }
-            let received = receive_layout::decode_fact(&receive.bytes).map_err(|_| {
+            let received = transit_received::decode_fact_payload(receive.body()).map_err(|_| {
                 "connection response receive context is not transport::transit provenance"
                     .to_string()
             })?;

@@ -24,7 +24,7 @@ impl Projector for TransitReceivedProjector {
         if fact.scope != FactScope::Local {
             return Err("transport::transit received fact must have FactScope::Local".to_string());
         }
-        let received = layout::decode_fact(&fact.bytes)?;
+        let received = layout::decode_fact(fact.body())?;
         Ok(
             ProjectionOutput::new().offer(matchers::transit_received_offer(
                 fact.id,

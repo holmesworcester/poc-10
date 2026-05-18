@@ -19,7 +19,7 @@ use crate::core::context::{
     ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
 };
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
-use crate::core::handler_dispatch::{HandlerContext, IntentHandler};
+use crate::core::handler_dispatch::{retry_intent_reason, HandlerContext, IntentHandler};
 use crate::core::intents::{AtomicIntent, Intent, IntentExecution, IntentKind, TableDelete};
 use crate::core::matchers::{match_context_delta, ContextMatch, ContextMatcher};
 use crate::core::projection::{
@@ -49,6 +49,7 @@ pub struct DispatchReport {
     pub handled: usize,
     pub facts: usize,
     pub intents: usize,
+    pub retries: usize,
 }
 
 #[derive(Debug, Default)]
@@ -61,6 +62,7 @@ pub struct WakeLoop {
     pending_owners: BTreeSet<FactId>,
     intents: Vec<Intent>,
     intent_keys: BTreeMap<Vec<u8>, usize>,
+    pending_atomic_row_intents: Vec<Intent>,
     dirty_facts: BTreeSet<FactId>,
     deleted_facts: BTreeSet<FactId>,
     dirty_context_owners: BTreeSet<FactId>,
@@ -134,6 +136,24 @@ impl WakeLoop {
     }
 
     pub fn save(&mut self, store: &Store) -> Result<(), String> {
+        if !self.pending_atomic_row_intents.is_empty() {
+            return Err(
+                "wake loop has unapplied atomic row intents; call save_applying_atomic_rows"
+                    .to_string(),
+            );
+        }
+        self.save_inner(store, &[])
+    }
+
+    pub fn save_applying_atomic_rows(
+        &mut self,
+        store: &Store,
+        allowed_tables: &[TableName],
+    ) -> Result<(), String> {
+        self.save_inner(store, allowed_tables)
+    }
+
+    fn save_inner(&mut self, store: &Store, allowed_tables: &[TableName]) -> Result<(), String> {
         let fact_rows = self.dirty_fact_rows();
         let deleted_fact_keys = self
             .deleted_facts
@@ -154,6 +174,8 @@ impl WakeLoop {
             .collect::<Vec<_>>();
         let intent_rows = self.dirty_intent_rows();
         let deleted_intent_keys = self.deleted_intent_keys.iter().cloned().collect::<Vec<_>>();
+        let (atomic_rows, atomic_deletes) =
+            atomic_row_mutations(&self.pending_atomic_row_intents, allowed_tables)?;
 
         store
             .write_transaction(|tx| {
@@ -164,10 +186,15 @@ impl WakeLoop {
                 tx.insert_table_rows_in_tx(pending_rows)?;
                 tx.delete_table_rows_in_tx(INTENTS, deleted_intent_keys)?;
                 tx.insert_table_rows_in_tx(intent_rows)?;
+                tx.insert_table_rows_in_tx(atomic_rows)?;
+                for delete in atomic_deletes {
+                    tx.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
+                }
                 Ok(())
             })
             .map_err(|err| format!("save wake loop: {err}"))?;
         self.clear_dirty();
+        self.pending_atomic_row_intents.clear();
         Ok(())
     }
 
@@ -297,6 +324,10 @@ impl WakeLoop {
                 Ok(output) => output,
                 Err(err) => {
                     self.restore_intent(intent_index, intent)?;
+                    if retry_intent_reason(&err).is_some() {
+                        report.retries += 1;
+                        break;
+                    }
                     if err.starts_with("handler context missing fact ") {
                         break;
                     }
@@ -343,6 +374,10 @@ impl WakeLoop {
                 Ok(output) => output,
                 Err(err) => {
                     self.restore_intent(intent_index, intent)?;
+                    if retry_intent_reason(&err).is_some() {
+                        report.retries += 1;
+                        break;
+                    }
                     return Err(err);
                 }
             };
@@ -385,7 +420,9 @@ impl WakeLoop {
         allowed_tables: &[TableName],
         limit: usize,
     ) -> Result<DrainReport, String> {
-        self.drain_inner(projector, matchers, limit, Some((store, allowed_tables)))
+        let report = self.drain_inner(projector, matchers, limit, Some(allowed_tables))?;
+        self.save_applying_atomic_rows(store, allowed_tables)?;
+        Ok(report)
     }
 
     fn drain_inner(
@@ -393,7 +430,7 @@ impl WakeLoop {
         projector: &impl Projector,
         matchers: &[&dyn ContextMatcher],
         limit: usize,
-        atomic_rows: Option<(&Store, &[TableName])>,
+        atomic_rows: Option<&[TableName]>,
     ) -> Result<DrainReport, String> {
         let mut report = DrainReport::default();
         while report.projections < limit {
@@ -420,8 +457,8 @@ impl WakeLoop {
                 self.restore_pending(owner);
                 return Err(err);
             }
-            if let Some((store, allowed_tables)) = atomic_rows {
-                if let Err(err) = apply_atomic_row_intents(&run.intents, store, allowed_tables) {
+            if let Some(allowed_tables) = atomic_rows {
+                if let Err(err) = validate_atomic_row_intents(&run.intents, allowed_tables) {
                     self.restore_pending(owner);
                     return Err(err);
                 }
@@ -432,6 +469,7 @@ impl WakeLoop {
                 self.wake_context_matches(&run.context_delta, matchers, &mut report);
             for intent in run.intents {
                 if atomic_rows.is_some() && intent.execution == IntentExecution::Atomic {
+                    self.pending_atomic_row_intents.push(intent);
                     report.intents += 1;
                     continue;
                 }
@@ -988,11 +1026,22 @@ fn intent_row(intent: &Intent) -> TableRow {
     }
 }
 
-fn apply_atomic_row_intents(
+fn validate_atomic_row_intents(
     intents: &[Intent],
-    store: &Store,
     allowed_tables: &[TableName],
 ) -> Result<(), String> {
+    for intent in intents {
+        if intent.execution == IntentExecution::Atomic {
+            AtomicIntent::from_intent(intent, allowed_tables)?;
+        }
+    }
+    Ok(())
+}
+
+fn atomic_row_mutations(
+    intents: &[Intent],
+    allowed_tables: &[TableName],
+) -> Result<(Vec<TableRow>, Vec<TableDelete>), String> {
     let mut rows = Vec::new();
     let mut deletes = Vec::<TableDelete>::new();
     for intent in intents {
@@ -1004,18 +1053,7 @@ fn apply_atomic_row_intents(
             AtomicIntent::DeleteRow(delete) => deletes.push(delete),
         }
     }
-    if rows.is_empty() && deletes.is_empty() {
-        return Ok(());
-    }
-    store
-        .write_transaction(|tx| {
-            tx.insert_table_rows_in_tx(rows)?;
-            for delete in deletes {
-                tx.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
-            }
-            Ok(())
-        })
-        .map_err(|err| format!("apply atomic row intents: {err}"))
+    Ok((rows, deletes))
 }
 
 fn context_row_key(owner: FactId, value: &[u8]) -> Vec<u8> {
@@ -1623,6 +1661,26 @@ mod tests {
             .expect("handler retry succeeds");
         assert_eq!(report.handled, 1);
         assert!(bus.intents().is_empty());
+    }
+
+    #[test]
+    fn retrying_handler_keeps_intent_without_failing_dispatch() {
+        let mut bus = WakeLoop::new();
+        bus.submit_intent(Intent::new(
+            IntentKind::new("retry_later").unwrap(),
+            IntentExecution::Deferred,
+            b"retry",
+            b"payload",
+        ))
+        .expect("submit retry intent");
+
+        let report = bus
+            .dispatch_intents(&RetryLaterHandler, &HandlerContext::new(), 10)
+            .expect("transient retry is not a dispatch failure");
+
+        assert_eq!(report.handled, 0);
+        assert_eq!(report.retries, 1);
+        assert_eq!(bus.intents().len(), 1);
     }
 
     #[test]
@@ -2238,6 +2296,20 @@ mod tests {
                 return Err("handler unavailable".to_string());
             }
             Ok(HandlerOutput::new())
+        }
+    }
+
+    struct RetryLaterHandler;
+
+    impl IntentHandler for RetryLaterHandler {
+        fn handle(
+            &self,
+            _intent: &Intent,
+            _context: &HandlerContext,
+        ) -> Result<HandlerOutput, String> {
+            Err(crate::core::handler_dispatch::retry_intent(
+                "transient transport",
+            ))
         }
     }
 

@@ -50,6 +50,10 @@ impl Fact {
             bytes,
         }
     }
+
+    pub fn body(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 pub fn fact_id(bytes: &[u8]) -> FactId {

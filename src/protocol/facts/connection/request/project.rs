@@ -12,8 +12,8 @@ use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::facts::connection::ephemeral_secret::layout as ephemeral_layout;
-use crate::protocol::facts::identity::invite::layout as invite_layout;
-use crate::protocol::facts::transport::transit_received::layout as receive_layout;
+use crate::protocol::facts::identity::invite;
+use crate::protocol::facts::transport::transit_received;
 use crate::protocol::matchers;
 use crate::protocol::matchers as ephemeral_matchers;
 use crate::protocol::matchers as receive_matchers;
@@ -41,7 +41,7 @@ impl Projector for ConnectionRequestProjector {
         if !matches!(fact.scope, FactScope::Local | FactScope::Global) {
             return Err("connection request fact must be local or global".to_string());
         }
-        let request = layout::decode_fact(&fact.bytes)?;
+        let request = layout::decode_fact(fact.body())?;
         validate_request_fields(&request)?;
         if request.from_endpoint == request.to_endpoint {
             return Err("connection request endpoints must differ".to_string());
@@ -52,7 +52,7 @@ impl Projector for ConnectionRequestProjector {
         let Some(invite) = projection_context.payload_for(&invite_need) else {
             return Ok(waiting_output([invite_need]));
         };
-        let invite_secret = invite_layout::decode_fact(&invite.bytes)
+        let invite_secret = invite::decode_fact_payload(&invite.bytes)
             .map_err(|_| "connection request invite context is not an invite secret".to_string())?;
         if invite.id != request.invite_secret_fact_id {
             return Err("connection request invite context id does not match request".to_string());
@@ -100,7 +100,7 @@ impl Projector for ConnectionRequestProjector {
         if receive.scope != FactScope::Local {
             return Err("connection request receive context must be local".to_string());
         }
-        let received = receive_layout::decode_fact(&receive.bytes).map_err(|_| {
+        let received = transit_received::decode_fact_payload(receive.body()).map_err(|_| {
             "connection request receive context is not transport::transit provenance".to_string()
         })?;
         if received.received_fact_id != fact.id {

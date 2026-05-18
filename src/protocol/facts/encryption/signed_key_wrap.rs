@@ -14,7 +14,7 @@ pub(super) fn signed_key_wrap(
     fact: &Fact,
     projection_context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
-    let envelope = signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+    let envelope = signed_fact::layout::decode_signed_fact(fact.body())?;
     if envelope.inner_type != layout::TYPE_KEY_WRAP {
         return Err("signed fact does not contain an encryption key wrap".to_string());
     }

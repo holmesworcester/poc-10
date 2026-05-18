@@ -28,7 +28,7 @@ impl Projector for DisappearingMessagesSettingProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let setting = layout::decode_fact(&fact.bytes)?;
+        let setting = layout::decode_fact(fact.body())?;
         if setting.ttl_minutes == 0 {
             return Err("disappearing setting ttl_minutes must be non-zero".to_string());
         }
@@ -127,10 +127,10 @@ fn validate_authority(
 fn decode_admin_payload(fact: &Fact) -> Result<identity::admin::fact::AdminFact, String> {
     match fact.bytes.first().copied() {
         Some(identity::admin::layout::TYPE_ADMIN) => {
-            identity::admin::layout::decode_fact(&fact.bytes)
+            identity::admin::layout::decode_fact(fact.body())
         }
         Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) => {
-            let envelope = identity::signed_fact::layout::decode_signed_fact(&fact.bytes)?;
+            let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())?;
             if envelope.inner_type != identity::admin::layout::TYPE_ADMIN {
                 return Err("expected signed admin".to_string());
             }
@@ -172,8 +172,8 @@ mod projector_tests {
         DisappearingMessagesSettingFact, SCOPE_KIND_CHANNEL, SCOPE_KIND_WORKSPACE,
     };
     use topo::protocol::facts::encryption::disappearing_messages_setting::{layout, project, rows};
+    use topo::protocol::facts::identity::admin;
     use topo::protocol::facts::identity::admin::fact::AdminFact;
-    use topo::protocol::facts::identity::admin::layout as admin_layout;
     use topo::protocol::intents::sync::share_fact_with_workspace;
 
     use topo::protocol::matchers as sync_matchers;
@@ -341,7 +341,7 @@ mod projector_tests {
         Fact::new(
             FactScope::Global,
             1,
-            admin_layout::encode_fact(&AdminFact {
+            admin::encode_fact_payload(&AdminFact {
                 created_at_ms: 1,
                 workspace_id,
                 public_key: [8; 32],

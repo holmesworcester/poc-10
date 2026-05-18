@@ -35,7 +35,7 @@ impl Projector for SignedFactProjector {
 }
 
 fn project_local_signer_secret(fact: &Fact) -> Result<ProjectionOutput, String> {
-    let secret = layout::decode_local_signer_secret(&fact.bytes)?;
+    let secret = layout::decode_local_signer_secret(fact.body())?;
     require_local_scope(fact)?;
     let scope = workspace_scope(secret.workspace_id);
     Ok(

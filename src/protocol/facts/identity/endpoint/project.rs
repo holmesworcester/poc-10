@@ -28,7 +28,7 @@ impl Projector for EndpointProjector {
         if fact.scope != FactScope::Local {
             return Err("local endpoint fact must have local scope".to_string());
         }
-        let endpoint = layout::decode_fact(&fact.bytes)?;
+        let endpoint = layout::decode_fact(fact.body())?;
         let mut output = ProjectionOutput::new();
         for row in endpoint_rows(&endpoint) {
             output = output.intent(AtomicIntent::PutRow(row).into_intent());
@@ -43,7 +43,7 @@ mod projector_tests {
 
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::schema_dsl::FACTS_SCHEMA_SOURCE;
+    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::identity::endpoint::fact::EndpointFact;
@@ -68,8 +68,9 @@ mod projector_tests {
             7,
             layout::encode_fact(&endpoint).expect("encode endpoint"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact.clone()));
@@ -140,8 +141,9 @@ mod projector_tests {
             7,
             layout::encode_fact(&endpoint).expect("encode endpoint"),
         );
-        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE])
-            .expect("open target schema");
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open target schema");
         let mut bus = WakeLoop::new();
 
         assert!(bus.submit_fact(fact));

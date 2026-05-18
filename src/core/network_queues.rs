@@ -2,9 +2,9 @@
 //!
 //! Core owns the mechanics of queueing bytes by route because the TCP code
 //! needs a place to stage frames before and after socket writes. These queues
-//! are memory-local operational state, not durable protocol truth. The only
-//! interpretation here is the route key needed to claim a bounded batch for one
-//! remote address without scanning every pending row.
+//! are process-local operational state, not protocol truth. Durable work lives
+//! in projected facts, context, rows, and intents; network bytes are retried by
+//! re-running the intent that staged them.
 //!
 //! The queue key is intentionally deterministic: the same route and same bytes
 //! map to the same row. That gives the boundary a cheap idempotence property
@@ -24,8 +24,8 @@ pub const INBOUND_TABLE: TableName = TableName::new("network_in");
 ///
 /// Network queues are core IO state, so their schemas live here rather than in
 /// the protocol registry. They still use the same generic row-table shape as
-/// module-owned tables, but they are restart-local because higher layers can
-/// regenerate meaningful sends and resend missing inbound facts.
+/// module-owned tables, and they are memory-only so a restart never turns stale
+/// socket staging into protocol-visible work.
 pub const SCHEMAS: &[Schema] = &[
     Schema::memory_row_table("core.network.outbound.v1", OUTBOUND_TABLE),
     Schema::memory_row_table("core.network.inbound.v1", INBOUND_TABLE),
@@ -130,6 +130,29 @@ pub fn claim_outbound_for_target(
         .into_iter()
         .map(|(key, value)| decode_outbound(key, &value))
         .collect()
+}
+
+/// Claim specific outbound rows by exact deterministic key.
+///
+/// This is the shape used by one-shot intent handlers: the handler proves the
+/// rows it just staged are present before attempting the socket write.
+pub fn claim_exact_outbound(
+    store: &Store,
+    rows: &[OutboundNetworkRow],
+) -> Result<Vec<OutboundNetworkRow>, String> {
+    let mut claimed = Vec::with_capacity(rows.len());
+    for expected in rows {
+        let value = store
+            .table_row(OUTBOUND_TABLE, &expected.key)
+            .map_err(|err| format!("claim exact outbound network row: {err}"))?
+            .ok_or_else(|| "queued outbound network row was not claimable".to_string())?;
+        let row = decode_outbound(expected.key.clone(), &value)?;
+        if row.target != expected.target || row.bytes != expected.bytes {
+            return Err("queued outbound network row did not match expected bytes".to_string());
+        }
+        claimed.push(row);
+    }
+    Ok(claimed)
 }
 
 /// Remove outbound rows that have been successfully handed off by the caller.

@@ -56,6 +56,44 @@ impl ProjectionContext {
             .map(|matched| &matched.payload)
     }
 
+    pub fn payload_for_checked(
+        &self,
+        need: &ContextNeed,
+        label: &str,
+    ) -> Result<Option<&Fact>, String> {
+        let Some(matched) = self.matched.iter().find(|matched| matched.need == *need) else {
+            return Ok(None);
+        };
+        if matched.offer.payload_ref != matched.payload.id {
+            return Err(format!("{label} context offer payload mismatch"));
+        }
+        Ok(Some(&matched.payload))
+    }
+
+    pub fn matched_payloads_for<'a>(
+        &'a self,
+        need: &'a ContextNeed,
+    ) -> impl Iterator<Item = (&'a ContextOffer, &'a Fact)> + 'a {
+        self.matched
+            .iter()
+            .filter(move |matched| matched.need == *need)
+            .map(|matched| (&matched.offer, &matched.payload))
+    }
+
+    pub fn offer_payload_refs_matching<'a>(
+        &'a self,
+        role: &'a crate::core::context::Role,
+        scope: &'a crate::core::facts::FactScope,
+        selector: &'a crate::core::context::Selector,
+    ) -> impl Iterator<Item = FactId> + 'a {
+        self.offers
+            .iter()
+            .filter(move |offer| {
+                offer.role == *role && offer.scope == *scope && offer.selector == *selector
+            })
+            .map(|offer| offer.payload_ref)
+    }
+
     pub fn payload_refs(&self) -> impl Iterator<Item = FactId> + '_ {
         self.offers.iter().map(|offer| offer.payload_ref)
     }

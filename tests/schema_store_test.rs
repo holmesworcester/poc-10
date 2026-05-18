@@ -104,21 +104,121 @@ fn schema_sources_reject_existing_table_with_wrong_shape() {
 }
 
 #[test]
-fn schema_sources_reject_non_row_store_declarations() {
+fn schema_sources_create_typed_table_declarations() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("typed-schema-store.db");
     let source = r#"
-        table not_rows {
-          column id bytes;
-          column value bytes;
-          row_key (id);
+        table typed_messages {
+          column workspace_id bytes(32);
+          column message_id bytes(32);
+          column created_at_ms u64;
+          column deleted bool;
+          row_key (workspace_id, message_id);
+          index by_workspace_created (workspace_id, created_at_ms);
         }
     "#;
 
-    let err = match Store::open_memory_with_schema_sources(&[source]) {
-        Ok(_) => panic!("non-row-store declaration should reject"),
+    Store::open_disk_with_schema_sources(&path, &[source]).expect("create typed table");
+    let conn = Connection::open(&path).expect("open sqlite");
+    let columns = conn
+        .prepare("PRAGMA table_info(typed_messages)")
+        .expect("prepare table info")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query table info")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect columns");
+    assert_eq!(
+        columns,
+        vec![
+            "workspace_id".to_string(),
+            "message_id".to_string(),
+            "created_at_ms".to_string(),
+            "deleted".to_string()
+        ]
+    );
+
+    let index_count: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'typed_messages_by_workspace_created'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query typed index");
+    assert_eq!(index_count, 1);
+
+    Store::open_disk_with_schema_sources(&path, &[source]).expect("reopen validates typed table");
+}
+
+#[test]
+fn schema_sources_reject_existing_typed_table_with_wrong_shape() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("typed-schema-store.db");
+    let conn = Connection::open(&path).expect("open sqlite");
+    conn.execute_batch(
+        "CREATE TABLE typed_messages (
+            workspace_id BLOB NOT NULL,
+            message_id BLOB NOT NULL,
+            created_at_ms TEXT NOT NULL,
+            deleted INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, message_id)
+        );",
+    )
+    .expect("create incompatible typed table");
+    drop(conn);
+    let source = r#"
+        table typed_messages {
+          column workspace_id bytes(32);
+          column message_id bytes(32);
+          column created_at_ms u64;
+          column deleted bool;
+          row_key (workspace_id, message_id);
+        }
+    "#;
+
+    let err = match Store::open_disk_with_schema_sources(&path, &[source]) {
+        Ok(_) => panic!("incompatible typed table should reject"),
         Err(err) => err,
     };
     assert!(
-        err.to_string().contains("must use row-store shape"),
+        err.to_string().contains("existing table typed_messages"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn schema_sources_reject_existing_typed_table_missing_declared_index() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("typed-schema-store.db");
+    let conn = Connection::open(&path).expect("open sqlite");
+    conn.execute_batch(
+        "CREATE TABLE typed_messages (
+            workspace_id BLOB NOT NULL,
+            message_id BLOB NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            deleted INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, message_id)
+        );",
+    )
+    .expect("create typed table without declared index");
+    drop(conn);
+    let source = r#"
+        table typed_messages {
+          column workspace_id bytes(32);
+          column message_id bytes(32);
+          column created_at_ms u64;
+          column deleted bool;
+          row_key (workspace_id, message_id);
+          index by_workspace_created (workspace_id, created_at_ms);
+        }
+    "#;
+
+    let err = match Store::open_disk_with_schema_sources(&path, &[source]) {
+        Ok(_) => panic!("typed table with missing index should reject"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("is missing index typed_messages_by_workspace_created"),
         "unexpected error: {err}"
     );
 }

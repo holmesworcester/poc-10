@@ -14,8 +14,7 @@ use crate::core::network_queues;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::core::runtime::{RuntimeHandlers, RuntimeMatchers, RuntimeProtocol};
 use crate::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
-use crate::core::store::Store;
-use crate::core::store::TableName;
+use crate::core::store::{Schema, Store, TableName};
 use crate::core::tcp;
 use crate::core::wake_loop::{DispatchReport, WakeLoop};
 use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
@@ -49,7 +48,6 @@ impl crate::core::runtime::Runtime<super::Protocol> {
                 )?,
             )?;
         }
-        network_queues::delete_inbound(self.store(), &inbound)?;
 
         let projection_before_handlers = self.drain_projection_until_idle(4, work_limit)?;
         let queued_retention = self.enqueue_due_retention(work_limit)?;
@@ -59,9 +57,12 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         let dispatched_after_seed = self.dispatch_intents(work_limit)?;
         let projection_after_handlers = self.drain_projection_until_idle(4, work_limit)?;
         self.save()?;
+        let received_rows = &inbound;
+        network_queues::delete_inbound(self.store(), received_rows)?;
 
         Ok(TickReport {
             accepted_connections: accepted.accepted_connections,
+            sent_frames: accepted.value.sent_frames,
             received_frames: accepted.value.received_frames,
             projections: projection_before_handlers.projections
                 + projection_after_seed.projections
@@ -230,6 +231,10 @@ impl RuntimeProtocol for super::Protocol {
 
     fn schema_sources() -> &'static [&'static str] {
         SCHEMA_SOURCES
+    }
+
+    fn schemas() -> &'static [Schema] {
+        network_queues::SCHEMAS
     }
 
     fn atomic_row_tables() -> &'static [TableName] {
@@ -679,12 +684,14 @@ impl ProtocolHandlers {
         total.handled += report.handled;
         total.facts += report.facts;
         total.intents += report.intents;
-        if report.handled == 0 {
+        total.retries += report.retries;
+        if report.handled == 0 && report.retries == 0 {
             let empty_context = HandlerContext::new().with_store(store);
             let report = wake_loop.dispatch_atomic_intents(handler, &empty_context, limit)?;
             total.handled += report.handled;
             total.facts += report.facts;
             total.intents += report.intents;
+            total.retries += report.retries;
         }
         Ok(())
     }
