@@ -132,7 +132,6 @@ mod tests {
             role,
             scope: FactScope::Global,
             selector: Selector::from_bytes([2; 32]),
-
         };
 
         let matched = exact_selector_match(&need, &offer).unwrap();
@@ -156,14 +155,12 @@ mod tests {
                 role: role.clone(),
                 scope: FactScope::Global,
                 selector: Selector::from_bytes([2; 32]),
-
             },
             ContextOffer {
                 owner: [5; 32],
                 role,
                 scope: FactScope::Local,
                 selector: Selector::from_bytes([2; 32]),
-
             },
         ];
 
@@ -181,7 +178,6 @@ mod tests {
             role: role.clone(),
             scope: FactScope::Global,
             selector: Selector::from_bytes([2; 32]),
-
         };
         let needs = vec![ContextNeed {
             owner: [1; 32],
@@ -222,7 +218,6 @@ mod tests {
             role,
             scope: FactScope::Global,
             selector: Selector::from_bytes([8; 32]),
-
         };
         let delta = ContextSetDelta {
             added_needs: vec![added_need],
@@ -258,7 +253,6 @@ mod tests {
             role,
             scope: FactScope::Global,
             selector: Selector::from_bytes([2; 32]),
-
         };
         let delta = ContextSetDelta {
             added_needs: vec![need.clone()],
@@ -279,7 +273,6 @@ mod tests {
             vec![ContextMatch {
                 need_owner: [1; 32],
                 offer_owner: [3; 32],
-
             }]
         );
     }

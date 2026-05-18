@@ -71,16 +71,14 @@ impl Projector for ContentMessageDeletionProjector {
                 ]));
             }
         }
-        let Some(target_fact) = payload_for_need(context, &target_need)
-        else {
+        let Some(target_fact) = payload_for_need(context, &target_need) else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(target_need),
                 Some(author_need),
             ]));
         };
-        let Some(author_fact) = payload_for_need(context, &author_need)
-        else {
+        let Some(author_fact) = payload_for_need(context, &author_need) else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(target_need),

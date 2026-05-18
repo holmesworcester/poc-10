@@ -355,11 +355,7 @@ mod projector_tests {
     fn previous_match(owner: [u8; 32], previous: Fact) -> MatchedContext {
         matched(
             sync_matchers::exact_event_need(owner, FactScope::Global, previous.id),
-            sync_matchers::exact_event_offer(
-                previous.id,
-                FactScope::Global,
-                previous.id,
-            ),
+            sync_matchers::exact_event_offer(previous.id, FactScope::Global, previous.id),
             previous,
         )
     }

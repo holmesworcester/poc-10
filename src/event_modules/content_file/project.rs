@@ -103,9 +103,7 @@ impl Projector for ContentFileProjector {
             file.message_id,
             parent_message.author_user_id,
         );
-        if let Some(deletion) =
-            payload_for_need(context, &parent_deletion_need)
-        {
+        if let Some(deletion) = payload_for_need(context, &parent_deletion_need) {
             validate_message_deletion(
                 deletion,
                 file.workspace_id,

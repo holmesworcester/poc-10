@@ -35,11 +35,7 @@ impl Projector for SyncEncryptedRootProjector {
                 root.dependency_id,
                 root.key_wrap_id,
             ))
-            .offer(matchers::exact_event_offer(
-                fact.id,
-                scope,
-                root.event_id,
-            )))
+            .offer(matchers::exact_event_offer(fact.id, scope, root.event_id)))
     }
 }
 

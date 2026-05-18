@@ -104,9 +104,7 @@ impl Projector for ContentReactionProjector {
             reaction.target_message_id,
             target_message.author_user_id,
         );
-        if let Some(deletion) =
-            payload_for_need(context, &target_deletion_need)
-        {
+        if let Some(deletion) = payload_for_need(context, &target_deletion_need) {
             validate_message_deletion(
                 deletion,
                 reaction.workspace_id,

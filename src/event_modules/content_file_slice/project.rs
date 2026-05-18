@@ -87,10 +87,7 @@ impl Projector for ContentFileSliceProjector {
     }
 }
 
-fn payload_for_need<'a>(
-    context: &'a ProjectionContext,
-    need: &ContextNeed,
-) -> Option<&'a Fact> {
+fn payload_for_need<'a>(context: &'a ProjectionContext, need: &ContextNeed) -> Option<&'a Fact> {
     // The wake loop guarantees `payload.id == offer.owner` because each
     // projector can only offer its own fact; no defensive equality check needed.
     context.payload_for(need)

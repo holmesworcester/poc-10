@@ -123,10 +123,7 @@ pub(super) fn require_local_scope(fact: &Fact) -> Result<(), String> {
     }
 }
 
-fn validate_wrap_source_payload(
-    payload: &Fact,
-    source: &WrapSourceSelector,
-) -> Result<(), String> {
+fn validate_wrap_source_payload(payload: &Fact, source: &WrapSourceSelector) -> Result<(), String> {
     // The wake loop guarantees `payload.id == offer.owner` because each
     // projector can only offer its own fact; no defensive equality check needed.
     if payload.scope != FactScope::Local {
