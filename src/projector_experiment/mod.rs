@@ -7,5 +7,7 @@
 //!
 //! Variants live behind `#[cfg(test)]` so they cost nothing in release builds.
 
+#[cfg(test)]
+pub mod checks;
 pub mod connection_request;
 pub mod device_invite;
