@@ -79,11 +79,11 @@ impl Projector for ContentFileProjector {
                 ]));
             }
         }
-        if let Some(deletion) = payload_for_need(context, &file_deletion_need, "file deletion")? {
+        if let Some(deletion) = payload_for_need(context, &file_deletion_need) {
             validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
             return Ok(delete_file_projection(file.workspace_id, fact.id).need(file_deletion_need));
         }
-        let Some(parent) = payload_for_need(context, &parent_need, "file parent")? else {
+        let Some(parent) = payload_for_need(context, &parent_need) else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(parent_need),
@@ -104,7 +104,7 @@ impl Projector for ContentFileProjector {
             parent_message.author_user_id,
         );
         if let Some(deletion) =
-            payload_for_need(context, &parent_deletion_need, "file parent deletion")?
+            payload_for_need(context, &parent_deletion_need)
         {
             validate_message_deletion(
                 deletion,
@@ -117,7 +117,7 @@ impl Projector for ContentFileProjector {
                 .need(parent_need)
                 .need(parent_deletion_need));
         }
-        let Some(author) = payload_for_need(context, &author_need, "file author")? else {
+        let Some(author) = payload_for_need(context, &author_need) else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(file_deletion_need),
@@ -139,7 +139,6 @@ impl Projector for ContentFileProjector {
             fact.id,
             message_matchers::workspace_scope(file.workspace_id),
             fact.id,
-            fact.id,
         ))
         .intent(AtomicIntent::PutRow(content_file_row(fact.id, &file)?).into_intent()))
     }
@@ -148,9 +147,8 @@ impl Projector for ContentFileProjector {
 fn payload_for_need<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
-    label: &str,
-) -> Result<Option<&'a Fact>, String> {
-    authority::payload_for_need(context, need, label)
+) -> Option<&'a Fact> {
+    authority::payload_for_need(context, need)
 }
 
 fn output_with_needs(

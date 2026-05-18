@@ -61,7 +61,6 @@ pub fn recipient_key_offer(
         role: recipient_key_role(),
         scope,
         selector: Selector::from_bytes(recipient_key_id),
-        payload_ref: owner,
     }
 }
 
@@ -88,7 +87,6 @@ pub fn local_recipient_key_offer(
         role: local_recipient_key_role(),
         scope,
         selector: Selector::from_bytes(recipient_key_id),
-        payload_ref: owner,
     }
 }
 
@@ -107,7 +105,6 @@ pub fn frontier_offer(owner: FactId, scope: FactScope, frontier_id: FrontierId) 
         role: frontier_role(),
         scope,
         selector: Selector::from_bytes(frontier_id),
-        payload_ref: owner,
     }
 }
 
@@ -134,7 +131,6 @@ pub fn recipient_superseded_offer(
         role: recipient_superseded_role(),
         scope,
         selector: Selector::from_bytes(recipient_key_id),
-        payload_ref: owner,
     }
 }
 
@@ -262,7 +258,6 @@ pub fn wrap_source_offer(
         role: wrap_source_role(),
         scope,
         selector: encode_wrap_source_selector(&source),
-        payload_ref: owner,
     }
 }
 
@@ -473,6 +468,5 @@ fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Context
     matches.then_some(ContextMatch {
         need_owner: need.owner,
         offer_owner: offer.owner,
-        payload_ref: offer.payload_ref,
     })
 }

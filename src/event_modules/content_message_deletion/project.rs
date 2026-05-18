@@ -71,7 +71,7 @@ impl Projector for ContentMessageDeletionProjector {
                 ]));
             }
         }
-        let Some(target_fact) = payload_for_need(context, &target_need, "message deletion target")?
+        let Some(target_fact) = payload_for_need(context, &target_need)
         else {
             return Ok(output_with_needs([
                 signer_need,
@@ -79,7 +79,7 @@ impl Projector for ContentMessageDeletionProjector {
                 Some(author_need),
             ]));
         };
-        let Some(author_fact) = payload_for_need(context, &author_need, "message deletion author")?
+        let Some(author_fact) = payload_for_need(context, &author_need)
         else {
             return Ok(output_with_needs([
                 signer_need,
@@ -112,9 +112,8 @@ impl Projector for ContentMessageDeletionProjector {
 fn payload_for_need<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
-    label: &str,
-) -> Result<Option<&'a Fact>, String> {
-    authority::payload_for_need(context, need, label)
+) -> Option<&'a Fact> {
+    authority::payload_for_need(context, need)
 }
 
 fn output_with_needs(

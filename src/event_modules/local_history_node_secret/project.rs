@@ -111,7 +111,6 @@ impl Projector for LocalHistoryNodeSecretProjector {
                 fact.id,
                 FactScope::Local,
                 fact.id,
-                fact.id,
             ))
             .offer(history_matchers::source_secret_offer(fact.id, fact.id))
             .offer(sealed_message::matchers::secret_offer(
@@ -353,7 +352,6 @@ mod projector_tests {
             sync_matchers::exact_event_offer(
                 frontier.id,
                 workspace_scope(node.workspace_id),
-                frontier.id,
                 frontier.id,
             ),
             frontier,

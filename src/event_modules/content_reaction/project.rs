@@ -77,7 +77,7 @@ impl Projector for ContentReactionProjector {
                 ]));
             }
         }
-        let Some(target) = payload_for_need(context, &target_need, "reaction target")? else {
+        let Some(target) = payload_for_need(context, &target_need) else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(target_need),
@@ -105,7 +105,7 @@ impl Projector for ContentReactionProjector {
             target_message.author_user_id,
         );
         if let Some(deletion) =
-            payload_for_need(context, &target_deletion_need, "reaction target deletion")?
+            payload_for_need(context, &target_deletion_need)
         {
             validate_message_deletion(
                 deletion,
@@ -117,7 +117,7 @@ impl Projector for ContentReactionProjector {
                 .need(target_need)
                 .need(target_deletion_need));
         }
-        let Some(author) = payload_for_need(context, &author_need, "reaction author")? else {
+        let Some(author) = payload_for_need(context, &author_need) else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(target_need),
@@ -149,9 +149,8 @@ impl Projector for ContentReactionProjector {
 fn payload_for_need<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
-    label: &str,
-) -> Result<Option<&'a Fact>, String> {
-    authority::payload_for_need(context, need, label)
+) -> Option<&'a Fact> {
+    authority::payload_for_need(context, need)
 }
 
 fn output_with_needs(

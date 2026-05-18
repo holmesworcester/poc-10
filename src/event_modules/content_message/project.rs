@@ -70,7 +70,7 @@ impl Projector for ContentMessageProjector {
                 ]));
             }
         }
-        if let Some(deletion) = payload_for_need(context, &deletion_need, "message deletion")? {
+        if let Some(deletion) = payload_for_need(context, &deletion_need) {
             validate_message_deletion(
                 deletion,
                 message.workspace_id,
@@ -85,7 +85,7 @@ impl Projector for ContentMessageProjector {
                 .into_intent(),
             ));
         }
-        let Some(author) = payload_for_need(context, &author_need, "message author")? else {
+        let Some(author) = payload_for_need(context, &author_need) else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(deletion_need),
@@ -105,9 +105,8 @@ impl Projector for ContentMessageProjector {
 fn payload_for_need<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
-    label: &str,
-) -> Result<Option<&'a Fact>, String> {
-    authority::payload_for_need(context, need, label)
+) -> Option<&'a Fact> {
+    authority::payload_for_need(context, need)
 }
 
 fn output_with_needs(

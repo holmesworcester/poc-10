@@ -29,6 +29,5 @@ pub fn transit_received_offer(owner: FactId, received_fact_id: FactId) -> Contex
         role: transit_received_role(),
         scope: FactScope::Local,
         selector: Selector::from_bytes(received_fact_id),
-        payload_ref: owner,
     }
 }

@@ -61,7 +61,7 @@ pub fn validate_signer_context(
     author_user_id: Option<FactId>,
     label: &str,
 ) -> Result<bool, String> {
-    let Some(payload) = payload_for_need(context, need, &format!("{label} signer"))? else {
+    let Some(payload) = payload_for_need(context, need) else {
         return Ok(false);
     };
     if payload.id != signer.signer_id {
@@ -99,17 +99,8 @@ pub fn validate_signer_context(
 pub fn payload_for_need<'a>(
     context: &'a ProjectionContext,
     need: &ContextNeed,
-    label: &str,
-) -> Result<Option<&'a Fact>, String> {
-    let Some(matched) = context
-        .matched_context()
-        .iter()
-        .find(|matched| matched.need == *need)
-    else {
-        return Ok(None);
-    };
-    if matched.offer.payload_ref != matched.payload.id {
-        return Err(format!("{label} context offer payload mismatch"));
-    }
-    Ok(Some(&matched.payload))
+) -> Option<&'a Fact> {
+    // The wake loop guarantees `payload.id == offer.owner` because each
+    // projector can only offer its own fact; no defensive equality check needed.
+    context.payload_for(need)
 }

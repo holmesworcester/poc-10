@@ -74,7 +74,6 @@ pub fn exact_offer(owner: FactId, role: Role) -> ContextOffer {
         role,
         scope: FactScope::Global,
         selector: Selector::from_bytes(owner),
-        payload_ref: owner,
     }
 }
 
@@ -119,7 +118,6 @@ pub fn scoped_key_offer(
         role,
         scope: workspace_scope(workspace_id),
         selector: Selector::from_bytes(selector),
-        payload_ref: owner,
     }
 }
 

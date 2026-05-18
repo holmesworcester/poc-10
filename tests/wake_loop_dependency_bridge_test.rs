@@ -170,7 +170,7 @@ fn project_event_with_deps(
     for dependency in event.dependencies {
         let selector = Selector::from_bytes(dependency);
         let has_dependency = context.offers().iter().any(|offer| {
-            offer.role == role && offer.selector == selector && offer.payload_ref == dependency
+            offer.role == role && offer.selector == selector && offer.owner == dependency
         });
         if !has_dependency {
             output = output.need(ContextNeed {
@@ -188,7 +188,6 @@ fn project_event_with_deps(
             role,
             scope: fact.scope.clone(),
             selector: Selector::from_bytes(fact.id),
-            payload_ref: fact.id,
         });
     }
     Ok(output)
@@ -238,7 +237,7 @@ fn event_with_deps_bridge_resolves_out_of_order_dependencies_by_context() {
         let context = bus.context(&fact.id).expect("standing offer context");
         assert!(context.needs.is_empty());
         assert_eq!(context.offers.len(), 1);
-        assert_eq!(context.offers[0].payload_ref, fact.id);
+        assert_eq!(context.offers[0].owner, fact.id);
     }
     assert!(bus.intents().is_empty());
     assert!(!bus.submit_fact(dep));

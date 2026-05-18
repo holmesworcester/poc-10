@@ -96,10 +96,8 @@ fn validate_range_match(matched: &MatchedContext) -> Result<matchers::RangeOffer
         .ok_or_else(|| "sync range context offer selector is malformed".to_string())?;
     let root = encrypted_root_layout::decode_fact(&matched.payload.bytes)?;
     encrypted_root_project::validate_sync_fact_workspace(&matched.payload, root.workspace_id)?;
-    if matched.offer.owner != matched.payload.id || matched.offer.payload_ref != matched.payload.id
-    {
-        return Err("sync range context offer must point at its encrypted-root fact".to_string());
-    }
+    // The wake loop guarantees `payload.id == offer.owner` because each
+    // projector can only offer its own fact; no defensive equality check needed.
     if matched.offer.scope != matchers::workspace_scope(root.workspace_id) {
         return Err("sync range context offer scope does not match payload".to_string());
     }

@@ -491,18 +491,8 @@ impl WakeLoop {
             changed = true;
         }
 
-        let mut dirty_context_owners = Vec::new();
-        self.context_by_owner.retain(|context_owner, context| {
-            let before = context.offers.len();
-            context.offers.retain(|offer| offer.payload_ref != owner);
-            if context.offers.len() != before {
-                dirty_context_owners.push(*context_owner);
-            }
-            !(context.needs.is_empty() && context.offers.is_empty())
-        });
-        for context_owner in dirty_context_owners {
-            self.dirty_context_owners.insert(context_owner);
-        }
+        // No cross-owner offer cleanup needed: every offer's payload is its
+        // own owner, so other context owners never reference this fact.
         changed
     }
 
@@ -628,14 +618,13 @@ impl WakeLoop {
                         .any(|context_match| {
                             context_match.need_owner == need.owner
                                 && context_match.offer_owner == offer.owner
-                                && context_match.payload_ref == offer.payload_ref
                         });
                     if !offer_matches || !seen.insert((need.clone(), offer.clone())) {
                         continue;
                     }
                     let payload = self
                         .facts
-                        .get(&offer.payload_ref)
+                        .get(&offer.owner)
                         .ok_or_else(|| "context offer payload references unknown fact".to_string())?
                         .clone();
                     matched.push(MatchedContext {
@@ -894,7 +883,6 @@ fn encode_offer(offer: &ContextOffer) -> Vec<u8> {
     put_string_u16(&mut out, offer.role.as_str());
     encode_scope(&mut out, &offer.scope);
     put_bytes_u32(&mut out, offer.selector.as_bytes());
-    put_id(&mut out, &offer.payload_ref);
     out
 }
 
@@ -905,14 +893,12 @@ fn decode_offer(value: &[u8]) -> Result<ContextOffer, String> {
     let role = Role::new(reader.take_string_u16()?)?;
     let scope = decode_scope(&mut reader)?;
     let selector = Selector::from_bytes(reader.take_bytes_u32()?.to_vec());
-    let payload_ref = reader.take_id()?;
     reader.finish()?;
     Ok(ContextOffer {
         owner,
         role,
         scope,
         selector,
-        payload_ref,
     })
 }
 
@@ -1735,7 +1721,6 @@ mod tests {
                     role: self.role.clone(),
                     scope: fact.scope.clone(),
                     selector: self.selector.clone(),
-                    payload_ref: fact.id,
                 }));
             }
             self.need_projections.set(self.need_projections.get() + 1);
@@ -1751,7 +1736,7 @@ mod tests {
                 IntentKind::new("open_context").unwrap(),
                 IntentExecution::Atomic,
                 fact.id,
-                context.payload_refs().next().unwrap_or(fact.id),
+                context.offer_owners().next().unwrap_or(fact.id),
             )))
         }
     }
@@ -1791,7 +1776,6 @@ mod tests {
                     role: self.role.clone(),
                     scope: fact.scope.clone(),
                     selector: self.selector.clone(),
-                    payload_ref: fact.id,
                 }));
             }
             if context.offers().is_empty() {
@@ -1835,7 +1819,6 @@ mod tests {
                     role: self.role.clone(),
                     scope: fact.scope.clone(),
                     selector: self.selector.clone(),
-                    payload_ref: fact.id,
                 }));
             }
 
@@ -2055,7 +2038,6 @@ mod tests {
                     role: self.base_role.clone(),
                     scope: fact.scope.clone(),
                     selector: self.base_selector.clone(),
-                    payload_ref: fact.id,
                 }));
             }
             if fact.bytes == b"updater" {
@@ -2064,7 +2046,6 @@ mod tests {
                     role: self.update_role.clone(),
                     scope: fact.scope.clone(),
                     selector: self.update_selector.clone(),
-                    payload_ref: fact.id,
                 }));
             }
             let saw_base = context
@@ -2132,7 +2113,6 @@ mod tests {
                     role: self.update_role.clone(),
                     scope: fact.scope.clone(),
                     selector: self.update_selector.clone(),
-                    payload_ref: fact.id,
                 }));
             }
             let saw_update = context
@@ -2192,7 +2172,6 @@ mod tests {
                     role: self.role.clone(),
                     scope: fact.scope.clone(),
                     selector: self.selector.clone(),
-                    payload_ref: fact.id,
                 }));
             }
             if let Some(matched) = context.matched_context().first() {
@@ -2250,14 +2229,12 @@ mod tests {
                         role: self.role.clone(),
                         scope: fact.scope.clone(),
                         selector: self.wanted.clone(),
-                        payload_ref: fact.id,
                     })
                     .offer(ContextOffer {
                         owner: fact.id,
                         role: self.role.clone(),
                         scope: fact.scope.clone(),
                         selector: self.sibling.clone(),
-                        payload_ref: fact.id,
                     }));
             }
             if !context.offers().is_empty() {

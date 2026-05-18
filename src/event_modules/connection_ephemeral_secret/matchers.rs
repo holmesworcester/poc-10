@@ -24,6 +24,5 @@ pub fn connection_ephemeral_secret_offer(owner: FactId, secret_id: FactId) -> Co
         role: connection_ephemeral_secret_role(),
         scope: FactScope::Local,
         selector: Selector::from_bytes(secret_id),
-        payload_ref: owner,
     }
 }

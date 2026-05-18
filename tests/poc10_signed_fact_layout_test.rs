@@ -110,7 +110,7 @@ fn local_signer_secret_round_trips_and_offers_signing_context() {
         .expect("project signer secret");
     assert_eq!(output.offers.len(), 1);
     assert_eq!(output.offers[0].owner, fact.id);
-    assert_eq!(output.offers[0].payload_ref, fact.id);
+    assert_eq!(output.offers[0].owner, fact.id);
     assert_eq!(output.offers[0].scope, workspace_scope(workspace));
 }
 

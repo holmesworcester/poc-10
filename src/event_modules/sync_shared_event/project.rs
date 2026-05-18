@@ -30,7 +30,6 @@ impl Projector for SyncSharedEventProjector {
             fact.id,
             scope,
             shared.event_id,
-            fact.id,
         )))
     }
 }

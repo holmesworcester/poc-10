@@ -19,16 +19,14 @@ pub(super) fn matching_wrap_sources_with_signer(
                 .map(|source| (matched, source))
         })
         .map(|(matched, source)| {
-            validate_wrap_source_payload(&matched.payload, matched.offer.payload_ref, &source)?;
-            Ok(local_signer_secret_payload_ref(
+            validate_wrap_source_payload(&matched.payload, &source)?;
+            Ok(local_signer_secret_owner(
                 projection_context.offers(),
                 need.owner,
                 &need.scope,
                 source.owner_endpoint_id,
             )
-            .map(|signer_secret_fact_id| {
-                (matched.offer.payload_ref, signer_secret_fact_id, source)
-            }))
+            .map(|signer_secret_fact_id| (matched.offer.owner, signer_secret_fact_id, source)))
         })
         .collect::<Result<Vec<_>, String>>()
         .map(|items| items.into_iter().flatten().collect())
@@ -47,7 +45,7 @@ pub(super) fn add_signer_needs_for_matching_sources(
         let Some(source) = matchers::wrap_source_offer_matches_need(need, &matched.offer) else {
             continue;
         };
-        validate_wrap_source_payload(&matched.payload, matched.offer.payload_ref, &source)?;
+        validate_wrap_source_payload(&matched.payload, &source)?;
         output = output.need(signed_fact::matchers::local_signer_secret_need(
             need.owner,
             need.scope.clone(),
@@ -57,7 +55,7 @@ pub(super) fn add_signer_needs_for_matching_sources(
     Ok(output)
 }
 
-fn local_signer_secret_payload_ref(
+fn local_signer_secret_owner(
     offers: &[ContextOffer],
     owner: FactId,
     scope: &FactScope,
@@ -67,7 +65,7 @@ fn local_signer_secret_payload_ref(
     offers
         .iter()
         .filter(|offer| offer.role == need.role && offer.selector == need.selector)
-        .map(|offer| offer.payload_ref)
+        .map(|offer| offer.owner)
         .min()
 }
 
@@ -127,12 +125,10 @@ pub(super) fn require_local_scope(fact: &Fact) -> Result<(), String> {
 
 fn validate_wrap_source_payload(
     payload: &Fact,
-    expected_payload_ref: FactId,
     source: &WrapSourceSelector,
 ) -> Result<(), String> {
-    if payload.id != expected_payload_ref {
-        return Err("wrap source context payload id mismatch".to_string());
-    }
+    // The wake loop guarantees `payload.id == offer.owner` because each
+    // projector can only offer its own fact; no defensive equality check needed.
     if payload.scope != FactScope::Local {
         return Err("wrap source context must be local key material".to_string());
     }

@@ -44,7 +44,7 @@ impl Projector for ContentFileSliceProjector {
         let scope = message_matchers::workspace_scope(slice.workspace_id);
         require_fact_scope(fact, &scope)?;
         let file_need = file_matchers::file_need(fact.id, scope.clone(), slice.file_id);
-        let Some(parent) = payload_for_need(context, &file_need, "file slice parent")? else {
+        let Some(parent) = payload_for_need(context, &file_need) else {
             return Ok(ProjectionOutput::new().need(file_need));
         };
         let file = file_layout::decode_fact(&parent.bytes)
@@ -63,9 +63,7 @@ impl Projector for ContentFileSliceProjector {
         }
         let file_deletion_need =
             message_matchers::deletion_need(fact.id, scope, parent.id, file.author_user_id);
-        if let Some(deletion) =
-            payload_for_need(context, &file_deletion_need, "file slice parent deletion")?
-        {
+        if let Some(deletion) = payload_for_need(context, &file_deletion_need) {
             validate_file_deletion(deletion, file.workspace_id, parent.id, file.author_user_id)?;
             return Ok(ProjectionOutput::new()
                 .need(file_need)
@@ -92,19 +90,10 @@ impl Projector for ContentFileSliceProjector {
 fn payload_for_need<'a>(
     context: &'a ProjectionContext,
     need: &ContextNeed,
-    label: &str,
-) -> Result<Option<&'a Fact>, String> {
-    let Some(matched) = context
-        .matched_context()
-        .iter()
-        .find(|matched| matched.need == *need)
-    else {
-        return Ok(None);
-    };
-    if matched.offer.payload_ref != matched.payload.id {
-        return Err(format!("{label} context offer payload mismatch"));
-    }
-    Ok(Some(&matched.payload))
+) -> Option<&'a Fact> {
+    // The wake loop guarantees `payload.id == offer.owner` because each
+    // projector can only offer its own fact; no defensive equality check needed.
+    context.payload_for(need)
 }
 
 fn validate_file_deletion(

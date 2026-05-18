@@ -39,7 +39,6 @@ impl Projector for SyncEncryptedRootProjector {
                 fact.id,
                 scope,
                 root.event_id,
-                fact.id,
             )))
     }
 }

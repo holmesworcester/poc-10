@@ -54,7 +54,6 @@ pub fn range_event_offer(
         role: range_event_role(),
         scope,
         selector: range_offer_selector(timestamp, event_id, dependency_id, key_wrap_id),
-        payload_ref: owner,
     }
 }
 
@@ -67,18 +66,12 @@ pub fn exact_event_need(owner: FactId, scope: FactScope, event_id: EventId) -> C
     }
 }
 
-pub fn exact_event_offer(
-    owner: FactId,
-    scope: FactScope,
-    event_id: EventId,
-    payload_ref: FactId,
-) -> ContextOffer {
+pub fn exact_event_offer(owner: FactId, scope: FactScope, event_id: EventId) -> ContextOffer {
     ContextOffer {
         owner,
         role: exact_event_role(),
         scope,
         selector: Selector::from_bytes(event_id),
-        payload_ref,
     }
 }
 
@@ -97,7 +90,6 @@ pub fn key_wrap_offer(owner: FactId, scope: FactScope, key_wrap_id: KeyWrapId) -
         role: key_wrap_role(),
         scope,
         selector: Selector::from_bytes(key_wrap_id),
-        payload_ref: owner,
     }
 }
 
@@ -224,6 +216,5 @@ pub fn range_event_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Con
     Some(ContextMatch {
         need_owner: need.owner,
         offer_owner: offer.owner,
-        payload_ref: offer.payload_ref,
     })
 }

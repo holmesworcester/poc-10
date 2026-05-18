@@ -67,7 +67,7 @@ impl Projector for ContentFileDeletionProjector {
                 ]));
             }
         }
-        let Some(target_fact) = payload_for_need(context, &target_need, "file deletion target")?
+        let Some(target_fact) = payload_for_need(context, &target_need)
         else {
             return Ok(output_with_needs([
                 signer_need,
@@ -75,7 +75,7 @@ impl Projector for ContentFileDeletionProjector {
                 Some(author_need),
             ]));
         };
-        let Some(author_fact) = payload_for_need(context, &author_need, "file deletion author")?
+        let Some(author_fact) = payload_for_need(context, &author_need)
         else {
             return Ok(output_with_needs([
                 signer_need,
@@ -108,9 +108,8 @@ impl Projector for ContentFileDeletionProjector {
 fn payload_for_need<'a>(
     context: &'a ProjectionContext,
     need: &crate::core::context::ContextNeed,
-    label: &str,
-) -> Result<Option<&'a Fact>, String> {
-    authority::payload_for_need(context, need, label)
+) -> Option<&'a Fact> {
+    authority::payload_for_need(context, need)
 }
 
 fn output_with_needs(
@@ -357,7 +356,6 @@ mod projector_tests {
                 offer: sync_matchers::exact_event_offer(
                     target_fact.id,
                     target_fact.scope.clone(),
-                    target_fact.id,
                     target_fact.id,
                 ),
                 payload: target_fact.clone(),

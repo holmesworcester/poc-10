@@ -43,6 +43,5 @@ pub fn local_signer_secret_offer(
         role: local_signer_secret_role(),
         scope,
         selector: Selector::from_bytes(signer_id),
-        payload_ref: owner,
     }
 }

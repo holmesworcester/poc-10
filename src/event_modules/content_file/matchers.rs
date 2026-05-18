@@ -22,6 +22,5 @@ pub fn file_offer(owner: FactId, scope: FactScope, file_id: FactId) -> ContextOf
         role: file_role(),
         scope,
         selector: Selector::from_bytes(file_id),
-        payload_ref: owner,
     }
 }

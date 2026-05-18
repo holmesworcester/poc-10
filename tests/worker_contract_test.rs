@@ -272,7 +272,6 @@ impl Projector for DependencyProjector {
                 role: self.role.clone(),
                 scope: fact.scope.clone(),
                 selector: Selector::from_bytes(fact.id),
-                payload_ref: fact.id,
             }));
         }
 
@@ -357,7 +356,6 @@ impl UpdateProjector {
             role,
             scope: FactScope::Global,
             selector: Selector::from_bytes(selector),
-            payload_ref: owner,
         }
     }
 }

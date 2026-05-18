@@ -30,10 +30,10 @@ fn secret_coverage_matcher_handles_root_internal_leaf_ranges() {
     assert_eq!(matches.len(), 2);
     assert!(matches
         .iter()
-        .any(|matched| matched.payload_ref == root_offer.payload_ref));
+        .any(|matched| matched.offer_owner == root_offer.owner));
     assert!(matches
         .iter()
-        .any(|matched| matched.payload_ref == exact_leaf_offer.payload_ref));
+        .any(|matched| matched.offer_owner == exact_leaf_offer.owner));
 }
 
 #[test]
@@ -124,7 +124,6 @@ fn secret_coverage_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Con
         Some(ContextMatch {
             need_owner: need.owner,
             offer_owner: offer.owner,
-            payload_ref: offer.payload_ref,
         })
     } else {
         None
@@ -179,7 +178,6 @@ impl Projector for SecretProjection {
                     role: self.role.clone(),
                     scope: fact.scope.clone(),
                     selector: secret_offer_selector(self.workspace, start, end),
-                    payload_ref: fact.id,
                 }))
             }
             _ => Err("unknown secret projection fact".to_string()),
@@ -208,7 +206,6 @@ fn secret_offer(
         role: secret_role(),
         scope,
         selector: secret_offer_selector(workspace, start, end),
-        payload_ref: owner,
     }
 }
 

@@ -86,7 +86,6 @@ impl Projector for RemovalFrontierProjector {
                 fact.id,
                 expected_scope,
                 fact.id,
-                fact.id,
             ))
             .intent(AtomicIntent::PutRow(removal_frontier_row(fact.id, &frontier)?).into_intent()))
     }
@@ -168,7 +167,6 @@ mod projector_tests {
                     ref_a.id,
                     workspace_scope(frontier.workspace_id),
                     ref_a.id,
-                    ref_a.id,
                 ),
                 ref_a.clone(),
             ),
@@ -181,7 +179,6 @@ mod projector_tests {
                 sync_matchers::exact_event_offer(
                     ref_b.id,
                     workspace_scope(frontier.workspace_id),
-                    ref_b.id,
                     ref_b.id,
                 ),
                 ref_b.clone(),

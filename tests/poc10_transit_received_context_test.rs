@@ -50,7 +50,7 @@ fn transit_received_projector_offers_receive_context_by_received_fact_id() {
         standing.offers[0].selector,
         Selector::from_bytes(provenance.received_fact_id)
     );
-    assert_eq!(standing.offers[0].payload_ref, fact.id);
+    assert_eq!(standing.offers[0].owner, fact.id);
 }
 
 #[test]

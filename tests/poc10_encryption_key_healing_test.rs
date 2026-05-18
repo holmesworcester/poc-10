@@ -384,12 +384,12 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     assert!(signed_context.offers.iter().any(|offer| {
         offer.role == sync_context::key_wrap_role()
             && offer.selector.as_bytes() == expected_signed_wrap.id
-            && offer.payload_ref == expected_signed_wrap.id
+            && offer.owner == expected_signed_wrap.id
     }));
     assert!(signed_context.offers.iter().any(|offer| {
         offer.role == sync_context::exact_event_role()
             && offer.selector.as_bytes() == expected_signed_wrap.id
-            && offer.payload_ref == expected_signed_wrap.id
+            && offer.owner == expected_signed_wrap.id
     }));
     assert!(signed_context.needs.iter().any(|need| {
         need.role == encryption_context::local_recipient_key_role()
@@ -1022,12 +1022,12 @@ fn signed_key_wrap_waits_for_context_then_offers_sync_key_and_row() {
     assert!(ready.offers.iter().any(|offer| {
         offer.role == sync_context::key_wrap_role()
             && offer.selector.as_bytes() == signed_wrap.id
-            && offer.payload_ref == signed_wrap.id
+            && offer.owner == signed_wrap.id
     }));
     assert!(ready.offers.iter().any(|offer| {
         offer.role == sync_context::exact_event_role()
             && offer.selector.as_bytes() == signed_wrap.id
-            && offer.payload_ref == signed_wrap.id
+            && offer.owner == signed_wrap.id
     }));
     let rows = bus
         .intents()
@@ -1139,7 +1139,7 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
     assert!(wrap_context.offers.iter().any(|offer| {
         offer.role == sync_context::key_wrap_role()
             && offer.selector.as_bytes() == signed_wrap.id
-            && offer.payload_ref == signed_wrap.id
+            && offer.owner == signed_wrap.id
     }));
     assert!(
         !wrap_context

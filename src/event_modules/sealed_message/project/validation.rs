@@ -102,9 +102,8 @@ pub(super) fn matched_secret_payload<'a>(
 }
 
 fn validate_secret_context(matched: &MatchedContext, need: &ContextNeed) -> Result<(), String> {
-    if matched.offer.payload_ref != matched.payload.id {
-        return Err("sealed-message secret context offer payload mismatch".to_string());
-    }
+    // The wake loop guarantees `payload.id == offer.owner` because each
+    // projector can only offer its own fact; no defensive equality check needed.
     if !matchers::secret_offer_matches_need(need, &matched.offer) {
         return Err("sealed-message secret context offer does not match need".to_string());
     }

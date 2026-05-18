@@ -8,9 +8,9 @@
 //!
 //! `scope`, `role`, and `selector` form the match key. `owner` says which fact
 //! produced the row so later projection can replace that fact's context without
-//! deleting anyone else's rows. `payload_ref` names the fact to load after a
-//! match; keeping it separate from `owner` lets wrapper facts advertise inner
-//! material without pretending the wrapper and payload have the same id.
+//! deleting anyone else's rows. Each owner can only offer its own payload — the
+//! emitting fact IS what gets loaded on a match — so `owner` is the payload
+//! reference too; an emitter cannot advertise a different fact under its name.
 
 use crate::core::facts::{FactId, FactScope};
 use std::collections::BTreeSet;
@@ -76,17 +76,16 @@ pub struct ContextNeed {
 
 /// A standing statement that one fact can provide context to matching needs.
 ///
-/// The offer's `owner` is the fact that emitted this relationship. `payload_ref`
-/// is the fact core should load and pass to the woken projector when this offer
-/// matches; it is usually the owner, but can name another fact when a local
-/// projection advertises context on behalf of a shared or derived fact.
+/// `owner` is the fact that emitted this relationship and also the fact core
+/// will load and pass to the woken projector when this offer matches. A
+/// projector can only offer its own fact — there is no separate payload field
+/// for it to point at someone else's.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextOffer {
     pub owner: FactId,
     pub role: Role,
     pub scope: FactScope,
     pub selector: Selector,
-    pub payload_ref: FactId,
 }
 
 /// The complete standing context emitted by a single projection owner.
@@ -197,7 +196,6 @@ mod tests {
                 role,
                 scope: FactScope::Global,
                 selector,
-                payload_ref: id,
             });
 
         assert_eq!(set.needs.len(), 1);
@@ -273,7 +271,6 @@ mod tests {
                 role,
                 scope: FactScope::Global,
                 selector,
-                payload_ref: id,
             })
             .normalized();
 

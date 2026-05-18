@@ -144,7 +144,6 @@ impl Projector for ContentPurgeBridge {
                     role: deletion_role(),
                     scope: fact.scope.clone(),
                     selector: Selector::from_bytes(target),
-                    payload_ref: fact.id,
                 }))
             }
             _ => Err("unknown content purge bridge fact".to_string()),

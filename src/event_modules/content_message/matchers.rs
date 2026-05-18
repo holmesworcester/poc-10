@@ -40,7 +40,6 @@ pub fn message_offer(owner: FactId, scope: FactScope, message_id: FactId) -> Con
         role: message_role(),
         scope,
         selector: Selector::from_bytes(message_id),
-        payload_ref: owner,
     }
 }
 
@@ -69,7 +68,6 @@ pub fn deletion_offer(
         role: deletion_role(),
         scope,
         selector: deletion_selector(target_id, author_user_id),
-        payload_ref: owner,
     }
 }
 

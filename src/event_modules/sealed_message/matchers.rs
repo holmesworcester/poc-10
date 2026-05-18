@@ -45,7 +45,6 @@ pub fn signer_offer(owner: FactId, scope: FactScope, signer_id: SignerId) -> Con
         role: signer_role(),
         scope,
         selector: Selector::from_bytes(signer_id),
-        payload_ref: owner,
     }
 }
 
@@ -74,7 +73,6 @@ pub fn deletion_offer(
         role: deletion_role(),
         scope,
         selector: deletion_selector(target_id, author_user_id),
-        payload_ref: owner,
     }
 }
 
@@ -123,7 +121,6 @@ pub fn secret_offer(
             prefix_bytes,
             leaf_prefix,
         ),
-        payload_ref: owner,
     }
 }
 
@@ -298,7 +295,6 @@ fn secret_coverage_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Con
     Some(ContextMatch {
         need_owner,
         offer_owner: offer.owner,
-        payload_ref: offer.payload_ref,
     })
 }
 
@@ -326,7 +322,6 @@ mod tests {
 
         assert_eq!(matched.need_owner, [3; 32]);
         assert_eq!(matched.offer_owner, [4; 32]);
-        assert_eq!(matched.payload_ref, [4; 32]);
     }
 
     #[test]

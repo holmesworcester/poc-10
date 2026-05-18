@@ -27,6 +27,5 @@ pub fn source_secret_offer(owner: FactId, source_secret_id: FactId) -> ContextOf
         role: source_secret_role(),
         scope: FactScope::Local,
         selector: Selector::from_bytes(source_secret_id),
-        payload_ref: owner,
     }
 }

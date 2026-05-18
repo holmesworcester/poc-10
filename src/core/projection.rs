@@ -56,8 +56,11 @@ impl ProjectionContext {
             .map(|matched| &matched.payload)
     }
 
-    pub fn payload_refs(&self) -> impl Iterator<Item = FactId> + '_ {
-        self.offers.iter().map(|offer| offer.payload_ref)
+    /// The set of fact ids whose payloads are currently offered by this
+    /// context. With per-projector ownership, every offer's payload is the
+    /// offering fact itself, so this is just the set of offer owners.
+    pub fn offer_owners(&self) -> impl Iterator<Item = FactId> + '_ {
+        self.offers.iter().map(|offer| offer.owner)
     }
 
     pub fn payload_facts(&self) -> impl Iterator<Item = &Fact> + '_ {
@@ -167,7 +170,6 @@ mod tests {
                 role,
                 scope: FactScope::Global,
                 selector,
-                payload_ref: id,
             });
 
         assert_eq!(output.needs.len(), 1);
@@ -233,7 +235,6 @@ mod tests {
             role,
             scope: FactScope::Global,
             selector,
-            payload_ref: [3; 32],
         };
 
         let next = run_projection(&projector, &fact, &previous, vec![offer])
@@ -270,7 +271,7 @@ mod tests {
                     self.intent_kind.clone(),
                     IntentExecution::Atomic,
                     fact.id,
-                    context.payload_refs().next().unwrap_or(fact.id),
+                    context.offer_owners().next().unwrap_or(fact.id),
                 )))
             }
         }

@@ -397,7 +397,7 @@ fn message_match(owner: &Fact, message: &Fact) -> MatchedContext {
 fn file_event_match(owner: &Fact, file: &Fact) -> MatchedContext {
     MatchedContext {
         need: sync::matchers::exact_event_need(owner.id, file.scope.clone(), file.id),
-        offer: sync::matchers::exact_event_offer(file.id, file.scope.clone(), file.id, file.id),
+        offer: sync::matchers::exact_event_offer(file.id, file.scope.clone(), file.id),
         payload: file.clone(),
     }
 }

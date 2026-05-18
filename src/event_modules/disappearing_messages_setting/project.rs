@@ -91,7 +91,6 @@ impl Projector for DisappearingMessagesSettingProjector {
                 fact.id,
                 FactScope::Global,
                 fact.id,
-                fact.id,
             ))
             .intent(AtomicIntent::PutRow(row).into_intent()))
     }
@@ -359,7 +358,6 @@ mod projector_tests {
             sync_matchers::exact_event_offer(
                 previous.id,
                 FactScope::Global,
-                previous.id,
                 previous.id,
             ),
             previous,
