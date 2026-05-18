@@ -1,18 +1,26 @@
 //! Poc-10 device-invite projector.
 //!
-//! Device invites are signed either by the invited user or by an existing
-//! endpoint_shared signer for that user. Projection validates the envelope
-//! signer against the matching authority context before writing the invite.
+//! POLICY. A device_invite is admitted iff:
+//!   1. STRUCTURAL. The outer fact is global, signed, contains a device_invite,
+//!      and all selector fields are non-zero.
+//!   2. AUTHORITY. The invite follows one of two named authority paths:
+//!      user-signed invites require workspace, user, and user_invite context;
+//!      endpoint-signed invites require workspace and endpoint_shared context.
+//!   3. MATERIALIZE. Once the path validates, write the row, publish exact/key
+//!      offers, and mark the fact shareable with the workspace.
 
-use crate::core::facts::{Fact, FactScope};
+use crate::core::context::ContextNeed;
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::AtomicIntent;
 use crate::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::facts::identity;
+use crate::protocol::facts::identity::device_invite::fact::DeviceInviteFact;
 use crate::protocol::facts::identity::endpoint_shared::layout as endpoint_shared_layout;
 use crate::protocol::facts::identity::user::layout as user_layout;
 use crate::protocol::facts::identity::user_invite::layout as user_invite_layout;
 use crate::protocol::facts::identity::workspace::layout as workspace_layout;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::matchers;
 
 use super::layout;
 use super::rows::device_invite_row;
@@ -32,6 +40,7 @@ impl Projector for DeviceInviteProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("device_invite fact must have global scope".to_string());
         }
@@ -50,111 +59,44 @@ impl Projector for DeviceInviteProjector {
         if device_invite.public_key == [0; 32] {
             return Err("device_invite fact has empty public_key".to_string());
         }
-        let needs = authority_needs(fact.id, &device_invite, envelope.signer_id);
-        let output = output_with_needs(&needs);
-        if !has_all_context(&needs, context) {
-            return Ok(output);
-        }
-        validate_authority(&needs, &device_invite, &envelope, context)?;
-        Ok(output
-            .intent(AtomicIntent::PutRow(device_invite_row(fact.id, &device_invite)?).into_intent())
-            .offer(crate::protocol::matchers::exact_offer(
-                fact.id,
-                crate::protocol::matchers::device_invite_role(),
-            ))
-            .offer(crate::protocol::matchers::scoped_key_offer(
-                fact.id,
-                crate::protocol::matchers::device_invite_key_role(),
-                device_invite.workspace_id,
-                crate::protocol::matchers::device_invite_key(
-                    device_invite.user_authority_fact_id,
-                    device_invite.public_key,
-                ),
-            ))
-            .intent(share_fact_with_workspace_intent_for_fact(
-                device_invite.workspace_id,
+
+        // 2. Authority.
+        match device_invite.user_invite_fact_id {
+            Some(user_invite_fact_id) => project_user_signed(
                 fact,
-            )))
-    }
-}
-
-fn authority_needs(
-    owner: [u8; 32],
-    invite: &super::fact::DeviceInviteFact,
-    signer_id: [u8; 32],
-) -> Vec<crate::core::context::ContextNeed> {
-    let workspace_need = crate::protocol::matchers::exact_need(
-        owner,
-        crate::protocol::matchers::workspace_role(),
-        invite.workspace_id,
-    );
-    if let Some(user_invite_fact_id) = invite.user_invite_fact_id {
-        vec![
-            workspace_need,
-            crate::protocol::matchers::exact_need(
-                owner,
-                crate::protocol::matchers::user_role(),
-                invite.user_authority_fact_id,
-            ),
-            crate::protocol::matchers::exact_need(
-                owner,
-                crate::protocol::matchers::user_invite_role(),
+                &device_invite,
+                &envelope,
                 user_invite_fact_id,
+                context,
             ),
-        ]
-    } else {
-        vec![
-            workspace_need,
-            crate::protocol::matchers::exact_need(
-                owner,
-                crate::protocol::matchers::endpoint_shared_role(),
-                signer_id,
-            ),
-        ]
+            None => project_endpoint_signed(fact, &device_invite, &envelope, context),
+        }
     }
 }
 
-fn output_with_needs(needs: &[crate::core::context::ContextNeed]) -> ProjectionOutput {
-    let mut output = ProjectionOutput::new();
-    for need in needs {
-        output = output.need(need.clone());
-    }
-    output
-}
-
-fn has_all_context(
-    needs: &[crate::core::context::ContextNeed],
-    context: &ProjectionContext,
-) -> bool {
-    needs.iter().all(|need| context.payload_for(need).is_some())
-}
-
-fn validate_authority(
-    needs: &[crate::core::context::ContextNeed],
-    invite: &super::fact::DeviceInviteFact,
+fn project_user_signed(
+    fact: &Fact,
+    invite: &DeviceInviteFact,
     envelope: &identity::signed_fact::fact::SignedFactEnvelope,
+    user_invite_fact_id: FactId,
     context: &ProjectionContext,
-) -> Result<(), String> {
-    let workspace_fact = context
-        .payload_for(&needs[0])
-        .expect("checked by has_all_context");
-    if workspace_fact.id != invite.workspace_id {
-        return Err("device_invite workspace context payload id mismatch".to_string());
-    }
-    workspace_layout::decode_fact(workspace_fact.body())
-        .map_err(|_| "device_invite workspace dependency is not a workspace".to_string())?;
+) -> Result<ProjectionOutput, String> {
+    let needs = UserSignedNeeds::new(fact.id, invite, user_invite_fact_id);
+    let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
+        return Ok(needs.output());
+    };
+    let Some(user_fact) = context.payload_for(&needs.user) else {
+        return Ok(needs.output());
+    };
+    let Some(user_invite_fact) = context.payload_for(&needs.user_invite) else {
+        return Ok(needs.output());
+    };
 
-    if invite.user_invite_fact_id.is_none() {
-        return validate_endpoint_shared_authority(&needs[1], invite, envelope, context);
-    }
+    validate_workspace_context(workspace_fact, invite.workspace_id)?;
 
     if envelope.signer_id != invite.user_authority_fact_id {
         return Err("user-signed device_invite authority must match signer user".to_string());
     }
-    let user_need = &needs[1];
-    let user_fact = context
-        .payload_for(user_need)
-        .expect("checked by has_all_context");
     if user_fact.id != invite.user_authority_fact_id {
         return Err("device_invite user context payload id mismatch".to_string());
     }
@@ -172,49 +114,48 @@ fn validate_authority(
         return Err("device_invite user authority belongs to a different workspace".to_string());
     }
 
-    if let Some(user_invite_fact_id) = invite.user_invite_fact_id {
-        if user_envelope.signer_id != user_invite_fact_id {
-            return Err(
-                "device_invite user_invite dependency does not match signed user".to_string(),
-            );
-        }
-        let invite_need = &needs[2];
-        let invite_fact = context
-            .payload_for(invite_need)
-            .expect("checked by has_all_context");
-        if invite_fact.id != user_invite_fact_id {
-            return Err("device_invite user_invite context payload id mismatch".to_string());
-        }
-        let invite_envelope = identity::signed_fact::layout::decode_signed_fact(invite_fact.body())
-            .map_err(|_| {
-                "device_invite user_invite context is not a user_invite fact".to_string()
-            })?;
-        if invite_envelope.inner_type != user_invite_layout::TYPE_USER_INVITE {
-            return Err("device_invite user_invite dependency is not a user_invite".to_string());
-        }
-        let user_invite =
-            user_invite_layout::decode_fact(&invite_envelope.payload).map_err(|_| {
-                "device_invite user_invite context is not a user_invite fact".to_string()
-            })?;
-        if user_invite.workspace_id != invite.workspace_id {
-            return Err("device_invite user_invite belongs to a different workspace".to_string());
-        }
-        if user_invite.public_key != user_envelope.signer_public_key {
-            return Err("device_invite user_invite key does not match user".to_string());
-        }
+    if user_envelope.signer_id != user_invite_fact_id {
+        return Err("device_invite user_invite dependency does not match signed user".to_string());
     }
-    Ok(())
+    if user_invite_fact.id != user_invite_fact_id {
+        return Err("device_invite user_invite context payload id mismatch".to_string());
+    }
+    let invite_envelope = identity::signed_fact::layout::decode_signed_fact(
+        user_invite_fact.body(),
+    )
+    .map_err(|_| "device_invite user_invite context is not a user_invite fact".to_string())?;
+    if invite_envelope.inner_type != user_invite_layout::TYPE_USER_INVITE {
+        return Err("device_invite user_invite dependency is not a user_invite".to_string());
+    }
+    let user_invite = user_invite_layout::decode_fact(&invite_envelope.payload)
+        .map_err(|_| "device_invite user_invite context is not a user_invite fact".to_string())?;
+    if user_invite.workspace_id != invite.workspace_id {
+        return Err("device_invite user_invite belongs to a different workspace".to_string());
+    }
+    if user_invite.public_key != user_envelope.signer_public_key {
+        return Err("device_invite user_invite key does not match user".to_string());
+    }
+
+    // 3. Materialize.
+    materialized_output(fact, invite, needs.output())
 }
 
-fn validate_endpoint_shared_authority(
-    need: &crate::core::context::ContextNeed,
-    invite: &super::fact::DeviceInviteFact,
+fn project_endpoint_signed(
+    fact: &Fact,
+    invite: &DeviceInviteFact,
     envelope: &identity::signed_fact::fact::SignedFactEnvelope,
     context: &ProjectionContext,
-) -> Result<(), String> {
-    let signer_fact = context
-        .payload_for(need)
-        .expect("checked by has_all_context");
+) -> Result<ProjectionOutput, String> {
+    let needs = EndpointSignedNeeds::new(fact.id, invite, envelope.signer_id);
+    let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
+        return Ok(needs.output());
+    };
+    let Some(signer_fact) = context.payload_for(&needs.endpoint_shared) else {
+        return Ok(needs.output());
+    };
+
+    validate_workspace_context(workspace_fact, invite.workspace_id)?;
+
     if signer_fact.id != envelope.signer_id {
         return Err("device_invite endpoint_shared context payload id mismatch".to_string());
     }
@@ -241,7 +182,92 @@ fn validate_endpoint_shared_authority(
             "endpoint_shared-signed device_invite user authority does not match signer".to_string(),
         );
     }
+
+    // 3. Materialize.
+    materialized_output(fact, invite, needs.output())
+}
+
+struct UserSignedNeeds {
+    workspace: ContextNeed,
+    user: ContextNeed,
+    user_invite: ContextNeed,
+}
+
+impl UserSignedNeeds {
+    fn new(owner: FactId, invite: &DeviceInviteFact, user_invite_fact_id: FactId) -> Self {
+        Self {
+            workspace: matchers::exact_need(owner, matchers::workspace_role(), invite.workspace_id),
+            user: matchers::exact_need(owner, matchers::user_role(), invite.user_authority_fact_id),
+            user_invite: matchers::exact_need(
+                owner,
+                matchers::user_invite_role(),
+                user_invite_fact_id,
+            ),
+        }
+    }
+
+    fn output(&self) -> ProjectionOutput {
+        ProjectionOutput::new()
+            .need(self.workspace.clone())
+            .need(self.user.clone())
+            .need(self.user_invite.clone())
+    }
+}
+
+struct EndpointSignedNeeds {
+    workspace: ContextNeed,
+    endpoint_shared: ContextNeed,
+}
+
+impl EndpointSignedNeeds {
+    fn new(owner: FactId, invite: &DeviceInviteFact, signer_id: FactId) -> Self {
+        Self {
+            workspace: matchers::exact_need(owner, matchers::workspace_role(), invite.workspace_id),
+            endpoint_shared: matchers::exact_need(
+                owner,
+                matchers::endpoint_shared_role(),
+                signer_id,
+            ),
+        }
+    }
+
+    fn output(&self) -> ProjectionOutput {
+        ProjectionOutput::new()
+            .need(self.workspace.clone())
+            .need(self.endpoint_shared.clone())
+    }
+}
+
+fn validate_workspace_context(workspace_fact: &Fact, workspace_id: FactId) -> Result<(), String> {
+    if workspace_fact.id != workspace_id {
+        return Err("device_invite workspace context payload id mismatch".to_string());
+    }
+    workspace_layout::decode_fact(workspace_fact.body())
+        .map_err(|_| "device_invite workspace dependency is not a workspace".to_string())?;
     Ok(())
+}
+
+fn materialized_output(
+    fact: &Fact,
+    invite: &DeviceInviteFact,
+    output: ProjectionOutput,
+) -> Result<ProjectionOutput, String> {
+    Ok(output
+        .intent(AtomicIntent::PutRow(device_invite_row(fact.id, invite)?).into_intent())
+        .offer(matchers::exact_offer(
+            fact.id,
+            matchers::device_invite_role(),
+        ))
+        .offer(matchers::scoped_key_offer(
+            fact.id,
+            matchers::device_invite_key_role(),
+            invite.workspace_id,
+            matchers::device_invite_key(invite.user_authority_fact_id, invite.public_key),
+        ))
+        .intent(share_fact_with_workspace_intent_for_fact(
+            invite.workspace_id,
+            fact,
+        )))
 }
 
 #[cfg(test)]
