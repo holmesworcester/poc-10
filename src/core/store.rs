@@ -18,7 +18,7 @@
 //! parameters, and table names are accepted only from `TableName` after a
 //! conservative identifier check.
 
-use crate::core::schema_dsl::{self, ColumnType, TableDeclaration};
+use crate::core::schema_dsl::{self, ColumnType, TableDeclaration, TableKind};
 use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -754,13 +754,7 @@ fn table_declarations_from_schema_sources(
 }
 
 fn is_row_table_declaration(table: &TableDeclaration) -> bool {
-    let valid_columns = table.columns.len() == 2
-        && table.columns[0].name == "key"
-        && table.columns[0].ty == (ColumnType::Bytes { len: None })
-        && table.columns[1].name == "value"
-        && table.columns[1].ty == (ColumnType::Bytes { len: None });
-    let valid_row_key = table.row_key.columns.len() == 1 && table.row_key.columns[0] == "key";
-    valid_columns && valid_row_key && table.indexes.is_empty()
+    table.kind == TableKind::Row
 }
 
 /// One column returned by SQLite's `PRAGMA table_info`.

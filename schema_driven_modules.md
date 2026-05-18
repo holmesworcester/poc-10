@@ -99,8 +99,9 @@ stays in Rust where a cryptographer can audit it.
 
 ## Schema vocabulary needed
 
-The current `schema_dsl.rs` parses tables, columns, row keys, indexes. To
-absorb fact/layout/create boilerplate it needs:
+The current `schema_dsl.rs` parses explicit row-table declarations, typed
+tables, columns, row keys, and indexes. To absorb fact/layout/create boilerplate
+it needs:
 
 1. **Fact-shape declarations**: per-fact tag byte, scope kind (Global, Local,
    Scoped<workspace>, …), timestamp source.

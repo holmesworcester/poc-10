@@ -1,119 +1,25 @@
 # Initial poc-10 fact-module projection table inventory.
-# These declarations list durable ownership without migrating behavior yet.
+# Row table declarations list durable ownership without migrating behavior yet.
 
-table message_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table opened_message_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table sealed_message_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table message_tombstone_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table file_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table file_slice_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table workspace_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table recipient_key_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table key_wrap_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table user_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table local_endpoint_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table local_endpoint_secret_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table local_endpoint_signing_public_key_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table local_endpoint_signing_secret_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table identity_endpoint_shared_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table content_event_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table cascade_staged_fact_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table admin_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table reaction_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
+row_table message_rows;
+row_table opened_message_rows;
+row_table sealed_message_rows;
+row_table message_tombstone_rows;
+row_table file_rows;
+row_table file_slice_rows;
+row_table workspace_rows;
+row_table recipient_key_rows;
+row_table key_wrap_rows;
+row_table user_rows;
+row_table local_endpoint_rows;
+row_table local_endpoint_secret_rows;
+row_table local_endpoint_signing_public_key_rows;
+row_table local_endpoint_signing_secret_rows;
+row_table identity_endpoint_shared_rows;
+row_table content_event_rows;
+row_table cascade_staged_fact_rows;
+row_table admin_rows;
+row_table reaction_rows;
 
 table content_messages {
   column workspace_id bytes(32);
@@ -150,110 +56,21 @@ table content_files {
   index by_message (workspace_id, message_id, created_at_ms);
 }
 
-table content_message_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table connection_ephemeral_secret_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table connection_request_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table connection_response_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table invite_accepted_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table invite_server_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table user_invite_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table device_invite_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table invite_secret_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table sync_compare_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table sync_have_id_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table sync_need_id_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table sync_shareable_fact_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table message_deletion_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table file_deletion_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table removal_frontier_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table local_history_node_secret_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
-
-table disappearing_messages_setting_rows {
-  column key bytes;
-  column value bytes;
-  row_key (key);
-}
+row_table content_message_rows;
+row_table connection_ephemeral_secret_rows;
+row_table connection_request_rows;
+row_table connection_response_rows;
+row_table invite_accepted_rows;
+row_table invite_server_rows;
+row_table user_invite_rows;
+row_table device_invite_rows;
+row_table invite_secret_rows;
+row_table sync_compare_rows;
+row_table sync_have_id_rows;
+row_table sync_need_id_rows;
+row_table sync_shareable_fact_rows;
+row_table message_deletion_rows;
+row_table file_deletion_rows;
+row_table removal_frontier_rows;
+row_table local_history_node_secret_rows;
+row_table disappearing_messages_setting_rows;
