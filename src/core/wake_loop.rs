@@ -23,7 +23,8 @@ use crate::core::handler_dispatch::{retry_intent_reason, HandlerContext, IntentH
 use crate::core::intents::{AtomicIntent, Intent, IntentExecution, IntentKind, TableDelete};
 use crate::core::matchers::{match_context_delta, ContextMatch, ContextMatcher};
 use crate::core::projection::{
-    run_projection_with_context, MatchedContext, ProjectionContext, Projector,
+    run_projection_with_context, MatchedContext, ProjectionContext, Projector, TimeRange, TimeWake,
+    Timeline,
 };
 use crate::core::store::{Store, TableName, TableRow};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -31,6 +32,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub const FACTS: TableName = TableName::new("facts");
 pub const NEEDS: TableName = TableName::new("needs");
 pub const OFFERS: TableName = TableName::new("offers");
+pub const TIME_WAKES: TableName = TableName::new("time_wakes");
 pub const PENDING_PROJECTION: TableName = TableName::new("pending_projection");
 pub const INTENTS: TableName = TableName::new("intents");
 
@@ -58,6 +60,8 @@ pub struct WakeLoop {
     context_by_owner: BTreeMap<FactId, ContextSet>,
     needs_by_exact_key: BTreeMap<ExactContextKey, BTreeSet<ContextNeed>>,
     offers_by_exact_key: BTreeMap<ExactContextKey, BTreeSet<ContextOffer>>,
+    time_wakes_by_owner: BTreeMap<FactId, Vec<TimeWake>>,
+    pending_time_ranges: BTreeMap<FactId, Vec<TimeRange>>,
     pending_projection: VecDeque<FactId>,
     pending_owners: BTreeSet<FactId>,
     intents: Vec<Intent>,
@@ -66,6 +70,7 @@ pub struct WakeLoop {
     dirty_facts: BTreeSet<FactId>,
     deleted_facts: BTreeSet<FactId>,
     dirty_context_owners: BTreeSet<FactId>,
+    dirty_time_wake_owners: BTreeSet<FactId>,
     dirty_pending_owners: BTreeSet<FactId>,
     dirty_intent_keys: BTreeSet<Vec<u8>>,
     deleted_intent_keys: BTreeSet<Vec<u8>>,
@@ -111,6 +116,20 @@ impl WakeLoop {
             *context = std::mem::take(context).normalized();
         }
         bus.rebuild_context_indexes();
+        for (_, value) in store
+            .table_rows(TIME_WAKES)
+            .map_err(|err| format!("load time wakes: {err}"))?
+        {
+            let wake = decode_time_wake(&value)?;
+            bus.time_wakes_by_owner
+                .entry(wake.owner)
+                .or_default()
+                .push(wake);
+        }
+        for wakes in bus.time_wakes_by_owner.values_mut() {
+            wakes.sort();
+            wakes.dedup();
+        }
         for (key, _) in store
             .table_rows(PENDING_PROJECTION)
             .map_err(|err| format!("load pending projection: {err}"))?
@@ -165,6 +184,11 @@ impl WakeLoop {
             .iter()
             .copied()
             .collect::<Vec<_>>();
+        let dirty_time_wake_owners = self
+            .dirty_time_wake_owners
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
         let pending_rows = self.dirty_pending_rows();
         let deleted_pending_keys = self
             .dirty_pending_owners
@@ -182,6 +206,7 @@ impl WakeLoop {
                 tx.delete_table_rows_in_tx(FACTS, deleted_fact_keys)?;
                 tx.insert_table_rows_in_tx(fact_rows)?;
                 replace_context_owner_rows(tx, &dirty_context_owners, self)?;
+                replace_time_wake_owner_rows(tx, &dirty_time_wake_owners, self)?;
                 tx.delete_table_rows_in_tx(PENDING_PROJECTION, deleted_pending_keys)?;
                 tx.insert_table_rows_in_tx(pending_rows)?;
                 tx.delete_table_rows_in_tx(INTENTS, deleted_intent_keys)?;
@@ -240,9 +265,51 @@ impl WakeLoop {
         self.record_intent(intent)
     }
 
+    pub fn wake_time_range(
+        &mut self,
+        timeline: Timeline,
+        start_exclusive: Option<u64>,
+        end_inclusive: u64,
+        limit: usize,
+    ) -> usize {
+        if limit == 0 {
+            return 0;
+        }
+        let range = TimeRange {
+            timeline,
+            start_exclusive,
+            end_inclusive,
+        };
+        let mut due = self
+            .time_wakes_by_owner
+            .values()
+            .flat_map(|wakes| wakes.iter())
+            .filter(|wake| wake.timeline == range.timeline && range.contains(wake.at))
+            .cloned()
+            .collect::<Vec<_>>();
+        due.sort_by(|left, right| {
+            left.at
+                .cmp(&right.at)
+                .then_with(|| left.owner.cmp(&right.owner))
+                .then_with(|| left.timeline.cmp(&right.timeline))
+        });
+        due.dedup();
+
+        let mut matched = 0usize;
+        for wake in due.into_iter().take(limit) {
+            self.pending_time_ranges
+                .entry(wake.owner)
+                .or_default()
+                .push(range.clone());
+            self.wake(wake.owner);
+            matched += 1;
+        }
+        matched
+    }
+
     pub fn dispatch_intents(
         &mut self,
-        handler: &impl IntentHandler,
+        handler: &(impl IntentHandler + ?Sized),
         context: &HandlerContext,
         limit: usize,
     ) -> Result<DispatchReport, String> {
@@ -251,7 +318,7 @@ impl WakeLoop {
 
     pub fn dispatch_atomic_intents(
         &mut self,
-        handler: &impl IntentHandler,
+        handler: &(impl IntentHandler + ?Sized),
         context: &HandlerContext,
         limit: usize,
     ) -> Result<DispatchReport, String> {
@@ -262,7 +329,7 @@ impl WakeLoop {
 
     pub fn dispatch_deferred_intents(
         &mut self,
-        handler: &impl IntentHandler,
+        handler: &(impl IntentHandler + ?Sized),
         context: &HandlerContext,
         limit: usize,
     ) -> Result<DispatchReport, String> {
@@ -273,7 +340,7 @@ impl WakeLoop {
 
     pub fn dispatch_deferred_intents_with_fact_context(
         &mut self,
-        handler: &impl IntentHandler,
+        handler: &(impl IntentHandler + ?Sized),
         limit: usize,
     ) -> Result<DispatchReport, String> {
         self.dispatch_deferred_intents_with_optional_store(handler, None, limit)
@@ -281,7 +348,7 @@ impl WakeLoop {
 
     pub fn dispatch_deferred_intents_with_fact_context_and_store(
         &mut self,
-        handler: &impl IntentHandler,
+        handler: &(impl IntentHandler + ?Sized),
         store: &Store,
         limit: usize,
     ) -> Result<DispatchReport, String> {
@@ -290,7 +357,7 @@ impl WakeLoop {
 
     fn dispatch_deferred_intents_with_optional_store(
         &mut self,
-        handler: &impl IntentHandler,
+        handler: &(impl IntentHandler + ?Sized),
         store: Option<&Store>,
         limit: usize,
     ) -> Result<DispatchReport, String> {
@@ -358,7 +425,7 @@ impl WakeLoop {
 
     fn dispatch_intents_matching(
         &mut self,
-        handler: &impl IntentHandler,
+        handler: &(impl IntentHandler + ?Sized),
         context: &HandlerContext,
         limit: usize,
         accepts_execution: impl Fn(&Intent) -> bool,
@@ -445,7 +512,9 @@ impl WakeLoop {
                 .get(&owner)
                 .cloned()
                 .unwrap_or_default();
-            let context = self.matching_context_for_owner(&owner, matchers)?;
+            let context = self
+                .matching_context_for_owner(&owner, matchers)?
+                .with_time_ranges(self.pending_time_ranges.remove(&owner).unwrap_or_default());
             let run = match run_projection_with_context(projector, &fact, &previous, context) {
                 Ok(run) => run,
                 Err(err) => {
@@ -464,6 +533,7 @@ impl WakeLoop {
                 }
             }
             self.replace_context(owner, run.context);
+            self.replace_time_wakes(owner, run.time_wakes);
             report.projections += 1;
             report.context_matches +=
                 self.wake_context_matches(&run.context_delta, matchers, &mut report);
@@ -517,6 +587,17 @@ impl WakeLoop {
         self.dirty_context_owners.insert(owner);
     }
 
+    fn replace_time_wakes(&mut self, owner: FactId, mut wakes: Vec<TimeWake>) {
+        wakes.sort();
+        wakes.dedup();
+        if wakes.is_empty() {
+            self.time_wakes_by_owner.remove(&owner);
+        } else {
+            self.time_wakes_by_owner.insert(owner, wakes);
+        }
+        self.dirty_time_wake_owners.insert(owner);
+    }
+
     pub fn purge_fact(&mut self, owner: FactId) -> bool {
         let mut changed = self.facts.remove(&owner).is_some();
         if changed {
@@ -526,6 +607,13 @@ impl WakeLoop {
         if let Some(context) = self.context_by_owner.remove(&owner) {
             self.remove_context_from_indexes(&context);
             self.dirty_context_owners.insert(owner);
+            changed = true;
+        }
+        if self.time_wakes_by_owner.remove(&owner).is_some() {
+            self.dirty_time_wake_owners.insert(owner);
+            changed = true;
+        }
+        if self.pending_time_ranges.remove(&owner).is_some() {
             changed = true;
         }
         if self.pending_owners.remove(&owner) {
@@ -601,7 +689,7 @@ impl WakeLoop {
 
     fn pop_next_intent_matching(
         &mut self,
-        handler: &impl IntentHandler,
+        handler: &(impl IntentHandler + ?Sized),
         accepts_execution: impl Fn(&Intent) -> bool,
     ) -> Result<Option<(usize, Intent)>, String> {
         let Some(index) = self
@@ -910,6 +998,7 @@ impl WakeLoop {
         self.dirty_facts.clear();
         self.deleted_facts.clear();
         self.dirty_context_owners.clear();
+        self.dirty_time_wake_owners.clear();
         self.dirty_pending_owners.clear();
         self.dirty_intent_keys.clear();
         self.deleted_intent_keys.clear();
@@ -991,6 +1080,31 @@ fn replace_context_owner_rows(
     Ok(())
 }
 
+fn replace_time_wake_owner_rows(
+    store: &Store,
+    owners: &[FactId],
+    wake_loop: &WakeLoop,
+) -> rusqlite::Result<()> {
+    let mut delete_keys = Vec::new();
+    let mut rows = Vec::new();
+
+    for owner in owners {
+        delete_keys.extend(
+            store
+                .table_rows_with_key_prefix(TIME_WAKES, owner, usize::MAX)?
+                .into_iter()
+                .map(|(key, _)| key),
+        );
+        if let Some(wakes) = wake_loop.time_wakes_by_owner.get(owner) {
+            rows.extend(wakes.iter().map(time_wake_row));
+        }
+    }
+
+    store.delete_table_rows_in_tx(TIME_WAKES, delete_keys)?;
+    store.insert_table_rows_in_tx(rows)?;
+    Ok(())
+}
+
 fn fact_row(fact: &Fact) -> TableRow {
     TableRow {
         table: FACTS,
@@ -1013,6 +1127,15 @@ fn offer_row(offer: &ContextOffer) -> TableRow {
     TableRow {
         table: OFFERS,
         key: context_row_key(offer.owner, &value),
+        value,
+    }
+}
+
+fn time_wake_row(wake: &TimeWake) -> TableRow {
+    let value = encode_time_wake(wake);
+    TableRow {
+        table: TIME_WAKES,
+        key: context_row_key(wake.owner, &value),
         value,
     }
 }
@@ -1167,6 +1290,29 @@ fn decode_offer(value: &[u8]) -> Result<ContextOffer, String> {
         scope,
         selector,
         payload_ref,
+    })
+}
+
+fn encode_time_wake(wake: &TimeWake) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_u8(&mut out, 1);
+    put_id(&mut out, &wake.owner);
+    put_string_u16(&mut out, wake.timeline.as_str());
+    put_u64(&mut out, wake.at);
+    out
+}
+
+fn decode_time_wake(value: &[u8]) -> Result<TimeWake, String> {
+    let mut reader = Reader::new(value);
+    reader.expect_u8(1)?;
+    let owner = reader.take_id()?;
+    let timeline = Timeline::new(reader.take_string_u16()?)?;
+    let at = reader.take_u64()?;
+    reader.finish()?;
+    Ok(TimeWake {
+        owner,
+        timeline,
+        at,
     })
 }
 

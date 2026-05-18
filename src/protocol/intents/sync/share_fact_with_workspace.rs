@@ -11,6 +11,7 @@ use crate::core::{
     intents::{Intent, IntentExecution, IntentKind},
 };
 use crate::protocol::facts::sync::shared_fact;
+use crate::protocol::intents::sync::seed_connection;
 
 pub const SHARE_FACT_WITH_WORKSPACE: &str = "share_fact_with_workspace";
 
@@ -156,7 +157,7 @@ impl IntentHandler for ShareFactWithWorkspaceHandler {
             fact,
             input.timestamp_ms,
         )?;
-        Ok(HandlerOutput::new())
+        seed_connection::advertise_indexed_fact_to_connections(context.store()?, fact)
     }
 }
 

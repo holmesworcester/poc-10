@@ -143,6 +143,7 @@ fn project_user_signed(
     if user_invite.public_key != user_envelope.signer_public_key {
         return Err("device_invite user_invite key does not match user".to_string());
     }
+    identity::signed_fact::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output())
@@ -190,6 +191,7 @@ fn project_endpoint_signed(
             "endpoint_shared-signed device_invite user authority does not match signer".to_string(),
         );
     }
+    identity::signed_fact::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output())

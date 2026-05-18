@@ -185,7 +185,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
         .iter()
         .map(|handler| handler.runtime_field.to_string())
         .collect::<BTreeSet<_>>();
-    let dispatched = runtime_dispatch_handler_fields();
+    let dispatched = runtime_dispatch_handler_routes();
 
     for required in [
         "purge_message_child",
@@ -198,7 +198,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
         );
         assert!(
             dispatched.contains(required),
-            "{required} must be included by ProtocolHandlers::dispatch_all"
+            "{required} must be included by HANDLER_ROUTES"
         );
     }
 
@@ -213,7 +213,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
 
     assert!(
         missing.is_empty() && unexpected.is_empty(),
-        "ProtocolHandlers::dispatch_all must stay in lockstep with src/protocol.rs handlers\nmissing from runtime dispatch: {missing:?}\nunexpected runtime dispatch handlers: {unexpected:?}"
+        "HANDLER_ROUTES must stay in lockstep with src/protocol.rs handlers\nmissing from runtime dispatch: {missing:?}\nunexpected runtime dispatch handlers: {unexpected:?}"
     );
 }
 
@@ -269,36 +269,36 @@ fn workspace_scope(workspace_id: [u8; 32]) -> FactScope {
     }
 }
 
-fn runtime_dispatch_handler_fields() -> BTreeSet<String> {
+fn runtime_dispatch_handler_routes() -> BTreeSet<String> {
     let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/runtime.rs");
     let source = std::fs::read_to_string(&runtime_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", runtime_path.display()));
-    let impl_start = source
-        .find("impl ProtocolHandlers")
-        .expect("ProtocolHandlers impl block");
-    let start = source[impl_start..]
-        .find("fn dispatch_all(")
-        .map(|offset| impl_start + offset)
-        .expect("ProtocolHandlers::dispatch_all start");
+    let const_start = source
+        .find("const HANDLER_ROUTES")
+        .expect("HANDLER_ROUTES declaration");
+    let start = source[const_start..]
+        .find("&[")
+        .map(|offset| const_start + offset)
+        .expect("HANDLER_ROUTES body start");
     let end = source[start..]
-        .find("    fn dispatch_one(")
+        .find("];")
         .map(|offset| start + offset)
-        .expect("ProtocolHandlers::dispatch end");
+        .expect("HANDLER_ROUTES body end");
     let body = &source[start..end];
 
-    let mut fields = BTreeSet::new();
+    let mut routes = BTreeSet::new();
     let mut rest = body;
-    while let Some(index) = rest.find("&self.") {
-        let after_prefix = &rest[index + "&self.".len()..];
+    while let Some(index) = rest.find("name: \"") {
+        let after_prefix = &rest[index + "name: \"".len()..];
         let field_len = after_prefix
             .chars()
-            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .take_while(|ch| *ch != '"')
             .map(char::len_utf8)
             .sum::<usize>();
         if field_len > 0 {
-            fields.insert(after_prefix[..field_len].to_string());
+            routes.insert(after_prefix[..field_len].to_string());
         }
         rest = &after_prefix[field_len..];
     }
-    fields
+    routes
 }

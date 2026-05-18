@@ -14,6 +14,11 @@ pub const TYPE_MESSAGE_DELETION: u8 = layout::TYPE_MESSAGE_DELETION;
 pub const TYPE_SIGNER_PUBKEY: u8 = layout::TYPE_SIGNER_PUBKEY;
 pub const TYPE_SECRET_NODE: u8 = layout::TYPE_SECRET_NODE;
 
+pub fn expiration_timeline() -> crate::core::projection::Timeline {
+    crate::core::projection::Timeline::new("sealed_message_expiry")
+        .expect("valid sealed-message expiry timeline")
+}
+
 pub enum ProjectionPayload {
     Message(fact::SealedMessageFact),
     SignedMessage(

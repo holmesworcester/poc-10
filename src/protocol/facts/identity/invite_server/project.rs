@@ -105,6 +105,7 @@ fn project_workspace_signed(
             "signed invite_server signer key does not match workspace public key".to_string(),
         );
     }
+    identity::signed_fact::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output())
@@ -155,6 +156,7 @@ fn project_endpoint_signed(
     if endpoint.user_authority_fact_id != admin.user_fact_id {
         return Err("invite_server signer user does not match admin authority user".to_string());
     }
+    identity::signed_fact::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output())

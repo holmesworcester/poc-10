@@ -50,12 +50,16 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let deletion = decoded.payload;
+        let authority::DecodedFact {
+            payload: deletion,
+            signer,
+            envelope,
+        } = decoded;
         let scope = matchers::workspace_scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
-        let signer_need = authority::signer_need(fact.id, decoded.signer);
+        let signer_need = authority::signer_need(fact.id, signer);
         let target_need = crate::protocol::matchers::exact_fact_need(
             fact.id,
             scope.clone(),
@@ -66,7 +70,7 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
             crate::protocol::matchers::user_role(),
             deletion.author_user_id,
         );
-        if let (Some(signer), Some(need)) = (decoded.signer, signer_need.as_ref()) {
+        if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
             if !authority::validate_signer_context(
                 context,
                 need,
@@ -100,6 +104,7 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
         };
         validate_target_file(&deletion, target_fact, &scope)?;
         validate_author_user(&deletion, author_fact)?;
+        authority::verify_envelope(envelope.as_ref(), "file deletion")?;
 
         // 3. Materialize.
         let row = file_deletion_row(FileDeletionRow {
@@ -195,6 +200,7 @@ fn maybe_signed_payload(
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),
             signer: None,
+            envelope: None,
         })
     }
 }

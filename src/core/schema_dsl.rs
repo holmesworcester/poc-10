@@ -683,6 +683,7 @@ mod tests {
                 "inbox",
                 "needs",
                 "offers",
+                "time_wakes",
                 "pending_projection",
                 "intents",
                 "clock",

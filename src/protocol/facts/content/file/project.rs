@@ -53,13 +53,17 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let file = decoded.payload;
+        let authority::DecodedFact {
+            payload: file,
+            signer,
+            envelope,
+        } = decoded;
         validate_file_fields(&file)?;
         let scope = message_matchers::workspace_scope(file.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
-        let signer_need = authority::signer_need(fact.id, decoded.signer);
+        let signer_need = authority::signer_need(fact.id, signer);
         let file_deletion_need =
             message_matchers::deletion_need(fact.id, scope.clone(), fact.id, file.author_user_id);
         let parent_need = message_matchers::message_need(fact.id, scope.clone(), file.message_id);
@@ -68,7 +72,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             crate::protocol::matchers::user_role(),
             file.author_user_id,
         );
-        if let (Some(signer), Some(need)) = (decoded.signer, signer_need.as_ref()) {
+        if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
             if !authority::validate_signer_context(
                 context,
                 need,
@@ -88,6 +92,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         }
         if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
             validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
+            authority::verify_envelope(envelope.as_ref(), "file")?;
             return Ok(delete_file_projection(file.workspace_id, fact.id).need(file_deletion_need));
         }
         let Some(parent_payload) = context_payload(context, &parent_need, "file parent")? else {
@@ -121,6 +126,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
                 file.message_id,
                 parent.message.author_user_id,
             )?;
+            authority::verify_envelope(envelope.as_ref(), "file")?;
             return Ok(delete_file_projection(file.workspace_id, fact.id)
                 .need(file_deletion_need)
                 .need(parent_need)
@@ -136,6 +142,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             ]));
         };
         validate_author_user(author, file.workspace_id, file.author_user_id)?;
+        authority::verify_envelope(envelope.as_ref(), "file")?;
 
         // 3. Materialize.
         Ok(output_with_needs([
@@ -353,6 +360,7 @@ fn maybe_signed_payload(
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),
             signer: None,
+            envelope: None,
         })
     }
 }

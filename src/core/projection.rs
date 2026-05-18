@@ -12,6 +12,7 @@ pub struct ProjectionContext {
     offers: Vec<ContextOffer>,
     matched: Vec<MatchedContext>,
     matched_by_need: BTreeMap<ContextNeed, Vec<usize>>,
+    time_ranges: Vec<TimeRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,7 @@ impl ProjectionContext {
             offers,
             matched: Vec::new(),
             matched_by_need: BTreeMap::new(),
+            time_ranges: Vec::new(),
         }
     }
 
@@ -42,6 +44,7 @@ impl ProjectionContext {
             offers,
             matched,
             matched_by_need,
+            time_ranges: Vec::new(),
         }
     }
 
@@ -51,6 +54,23 @@ impl ProjectionContext {
 
     pub fn matched_context(&self) -> &[MatchedContext] {
         &self.matched
+    }
+
+    pub fn with_time_ranges(mut self, time_ranges: Vec<TimeRange>) -> Self {
+        self.time_ranges = time_ranges;
+        self
+    }
+
+    pub fn time_ranges(&self) -> &[TimeRange] {
+        &self.time_ranges
+    }
+
+    pub fn time_reached(&self, timeline: &Timeline, at: u64) -> Option<u64> {
+        self.time_ranges
+            .iter()
+            .filter(|range| &range.timeline == timeline && range.contains(at))
+            .map(|range| range.end_inclusive)
+            .max()
     }
 
     /// Return the payload fact supplied for an exact need, if any.
@@ -178,10 +198,54 @@ fn index_matches_by_need(matched: &[MatchedContext]) -> BTreeMap<ContextNeed, Ve
     matched_by_need
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Timeline(String);
+
+impl Timeline {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err("timeline cannot be empty".to_string());
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(format!("invalid timeline {value:?}"));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TimeWake {
+    pub owner: FactId,
+    pub timeline: Timeline,
+    pub at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeRange {
+    pub timeline: Timeline,
+    pub start_exclusive: Option<u64>,
+    pub end_inclusive: u64,
+}
+
+impl TimeRange {
+    pub fn contains(&self, at: u64) -> bool {
+        self.start_exclusive.is_none_or(|start| at > start) && at <= self.end_inclusive
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionOutput {
     pub needs: Vec<ContextNeed>,
     pub offers: Vec<ContextOffer>,
+    pub time_wakes: Vec<TimeWake>,
     pub intents: Vec<Intent>,
 }
 
@@ -197,6 +261,11 @@ impl ProjectionOutput {
 
     pub fn offer(mut self, offer: ContextOffer) -> Self {
         self.offers.push(offer);
+        self
+    }
+
+    pub fn time_wake(mut self, wake: TimeWake) -> Self {
+        self.time_wakes.push(wake);
         self
     }
 
@@ -217,6 +286,61 @@ impl ProjectionOutput {
 pub trait Projector {
     fn project(&self, fact: &Fact, context: &ProjectionContext)
         -> Result<ProjectionOutput, String>;
+}
+
+pub type ProjectorFn = fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>;
+pub type EffectiveTagFn = fn(&Fact) -> Result<u8, String>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct FactRoute {
+    pub tag: u8,
+    pub projector: ProjectorFn,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EnvelopeRoute {
+    pub outer_tag: u8,
+    pub effective_tag: EffectiveTagFn,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RouterProjector {
+    routes: &'static [FactRoute],
+    envelopes: &'static [EnvelopeRoute],
+}
+
+impl RouterProjector {
+    pub const fn new(routes: &'static [FactRoute], envelopes: &'static [EnvelopeRoute]) -> Self {
+        Self { routes, envelopes }
+    }
+
+    fn effective_tag(&self, fact: &Fact) -> Result<u8, String> {
+        let Some(tag) = fact.bytes.first().copied() else {
+            return Err("cannot project empty fact bytes".to_string());
+        };
+        if let Some(envelope) = self
+            .envelopes
+            .iter()
+            .find(|envelope| envelope.outer_tag == tag)
+        {
+            return (envelope.effective_tag)(fact);
+        }
+        Ok(tag)
+    }
+}
+
+impl Projector for RouterProjector {
+    fn project(
+        &self,
+        fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        let tag = self.effective_tag(fact)?;
+        let Some(route) = self.routes.iter().find(|route| route.tag == tag) else {
+            return Err(format!("no target projector registered for fact tag {tag}"));
+        };
+        (route.projector)(fact, context)
+    }
 }
 
 /// Type-aware decoder supplied by the fact module that owns the wire layout.
@@ -262,6 +386,7 @@ where
 pub struct ProjectionRun {
     pub context: ContextSet,
     pub context_delta: ContextSetDelta,
+    pub time_wakes: Vec<TimeWake>,
     pub intents: Vec<Intent>,
 }
 
@@ -286,13 +411,45 @@ pub fn run_projection_with_context(
     context: ProjectionContext,
 ) -> Result<ProjectionRun, String> {
     let output = projector.project(fact, &context)?;
+    enforce_owner_is_self(fact, &output)?;
     let context = output.context_set();
     let context_delta = diff_context_sets(previous_context, &context);
     Ok(ProjectionRun {
         context,
         context_delta,
+        time_wakes: output.time_wakes,
         intents: output.intents,
     })
+}
+
+/// Reject any projected need, offer, or time wake whose `owner` is not the fact
+/// being projected.
+fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
+    for need in &output.needs {
+        if need.owner != fact.id {
+            return Err(format!(
+                "projector emitted need with owner {:x?} that is not the projected fact {:x?}",
+                need.owner, fact.id
+            ));
+        }
+    }
+    for offer in &output.offers {
+        if offer.owner != fact.id {
+            return Err(format!(
+                "projector emitted offer with owner {:x?} that is not the projected fact {:x?}",
+                offer.owner, fact.id
+            ));
+        }
+    }
+    for wake in &output.time_wakes {
+        if wake.owner != fact.id {
+            return Err(format!(
+                "projector emitted time wake with owner {:x?} that is not the projected fact {:x?}",
+                wake.owner, fact.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

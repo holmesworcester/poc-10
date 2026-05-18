@@ -537,6 +537,11 @@ pub const INTENTS: &[IntentRegistration] = &[
         declared_by: "intents::sync::share_fact_with_workspace",
     },
     IntentRegistration {
+        kind: sync_intents::seed_connection::SEED_CONNECTION_SYNC,
+        execution: IntentExecutionKind::Deferred,
+        declared_by: "intents::sync::seed_connection",
+    },
+    IntentRegistration {
         kind: transport_intents::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
         execution: IntentExecutionKind::Deferred,
         declared_by: "intents::transport::send_facts_on_connection",
@@ -609,6 +614,12 @@ pub const HANDLERS: &[HandlerRegistration] = &[
         handler: "ShareFactWithWorkspaceHandler",
         runtime_field: "share_fact_with_workspace",
         intents: &[sync_intents::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE],
+    },
+    HandlerRegistration {
+        module: "sync::seed_connection",
+        handler: "SeedConnectionSyncHandler",
+        runtime_field: "seed_connection_sync",
+        intents: &[sync_intents::seed_connection::SEED_CONNECTION_SYNC],
     },
     HandlerRegistration {
         module: "encryption::create_key_wrap",

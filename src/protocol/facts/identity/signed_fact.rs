@@ -19,6 +19,10 @@ pub fn decode_envelope(bytes: &[u8]) -> Result<fact::SignedFactEnvelope, String>
     layout::decode_signed_fact(bytes)
 }
 
+pub fn verify_envelope(envelope: &fact::SignedFactEnvelope) -> Result<(), String> {
+    layout::verify_signed_fact(envelope)
+}
+
 pub fn decode_local_signer_secret_payload(
     bytes: &[u8],
 ) -> Result<fact::LocalSignerSecretFact, String> {

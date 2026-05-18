@@ -7,12 +7,14 @@ use crate::protocol::facts::identity;
 pub struct DecodedPayload {
     pub payload: Vec<u8>,
     pub signer: Option<SignedSigner>,
+    pub envelope: Option<identity::signed_fact::fact::SignedFactEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedFact<T> {
     pub payload: T,
     pub signer: Option<SignedSigner>,
+    pub envelope: Option<identity::signed_fact::fact::SignedFactEnvelope>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,18 +35,35 @@ pub fn decode_raw_or_signed(
             return Err(format!("signed fact does not contain a {label}"));
         }
         return Ok(DecodedPayload {
-            payload: envelope.payload,
+            payload: envelope.payload.clone(),
             signer: Some(SignedSigner {
                 signer_id: envelope.signer_id,
                 signer_public_key: envelope.signer_public_key,
             }),
+            envelope: Some(envelope),
         });
     }
 
     Ok(DecodedPayload {
         payload: fact.bytes.clone(),
         signer: None,
+        envelope: None,
     })
+}
+
+pub fn verify_signature<T>(decoded: &DecodedFact<T>, label: &str) -> Result<(), String> {
+    verify_envelope(decoded.envelope.as_ref(), label)
+}
+
+pub fn verify_envelope(
+    envelope: Option<&identity::signed_fact::fact::SignedFactEnvelope>,
+    label: &str,
+) -> Result<(), String> {
+    let Some(envelope) = envelope else {
+        return Ok(());
+    };
+    identity::signed_fact::layout::verify_signed_fact(envelope)
+        .map_err(|err| format!("{label} signed fact is invalid: {err}"))
 }
 
 pub fn decode_raw_or_signed_fact<T>(
@@ -58,6 +77,7 @@ pub fn decode_raw_or_signed_fact<T>(
     Ok(DecodedFact {
         payload,
         signer: decoded.signer,
+        envelope: decoded.envelope,
     })
 }
 

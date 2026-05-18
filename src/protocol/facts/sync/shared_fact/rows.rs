@@ -155,6 +155,34 @@ pub fn shareable_fact_for_connection(
         .find(|fact| fact.id == fact_id))
 }
 
+pub fn connection_ids_for_shareable_fact(
+    store: &Store,
+    fact_id: FactId,
+) -> Result<Vec<FactId>, String> {
+    let mut connection_ids = Vec::new();
+    for connection in connection_response_rows(store)? {
+        if shareable_fact_for_connection(store, connection.connection_id, fact_id)?.is_some() {
+            connection_ids.push(connection.connection_id);
+        }
+    }
+    connection_ids.sort();
+    connection_ids.dedup();
+    Ok(connection_ids)
+}
+
+fn connection_response_rows(
+    store: &Store,
+) -> Result<Vec<connection::response::rows::ConnectionResponseRow>, String> {
+    store
+        .table_rows(connection::response::rows::CONNECTION_RESPONSE_ROWS)
+        .map_err(|err| format!("load connection rows for shareable sync: {err}"))?
+        .into_iter()
+        .map(|(key, value)| {
+            connection::response::rows::decode_connection_response_row(&key, &value)
+        })
+        .collect()
+}
+
 fn connection_response_row(
     store: &Store,
     connection_id: FactId,

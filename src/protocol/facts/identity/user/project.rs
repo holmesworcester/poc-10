@@ -70,6 +70,7 @@ impl TypedProjector<super::Codec> for UserProjector {
         let Some(invite_fact) = context.payload_for(&invite_need) else {
             return Ok(ProjectionOutput::new().need(invite_need));
         };
+        identity::signed_fact::verify_envelope(&envelope)?;
         if invite_fact.id != envelope.signer_id {
             return Err("user signer context payload id mismatch".to_string());
         }

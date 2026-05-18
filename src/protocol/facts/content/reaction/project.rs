@@ -49,12 +49,16 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let reaction = decoded.payload;
+        let authority::DecodedFact {
+            payload: reaction,
+            signer,
+            envelope,
+        } = decoded;
         let scope = message_matchers::workspace_scope(reaction.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
-        let signer_need = authority::signer_need(fact.id, decoded.signer);
+        let signer_need = authority::signer_need(fact.id, signer);
         let target_need =
             message_matchers::message_need(fact.id, scope.clone(), reaction.target_message_id);
         let author_need = crate::protocol::matchers::exact_need(
@@ -62,7 +66,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             crate::protocol::matchers::user_role(),
             reaction.author_user_id,
         );
-        if let (Some(signer), Some(need)) = (decoded.signer, signer_need.as_ref()) {
+        if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
             if !authority::validate_signer_context(
                 context,
                 need,
@@ -109,6 +113,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
                 reaction.target_message_id,
                 target_context.message.author_user_id,
             )?;
+            authority::verify_envelope(envelope.as_ref(), "reaction")?;
             return Ok(delete_reaction_projection(reaction.workspace_id, fact.id)
                 .need(target_need)
                 .need(target_deletion_need));
@@ -122,6 +127,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             ]));
         };
         validate_author_user(author, reaction.workspace_id, reaction.author_user_id)?;
+        authority::verify_envelope(envelope.as_ref(), "reaction")?;
 
         // 3. Materialize.
         let row = reaction_row(ReactionRow {
@@ -274,6 +280,7 @@ fn maybe_signed_payload(
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),
             signer: None,
+            envelope: None,
         })
     }
 }

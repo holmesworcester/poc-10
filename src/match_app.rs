@@ -599,7 +599,7 @@ fn run_key_derive(parsed: ParsedArgs) -> Result<(), String> {
     let scanned_key_wraps = encryption::commands::key_wrap_count(&runtime)?;
     for _ in 0..4 {
         runtime.drain_projection_until_idle(8, limit)?;
-        let dispatched = runtime.dispatch_intents(limit)?;
+        let dispatched = runtime.dispatch_cli_intents(limit)?;
         if dispatched.handled == 0 && dispatched.facts == 0 && dispatched.intents == 0 {
             break;
         }
@@ -1260,7 +1260,7 @@ fn run_generate(parsed: ParsedArgs) -> Result<(), String> {
         content::event::cli::generate(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    let _report = runtime.drain_projection_until_idle(8, 1024)?;
+    drain_runtime(&mut runtime)?;
     runtime.save()?;
 
     for line in content::event::cli::generated_output(&receipt, receipt.generated_facts).lines {
@@ -1686,7 +1686,7 @@ fn parse_disappearing_tighten_args(values: &[String]) -> Result<DisappearingTigh
 fn drain_runtime(runtime: &mut ProtocolRuntime) -> Result<(), String> {
     for _ in 0..4 {
         runtime.drain_projection_until_idle(8, 512)?;
-        let dispatched = runtime.dispatch_intents(512)?;
+        let dispatched = runtime.dispatch_cli_intents(512)?;
         if dispatched.handled == 0 && dispatched.facts == 0 && dispatched.intents == 0 {
             runtime.drain_projection_until_idle(8, 512)?;
             return Ok(());

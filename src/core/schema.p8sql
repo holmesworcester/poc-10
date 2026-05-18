@@ -5,6 +5,7 @@ row_table facts;
 row_table inbox;
 row_table needs;
 row_table offers;
+row_table time_wakes;
 row_table pending_projection;
 row_table intents;
 row_table clock;

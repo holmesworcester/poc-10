@@ -49,12 +49,16 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let message = decoded.payload;
+        let authority::DecodedFact {
+            payload: message,
+            signer,
+            envelope,
+        } = decoded;
         let scope = matchers::workspace_scope(message.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
-        let signer_need = authority::signer_need(fact.id, decoded.signer);
+        let signer_need = authority::signer_need(fact.id, signer);
         let deletion_need =
             matchers::deletion_need(fact.id, scope.clone(), fact.id, message.author_user_id);
         let author_need = crate::protocol::matchers::exact_need(
@@ -62,7 +66,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             crate::protocol::matchers::user_role(),
             message.author_user_id,
         );
-        if let (Some(signer), Some(need)) = (decoded.signer, signer_need.as_ref()) {
+        if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
             if !authority::validate_signer_context(
                 context,
                 need,
@@ -85,6 +89,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
                 fact.id,
                 message.author_user_id,
             )?;
+            authority::verify_envelope(envelope.as_ref(), "message")?;
             return Ok(ProjectionOutput::new().need(deletion_need).intent(
                 AtomicIntent::DeleteRow(TableDelete {
                     table: CONTENT_MESSAGE_ROWS,
@@ -101,6 +106,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             ]));
         };
         validate_author_user(author, message.workspace_id, message.author_user_id)?;
+        authority::verify_envelope(envelope.as_ref(), "message")?;
 
         // 3. Materialize.
         let row = content_message_row(fact.id, &message);
@@ -187,6 +193,7 @@ fn maybe_signed_payload(
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),
             signer: None,
+            envelope: None,
         })
     }
 }

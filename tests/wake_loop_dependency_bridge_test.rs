@@ -7,7 +7,9 @@ use topo::core::intents::AtomicIntent;
 use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::store::{Schema, Store, TableName, TableRow};
-use topo::core::wake_loop::{WakeLoop, FACTS, INTENTS, NEEDS, OFFERS, PENDING_PROJECTION};
+use topo::core::wake_loop::{
+    WakeLoop, FACTS, INTENTS, NEEDS, OFFERS, PENDING_PROJECTION, TIME_WAKES,
+};
 use topo::protocol::matchers::ExactSelectorMatcher;
 
 const MAX_DEPS: usize = 10;
@@ -23,6 +25,7 @@ const SCHEMAS: &[Schema] = &[
     Schema::durable_row_table("core.offers.v1", OFFERS),
     Schema::durable_row_table("core.pending_projection.v1", PENDING_PROJECTION),
     Schema::durable_row_table("core.intents.v1", INTENTS),
+    Schema::durable_row_table("core.time_wakes.v1", TIME_WAKES),
     Schema::durable_row_table(
         "test_events.staged_event_with_deps.v1",
         STAGED_EVENTS_WITH_DEPS,

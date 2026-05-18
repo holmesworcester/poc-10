@@ -73,6 +73,7 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
         if !has_valid_authority(&authority_need, &event, &envelope, context)? {
             return Ok(ProjectionOutput::new().need(authority_need));
         }
+        identity::signed_fact::verify_envelope(&envelope)?;
 
         // 3. Materialize.
         Ok(ProjectionOutput::new()

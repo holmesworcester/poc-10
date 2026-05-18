@@ -46,13 +46,17 @@ impl TypedProjector<super::Codec> for ContentEventProjector {
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let event = decoded.payload;
+        let authority::DecodedFact {
+            payload: event,
+            signer,
+            envelope,
+        } = decoded;
         let scope = matchers::workspace_scope(event.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
-        let signer_need = authority::signer_need(fact.id, decoded.signer);
-        if let (Some(signer), Some(need)) = (decoded.signer, signer_need.as_ref()) {
+        let signer_need = authority::signer_need(fact.id, signer);
+        if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
             if !authority::validate_signer_context(
                 context,
                 need,
@@ -64,6 +68,7 @@ impl TypedProjector<super::Codec> for ContentEventProjector {
                 return Ok(output_with_signer_need(signer_need));
             }
         }
+        authority::verify_envelope(envelope.as_ref(), "content event")?;
 
         // 3. Materialize.
         Ok(output_with_signer_need(signer_need)

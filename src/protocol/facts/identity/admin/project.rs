@@ -111,6 +111,7 @@ fn project_bootstrap_admin(
     if admin.public_key != workspace.public_key {
         return Err("admin public_key does not match root workspace public_key".to_string());
     }
+    identity::signed_fact::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, admin, needs.output())
@@ -161,6 +162,7 @@ fn project_delegated_admin(
     if user.public_key != admin.public_key {
         return Err("admin public_key does not match user public_key".to_string());
     }
+    identity::signed_fact::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, admin, needs.output())

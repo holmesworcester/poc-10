@@ -7,9 +7,10 @@
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
 use crate::core::facts::Fact;
+use crate::core::handler_dispatch::{HandlerContext, IntentHandler};
 use crate::core::intents::Intent;
 use crate::core::matchers::ContextMatcher;
-use crate::core::projection::Projector;
+use crate::core::projection::{Projector, Timeline};
 use crate::core::store::{Schema, Store, TableName};
 use crate::core::wake_loop::{DispatchReport, DrainReport, WakeLoop};
 use std::marker::PhantomData;
@@ -41,6 +42,71 @@ pub trait RuntimeHandlers {
         store: &Store,
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String>;
+}
+
+pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct HandlerRoute {
+    pub name: &'static str,
+    pub factory: HandlerFactory,
+}
+
+pub struct HandlerSet {
+    handlers: Vec<Box<dyn IntentHandler>>,
+}
+
+impl HandlerSet {
+    pub fn new(routes: &'static [HandlerRoute]) -> Self {
+        Self {
+            handlers: routes.iter().map(|route| (route.factory)()).collect(),
+        }
+    }
+
+    pub fn new_excluding(routes: &'static [HandlerRoute], excluded_names: &[&str]) -> Self {
+        Self {
+            handlers: routes
+                .iter()
+                .filter(|route| !excluded_names.contains(&route.name))
+                .map(|route| (route.factory)())
+                .collect(),
+        }
+    }
+}
+
+impl RuntimeHandlers for HandlerSet {
+    fn dispatch(
+        &self,
+        wake_loop: &mut WakeLoop,
+        store: &Store,
+        limit_per_handler: usize,
+    ) -> Result<DispatchReport, String> {
+        let mut total = DispatchReport::default();
+        for handler in &self.handlers {
+            let report = wake_loop.dispatch_deferred_intents_with_fact_context_and_store(
+                handler.as_ref(),
+                store,
+                limit_per_handler,
+            )?;
+            total.handled += report.handled;
+            total.facts += report.facts;
+            total.intents += report.intents;
+            total.retries += report.retries;
+            if report.handled == 0 && report.retries == 0 {
+                let empty_context = HandlerContext::new().with_store(store);
+                let report = wake_loop.dispatch_atomic_intents(
+                    handler.as_ref(),
+                    &empty_context,
+                    limit_per_handler,
+                )?;
+                total.handled += report.handled;
+                total.facts += report.facts;
+                total.intents += report.intents;
+                total.retries += report.retries;
+            }
+        }
+        Ok(total)
+    }
 }
 
 /// Runtime for one concrete protocol.
@@ -184,6 +250,25 @@ impl<P: RuntimeProtocol> Runtime<P> {
     pub fn dispatch_intents(&mut self, limit_per_handler: usize) -> Result<DispatchReport, String> {
         self.handlers
             .dispatch(&mut self.wake_loop, &self.store, limit_per_handler)
+    }
+
+    pub fn dispatch_with_handlers(
+        &mut self,
+        handlers: &impl RuntimeHandlers,
+        limit_per_handler: usize,
+    ) -> Result<DispatchReport, String> {
+        handlers.dispatch(&mut self.wake_loop, &self.store, limit_per_handler)
+    }
+
+    pub fn wake_time_range(
+        &mut self,
+        timeline: Timeline,
+        start_exclusive: Option<u64>,
+        end_inclusive: u64,
+        limit: usize,
+    ) -> usize {
+        self.wake_loop
+            .wake_time_range(timeline, start_exclusive, end_inclusive, limit)
     }
 
     pub fn save(&mut self) -> Result<(), String> {
