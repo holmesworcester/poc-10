@@ -45,6 +45,17 @@ pub struct TickReport {
     pub emitted_intents: usize,
 }
 
+impl TickReport {
+    fn has_activity(&self) -> bool {
+        self.accepted_connections > 0
+            || self.received_frames > 0
+            || self.projections > 0
+            || self.handled_intents > 0
+            || self.emitted_facts > 0
+            || self.emitted_intents > 0
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DaemonReport {
     pub local_addr: Option<SocketAddr>,
@@ -106,9 +117,12 @@ pub fn start(
     };
     while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         let tick_report = tick(&listener, options.work_limit)?;
+        let sleep_after_tick = sleep_after_tick(&options, &tick_report);
         report.add_tick(tick_report);
         report.ticks += 1;
-        std::thread::sleep(Duration::from_millis(options.tick_ms));
+        if let Some(duration) = sleep_after_tick {
+            std::thread::sleep(duration);
+        }
     }
 
     Ok(CliOutput::lines(report.lines()))
@@ -155,7 +169,7 @@ pub fn current_listen_addr(db_path: &Path) -> Result<Option<SocketAddr>, String>
 fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
     let mut listen = None;
     let mut tick_ms = DEFAULT_TICK_MS;
-    let mut quiet_ms = DEFAULT_TICK_MS;
+    let mut quiet_ms = None;
     let mut idx = 0;
     while idx < args.values().len() {
         match args.get(idx).expect("index in bounds") {
@@ -174,7 +188,7 @@ fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
                 idx += 2;
             }
             "--quiet-ms" => {
-                quiet_ms = parse_positive_u64(args.get(idx + 1))?;
+                quiet_ms = Some(parse_positive_u64(args.get(idx + 1))?);
                 idx += 2;
             }
             other => return Err(format!("unknown start option `{other}`\n{START_USAGE}")),
@@ -183,9 +197,13 @@ fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
     Ok(StartOptions {
         listen: listen.ok_or_else(|| START_USAGE.to_string())?,
         tick_ms,
-        quiet_ms,
+        quiet_ms: quiet_ms.unwrap_or(tick_ms),
         work_limit: DEFAULT_WORK_LIMIT,
     })
+}
+
+fn sleep_after_tick(options: &StartOptions, tick: &TickReport) -> Option<Duration> {
+    (!tick.has_activity()).then(|| Duration::from_millis(options.quiet_ms))
 }
 
 fn parse_positive_u64(value: Option<&str>) -> Result<u64, String> {
@@ -464,5 +482,40 @@ mod tests {
         assert_eq!(parsed.listen, "127.0.0.1:41000".parse().unwrap());
         assert_eq!(parsed.tick_ms, 100);
         assert_eq!(parsed.quiet_ms, 200);
+    }
+
+    #[test]
+    fn quiet_ms_defaults_to_tick_ms_for_compatibility() {
+        let args = vec![
+            "--listen".to_string(),
+            "127.0.0.1".to_string(),
+            "41000".to_string(),
+            "--sync-ms".to_string(),
+            "125".to_string(),
+        ];
+        let parsed = parse_start_options(CliArgs::new(&args)).expect("parse");
+
+        assert_eq!(parsed.tick_ms, 125);
+        assert_eq!(parsed.quiet_ms, 125);
+    }
+
+    #[test]
+    fn active_ticks_run_next_tick_without_injected_sleep() {
+        let options = StartOptions {
+            listen: "127.0.0.1:41000".parse().unwrap(),
+            tick_ms: 100,
+            quiet_ms: 200,
+            work_limit: 1,
+        };
+        let active = TickReport {
+            handled_intents: 1,
+            ..TickReport::default()
+        };
+
+        assert_eq!(sleep_after_tick(&options, &active), None);
+        assert_eq!(
+            sleep_after_tick(&options, &TickReport::default()),
+            Some(Duration::from_millis(200))
+        );
     }
 }

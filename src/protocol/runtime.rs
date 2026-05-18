@@ -33,7 +33,7 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         listener: &tcp::Listener,
         work_limit: usize,
     ) -> Result<TickReport, String> {
-        self.reload_wake_loop()?;
+        self.reload_wake_loop_if_store_changed()?;
         let accepted = listener.accept_available(self.store(), work_limit)?;
         let inbound = network_queues::claim_inbound(self.store(), work_limit)?;
         for row in &inbound {

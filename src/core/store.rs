@@ -376,6 +376,17 @@ impl Store {
             .map(|count| count as usize)
     }
 
+    /// SQLite connection-local external write marker.
+    ///
+    /// `PRAGMA data_version` changes when another connection commits to the
+    /// same database, but not for writes made by this `Store`'s own connection.
+    /// Runtime code can use it to avoid broad reloads while still noticing
+    /// sibling CLI processes that appended facts or intents.
+    pub fn data_version(&self) -> rusqlite::Result<i64> {
+        self.conn
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+    }
+
     /// Scan one declared table in key order.
     pub fn table_rows(&self, table: TableName) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         if self.storage_for(table) == StorageClass::Memory {

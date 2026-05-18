@@ -44,6 +44,7 @@ pub trait RuntimeHandlers {
 pub struct Runtime<P: RuntimeProtocol> {
     store: Store,
     wake_loop: WakeLoop,
+    wake_loop_store_version: i64,
     projector: P::Projector,
     matchers: P::Matchers,
     handlers: P::Handlers,
@@ -65,9 +66,13 @@ impl<P: RuntimeProtocol> Runtime<P> {
 
     fn from_store(store: Store) -> Result<Self, String> {
         let wake_loop = WakeLoop::load(&store)?;
+        let wake_loop_store_version = store
+            .data_version()
+            .map_err(|err| format!("read store data version: {err}"))?;
         Ok(Self {
             store,
             wake_loop,
+            wake_loop_store_version,
             projector: P::projector(),
             matchers: P::matchers(),
             handlers: P::handlers(),
@@ -85,7 +90,23 @@ impl<P: RuntimeProtocol> Runtime<P> {
 
     pub fn reload_wake_loop(&mut self) -> Result<(), String> {
         self.wake_loop = WakeLoop::load(&self.store)?;
+        self.wake_loop_store_version = self
+            .store
+            .data_version()
+            .map_err(|err| format!("read store data version: {err}"))?;
         Ok(())
+    }
+
+    pub fn reload_wake_loop_if_store_changed(&mut self) -> Result<bool, String> {
+        let current = self
+            .store
+            .data_version()
+            .map_err(|err| format!("read store data version: {err}"))?;
+        if current == self.wake_loop_store_version {
+            return Ok(false);
+        }
+        self.reload_wake_loop()?;
+        Ok(true)
     }
 
     pub fn facts(&self) -> impl Iterator<Item = &Fact> {
@@ -159,5 +180,114 @@ impl<P: RuntimeProtocol> Runtime<P> {
 
     pub fn save(&mut self) -> Result<(), String> {
         self.wake_loop.save(&self.store)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::facts::{Fact, FactScope};
+    use crate::core::projection::{ProjectionContext, ProjectionOutput};
+    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
+
+    struct TestProtocol;
+
+    struct NoopProjector;
+
+    impl Projector for NoopProjector {
+        fn project(
+            &self,
+            _fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new())
+        }
+    }
+
+    struct NoMatchers;
+
+    impl RuntimeMatchers for NoMatchers {
+        fn refs(&self) -> Vec<&dyn ContextMatcher> {
+            Vec::new()
+        }
+    }
+
+    struct NoHandlers;
+
+    impl RuntimeHandlers for NoHandlers {
+        fn dispatch(
+            &self,
+            _wake_loop: &mut WakeLoop,
+            _store: &Store,
+            _limit_per_handler: usize,
+        ) -> Result<DispatchReport, String> {
+            Ok(DispatchReport::default())
+        }
+    }
+
+    impl RuntimeProtocol for TestProtocol {
+        type Projector = NoopProjector;
+        type Matchers = NoMatchers;
+        type Handlers = NoHandlers;
+
+        fn schema_sources() -> &'static [&'static str] {
+            &[CORE_SCHEMA_SOURCE]
+        }
+
+        fn atomic_row_tables() -> &'static [TableName] {
+            &[]
+        }
+
+        fn projector() -> Self::Projector {
+            NoopProjector
+        }
+
+        fn matchers() -> Self::Matchers {
+            NoMatchers
+        }
+
+        fn handlers() -> Self::Handlers {
+            NoHandlers
+        }
+    }
+
+    #[test]
+    fn reload_wake_loop_if_store_changed_skips_until_external_commit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("runtime.db");
+        let mut runtime = Runtime::<TestProtocol>::open_disk(&path).expect("runtime");
+
+        assert!(
+            !runtime
+                .reload_wake_loop_if_store_changed()
+                .expect("unchanged reload check"),
+            "fresh runtime should not reload without an external commit"
+        );
+
+        let external_fact = Fact::new(FactScope::Global, 7, b"external".to_vec());
+        let mut writer = Runtime::<TestProtocol>::open_disk(&path).expect("writer runtime");
+        assert!(writer.submit_fact(external_fact.clone()));
+        writer.save().expect("writer save");
+
+        assert!(
+            runtime.facts().all(|fact| fact.id != external_fact.id),
+            "runtime should not see sibling writes before the conditional reload"
+        );
+        assert!(
+            runtime
+                .reload_wake_loop_if_store_changed()
+                .expect("changed reload check"),
+            "external commit should trigger a reload"
+        );
+        assert!(
+            runtime.facts().any(|fact| fact.id == external_fact.id),
+            "conditional reload should load externally committed facts"
+        );
+        assert!(
+            !runtime
+                .reload_wake_loop_if_store_changed()
+                .expect("post-reload check"),
+            "second check should stay cheap until the next external commit"
+        );
     }
 }
