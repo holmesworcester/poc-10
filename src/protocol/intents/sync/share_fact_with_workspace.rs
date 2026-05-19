@@ -9,6 +9,7 @@ use crate::core::{
     facts::{Fact, FactId},
     handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler},
     intents::{Intent, IntentExecution, IntentKind},
+    schema_dsl::{self, FieldValue},
 };
 use crate::protocol::facts::sync::shared_fact;
 use crate::protocol::intents::sync::seed_connection;
@@ -25,11 +26,19 @@ pub struct ShareFactWithWorkspace {
 }
 
 pub fn share_fact_with_workspace_intent(input: ShareFactWithWorkspace) -> Intent {
-    let mut payload = Vec::with_capacity(1 + 32 + 32 + 8);
-    payload.push(1);
-    payload.extend_from_slice(&input.workspace_id);
-    payload.extend_from_slice(&input.fact_id);
-    payload.extend_from_slice(&input.timestamp_ms.to_be_bytes());
+    let payload = schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("share_fact_with_workspace_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "workspace_id",
+                FieldValue::Bytes(input.workspace_id.to_vec()),
+            ),
+            ("fact_id", FieldValue::Bytes(input.fact_id.to_vec())),
+            ("timestamp_ms", FieldValue::U64(input.timestamp_ms)),
+        ],
+    )
+    .expect("share_fact_with_workspace payload matches schema");
     Intent::new(
         IntentKind::new(SHARE_FACT_WITH_WORKSPACE).expect("valid share_fact_with_workspace kind"),
         IntentExecution::Deferred,
@@ -53,18 +62,17 @@ pub fn decode_share_fact_with_workspace(intent: &Intent) -> Result<ShareFactWith
     if intent.execution != IntentExecution::Deferred {
         return Err("share_fact_with_workspace intent must be deferred".to_string());
     }
-    let mut reader = Reader::new(&intent.payload);
-    if reader.u8()? != 1 {
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("share_fact_with_workspace_payload"),
+        &intent.payload,
+    )?;
+    if payload.u8("version")? != 1 {
         return Err("share_fact_with_workspace payload version unsupported".to_string());
     }
-    let workspace_id = reader.id()?;
-    let fact_id = reader.id()?;
-    let timestamp_ms = reader.u64()?;
-    reader.finish()?;
     let input = ShareFactWithWorkspace {
-        workspace_id,
-        fact_id,
-        timestamp_ms,
+        workspace_id: payload.bytes_array("workspace_id")?,
+        fact_id: payload.bytes_array("fact_id")?,
+        timestamp_ms: payload.u64("timestamp_ms")?,
     };
     if intent.key != share_fact_with_workspace_key(&input) {
         return Err("share_fact_with_workspace idempotence key does not match payload".to_string());
@@ -79,53 +87,6 @@ fn share_fact_with_workspace_key(input: &ShareFactWithWorkspace) -> Vec<u8> {
     hash.update(&input.fact_id);
     hash.update(&input.timestamp_ms.to_be_bytes());
     hash.finalize().as_bytes().to_vec()
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn u8(&mut self) -> Result<u8, String> {
-        let byte = self.take(1)?;
-        Ok(byte[0])
-    }
-
-    fn u64(&mut self) -> Result<u64, String> {
-        let bytes = self.take(8)?;
-        Ok(u64::from_be_bytes(bytes.try_into().unwrap()))
-    }
-
-    fn id(&mut self) -> Result<[u8; 32], String> {
-        let bytes = self.take(32)?;
-        Ok(bytes.try_into().unwrap())
-    }
-
-    fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
-        let end = self
-            .offset
-            .checked_add(len)
-            .ok_or_else(|| "intent payload length overflow".to_string())?;
-        if end > self.bytes.len() {
-            return Err("truncated intent payload".to_string());
-        }
-        let bytes = &self.bytes[self.offset..end];
-        self.offset = end;
-        Ok(bytes)
-    }
-
-    fn finish(self) -> Result<(), String> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err("intent payload has trailing bytes".to_string())
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]

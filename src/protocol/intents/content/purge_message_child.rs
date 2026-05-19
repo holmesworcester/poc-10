@@ -6,6 +6,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::schema_dsl::{self, FieldValue};
 use crate::protocol::facts::{content::file, content::reaction, content::sealed_message};
 
 pub const PURGE_MESSAGE_CHILD: &str = "purge_message_child";
@@ -54,26 +55,43 @@ fn purge_message_child_key(input: &PurgeMessageChild) -> Vec<u8> {
 }
 
 fn encode_purge_message_child(input: &PurgeMessageChild) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(130);
-    payload.push(1);
-    payload.extend_from_slice(&input.workspace_id);
-    payload.extend_from_slice(&input.parent_message_id);
-    payload.push(input.child_kind);
-    payload.extend_from_slice(&input.child_id);
-    payload.extend_from_slice(&input.parent_deletion_id);
-    payload
+    schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("purge_message_child_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "workspace_id",
+                FieldValue::Bytes(input.workspace_id.to_vec()),
+            ),
+            (
+                "parent_message_id",
+                FieldValue::Bytes(input.parent_message_id.to_vec()),
+            ),
+            ("child_kind", FieldValue::U8(input.child_kind)),
+            ("child_id", FieldValue::Bytes(input.child_id.to_vec())),
+            (
+                "parent_deletion_id",
+                FieldValue::Bytes(input.parent_deletion_id.to_vec()),
+            ),
+        ],
+    )
+    .expect("purge_message_child payload matches schema")
 }
 
 fn decode_purge_message_child_payload(payload: &[u8]) -> Result<PurgeMessageChild, String> {
-    if payload.len() != 130 || payload[0] != 1 {
-        return Err("invalid purge_message_child payload".to_string());
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("purge_message_child_payload"),
+        payload,
+    )?;
+    if payload.u8("version")? != 1 {
+        return Err("purge_message_child payload version unsupported".to_string());
     }
     Ok(PurgeMessageChild {
-        workspace_id: payload[1..33].try_into().unwrap(),
-        parent_message_id: payload[33..65].try_into().unwrap(),
-        child_kind: payload[65],
-        child_id: payload[66..98].try_into().unwrap(),
-        parent_deletion_id: payload[98..130].try_into().unwrap(),
+        workspace_id: payload.bytes_array("workspace_id")?,
+        parent_message_id: payload.bytes_array("parent_message_id")?,
+        child_kind: payload.u8("child_kind")?,
+        child_id: payload.bytes_array("child_id")?,
+        parent_deletion_id: payload.bytes_array("parent_deletion_id")?,
     })
 }
 

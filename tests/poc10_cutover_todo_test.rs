@@ -171,6 +171,12 @@ fn ignored_test_names(path: &Path) -> Vec<String> {
     ignored
 }
 
+fn production_text_before_unit_tests(text: &str) -> &str {
+    text.find("#[cfg(test)]")
+        .map(|index| &text[..index])
+        .unwrap_or(text)
+}
+
 fn projector_test_files(root: &Path) -> Vec<PathBuf> {
     rust_files_under(&root.join("tests"))
         .into_iter()
@@ -880,6 +886,105 @@ fn cutover_content_read_models_have_normal_sqlite_tables() {
         missing.is_empty(),
         "content projections should expose normal SQLite tables for queryable message/reaction/file state while canonical fact bytes remain separately durable:\n{}",
         missing.join("\n")
+    );
+}
+
+#[test]
+fn cutover_schema_dsl_has_runtime_codec_helpers_not_parser_only_commentary() {
+    let root = root();
+    let schema_dsl = source_text(&root.join("src/core/schema_dsl.rs"));
+    let required = [
+        "pub fn encode_layout_record",
+        "pub fn decode_layout_record",
+        "pub fn encode_table_row",
+        "pub fn decode_table_row",
+        "pub enum FieldValue",
+    ];
+    let missing = required
+        .into_iter()
+        .filter(|needle| !schema_dsl.contains(needle))
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "schema DSL cutover must expose reusable runtime codecs; missing: {}",
+        missing.join(", ")
+    );
+    assert!(
+        !schema_dsl.contains("does not create store") && !schema_dsl.contains("row codecs yet"),
+        "schema_dsl.rs still documents the old parser-only state"
+    );
+}
+
+#[test]
+fn cutover_typed_content_row_codecs_use_schema_declarations() {
+    let root = root();
+    let paths = [
+        "src/protocol/facts/content/message/rows.rs",
+        "src/protocol/facts/content/reaction/rows.rs",
+        "src/protocol/facts/content/file/rows.rs",
+    ];
+    let mut offenders = Vec::new();
+    for path in paths {
+        let full = root.join(path);
+        let text = source_text(&full);
+        if !text.contains("schema_dsl::encode_table_row")
+            || !text.contains("schema_dsl::decode_table_row")
+        {
+            offenders.push(format!("{path} does not use schema_dsl table row helpers"));
+        }
+        for forbidden in [
+            "wire::Reader",
+            "wire::Writer",
+            "copy_from_slice",
+            "try_into().unwrap()",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!("{path} contains {forbidden:?}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "typed content read-model rows must be driven by p8sql table declarations:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn cutover_fixed_intent_payloads_use_schema_layouts() {
+    let root = root();
+    let paths = [
+        "src/protocol/intents/sync/share_fact_with_workspace.rs",
+        "src/protocol/intents/sync/seed_connection.rs",
+        "src/protocol/intents/sync/send_needed_fact_id.rs",
+        "src/protocol/intents/sync/send_requested_fact.rs",
+        "src/protocol/intents/sync/send_compare_response.rs",
+        "src/protocol/facts/content/sealed_message/intent.rs",
+        "src/protocol/intents/content/purge_expired_message.rs",
+        "src/protocol/intents/content/purge_below_retention_floor.rs",
+        "src/protocol/intents/content/purge_message_child.rs",
+        "src/protocol/intents/connection/create_response.rs",
+        "src/protocol/facts/encryption/intent.rs",
+    ];
+    let mut offenders = Vec::new();
+    for path in paths {
+        let text = source_text(&root.join(path));
+        let production = production_text_before_unit_tests(&text);
+        if !text.contains("schema_dsl::encode_layout_record")
+            || !text.contains("schema_dsl::decode_layout_record")
+        {
+            offenders.push(format!("{path} does not use schema_dsl layout helpers"));
+        }
+        for forbidden in ["struct Reader", "payload[", "vec![0u8;"] {
+            if production.contains(forbidden) {
+                offenders.push(format!("{path} contains {forbidden:?}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "fixed intent payload codecs should be declared in p8sql and packed by schema_dsl:\n{}",
+        offenders.join("\n")
     );
 }
 

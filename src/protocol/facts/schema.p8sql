@@ -33,6 +33,17 @@ table content_messages {
   index by_workspace_created (workspace_id, created_at_ms);
 }
 
+layout content_message_fact {
+  field type u8;
+  field workspace_id bytes(32);
+  field author_user_id bytes(32);
+  field created_at_ms u64;
+  field frontier_id bytes(32);
+  field minute u64;
+  field leaf_id bytes(32);
+  field sealed_message_id bytes(32);
+}
+
 table content_reactions {
   column workspace_id bytes(32);
   column reaction_id bytes(32);

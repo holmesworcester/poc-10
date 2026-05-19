@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 
 use rusqlite::{params, Connection};
 use topo::core::schema_dsl::{
-    parse_schema, CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE,
+    decode_layout_record, decode_table_row, encode_layout_record, encode_table_row, facts_layout,
+    facts_table, parse_schema, FieldValue, CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE,
+    INTENTS_SCHEMA_SOURCE,
 };
 use topo::core::store::{Store, TableName, TableRow};
 use topo::protocol::facts::content::{file, message, reaction};
@@ -379,6 +381,58 @@ fn schema_source_typed_tables_are_written_as_queryable_columns() {
         )
         .expect("read typed sqlite row");
     assert_eq!(row, (workspace_id.to_vec(), message_id.to_vec(), 123, 1));
+}
+
+#[test]
+fn schema_dsl_runtime_helpers_pack_declared_rows_and_layouts() {
+    let message_table = facts_table("content_messages");
+    let row = encode_table_row(
+        message::rows::CONTENT_MESSAGE_ROWS,
+        message_table,
+        &[
+            ("workspace_id", FieldValue::Bytes(vec![1; 32])),
+            ("message_id", FieldValue::Bytes(vec![2; 32])),
+            ("author_user_id", FieldValue::Bytes(vec![3; 32])),
+            ("created_at_ms", FieldValue::U64(42)),
+            ("frontier_id", FieldValue::Bytes(vec![4; 32])),
+            ("minute", FieldValue::U64(7)),
+            ("leaf_id", FieldValue::Bytes(vec![5; 32])),
+            ("sealed_message_id", FieldValue::Bytes(vec![6; 32])),
+            ("deleted", FieldValue::Bool(false)),
+        ],
+    )
+    .expect("encode declared row");
+
+    let decoded = decode_table_row(message_table, &row.key, &row.value).expect("decode row");
+    assert_eq!(decoded.bytes_array::<32>("workspace_id").unwrap(), [1; 32]);
+    assert_eq!(decoded.bytes_array::<32>("message_id").unwrap(), [2; 32]);
+    assert_eq!(decoded.u64("created_at_ms").unwrap(), 42);
+    assert!(!decoded.bool("deleted").unwrap());
+
+    let encoded = encode_layout_record(
+        facts_layout("content_message_fact"),
+        &[
+            (
+                "type",
+                FieldValue::U8(message::layout::TYPE_CONTENT_MESSAGE),
+            ),
+            ("workspace_id", FieldValue::Bytes(vec![1; 32])),
+            ("author_user_id", FieldValue::Bytes(vec![3; 32])),
+            ("created_at_ms", FieldValue::U64(42)),
+            ("frontier_id", FieldValue::Bytes(vec![4; 32])),
+            ("minute", FieldValue::U64(7)),
+            ("leaf_id", FieldValue::Bytes(vec![5; 32])),
+            ("sealed_message_id", FieldValue::Bytes(vec![6; 32])),
+        ],
+    )
+    .expect("encode declared fact layout");
+    let decoded = decode_layout_record(facts_layout("content_message_fact"), &encoded)
+        .expect("decode declared layout");
+    assert_eq!(
+        decoded.u8("type").unwrap(),
+        message::layout::TYPE_CONTENT_MESSAGE
+    );
+    assert_eq!(decoded.bytes_array::<32>("leaf_id").unwrap(), [5; 32]);
 }
 
 #[test]

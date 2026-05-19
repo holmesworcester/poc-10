@@ -2,7 +2,7 @@
 
 use crate::core::facts::FactId;
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
-use crate::core::wire::{FixedLayout, U16be, U64be};
+use crate::core::schema_dsl::{self, FieldValue};
 
 use super::fact::{RecipientKeyId, WorkspaceId};
 use crate::protocol::matchers::{WrapSourceKind, WrapSourceSelector};
@@ -146,9 +146,9 @@ fn create_key_wrap_key(input: &CreateKeyWrapIntent) -> Vec<u8> {
             fact_id_prefix,
         } => {
             key.push(2);
-            key.extend_from_slice(&encode_u64(range_start));
-            key.extend_from_slice(&encode_u64(range_width));
-            key.extend_from_slice(&encode_u16(bit_depth));
+            key.extend_from_slice(&range_start.to_be_bytes());
+            key.extend_from_slice(&range_width.to_be_bytes());
+            key.extend_from_slice(&bit_depth.to_be_bytes());
             key.extend_from_slice(&fact_id_prefix);
         }
     }
@@ -166,54 +166,75 @@ fn unwrap_key(input: &UnwrapKeyWrapIntent) -> Vec<u8> {
 }
 
 fn encode_create_key_wrap_payload(input: &CreateKeyWrapIntent) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 32 + 32 + 32 + 32 + 32 + 1 + 8 + 8 + 2 + 32);
-    out.push(1);
-    out.extend_from_slice(&input.workspace_id);
-    out.extend_from_slice(&input.frontier_id);
-    out.extend_from_slice(&input.recipient_key_id);
-    out.extend_from_slice(&input.source_fact_id);
-    out.extend_from_slice(&input.signer_secret_fact_id);
-    match input.source {
-        WrapSourceKind::FrontierRoot => {
-            out.push(1);
-            out.extend_from_slice(&[0; 50]);
-        }
+    let (source_kind, range_start, range_width, bit_depth, fact_id_prefix) = match input.source {
+        WrapSourceKind::FrontierRoot => (1, 0, 0, 0, [0; 32]),
         WrapSourceKind::HistoryNode {
             range_start,
             range_width,
             bit_depth,
             fact_id_prefix,
-        } => {
-            out.push(2);
-            out.extend_from_slice(&encode_u64(range_start));
-            out.extend_from_slice(&encode_u64(range_width));
-            out.extend_from_slice(&encode_u16(bit_depth));
-            out.extend_from_slice(&fact_id_prefix);
-        }
-    }
-    out
+        } => (2, range_start, range_width, bit_depth, fact_id_prefix),
+    };
+    schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("create_key_wrap_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "workspace_id",
+                FieldValue::Bytes(input.workspace_id.to_vec()),
+            ),
+            ("frontier_id", FieldValue::Bytes(input.frontier_id.to_vec())),
+            (
+                "recipient_key_id",
+                FieldValue::Bytes(input.recipient_key_id.to_vec()),
+            ),
+            (
+                "source_fact_id",
+                FieldValue::Bytes(input.source_fact_id.to_vec()),
+            ),
+            (
+                "signer_secret_fact_id",
+                FieldValue::Bytes(input.signer_secret_fact_id.to_vec()),
+            ),
+            ("source_kind", FieldValue::U8(source_kind)),
+            ("source_range_start", FieldValue::U64(range_start)),
+            ("source_range_width", FieldValue::U64(range_width)),
+            ("source_bit_depth", FieldValue::U16(bit_depth)),
+            (
+                "source_fact_id_prefix",
+                FieldValue::Bytes(fact_id_prefix.to_vec()),
+            ),
+        ],
+    )
+    .expect("create_key_wrap payload matches schema")
 }
 
 fn decode_create_key_wrap_payload(payload: &[u8]) -> Result<CreateKeyWrapIntent, String> {
-    if payload.len() != 212 || payload[0] != 1 {
-        return Err("invalid create_key_wrap payload".to_string());
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("create_key_wrap_payload"),
+        payload,
+    )?;
+    if payload.u8("version")? != 1 {
+        return Err("create_key_wrap payload version unsupported".to_string());
     }
-    let workspace_id = payload[1..33].try_into().unwrap();
-    let frontier_id = payload[33..65].try_into().unwrap();
-    let recipient_key_id = payload[65..97].try_into().unwrap();
-    let source_fact_id = payload[97..129].try_into().unwrap();
-    let signer_secret_fact_id = payload[129..161].try_into().unwrap();
-    let source = match payload[161] {
+    let source = match payload.u8("source_kind")? {
         1 => {
-            if payload[162..212].iter().any(|byte| *byte != 0) {
+            if payload.u64("source_range_start")? != 0
+                || payload.u64("source_range_width")? != 0
+                || payload.u16("source_bit_depth")? != 0
+                || payload
+                    .bytes("source_fact_id_prefix")?
+                    .iter()
+                    .any(|byte| *byte != 0)
+            {
                 return Err("invalid create_key_wrap root padding".to_string());
             }
             WrapSourceKind::FrontierRoot
         }
         2 => {
-            let range_start = decode_u64(&payload[162..170])?;
-            let range_width = decode_u64(&payload[170..178])?;
-            let bit_depth = decode_u16(&payload[178..180])?;
+            let range_start = payload.u64("source_range_start")?;
+            let range_width = payload.u64("source_range_width")?;
+            let bit_depth = payload.u16("source_bit_depth")?;
             if bit_depth > 256 || range_width == 0 || !range_width.is_power_of_two() {
                 return Err("invalid create_key_wrap history range".to_string());
             }
@@ -221,42 +242,59 @@ fn decode_create_key_wrap_payload(payload: &[u8]) -> Result<CreateKeyWrapIntent,
                 range_start,
                 range_width,
                 bit_depth,
-                fact_id_prefix: payload[180..212].try_into().unwrap(),
+                fact_id_prefix: payload.bytes_array("source_fact_id_prefix")?,
             }
         }
         _ => return Err("invalid create_key_wrap source kind".to_string()),
     };
     Ok(CreateKeyWrapIntent {
-        workspace_id,
-        frontier_id,
-        recipient_key_id,
-        source_fact_id,
-        signer_secret_fact_id,
+        workspace_id: payload.bytes_array("workspace_id")?,
+        frontier_id: payload.bytes_array("frontier_id")?,
+        recipient_key_id: payload.bytes_array("recipient_key_id")?,
+        source_fact_id: payload.bytes_array("source_fact_id")?,
+        signer_secret_fact_id: payload.bytes_array("signer_secret_fact_id")?,
         source,
     })
 }
 
 fn encode_unwrap_payload(input: &UnwrapKeyWrapIntent) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 32 * 5);
-    out.push(1);
-    out.extend_from_slice(&input.workspace_id);
-    out.extend_from_slice(&input.frontier_id);
-    out.extend_from_slice(&input.recipient_key_id);
-    out.extend_from_slice(&input.key_wrap_id);
-    out.extend_from_slice(&input.local_recipient_key_id);
-    out
+    schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("unwrap_key_wrap_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "workspace_id",
+                FieldValue::Bytes(input.workspace_id.to_vec()),
+            ),
+            ("frontier_id", FieldValue::Bytes(input.frontier_id.to_vec())),
+            (
+                "recipient_key_id",
+                FieldValue::Bytes(input.recipient_key_id.to_vec()),
+            ),
+            ("key_wrap_id", FieldValue::Bytes(input.key_wrap_id.to_vec())),
+            (
+                "local_recipient_key_id",
+                FieldValue::Bytes(input.local_recipient_key_id.to_vec()),
+            ),
+        ],
+    )
+    .expect("unwrap_key_wrap payload matches schema")
 }
 
 fn decode_unwrap_payload(payload: &[u8]) -> Result<UnwrapKeyWrapIntent, String> {
-    if payload.len() != 1 + 32 * 5 || payload[0] != 1 {
-        return Err("invalid unwrap_key_wrap payload".to_string());
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("unwrap_key_wrap_payload"),
+        payload,
+    )?;
+    if payload.u8("version")? != 1 {
+        return Err("unwrap_key_wrap payload version unsupported".to_string());
     }
     Ok(UnwrapKeyWrapIntent {
-        workspace_id: payload[1..33].try_into().unwrap(),
-        frontier_id: payload[33..65].try_into().unwrap(),
-        recipient_key_id: payload[65..97].try_into().unwrap(),
-        key_wrap_id: payload[97..129].try_into().unwrap(),
-        local_recipient_key_id: payload[129..161].try_into().unwrap(),
+        workspace_id: payload.bytes_array("workspace_id")?,
+        frontier_id: payload.bytes_array("frontier_id")?,
+        recipient_key_id: payload.bytes_array("recipient_key_id")?,
+        key_wrap_id: payload.bytes_array("key_wrap_id")?,
+        local_recipient_key_id: payload.bytes_array("local_recipient_key_id")?,
     })
 }
 
@@ -306,43 +344,33 @@ fn encode_retired_recipient_payload(
     recipient_key_id: RecipientKeyId,
     local_recipient_key_id: FactId,
 ) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(65);
-    payload.push(1);
-    payload.extend_from_slice(&recipient_key_id);
-    payload.extend_from_slice(&local_recipient_key_id);
-    payload
+    schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("purge_retired_recipient_material_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "recipient_key_id",
+                FieldValue::Bytes(recipient_key_id.to_vec()),
+            ),
+            (
+                "local_recipient_key_id",
+                FieldValue::Bytes(local_recipient_key_id.to_vec()),
+            ),
+        ],
+    )
+    .expect("purge_retired_recipient_material payload matches schema")
 }
 
 fn decode_retired_recipient_payload(payload: &[u8]) -> Result<(RecipientKeyId, FactId), String> {
-    if payload.len() != 65 || payload[0] != 1 {
-        return Err("invalid purge_retired_recipient_material payload".to_string());
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("purge_retired_recipient_material_payload"),
+        payload,
+    )?;
+    if payload.u8("version")? != 1 {
+        return Err("purge_retired_recipient_material payload version unsupported".to_string());
     }
     Ok((
-        payload[1..33].try_into().unwrap(),
-        payload[33..65].try_into().unwrap(),
+        payload.bytes_array("recipient_key_id")?,
+        payload.bytes_array("local_recipient_key_id")?,
     ))
-}
-
-fn encode_u64(value: u64) -> [u8; 8] {
-    let mut buf = [0; 8];
-    U64be(value).encode(&mut buf).expect("u64 fixed layout");
-    buf
-}
-
-fn encode_u16(value: u16) -> [u8; 2] {
-    let mut buf = [0; 2];
-    U16be(value).encode(&mut buf).expect("u16 fixed layout");
-    buf
-}
-
-fn decode_u64(bytes: &[u8]) -> Result<u64, String> {
-    U64be::decode(bytes)
-        .map(|value| value.0)
-        .map_err(|err| format!("invalid u64 field: {err:?}"))
-}
-
-fn decode_u16(bytes: &[u8]) -> Result<u16, String> {
-    U16be::decode(bytes)
-        .map(|value| value.0)
-        .map_err(|err| format!("invalid u16 field: {err:?}"))
 }

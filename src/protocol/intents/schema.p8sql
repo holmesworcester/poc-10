@@ -5,3 +5,97 @@ row_table purge_retire_coords;
 row_table sync_index_snapshots;
 row_table connection_attempt_checkpoints;
 row_table send_network_frame_cursors;
+
+layout share_fact_with_workspace_payload {
+  field version u8;
+  field workspace_id bytes(32);
+  field fact_id bytes(32);
+  field timestamp_ms u64;
+}
+
+layout seed_connection_sync_payload {
+  field version u8;
+  field connection_id bytes(32);
+}
+
+layout send_needed_fact_id_payload {
+  field version u8;
+  field have_fact_id bytes(32);
+}
+
+layout send_requested_fact_payload {
+  field version u8;
+  field need_fact_id bytes(32);
+}
+
+layout send_sync_compare_response_payload {
+  field version u8;
+  field compare_fact_id bytes(32);
+}
+
+layout purge_deleted_message_payload {
+  field version u8;
+  field workspace_id bytes(32);
+  field target_kind u8;
+  field target_id bytes(32);
+  field reason_kind u8;
+  field reason_fact_id bytes(32);
+}
+
+layout purge_expired_message_payload {
+  field version u8;
+  field workspace_id bytes(32);
+  field target_id bytes(32);
+  field now_minute u64;
+}
+
+layout purge_below_retention_floor_payload {
+  field version u8;
+  field workspace_id bytes(32);
+  field setting_id bytes(32);
+  field target_id bytes(32);
+}
+
+layout purge_message_child_payload {
+  field version u8;
+  field workspace_id bytes(32);
+  field parent_message_id bytes(32);
+  field child_kind u8;
+  field child_id bytes(32);
+  field parent_deletion_id bytes(32);
+}
+
+layout create_connection_response_payload {
+  field request_id bytes(32);
+  field invite_secret_id bytes(32);
+  field receive_id bytes(32);
+}
+
+layout create_key_wrap_payload {
+  field version u8;
+  field workspace_id bytes(32);
+  field frontier_id bytes(32);
+  field recipient_key_id bytes(32);
+  field source_fact_id bytes(32);
+  field signer_secret_fact_id bytes(32);
+  field source_kind u8;
+  field source_range_start u64;
+  field source_range_width u64;
+  field source_bit_depth u16;
+  field source_fact_id_prefix bytes(32);
+}
+
+layout unwrap_key_wrap_payload {
+  field version u8;
+  field workspace_id bytes(32);
+  field frontier_id bytes(32);
+  field recipient_key_id bytes(32);
+  field key_wrap_id bytes(32);
+  field local_recipient_key_id bytes(32);
+}
+
+layout purge_retired_recipient_material_payload {
+  field version u8;
+  field recipient_key_id bytes(32);
+  field local_recipient_key_id bytes(32);
+}

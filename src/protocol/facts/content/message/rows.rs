@@ -7,8 +7,8 @@
 //! projection once the per-message decryption secret resolves).
 
 use crate::core::facts::FactId;
+use crate::core::schema_dsl::{self, FieldValue};
 use crate::core::store::{TableName, TableRow};
-use crate::core::wire;
 
 use super::fact::{AuthorId, ContentMessageFact, FrontierId, WorkspaceId};
 
@@ -36,53 +36,49 @@ pub fn content_message_key(workspace_id: WorkspaceId, message_id: FactId) -> Vec
 }
 
 pub fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> TableRow {
-    let mut writer = wire::Writer::with_capacity(ROW_VALUE_BYTES);
-    writer.fixed(&fact.author_user_id);
-    writer.u64be(fact.created_at_ms);
-    writer.fixed(&fact.frontier_id);
-    writer.u64be(fact.minute);
-    writer.fixed(&fact.leaf_id);
-    writer.fixed(&fact.sealed_body_ref);
-    writer.u8(0);
-    TableRow {
-        table: CONTENT_MESSAGE_ROWS,
-        key: content_message_key(fact.workspace_id, message_id),
-        value: writer.finish(),
-    }
+    schema_dsl::encode_table_row(
+        CONTENT_MESSAGE_ROWS,
+        schema_dsl::facts_table("content_messages"),
+        &[
+            (
+                "workspace_id",
+                FieldValue::Bytes(fact.workspace_id.to_vec()),
+            ),
+            ("message_id", FieldValue::Bytes(message_id.to_vec())),
+            (
+                "author_user_id",
+                FieldValue::Bytes(fact.author_user_id.to_vec()),
+            ),
+            ("created_at_ms", FieldValue::U64(fact.created_at_ms)),
+            ("frontier_id", FieldValue::Bytes(fact.frontier_id.to_vec())),
+            ("minute", FieldValue::U64(fact.minute)),
+            ("leaf_id", FieldValue::Bytes(fact.leaf_id.to_vec())),
+            (
+                "sealed_message_id",
+                FieldValue::Bytes(fact.sealed_body_ref.to_vec()),
+            ),
+            ("deleted", FieldValue::Bool(false)),
+        ],
+    )
+    .expect("content_messages row matches schema")
 }
 
 pub fn decode_content_message_row(key: &[u8], value: &[u8]) -> Result<ContentMessageRow, String> {
-    if key.len() != 64 {
-        return Err("content message row key is malformed".to_string());
+    let record =
+        schema_dsl::decode_table_row(schema_dsl::facts_table("content_messages"), key, value)?;
+    if record.bool("deleted")? {
+        return Err("content message row is deleted".to_string());
     }
-    if value.len() != ROW_VALUE_BYTES {
-        return Err("content message row value is malformed".to_string());
-    }
-    let mut key_reader = wire::Reader::new(key);
-    let workspace_id = key_reader.array().map_err(wire_err)?;
-    let message_id = key_reader.array().map_err(wire_err)?;
-    key_reader.finish().map_err(wire_err)?;
-    let mut value_reader = wire::Reader::new(value);
-    let row = ContentMessageRow {
-        workspace_id,
-        message_id,
-        author_user_id: value_reader.array().map_err(wire_err)?,
-        created_at_ms: value_reader.u64be().map_err(wire_err)?,
-        frontier_id: value_reader.array().map_err(wire_err)?,
-        minute: value_reader.u64be().map_err(wire_err)?,
-        leaf_id: value_reader.array().map_err(wire_err)?,
-        sealed_body_ref: value_reader.array().map_err(wire_err)?,
-    };
-    let deleted = value_reader.u8().map_err(wire_err)?;
-    if deleted > 1 {
-        return Err("content message row deleted flag is malformed".to_string());
-    }
-    value_reader.finish().map_err(wire_err)?;
-    Ok(row)
-}
-
-fn wire_err(err: wire::WireError) -> String {
-    format!("{err:?}")
+    Ok(ContentMessageRow {
+        workspace_id: record.bytes_array("workspace_id")?,
+        message_id: record.bytes_array("message_id")?,
+        author_user_id: record.bytes_array("author_user_id")?,
+        created_at_ms: record.u64("created_at_ms")?,
+        frontier_id: record.bytes_array("frontier_id")?,
+        minute: record.u64("minute")?,
+        leaf_id: record.bytes_array("leaf_id")?,
+        sealed_body_ref: record.bytes_array("sealed_message_id")?,
+    })
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ use crate::core::{
     facts::{Fact, FactId},
     handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler},
     intents::{Intent, IntentExecution, IntentKind},
+    schema_dsl::{self, FieldValue},
     store::Store,
 };
 use crate::protocol::facts::{connection, sync};
@@ -36,11 +37,15 @@ pub fn decode_seed_connection_sync(intent: &Intent) -> Result<SeedConnectionSync
     if intent.execution != IntentExecution::Deferred {
         return Err("seed_connection_sync intent must be deferred".to_string());
     }
-    if intent.payload.len() != 33 || intent.payload[0] != 1 {
-        return Err("invalid seed_connection_sync payload".to_string());
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("seed_connection_sync_payload"),
+        &intent.payload,
+    )?;
+    if payload.u8("version")? != 1 {
+        return Err("seed_connection_sync payload version unsupported".to_string());
     }
     let input = SeedConnectionSync {
-        connection_id: intent.payload[1..33].try_into().unwrap(),
+        connection_id: payload.bytes_array("connection_id")?,
     };
     if intent.key != seed_connection_sync_key(input.connection_id) {
         return Err("seed_connection_sync key does not match payload".to_string());
@@ -55,10 +60,17 @@ fn seed_connection_sync_key(connection_id: FactId) -> Vec<u8> {
 }
 
 fn encode_seed_connection_sync(input: &SeedConnectionSync) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(33);
-    payload.push(1);
-    payload.extend_from_slice(&input.connection_id);
-    payload
+    schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("seed_connection_sync_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "connection_id",
+                FieldValue::Bytes(input.connection_id.to_vec()),
+            ),
+        ],
+    )
+    .expect("seed_connection_sync payload matches schema")
 }
 
 #[derive(Debug, Clone, Default)]

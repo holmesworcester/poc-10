@@ -1036,6 +1036,22 @@ fn decode_column_value(
             let out = take_exact(bytes, offset, len, label)?;
             Ok(Value::Blob(out.to_vec()))
         }
+        ColumnType::U8 => {
+            let raw = take_exact(bytes, offset, 1, label)?[0];
+            Ok(Value::Integer(i64::from(raw)))
+        }
+        ColumnType::U16 => {
+            let raw = take_exact(bytes, offset, 2, label)?;
+            Ok(Value::Integer(i64::from(u16::from_be_bytes(
+                raw.try_into().unwrap(),
+            ))))
+        }
+        ColumnType::U32 => {
+            let raw = take_exact(bytes, offset, 4, label)?;
+            Ok(Value::Integer(i64::from(u32::from_be_bytes(
+                raw.try_into().unwrap(),
+            ))))
+        }
         ColumnType::U64 => {
             let raw = take_exact(bytes, offset, 8, label)?;
             let value = u64::from_be_bytes(raw.try_into().unwrap());
@@ -1092,6 +1108,30 @@ fn encode_column_value(
         (ColumnType::Bytes { len: None }, Value::Blob(bytes)) => {
             put_sized_u32(out, bytes, label)?;
         }
+        (ColumnType::U8, Value::Integer(value)) => {
+            let value = u8::try_from(*value).map_err(|_| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed column {label} is outside u8 range"
+                ))
+            })?;
+            out.push(value);
+        }
+        (ColumnType::U16, Value::Integer(value)) => {
+            let value = u16::try_from(*value).map_err(|_| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed column {label} is outside u16 range"
+                ))
+            })?;
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        (ColumnType::U32, Value::Integer(value)) => {
+            let value = u32::try_from(*value).map_err(|_| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed column {label} is outside u32 range"
+                ))
+            })?;
+            out.extend_from_slice(&value.to_be_bytes());
+        }
         (ColumnType::U64, Value::Integer(value)) => {
             let value = u64::try_from(*value).map_err(|_| {
                 rusqlite::Error::InvalidParameterName(format!(
@@ -1129,9 +1169,12 @@ fn sqlite_column_value(
 ) -> rusqlite::Result<Value> {
     match ty {
         ColumnType::Bytes { .. } => row.get::<_, Vec<u8>>(index).map(Value::Blob),
-        ColumnType::U64 | ColumnType::I64 | ColumnType::Bool => {
-            row.get::<_, i64>(index).map(Value::Integer)
-        }
+        ColumnType::U8
+        | ColumnType::U16
+        | ColumnType::U32
+        | ColumnType::U64
+        | ColumnType::I64
+        | ColumnType::Bool => row.get::<_, i64>(index).map(Value::Integer),
         ColumnType::Text => row.get::<_, String>(index).map(Value::Text),
     }
 }
@@ -1378,7 +1421,9 @@ fn validate_sqlite_typed_table(
 fn sqlite_type(ty: &ColumnType) -> &'static str {
     match ty {
         ColumnType::Bytes { .. } => "BLOB",
-        ColumnType::U64 | ColumnType::I64 => "INTEGER",
+        ColumnType::U8 | ColumnType::U16 | ColumnType::U32 | ColumnType::U64 | ColumnType::I64 => {
+            "INTEGER"
+        }
         ColumnType::Text => "TEXT",
         ColumnType::Bool => "INTEGER",
     }

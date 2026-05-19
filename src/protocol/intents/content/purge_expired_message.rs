@@ -6,6 +6,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::schema_dsl::{self, FieldValue};
 use crate::protocol::facts::content::sealed_message::retention;
 
 pub const PURGE_EXPIRED_MESSAGE: &str = "purge_expired_message";
@@ -48,22 +49,33 @@ fn purge_expired_message_key(input: &PurgeExpiredMessage) -> Vec<u8> {
 }
 
 fn encode_purge_expired_message(input: &PurgeExpiredMessage) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(73);
-    payload.push(1);
-    payload.extend_from_slice(&input.workspace_id);
-    payload.extend_from_slice(&input.target_id);
-    payload.extend_from_slice(&input.now_minute.to_be_bytes());
-    payload
+    schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("purge_expired_message_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "workspace_id",
+                FieldValue::Bytes(input.workspace_id.to_vec()),
+            ),
+            ("target_id", FieldValue::Bytes(input.target_id.to_vec())),
+            ("now_minute", FieldValue::U64(input.now_minute)),
+        ],
+    )
+    .expect("purge_expired_message payload matches schema")
 }
 
 fn decode_purge_expired_message_payload(payload: &[u8]) -> Result<PurgeExpiredMessage, String> {
-    if payload.len() != 73 || payload[0] != 1 {
-        return Err("invalid purge_expired_message payload".to_string());
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("purge_expired_message_payload"),
+        payload,
+    )?;
+    if payload.u8("version")? != 1 {
+        return Err("purge_expired_message payload version unsupported".to_string());
     }
     Ok(PurgeExpiredMessage {
-        workspace_id: payload[1..33].try_into().unwrap(),
-        target_id: payload[33..65].try_into().unwrap(),
-        now_minute: u64::from_be_bytes(payload[65..73].try_into().unwrap()),
+        workspace_id: payload.bytes_array("workspace_id")?,
+        target_id: payload.bytes_array("target_id")?,
+        now_minute: payload.u64("now_minute")?,
     })
 }
 

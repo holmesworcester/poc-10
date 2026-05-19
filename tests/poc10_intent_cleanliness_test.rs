@@ -1202,7 +1202,9 @@ fn target_schema_dsl_files_are_declarative_only() {
         for line in meaningful_source_lines(&text) {
             if !(line.starts_with("table ")
                 || line.starts_with("row_table ")
+                || line.starts_with("layout ")
                 || line.starts_with("column ")
+                || line.starts_with("field ")
                 || line.starts_with("row_key ")
                 || line.starts_with("index ")
                 || line.starts_with("unique index ")
@@ -1218,7 +1220,7 @@ fn target_schema_dsl_files_are_declarative_only() {
 
     assert!(
         offenders.is_empty(),
-        "poc-10 schema DSL files should declare tables only, not behavior:\n{}",
+        "poc-10 schema DSL files should declare tables and byte layouts only, not behavior:\n{}",
         offenders.join("\n")
     );
 }
@@ -1235,7 +1237,6 @@ fn target_schema_dsl_parser_stays_protocol_neutral() {
         "crate::protocol::facts",
         "crate::legacy::protocol",
         "crate::legacy::workers",
-        "TableRow",
         "Intent",
         "ProjectionOutput",
         "ContextNeed",

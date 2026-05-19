@@ -7,13 +7,12 @@
 //! per-file decryption secret.
 
 use crate::core::facts::FactId;
+use crate::core::schema_dsl::{self, FieldValue};
 use crate::core::store::{TableName, TableRow};
-use crate::core::wire;
 
-use super::fact::{AuthorId, ContentFileFact, RootHash, WorkspaceId, FILE_ROOT_HASH_BYTES};
+use super::fact::{AuthorId, ContentFileFact, RootHash, WorkspaceId};
 
 pub const FILE_ROWS: TableName = TableName::new("content_files");
-pub const ROW_PREFIX_BYTES: usize = 32 + 32 + 32 + 8 + FILE_ROOT_HASH_BYTES + 8 + 8 + 8 + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentFileRow {
@@ -38,89 +37,68 @@ pub fn content_file_key(workspace_id: &WorkspaceId, file_fact_id: &FactId) -> Ve
 }
 
 pub fn content_file_row(file_fact_id: FactId, fact: &ContentFileFact) -> Result<TableRow, String> {
-    let sealed_len: u32 = fact
-        .sealed_metadata
-        .len()
-        .try_into()
-        .map_err(|_| "content file row sealed metadata exceeds u32".to_string())?;
-    let mut writer = wire::Writer::with_capacity(ROW_PREFIX_BYTES + fact.sealed_metadata.len() + 1);
-    writer.fixed(&fact.message_id);
-    writer.fixed(&fact.file_id);
-    writer.fixed(&fact.author_user_id);
-    writer.u64be(fact.created_at_ms);
-    writer.fixed(&fact.root_hash);
-    writer.u64be(fact.blob_bytes);
-    writer.u64be(u64::from(fact.total_slices));
-    writer.u64be(u64::from(fact.slice_bytes));
-    writer.u32be(sealed_len);
-    writer.bytes(&fact.sealed_metadata);
-    writer.u8(0);
-    Ok(TableRow {
-        table: FILE_ROWS,
-        key: content_file_key(&fact.workspace_id, &file_fact_id),
-        value: writer.finish(),
-    })
+    schema_dsl::encode_table_row(
+        FILE_ROWS,
+        schema_dsl::facts_table("content_files"),
+        &[
+            (
+                "workspace_id",
+                FieldValue::Bytes(fact.workspace_id.to_vec()),
+            ),
+            ("file_fact_id", FieldValue::Bytes(file_fact_id.to_vec())),
+            ("message_id", FieldValue::Bytes(fact.message_id.to_vec())),
+            ("file_id", FieldValue::Bytes(fact.file_id.to_vec())),
+            (
+                "author_user_id",
+                FieldValue::Bytes(fact.author_user_id.to_vec()),
+            ),
+            ("created_at_ms", FieldValue::U64(fact.created_at_ms)),
+            ("root_hash", FieldValue::Bytes(fact.root_hash.to_vec())),
+            ("byte_len", FieldValue::U64(fact.blob_bytes)),
+            (
+                "total_slices",
+                FieldValue::U64(u64::from(fact.total_slices)),
+            ),
+            ("slice_bytes", FieldValue::U64(u64::from(fact.slice_bytes))),
+            (
+                "sealed_metadata",
+                FieldValue::Bytes(fact.sealed_metadata.clone()),
+            ),
+            ("deleted", FieldValue::Bool(false)),
+        ],
+    )
 }
 
 pub fn decode_content_file_row(key: &[u8], value: &[u8]) -> Result<ContentFileRow, String> {
-    if key.len() != 64 {
-        return Err("content file row key is malformed".to_string());
+    let record =
+        schema_dsl::decode_table_row(schema_dsl::facts_table("content_files"), key, value)?;
+    if record.bool("deleted")? {
+        return Err("content file row is deleted".to_string());
     }
-    if value.len() < ROW_PREFIX_BYTES + 1 {
-        return Err("content file row value is malformed".to_string());
-    }
-    let mut value_reader = wire::Reader::new(value);
-    let message_id = value_reader.array().map_err(wire_err)?;
-    let file_id = value_reader.array().map_err(wire_err)?;
-    let author_user_id = value_reader.array().map_err(wire_err)?;
-    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
-    let root_hash = value_reader.array().map_err(wire_err)?;
-    let blob_bytes = value_reader.u64be().map_err(wire_err)?;
-    let total_slices = value_reader
-        .u64be()
-        .map_err(wire_err)?
-        .try_into()
-        .map_err(|_| "content file row total_slices exceeds u32".to_string())?;
-    let slice_bytes = value_reader
-        .u64be()
-        .map_err(wire_err)?
-        .try_into()
-        .map_err(|_| "content file row slice_bytes exceeds u32".to_string())?;
-    let sealed_len = value_reader.u32be().map_err(wire_err)? as usize;
-    if value.len() != ROW_PREFIX_BYTES + sealed_len + 1 {
-        return Err("content file row value length does not match metadata".to_string());
-    }
-    let sealed_metadata = value_reader.bytes(sealed_len).map_err(wire_err)?.to_vec();
-    let deleted = value_reader.u8().map_err(wire_err)?;
-    if deleted > 1 {
-        return Err("content file row deleted flag is malformed".to_string());
-    }
-    value_reader.finish().map_err(wire_err)?;
-    let mut key_reader = wire::Reader::new(key);
-    let workspace_id = key_reader.array().map_err(wire_err)?;
-    let file_fact_id = key_reader.array().map_err(wire_err)?;
-    key_reader.finish().map_err(wire_err)?;
     Ok(ContentFileRow {
-        workspace_id,
-        file_fact_id,
-        created_at_ms,
-        message_id,
-        author_user_id,
-        file_id,
-        blob_bytes,
-        total_slices,
-        slice_bytes,
-        root_hash,
-        sealed_metadata,
+        workspace_id: record.bytes_array("workspace_id")?,
+        file_fact_id: record.bytes_array("file_fact_id")?,
+        created_at_ms: record.u64("created_at_ms")?,
+        message_id: record.bytes_array("message_id")?,
+        author_user_id: record.bytes_array("author_user_id")?,
+        file_id: record.bytes_array("file_id")?,
+        blob_bytes: record.u64("byte_len")?,
+        total_slices: record
+            .u64("total_slices")?
+            .try_into()
+            .map_err(|_| "content file row total_slices exceeds u32".to_string())?,
+        slice_bytes: record
+            .u64("slice_bytes")?
+            .try_into()
+            .map_err(|_| "content file row slice_bytes exceeds u32".to_string())?,
+        root_hash: record.bytes_array("root_hash")?,
+        sealed_metadata: record.bytes_vec("sealed_metadata")?,
     })
-}
-
-fn wire_err(err: wire::WireError) -> String {
-    format!("{err:?}")
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::fact::FILE_ROOT_HASH_BYTES;
     use super::*;
 
     #[test]

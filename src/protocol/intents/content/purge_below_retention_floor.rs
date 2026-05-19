@@ -6,6 +6,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::schema_dsl::{self, FieldValue};
 use crate::protocol::facts::{
     content::sealed_message::retention, encryption::disappearing_messages_setting,
 };
@@ -53,24 +54,35 @@ fn purge_below_retention_floor_key(input: &PurgeBelowRetentionFloor) -> Vec<u8> 
 }
 
 fn encode_purge_below_retention_floor(input: &PurgeBelowRetentionFloor) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(97);
-    payload.push(1);
-    payload.extend_from_slice(&input.workspace_id);
-    payload.extend_from_slice(&input.setting_id);
-    payload.extend_from_slice(&input.target_id);
-    payload
+    schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("purge_below_retention_floor_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "workspace_id",
+                FieldValue::Bytes(input.workspace_id.to_vec()),
+            ),
+            ("setting_id", FieldValue::Bytes(input.setting_id.to_vec())),
+            ("target_id", FieldValue::Bytes(input.target_id.to_vec())),
+        ],
+    )
+    .expect("purge_below_retention_floor payload matches schema")
 }
 
 fn decode_purge_below_retention_floor_payload(
     payload: &[u8],
 ) -> Result<PurgeBelowRetentionFloor, String> {
-    if payload.len() != 97 || payload[0] != 1 {
-        return Err("invalid purge_below_retention_floor payload".to_string());
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("purge_below_retention_floor_payload"),
+        payload,
+    )?;
+    if payload.u8("version")? != 1 {
+        return Err("purge_below_retention_floor payload version unsupported".to_string());
     }
     Ok(PurgeBelowRetentionFloor {
-        workspace_id: payload[1..33].try_into().unwrap(),
-        setting_id: payload[33..65].try_into().unwrap(),
-        target_id: payload[65..97].try_into().unwrap(),
+        workspace_id: payload.bytes_array("workspace_id")?,
+        setting_id: payload.bytes_array("setting_id")?,
+        target_id: payload.bytes_array("target_id")?,
     })
 }
 

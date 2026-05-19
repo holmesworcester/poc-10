@@ -7,14 +7,12 @@
 //! resolves the per-message decryption secret.
 
 use crate::core::facts::FactId;
+use crate::core::schema_dsl::{self, FieldValue};
 use crate::core::store::{TableName, TableRow};
-use crate::core::wire;
 
 use super::fact::{AuthorId, WorkspaceId, REACTION_CIPHERTEXT_BYTES, REACTION_NONCE_BYTES};
 
 pub const REACTION_ROWS: TableName = TableName::new("content_reactions");
-
-pub const ROW_PREFIX_BYTES: usize = 32 + 32 + 8 + REACTION_NONCE_BYTES + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionRow {
@@ -38,67 +36,50 @@ pub fn reaction_row(input: ReactionRow) -> Result<TableRow, String> {
     if input.ciphertext.len() > REACTION_CIPHERTEXT_BYTES {
         return Err("reaction row ciphertext exceeds fixed slot".to_string());
     }
-    let mut writer = wire::Writer::with_capacity(ROW_PREFIX_BYTES + input.ciphertext.len() + 1);
-    writer.fixed(&input.target_message_id);
-    writer.fixed(&input.author_user_id);
-    writer.u64be(input.created_at_ms);
-    writer.fixed(&input.nonce);
-    writer.u32be(input.ciphertext.len() as u32);
-    writer.bytes(&input.ciphertext);
-    writer.u8(0);
-    Ok(TableRow {
-        table: REACTION_ROWS,
-        key: reaction_key(input.workspace_id, input.reaction_id),
-        value: writer.finish(),
-    })
+    schema_dsl::encode_table_row(
+        REACTION_ROWS,
+        schema_dsl::facts_table("content_reactions"),
+        &[
+            (
+                "workspace_id",
+                FieldValue::Bytes(input.workspace_id.to_vec()),
+            ),
+            ("reaction_id", FieldValue::Bytes(input.reaction_id.to_vec())),
+            (
+                "message_id",
+                FieldValue::Bytes(input.target_message_id.to_vec()),
+            ),
+            (
+                "author_user_id",
+                FieldValue::Bytes(input.author_user_id.to_vec()),
+            ),
+            ("created_at_ms", FieldValue::U64(input.created_at_ms)),
+            ("nonce", FieldValue::Bytes(input.nonce.to_vec())),
+            ("ciphertext", FieldValue::Bytes(input.ciphertext)),
+            ("deleted", FieldValue::Bool(false)),
+        ],
+    )
 }
 
 pub fn decode_reaction_row(key: &[u8], value: &[u8]) -> Result<ReactionRow, String> {
-    if key.len() != 64 {
-        return Err("reaction row key is malformed".to_string());
-    }
-    if value.len() < ROW_PREFIX_BYTES + 1 {
-        return Err("reaction row value is malformed".to_string());
-    }
-    let mut key_reader = wire::Reader::new(key);
-    let workspace_id = key_reader.array().map_err(wire_err)?;
-    let reaction_id = key_reader.array().map_err(wire_err)?;
-    key_reader.finish().map_err(wire_err)?;
-    let mut value_reader = wire::Reader::new(value);
-    let target_message_id = value_reader.array().map_err(wire_err)?;
-    let author_user_id = value_reader.array().map_err(wire_err)?;
-    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
-    let nonce = value_reader.array().map_err(wire_err)?;
-    let ciphertext_len = value_reader.u32be().map_err(wire_err)? as usize;
-    if ciphertext_len > REACTION_CIPHERTEXT_BYTES {
+    let record =
+        schema_dsl::decode_table_row(schema_dsl::facts_table("content_reactions"), key, value)?;
+    let ciphertext = record.bytes_vec("ciphertext")?;
+    if ciphertext.len() > REACTION_CIPHERTEXT_BYTES {
         return Err("reaction row ciphertext exceeds fixed slot".to_string());
     }
-    if value.len() != ROW_PREFIX_BYTES + ciphertext_len + 1 {
-        return Err("reaction row value is malformed".to_string());
+    if record.bool("deleted")? {
+        return Err("reaction row is deleted".to_string());
     }
-    let ciphertext = value_reader
-        .bytes(ciphertext_len)
-        .map_err(wire_err)?
-        .to_vec();
-    let deleted = value_reader.u8().map_err(wire_err)?;
-    if deleted > 1 {
-        return Err("reaction row deleted flag is malformed".to_string());
-    }
-    let row = ReactionRow {
-        workspace_id,
-        reaction_id,
-        created_at_ms,
-        target_message_id,
-        author_user_id,
-        nonce,
+    Ok(ReactionRow {
+        workspace_id: record.bytes_array("workspace_id")?,
+        reaction_id: record.bytes_array("reaction_id")?,
+        created_at_ms: record.u64("created_at_ms")?,
+        target_message_id: record.bytes_array("message_id")?,
+        author_user_id: record.bytes_array("author_user_id")?,
+        nonce: record.bytes_array("nonce")?,
         ciphertext,
-    };
-    value_reader.finish().map_err(wire_err)?;
-    Ok(row)
-}
-
-fn wire_err(err: wire::WireError) -> String {
-    format!("{err:?}")
+    })
 }
 
 #[cfg(test)]

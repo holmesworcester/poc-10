@@ -1,11 +1,14 @@
-//! Parser skeleton for the poc-10 schema declaration files.
+//! Parser and byte-codec helpers for the poc-10 schema declaration files.
 //!
-//! This module intentionally stops at a small AST. It does not create store
-//! schemas or row codecs yet; the first step is making durable table ownership
-//! explicit and parseable without embedding SQL or Rust behavior.
+//! The DSL owns table declarations and fixed record layouts. Core uses those
+//! declarations for storage shape and byte packing mechanics; protocol modules
+//! still own semantic invariants, projection policy, crypto, and command
+//! behavior.
 
-use std::collections::BTreeSet;
+use crate::core::store::{TableName, TableRow};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::OnceLock;
 
 pub const CORE_SCHEMA_SOURCE: &str = include_str!("schema.p8sql");
 pub const FACTS_SCHEMA_SOURCE: &str = include_str!("../protocol/facts/schema.p8sql");
@@ -14,11 +17,16 @@ pub const INTENTS_SCHEMA_SOURCE: &str = include_str!("../protocol/intents/schema
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDocument {
     pub tables: Vec<TableDeclaration>,
+    pub layouts: Vec<LayoutDeclaration>,
 }
 
 impl SchemaDocument {
     pub fn table(&self, name: &str) -> Option<&TableDeclaration> {
         self.tables.iter().find(|table| table.name == name)
+    }
+
+    pub fn layout(&self, name: &str) -> Option<&LayoutDeclaration> {
+        self.layouts.iter().find(|layout| layout.name == name)
     }
 }
 
@@ -55,6 +63,9 @@ pub struct ColumnDeclaration {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
+    U8,
+    U16,
+    U32,
     Bytes { len: Option<usize> },
     U64,
     I64,
@@ -72,6 +83,139 @@ pub struct IndexDeclaration {
     pub name: String,
     pub unique: bool,
     pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutDeclaration {
+    pub name: String,
+    pub fields: Vec<FieldDeclaration>,
+}
+
+impl LayoutDeclaration {
+    pub fn field(&self, name: &str) -> Option<&FieldDeclaration> {
+        self.fields.iter().find(|field| field.name == name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDeclaration {
+    pub name: String,
+    pub ty: ColumnType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldValue {
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    I64(i64),
+    Bytes(Vec<u8>),
+    Text(String),
+    Bool(bool),
+}
+
+impl FieldValue {
+    pub fn bytes_array<const N: usize>(&self, label: &str) -> Result<[u8; N], String> {
+        match self {
+            FieldValue::Bytes(bytes) => bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| format!("field `{label}` is not {N} bytes")),
+            _ => Err(format!("field `{label}` is not bytes")),
+        }
+    }
+
+    pub fn u8(&self, label: &str) -> Result<u8, String> {
+        match self {
+            FieldValue::U8(value) => Ok(*value),
+            _ => Err(format!("field `{label}` is not u8")),
+        }
+    }
+
+    pub fn u16(&self, label: &str) -> Result<u16, String> {
+        match self {
+            FieldValue::U16(value) => Ok(*value),
+            _ => Err(format!("field `{label}` is not u16")),
+        }
+    }
+
+    pub fn u32(&self, label: &str) -> Result<u32, String> {
+        match self {
+            FieldValue::U32(value) => Ok(*value),
+            _ => Err(format!("field `{label}` is not u32")),
+        }
+    }
+
+    pub fn u64(&self, label: &str) -> Result<u64, String> {
+        match self {
+            FieldValue::U64(value) => Ok(*value),
+            _ => Err(format!("field `{label}` is not u64")),
+        }
+    }
+
+    pub fn bool(&self, label: &str) -> Result<bool, String> {
+        match self {
+            FieldValue::Bool(value) => Ok(*value),
+            _ => Err(format!("field `{label}` is not bool")),
+        }
+    }
+
+    pub fn bytes(&self, label: &str) -> Result<&[u8], String> {
+        match self {
+            FieldValue::Bytes(value) => Ok(value),
+            _ => Err(format!("field `{label}` is not bytes")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedRecord {
+    values: BTreeMap<String, FieldValue>,
+}
+
+impl DecodedRecord {
+    pub fn new(values: BTreeMap<String, FieldValue>) -> Self {
+        Self { values }
+    }
+
+    pub fn get(&self, name: &str) -> Result<&FieldValue, String> {
+        self.values
+            .get(name)
+            .ok_or_else(|| format!("decoded record is missing field `{name}`"))
+    }
+
+    pub fn u8(&self, name: &str) -> Result<u8, String> {
+        self.get(name)?.u8(name)
+    }
+
+    pub fn u16(&self, name: &str) -> Result<u16, String> {
+        self.get(name)?.u16(name)
+    }
+
+    pub fn u32(&self, name: &str) -> Result<u32, String> {
+        self.get(name)?.u32(name)
+    }
+
+    pub fn u64(&self, name: &str) -> Result<u64, String> {
+        self.get(name)?.u64(name)
+    }
+
+    pub fn bool(&self, name: &str) -> Result<bool, String> {
+        self.get(name)?.bool(name)
+    }
+
+    pub fn bytes(&self, name: &str) -> Result<&[u8], String> {
+        self.get(name)?.bytes(name)
+    }
+
+    pub fn bytes_vec(&self, name: &str) -> Result<Vec<u8>, String> {
+        Ok(self.bytes(name)?.to_vec())
+    }
+
+    pub fn bytes_array<const N: usize>(&self, name: &str) -> Result<[u8; N], String> {
+        self.get(name)?.bytes_array(name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +245,146 @@ impl std::error::Error for ParseError {}
 
 pub fn parse_schema(source: &str) -> Result<SchemaDocument, ParseError> {
     Parser::new(source)?.parse_document()
+}
+
+pub fn core_schema_document() -> &'static SchemaDocument {
+    static DOCUMENT: OnceLock<SchemaDocument> = OnceLock::new();
+    DOCUMENT.get_or_init(|| parse_schema(CORE_SCHEMA_SOURCE).expect("core schema parses"))
+}
+
+pub fn facts_schema_document() -> &'static SchemaDocument {
+    static DOCUMENT: OnceLock<SchemaDocument> = OnceLock::new();
+    DOCUMENT.get_or_init(|| parse_schema(FACTS_SCHEMA_SOURCE).expect("facts schema parses"))
+}
+
+pub fn intents_schema_document() -> &'static SchemaDocument {
+    static DOCUMENT: OnceLock<SchemaDocument> = OnceLock::new();
+    DOCUMENT.get_or_init(|| parse_schema(INTENTS_SCHEMA_SOURCE).expect("intents schema parses"))
+}
+
+pub fn facts_layout(name: &str) -> &'static LayoutDeclaration {
+    facts_schema_document()
+        .layout(name)
+        .unwrap_or_else(|| panic!("missing facts layout `{name}`"))
+}
+
+pub fn intents_layout(name: &str) -> &'static LayoutDeclaration {
+    intents_schema_document()
+        .layout(name)
+        .unwrap_or_else(|| panic!("missing intents layout `{name}`"))
+}
+
+pub fn facts_table(name: &str) -> &'static TableDeclaration {
+    facts_schema_document()
+        .table(name)
+        .unwrap_or_else(|| panic!("missing facts table `{name}`"))
+}
+
+pub fn encode_layout_record(
+    layout: &LayoutDeclaration,
+    values: &[(&str, FieldValue)],
+) -> Result<Vec<u8>, String> {
+    let values = value_map(values)?;
+    let mut out = Vec::new();
+    for field in &layout.fields {
+        let value = values
+            .get(field.name.as_str())
+            .ok_or_else(|| format!("layout `{}` missing field `{}`", layout.name, field.name))?;
+        encode_value(&field.ty, value, &mut out, &field.name)?;
+    }
+    reject_extra_values(
+        values.keys().copied(),
+        layout.fields.iter().map(|field| field.name.as_str()),
+        &format!("layout `{}`", layout.name),
+    )?;
+    Ok(out)
+}
+
+pub fn decode_layout_record(
+    layout: &LayoutDeclaration,
+    bytes: &[u8],
+) -> Result<DecodedRecord, String> {
+    let mut offset = 0;
+    let mut values = BTreeMap::new();
+    for field in &layout.fields {
+        let value = decode_value(&field.ty, bytes, &mut offset, &field.name)?;
+        values.insert(field.name.clone(), value);
+    }
+    if offset != bytes.len() {
+        return Err(format!("layout `{}` has trailing bytes", layout.name));
+    }
+    Ok(DecodedRecord::new(values))
+}
+
+pub fn encode_table_row(
+    table_name: TableName,
+    table: &TableDeclaration,
+    values: &[(&str, FieldValue)],
+) -> Result<TableRow, String> {
+    if table.kind != TableKind::Typed {
+        return Err(format!("table `{}` is not typed", table.name));
+    }
+    let values = value_map(values)?;
+    let mut key = Vec::new();
+    let mut value = Vec::new();
+    for column in &table.columns {
+        let field = values
+            .get(column.name.as_str())
+            .ok_or_else(|| format!("table `{}` missing column `{}`", table.name, column.name))?;
+        if table
+            .row_key
+            .columns
+            .iter()
+            .any(|name| name == &column.name)
+        {
+            encode_value(&column.ty, field, &mut key, &column.name)?;
+        } else {
+            encode_value(&column.ty, field, &mut value, &column.name)?;
+        }
+    }
+    reject_extra_values(
+        values.keys().copied(),
+        table.columns.iter().map(|column| column.name.as_str()),
+        &format!("table `{}`", table.name),
+    )?;
+    Ok(TableRow {
+        table: table_name,
+        key,
+        value,
+    })
+}
+
+pub fn decode_table_row(
+    table: &TableDeclaration,
+    key: &[u8],
+    value: &[u8],
+) -> Result<DecodedRecord, String> {
+    if table.kind != TableKind::Typed {
+        return Err(format!("table `{}` is not typed", table.name));
+    }
+    let mut key_offset = 0;
+    let mut value_offset = 0;
+    let mut values = BTreeMap::new();
+    for column in &table.columns {
+        let from_key = table
+            .row_key
+            .columns
+            .iter()
+            .any(|name| name == &column.name);
+        let decoded = if from_key {
+            decode_value(&column.ty, key, &mut key_offset, &column.name)?
+        } else {
+            decode_value(&column.ty, value, &mut value_offset, &column.name)?
+        };
+        values.insert(column.name.clone(), decoded);
+    }
+    if key_offset != key.len() {
+        return Err(format!("table `{}` key has trailing bytes", table.name));
+    }
+    if value_offset != value.len() {
+        return Err(format!("table `{}` value has trailing bytes", table.name));
+    }
+    Ok(DecodedRecord::new(values))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,19 +417,43 @@ impl<'a> Parser<'a> {
     fn parse_document(mut self) -> Result<SchemaDocument, ParseError> {
         let mut tables = Vec::new();
         let mut table_names = BTreeSet::new();
+        let mut layouts = Vec::new();
+        let mut layout_names = BTreeSet::new();
 
         while !matches!(self.lookahead.kind, TokenKind::Eof) {
-            let table = match &self.lookahead.kind {
-                TokenKind::Ident(keyword) if keyword == "row_table" => self.parse_row_table()?,
-                _ => self.parse_table()?,
+            match &self.lookahead.kind {
+                TokenKind::Ident(keyword) if keyword == "row_table" => {
+                    let table = self.parse_row_table()?;
+                    if !table_names.insert(table.name.clone()) {
+                        return Err(
+                            self.error(format!("duplicate table declaration `{}`", table.name))
+                        );
+                    }
+                    tables.push(table);
+                }
+                TokenKind::Ident(keyword) if keyword == "table" => {
+                    let table = self.parse_table()?;
+                    if !table_names.insert(table.name.clone()) {
+                        return Err(
+                            self.error(format!("duplicate table declaration `{}`", table.name))
+                        );
+                    }
+                    tables.push(table);
+                }
+                TokenKind::Ident(keyword) if keyword == "layout" => {
+                    let layout = self.parse_layout()?;
+                    if !layout_names.insert(layout.name.clone()) {
+                        return Err(
+                            self.error(format!("duplicate layout declaration `{}`", layout.name))
+                        );
+                    }
+                    layouts.push(layout);
+                }
+                _ => return Err(self.error("expected `row_table`, `table`, or `layout`")),
             };
-            if !table_names.insert(table.name.clone()) {
-                return Err(self.error(format!("duplicate table declaration `{}`", table.name)));
-            }
-            tables.push(table);
         }
 
-        Ok(SchemaDocument { tables })
+        Ok(SchemaDocument { tables, layouts })
     }
 
     fn parse_table(&mut self) -> Result<TableDeclaration, ParseError> {
@@ -321,6 +629,9 @@ impl<'a> Parser<'a> {
                 };
                 Ok(ColumnType::Bytes { len })
             }
+            "u8" => Ok(ColumnType::U8),
+            "u16" => Ok(ColumnType::U16),
+            "u32" => Ok(ColumnType::U32),
             "u64" => Ok(ColumnType::U64),
             "i64" => Ok(ColumnType::I64),
             "text" => Ok(ColumnType::Text),
@@ -331,6 +642,60 @@ impl<'a> Parser<'a> {
                 format!("unknown column type `{ty}`"),
             )),
         }
+    }
+
+    fn parse_layout(&mut self) -> Result<LayoutDeclaration, ParseError> {
+        let layout_token = self.expect_keyword("layout")?;
+        let name = self.parse_name()?;
+        self.expect_symbol('{')?;
+
+        let mut fields = Vec::new();
+        let mut field_names = BTreeSet::new();
+        loop {
+            if self.consume_symbol('}')? {
+                break;
+            }
+            if matches!(self.lookahead.kind, TokenKind::Eof) {
+                return Err(ParseError::new(
+                    layout_token.line,
+                    layout_token.column,
+                    format!("unterminated layout declaration `{name}`"),
+                ));
+            }
+            let keyword = match &self.lookahead.kind {
+                TokenKind::Ident(keyword) => keyword.as_str(),
+                _ => return Err(self.error("expected layout statement: `field`")),
+            };
+            if keyword != "field" {
+                return Err(self.error(format!(
+                    "unknown layout statement `{keyword}`; expected `field`"
+                )));
+            }
+            self.expect_keyword("field")?;
+            let field_token = self.expect_identifier()?;
+            let field_name = identifier_text(&field_token);
+            if !field_names.insert(field_name.clone()) {
+                return Err(ParseError::new(
+                    field_token.line,
+                    field_token.column,
+                    format!("duplicate field declaration `{field_name}`"),
+                ));
+            }
+            let ty = self.parse_column_type()?;
+            self.expect_symbol(';')?;
+            fields.push(FieldDeclaration {
+                name: field_name,
+                ty,
+            });
+        }
+        if fields.is_empty() {
+            return Err(ParseError::new(
+                layout_token.line,
+                layout_token.column,
+                format!("layout `{name}` must declare at least one field"),
+            ));
+        }
+        Ok(LayoutDeclaration { name, fields })
     }
 
     fn parse_index_statement(
@@ -618,6 +983,148 @@ fn is_ident_continue(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+fn value_map<'a>(
+    values: &'a [(&'a str, FieldValue)],
+) -> Result<BTreeMap<&'a str, &'a FieldValue>, String> {
+    let mut out = BTreeMap::new();
+    for (name, value) in values {
+        if out.insert(*name, value).is_some() {
+            return Err(format!("duplicate field value `{name}`"));
+        }
+    }
+    Ok(out)
+}
+
+fn reject_extra_values<'a>(
+    actual: impl Iterator<Item = &'a str>,
+    declared: impl Iterator<Item = &'a str>,
+    owner: &str,
+) -> Result<(), String> {
+    let declared = declared.collect::<BTreeSet<_>>();
+    let extras = actual
+        .filter(|name| !declared.contains(name))
+        .collect::<Vec<_>>();
+    if extras.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{owner} has undeclared field values: {}",
+            extras.join(", ")
+        ))
+    }
+}
+
+fn encode_value(
+    ty: &ColumnType,
+    value: &FieldValue,
+    out: &mut Vec<u8>,
+    label: &str,
+) -> Result<(), String> {
+    match (ty, value) {
+        (ColumnType::U8, FieldValue::U8(value)) => out.push(*value),
+        (ColumnType::U16, FieldValue::U16(value)) => out.extend_from_slice(&value.to_be_bytes()),
+        (ColumnType::U32, FieldValue::U32(value)) => out.extend_from_slice(&value.to_be_bytes()),
+        (ColumnType::U64, FieldValue::U64(value)) => out.extend_from_slice(&value.to_be_bytes()),
+        (ColumnType::I64, FieldValue::I64(value)) => out.extend_from_slice(&value.to_be_bytes()),
+        (ColumnType::Bytes { len: Some(len) }, FieldValue::Bytes(bytes)) => {
+            if bytes.len() != *len {
+                return Err(format!(
+                    "field `{label}` has {} bytes, expected {len}",
+                    bytes.len()
+                ));
+            }
+            out.extend_from_slice(bytes);
+        }
+        (ColumnType::Bytes { len: None }, FieldValue::Bytes(bytes)) => {
+            let len = u32::try_from(bytes.len())
+                .map_err(|_| format!("field `{label}` exceeds u32 length"))?;
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(bytes);
+        }
+        (ColumnType::Text, FieldValue::Text(text)) => {
+            let len = u32::try_from(text.len())
+                .map_err(|_| format!("field `{label}` exceeds u32 length"))?;
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(text.as_bytes());
+        }
+        (ColumnType::Bool, FieldValue::Bool(false)) => out.push(0),
+        (ColumnType::Bool, FieldValue::Bool(true)) => out.push(1),
+        _ => {
+            return Err(format!(
+                "field `{label}` value does not match declared type"
+            ))
+        }
+    }
+    Ok(())
+}
+
+fn decode_value(
+    ty: &ColumnType,
+    bytes: &[u8],
+    offset: &mut usize,
+    label: &str,
+) -> Result<FieldValue, String> {
+    match ty {
+        ColumnType::U8 => Ok(FieldValue::U8(take_exact(bytes, offset, 1, label)?[0])),
+        ColumnType::U16 => {
+            let raw = take_exact(bytes, offset, 2, label)?;
+            Ok(FieldValue::U16(u16::from_be_bytes(raw.try_into().unwrap())))
+        }
+        ColumnType::U32 => {
+            let raw = take_exact(bytes, offset, 4, label)?;
+            Ok(FieldValue::U32(u32::from_be_bytes(raw.try_into().unwrap())))
+        }
+        ColumnType::U64 => {
+            let raw = take_exact(bytes, offset, 8, label)?;
+            Ok(FieldValue::U64(u64::from_be_bytes(raw.try_into().unwrap())))
+        }
+        ColumnType::I64 => {
+            let raw = take_exact(bytes, offset, 8, label)?;
+            Ok(FieldValue::I64(i64::from_be_bytes(raw.try_into().unwrap())))
+        }
+        ColumnType::Bytes { len: Some(len) } => Ok(FieldValue::Bytes(
+            take_exact(bytes, offset, *len, label)?.to_vec(),
+        )),
+        ColumnType::Bytes { len: None } => {
+            let raw_len = take_exact(bytes, offset, 4, label)?;
+            let len = u32::from_be_bytes(raw_len.try_into().unwrap()) as usize;
+            Ok(FieldValue::Bytes(
+                take_exact(bytes, offset, len, label)?.to_vec(),
+            ))
+        }
+        ColumnType::Text => {
+            let raw_len = take_exact(bytes, offset, 4, label)?;
+            let len = u32::from_be_bytes(raw_len.try_into().unwrap()) as usize;
+            let raw = take_exact(bytes, offset, len, label)?;
+            let text = String::from_utf8(raw.to_vec())
+                .map_err(|err| format!("field `{label}` is not utf8: {err}"))?;
+            Ok(FieldValue::Text(text))
+        }
+        ColumnType::Bool => match take_exact(bytes, offset, 1, label)?[0] {
+            0 => Ok(FieldValue::Bool(false)),
+            1 => Ok(FieldValue::Bool(true)),
+            value => Err(format!("field `{label}` has invalid bool byte {value}")),
+        },
+    }
+}
+
+fn take_exact<'a>(
+    bytes: &'a [u8],
+    offset: &mut usize,
+    len: usize,
+    label: &str,
+) -> Result<&'a [u8], String> {
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| format!("field `{label}` length overflows"))?;
+    if end > bytes.len() {
+        return Err(format!("field `{label}` is truncated"));
+    }
+    let out = &bytes[*offset..end];
+    *offset = end;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +1143,13 @@ mod tests {
               row_key (id);
               index by_scope_time (scope, timestamp);
               unique index by_scope_id (scope, id);
+            }
+
+            layout facts_wire {
+              field version u8;
+              field id bytes(32);
+              field timestamp u64;
+              field body bytes;
             }
             "#,
         )
@@ -667,6 +1181,16 @@ mod tests {
         assert_eq!(
             typed_facts.index("by_scope_id").map(|index| index.unique),
             Some(true)
+        );
+
+        let layout = schema.layout("facts_wire").expect("layout");
+        assert_eq!(
+            layout.field("version").map(|field| &field.ty),
+            Some(&ColumnType::U8)
+        );
+        assert_eq!(
+            layout.field("body").map(|field| &field.ty),
+            Some(&ColumnType::Bytes { len: None })
         );
     }
 

@@ -2,6 +2,7 @@
 
 use crate::core::facts::FactId;
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::schema_dsl::{self, FieldValue};
 
 use super::fact::WorkspaceId;
 
@@ -71,26 +72,40 @@ fn purge_deleted_message_key(
 }
 
 fn encode_purge_deleted_message_payload(input: &PurgeDeletedMessage) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(99);
-    payload.push(1);
-    payload.extend_from_slice(&input.workspace_id);
-    payload.push(input.target_kind);
-    payload.extend_from_slice(&input.target_id);
-    payload.push(input.reason_kind);
-    payload.extend_from_slice(&input.reason_fact_id);
-    payload
+    schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("purge_deleted_message_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "workspace_id",
+                FieldValue::Bytes(input.workspace_id.to_vec()),
+            ),
+            ("target_kind", FieldValue::U8(input.target_kind)),
+            ("target_id", FieldValue::Bytes(input.target_id.to_vec())),
+            ("reason_kind", FieldValue::U8(input.reason_kind)),
+            (
+                "reason_fact_id",
+                FieldValue::Bytes(input.reason_fact_id.to_vec()),
+            ),
+        ],
+    )
+    .expect("purge_deleted_message payload matches schema")
 }
 
 fn decode_purge_deleted_message_payload(payload: &[u8]) -> Result<PurgeDeletedMessage, String> {
-    if payload.len() != 99 || payload[0] != 1 {
-        return Err("invalid purge_deleted_message intent payload".to_string());
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("purge_deleted_message_payload"),
+        payload,
+    )?;
+    if payload.u8("version")? != 1 {
+        return Err("purge_deleted_message payload version unsupported".to_string());
     }
     Ok(PurgeDeletedMessage {
-        workspace_id: payload[1..33].try_into().unwrap(),
-        target_kind: payload[33],
-        target_id: payload[34..66].try_into().unwrap(),
-        reason_kind: payload[66],
-        reason_fact_id: payload[67..99].try_into().unwrap(),
+        workspace_id: payload.bytes_array("workspace_id")?,
+        target_kind: payload.u8("target_kind")?,
+        target_id: payload.bytes_array("target_id")?,
+        reason_kind: payload.u8("reason_kind")?,
+        reason_fact_id: payload.bytes_array("reason_fact_id")?,
     })
 }
 

@@ -23,16 +23,13 @@
 //! the layout is a simple concatenation of fixed-width 32-byte ids.
 
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::schema_dsl::{self, FieldValue};
 
 /// 32-byte fact id, named locally to avoid pulling fact module types into
 /// the handler intent file.
 pub type FactId = [u8; 32];
 
 pub const CREATE_CONNECTION_RESPONSE: &str = "create_connection_response";
-
-const FIELD_BYTES: usize = 32;
-const FIELD_COUNT: usize = 3;
-const PAYLOAD_BYTES: usize = FIELD_BYTES * FIELD_COUNT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateConnectionResponse {
@@ -62,13 +59,14 @@ pub fn decode_create_connection_response_intent(
     if intent.execution != IntentExecution::Deferred {
         return Err("create_connection_response intent must be deferred".to_string());
     }
-    if intent.payload.len() != PAYLOAD_BYTES {
-        return Err("create_connection_response payload has wrong length".to_string());
-    }
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("create_connection_response_payload"),
+        &intent.payload,
+    )?;
     let input = CreateConnectionResponse {
-        request_id: take_id(&intent.payload, 0),
-        invite_secret_id: take_id(&intent.payload, 1),
-        receive_id: take_id(&intent.payload, 2),
+        request_id: payload.bytes_array("request_id")?,
+        invite_secret_id: payload.bytes_array("invite_secret_id")?,
+        receive_id: payload.bytes_array("receive_id")?,
     };
     if intent.key != idempotence_key(&input) {
         return Err(
@@ -79,11 +77,18 @@ pub fn decode_create_connection_response_intent(
 }
 
 fn encode_payload(input: &CreateConnectionResponse) -> Vec<u8> {
-    let mut out = vec![0u8; PAYLOAD_BYTES];
-    out[0..32].copy_from_slice(&input.request_id);
-    out[32..64].copy_from_slice(&input.invite_secret_id);
-    out[64..96].copy_from_slice(&input.receive_id);
-    out
+    schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("create_connection_response_payload"),
+        &[
+            ("request_id", FieldValue::Bytes(input.request_id.to_vec())),
+            (
+                "invite_secret_id",
+                FieldValue::Bytes(input.invite_secret_id.to_vec()),
+            ),
+            ("receive_id", FieldValue::Bytes(input.receive_id.to_vec())),
+        ],
+    )
+    .expect("create_connection_response payload matches schema")
 }
 
 fn idempotence_key(input: &CreateConnectionResponse) -> Vec<u8> {
@@ -94,13 +99,6 @@ fn idempotence_key(input: &CreateConnectionResponse) -> Vec<u8> {
     hasher.update(b"topo:create-connection-response-intent:v1:");
     hasher.update(&input.request_id);
     hasher.finalize().as_bytes().to_vec()
-}
-
-fn take_id(payload: &[u8], index: usize) -> FactId {
-    let start = index * FIELD_BYTES;
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&payload[start..start + FIELD_BYTES]);
-    out
 }
 
 #[cfg(test)]

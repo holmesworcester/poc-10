@@ -2,6 +2,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::schema_dsl::{self, FieldValue};
 use crate::protocol::intents::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
@@ -16,9 +17,17 @@ pub struct SendSyncCompareResponse {
 }
 
 pub fn send_sync_compare_response_intent(input: SendSyncCompareResponse) -> Intent {
-    let mut payload = Vec::with_capacity(1 + 32);
-    payload.push(1);
-    payload.extend_from_slice(&input.compare_fact_id);
+    let payload = schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("send_sync_compare_response_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "compare_fact_id",
+                FieldValue::Bytes(input.compare_fact_id.to_vec()),
+            ),
+        ],
+    )
+    .expect("send_sync_compare_response payload matches schema");
     Intent::new(
         IntentKind::new(SEND_SYNC_COMPARE_RESPONSE).expect("valid send_sync_compare_response kind"),
         IntentExecution::Deferred,
@@ -36,10 +45,14 @@ pub fn decode_send_sync_compare_response(
     if intent.execution != IntentExecution::Deferred {
         return Err("send_sync_compare_response intent must be deferred".to_string());
     }
-    if intent.payload.len() != 33 || intent.payload[0] != 1 {
-        return Err("send_sync_compare_response payload is malformed".to_string());
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("send_sync_compare_response_payload"),
+        &intent.payload,
+    )?;
+    if payload.u8("version")? != 1 {
+        return Err("send_sync_compare_response payload version unsupported".to_string());
     }
-    let compare_fact_id = intent.payload[1..33].try_into().unwrap();
+    let compare_fact_id = payload.bytes_array("compare_fact_id")?;
     let input = SendSyncCompareResponse { compare_fact_id };
     if intent.key != send_sync_compare_response_key(&input) {
         return Err(

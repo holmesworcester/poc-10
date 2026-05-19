@@ -2,6 +2,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::schema_dsl::{self, FieldValue};
 use crate::protocol::facts::sync::need_id;
 use crate::protocol::intents::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -17,9 +18,17 @@ pub struct SendRequestedFact {
 }
 
 pub fn send_requested_fact_intent(input: SendRequestedFact) -> Intent {
-    let mut payload = Vec::with_capacity(1 + 32);
-    payload.push(1);
-    payload.extend_from_slice(&input.need_fact_id);
+    let payload = schema_dsl::encode_layout_record(
+        schema_dsl::intents_layout("send_requested_fact_payload"),
+        &[
+            ("version", FieldValue::U8(1)),
+            (
+                "need_fact_id",
+                FieldValue::Bytes(input.need_fact_id.to_vec()),
+            ),
+        ],
+    )
+    .expect("send_requested_fact payload matches schema");
     Intent::new(
         IntentKind::new(SEND_REQUESTED_FACT).expect("valid send_requested_fact kind"),
         IntentExecution::Deferred,
@@ -35,10 +44,14 @@ pub fn decode_send_requested_fact(intent: &Intent) -> Result<SendRequestedFact, 
     if intent.execution != IntentExecution::Deferred {
         return Err("send_requested_fact intent must be deferred".to_string());
     }
-    if intent.payload.len() != 33 || intent.payload[0] != 1 {
-        return Err("send_requested_fact payload is malformed".to_string());
+    let payload = schema_dsl::decode_layout_record(
+        schema_dsl::intents_layout("send_requested_fact_payload"),
+        &intent.payload,
+    )?;
+    if payload.u8("version")? != 1 {
+        return Err("send_requested_fact payload version unsupported".to_string());
     }
-    let need_fact_id = intent.payload[1..33].try_into().unwrap();
+    let need_fact_id = payload.bytes_array("need_fact_id")?;
     let input = SendRequestedFact { need_fact_id };
     if intent.key != send_requested_fact_key(&input) {
         return Err("send_requested_fact idempotence key does not match payload".to_string());
