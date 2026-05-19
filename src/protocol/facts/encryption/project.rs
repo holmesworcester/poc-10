@@ -20,6 +20,7 @@ use super::local_recipient_key::local_recipient_key;
 use super::recipient_key::recipient_key;
 use super::signed_key_wrap::signed_key_wrap;
 use super::validation::require_fact_scope;
+use crate::protocol::facts::{content, identity};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
@@ -52,7 +53,9 @@ impl TypedProjector<super::fact::Codec> for EncryptionProjector {
         // 1. Dispatch.
         match payload {
             ProjectionPayload::RecipientKey(recipient) => recipient_key(fact, context, recipient),
-            ProjectionPayload::RemovalFrontier(frontier) => removal_frontier(fact, frontier),
+            ProjectionPayload::RemovalFrontier(frontier) => {
+                removal_frontier(fact, context, frontier)
+            }
             ProjectionPayload::LocalKeySecret(secret) => {
                 project_local_key_secret(fact, context, secret)
             }
@@ -70,16 +73,92 @@ impl TypedProjector<super::fact::Codec> for EncryptionProjector {
 
 fn removal_frontier(
     fact: &Fact,
+    context: &ProjectionContext,
     frontier: super::fact::RemovalFrontierFact,
 ) -> Result<ProjectionOutput, String> {
     // 1. Structural.
     let scope = matchers::workspace_scope(frontier.workspace_id);
     require_fact_scope(fact, &scope)?;
+
+    // 2. Authority.
+    //
+    // The legacy-shaped removal frontier names the endpoint that owns the
+    // root key secret. That endpoint must be proven either by a workspace
+    // endpoint_shared signer offer (the normal received/public path) or by the
+    // local signer secret for the same endpoint (the local authoring path)
+    // before this fact can become usable frontier context. Otherwise an
+    // unauthenticated workspace-scoped byte string could advertise a key
+    // frontier.
+    let owner_signer_need =
+        matchers::signer_need(fact.id, scope.clone(), frontier.owner_endpoint_id);
+    let local_signer_need =
+        matchers::local_signer_secret_need(fact.id, scope.clone(), frontier.owner_endpoint_id);
+    let waiting = ProjectionOutput::new()
+        .need(owner_signer_need.clone())
+        .need(local_signer_need.clone());
+    match (
+        context.payload_for(&owner_signer_need),
+        context.payload_for(&local_signer_need),
+    ) {
+        (Some(owner_fact), _) => validate_frontier_endpoint_shared_owner(owner_fact, &frontier)?,
+        (None, Some(owner_fact)) => validate_frontier_local_owner(owner_fact, &frontier)?,
+        (None, None) => return Ok(waiting),
+    }
+
     // 3. Materialize.
-    Ok(ProjectionOutput::new()
+    Ok(waiting
         .offer(matchers::frontier_offer(fact.id, scope, fact.id))
         .intent(share_fact_with_workspace_intent_for_fact(
             frontier.workspace_id,
             fact,
         )))
+}
+
+fn validate_frontier_endpoint_shared_owner(
+    owner_fact: &Fact,
+    frontier: &super::fact::RemovalFrontierFact,
+) -> Result<(), String> {
+    if let Ok(owner) = identity::signed_fact::decode_signed_fact_payload(
+        owner_fact,
+        identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED,
+        "endpoint_shared",
+        identity::endpoint_shared::decode_fact_payload,
+    ) {
+        let owner = owner.payload;
+        if owner.workspace_id != frontier.workspace_id {
+            return Err("removal frontier owner workspace mismatch".to_string());
+        }
+        if owner.endpoint_id != frontier.owner_endpoint_id {
+            return Err("removal frontier owner endpoint mismatch".to_string());
+        }
+        return Ok(());
+    }
+    let signer =
+        content::sealed_message::decode_signer_pubkey_payload(owner_fact.body()).map_err(|_| {
+            "removal frontier owner context must be endpoint_shared or signer pubkey".to_string()
+        })?;
+    if owner_fact.scope != matchers::workspace_scope(frontier.workspace_id) {
+        return Err("removal frontier signer pubkey workspace mismatch".to_string());
+    }
+    if signer.signer_id != frontier.owner_endpoint_id {
+        return Err("removal frontier signer pubkey endpoint mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn validate_frontier_local_owner(
+    owner_fact: &Fact,
+    frontier: &super::fact::RemovalFrontierFact,
+) -> Result<(), String> {
+    let owner = identity::signed_fact::decode_local_signer_secret_payload(owner_fact.body())
+        .map_err(|_| {
+            "removal frontier local owner context must be local signer secret".to_string()
+        })?;
+    if owner.workspace_id != frontier.workspace_id {
+        return Err("removal frontier local owner workspace mismatch".to_string());
+    }
+    if owner.signer_id != frontier.owner_endpoint_id {
+        return Err("removal frontier local owner endpoint mismatch".to_string());
+    }
+    Ok(())
 }

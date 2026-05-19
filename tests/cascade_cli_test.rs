@@ -10,7 +10,6 @@ fn cascade_cli_replays_fact_with_deps_out_of_order_and_unblocks_10k() {
 }
 
 #[test]
-#[ignore = "large cascade perf fixture is kept manual; run with --ignored when validating replay scale"]
 fn cascade_cli_replays_fact_with_deps_out_of_order_and_unblocks_100k() {
     run_cascade_replay_perf(100_000, true);
 }

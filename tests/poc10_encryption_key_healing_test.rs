@@ -99,19 +99,23 @@ fn recipient_key_waits_for_local_signer_secret_before_materializing_wrap() {
     let recipient = recipient_key_fact(workspace, endpoint, NO_PREVIOUS_RECIPIENT_KEY, 10);
     let frontier = removal_frontier_fact(workspace, endpoint, 19);
     let root = local_key_secret_fact(workspace, frontier.id, endpoint, 20);
+    let signer_pubkey = signer_pubkey_fact(workspace, endpoint, [0x88; 32]);
     let mut bus = WakeLoop::new();
     let projector = CombinedProjector;
+    let signer_pubkey_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
         ExactSelectorMatcher::new(topo::protocol::matchers::local_signer_secret_role());
     let matchers = [
+        &signer_pubkey_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
 
     bus.submit_fact(recipient.clone());
+    bus.submit_fact(signer_pubkey);
     bus.submit_fact(frontier);
     bus.submit_fact(root);
     bus.drain(&projector, &matchers, 20)
@@ -230,19 +234,18 @@ fn recipient_key_rotation_rejects_cross_endpoint_supersession() {
 }
 
 #[test]
-#[ignore = "blocker: RemovalFrontierFact has no signed/admin authority fields; fixing this requires a removal-frontier fact/command/schema cutover outside the key-wrap receive path"]
-fn removal_frontier_projection_must_wait_for_signed_admin_authority() {
+fn removal_frontier_projection_must_wait_for_owner_authority() {
     let workspace = [11; 32];
     let owner = [12; 32];
     let frontier = removal_frontier_fact(workspace, owner, 10);
 
     let output = encryption_project::EncryptionProjector::new()
         .project(&frontier, &ProjectionContext::default())
-        .expect("current removal frontier projection is row-only");
+        .expect("missing owner authority parks projection");
 
     assert!(
         output.offers.is_empty(),
-        "encryption::removal_frontier must not offer frontier context before signed admin/root authority is validated"
+        "encryption::removal_frontier must not offer frontier context before owner authority is validated"
     );
 }
 
@@ -1285,6 +1288,7 @@ fn signed_key_wrap_rejects_frontier_owned_by_someone_else() {
         signer_id,
         crypto::ed25519_public_key(&signer_private_key),
     );
+    let other_owner_signer = signer_pubkey_fact(workspace, other_owner, [0x89; 32]);
     let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
@@ -1296,6 +1300,7 @@ fn signed_key_wrap_rejects_frontier_owned_by_someone_else() {
     let mut bus = WakeLoop::new();
 
     bus.submit_fact(signer);
+    bus.submit_fact(other_owner_signer);
     bus.submit_fact(frontier);
     bus.submit_fact(recipient);
     bus.submit_fact(signed_wrap.clone());

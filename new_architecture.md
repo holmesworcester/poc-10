@@ -79,9 +79,10 @@ with the `poc-8` behavior still green.
 
 ## Current Migration Checkpoint
 
-As of the 2026-05-15 checkpoint on branch `main`, the repo is in a cutover
-state with target code active and remaining gaps called out by ignored guardrail
-or black-box tests:
+As of the 2026-05-18 checkpoint on branch `main`, the repo is in a cutover
+state with target code active and the normal poc-10 cutover guardrails running
+without ignores. The only ignored behavior tests are explicit manual perf
+fixtures and the deferred partial-download-progress content tests.
 
 - `src/main.rs` delegates to the product-facing `match` entrypoint.
 - Product commands are being cut over to a generic core runtime/app facade
@@ -95,19 +96,21 @@ or black-box tests:
   projection wakes, and intents. It also feeds exact declared fact inputs into
   handlers instead of exposing all facts.
 - Target fact modules under `src/protocol/facts/` are exercised by poc-10 tests
-  and are not yet the whole production path.
+  and route production `match` behavior through the target runtime.
 - Target intent handlers under `src/protocol/intents/` are themed files and
   are registered from `src/protocol/intents.rs`.
 - Broad handler driver submodules have been removed.
 - Target receive transit can open fixed transit frames that carry signed
   key-wrap facts, admit the opened fact, and record local receive provenance.
-  Send-side flow now emits send-on-connection and network-send intents and can
-  write a bounded TCP frame when route context is present. Remaining send-side
-  debt is fixed-layout intent generation from schema, durable acknowledgements,
-  cursors, and richer route retry policy.
+  Send-side flow emits send-on-connection and network-send intents and writes a
+  bounded TCP frame when route context is present.
 - Target purge can remove exact retained target facts through handler output;
-  cascade discovery, secret retirement, and sync-index repair still need their
-  bounded handler cuts before target purge behavior is complete.
+  child-message purge, expiry, retention-floor purge, deleted-message purge,
+  retired-recipient material purge, and sync shareability recording are bounded
+  target handlers.
+- Removal-frontier projection is authority-gated: a frontier does not publish
+  frontier context until the owner endpoint is proven by workspace signer
+  context or the matching local signer secret.
 
 Implemented target slices:
 
@@ -130,23 +133,15 @@ Implemented target slices:
   through module `queries.rs`, but do not call legacy workers or handler
   dispatch directly. The type lives in `core::command_context`.
 
-Current hard gaps:
+Current follow-up work outside the active cutover guard:
 
-- The production CLI still needs to finish moving through a generic core
-  runtime/app facade configured by the protocol registry. Several user-facing
-  commands are target-owned and black-box tested, but `match_app.rs` still has
-  hand routing and explicit "not ported" paths.
-- Transit wrap/unwrap is not fully target-owned. The remaining work is to make
-  intent/frame layouts schema-generated and fixed length, finish durable
-  network acknowledgements/cursors, and keep crypto semantics in fact-module
-  constructors instead of handlers.
-- Sync still needs the target context transfer for key dependencies. In-range
-  encrypted content must bring relevant out-of-range key wraps or retained key
-  nodes, and perf tests should prove that display remains fast.
-- Purge still needs bounded cuts for cascade discovery, secret retirement, and
-  sync-index purge/update.
-- Remaining poc-8 behavior needs unchanged or harness-only-adjusted target
-  coverage before the migration can be called complete.
+- Generate more row and wire boilerplate from the schema declarations instead
+  of hand-written module codecs.
+- Keep manual projection/download perf fixtures available, but out of the
+  default test suite.
+- Finish the intentionally deferred partial-download-progress CLI behavior.
+- Tighten route retry/ack policy beyond the current idempotent eventually
+  consistent network-send path.
 
 ## File Organization
 
@@ -218,7 +213,7 @@ src/
         unwrap_key_wrap.rs
       sync.rs
       sync/
-        record_indexed_fact.rs
+        share_fact_with_workspace.rs
         send_compare_response.rs
         send_needed_fact_id.rs
         send_requested_fact.rs
@@ -1171,18 +1166,13 @@ The next cuts should move live behavior onto the target architecture without
 adding new compatibility layers:
 
 ```text
-1. Extend the signed-key-wrap ReceiveTransit path into a general target
-   admission path for the remaining shared fact types.
-2. Finish fact-module-owned transit frame packaging and send-side
-   classification.
-3. Wire SendOnConnection -> transit packaging -> NetworkSend through facts and
-   intents.
-4. Move sync compare/have/need handling to target facts, context, and handlers.
-5. Finish dep-aware sync for key coverage needed by encrypted content.
-6. Split purge into exact purge, cascade discovery, secret retirement, and
-   sync-index update handlers.
-7. Delete the legacy compatibility island once the unchanged or harness-only
-   adjusted poc-8 tests pass through the target path.
+1. Generate row and wire boilerplate from the schema declarations.
+2. Keep extending black-box network/perf coverage while preserving manual
+   status for expensive throughput fixtures.
+3. Finish the partial-download-progress behavior that is explicitly deferred in
+   `content_cli_test.rs`.
+4. Tighten durable route retry/ack policy around network-send without making
+   network delivery itself part of the protocol durability contract.
 ```
 
 ## Guardrails

@@ -389,10 +389,6 @@ fn cli_daemon_download_perf_times_send_to_peer_receipt() {
 }
 
 #[test]
-#[ignore = "asymmetric three-peer late-joiner convergence still has a transport::transit \
-admission race when alice processes bob's sync compares while accepting carol's \
-bootstrap stream; tracked as a follow-on \
-fix"]
 fn cli_three_long_running_daemons_converge_messages_among_late_joiner() {
     // alice runs a daemon. bob accepts alice's daemon-served invite, then
     // carol does the same. All three converge on shared messages from alice

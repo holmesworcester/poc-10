@@ -1,6 +1,7 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projection::ProjectionContext;
+use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity;
 
 use super::super::fact::{SealedMessageFact, SignerId};
@@ -93,7 +94,11 @@ pub(super) fn matched_secret_payload<'a>(
 ) -> Result<Option<&'a Fact>, String> {
     for (offer, payload) in context.matched_payloads_for(need) {
         validate_secret_context(offer, payload, need)?;
-        return Ok(Some(payload));
+        if encryption::layout::decode_local_key_secret(payload.body()).is_ok()
+            || encryption::layout::decode_local_history_node_secret(payload.body()).is_ok()
+        {
+            return Ok(Some(payload));
+        }
     }
     Ok(None)
 }

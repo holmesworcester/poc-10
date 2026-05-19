@@ -19,6 +19,12 @@ pub fn decode_envelope(bytes: &[u8]) -> Result<fact::SignedFactEnvelope, String>
     layout::decode_signed_fact(bytes)
 }
 
+pub fn decode_local_signer_secret_payload(
+    bytes: &[u8],
+) -> Result<fact::LocalSignerSecretFact, String> {
+    layout::decode_local_signer_secret(bytes)
+}
+
 pub fn decode_signed_fact_payload<T>(
     fact: &crate::core::facts::Fact,
     expected_type: u8,

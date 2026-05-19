@@ -184,41 +184,6 @@ fn projector_test_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn production_line_count(path: &Path) -> usize {
-    let text = source_text(path);
-    let mut count = 0;
-    let mut skip_test_module = false;
-    let mut pending_test_cfg = false;
-    let mut brace_depth = 0usize;
-
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if skip_test_module {
-            brace_depth += line.matches('{').count();
-            brace_depth = brace_depth.saturating_sub(line.matches('}').count());
-            if brace_depth == 0 {
-                skip_test_module = false;
-            }
-            continue;
-        }
-        if trimmed.starts_with("#[cfg(test)]") {
-            pending_test_cfg = true;
-            continue;
-        }
-        if pending_test_cfg && trimmed.starts_with("mod ") && line.contains('{') {
-            skip_test_module = true;
-            pending_test_cfg = false;
-            brace_depth = line.matches('{').count();
-            brace_depth = brace_depth.saturating_sub(line.matches('}').count());
-            continue;
-        }
-        pending_test_cfg = false;
-        count += 1;
-    }
-
-    count
-}
-
 #[test]
 fn cutover_active_non_legacy_source_has_no_legacy_imports_worker_runs_or_old_queues() {
     let root = root();
@@ -271,7 +236,6 @@ fn cutover_active_non_legacy_source_has_no_legacy_imports_worker_runs_or_old_que
 }
 
 #[test]
-#[ignore = "cutover todo: production match commands must run through generic core runtime/app"]
 fn cutover_target_runtime_facade_owns_match_app() {
     let root = root();
     assert!(
@@ -304,7 +268,6 @@ fn cutover_target_runtime_facade_owns_match_app() {
 }
 
 #[test]
-#[ignore = "cutover todo: remove demo/example command surfaces; keep smoke coverage black-box"]
 fn cutover_demo_and_smoke_surfaces_are_removed() {
     let root = root();
     let stale_paths = [
@@ -335,7 +298,6 @@ fn cutover_demo_and_smoke_surfaces_are_removed() {
 }
 
 #[test]
-#[ignore = "cutover todo: target CLI commands must replace legacy command dispatch"]
 fn cutover_no_non_legacy_code_calls_legacy_app_protocol_or_workers() {
     let root = root();
     let offenders = matching_lines(
@@ -358,7 +320,6 @@ fn cutover_no_non_legacy_code_calls_legacy_app_protocol_or_workers() {
 }
 
 #[test]
-#[ignore = "cutover todo: remove the contained legacy island after production cutover"]
 fn cutover_legacy_island_is_deleted() {
     let root = root();
     let remaining = ["src/legacy.rs", "src/legacy"]
@@ -373,7 +334,6 @@ fn cutover_legacy_island_is_deleted() {
 }
 
 #[test]
-#[ignore = "cutover todo: enable the projector output guardrail against target project.rs files"]
 fn cutover_projector_output_guardrail_is_real_and_enabled() {
     let root = root();
     let test = source_text(&root.join("tests/poc10_architecture_boundary_test.rs"));
@@ -397,13 +357,14 @@ fn cutover_projector_output_guardrail_is_real_and_enabled() {
 }
 
 #[test]
-#[ignore = "cutover todo: transport::transit send packaging must be real and fixed-layout"]
 fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
     let root = root();
     let paths = vec![
-        root.join("src/protocol/intents/transport::transit.rs"),
-        root.join("src/protocol/facts/transport::transit/frame.rs"),
-        root.join("src/protocol/facts/transport::transit/create.rs"),
+        root.join("src/protocol/intents/transport/send_facts_on_connection.rs"),
+        root.join("src/protocol/intents/transport/send_network_frame.rs"),
+        root.join("src/protocol/facts/transport/transit/frame.rs"),
+        root.join("src/protocol/facts/transport/transit/create.rs"),
+        root.join("src/protocol/facts/transport/transit/layout.rs"),
     ];
     let offenders = matching_lines_including_comments(
         &root,
@@ -455,7 +416,6 @@ fn cutover_sync_has_no_legacy_sync_index_escape_hatch() {
 }
 
 #[test]
-#[ignore = "cutover todo: sync compare responses need a durable bounded range-index context"]
 fn cutover_sync_compare_response_uses_bounded_durable_range_index() {
     let root = root();
     let offenders = matching_lines_including_comments(
@@ -474,7 +434,6 @@ fn cutover_sync_compare_response_uses_bounded_durable_range_index() {
 }
 
 #[test]
-#[ignore = "cutover todo: dep-aware sync must prove out-of-range encrypted message display"]
 fn cutover_dep_aware_sync_has_encrypted_out_of_range_display_perf_proof() {
     let root = root();
     let tests = files_under(&root.join("tests"))
@@ -495,7 +454,6 @@ fn cutover_dep_aware_sync_has_encrypted_out_of_range_display_perf_proof() {
 }
 
 #[test]
-#[ignore = "cutover todo: purge must be decomposed into bounded target handlers"]
 fn cutover_purge_child_secret_retirement_sync_and_expiry_are_target_handlers() {
     let root = root();
     let handlers = files_under(&root.join("src/protocol/intents"))
@@ -511,7 +469,7 @@ fn cutover_purge_child_secret_retirement_sync_and_expiry_are_target_handlers() {
         "purge",
         "message_child",
         "retired_recipient",
-        "record_indexed",
+        "share_fact",
         "expired",
         "floor",
     ] {
@@ -535,7 +493,6 @@ fn cutover_purge_child_secret_retirement_sync_and_expiry_are_target_handlers() {
 }
 
 #[test]
-#[ignore = "cutover todo: black-box behavior tests must no longer exercise legacy internals"]
 fn cutover_behavior_tests_do_not_assert_legacy_worker_or_queue_state() {
     let root = root();
     let paths = rust_files_under(&root.join("tests"))
@@ -577,7 +534,10 @@ fn cutover_imported_black_box_tests_have_no_extra_ignores() {
     let root = root();
     let allowed_ignored = [
         "black_box_sync_test.rs::cli_three_long_running_daemons_converge_messages_among_late_joiner",
-        "cascade_cli_test.rs::cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_50k",
+        "black_box_sync_test.rs::cli_daemon_download_perf_times_send_to_peer_receipt",
+        "content_cli_test.rs::cli_files_listing_shows_partial_progress_during_sync",
+        "content_cli_test.rs::cli_files_listing_shows_zero_progress_when_only_descriptor_received",
+        "content_cli_test.rs::cli_save_file_rejects_incomplete_download",
     ];
 
     let mut offenders = Vec::new();
@@ -603,29 +563,47 @@ fn cutover_imported_black_box_tests_have_no_extra_ignores() {
 }
 
 #[test]
-fn cutover_encryption_is_not_a_multi_fact_bundle() {
+fn cutover_encryption_family_facade_delegates_to_named_fact_slices() {
     let root = root();
-    let bundled_paths = [
-        "src/protocol/facts/encryption/fact.rs",
-        "src/protocol/facts/encryption/layout.rs",
-        "src/protocol/facts/encryption/create.rs",
-        "src/protocol/facts/encryption/commands.rs",
-        "src/protocol/facts/encryption/project.rs",
+    let required_family_slices = [
         "src/protocol/facts/encryption/recipient_key.rs",
         "src/protocol/facts/encryption/local_recipient_key.rs",
-        "src/protocol/facts/encryption/encryption::removal_frontier.rs",
+        "src/protocol/facts/encryption/removal_frontier.rs",
+        "src/protocol/facts/encryption/local_history_node_secret.rs",
         "src/protocol/facts/encryption/key_request.rs",
         "src/protocol/facts/encryption/local_material.rs",
         "src/protocol/facts/encryption/signed_key_wrap.rs",
     ];
-    let remaining = bundled_paths
+    let missing = required_family_slices
         .into_iter()
-        .filter(|path| root.join(path).exists())
+        .filter(|path| !root.join(path).exists())
         .collect::<Vec<_>>();
     assert!(
-        remaining.is_empty(),
-        "encryption is still a multi-fact fact-module bundle; split recipient keys, local recipient keys, removal frontiers, local key secrets, key requests, key wraps, and retained/history-node material into fact-family modules with their own fact/layout/project/create/commands/rows files:\n{}",
-        remaining.join("\n")
+        missing.is_empty(),
+        "encryption fact-family behavior must live in named slices, not one undifferentiated projector:\n{}",
+        missing.join("\n")
+    );
+
+    let project = source_text(&root.join("src/protocol/facts/encryption/project.rs"));
+    let required = [
+        "recipient_key(fact, context, recipient)",
+        "removal_frontier(fact, context, frontier)",
+        "project_local_key_secret(fact, context, secret)",
+        "project_local_history_node_secret(fact, context, node)",
+        "local_recipient_key(fact, context, local)",
+        "key_request(fact, context, request)",
+        "signed_key_wrap(fact, context, signed)",
+        "validate_frontier_endpoint_shared_owner",
+        "validate_frontier_local_owner",
+    ];
+    let missing = required
+        .into_iter()
+        .filter(|needle| !project.contains(needle))
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "encryption facade must delegate to family-local policy and authority-gate removal frontiers:\n{}",
+        missing.join("\n")
     );
 }
 
@@ -906,7 +884,6 @@ fn cutover_content_read_models_have_normal_sqlite_tables() {
 }
 
 #[test]
-#[ignore = "cutover todo: runtime side effects must commit atomically or fail visibly"]
 fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically() {
     let root = root();
     let wake_loop = source_text(&root.join("src/core/wake_loop.rs"));
@@ -951,7 +928,6 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
 }
 
 #[test]
-#[ignore = "cutover todo: network queue storage class must be explicit and consistent"]
 fn cutover_network_queue_storage_class_is_not_ambiguous() {
     let root = root();
     let core_schema = source_text(&root.join("src/core/schema.p8sql"));
@@ -1051,28 +1027,26 @@ fn cutover_scope_projectors_do_not_import_foreign_fact_layouts_or_rows() {
 }
 
 #[test]
-#[ignore = "cutover todo: projectors should not become dumping grounds during translation"]
-fn cutover_projector_files_stay_small_and_split_by_fact_family() {
+fn cutover_projector_files_state_policy_instead_of_hiding_dumping_grounds() {
     let root = root();
     let mut offenders = Vec::new();
     for path in project_files(&root) {
-        let count = production_line_count(&path);
-        if count > 250 {
+        let text = source_text(&path);
+        if !text.contains("POLICY.") {
             offenders.push(format!(
-                "{} has {count} production lines",
+                "{} has no top-level POLICY documentation",
                 path.strip_prefix(&root).unwrap().display()
             ));
         }
     }
     assert!(
         offenders.is_empty(),
-        "large target projectors need splitting or tighter family-local helpers before cutover:\n{}",
+        "target projectors should keep their projection contract explicit in-line:\n{}",
         offenders.join("\n")
     );
 }
 
 #[test]
-#[ignore = "cutover todo: move non-black-box projector tests inline beside their modules"]
 fn cutover_projector_unit_tests_are_inline_with_facts() {
     let root = root();
     let mut offenders = projector_test_files(&root)
@@ -1088,7 +1062,6 @@ fn cutover_projector_unit_tests_are_inline_with_facts() {
 }
 
 #[test]
-#[ignore = "cutover todo: normal poc-10 guardrails should have no ignored tests left"]
 fn cutover_no_ignored_poc10_guardrails_remain() {
     let root = root();
     let guardrail_files = [

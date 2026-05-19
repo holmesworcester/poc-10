@@ -30,7 +30,8 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
     let frontier_id = frontier.id;
     let leaf = [0b1010_1111; 32];
     let message = message_fact(workspace, signer, frontier_id, 42, leaf);
-    let signer_fact = signer_fact(workspace, signer);
+    let message_signer_fact = signer_fact(workspace, signer);
+    let frontier_owner_fact = signer_fact(workspace, [0x71; 32]);
     let secret_root = local_key_secret_fact(workspace, frontier_id, [0x71; 32]);
     let mut prefix = [0; 32];
     prefix[0] = 0b1010_1111;
@@ -54,7 +55,7 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
     assert_eq!(waiting.intents, 0);
     assert_eq!(bus.context(&message.id).unwrap().needs.len(), 3);
 
-    bus.submit_fact(signer_fact);
+    bus.submit_fact(message_signer_fact);
     let signer_seen = bus
         .drain(&projector, &matchers, 10)
         .expect("signer wakes message");
@@ -73,6 +74,7 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
         message_body(&message).ciphertext
     );
 
+    bus.submit_fact(frontier_owner_fact);
     bus.submit_fact(frontier);
     bus.submit_fact(secret_root);
     bus.submit_fact(secret_internal);
@@ -155,6 +157,7 @@ fn deletion_update_purges_message_before_keys_arrive() {
     );
 
     bus.submit_fact(signer_fact(workspace, signer));
+    bus.submit_fact(signer_fact(workspace, [0x73; 32]));
     bus.submit_fact(frontier);
     bus.submit_fact(local_key_secret_fact(workspace, frontier_id, [0x72; 32]));
     let later_context = bus
@@ -203,9 +206,10 @@ fn non_author_deletion_does_not_purge_or_wake_message() {
     assert_eq!(bus.context(&message.id).unwrap().needs.len(), 3);
 
     bus.submit_fact(signer_fact(workspace, signer));
+    bus.submit_fact(signer_fact(workspace, [0x73; 32]));
     bus.submit_fact(frontier);
     bus.submit_fact(local_key_secret_fact(workspace, frontier_id, [0x73; 32]));
-    bus.drain(&projector, &matchers, 10)
+    bus.drain(&projector, &matchers, 30)
         .expect("valid context still projects sealed row");
 
     assert_eq!(bus.context(&message.id).unwrap().needs.len(), 2);

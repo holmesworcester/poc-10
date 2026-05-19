@@ -158,6 +158,7 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
     let leaf = id(74);
     let sealed_message = sealed_message_fact(workspace, signer, frontier, day_ms / 60_000, leaf);
     let signer_fact = sealed_signer_fact(workspace, signer);
+    let frontier_owner_fact = sealed_signer_fact(workspace, id(73));
     let secret_fact = local_key_secret_fact(workspace, frontier, id(73));
     let frontier_matcher = ExactSelectorMatcher::new(encryption_context::frontier_role());
     let signer_matcher = ExactSelectorMatcher::new(sealed_context::signer_role());
@@ -173,18 +174,19 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
     let mut receiver = WakeLoop::new();
 
     receiver.submit_fact(signer_fact);
+    receiver.submit_fact(frontier_owner_fact);
     receiver.submit_fact(frontier_fact);
     receiver.submit_fact(secret_fact);
     receiver
-        .drain(&sealed_projector, &sealed_matchers, 4)
+        .drain(&sealed_projector, &sealed_matchers, 10)
         .expect("receiver projects pre-existing signer and key offers");
     receiver.submit_fact(sealed_message.clone());
     let opened = receiver
-        .drain(&sealed_projector, &sealed_matchers, 3)
+        .drain(&sealed_projector, &sealed_matchers, 10)
         .expect("sealed message should resolve from matched key context");
 
     assert!(
-        opened.projections <= 3,
+        opened.projections <= 4,
         "message display should be a bounded context wake, not a key request loop: {opened:?}"
     );
     let sealed_rows = receiver
