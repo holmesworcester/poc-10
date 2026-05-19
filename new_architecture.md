@@ -27,7 +27,7 @@ The migration succeeds when:
 
 - Every non-ignored `poc-8` test passes in `poc-10`, with the same user-facing
   behavior.
-- The old mechanisms are gone, not wrapped: legacy labels, blocked tables,
+- The old mechanisms are gone, not wrapped: label stores, blocked tables,
   ready queues, pending reprojection queues, worker-specific domain queues, and
   receive metadata side channels.
 - Core owns facts, context, command context, context matchers, `WakeLoop`,
@@ -48,7 +48,7 @@ The migration succeeds when:
 - The product-facing binary is `match`; the package may still be named `topo`.
 - Product entry is a thin root function that supplies the CLI name and protocol
   registry to generic core runtime/app code. It must not contain
-  `MatchRuntime`-specific product logic.
+  product-specific runtime logic.
 - There is no product `demo` or `smoke` command. Smoke coverage belongs in
   black-box CLI tests against the real `match` binary.
 - Intent handlers are themed files under `src/protocol/intents/<theme>/...`
@@ -90,7 +90,7 @@ fixtures and the deferred partial-download-progress content tests.
   temporary cutover debt, not the target architecture.
 - Smoke behavior is tested through black-box CLI tests on the real `match`
   binary, not through a demo command or demo source file.
-- The legacy module island has been removed; new behavior belongs in target
+- The old source island has been removed; new behavior belongs in target
   modules only.
 - `src/core/wake_loop.rs` persists and reloads facts, needs, offers, internal
   projection wakes, and intents. It also feeds exact declared fact inputs into
@@ -130,8 +130,8 @@ Implemented target slices:
   contracts, black-box invite/accept/link flows, basic content send/messages,
   encryption CLI flows, and daemon lifecycle.
 - `CommandContext` for user-facing target commands that may read projected state
-  through module `queries.rs`, but do not call legacy workers or handler
-  dispatch directly. The type lives in `core::command_context`.
+  through module `queries.rs`, but do not drive handlers or transport directly.
+  The type lives in `core::command_context`.
 
 Current follow-up work outside the active cutover guard:
 
@@ -264,7 +264,7 @@ intent kinds, and handlers. It does not replace the fact-module or
 intent-handler manifests: those files define Rust namespaces, while
 `protocol.rs` declares which namespaces make up the concrete `match` protocol.
 
-The old legacy source island has been removed. Do not recreate compatibility
+The old source island has been removed. Do not recreate compatibility
 bridges; port behavior into the target runtime, fact modules, intent handlers,
 and queries instead.
 
@@ -650,13 +650,13 @@ Projectors validate protocol meaning. Core may supply candidate context; the
 projector must still verify type, scope, workspace, signer, author, endpoint,
 role, and authorization.
 
-### Projector Translation Checklist
+### Projector Implementation Checklist
 
-When translating a legacy projector into the target tree:
+When implementing or reviewing a projector:
 
 ```text
-1. Read the legacy projector and record every require_dependency, update label,
-   receive/provenance check, queued side effect, and row write.
+1. Record every required dependency, update trigger, receive/provenance check,
+   queued side effect, and row write.
 2. For each requirement, inspect supplied ProjectionContext first. If matched
    context is absent, emit a stable target ContextNeed unless the fact is
    local-only or truly dependency-free.
@@ -675,9 +675,9 @@ When translating a legacy projector into the target tree:
 9. Add any new context role, need constructor, offer constructor, and matching
    behavior to the relation-specific module under src/protocol/matchers/, then
    register that matcher in src/protocol.rs.
-10. If a port is temporarily a row shell because sibling context is not ready,
-    document the exact legacy parity gap in the module docs and remove that gap
-    when the sibling context lands.
+10. If a module is temporarily a row shell because sibling context is not ready,
+    document the exact behavior gap in the module docs and remove that gap when
+    the sibling context lands.
 11. Do not add protocol-specific context.rs, selectors.rs, or fact-module
     matchers.rs helper/source-of-truth files. Keep projection logic in
     project.rs and relation-specific matching in src/protocol/matchers/.
@@ -1143,23 +1143,22 @@ PurgeRetiredRecipientMaterial
 Destructive steps are atomic when they run. The full workflow is intentionally
 multi-step and retryable through intents.
 
-## Legacy Mechanisms Removed Or Collapsing
+## Removed Mechanisms
 
-These names are legacy/removal vocabulary only. They must not reappear in
-target code paths except in tests or documentation that explicitly describes
-the old mechanism being deleted:
+These removed names must not reappear in target code paths except in tests or
+documentation that explicitly describes the old mechanism being deleted:
 
 ```text
-event_modules.ready_events
-event_modules.blocked_events_by_missing_dep
-event_modules.missing_deps_by_blocked_event
-event_modules.dependents_by_dep
-event_modules.deps_by_dependent
-event_modules.labels
-event_modules.recently_valid_events
-event_modules.pending_reprojections
-event_modules.applied_shared_events
-event_modules.event_receive_context
+ready event queues
+blocked-by-missing-dependency maps
+missing-dependencies-by-blocked-event maps
+dependent-by-dependency maps
+dependency-by-dependent maps
+label stores
+recently-valid event caches
+pending reprojection queues
+applied shared event sets
+event receive context side tables
 canonical.in
 content.purge_instructions
 encryption.pending_key_requests

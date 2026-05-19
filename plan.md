@@ -16,7 +16,7 @@ work on any fake or missing behavior.
   context is required, or looser than poc-8, add the missing behavior or a
   failing test before continuing.
 - [ ] The loop repeats until review says target poc-10 is real,
-  poc-8-equivalent where claimed, and free of legacy holdovers.
+  poc-8-equivalent where claimed, and free of old-mechanism holdovers.
 
 Reviewer instructions:
 
@@ -33,26 +33,26 @@ Reviewer instructions:
 ## Source Shape
 
 - [x] Product binary is `match`, not `topo`, `demo`, or `smoke`.
-- [x] Legacy source island has been removed from the target tree.
-- [x] Root `src/commands.rs`, `src/event_modules.rs`, and `src/handlers.rs` are
-  gone; registries live under their directories.
+- [x] The old source island has been removed from the target tree.
+- [x] The old root command/fact/handler manifests are gone; manifests live
+  under `src/protocol/`.
 - [x] No `src/workers`, worker catalog, round-robin scheduler, ready queue,
   blocked queue, recently-valid queue, or pending-reprojection queue remains in
   the active target tree.
 - [ ] Runtime code is consolidated: core owns the generic runtime/app facade;
-  protocol supplies the registry; event modules and handlers do not know the
+  protocol supplies the registry; fact modules and handlers do not know the
   product entrypoint.
-- [ ] Event modules use consistent files:
+- [ ] Fact modules use consistent files:
   `fact.rs`, `layout.rs`, `create.rs`, `commands.rs`, `queries.rs`,
   `matchers.rs`, `project.rs`, `rows.rs`, and module-specific small files only
   when they make the projector clearer.
 - [ ] Multi-fact bundles are split into fact-family modules. The current
-  `event_modules/encryption/` bundle is not acceptable as final shape:
+  `src/protocol/facts/encryption/` bundle is not acceptable as final shape:
   recipient keys, local recipient keys, removal frontiers, local key secrets,
   key requests, key wraps, and retained/history-node key material each need
-  their own event module shape with local `fact.rs`, `layout.rs`, `project.rs`,
+  their own fact module shape with local `fact.rs`, `layout.rs`, `project.rs`,
   and only the relevant `create.rs`/`commands.rs`/`rows.rs`.
-- [x] Sync follows the same rule. `event_modules/sync/` must not be a dumping
+- [x] Sync follows the same rule. `src/protocol/facts/sync/` must not be a dumping
   folder for range/key/support facts. Split `sync_range_request`,
   `sync_encrypted_root`, `sync_shared_event`, and `sync_key_wrap_available`
   into fact-family modules with their own `fact.rs`, `layout.rs`, and
@@ -63,8 +63,8 @@ Reviewer instructions:
 - [ ] No dumping-ground files exist. `mod.rs`, broad `schema.rs`, broad
   `codec.rs`, and broad `cli.rs` are not allowed as logic sinks.
 - [ ] Schema is declared only in the three DSL files:
-  `src/core/schema.p8sql`, `src/event_modules/schema.p8sql`,
-  `src/handlers/schema.p8sql`.
+  `src/core/schema.p8sql`, `src/protocol/facts/schema.p8sql`,
+  `src/protocol/intents/schema.p8sql`.
 
 ## Projector Contract
 
@@ -132,7 +132,7 @@ Reviewer instructions:
 
 ## Encryption And Key Healing
 
-- [ ] Encryption is split out of the current bundled `event_modules/encryption/`
+- [ ] Encryption is split out of the current bundled `src/protocol/facts/encryption/`
   shape. Shared crypto/key-healing helpers may remain in a clearly named helper
   module, but no bundled `EncryptionProjector`, bundled `fact.rs`, bundled
   `layout.rs`, bundled `create.rs`, or bundled `commands.rs` may define several
@@ -225,12 +225,12 @@ Reviewer instructions:
 - [ ] `cli.rs` only parses user input and formats output.
 - [x] Product `match_app.rs` is routing and lifecycle only. It must not contain
   command business logic, protocol-specific row scans, key derivation, purge
-  logic, or command chaining that belongs in event-module commands/read models
+  logic, or command chaining that belongs in fact-module commands/read models
   or handlers.
 - [ ] Commands return ids/output only after submitted facts/intents are drained
   enough for read-your-writes behavior.
 - [ ] Black-box CLI tests use the real `match` binary and real daemon/runtime
-  path. They do not seed rows, call workers, or assert legacy queue state.
+  path. They do not seed rows or assert removed queue state.
 - [x] First make poc-8 CLI suites true black-box behavior tests, prove them
   green there, then port those contracts to poc-10 unchanged except for harness
   and binary-name changes.

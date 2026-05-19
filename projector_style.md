@@ -172,8 +172,8 @@ Family projectors use the same rule with a module-owned enum:
 
 ```rust
 pub enum ProjectionPayload {
-    Message(fact::SealedMessageFact),
-    SignedMessage(identity::signed_fact::SignedPayload<fact::SealedMessageFact>),
+    Message(fact::ContentMessageFact),
+    SignedMessage(identity::signed_fact::SignedPayload<fact::ContentMessageFact>),
     SecretNode(fact::SecretNodeFact),
 }
 ```

@@ -1,8 +1,7 @@
 # Rules
 
-These rules describe the poc-10 target architecture. Anything under
-`src/legacy/` is compatibility code kept only until the `match` production path
-is fully cut over to the target model.
+These rules describe the poc-10 target architecture. The old source island
+has been removed; new behavior belongs in `src/core` or `src/protocol`.
 
 ## Architecture Boundary
 
@@ -20,29 +19,27 @@ is fully cut over to the target model.
   declared fact inputs, then return facts, purged fact ids, and follow-up
   intents. They must not own protocol fact layouts or read-model projection
   rows.
-- The product-facing binary is `match`. `src/match_app.rs` is a temporary bridge
-  to `src/legacy/` until the target runtime facade owns the production path.
-- `src/legacy/` is one deletion island: old app shell, daemon loop, protocol
-  tree, round-robin scheduler, and worker tree. New code must not add behavior
-  there unless it is required to keep unchanged legacy tests passing during
-  cutover.
+- The product-facing binary is `match`. `src/match_app.rs` should stay a thin
+  app boundary around the core runtime and protocol registry.
 
 ## File Ownership
 
 - `src/core/` contains protocol-neutral mechanics only: facts, context,
   matchers, projection contracts, intents, handler dispatch, store, wire,
   crypto, network queues, TCP, clock, and schema DSL.
-- `src/event_modules/<module>/` owns fact shape, fixed wire layout, command
-  constructors, projection, rows, and context helpers for one fact family.
-- `src/handlers/<handler_name>.rs` owns one deferred effect boundary. Handler
-  subdirectories, `driver.rs`, and handler-local `intent.rs` files are
+- `src/protocol/facts/<family>/<module>/` owns fact shape, fixed wire layout,
+  command constructors, projection, rows, and context helpers for one fact
+  family.
+- `src/protocol/intents/<theme>/<handler>.rs` owns one deferred effect boundary.
+  Handler subdirectories, `driver.rs`, and handler-local `intent.rs` files are
   forbidden.
-- `src/commands/` owns only shared command context/output types. Concrete
-  command constructors live in the fact module that owns the emitted fact.
+- Shared command context/output types live in `src/core/command_context.rs`.
+  Concrete command constructors live in the fact module that owns the emitted
+  fact.
 - There is no `mod.rs`. Root manifest files such as `src/core.rs`,
-  `src/event_modules.rs`, and `src/handlers.rs` are declaration-only.
+  `src/protocol/facts.rs`, and `src/protocol/intents.rs` are declaration-only.
 - Schema declarations exist only in `src/core/schema.p8sql`,
-  `src/event_modules/schema.p8sql`, and `src/handlers/schema.p8sql`.
+  `src/protocol/facts/schema.p8sql`, and `src/protocol/intents/schema.p8sql`.
 - Broad names are suspect. Avoid files or directories named `runtime`, `state`,
   `jobs`, `cli_commands`, `schema.rs`, `codec.rs`, or `cli.rs` in target code.
 
@@ -145,7 +142,7 @@ keys already observed before retirement.
 - Boundary tests are part of the architecture. If a new file shape or import is
   correct, update the boundary test with the rule that makes it correct.
 - Tests should not seed protocol rows directly unless they are explicitly unit
-  tests for that row codec or legacy compatibility.
+  tests for that row codec.
 - Guardrails should fail on old vocabulary in target code: labels, blockers,
   ready queues, canonical ingress queues, worker catalogs, handler subdirs, and
   direct protocol/worker imports.

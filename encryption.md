@@ -1,8 +1,7 @@
 # Encryption
 
 This document records the poc-10 encryption, key-healing, disappearing-message,
-and purge invariants. The current production implementation still lives partly
-under `src/legacy/`; target code must express the same behavior with facts,
+and purge invariants. Production code expresses this behavior with facts,
 context needs/offers, `WakeLoop`, projectors, and handlers.
 
 ## Fact Families

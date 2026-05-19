@@ -1,4 +1,4 @@
-# Schema-Driven Event Modules
+# Schema-Driven Fact Modules
 
 A proposal to collapse `fact.rs`, `layout.rs`, and the boilerplate share of
 `create.rs` onto schema generation, leaving only protocol-bearing recipes in
@@ -11,7 +11,7 @@ code, and isolate the parts that genuinely deserve hand-written Rust.
 
 ## Why
 
-Looking across the 30-plus modules in `src/event_modules/`:
+Looking across the 30-plus modules in `src/protocol/facts/`:
 
 - `fact.rs` is almost always a typed struct with semantic field names.
 - `layout.rs` is almost always a tag byte plus fixed-offset writes of those
@@ -185,7 +185,7 @@ After the work:
   uses.
 - `core/crypto.rs` — unchanged; it is the primitive library the recipes call.
 - `core/schema_dsl.rs` — grows to cover the vocabulary above.
-- `src/event_modules/schema.p8sql` — grows from table declarations to also
+- `src/protocol/facts/schema.p8sql` — grows from table declarations to also
   declare facts, enums, fixed scalars, and per-fact builders.
 - One new `crypto_labels.rs` — centralized purpose strings.
 

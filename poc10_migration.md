@@ -1,16 +1,14 @@
 # Poc-10 Migration Status
 
-This file tracks the remaining cutover after the legacy crate module and
-`src/legacy/` reference island were removed. The executable TODO list lives in
-`tests/poc10_cutover_todo_test.rs`.
+This file tracks remaining cleanup after the old source island was removed.
+The executable TODO list lives in `tests/poc10_cutover_todo_test.rs`.
 
 ## Current State
 
 - Production entry is `match`, implemented by `src/main.rs` and a thin root
   app boundary.
-- Product commands are moving to a generic core runtime/app facade configured
-  by `src/protocol.rs`. Product-specific runtime code is cutover debt, not the
-  target shape.
+- Product commands route through the core runtime/app facade configured by
+  `src/protocol.rs`.
 - Commands return receipts: ids, scope ids, and deterministic timestamps only.
   CLI/API code queries projected rows after runtime drain when it needs display
   data.
@@ -19,11 +17,11 @@ This file tracks the remaining cutover after the legacy crate module and
   user-facing `commands.rs` or `cli.rs`.
 - `CommandContext` and `CommandOutput` live in `core::command_context`; there
   is no root `src/commands` module.
-- Module manifests live in `src/event_modules/registry.rs` and
-  `src/handlers/registry.rs`, exported via `#[path]` from `src/lib.rs`.
+- Module manifests live under `src/protocol/facts.rs` and
+  `src/protocol/intents.rs`, with the concrete registry in `src/protocol.rs`.
 - Smoke coverage belongs in black-box CLI tests against the real `match`
   binary; there is no product `demo` or `smoke` command.
-- `src/legacy.rs`, `src/legacy/`, and the old legacy boundary test were deleted.
+- The old source island and its boundary test were deleted.
 
 ## Success Criteria
 
@@ -32,10 +30,10 @@ This file tracks the remaining cutover after the legacy crate module and
   projectors, intents, flat handlers, module commands, module queries, and
   module CLI adapters.
 - Runtime is generic core runtime/app plus protocol registry, not
-  `MatchRuntime`-specific product logic.
+  product-specific runtime logic.
 - No old labels, blocker tables, ready queues, canonical ingress queues,
   recently-valid queues, pending reprojection queues, or worker catalogs remain.
-  No legacy module imports remain.
+  No removed-source imports remain.
 - Reactive work creates new facts through intents and handlers, not through
   commands.
 

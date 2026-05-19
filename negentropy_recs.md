@@ -64,8 +64,8 @@ Sync handlers are bounded intent handlers:
 - transit send handlers package sync facts as ordinary facts; sync does not own
   sockets.
 
-There is no target sync worker. The old sync worker remains only inside
-`src/legacy/`.
+There is no sync worker. Sync behavior is modeled as facts, context, and
+bounded intent handlers.
 
 ## Performance Proof
 

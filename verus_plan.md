@@ -32,8 +32,8 @@ src/core/matchers/proof.rs           # if matchers grows into a directory
 src/core/projection/proof.rs         # if projection grows into a directory
 src/core/wake_loop/proof.rs          # if wake_loop grows into a directory
 
-src/event_modules/<module>/proof.rs
-src/event_modules/<module>/proof/
+src/protocol/facts/<family>/<module>/proof.rs
+src/protocol/facts/<family>/<module>/proof/
   mod.rs
   layout.rs
   projector.rs
@@ -44,9 +44,9 @@ src/event_modules/<module>/proof/
 A single proof file per event/fact module is allowed and preferred at first:
 
 ```text
-src/event_modules/connection_request/proof.rs
-src/event_modules/connection_response/proof.rs
-src/event_modules/identity_admin/proof.rs
+src/protocol/facts/connection/request/proof.rs
+src/protocol/facts/connection/response/proof.rs
+src/protocol/facts/identity/admin/proof.rs
 ```
 
 Proofs should not live directly in `project.rs`, `commands.rs`, `create.rs`, or
