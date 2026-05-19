@@ -5,6 +5,8 @@
 //!      deletion payload for one message and author user.
 //!   2. AUTHORITY. The signer, target message, and author contexts prove the
 //!      deletion author is the target message author in the same workspace.
+//!      This uses authenticated message metadata, so deletes do not wait for
+//!      encrypted message text to open.
 //!   3. MATERIALIZE. Once authorized, write the deletion row, publish the
 //!      content_deleted offer, and share the deletion fact.
 
@@ -61,7 +63,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
         // 2. Authority.
         let signer_need = authority::signer_need(fact.id, signer);
         let target_need =
-            message_matchers::message_need(fact.id, scope.clone(), deletion.target_message_id);
+            message_matchers::message_meta_need(fact.id, scope.clone(), deletion.target_message_id);
         let author_need = crate::protocol::matchers::exact_need(
             fact.id,
             crate::protocol::matchers::user_role(),
@@ -276,7 +278,7 @@ mod projector_tests {
         assert!(output.intents.is_empty());
         assert!(output.offers.is_empty());
         assert_eq!(output.needs.len(), 2);
-        assert!(output.needs.contains(&message_context::message_need(
+        assert!(output.needs.contains(&message_context::message_meta_need(
             fact.id,
             message_context::workspace_scope(deletion.workspace_id),
             deletion.target_message_id
@@ -307,7 +309,7 @@ mod projector_tests {
         assert!(output.intents.is_empty());
         assert!(output.offers.is_empty());
         assert_eq!(output.needs.len(), 2);
-        assert!(output.needs.contains(&message_context::message_need(
+        assert!(output.needs.contains(&message_context::message_meta_need(
             fact.id,
             message_context::workspace_scope(deletion.workspace_id),
             deletion.target_message_id
@@ -391,10 +393,15 @@ mod projector_tests {
             workspace_id,
             author_user_id,
             created_at_ms: 12_000,
+            signer_id: [8; 32],
             frontier_id: [3; 32],
+            local_history_node_secret_id: [0; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [0; 32],
             minute: 12,
             leaf_id: [4; 32],
-            sealed_body_ref: [5; 32],
+            nonce: [5; crate::protocol::facts::content::message::fact::NONCE_BYTES],
+            ciphertext: vec![6; crate::protocol::facts::content::message::fact::CIPHERTEXT_BYTES],
         };
         Fact::new(
             message_context::workspace_scope(workspace_id),
@@ -432,8 +439,12 @@ mod projector_tests {
         let deletion = layout::decode_fact(&deletion_fact.bytes).expect("decode deletion");
         let scope = message_context::workspace_scope(deletion.workspace_id);
         MatchedContext {
-            need: message_context::message_need(deletion_fact.id, scope.clone(), target_fact.id),
-            offer: message_context::message_offer(target_fact.id, scope, target_fact.id),
+            need: message_context::message_meta_need(
+                deletion_fact.id,
+                scope.clone(),
+                target_fact.id,
+            ),
+            offer: message_context::message_meta_offer(target_fact.id, scope, target_fact.id),
             payload: target_fact.clone(),
         }
     }

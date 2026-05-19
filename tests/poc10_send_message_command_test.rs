@@ -4,7 +4,7 @@
 //! drive the command, and assert: (1) the happy path produces one fact and a
 //! receipt, (2) blank or empty text is rejected, (3) the produced fact is a
 //! signed envelope whose inner payload decodes through
-//! `content::sealed_message::layout::decode_sealed_message` and whose ciphertext
+//! `content::message::layout::decode_fact` and whose ciphertext
 //! decrypts back to the original plaintext under the workspace key.
 
 use std::cell::Cell;
@@ -16,10 +16,10 @@ use topo::core::command_context::{
 use topo::core::crypto;
 use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
 use topo::core::store::Store;
-use topo::protocol::facts::content::sealed_message::create::{
+use topo::protocol::facts::content::message::create::{
     associated_data, recover_text, send_message,
 };
-use topo::protocol::facts::content::sealed_message::layout::decode_sealed_message;
+use topo::protocol::facts::content::message::layout::{decode_fact, TYPE_CONTENT_MESSAGE};
 use topo::protocol::facts::encryption::fact::LocalKeySecretFact;
 use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::facts::identity::signed_fact::layout::decode_signed_fact;
@@ -112,7 +112,7 @@ fn open_store() -> Store {
 }
 
 #[test]
-fn send_message_happy_path_emits_one_sealed_message_fact() {
+fn send_message_happy_path_emits_one_content_message_fact() {
     let store = open_store();
     let workspace_id = [1u8; 32];
     let vault = seeded_vault(workspace_id);
@@ -128,12 +128,13 @@ fn send_message_happy_path_emits_one_sealed_message_fact() {
     assert!(output.intents.is_empty(), "no intents in the first cut");
 
     // The fact id is the blake3 of the signed envelope bytes. Peel the
-    // envelope to recover the inner sealed-message payload before decoding.
+    // envelope to recover the inner content-message payload before decoding.
     let envelope = decode_signed_fact(&output.facts[0].bytes).expect("decode signed envelope");
-    let sealed = decode_sealed_message(&envelope.payload).expect("decode inner sealed message");
-    assert_eq!(sealed.workspace_id, workspace_id);
-    assert_eq!(sealed.created_at_ms, 60_000);
-    assert_eq!(sealed.minute, 60_000 / 60_000);
+    assert_eq!(envelope.inner_type, TYPE_CONTENT_MESSAGE);
+    let message = decode_fact(&envelope.payload).expect("decode inner content message");
+    assert_eq!(message.workspace_id, workspace_id);
+    assert_eq!(message.created_at_ms, 60_000);
+    assert_eq!(message.minute, 60_000 / 60_000);
 }
 
 #[test]
@@ -152,18 +153,19 @@ fn send_message_rejects_blank_or_empty_text() {
 }
 
 #[test]
-fn send_message_fact_round_trips_through_decode_sealed_message() {
+fn send_message_fact_round_trips_through_decode_content_message() {
     let store = open_store();
     let workspace_id = [42u8; 32];
     let vault = seeded_vault(workspace_id);
     let clock = FixedClock::new(120_000);
     let ctx = CommandContext::new(&store, &clock, &vault);
 
-    let text = "round-trip me through decode_sealed_message";
+    let text = "round-trip me through decode_fact";
     let output = send_message(&ctx, workspace_id, text).expect("send_message");
 
     let envelope = decode_signed_fact(&output.facts[0].bytes).expect("decode signed envelope");
-    let sealed = decode_sealed_message(&envelope.payload).expect("decode inner sealed message");
+    assert_eq!(envelope.inner_type, TYPE_CONTENT_MESSAGE);
+    let message = decode_fact(&envelope.payload).expect("decode inner content message");
 
     // Recover the plaintext using the same workspace key the vault handed
     // to the command. The test must not be able to read the key from any
@@ -173,9 +175,9 @@ fn send_message_fact_round_trips_through_decode_sealed_message() {
         .expect("vault encryption capability");
     let plaintext = crypto::xchacha20poly1305_decrypt(
         &encryption.fact.key_secret,
-        &associated_data(workspace_id, sealed.frontier_id, sealed.minute),
-        &sealed.nonce,
-        &sealed.ciphertext,
+        &associated_data(workspace_id, message.frontier_id, message.minute),
+        &message.nonce,
+        &message.ciphertext,
     )
     .expect("decrypt sealed ciphertext");
 

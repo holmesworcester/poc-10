@@ -244,6 +244,22 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 ))
             });
         }
+        content::message::TYPE_CONTENT_MESSAGE => {
+            return admit_with_codec::<content::message::Codec>(bytes, |decoded| {
+                Ok(Admission::workspace(
+                    decoded.payload.workspace_id,
+                    decoded.payload.created_at_ms,
+                ))
+            });
+        }
+        content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION => {
+            return admit_with_codec::<content::message_deletion::Codec>(bytes, |decoded| {
+                Ok(Admission::workspace(
+                    decoded.payload.workspace_id,
+                    decoded.payload.created_at_ms,
+                ))
+            });
+        }
         content::file_deletion::TYPE_CONTENT_FILE_DELETION => {
             return admit_with_codec::<content::file_deletion::Codec>(bytes, |decoded| {
                 Ok(Admission::workspace(
@@ -267,12 +283,6 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                     frontier.created_at_ms,
                 ))
             });
-        }
-        content::sealed_message::TYPE_SEALED_MESSAGE
-        | content::sealed_message::TYPE_SIGNER_PUBKEY
-        | content::sealed_message::TYPE_SECRET_NODE
-        | content::sealed_message::TYPE_MESSAGE_DELETION => {
-            return admit_sealed_message_fact(bytes);
         }
         sync::compare::TYPE_SYNC_COMPARE => {
             return admit_with_codec::<sync::compare::Codec>(bytes, |_| Ok(Admission::global(0)));
@@ -363,28 +373,6 @@ fn admit_encryption_fact(bytes: Vec<u8>) -> Result<Fact, String> {
     })
 }
 
-fn admit_sealed_message_fact(bytes: Vec<u8>) -> Result<Fact, String> {
-    admit_with_codec::<content::sealed_message::Codec>(bytes, |payload| match payload {
-        content::sealed_message::ProjectionPayload::Message(message)
-        | content::sealed_message::ProjectionPayload::SignedMessage(
-            identity::signed_fact::SignedPayload {
-                payload: message, ..
-            },
-        ) => Ok(Admission::workspace(
-            message.workspace_id,
-            message.created_at_ms,
-        )),
-        content::sealed_message::ProjectionPayload::SignerPubkey(_) => Ok(Admission::global(0)),
-        content::sealed_message::ProjectionPayload::SecretNode(secret) => Ok(Admission::workspace(
-            secret.workspace_id,
-            secret.start_minute,
-        )),
-        content::sealed_message::ProjectionPayload::MessageDeletion(deletion) => Ok(
-            Admission::workspace(deletion.workspace_id, deletion.created_at_ms),
-        ),
-    })
-}
-
 fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
     let envelope = identity::signed_fact::layout::decode_signed_fact(&bytes)?;
     match envelope.inner_type {
@@ -417,7 +405,22 @@ fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             })
         }
         encryption::layout::TYPE_KEY_WRAP => admit_signed_key_wrap_fact(bytes),
-        content::sealed_message::TYPE_SEALED_MESSAGE => admit_sealed_message_fact(bytes),
+        content::message::TYPE_CONTENT_MESSAGE => {
+            admit_with_codec::<content::message::Codec>(bytes, |signed| {
+                Ok(Admission::workspace(
+                    signed.payload.workspace_id,
+                    signed.payload.created_at_ms,
+                ))
+            })
+        }
+        content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION => {
+            admit_with_codec::<content::message_deletion::Codec>(bytes, |signed| {
+                Ok(Admission::workspace(
+                    signed.payload.workspace_id,
+                    signed.payload.created_at_ms,
+                ))
+            })
+        }
         other => Err(format!(
             "unsupported signed transport::transit payload type {other}"
         )),
@@ -514,7 +517,6 @@ fn require_connection_endpoints(
 mod tests {
     use super::*;
     use crate::core::crypto::{ed25519_public_key, ed25519_sign};
-    use crate::protocol::facts::content::sealed_message::fact::MessageDeletionFact;
     use crate::protocol::facts::identity::endpoint::fact::EndpointFact;
     use crate::protocol::facts::identity::invite::fact::InviteSecretFact;
     use crate::protocol::facts::identity::signed_fact::fact::SignedFactEnvelope;
@@ -523,14 +525,14 @@ mod tests {
 
     #[test]
     fn admitted_message_deletion_uses_payload_created_timestamp() {
-        let deletion = MessageDeletionFact {
+        let deletion = content::message_deletion::fact::ContentMessageDeletionFact {
             workspace_id: [9; 32],
             created_at_ms: 12_345,
-            target_id: [10; 32],
+            target_message_id: [10; 32],
             author_user_id: [11; 32],
         };
-        let bytes = content::sealed_message::layout::encode_message_deletion(&deletion)
-            .expect("encode deletion");
+        let bytes =
+            content::message_deletion::layout::encode_fact(&deletion).expect("encode deletion");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit deletion");
 

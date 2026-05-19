@@ -61,11 +61,6 @@ fn schema_sources_create_declared_row_tables() {
                 key: b"message/1".to_vec(),
                 value: b"message bytes".to_vec(),
             },
-            TableRow {
-                table: TableName::new("send_network_frame_cursors"),
-                key: b"cursor/1".to_vec(),
-                value: b"cursor bytes".to_vec(),
-            },
         ])
         .expect("insert rows into p8sql-created tables");
 
@@ -161,10 +156,15 @@ fn content_read_model_rows_materialize_into_typed_tables() {
         workspace_id: [1; 32],
         author_user_id: [2; 32],
         created_at_ms: 60_000,
+        signer_id: [6; 32],
         frontier_id: [3; 32],
+        local_history_node_secret_id: [0; 32],
+        expires_at_minute: u64::MAX,
+        disappearing_setting_id: [0; 32],
         minute: 1,
         leaf_id: [4; 32],
-        sealed_body_ref: [5; 32],
+        nonce: [5; message::fact::NONCE_BYTES],
+        ciphertext: vec![7; message::fact::CIPHERTEXT_BYTES],
     };
     let message_row = message::rows::content_message_row([9; 32], &message_fact);
 
@@ -223,7 +223,7 @@ fn content_read_model_rows_materialize_into_typed_tables() {
     let conn = Connection::open(&path).expect("open sqlite");
     let message_columns = conn
         .query_row(
-            "SELECT author_user_id, created_at_ms, sealed_message_id, deleted
+            "SELECT author_user_id, created_at_ms, signer_id, deleted
              FROM content_messages
              WHERE workspace_id = ?1 AND message_id = ?2",
             params![&[1u8; 32][..], &[9u8; 32][..]],
@@ -237,7 +237,7 @@ fn content_read_model_rows_materialize_into_typed_tables() {
             },
         )
         .expect("query content_messages");
-    assert_eq!(message_columns, (vec![2; 32], 60_000, vec![5; 32], 0));
+    assert_eq!(message_columns, (vec![2; 32], 60_000, vec![6; 32], 0));
 
     let reaction_columns = conn
         .query_row(

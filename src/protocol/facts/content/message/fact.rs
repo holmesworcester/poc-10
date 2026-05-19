@@ -1,27 +1,33 @@
-//! Retired unsealed content-message fact shape.
+//! Semantic content-message fact shape.
 //!
-//! Normal poc-10 chat messages are encrypted sealed-message facts. This module
-//! is not registered by the concrete protocol; it exists only for older
-//! migration fixtures that have not been rewritten yet.
+//! The fact type is public protocol metadata. User-visible message text is an
+//! encrypted field that opens only when matching key context is available.
 
 use crate::core::facts::FactId;
 
 pub const UNIX_MINUTE_MS: u64 = 60_000;
+pub const CIPHERTEXT_BYTES: usize = 128;
+pub const NONCE_BYTES: usize = 24;
 
 pub type WorkspaceId = FactId;
 pub type AuthorId = FactId;
 pub type FrontierId = FactId;
+pub type SignerId = FactId;
 
-/// Retired public-shape content-message fact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentMessageFact {
     pub workspace_id: WorkspaceId,
-    pub author_user_id: AuthorId,
     pub created_at_ms: u64,
+    pub author_user_id: AuthorId,
+    pub signer_id: SignerId,
     pub frontier_id: FrontierId,
+    pub local_history_node_secret_id: FactId,
+    pub expires_at_minute: u64,
+    pub disappearing_setting_id: FactId,
     pub minute: u64,
     pub leaf_id: FactId,
-    pub sealed_body_ref: FactId,
+    pub nonce: [u8; NONCE_BYTES],
+    pub ciphertext: Vec<u8>,
 }
 
 /// Convenience: derive the authoring `unix_minute` from `created_at_ms`. The

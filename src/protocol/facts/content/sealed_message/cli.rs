@@ -16,11 +16,11 @@ use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::store::Store;
-use crate::protocol::facts::content::{file, file_slice, reaction};
+use crate::protocol::facts::content::{file, file_slice, message, message_deletion, reaction};
 use crate::protocol::facts::identity;
 use crate::protocol::matchers;
 
-use super::{create, layout, queries};
+use super::queries;
 
 pub const SEND_USAGE: &str = "send WORKSPACE_ID_HEX TEXT";
 pub const REACT_USAGE: &str = "react WORKSPACE_ID_HEX MESSAGE_SELECTOR EMOJI";
@@ -66,14 +66,14 @@ pub struct DeleteMessageReceipt {
 pub fn send(
     ctx: &CommandContext<'_>,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<create::SendReceipt>, String> {
+) -> Result<CommandOutput<message::create::SendReceipt>, String> {
     args.require_len(2, SEND_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let text = args.get(1).expect("length checked");
-    create::send_message(ctx, workspace_id, text)
+    message::create::send_message(ctx, workspace_id, text)
 }
 
-pub fn send_output(receipt: &create::SendReceipt, text: &str) -> CliOutput {
+pub fn send_output(receipt: &message::create::SendReceipt, text: &str) -> CliOutput {
     CliOutput::lines(vec![
         format!("workspace_id: {}", encode_hex_32(&receipt.workspace_id)),
         format!("fact_id: {}", encode_hex_32(&receipt.message_fact_id)),
@@ -148,7 +148,7 @@ pub fn send_file(
         .and_then(|name| name.to_str())
         .ok_or_else(|| "file path must have a utf-8 filename".to_string())?
         .to_string();
-    let message_output = create::send_message(ctx, parsed.workspace_id, &parsed.text)?;
+    let message_output = message::create::send_message(ctx, parsed.workspace_id, &parsed.text)?;
     let message_receipt = message_output.receipt.clone();
     let author_user_id = local_author_user_id(ctx.store(), parsed.workspace_id)?;
     let created_at_ms = message_receipt.created_at_ms.saturating_add(1);
@@ -235,16 +235,16 @@ pub fn delete_message(
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let target = resolve_message_selector(ctx.store(), workspace_id, args.get(1).unwrap())?;
     let created_at_ms = ctx.next_timestamp();
-    let deletion = super::fact::MessageDeletionFact {
+    let deletion = message_deletion::fact::ContentMessageDeletionFact {
         workspace_id,
         created_at_ms,
-        target_id: target.message_id,
+        target_message_id: target.message_id,
         author_user_id: target.author_user_id,
     };
     let fact = Fact::new(
         matchers::workspace_scope(workspace_id),
         created_at_ms,
-        layout::encode_message_deletion(&deletion)?,
+        message_deletion::layout::encode_fact(&deletion)?,
     );
     Ok(CommandOutput::new(DeleteMessageReceipt {
         workspace_id,

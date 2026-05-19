@@ -118,6 +118,8 @@ const ATOMIC_ROW_TABLES: &[TableName] = &[
     content::file::rows::FILE_ROWS,
     content::file_deletion::rows::FILE_DELETION_ROWS,
     content::file_slice::rows::FILE_SLICE_ROWS,
+    content::message::rows::CONTENT_MESSAGE_ROWS,
+    content::message_deletion::rows::MESSAGE_DELETION_ROWS,
     content::reaction::rows::REACTION_ROWS,
     encryption::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
     encryption::rows::KEY_WRAP_ROWS,
@@ -229,6 +231,14 @@ projector_route!(
     content::file_slice::project::ContentFileSliceProjector
 );
 projector_route!(
+    project_content_message,
+    content::message::project::ContentMessageProjector
+);
+projector_route!(
+    project_content_message_deletion,
+    content::message_deletion::project::ContentMessageDeletionProjector
+);
+projector_route!(
     project_content_reaction,
     content::reaction::project::ContentReactionProjector
 );
@@ -262,10 +272,6 @@ projector_route!(
     identity::invite_server::project::InviteServerProjector
 );
 projector_route!(project_admin, identity::admin::project::AdminProjector);
-projector_route!(
-    project_sealed_message,
-    content::sealed_message::project::SealedMessageProjector
-);
 projector_route!(
     project_invite_accepted,
     identity::invite_accepted::project::InviteAcceptedProjector
@@ -363,6 +369,14 @@ const FACT_ROUTES: &[FactRoute] = &[
         projector: project_content_file_slice,
     },
     FactRoute {
+        tag: content::message::layout::TYPE_CONTENT_MESSAGE,
+        projector: project_content_message,
+    },
+    FactRoute {
+        tag: content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION,
+        projector: project_content_message_deletion,
+    },
+    FactRoute {
         tag: content::reaction::layout::TYPE_CONTENT_REACTION,
         projector: project_content_reaction,
     },
@@ -425,22 +439,6 @@ const FACT_ROUTES: &[FactRoute] = &[
     FactRoute {
         tag: identity::admin::layout::TYPE_ADMIN,
         projector: project_admin,
-    },
-    FactRoute {
-        tag: content::sealed_message::layout::TYPE_SEALED_MESSAGE,
-        projector: project_sealed_message,
-    },
-    FactRoute {
-        tag: content::sealed_message::layout::TYPE_SIGNER_PUBKEY,
-        projector: project_sealed_message,
-    },
-    FactRoute {
-        tag: content::sealed_message::layout::TYPE_SECRET_NODE,
-        projector: project_sealed_message,
-    },
-    FactRoute {
-        tag: content::sealed_message::layout::TYPE_MESSAGE_DELETION,
-        projector: project_sealed_message,
     },
     FactRoute {
         tag: identity::invite_accepted::layout::TYPE_INVITE_ACCEPTED,

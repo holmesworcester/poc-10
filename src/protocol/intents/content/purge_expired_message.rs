@@ -1,6 +1,6 @@
 //! Bounded per-message expiry handler.
 //!
-//! The intent names one sealed message fact and the clock minute that made it
+//! The intent names one message fact and the clock minute that made it
 //! due. The handler revalidates the message's embedded expiry stamp before
 //! purging the fact.
 
@@ -93,7 +93,7 @@ impl IntentHandler for PurgeExpiredMessageHandler {
     ) -> Result<HandlerOutput, String> {
         let input = decode_purge_expired_message(raw_intent)?;
         let target = context.require_fact(&input.target_id)?;
-        let message = retention::decode_sealed_message_fact(target)?;
+        let message = retention::decode_message_fact(target)?;
         if message.workspace_id != input.workspace_id {
             return Err("purge_expired_message workspace mismatch".to_string());
         }

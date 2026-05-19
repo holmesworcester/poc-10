@@ -74,7 +74,7 @@ For protocol modules with no crypto (`identity_workspace`,
 struct, encode, wrap in `Fact::new` with the right scope and timestamp.
 Schema-derivable end-to-end.
 
-For crypto modules (`connection_response`, `sealed_message`, `encryption`),
+For crypto modules (`connection_response`, `content_message`, `encryption`),
 the tail of every recipe is the same shape: build the fact struct, encode,
 optionally wrap in a signed envelope, return a `Fact` with the right scope.
 The schema absorbs that tail. What it does not absorb is the recipe body.
@@ -86,8 +86,13 @@ reviewable. Concretely:
 
 - `connection_response/create.rs` — X25519 DH (ee, es), HKDF derivation of
   response key and connection secret, transcript hashing.
-- `sealed_message/create.rs` — deterministic nonce derivation, AEAD encrypt,
-  plaintext padding, signed-envelope wrapping.
+- `content/message/create.rs` — deterministic nonce derivation, AEAD encrypt
+  of message fields, plaintext padding, signed-envelope wrapping. The old
+  `sealed_message` module remains legacy layout/row compatibility, not a
+  canonical authoring, runtime-routing, or transport-admission path.
+  Its projector exposes authenticated message metadata before decrypt so
+  author deletions can purge without keys, while opened message context remains
+  gated on successful decryption.
 - `encryption/create.rs` — key wrap/unwrap with per-recipient deterministic
   sender keys, AEAD with associated data, dispatch over wrapped-secret kinds.
 

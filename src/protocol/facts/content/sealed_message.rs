@@ -2,7 +2,6 @@ pub mod authoring;
 pub mod cli;
 pub mod create;
 pub mod fact;
-pub mod intent;
 pub mod layout;
 pub mod project;
 pub mod queries;

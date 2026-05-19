@@ -162,9 +162,9 @@ mod projector_tests {
     };
     use topo::protocol::facts::content::file_slice::fact::ContentFileSliceFact;
     use topo::protocol::facts::content::file_slice::{layout, project, rows};
-    use topo::protocol::facts::content::sealed_message::{
-        fact::{SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS},
-        layout as sealed_message_layout,
+    use topo::protocol::facts::content::message::{
+        fact::{ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS},
+        layout as message_layout,
     };
     use topo::protocol::matchers::ExactSelectorMatcher;
 
@@ -176,7 +176,7 @@ mod projector_tests {
     fn content_file_slice_projector_materializes_row_through_atomic_intent() {
         let parent_author = user_fact([9; 32], [8; 32], "parent-author");
         let file_author = user_fact([9; 32], [12; 32], "file-author");
-        let parent_fact = sealed_parent_fact([9; 32], parent_author.id, 1000);
+        let parent_fact = parent_message_fact([9; 32], parent_author.id, 1000);
         let file = ContentFileFact {
             workspace_id: [9; 32],
             created_at_ms: 1234,
@@ -294,7 +294,7 @@ mod projector_tests {
     fn content_file_slice_file_offer_before_need_wakes_slice() {
         let parent_author = user_fact([9; 32], [8; 32], "parent-author");
         let file_author = user_fact([9; 32], [12; 32], "file-author");
-        let parent_fact = sealed_parent_fact([9; 32], parent_author.id, 1000);
+        let parent_fact = parent_message_fact([9; 32], parent_author.id, 1000);
         let file = ContentFileFact {
             workspace_id: [9; 32],
             created_at_ms: 1234,
@@ -481,12 +481,9 @@ mod projector_tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             match fact.bytes.first().copied() {
-                Some(sealed_message_layout::TYPE_SEALED_MESSAGE) => Ok(ProjectionOutput::new()
-                    .offer(message_context::message_offer(
-                        fact.id,
-                        fact.scope.clone(),
-                        fact.id,
-                    ))),
+                Some(message_layout::TYPE_CONTENT_MESSAGE) => Ok(ProjectionOutput::new().offer(
+                    message_context::message_offer(fact.id, fact.scope.clone(), fact.id),
+                )),
                 Some(file_layout::TYPE_CONTENT_FILE) => {
                     topo::protocol::facts::content::file::project::ContentFileProjector::new()
                         .project(fact, context)
@@ -518,12 +515,12 @@ mod projector_tests {
         )
     }
 
-    fn sealed_parent_fact(
+    fn parent_message_fact(
         workspace_id: [u8; 32],
         author_user_id: [u8; 32],
         created_at_ms: u64,
     ) -> Fact {
-        let message = SealedMessageFact {
+        let message = ContentMessageFact {
             workspace_id,
             created_at_ms,
             author_user_id,
@@ -540,8 +537,7 @@ mod projector_tests {
         Fact::new(
             message_context::workspace_scope(workspace_id),
             created_at_ms,
-            sealed_message_layout::encode_sealed_message(&message)
-                .expect("encode sealed parent message"),
+            message_layout::encode_fact(&message).expect("encode content parent message"),
         )
     }
 }

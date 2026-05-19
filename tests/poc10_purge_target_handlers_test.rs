@@ -120,6 +120,26 @@ fn expiry_purges_due_sealed_message() {
 }
 
 #[test]
+fn expiry_purges_due_content_message() {
+    let message = content_message_fact(10, 11);
+    let intent = purge_expired_message_intent(PurgeExpiredMessage {
+        workspace_id: WORKSPACE,
+        target_id: message.id,
+        now_minute: 11,
+    });
+    let mut bus = WakeLoop::new();
+
+    bus.submit_fact(message.clone());
+    bus.submit_intent(intent).expect("submit expiry");
+    let report = bus
+        .dispatch_deferred_intents_with_fact_context(&PurgeExpiredMessageHandler::new(), 10)
+        .expect("expiry purge");
+
+    assert_eq!(report.handled, 1);
+    assert!(!bus.has_fact(&message.id));
+}
+
+#[test]
 fn expiry_rejects_message_that_is_not_due() {
     let message = message_fact(10, 12);
     let intent = purge_expired_message_intent(PurgeExpiredMessage {
@@ -204,6 +224,28 @@ fn message_fact(minute: u64, expires_at_minute: u64) -> Fact {
             ciphertext: vec![0x55; CIPHERTEXT_BYTES.min(8)],
         })
         .expect("encode sealed message"),
+    )
+}
+
+fn content_message_fact(minute: u64, expires_at_minute: u64) -> Fact {
+    Fact::new(
+        workspace_scope(WORKSPACE),
+        minute * 60_000,
+        content::message::layout::encode_fact(&content::message::fact::ContentMessageFact {
+            workspace_id: WORKSPACE,
+            created_at_ms: minute * 60_000,
+            author_user_id: AUTHOR,
+            signer_id: [7; 32],
+            frontier_id: [8; 32],
+            local_history_node_secret_id: [9; 32],
+            expires_at_minute,
+            disappearing_setting_id: [10; 32],
+            minute,
+            leaf_id: [11; 32],
+            nonce: [12; content::message::fact::NONCE_BYTES],
+            ciphertext: vec![0x55; CIPHERTEXT_BYTES.min(8)],
+        })
+        .expect("encode content message"),
     )
 }
 

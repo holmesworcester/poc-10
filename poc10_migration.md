@@ -72,6 +72,6 @@ This file tracks the remaining cutover after the legacy crate module and
 
 - Target architecture and intent cleanliness guardrails cover the new shape.
 - Target runtime tests cover command submission, projection, handler dispatch
-  registry parity, and signed sealed-message routing.
+  registry parity, and signed content-message routing.
 - Target projector/handler tests cover the translated fact families and bounded
   effects currently ported.

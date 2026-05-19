@@ -737,7 +737,6 @@ mod tests {
                 "purge_retire_coords",
                 "sync_index_snapshots",
                 "connection_attempt_checkpoints",
-                "send_network_frame_cursors",
             ]
         );
 

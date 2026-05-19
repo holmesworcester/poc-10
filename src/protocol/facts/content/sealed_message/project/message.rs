@@ -4,13 +4,13 @@ use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{ProjectionContext, ProjectionOutput, TimeWake};
 use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity::signed_fact;
+use crate::protocol::intents::content::purge_deleted_message::{
+    self, PurgeDeletedMessage, PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
+};
 use crate::protocol::intents::content::purge_expired_message::{self, PurgeExpiredMessage};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::super::fact::SealedMessageFact;
-use super::super::intent::{
-    self, PurgeDeletedMessage, PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
-};
 use super::super::rows::{
     message_key, message_row, message_tombstone_row, opened_message_row, sealed_message_row,
     MessageRow, OpenedMessageRow, SealedMessageRow, MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
@@ -282,13 +282,15 @@ fn author_deletion_output(
             })
             .into_intent(),
         )
-        .intent(intent::purge_deleted_message_intent(PurgeDeletedMessage {
-            workspace_id: message.workspace_id,
-            target_kind: PURGE_TARGET_MESSAGE,
-            target_id: message_id,
-            reason_kind: PURGE_REASON_AUTHOR_DELETION,
-            reason_fact_id,
-        }))
+        .intent(purge_deleted_message::purge_deleted_message_intent(
+            PurgeDeletedMessage {
+                workspace_id: message.workspace_id,
+                target_kind: PURGE_TARGET_MESSAGE,
+                target_id: message_id,
+                reason_kind: PURGE_REASON_AUTHOR_DELETION,
+                reason_fact_id,
+            },
+        ))
 }
 
 fn decrypt_text(message: &SealedMessageFact, secret_payload: &Fact) -> Result<String, String> {

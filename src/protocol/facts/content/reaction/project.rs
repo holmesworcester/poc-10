@@ -3,7 +3,7 @@
 //! POLICY. A content_reaction is admitted iff:
 //!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
 //!      reaction payload.
-//!   2. CONTEXT. Projection waits for signer, target sealed message, target
+//!   2. CONTEXT. Projection waits for signer, target content message, target
 //!      deletion, and author context; deleted targets remove the reaction row.
 //!   3. MATERIALIZE. Live reactions write one row and share the fact.
 
@@ -14,7 +14,7 @@ use crate::core::projection::{
 };
 
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
-use crate::protocol::facts::content::sealed_message;
+use crate::protocol::facts::content::{message, message_deletion};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
@@ -232,15 +232,15 @@ fn validate_message_deletion(
 ) -> Result<(), String> {
     let deletion_payload = maybe_signed_payload(
         payload,
-        sealed_message::TYPE_MESSAGE_DELETION,
+        message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
         "target deletion",
     )?;
-    let deletion = sealed_message::decode_message_deletion_payload(&deletion_payload.payload)
-        .map_err(|_| "target deletion context is not a sealed message deletion".to_string())?;
+    let deletion = message_deletion::decode_fact_payload(&deletion_payload.payload)
+        .map_err(|_| "target deletion context is not a content message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("target deletion workspace does not match reaction".to_string());
     }
-    if deletion.target_id != target_message_id {
+    if deletion.target_message_id != target_message_id {
         return Err("target deletion target does not match reaction parent".to_string());
     }
     if deletion.author_user_id != author_user_id {
@@ -260,12 +260,12 @@ struct TargetMessage {
 }
 
 fn decode_target_message_payload(payload: &Fact, label: &str) -> Result<TargetMessage, String> {
-    let sealed_payload = maybe_signed_payload(payload, sealed_message::TYPE_SEALED_MESSAGE, label)?;
-    let sealed = sealed_message::decode_sealed_message_payload(&sealed_payload.payload)
-        .map_err(|_| format!("{label} context is not a sealed message"))?;
+    let message_payload = maybe_signed_payload(payload, message::TYPE_CONTENT_MESSAGE, label)?;
+    let message = message::decode_fact_payload(&message_payload.payload)
+        .map_err(|_| format!("{label} context is not a content message"))?;
     Ok(TargetMessage {
-        workspace_id: sealed.workspace_id,
-        author_user_id: sealed.author_user_id,
+        workspace_id: message.workspace_id,
+        author_user_id: message.author_user_id,
     })
 }
 
@@ -302,14 +302,14 @@ mod projector_tests {
     use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
     use topo::core::store::Store;
     use topo::core::wake_loop::WakeLoop;
+    use topo::protocol::facts::content::message::{
+        fact::{ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS},
+        layout as message_layout,
+    };
     use topo::protocol::facts::content::reaction::fact::{
         ContentReactionFact, REACTION_NONCE_BYTES,
     };
     use topo::protocol::facts::content::reaction::{layout, project, rows};
-    use topo::protocol::facts::content::sealed_message::{
-        fact::{SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS},
-        layout as sealed_message_layout,
-    };
     use topo::protocol::matchers::ExactSelectorMatcher;
 
     use topo::protocol::facts::identity::user::{fact::UserFact, layout as user_layout};
@@ -327,7 +327,7 @@ mod projector_tests {
             nonce: [7; REACTION_NONCE_BYTES],
             ciphertext: b"sealed-emoji".to_vec(),
         };
-        let message_fact = sealed_parent_fact(reaction.workspace_id, target_author.id, 12_000);
+        let message_fact = target_message_fact(reaction.workspace_id, target_author.id, 12_000);
         reaction.target_message_id = message_fact.id;
         let reaction_fact = Fact::new(
             message_context::workspace_scope(reaction.workspace_id),
@@ -434,7 +434,7 @@ mod projector_tests {
             nonce: [7; REACTION_NONCE_BYTES],
             ciphertext: b"sealed-emoji".to_vec(),
         };
-        let message_fact = sealed_parent_fact(reaction.workspace_id, target_author.id, 12_000);
+        let message_fact = target_message_fact(reaction.workspace_id, target_author.id, 12_000);
         reaction.target_message_id = message_fact.id;
         let reaction_fact = Fact::new(
             message_context::workspace_scope(reaction.workspace_id),
@@ -504,12 +504,9 @@ mod projector_tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             match fact.bytes.first().copied() {
-                Some(sealed_message_layout::TYPE_SEALED_MESSAGE) => Ok(ProjectionOutput::new()
-                    .offer(message_context::message_offer(
-                        fact.id,
-                        fact.scope.clone(),
-                        fact.id,
-                    ))),
+                Some(message_layout::TYPE_CONTENT_MESSAGE) => Ok(ProjectionOutput::new().offer(
+                    message_context::message_offer(fact.id, fact.scope.clone(), fact.id),
+                )),
                 Some(layout::TYPE_CONTENT_REACTION) => {
                     project::ContentReactionProjector::new().project(fact, context)
                 }
@@ -542,12 +539,12 @@ mod projector_tests {
         )
     }
 
-    fn sealed_parent_fact(
+    fn target_message_fact(
         workspace_id: [u8; 32],
         author_user_id: [u8; 32],
         created_at_ms: u64,
     ) -> Fact {
-        let message = SealedMessageFact {
+        let message = ContentMessageFact {
             workspace_id,
             created_at_ms,
             author_user_id,
@@ -564,8 +561,7 @@ mod projector_tests {
         Fact::new(
             message_context::workspace_scope(workspace_id),
             created_at_ms,
-            sealed_message_layout::encode_sealed_message(&message)
-                .expect("encode sealed target message"),
+            message_layout::encode_fact(&message).expect("encode content target message"),
         )
     }
 }

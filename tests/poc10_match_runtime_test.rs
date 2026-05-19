@@ -7,14 +7,14 @@ use topo::core::command_context::{
 };
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
-use topo::protocol::facts::content::sealed_message::{
-    create::send_message, fact::SignerPubkeyFact, layout as sealed_layout, rows as sealed_rows,
+use topo::protocol::facts::content::{
+    message as content_message, sealed_message::rows as sealed_rows,
 };
 use topo::protocol::facts::encryption::{
     fact::{LocalKeySecretFact, RemovalFrontierFact},
     layout as encryption_layout,
 };
-use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::facts::identity::signed_fact::create as signed_fact_create;
 use topo::protocol::facts::identity::workspace::{
     commands::create_workspace, rows as workspace_rows,
 };
@@ -47,36 +47,6 @@ impl IdentityVault for EmptyVault {
         _workspace_id: WorkspaceId,
     ) -> Result<LocalEncryptionCapability, String> {
         Err("no encryption capability".to_string())
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SeededVault {
-    signing: LocalSigningCapability,
-    encryption: LocalEncryptionCapability,
-}
-
-impl IdentityVault for SeededVault {
-    fn local_signing_capability(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<LocalSigningCapability, String> {
-        if self.signing.fact.workspace_id == workspace_id {
-            Ok(self.signing.clone())
-        } else {
-            Err("no signing capability for workspace".to_string())
-        }
-    }
-
-    fn local_encryption_capability(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<LocalEncryptionCapability, String> {
-        if self.encryption.fact.workspace_id == workspace_id {
-            Ok(self.encryption.clone())
-        } else {
-            Err("no encryption capability for workspace".to_string())
-        }
     }
 }
 
@@ -116,66 +86,91 @@ fn runtime_submits_command_output_and_projects_workspace_rows() {
 }
 
 #[test]
-fn runtime_routes_signed_sealed_message_to_sealed_message_projector() {
+fn runtime_routes_signed_content_message_to_content_message_projector() {
     let workspace_id = [42; 32];
     let signer_id = [11; 32];
     let signer_private = [7; 32];
-    let signer_public = crypto::ed25519_public_key(&signer_private);
     let frontier = removal_frontier_fact(workspace_id, [33; 32]);
     let frontier_id = frontier.id;
+    let key_secret = [9; crypto::XCHACHA20_POLY1305_KEY_BYTES];
+    let message = signed_content_message_fact(
+        workspace_id,
+        [44; 32],
+        signer_id,
+        &signer_private,
+        frontier_id,
+        key_secret,
+        60_000,
+        "runtime signed message",
+    );
+    let message_id = message.id;
     let mut runtime = ProtocolRuntime::open_memory().expect("runtime");
-    let clock = FixedClock(Cell::new(60_000));
-    let vault = SeededVault {
-        signing: LocalSigningCapability {
-            fact: LocalSignerSecretFact {
-                workspace_id,
-                signer_id,
-                public_key: signer_public,
-                private_key: signer_private,
-            },
-        },
-        encryption: LocalEncryptionCapability {
-            fact: LocalKeySecretFact {
-                workspace_id,
-                frontier_id,
-                owner_endpoint_id: [33; 32],
-                created_at_ms: 1,
-                key_secret: [9; crypto::XCHACHA20_POLY1305_KEY_BYTES],
-            },
-        },
-    };
-    let output = {
-        let ctx = runtime.command_context(&clock, &vault);
-        send_message(&ctx, workspace_id, "runtime signed message").expect("send message")
-    };
-    let message_id = output.receipt.message_fact_id;
 
-    runtime
-        .submit_command_output(output)
-        .expect("submit signed message command output");
-    runtime.submit_fact(signer_pubkey_fact(workspace_id, signer_id, signer_public));
     runtime.submit_fact(frontier);
     runtime.submit_fact(local_key_secret_fact(
         workspace_id,
         frontier_id,
         [33; 32],
-        [9; crypto::XCHACHA20_POLY1305_KEY_BYTES],
+        key_secret,
     ));
+    runtime.submit_fact(message);
     let report = runtime
         .drain_projection_until_idle(8, 64)
         .expect("drain signed message projection");
 
     assert!(report.projections >= 3);
-    let rows = runtime
-        .store()
-        .table_rows(sealed_rows::SEALED_MESSAGE_ROWS)
-        .expect("sealed message rows");
-    assert_eq!(rows.len(), 1);
-    let row =
-        sealed_rows::decode_sealed_message_row(&rows[0].0, &rows[0].1).expect("decode sealed row");
-    assert_eq!(row.message_id, message_id);
-    assert_eq!(row.workspace_id, workspace_id);
-    assert_eq!(row.signer_id, signer_id);
+    assert!(
+        runtime
+            .store()
+            .table_rows(sealed_rows::SEALED_MESSAGE_ROWS)
+            .expect("sealed message rows")
+            .is_empty(),
+        "semantic content messages should not materialize sealed-message wrapper rows"
+    );
+    assert!(
+        runtime
+            .store()
+            .table_rows(content_message::rows::CONTENT_MESSAGE_ROWS)
+            .expect("content message rows")
+            .is_empty(),
+        "content rows wait until author context is available"
+    );
+    assert!(
+        runtime
+            .store()
+            .table_rows(sealed_rows::OPENED_MESSAGE_ROWS)
+            .expect("opened message rows")
+            .is_empty(),
+        "opened rows wait until author context is available"
+    );
+    let context = runtime
+        .wake_loop()
+        .context(&message_id)
+        .expect("message context");
+    assert!(context
+        .needs
+        .iter()
+        .any(|need| need.role == topo::protocol::matchers::user_role()));
+    assert!(context
+        .needs
+        .iter()
+        .any(|need| need.role == topo::protocol::matchers::signer_role()));
+    assert!(context
+        .needs
+        .iter()
+        .any(|need| need.role == topo::protocol::matchers::secret_role()));
+    assert!(context
+        .needs
+        .iter()
+        .any(|need| need.role == topo::protocol::matchers::deletion_role()));
+    assert!(
+        runtime
+            .wake_loop()
+            .intents()
+            .iter()
+            .any(|intent| intent.kind.as_str() == SHARE_FACT_WITH_WORKSPACE),
+        "semantic content message should still be made shareable while waiting"
+    );
 }
 
 #[test]
@@ -217,18 +212,6 @@ fn runtime_dispatches_every_protocol_handler_registration() {
     );
 }
 
-fn signer_pubkey_fact(workspace_id: [u8; 32], signer_id: [u8; 32], public_key: [u8; 32]) -> Fact {
-    Fact::new(
-        workspace_scope(workspace_id),
-        0,
-        sealed_layout::encode_signer_pubkey(&SignerPubkeyFact {
-            signer_id,
-            public_key,
-        })
-        .expect("encode signer pubkey"),
-    )
-}
-
 fn removal_frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32]) -> Fact {
     let body = RemovalFrontierFact {
         workspace_id,
@@ -260,6 +243,46 @@ fn local_key_secret_fact(
         })
         .expect("encode local key secret"),
     )
+}
+
+fn signed_content_message_fact(
+    workspace_id: [u8; 32],
+    author_user_id: [u8; 32],
+    signer_id: [u8; 32],
+    signer_private: &[u8; 32],
+    frontier_id: [u8; 32],
+    key_secret: [u8; crypto::XCHACHA20_POLY1305_KEY_BYTES],
+    created_at_ms: u64,
+    text: &str,
+) -> Fact {
+    let minute = created_at_ms / 60_000;
+    let nonce = [7; content_message::fact::NONCE_BYTES];
+    let plaintext = content_message::create::pad_plaintext(text.as_bytes()).expect("pad text");
+    let ciphertext = crypto::xchacha20poly1305_encrypt(
+        &key_secret,
+        &content_message::create::associated_data(workspace_id, frontier_id, minute),
+        &nonce,
+        &plaintext,
+    )
+    .expect("encrypt message");
+    let body = content_message::fact::ContentMessageFact {
+        workspace_id,
+        created_at_ms,
+        author_user_id,
+        signer_id,
+        frontier_id,
+        local_history_node_secret_id: [0; 32],
+        expires_at_minute: u64::MAX,
+        disappearing_setting_id: [0; 32],
+        minute,
+        leaf_id: [4; 32],
+        nonce,
+        ciphertext,
+    };
+    let payload = content_message::layout::encode_fact(&body).expect("encode content message");
+    let bytes = signed_fact_create::sign_payload_bytes(signer_id, signer_private, payload)
+        .expect("sign content message");
+    Fact::new(workspace_scope(workspace_id), created_at_ms, bytes)
 }
 
 fn workspace_scope(workspace_id: [u8; 32]) -> FactScope {

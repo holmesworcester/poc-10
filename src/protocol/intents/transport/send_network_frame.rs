@@ -2,10 +2,12 @@
 //!
 //! Owns the deferred intent that asks the runtime to push an already-packaged
 //! transport::transit frame onto a connection's TCP socket. The handler resolves the
-//! connection route from the fact context, stages the frame through core's
-//! outbound queue boundary, and attempts one bounded TCP write. If route
-//! context or the socket is unavailable, returning an error keeps the deferred
-//! intent queued for retry.
+//! connection route from the fact context, hands the opaque frame to core's
+//! network boundary, and attempts one bounded TCP write. If route
+//! context or the socket is unavailable, a retry error keeps the deferred
+//! intent queued. There is intentionally no protocol-level peer ACK here:
+//! TCP handles stream delivery for a single write, and duplicated transit
+//! frames are harmless because fact admission is idempotent.
 
 //! Send-network-frame intent layout.
 //!
@@ -21,7 +23,7 @@ pub const SEND_NETWORK_FRAME: &str = "send_network_frame";
 
 /// Maximum frame size accepted by the handler. Mirrors the largest transport::transit
 /// frame size class with a small headroom; oversized frames are rejected
-/// before any cursor work is attempted.
+/// before any route lookup or socket work is attempted.
 pub const MAX_FRAME_BYTES: usize = 1 << 21; // 2 MiB
 
 /// 32-byte routing key. May be a connection id or any other handle the
@@ -81,15 +83,6 @@ pub fn send_network_frame_key(input: &SendNetworkFrame) -> Vec<u8> {
     hash.update(&(input.frame.len() as u32).to_be_bytes());
     hash.update(&input.frame);
     hash.finalize().as_bytes().to_vec()
-}
-
-/// Deterministic digest of the frame bytes used by the cursor fact value.
-pub fn frame_digest(frame: &[u8]) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"topo:send-network-frame-digest:v1:");
-    hash.update(&(frame.len() as u32).to_be_bytes());
-    hash.update(frame);
-    *hash.finalize().as_bytes()
 }
 
 fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -175,7 +168,7 @@ impl IntentHandler for SendNetworkFrameHandler {
                 if err == SEND_NETWORK_FRAME_MISSING_ROUTE
                     || err == "send_network_frame missing connection request fact" =>
             {
-                return Ok(HandlerOutput::new());
+                return Err(retry_intent(format!("send_network_frame route: {err}")));
             }
             Err(err) => return Err(err),
         };

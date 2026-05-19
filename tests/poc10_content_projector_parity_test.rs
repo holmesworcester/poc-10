@@ -7,6 +7,7 @@ use topo::protocol::facts::identity;
 const WORKSPACE: FactId = [7; 32];
 const CONTENT_SIGNING_KEY: [u8; 32] = [9; 32];
 const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [11; 32];
+const CONTENT_ENDPOINT_ID: FactId = [21; 32];
 
 #[test]
 fn signed_content_event_waits_for_endpoint_shared_signer_context() {
@@ -108,13 +109,18 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
         workspace_id: WORKSPACE,
         author_user_id: author.id,
         created_at_ms: 60_000,
+        signer_id: CONTENT_ENDPOINT_ID,
         frontier_id: [3; 32],
+        local_history_node_secret_id: [0; 32],
+        expires_at_minute: u64::MAX,
+        disappearing_setting_id: [0; 32],
         minute: 1,
         leaf_id: [4; 32],
-        sealed_body_ref: [5; 32],
+        nonce: [5; content::message::fact::NONCE_BYTES],
+        ciphertext: vec![6; content::message::fact::CIPHERTEXT_BYTES],
     };
     let fact = signed_fact_in_workspace(
-        signer.id,
+        CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::message::layout::encode_fact(&message).expect("encode message"),
         message.created_at_ms,
@@ -123,7 +129,7 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
     let err = content::message::project::ContentMessageProjector::new()
         .project(
             &fact,
-            &ProjectionContext::from_matches(vec![signer_match(&fact, &signer)]),
+            &ProjectionContext::from_matches(vec![message_signer_match(&fact, &message, &signer)]),
         )
         .expect_err("signer for another author must fail");
 
@@ -307,7 +313,7 @@ fn endpoint_shared_fact(
         created_at_ms: 1,
         workspace_id,
         user_authority_fact_id,
-        endpoint_id: [21; 32],
+        endpoint_id: CONTENT_ENDPOINT_ID,
         signing_public_key: crypto::ed25519_public_key(&content_signing_key),
         endpoint_role: identity::endpoint_shared::fact::EndpointRole::Device,
         device_name: "laptop".to_string(),
@@ -340,10 +346,15 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         workspace_id,
         author_user_id,
         created_at_ms: 60_000,
+        signer_id: [8; 32],
         frontier_id: [3; 32],
+        local_history_node_secret_id: [0; 32],
+        expires_at_minute: u64::MAX,
+        disappearing_setting_id: [0; 32],
         minute: 1,
         leaf_id: [4; 32],
-        sealed_body_ref: [5; 32],
+        nonce: [5; content::message::fact::NONCE_BYTES],
+        ciphertext: vec![6; content::message::fact::CIPHERTEXT_BYTES],
     };
     Fact::new(
         topo::protocol::matchers::workspace_scope(workspace_id),
@@ -405,6 +416,26 @@ fn signer_match(owner: &Fact, signer: &Fact) -> MatchedContext {
         offer: topo::protocol::matchers::exact_offer(
             signer.id,
             topo::protocol::matchers::endpoint_shared_role(),
+        ),
+        payload: signer.clone(),
+    }
+}
+
+fn message_signer_match(
+    owner: &Fact,
+    message: &content::message::fact::ContentMessageFact,
+    signer: &Fact,
+) -> MatchedContext {
+    MatchedContext {
+        need: topo::protocol::matchers::signer_need(
+            owner.id,
+            topo::protocol::matchers::workspace_scope(message.workspace_id),
+            message.signer_id,
+        ),
+        offer: topo::protocol::matchers::signer_offer(
+            signer.id,
+            topo::protocol::matchers::workspace_scope(message.workspace_id),
+            message.signer_id,
         ),
         payload: signer.clone(),
     }

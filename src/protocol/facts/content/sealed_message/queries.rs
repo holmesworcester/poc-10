@@ -47,5 +47,13 @@ pub fn max_created_at_ms(store: &Store) -> Result<u64, String> {
             max_timestamp = max_timestamp.max(row.created_at_ms);
         }
     }
+    for (key, value) in store
+        .table_rows(rows::MESSAGE_ROWS)
+        .map_err(|err| format!("load message rows for clock: {err}"))?
+    {
+        if let Ok(row) = rows::decode_message_row(&key, &value) {
+            max_timestamp = max_timestamp.max(row.created_at_ms);
+        }
+    }
     Ok(max_timestamp)
 }

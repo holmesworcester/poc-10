@@ -952,6 +952,20 @@ fn cutover_network_queue_storage_class_is_not_ambiguous() {
             "network_queues declares memory schemas, but ProtocolRuntime does not load network_queues::SCHEMAS",
         );
     }
+    if source_text(&root.join("src/protocol/intents/schema.p8sql"))
+        .contains("send_network_frame_cursors")
+    {
+        offenders.push(
+            "send_network_frame_cursors reintroduces protocol-level network ACK/cursor state; deferred send intents plus idempotent fact admission are the durable boundary",
+        );
+    }
+    if source_text(&root.join("src/protocol/intents/transport/send_network_frame.rs"))
+        .contains("fn frame_digest")
+    {
+        offenders.push(
+            "send_network_frame frame_digest is unused ACK/cursor scaffolding; duplicate transport frames must stay harmless instead",
+        );
+    }
     if durable_in_core_schema == memory_in_queue_module {
         offenders.push(
             "network queues should have exactly one explicit storage contract: durable schema table or restart-local memory table",

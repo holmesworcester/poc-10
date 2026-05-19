@@ -631,33 +631,39 @@ fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
 }
 
 #[test]
-fn poc10_concrete_protocol_routes_only_sealed_messages() {
+fn poc10_concrete_protocol_routes_semantic_messages() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let paths = [
-        "src/protocol.rs",
-        "src/protocol/runtime.rs",
-        "src/protocol/facts/transport/transit/receive.rs",
-    ]
-    .into_iter()
-    .map(|path| root.join(path))
-    .collect::<Vec<_>>();
-    let offenders = source_code_matches_in_paths(
-        root,
-        paths,
-        &[
-            "TYPE_CONTENT_MESSAGE",
-            "TYPE_CONTENT_MESSAGE_DELETION",
-            "ContentMessageProjector",
-            "ContentMessageDeletionProjector",
-            "CONTENT_MESSAGE_ROWS",
-            "MESSAGE_DELETION_ROWS",
-        ],
-    );
+    let registry = source_text(&root.join("src/protocol.rs"));
+    let runtime = source_text(&root.join("src/protocol/runtime.rs"));
+    let receive = source_text(&root.join("src/protocol/facts/transport/transit/receive.rs"));
 
+    for required in [
+        "content::message",
+        "TYPE_CONTENT_MESSAGE",
+        "ContentMessageProjector",
+        "content::message_deletion",
+        "TYPE_CONTENT_MESSAGE_DELETION",
+        "ContentMessageDeletionProjector",
+    ] {
+        assert!(
+            registry.contains(required) || runtime.contains(required) || receive.contains(required),
+            "normal poc-10 messages must route through semantic content::message facts; missing {required}"
+        );
+    }
+    assert!(runtime.contains("CONTENT_MESSAGE_ROWS"));
+    assert!(runtime.contains("MESSAGE_DELETION_ROWS"));
     assert!(
-        offenders.is_empty(),
-        "normal poc-10 messages must route through content::sealed_message only; unsealed message facts must not be registered, projected, transported, or row-applied by the concrete protocol:\n{}",
-        offenders.join("\n")
+        !registry.contains("module: \"content::sealed_message\""),
+        "sealed_message is legacy compatibility code, not a current protocol fact registration"
+    );
+    assert!(
+        !runtime.contains("TYPE_SEALED_MESSAGE") && !runtime.contains("project_sealed_message"),
+        "normal runtime dispatch must not route sealed-message wrappers"
+    );
+    assert!(
+        !receive.contains("content::sealed_message::TYPE_SEALED_MESSAGE")
+            && !receive.contains("admit_sealed_message_fact"),
+        "transport admission must accept semantic content::message facts, not sealed-message wrappers"
     );
 }
 

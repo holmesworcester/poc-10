@@ -1,6 +1,6 @@
 //! Bounded retention-floor handler.
 //!
-//! The intent names one disappearing-messages setting fact and one sealed
+//! The intent names one disappearing-messages setting fact and one
 //! message fact. The handler purges only when the message minute is below the
 //! setting's monotonic retire floor.
 
@@ -103,7 +103,7 @@ impl IntentHandler for PurgeBelowRetentionFloorHandler {
             &context.require_fact(&input.setting_id)?.bytes,
         )?;
         let target = context.require_fact(&input.target_id)?;
-        let message = retention::decode_sealed_message_fact(target)?;
+        let message = retention::decode_message_fact(target)?;
 
         if setting.workspace_id != input.workspace_id {
             return Err("purge_below_retention_floor setting workspace mismatch".to_string());

@@ -7,7 +7,9 @@
 
 use std::net::SocketAddr;
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::handler_dispatch::{
+    retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
+};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::facts::connection::request::{addr, layout};
@@ -97,7 +99,9 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
                 retry_key: Some(intent.key.clone()),
             },
         )
-        .map_err(|err| format!("send_bootstrap_connection_request tcp send: {err}"))?;
+        .map_err(|err| {
+            retry_intent(format!("send_bootstrap_connection_request tcp send: {err}"))
+        })?;
         Ok(HandlerOutput::new())
     }
 }
@@ -108,4 +112,67 @@ fn send_bootstrap_connection_request_key(input: &SendBootstrapConnectionRequest)
     hash.update(&input.request_id);
     hash.update(input.addr.to_string().as_bytes());
     hash.finalize().as_bytes().to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+
+    use super::*;
+    use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
+    use crate::core::facts::{Fact, FactScope};
+    use crate::core::handler_dispatch::{retry_intent_reason, IntentHandler};
+    use crate::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+    use crate::core::store::Store;
+    use crate::protocol::facts::connection::request::fact::ConnectionRequestFact;
+
+    #[test]
+    fn unreachable_bootstrap_peer_requests_retry_without_consuming_intent() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind closed listener");
+        let addr = listener.local_addr().expect("listener addr");
+        drop(listener);
+
+        let request = ConnectionRequestFact {
+            from_endpoint: [10; 32],
+            to_endpoint: [11; 32],
+            nonce: [12; 32],
+            invite_fact_id: [13; 32],
+            bootstrap_hash: [14; 32],
+            invite_signature: [15; ED25519_SIGNATURE_BYTES],
+            invite_secret_fact_id: [16; 32],
+            initiator_ephemeral_secret_fact_id: [17; 32],
+            initiator_ephemeral_public_key: crypto::x25519_public_key(&[18; 32]),
+            from_listen_addr: Some(addr),
+            to_listen_addr: None,
+        };
+        let request_fact = Fact::new(
+            FactScope::Global,
+            1,
+            layout::encode_fact(&request).expect("request"),
+        );
+        let intent = send_bootstrap_connection_request_intent(SendBootstrapConnectionRequest {
+            request_id: request_fact.id,
+            addr,
+        })
+        .expect("intent");
+        let store = Store::open_memory_with_schema_sources_and_schemas(
+            &[
+                CORE_SCHEMA_SOURCE,
+                FACTS_SCHEMA_SOURCE,
+                INTENTS_SCHEMA_SOURCE,
+            ],
+            network::SCHEMAS,
+        )
+        .expect("store");
+
+        let err = SendBootstrapConnectionRequestHandler::new()
+            .handle(
+                &intent,
+                &HandlerContext::with_facts([request_fact]).with_store(&store),
+            )
+            .expect_err("unreachable peer should request retry");
+
+        assert!(retry_intent_reason(&err).is_some(), "{err}");
+        assert!(err.contains("open tcp stream"), "{err}");
+    }
 }

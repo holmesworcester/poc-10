@@ -12,6 +12,7 @@ pub const CONNECTION_INVITE_SECRET_ROLE: &str = "connection_invite_secret";
 pub const CONNECTION_REQUEST_ROLE: &str = "connection_request";
 pub const CONTENT_FILE_ROLE: &str = "content_file";
 pub const CONTENT_MESSAGE_ROLE: &str = "content_message";
+pub const CONTENT_MESSAGE_META_ROLE: &str = "content_message_meta";
 pub const CONTENT_DELETED_ROLE: &str = "content_deleted";
 pub const IDENTITY_ADMIN_ROLE: &str = "identity_admin";
 pub const IDENTITY_DEVICE_INVITE_ROLE: &str = "identity_device_invite";
@@ -175,6 +176,18 @@ pub fn message_need(owner: FactId, scope: FactScope, message_id: FactId) -> Cont
 
 pub fn message_offer(owner: FactId, scope: FactScope, message_id: FactId) -> ContextOffer {
     exact_offer_for_selector(owner, message_role(), scope, message_id, owner)
+}
+
+pub fn message_meta_role() -> Role {
+    protocol_role(CONTENT_MESSAGE_META_ROLE)
+}
+
+pub fn message_meta_need(owner: FactId, scope: FactScope, message_id: FactId) -> ContextNeed {
+    exact_need_for_selector(owner, message_meta_role(), scope, message_id)
+}
+
+pub fn message_meta_offer(owner: FactId, scope: FactScope, message_id: FactId) -> ContextOffer {
+    exact_offer_for_selector(owner, message_meta_role(), scope, message_id, owner)
 }
 
 pub fn deletion_role() -> Role {

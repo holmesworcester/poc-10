@@ -1,19 +1,25 @@
 use topo::core::crypto;
-use topo::core::facts::Fact;
+use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::ContextMatcher;
 use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wake_loop::WakeLoop;
-use topo::protocol::facts::content::sealed_message::create as sealed_create;
-use topo::protocol::facts::content::sealed_message::fact::{
-    SealedMessageFact, SignerPubkeyFact, NONCE_BYTES,
+use topo::protocol::facts::content::message::{
+    create as message_create,
+    fact::{ContentMessageFact, NONCE_BYTES},
+    layout as message_layout,
+    rows::CONTENT_MESSAGE_ROWS,
 };
-use topo::protocol::facts::content::sealed_message::layout as sealed_layout;
 use topo::protocol::facts::content::sealed_message::rows::{
-    decode_sealed_message_row, message_key, SEALED_MESSAGE_ROWS,
+    decode_opened_message_row, OPENED_MESSAGE_ROWS,
 };
-use topo::protocol::facts::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
+use topo::protocol::facts::encryption::fact::LocalKeySecretFact;
 use topo::protocol::facts::encryption::layout as encryption_layout;
+use topo::protocol::facts::identity::endpoint_shared::{
+    fact::{EndpointRole, EndpointSharedFact},
+    layout as endpoint_shared_layout,
+};
+use topo::protocol::facts::identity::user::{fact::UserFact, layout as user_layout};
 use topo::protocol::facts::sync::encrypted_root::fact::EncryptedRootFact;
 use topo::protocol::facts::sync::encrypted_root::layout as encrypted_root_layout;
 use topo::protocol::facts::sync::key_wrap_available::fact::KeyWrapAvailableFact;
@@ -25,10 +31,7 @@ use topo::protocol::facts::sync::range_request::{
 use topo::protocol::facts::sync::shared_fact::fact::SharedFact;
 use topo::protocol::facts::sync::shared_fact::layout as shared_fact_layout;
 use topo::protocol::intents::transport::send_facts_on_connection;
-use topo::protocol::matchers as encryption_context;
-use topo::protocol::matchers as sealed_context;
 use topo::protocol::matchers::ExactSelectorMatcher;
-use topo::protocol::matchers::SecretCoverageMatcher;
 use topo::protocol::matchers::{self as context, RangeFactMatcher};
 use topo::protocol::runtime::ProtocolProjector;
 
@@ -152,71 +155,66 @@ fn dep_aware_sync_displays_encrypted_out_of_range_message_fast() {
         "request should not keep key needs once out-of-range key context is matched"
     );
 
-    let signer = id(72);
-    let frontier_fact = removal_frontier_fact(workspace, id(73), day_ms);
-    let frontier = frontier_fact.id;
+    let signer_id = id(72);
+    let author_id = id(75);
+    let frontier = id(73);
     let leaf = id(74);
-    let sealed_message = sealed_message_fact(workspace, signer, frontier, day_ms / 60_000, leaf);
-    let signer_fact = sealed_signer_fact(workspace, signer);
-    let frontier_owner_fact = sealed_signer_fact(workspace, id(73));
+    let content_message = content_message_fact(
+        workspace,
+        author_id,
+        signer_id,
+        frontier,
+        day_ms / 60_000,
+        leaf,
+    );
+    let signer_fact = endpoint_signer_fact(workspace, author_id, signer_id);
+    let author_fact = author_user_fact(workspace, author_id);
     let secret_fact = local_key_secret_fact(workspace, frontier, id(73));
-    let frontier_matcher = ExactSelectorMatcher::new(encryption_context::frontier_role());
-    let signer_matcher = ExactSelectorMatcher::new(sealed_context::signer_role());
-    let deletion_matcher = ExactSelectorMatcher::new(sealed_context::deletion_role());
-    let secret_matcher = SecretCoverageMatcher::new();
-    let sealed_matchers = [
-        &frontier_matcher as &dyn ContextMatcher,
-        &signer_matcher as &dyn ContextMatcher,
-        &deletion_matcher as &dyn ContextMatcher,
-        &secret_matcher as &dyn ContextMatcher,
-    ];
-    let sealed_projector = ProtocolProjector;
-    let mut receiver = WakeLoop::new();
-
-    receiver.submit_fact(signer_fact);
-    receiver.submit_fact(frontier_owner_fact);
-    receiver.submit_fact(frontier_fact);
-    receiver.submit_fact(secret_fact);
-    receiver
-        .drain(&sealed_projector, &sealed_matchers, 10)
-        .expect("receiver projects pre-existing signer and key offers");
-    receiver.submit_fact(sealed_message.clone());
-    let opened = receiver
-        .drain(&sealed_projector, &sealed_matchers, 10)
-        .expect("sealed message should resolve from matched key context");
+    let projector = ProtocolProjector;
+    let output = projector
+        .project(
+            &content_message,
+            &ProjectionContext::from_matches(vec![
+                signer_match(&content_message, &signer_fact, workspace, signer_id),
+                author_match(&content_message, &author_fact, author_id),
+                secret_match(&content_message, &secret_fact, workspace, frontier, leaf),
+            ]),
+        )
+        .expect("content message should resolve from matched key context");
 
     assert!(
-        opened.projections <= 4,
-        "message display should be a bounded context wake, not a key request loop: {opened:?}"
+        output
+            .needs
+            .iter()
+            .any(|need| need.role == context::secret_role()),
+        "message should keep its secret need declared even after matched key context"
     );
-    let sealed_rows = receiver
-        .intents()
+    let content_rows = output
+        .intents
         .iter()
-        .filter_map(|intent| AtomicIntent::from_intent(intent, &[SEALED_MESSAGE_ROWS]).ok())
+        .filter_map(|intent| AtomicIntent::from_intent(intent, &[CONTENT_MESSAGE_ROWS]).ok())
         .map(|intent| match intent {
             AtomicIntent::PutRow(row) => row,
-            AtomicIntent::DeleteRow(_) => panic!("sealed projection should put a row"),
+            AtomicIntent::DeleteRow(_) => panic!("content projection should put a row"),
         })
         .collect::<Vec<_>>();
-    assert_eq!(sealed_rows.len(), 1);
-    let sealed_row = &sealed_rows[0];
-    assert_eq!(sealed_row.key, message_key(workspace, sealed_message.id));
+    assert_eq!(content_rows.len(), 1);
+    let opened_rows = output
+        .intents
+        .iter()
+        .filter_map(|intent| AtomicIntent::from_intent(intent, &[OPENED_MESSAGE_ROWS]).ok())
+        .map(|intent| match intent {
+            AtomicIntent::PutRow(row) => row,
+            AtomicIntent::DeleteRow(_) => panic!("opened projection should put a row"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(opened_rows.len(), 1);
+    let opened_row = &opened_rows[0];
     assert_eq!(
-        decode_sealed_message_row(&sealed_row.key, &sealed_row.value)
-            .expect("decode sealed row")
+        decode_opened_message_row(&opened_row.key, &opened_row.value)
+            .expect("decode opened row")
             .message_id,
-        sealed_message.id
-    );
-    let remaining_needs = &receiver
-        .context(&sealed_message.id)
-        .expect("message should retain only live context needs")
-        .needs;
-    assert!(
-        remaining_needs
-            .iter()
-            .all(|need| need.role == sealed_context::deletion_role()
-                || need.role == sealed_context::signer_role()),
-        "secret need should clear once key context is matched"
+        content_message.id
     );
 }
 
@@ -555,20 +553,21 @@ fn key_wrap_available_fact(workspace_id: [u8; 32], timestamp: u64, key_wrap_id: 
     )
 }
 
-fn sealed_message_fact(
+fn content_message_fact(
     workspace_id: [u8; 32],
+    author_user_id: [u8; 32],
     signer_id: [u8; 32],
     frontier_id: [u8; 32],
     minute: u64,
     leaf_id: [u8; 32],
 ) -> Fact {
     Fact::new(
-        sealed_context::workspace_scope(workspace_id),
+        context::workspace_scope(workspace_id),
         minute,
-        sealed_layout::encode_sealed_message(&SealedMessageFact {
+        message_layout::encode_fact(&ContentMessageFact {
             workspace_id,
             created_at_ms: minute * 60_000,
-            author_user_id: [75; 32],
+            author_user_id,
             signer_id,
             frontier_id,
             local_history_node_secret_id: [76; 32],
@@ -579,48 +578,111 @@ fn sealed_message_fact(
             nonce: [78; NONCE_BYTES],
             ciphertext: encrypted_display_body(workspace_id, frontier_id, minute),
         })
-        .expect("encode sealed message"),
+        .expect("encode content message"),
     )
 }
 
 fn encrypted_display_body(workspace_id: [u8; 32], frontier_id: [u8; 32], minute: u64) -> Vec<u8> {
-    let plaintext = sealed_create::pad_plaintext(b"display").expect("pad display plaintext");
+    let plaintext = message_create::pad_plaintext(b"display").expect("pad display plaintext");
     crypto::xchacha20poly1305_encrypt(
         &DISPLAY_SECRET,
-        &sealed_create::associated_data(workspace_id, frontier_id, minute),
+        &message_create::associated_data(workspace_id, frontier_id, minute),
         &[78; NONCE_BYTES],
         &plaintext,
     )
     .expect("encrypt display message")
 }
 
-fn sealed_signer_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
+fn endpoint_signer_fact(
+    workspace_id: [u8; 32],
+    author_user_id: [u8; 32],
+    signer_id: [u8; 32],
+) -> Fact {
     Fact::new(
-        sealed_context::workspace_scope(workspace_id),
+        FactScope::Global,
         1,
-        sealed_layout::encode_signer_pubkey(&SignerPubkeyFact {
-            signer_id,
-            public_key: [79; 32],
+        endpoint_shared_layout::encode_fact(&EndpointSharedFact {
+            created_at_ms: 1,
+            workspace_id,
+            user_authority_fact_id: author_user_id,
+            endpoint_id: signer_id,
+            signing_public_key: [79; 32],
+            endpoint_role: EndpointRole::Device,
+            device_name: "display".to_string(),
         })
-        .expect("encode signer pubkey"),
+        .expect("encode endpoint shared"),
     )
 }
 
-fn removal_frontier_fact(
-    workspace_id: [u8; 32],
-    owner_endpoint_id: [u8; 32],
-    created_at_ms: u64,
-) -> Fact {
-    Fact::new(
-        sealed_context::workspace_scope(workspace_id),
-        created_at_ms,
-        encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
+fn author_user_fact(workspace_id: [u8; 32], author_user_id: [u8; 32]) -> Fact {
+    Fact {
+        id: author_user_id,
+        scope: FactScope::Global,
+        timestamp: 1,
+        bytes: user_layout::encode_fact(&UserFact {
+            created_at_ms: 1,
             workspace_id,
-            owner_endpoint_id,
-            created_at_ms,
+            public_key: [80; 32],
+            username: "display-author".to_string(),
         })
-        .expect("encode frontier"),
-    )
+        .expect("encode user"),
+    }
+}
+
+fn signer_match(
+    message_fact: &Fact,
+    signer_fact: &Fact,
+    workspace_id: [u8; 32],
+    signer_id: [u8; 32],
+) -> MatchedContext {
+    let scope = context::workspace_scope(workspace_id);
+    MatchedContext {
+        need: context::signer_need(message_fact.id, scope.clone(), signer_id),
+        offer: context::signer_offer(signer_fact.id, scope, signer_id),
+        payload: signer_fact.clone(),
+    }
+}
+
+fn author_match(message_fact: &Fact, author_fact: &Fact, author_id: [u8; 32]) -> MatchedContext {
+    MatchedContext {
+        need: context::exact_need(message_fact.id, context::user_role(), author_id),
+        offer: context::exact_offer(author_fact.id, context::user_role()),
+        payload: author_fact.clone(),
+    }
+}
+
+fn secret_match(
+    message_fact: &Fact,
+    secret_fact: &Fact,
+    workspace_id: [u8; 32],
+    frontier_id: [u8; 32],
+    leaf_id: [u8; 32],
+) -> MatchedContext {
+    let scope = context::workspace_scope(workspace_id);
+    let minute = message_layout::decode_fact(message_fact.body())
+        .expect("decode content message")
+        .minute;
+    MatchedContext {
+        need: context::secret_need(
+            message_fact.id,
+            scope.clone(),
+            workspace_id,
+            frontier_id,
+            minute,
+            leaf_id,
+        ),
+        offer: context::secret_offer(
+            secret_fact.id,
+            scope,
+            workspace_id,
+            frontier_id,
+            0,
+            u64::MAX,
+            0,
+            [0; 32],
+        ),
+        payload: secret_fact.clone(),
+    }
 }
 
 fn local_key_secret_fact(

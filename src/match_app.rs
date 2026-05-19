@@ -17,6 +17,9 @@ use crate::core::logical_clock;
 use crate::protocol::facts::connection;
 use crate::protocol::facts::sync;
 use crate::protocol::facts::{content, encryption, identity};
+use crate::protocol::intents::connection::send_bootstrap_request::{
+    decode_send_bootstrap_connection_request, SEND_BOOTSTRAP_CONNECTION_REQUEST,
+};
 use crate::protocol::intents::content::purge_below_retention_floor::{
     purge_below_retention_floor_intent, PurgeBelowRetentionFloor,
 };
@@ -258,6 +261,9 @@ fn run_accept(parsed: ParsedArgs) -> Result<(), String> {
     };
     let receipt = runtime.submit_command_output(output)?;
     drain_runtime(&mut runtime)?;
+    if from_listen_addr.is_none() {
+        ensure_bootstrap_request_sent(&runtime, receipt.request_id)?;
+    }
     runtime.save()?;
     if from_listen_addr.is_some() {
         connection::response::commands::wait_for_request_response(
@@ -929,6 +935,7 @@ fn apply_horizon_floor(
         .write_transaction(|tx| {
             tx.insert_table_rows_in_tx(tombstones)?;
             tx.delete_table_rows_in_tx(content::sealed_message::rows::MESSAGE_ROWS, keys.clone())?;
+            tx.delete_table_rows_in_tx(content::message::rows::CONTENT_MESSAGE_ROWS, keys.clone())?;
             tx.delete_table_rows_in_tx(
                 content::sealed_message::rows::OPENED_MESSAGE_ROWS,
                 keys.clone(),
@@ -1419,6 +1426,7 @@ fn next_cli_timestamp(runtime: &ProtocolRuntime) -> Result<u64, String> {
 fn max_cli_timestamp(store: &crate::core::store::Store) -> Result<u64, String> {
     let mut max_timestamp = content::event::queries::max_timestamp(store)?;
     max_timestamp = max_timestamp.max(content::sealed_message::queries::max_created_at_ms(store)?);
+    max_timestamp = max_timestamp.max(content::message::queries::max_created_at_ms(store)?);
     Ok(max_timestamp)
 }
 
@@ -1429,7 +1437,7 @@ fn enqueue_floor_retention(
     floor_minute: u64,
 ) -> Result<usize, String> {
     let mut queued = 0usize;
-    for message in sealed_message_rows(runtime.store(), workspace_id)? {
+    for message in message_rows(runtime.store(), workspace_id)? {
         if message.minute >= floor_minute {
             continue;
         }
@@ -1444,22 +1452,6 @@ fn enqueue_floor_retention(
         }
     }
     Ok(queued)
-}
-
-fn sealed_message_rows(
-    store: &crate::core::store::Store,
-    workspace_id: [u8; 32],
-) -> Result<Vec<content::sealed_message::rows::SealedMessageRow>, String> {
-    store
-        .table_rows_with_key_prefix(
-            content::sealed_message::rows::SEALED_MESSAGE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load sealed message rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| content::sealed_message::rows::decode_sealed_message_row(&key, &value))
-        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -1690,6 +1682,25 @@ fn drain_runtime(runtime: &mut ProtocolRuntime) -> Result<(), String> {
         if dispatched.handled == 0 && dispatched.facts == 0 && dispatched.intents == 0 {
             runtime.drain_projection_until_idle(8, 512)?;
             return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn ensure_bootstrap_request_sent(
+    runtime: &ProtocolRuntime,
+    request_id: [u8; 32],
+) -> Result<(), String> {
+    for intent in runtime.wake_loop().intents() {
+        if intent.kind.as_str() != SEND_BOOTSTRAP_CONNECTION_REQUEST {
+            continue;
+        }
+        let pending = decode_send_bootstrap_connection_request(intent)?;
+        if pending.request_id == request_id {
+            return Err(format!(
+                "open tcp stream: could not reach invite address {}",
+                pending.addr
+            ));
         }
     }
     Ok(())

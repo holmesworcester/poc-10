@@ -1,7 +1,9 @@
 pub mod authority;
+pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;
+pub mod queries;
 pub mod rows;
 
 pub const TYPE_CONTENT_MESSAGE: u8 = layout::TYPE_CONTENT_MESSAGE;

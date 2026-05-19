@@ -42,7 +42,7 @@ facts.
 
 ## Encrypted Content
 
-For sealed content in a range, sync must make the key path fast:
+For encrypted content in a range, sync must make the key path fast:
 
 - include recipient key facts needed to validate wraps.
 - include key wraps addressed to the receiving endpoint when known.

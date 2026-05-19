@@ -3,18 +3,19 @@ use topo::core::matchers::ContextMatcher;
 use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
+use topo::protocol::facts::content;
 use topo::protocol::facts::content::sealed_message::fact::{
     MessageDeletionFact, SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES,
-};
-use topo::protocol::facts::content::sealed_message::intent::{
-    self as purge_intent, PurgeDeletedMessage, PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
 };
 use topo::protocol::facts::content::sealed_message::rows::{
     message_row, sealed_message_row, MessageRow, SealedMessageRow, MESSAGE_ROWS,
     SEALED_MESSAGE_ROWS,
 };
 use topo::protocol::facts::content::sealed_message::{layout, project};
-use topo::protocol::intents::content::purge_deleted_message::PurgeDeletedMessageHandler;
+use topo::protocol::intents::content::purge_deleted_message::{
+    self as purge_intent, PurgeDeletedMessage, PurgeDeletedMessageHandler,
+    PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
+};
 use topo::protocol::matchers::ExactSelectorMatcher;
 use topo::protocol::matchers::{self as context, workspace_scope, SecretCoverageMatcher};
 
@@ -100,6 +101,26 @@ fn purge_deleted_message_with_author_proof_purges_target_fact_and_persists() {
     let loaded = WakeLoop::load(&store).expect("load purged bus");
     assert!(!loaded.has_fact(&message.id));
     assert!(loaded.has_fact(&deletion.id));
+}
+
+#[test]
+fn purge_deleted_message_accepts_content_message_and_content_deletion() {
+    let workspace = [9; 32];
+    let message = content_message_fact(workspace, [10; 32], AUTHOR);
+    let deletion = content_deletion_fact(workspace, message.id, AUTHOR);
+    let intent = purge_intent(workspace, message.id, deletion.id);
+    let mut bus = WakeLoop::new();
+
+    bus.submit_fact(message.clone());
+    bus.submit_fact(deletion.clone());
+    bus.submit_intent(intent).expect("submit purge intent");
+    let report = bus
+        .dispatch_deferred_intents_with_fact_context(&PurgeDeletedMessageHandler::new(), 10)
+        .expect("purge content message target fact");
+
+    assert_eq!(report.handled, 1);
+    assert!(!bus.has_fact(&message.id));
+    assert!(bus.has_fact(&deletion.id));
 }
 
 #[test]
@@ -228,5 +249,51 @@ fn deletion_fact(workspace_id: [u8; 32], target_id: [u8; 32], author_user_id: [u
             author_user_id,
         })
         .expect("encode deletion"),
+    )
+}
+
+fn content_message_fact(
+    workspace_id: [u8; 32],
+    signer_id: [u8; 32],
+    author_user_id: [u8; 32],
+) -> Fact {
+    Fact::new(
+        workspace_scope(workspace_id),
+        42,
+        content::message::layout::encode_fact(&content::message::fact::ContentMessageFact {
+            workspace_id,
+            created_at_ms: 42_000,
+            author_user_id,
+            signer_id,
+            frontier_id: [17; 32],
+            local_history_node_secret_id: [18; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [19; 32],
+            minute: 42,
+            leaf_id: [20; 32],
+            nonce: [21; content::message::fact::NONCE_BYTES],
+            ciphertext: vec![0x33; CIPHERTEXT_BYTES.min(4)],
+        })
+        .expect("encode content message"),
+    )
+}
+
+fn content_deletion_fact(
+    workspace_id: [u8; 32],
+    target_id: [u8; 32],
+    author_user_id: [u8; 32],
+) -> Fact {
+    Fact::new(
+        workspace_scope(workspace_id),
+        43,
+        content::message_deletion::layout::encode_fact(
+            &content::message_deletion::fact::ContentMessageDeletionFact {
+                workspace_id,
+                created_at_ms: 43,
+                target_message_id: target_id,
+                author_user_id,
+            },
+        )
+        .expect("encode content deletion"),
     )
 }

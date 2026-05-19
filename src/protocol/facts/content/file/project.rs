@@ -3,7 +3,7 @@
 //! POLICY. A content_file is admitted iff:
 //!   1. STRUCTURAL. The fact is workspace-scoped, has valid descriptor fields,
 //!      and contains a raw or signed content_file payload.
-//!   2. CONTEXT. Projection waits for signer, parent sealed message, deletion,
+//!   2. CONTEXT. Projection waits for signer, parent content message, deletion,
 //!      and author context; deletion context removes the descriptor row.
 //!   3. MATERIALIZE. Live files publish file/exact-fact offers, write the
 //!      descriptor row, and share the fact. File bytes remain slice facts.
@@ -14,9 +14,8 @@ use crate::core::projection::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::facts::content::file_deletion;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
-use crate::protocol::facts::content::sealed_message;
+use crate::protocol::facts::content::{file_deletion, message, message_deletion};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
@@ -312,15 +311,15 @@ fn validate_message_deletion(
 ) -> Result<(), String> {
     let deletion_payload = maybe_signed_payload(
         payload,
-        sealed_message::TYPE_MESSAGE_DELETION,
+        message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
         "parent deletion",
     )?;
-    let deletion = sealed_message::decode_message_deletion_payload(&deletion_payload.payload)
-        .map_err(|_| "parent deletion context is not a sealed message deletion".to_string())?;
+    let deletion = message_deletion::decode_fact_payload(&deletion_payload.payload)
+        .map_err(|_| "parent deletion context is not a content message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("parent deletion workspace does not match file".to_string());
     }
-    if deletion.target_id != target_message_id {
+    if deletion.target_message_id != target_message_id {
         return Err("parent deletion target does not match file parent".to_string());
     }
     if deletion.author_user_id != author_user_id {
@@ -340,12 +339,12 @@ struct ParentMessage {
 }
 
 fn decode_parent_message_payload(payload: &Fact, label: &str) -> Result<ParentMessage, String> {
-    let sealed_payload = maybe_signed_payload(payload, sealed_message::TYPE_SEALED_MESSAGE, label)?;
-    let sealed = sealed_message::decode_sealed_message_payload(&sealed_payload.payload)
-        .map_err(|_| format!("{label} context is not a sealed message"))?;
+    let message_payload = maybe_signed_payload(payload, message::TYPE_CONTENT_MESSAGE, label)?;
+    let message = message::decode_fact_payload(&message_payload.payload)
+        .map_err(|_| format!("{label} context is not a content message"))?;
     Ok(ParentMessage {
-        workspace_id: sealed.workspace_id,
-        author_user_id: sealed.author_user_id,
+        workspace_id: message.workspace_id,
+        author_user_id: message.author_user_id,
     })
 }
 
@@ -384,9 +383,9 @@ mod projector_tests {
     use topo::core::wake_loop::WakeLoop;
     use topo::protocol::facts::content::file::fact::{ContentFileFact, FILE_ROOT_HASH_BYTES};
     use topo::protocol::facts::content::file::{layout, project, rows};
-    use topo::protocol::facts::content::sealed_message::{
-        fact::{SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS},
-        layout as sealed_message_layout,
+    use topo::protocol::facts::content::message::{
+        fact::{ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS},
+        layout as message_layout,
     };
     use topo::protocol::matchers::ExactSelectorMatcher;
 
@@ -397,7 +396,7 @@ mod projector_tests {
     fn content_file_projector_materializes_row_through_atomic_intent() {
         let parent_author = user_fact([9; 32], [44; 32], "parent-author");
         let file_author = user_fact([9; 32], [22; 32], "file-author");
-        let parent_fact = sealed_parent_fact([9; 32], parent_author.id, 12_000);
+        let parent_fact = parent_message_fact([9; 32], parent_author.id, 12_000);
         let file = ContentFileFact {
             workspace_id: [9; 32],
             created_at_ms: 12345,
@@ -516,7 +515,7 @@ mod projector_tests {
     fn content_file_parent_offer_before_need_wakes_file() {
         let parent_author = user_fact([9; 32], [44; 32], "parent-author");
         let file_author = user_fact([9; 32], [22; 32], "file-author");
-        let parent_fact = sealed_parent_fact([9; 32], parent_author.id, 12_000);
+        let parent_fact = parent_message_fact([9; 32], parent_author.id, 12_000);
         let file = ContentFileFact {
             workspace_id: [9; 32],
             created_at_ms: 12345,
@@ -595,12 +594,9 @@ mod projector_tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             match fact.bytes.first().copied() {
-                Some(sealed_message_layout::TYPE_SEALED_MESSAGE) => Ok(ProjectionOutput::new()
-                    .offer(message_context::message_offer(
-                        fact.id,
-                        fact.scope.clone(),
-                        fact.id,
-                    ))),
+                Some(message_layout::TYPE_CONTENT_MESSAGE) => Ok(ProjectionOutput::new().offer(
+                    message_context::message_offer(fact.id, fact.scope.clone(), fact.id),
+                )),
                 Some(layout::TYPE_CONTENT_FILE) => {
                     project::ContentFileProjector::new().project(fact, context)
                 }
@@ -633,12 +629,12 @@ mod projector_tests {
         )
     }
 
-    fn sealed_parent_fact(
+    fn parent_message_fact(
         workspace_id: [u8; 32],
         author_user_id: [u8; 32],
         created_at_ms: u64,
     ) -> Fact {
-        let message = SealedMessageFact {
+        let message = ContentMessageFact {
             workspace_id,
             created_at_ms,
             author_user_id,
@@ -655,8 +651,7 @@ mod projector_tests {
         Fact::new(
             message_context::workspace_scope(workspace_id),
             created_at_ms,
-            sealed_message_layout::encode_sealed_message(&message)
-                .expect("encode sealed parent message"),
+            message_layout::encode_fact(&message).expect("encode content parent message"),
         )
     }
 }

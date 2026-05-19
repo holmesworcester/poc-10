@@ -6,7 +6,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
-use crate::protocol::facts::{content::file, content::reaction, content::sealed_message};
+use crate::protocol::facts::content::{file, message_deletion, reaction};
 
 pub const PURGE_MESSAGE_CHILD: &str = "purge_message_child";
 
@@ -102,20 +102,19 @@ impl IntentHandler for PurgeMessageChildHandler {
         context: &HandlerContext,
     ) -> Result<HandlerOutput, String> {
         let input = decode_purge_message_child(raw_intent)?;
-        let deletion = sealed_message::layout::decode_message_deletion(
-            &context.require_fact(&input.parent_deletion_id)?.bytes,
-        )?;
+        let deletion =
+            message_deletion::decode_any_fact(context.require_fact(&input.parent_deletion_id)?)?;
         if deletion.workspace_id != input.workspace_id {
             return Err("cascade parent deletion workspace mismatch".to_string());
         }
-        if deletion.target_id != input.parent_message_id {
+        if deletion.target_message_id != input.parent_message_id {
             return Err("cascade parent deletion target mismatch".to_string());
         }
 
         let child = context.require_fact(&input.child_id)?;
         match input.child_kind {
             CASCADE_CHILD_REACTION => {
-                let reaction = reaction::layout::decode_fact(child.body())?;
+                let reaction = reaction::decode_any_fact(child)?;
                 if reaction.workspace_id != input.workspace_id {
                     return Err("cascade reaction workspace mismatch".to_string());
                 }
@@ -124,7 +123,7 @@ impl IntentHandler for PurgeMessageChildHandler {
                 }
             }
             CASCADE_CHILD_FILE => {
-                let file = file::layout::decode_fact(child.body())?;
+                let file = file::decode_any_fact(child)?;
                 if file.workspace_id != input.workspace_id {
                     return Err("cascade file workspace mismatch".to_string());
                 }

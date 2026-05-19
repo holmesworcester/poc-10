@@ -1,21 +1,36 @@
-//! Retired unsealed content-message projector.
+//! Semantic content-message projector.
 //!
-//! POLICY. A legacy content_message is admitted iff:
+//! POLICY. A content_message is admitted iff:
 //!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
-//!      legacy message payload.
-//!   2. CONTEXT. Signed messages validate signer/author context and watch a
-//!      matching deletion fact. Live target runtime uses sealed_message.
-//!   3. MATERIALIZE. Live legacy messages write the compatibility row and
-//!      offer message context; deletions remove that row.
+//!      message payload with encrypted text.
+//!   2. CONTEXT. The projector records sync liveness immediately, then waits
+//!      for signer, author, deletion, secret, and time context. Once signer
+//!      and author validate, it publishes metadata context for deletion. It
+//!      does not publish opened message context or rows until the encrypted
+//!      text opens.
+//!   3. MATERIALIZE. Once opened, the projector writes read-model rows and
+//!      offers semantic message context.
 
-use crate::core::facts::Fact;
+use crate::core::context::ContextNeed;
+use crate::core::crypto;
+use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{AtomicIntent, TableDelete};
 use crate::core::projection::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
 use crate::protocol::facts::content::message_deletion;
+use crate::protocol::facts::content::sealed_message;
+use crate::protocol::facts::content::sealed_message::rows::{
+    message_key, message_row, message_tombstone_row, opened_message_row, MessageRow,
+    OpenedMessageRow, MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
+};
+use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
+use crate::protocol::intents::content::purge_deleted_message::{
+    self, PurgeDeletedMessage, PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
+};
+use crate::protocol::intents::content::purge_expired_message::{self, PurgeExpiredMessage};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
@@ -51,14 +66,19 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         // 1. Structural.
         let authority::DecodedFact {
             payload: message,
-            signer,
             envelope,
+            ..
         } = decoded;
         let scope = matchers::workspace_scope(message.workspace_id);
         require_fact_scope(fact, &scope)?;
+        if let Some(envelope) = envelope.as_ref() {
+            if envelope.signer_id != message.signer_id {
+                return Err("content message signer does not match signed envelope".to_string());
+            }
+        }
 
         // 2. Context and deletion gates.
-        let signer_need = authority::signer_need(fact.id, signer);
+        let signer_need = matchers::signer_need(fact.id, scope.clone(), message.signer_id);
         let deletion_need =
             matchers::deletion_need(fact.id, scope.clone(), fact.id, message.author_user_id);
         let author_need = crate::protocol::matchers::exact_need(
@@ -66,21 +86,42 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             crate::protocol::matchers::user_role(),
             message.author_user_id,
         );
-        if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
-            if !authority::validate_signer_context(
-                context,
-                need,
-                signer,
-                message.workspace_id,
-                Some(message.author_user_id),
-                "message",
-            )? {
-                return Ok(output_with_needs([
-                    signer_need,
-                    Some(deletion_need),
-                    Some(author_need),
-                ]));
-            }
+        let secret_need = matchers::secret_need(
+            fact.id,
+            scope.clone(),
+            message.workspace_id,
+            message.frontier_id,
+            message.minute,
+            message.leaf_id,
+        );
+
+        let base_output = base_wait_output(
+            fact,
+            &message,
+            [
+                signer_need.clone(),
+                deletion_need.clone(),
+                author_need.clone(),
+                secret_need.clone(),
+            ],
+        );
+        let Some(signer_payload) = context.payload_for(&signer_need) else {
+            return Ok(base_output);
+        };
+        validate_signer_context(signer_payload, &signer_need, &message, envelope.as_ref())?;
+        let Some(author) = context_payload(context, &author_need, "message author")? else {
+            return Ok(base_output);
+        };
+        validate_author_user(author, message.workspace_id, message.author_user_id)?;
+        authority::verify_envelope(envelope.as_ref(), "message")?;
+
+        let metadata_output = base_output.offer(matchers::message_meta_offer(
+            fact.id,
+            scope.clone(),
+            fact.id,
+        ));
+        if let Some(now_minute) = expiry_minute_reached(context, &message) {
+            return Ok(expired_output(fact.id, &message, now_minute));
         }
         if let Some(deletion) = context_payload(context, &deletion_need, "message deletion")? {
             validate_message_deletion(
@@ -89,37 +130,59 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
                 fact.id,
                 message.author_user_id,
             )?;
-            authority::verify_envelope(envelope.as_ref(), "message")?;
-            return Ok(ProjectionOutput::new().need(deletion_need).intent(
-                AtomicIntent::DeleteRow(TableDelete {
-                    table: CONTENT_MESSAGE_ROWS,
-                    key: content_message_key(message.workspace_id, fact.id),
-                })
-                .into_intent(),
-            ));
+            return Ok(author_deletion_output(fact.id, &message, deletion.id));
         }
-        let Some(author) = context_payload(context, &author_need, "message author")? else {
-            return Ok(output_with_needs([
-                signer_need,
-                Some(deletion_need),
-                Some(author_need),
-            ]));
+        let Some(secret_payload) = matched_secret_payload(context, &secret_need)? else {
+            return Ok(metadata_output);
         };
-        validate_author_user(author, message.workspace_id, message.author_user_id)?;
-        authority::verify_envelope(envelope.as_ref(), "message")?;
+        let text = decrypt_text(&message, secret_payload)?;
 
         // 3. Materialize.
-        let row = content_message_row(fact.id, &message);
-        Ok(
-            output_with_needs([signer_need, Some(deletion_need), Some(author_need)])
-                .offer(matchers::message_offer(fact.id, scope, fact.id))
-                .intent(AtomicIntent::PutRow(row).into_intent())
-                .intent(share_fact_with_workspace_intent_for_fact(
-                    message.workspace_id,
-                    fact,
-                )),
-        )
+        Ok(metadata_output
+            .offer(matchers::message_offer(fact.id, scope, fact.id))
+            .intent(AtomicIntent::PutRow(content_message_row(fact.id, &message)).into_intent())
+            .intent(
+                AtomicIntent::PutRow(message_row(MessageRow {
+                    workspace_id: message.workspace_id,
+                    message_id: fact.id,
+                    created_at_ms: message.created_at_ms,
+                    author_user_id: message.author_user_id,
+                    signer_id: message.signer_id,
+                    minute: message.minute,
+                    leaf_id: message.leaf_id,
+                }))
+                .into_intent(),
+            )
+            .intent(
+                AtomicIntent::PutRow(opened_message_row(OpenedMessageRow {
+                    workspace_id: message.workspace_id,
+                    message_id: fact.id,
+                    created_at_ms: message.created_at_ms,
+                    author_user_id: message.author_user_id,
+                    signer_id: message.signer_id,
+                    text,
+                }))
+                .into_intent(),
+            ))
     }
+}
+
+fn base_wait_output(
+    fact: &Fact,
+    message: &super::fact::ContentMessageFact,
+    needs: impl IntoIterator<Item = ContextNeed>,
+) -> ProjectionOutput {
+    with_expiry_wake(
+        needs
+            .into_iter()
+            .fold(ProjectionOutput::new(), |output, need| output.need(need))
+            .intent(share_fact_with_workspace_intent_for_fact(
+                message.workspace_id,
+                fact,
+            )),
+        fact.id,
+        message,
+    )
 }
 
 fn context_payload<'a>(
@@ -130,13 +193,54 @@ fn context_payload<'a>(
     authority::context_payload(context, need, label)
 }
 
-fn output_with_needs(
-    needs: impl IntoIterator<Item = Option<crate::core::context::ContextNeed>>,
-) -> ProjectionOutput {
-    needs
-        .into_iter()
-        .flatten()
-        .fold(ProjectionOutput::new(), |output, need| output.need(need))
+fn validate_signer_context(
+    payload: &Fact,
+    need: &ContextNeed,
+    message: &super::fact::ContentMessageFact,
+    envelope: Option<&identity::signed_fact::fact::SignedFactEnvelope>,
+) -> Result<(), String> {
+    if let Ok(signer) = sealed_message::layout::decode_signer_pubkey(payload.body()) {
+        if payload.scope != need.scope {
+            return Err("content message signer context scope does not match need".to_string());
+        }
+        if signer.signer_id != message.signer_id {
+            return Err("content message signer context payload does not match need".to_string());
+        }
+        if envelope.is_some_and(|envelope| signer.public_key != envelope.signer_public_key) {
+            return Err(
+                "content message signer context public key does not match signed envelope"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+
+    let endpoint = endpoint_shared_signer(payload).ok_or_else(|| {
+        "content message signer context must be a signer pubkey or endpoint_shared".to_string()
+    })?;
+    if endpoint.workspace_id != message.workspace_id {
+        return Err("content message signer endpoint workspace does not match message".to_string());
+    }
+    if endpoint.endpoint_id != message.signer_id {
+        return Err("content message signer endpoint id does not match message".to_string());
+    }
+    if endpoint.user_authority_fact_id != message.author_user_id {
+        return Err(
+            "content message signer endpoint is not authorized by the named author".to_string(),
+        );
+    }
+    if envelope.is_some_and(|envelope| endpoint.signing_public_key != envelope.signer_public_key) {
+        return Err(
+            "content message signer context public key does not match signed envelope".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn endpoint_shared_signer(
+    payload: &Fact,
+) -> Option<identity::endpoint_shared::fact::EndpointSharedFact> {
+    identity::endpoint_shared::decode_raw_or_signed_fact(payload).ok()
 }
 
 fn validate_author_user(
@@ -163,23 +267,215 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion_payload = maybe_signed_payload(
+    if let Ok(deletion_payload) = maybe_signed_payload(
         payload,
         message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
         "message deletion context",
+    ) {
+        let deletion =
+            message_deletion::decode_fact_payload(&deletion_payload.payload).map_err(|_| {
+                "message deletion context is not a content message deletion".to_string()
+            })?;
+        if deletion.workspace_id != workspace_id {
+            return Err("message deletion workspace does not match message".to_string());
+        }
+        if deletion.target_message_id != target_message_id {
+            return Err("message deletion target does not match message".to_string());
+        }
+        if deletion.author_user_id != author_user_id {
+            return Err("message deletion author does not match message author".to_string());
+        }
+        return Ok(());
+    }
+
+    let deletion_payload = maybe_signed_payload(
+        payload,
+        sealed_message::TYPE_MESSAGE_DELETION,
+        "message deletion",
     )?;
-    let deletion = message_deletion::decode_fact_payload(&deletion_payload.payload)
-        .map_err(|_| "message deletion context is not a content message deletion".to_string())?;
+    let deletion = sealed_message::decode_message_deletion_payload(&deletion_payload.payload)
+        .map_err(|_| "message deletion context is not a sealed message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("message deletion workspace does not match message".to_string());
     }
-    if deletion.target_message_id != target_message_id {
+    if deletion.target_id != target_message_id {
         return Err("message deletion target does not match message".to_string());
     }
     if deletion.author_user_id != author_user_id {
         return Err("message deletion author does not match message author".to_string());
     }
     Ok(())
+}
+
+fn matched_secret_payload<'a>(
+    context: &'a ProjectionContext,
+    need: &'a ContextNeed,
+) -> Result<Option<&'a Fact>, String> {
+    for (offer, payload) in context.matched_payloads_for(need) {
+        if !matchers::secret_offer_matches_need(need, offer) {
+            return Err("content message secret context offer does not match need".to_string());
+        }
+        if encryption::layout::decode_local_key_secret(payload.body()).is_ok()
+            || encryption::layout::decode_local_history_node_secret(payload.body()).is_ok()
+        {
+            return Ok(Some(payload));
+        }
+    }
+    Ok(None)
+}
+
+fn decrypt_text(
+    message: &super::fact::ContentMessageFact,
+    secret_payload: &Fact,
+) -> Result<String, String> {
+    let key = if let Ok(secret) = encryption::layout::decode_local_key_secret(secret_payload.body())
+    {
+        if secret.workspace_id != message.workspace_id || secret.frontier_id != message.frontier_id
+        {
+            return Err("content message root secret does not match message".to_string());
+        }
+        secret.key_secret
+    } else {
+        let node = encryption::layout::decode_local_history_node_secret(secret_payload.body())
+            .map_err(|_| "content message secret context is not local key material".to_string())?;
+        if node.workspace_id != message.workspace_id || node.frontier_id != message.frontier_id {
+            return Err("content message history secret does not match message".to_string());
+        }
+        node.node_secret
+    };
+    let plaintext = crypto::xchacha20poly1305_decrypt(
+        &key,
+        &crate::protocol::facts::content::message::create::associated_data(
+            message.workspace_id,
+            message.frontier_id,
+            message.minute,
+        ),
+        &message.nonce,
+        &message.ciphertext,
+    )?;
+    crate::protocol::facts::content::message::create::recover_text(&plaintext)
+}
+
+fn expiry_minute_reached(
+    context: &ProjectionContext,
+    message: &super::fact::ContentMessageFact,
+) -> Option<u64> {
+    if message.expires_at_minute == u64::MAX {
+        return None;
+    }
+    context.time_reached(
+        &crate::protocol::facts::content::sealed_message::expiration_timeline(),
+        message.expires_at_minute,
+    )
+}
+
+fn with_expiry_wake(
+    output: ProjectionOutput,
+    owner: FactId,
+    message: &super::fact::ContentMessageFact,
+) -> ProjectionOutput {
+    if message.expires_at_minute == u64::MAX {
+        return output;
+    }
+    output.time_wake(TimeWake {
+        owner,
+        timeline: crate::protocol::facts::content::sealed_message::expiration_timeline(),
+        at: message.expires_at_minute,
+    })
+}
+
+fn expired_output(
+    message_id: FactId,
+    message: &super::fact::ContentMessageFact,
+    now_minute: u64,
+) -> ProjectionOutput {
+    let row_key = message_key(message.workspace_id, message_id);
+    ProjectionOutput::new()
+        .intent(
+            AtomicIntent::PutRow(message_tombstone_row(
+                message.workspace_id,
+                message_id,
+                message.author_user_id,
+                message.created_at_ms,
+            ))
+            .into_intent(),
+        )
+        .intent(
+            AtomicIntent::DeleteRow(TableDelete {
+                table: CONTENT_MESSAGE_ROWS,
+                key: content_message_key(message.workspace_id, message_id),
+            })
+            .into_intent(),
+        )
+        .intent(
+            AtomicIntent::DeleteRow(TableDelete {
+                table: MESSAGE_ROWS,
+                key: row_key.clone(),
+            })
+            .into_intent(),
+        )
+        .intent(
+            AtomicIntent::DeleteRow(TableDelete {
+                table: OPENED_MESSAGE_ROWS,
+                key: row_key,
+            })
+            .into_intent(),
+        )
+        .intent(purge_expired_message::purge_expired_message_intent(
+            PurgeExpiredMessage {
+                workspace_id: message.workspace_id,
+                target_id: message_id,
+                now_minute,
+            },
+        ))
+}
+
+fn author_deletion_output(
+    message_id: FactId,
+    message: &super::fact::ContentMessageFact,
+    reason_fact_id: FactId,
+) -> ProjectionOutput {
+    let row_key = message_key(message.workspace_id, message_id);
+    ProjectionOutput::new()
+        .intent(
+            AtomicIntent::PutRow(message_tombstone_row(
+                message.workspace_id,
+                message_id,
+                message.author_user_id,
+                message.created_at_ms,
+            ))
+            .into_intent(),
+        )
+        .intent(
+            AtomicIntent::DeleteRow(TableDelete {
+                table: CONTENT_MESSAGE_ROWS,
+                key: content_message_key(message.workspace_id, message_id),
+            })
+            .into_intent(),
+        )
+        .intent(
+            AtomicIntent::DeleteRow(TableDelete {
+                table: MESSAGE_ROWS,
+                key: row_key.clone(),
+            })
+            .into_intent(),
+        )
+        .intent(
+            AtomicIntent::DeleteRow(TableDelete {
+                table: OPENED_MESSAGE_ROWS,
+                key: row_key,
+            })
+            .into_intent(),
+        )
+        .intent(purge_deleted_message::purge_deleted_message_intent(
+            PurgeDeletedMessage {
+                workspace_id: message.workspace_id,
+                target_kind: PURGE_TARGET_MESSAGE,
+                target_id: message_id,
+                reason_kind: PURGE_REASON_AUTHOR_DELETION,
+                reason_fact_id,
+            },
+        ))
 }
 
 fn maybe_signed_payload(
@@ -210,139 +506,153 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
 mod projector_tests {
     use crate as topo;
 
+    use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
-    use topo::core::store::Store;
-    use topo::core::wake_loop::WakeLoop;
+    use topo::core::intents::AtomicIntent;
+    use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::content::message::fact::ContentMessageFact;
     use topo::protocol::facts::content::message::{layout, project, rows};
     use topo::protocol::facts::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::facts::content::message_deletion::layout as deletion_layout;
+    use topo::protocol::facts::content::sealed_message::{
+        fact::SignerPubkeyFact, layout as signer_layout, rows as legacy_rows,
+    };
+    use topo::protocol::facts::encryption::{
+        fact::LocalKeySecretFact, layout as encryption_layout,
+    };
     use topo::protocol::matchers as message_context;
-    use topo::protocol::matchers::ExactSelectorMatcher;
 
     use topo::protocol::facts::identity::user::{fact::UserFact, layout as user_layout};
 
-    #[test]
-    fn content_message_projector_materializes_row_through_atomic_intent() {
-        let author_fact = user_fact([9; 32]);
-        let message = ContentMessageFact {
-            workspace_id: [9; 32],
-            author_user_id: author_fact.id,
-            created_at_ms: 180_000,
-            frontier_id: [3; 32],
-            minute: 3,
-            leaf_id: [4; 32],
-            sealed_body_ref: [5; 32],
+    macro_rules! put_row {
+        ($output:expr, $table:expr) => {
+            $output.intents.iter().find_map(|intent| {
+                let atomic = AtomicIntent::from_intent(intent, &[$table]).ok()?;
+                match atomic {
+                    AtomicIntent::PutRow(row) => Some(row),
+                    AtomicIntent::DeleteRow(_) => None,
+                }
+            })
         };
-        let fact = Fact::new(
-            message_context::workspace_scope(message.workspace_id),
-            message.created_at_ms,
-            layout::encode_fact(&message).expect("encode content message"),
-        );
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("open target schema");
-        let mut bus = WakeLoop::new();
-        let user_matcher = ExactSelectorMatcher::new(crate::protocol::matchers::user_role());
+    }
 
-        assert!(bus.submit_fact(author_fact));
-        assert!(bus.submit_fact(fact.clone()));
-        let projected = bus
-            .drain_applying_atomic_rows(
-                &CombinedProjector,
-                &[&user_matcher],
-                &store,
-                &[rows::CONTENT_MESSAGE_ROWS],
-                10,
-            )
-            .expect("project content message");
-        assert_eq!(projected.projections, 3);
-        assert_eq!(projected.intents, 2);
-        assert_eq!(bus.intents().len(), 1);
-
-        let table = store
-            .table_rows(rows::CONTENT_MESSAGE_ROWS)
-            .expect("content message rows");
-        assert_eq!(table.len(), 1);
-        let row =
-            rows::decode_content_message_row(&table[0].0, &table[0].1).expect("decode message row");
-        assert_eq!(row.workspace_id, message.workspace_id);
-        assert_eq!(row.message_id, fact.id);
-        assert_eq!(row.author_user_id, message.author_user_id);
-        assert_eq!(row.created_at_ms, message.created_at_ms);
-        assert_eq!(row.frontier_id, message.frontier_id);
-        assert_eq!(row.minute, message.minute);
-        assert_eq!(row.leaf_id, message.leaf_id);
-        assert_eq!(row.sealed_body_ref, message.sealed_body_ref);
+    macro_rules! put_delete {
+        ($output:expr, $table:expr) => {
+            $output.intents.iter().find_map(|intent| {
+                let atomic = AtomicIntent::from_intent(intent, &[$table]).ok()?;
+                match atomic {
+                    AtomicIntent::DeleteRow(delete) => Some(delete),
+                    AtomicIntent::PutRow(_) => None,
+                }
+            })
+        };
     }
 
     #[test]
-    fn content_message_projector_waits_for_author_context() {
-        let message = ContentMessageFact {
-            workspace_id: [9; 32],
-            author_user_id: [22; 32],
-            created_at_ms: 180_000,
-            frontier_id: [3; 32],
-            minute: 3,
-            leaf_id: [4; 32],
-            sealed_body_ref: [5; 32],
-        };
-        let fact = Fact::new(
-            message_context::workspace_scope(message.workspace_id),
-            message.created_at_ms,
-            layout::encode_fact(&message).expect("encode content message"),
-        );
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("open target schema");
-        let mut bus = WakeLoop::new();
+    fn content_message_projector_materializes_after_signer_author_and_secret_context() {
+        let author_fact = user_fact([9; 32]);
+        let (message, fact, key) = message_fact(author_fact.id, "hello from content message");
+        let signer_fact = signer_fact(&message);
+        let secret_fact = secret_fact(&message, key);
 
-        assert!(bus.submit_fact(fact.clone()));
-        let projected = bus
-            .drain_applying_atomic_rows(
-                &project::ContentMessageProjector::new(),
-                &[],
-                &store,
-                &[rows::CONTENT_MESSAGE_ROWS],
-                10,
+        let output = project::ContentMessageProjector::new()
+            .project(
+                &fact,
+                &ProjectionContext::from_matches(vec![
+                    signer_match(&fact, &message, &signer_fact),
+                    author_match(&fact, &message, &author_fact),
+                    secret_match(&fact, &message, &secret_fact),
+                ]),
             )
             .expect("project content message");
-        assert_eq!(projected.projections, 1);
-        assert_eq!(projected.intents, 0);
-        let context = bus.context(&fact.id).expect("message context");
-        assert_eq!(context.needs.len(), 2);
-        assert!(context
+
+        assert_eq!(output.needs.len(), 4);
+        assert_eq!(output.offers.len(), 2);
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role == message_context::message_meta_role()));
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role == message_context::message_role()));
+        assert_eq!(output.intents.len(), 4);
+
+        let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
+        let row = rows::decode_content_message_row(&row.key, &row.value).expect("decode row");
+        assert_eq!(row.workspace_id, message.workspace_id);
+        assert_eq!(row.message_id, fact.id);
+        assert_eq!(row.author_user_id, message.author_user_id);
+        assert_eq!(row.signer_id, message.signer_id);
+        assert_eq!(row.frontier_id, message.frontier_id);
+
+        let opened = put_row!(output, legacy_rows::OPENED_MESSAGE_ROWS).expect("opened row");
+        let opened = legacy_rows::decode_opened_message_row(&opened.key, &opened.value)
+            .expect("decode opened row");
+        assert_eq!(opened.message_id, fact.id);
+        assert_eq!(opened.text, "hello from content message");
+    }
+
+    #[test]
+    fn content_message_projector_waits_without_materializing_before_context() {
+        let author_fact = user_fact([9; 32]);
+        let (_message, fact, _key) = message_fact(author_fact.id, "hidden until key context");
+
+        let output = project::ContentMessageProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project content message");
+
+        assert_eq!(output.offers.len(), 0);
+        assert_eq!(output.needs.len(), 4);
+        assert_eq!(output.intents.len(), 1);
+        assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
+        assert!(output
             .needs
             .iter()
             .any(|need| need.role == crate::protocol::matchers::user_role()));
-        assert!(context
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role == message_context::signer_role()));
+        assert!(output
             .needs
             .iter()
             .any(|need| need.role == message_context::deletion_role()));
-        assert!(store
-            .table_rows(rows::CONTENT_MESSAGE_ROWS)
-            .expect("message rows")
-            .is_empty());
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role == message_context::secret_role()));
+    }
+
+    #[test]
+    fn content_message_projector_publishes_metadata_before_secret_context() {
+        let author_fact = user_fact([9; 32]);
+        let (message, fact, _key) = message_fact(author_fact.id, "hidden until key context");
+        let signer_fact = signer_fact(&message);
+
+        let output = project::ContentMessageProjector::new()
+            .project(
+                &fact,
+                &ProjectionContext::from_matches(vec![
+                    signer_match(&fact, &message, &signer_fact),
+                    author_match(&fact, &message, &author_fact),
+                ]),
+            )
+            .expect("project content message");
+
+        assert_eq!(output.needs.len(), 4);
+        assert_eq!(output.offers.len(), 1);
+        assert_eq!(output.offers[0].role, message_context::message_meta_role());
+        assert_eq!(output.intents.len(), 1);
+        assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
+        assert!(put_row!(output, legacy_rows::OPENED_MESSAGE_ROWS).is_none());
     }
 
     #[test]
     fn content_message_keeps_deletion_watch_and_deletes_when_matched() {
         let author_fact = user_fact([9; 32]);
-        let message = ContentMessageFact {
-            workspace_id: [9; 32],
-            author_user_id: author_fact.id,
-            created_at_ms: 180_000,
-            frontier_id: [3; 32],
-            minute: 3,
-            leaf_id: [4; 32],
-            sealed_body_ref: [5; 32],
-        };
-        let fact = Fact::new(
-            message_context::workspace_scope(message.workspace_id),
-            message.created_at_ms,
-            layout::encode_fact(&message).expect("encode content message"),
-        );
+        let (message, fact, _key) = message_fact(author_fact.id, "delete me");
+        let signer_fact = signer_fact(&message);
         let deletion = ContentMessageDeletionFact {
             workspace_id: message.workspace_id,
             created_at_ms: message.created_at_ms + 1,
@@ -354,101 +664,34 @@ mod projector_tests {
             deletion.created_at_ms,
             deletion_layout::encode_fact(&deletion).expect("encode deletion"),
         );
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-                .expect("open target schema");
-        let message_matcher = ExactSelectorMatcher::new(message_context::message_role());
-        let deletion_matcher = ExactSelectorMatcher::new(message_context::deletion_role());
-        let user_matcher = ExactSelectorMatcher::new(crate::protocol::matchers::user_role());
-        let mut bus = WakeLoop::new();
 
-        assert!(bus.submit_fact(author_fact));
-        assert!(bus.submit_fact(fact.clone()));
-        bus.drain_applying_atomic_rows(
-            &CombinedProjector,
-            &[&message_matcher, &deletion_matcher, &user_matcher],
-            &store,
-            &[rows::CONTENT_MESSAGE_ROWS],
-            10,
-        )
-        .expect("project message");
-        assert_eq!(
-            bus.context(&fact.id).expect("message context").needs.len(),
-            2
-        );
-        assert_eq!(
-            store
-                .table_rows(rows::CONTENT_MESSAGE_ROWS)
-                .expect("message rows")
-                .len(),
-            1
-        );
-
-        assert!(bus.submit_fact(deletion_fact));
-        let deleted = bus
-            .drain_applying_atomic_rows(
-                &CombinedProjector,
-                &[&message_matcher, &deletion_matcher, &user_matcher],
-                &store,
-                &[
-                    rows::CONTENT_MESSAGE_ROWS,
-                    topo::protocol::facts::content::message_deletion::rows::MESSAGE_DELETION_ROWS,
-                ],
-                10,
+        let output = project::ContentMessageProjector::new()
+            .project(
+                &fact,
+                &ProjectionContext::from_matches(vec![
+                    signer_match(&fact, &message, &signer_fact),
+                    author_match(&fact, &message, &author_fact),
+                    deletion_match(&fact, &message, &deletion_fact),
+                ]),
             )
             .expect("deletion wakes message");
 
-        assert!(deleted.wakes >= 1);
-        assert_eq!(
-            bus.context(&fact.id).expect("message context").needs.len(),
-            1
-        );
-        assert!(store
-            .table_rows(rows::CONTENT_MESSAGE_ROWS)
-            .expect("message rows")
-            .is_empty());
+        assert!(put_delete!(output, rows::CONTENT_MESSAGE_ROWS).is_some());
+        assert!(put_delete!(output, legacy_rows::MESSAGE_ROWS).is_some());
+        assert!(put_delete!(output, legacy_rows::OPENED_MESSAGE_ROWS).is_some());
+        assert!(put_row!(output, legacy_rows::MESSAGE_TOMBSTONE_ROWS).is_some());
     }
 
     #[test]
     fn content_message_projector_rejects_malformed_fact_bytes() {
         let fact = Fact::new(FactScope::Global, 0, vec![0; 8]);
-        let mut bus = WakeLoop::new();
-        bus.submit_fact(fact);
-        let err = bus
-            .drain(&project::ContentMessageProjector::new(), &[], 10)
+        let err = project::ContentMessageProjector::new()
+            .project(&fact, &ProjectionContext::default())
             .expect_err("malformed bytes must fail projection");
         assert!(
             err.to_lowercase().contains("message") || err.to_lowercase().contains("length"),
             "{err}"
         );
-    }
-
-    struct CombinedProjector;
-
-    impl topo::core::projection::Projector for CombinedProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &topo::core::projection::ProjectionContext,
-        ) -> Result<topo::core::projection::ProjectionOutput, String> {
-            if deletion_layout::decode_fact(fact.body()).is_ok() {
-                topo::protocol::facts::content::message_deletion::project::ContentMessageDeletionProjector::new()
-                    .project(fact, context)
-            } else if layout::decode_fact(fact.body()).is_ok() {
-                project::ContentMessageProjector::new().project(fact, context)
-            } else if crate::protocol::facts::identity::user::decode_fact_payload(fact.body())
-                .is_ok()
-            {
-                Ok(topo::core::projection::ProjectionOutput::new().offer(
-                    crate::protocol::matchers::exact_offer(
-                        fact.id,
-                        crate::protocol::matchers::user_role(),
-                    ),
-                ))
-            } else {
-                Err("unknown combined content message test fact".to_string())
-            }
-        }
     }
 
     fn user_fact(workspace_id: [u8; 32]) -> Fact {
@@ -463,5 +706,158 @@ mod projector_tests {
             user.created_at_ms,
             user_layout::encode_fact(&user).expect("encode user"),
         )
+    }
+
+    fn message_fact(author_user_id: [u8; 32], text: &str) -> (ContentMessageFact, Fact, [u8; 32]) {
+        let key = [42; 32];
+        let workspace_id = [9; 32];
+        let frontier_id = [3; 32];
+        let minute = 3;
+        let nonce = [7; crate::protocol::facts::content::message::fact::NONCE_BYTES];
+        let plaintext =
+            topo::protocol::facts::content::message::create::pad_plaintext(text.as_bytes())
+                .expect("pad plaintext");
+        let ciphertext = crypto::xchacha20poly1305_encrypt(
+            &key,
+            &topo::protocol::facts::content::message::create::associated_data(
+                workspace_id,
+                frontier_id,
+                minute,
+            ),
+            &nonce,
+            &plaintext,
+        )
+        .expect("encrypt message text");
+        let message = ContentMessageFact {
+            workspace_id,
+            author_user_id,
+            created_at_ms: 180_000,
+            signer_id: [8; 32],
+            frontier_id,
+            local_history_node_secret_id: [0; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [0; 32],
+            minute,
+            leaf_id: [4; 32],
+            nonce,
+            ciphertext,
+        };
+        let fact = Fact::new(
+            message_context::workspace_scope(message.workspace_id),
+            message.created_at_ms,
+            layout::encode_fact(&message).expect("encode content message"),
+        );
+        (message, fact, key)
+    }
+
+    fn signer_fact(message: &ContentMessageFact) -> Fact {
+        let signer = SignerPubkeyFact {
+            signer_id: message.signer_id,
+            public_key: [6; 32],
+        };
+        Fact::new(
+            message_context::workspace_scope(message.workspace_id),
+            message.created_at_ms,
+            signer_layout::encode_signer_pubkey(&signer).expect("encode signer"),
+        )
+    }
+
+    fn secret_fact(message: &ContentMessageFact, key: [u8; 32]) -> Fact {
+        let secret = LocalKeySecretFact {
+            workspace_id: message.workspace_id,
+            frontier_id: message.frontier_id,
+            owner_endpoint_id: message.signer_id,
+            created_at_ms: message.created_at_ms,
+            key_secret: key,
+        };
+        Fact::new(
+            FactScope::Local,
+            message.created_at_ms,
+            encryption_layout::encode_local_key_secret(&secret).expect("encode secret"),
+        )
+    }
+
+    fn signer_match(
+        message_fact: &Fact,
+        message: &ContentMessageFact,
+        signer: &Fact,
+    ) -> MatchedContext {
+        let scope = message_context::workspace_scope(message.workspace_id);
+        MatchedContext {
+            need: message_context::signer_need(message_fact.id, scope.clone(), message.signer_id),
+            offer: message_context::signer_offer(signer.id, scope, message.signer_id),
+            payload: signer.clone(),
+        }
+    }
+
+    fn author_match(
+        message_fact: &Fact,
+        message: &ContentMessageFact,
+        author: &Fact,
+    ) -> MatchedContext {
+        MatchedContext {
+            need: crate::protocol::matchers::exact_need(
+                message_fact.id,
+                crate::protocol::matchers::user_role(),
+                message.author_user_id,
+            ),
+            offer: crate::protocol::matchers::exact_offer(
+                author.id,
+                crate::protocol::matchers::user_role(),
+            ),
+            payload: author.clone(),
+        }
+    }
+
+    fn secret_match(
+        message_fact: &Fact,
+        message: &ContentMessageFact,
+        secret: &Fact,
+    ) -> MatchedContext {
+        let scope = message_context::workspace_scope(message.workspace_id);
+        MatchedContext {
+            need: message_context::secret_need(
+                message_fact.id,
+                scope.clone(),
+                message.workspace_id,
+                message.frontier_id,
+                message.minute,
+                message.leaf_id,
+            ),
+            offer: message_context::secret_offer(
+                secret.id,
+                scope,
+                message.workspace_id,
+                message.frontier_id,
+                0,
+                u64::MAX,
+                0,
+                [0; 32],
+            ),
+            payload: secret.clone(),
+        }
+    }
+
+    fn deletion_match(
+        message_fact: &Fact,
+        message: &ContentMessageFact,
+        deletion_fact: &Fact,
+    ) -> MatchedContext {
+        let scope = message_context::workspace_scope(message.workspace_id);
+        MatchedContext {
+            need: message_context::deletion_need(
+                message_fact.id,
+                scope.clone(),
+                message_fact.id,
+                message.author_user_id,
+            ),
+            offer: message_context::deletion_offer(
+                deletion_fact.id,
+                scope,
+                message_fact.id,
+                message.author_user_id,
+            ),
+            payload: deletion_fact.clone(),
+        }
     }
 }

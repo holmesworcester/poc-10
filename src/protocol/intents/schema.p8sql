@@ -4,4 +4,3 @@
 row_table purge_retire_coords;
 row_table sync_index_snapshots;
 row_table connection_attempt_checkpoints;
-row_table send_network_frame_cursors;

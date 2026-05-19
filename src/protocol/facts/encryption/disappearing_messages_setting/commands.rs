@@ -8,6 +8,7 @@ use crate::core::command_context::CommandOutput;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::Store;
 use crate::protocol::facts::{content, identity};
+use std::collections::BTreeSet;
 
 use super::fact::{DisappearingMessagesSettingFact, SCOPE_KIND_WORKSPACE};
 use super::{layout, queries};
@@ -191,21 +192,65 @@ pub fn count_messages_below_minute(
     workspace_id: FactId,
     floor_minute: u64,
 ) -> Result<usize, String> {
-    let rows = store
+    let mut message_ids = BTreeSet::new();
+
+    let sealed_rows = store
         .table_rows_with_key_prefix(
             content::sealed_message::rows::SEALED_MESSAGE_ROWS,
             &workspace_id,
             usize::MAX,
         )
         .map_err(|err| format!("read sealed message rows: {err}"))?;
-    let mut count = 0usize;
-    for (key, value) in rows {
+    for (key, value) in sealed_rows {
         let row = content::sealed_message::rows::decode_sealed_message_row(&key, &value)?;
         if row.minute < floor_minute {
-            count += 1;
+            message_ids.insert(row.message_id);
         }
     }
-    Ok(count)
+
+    let content_rows = store
+        .table_rows_with_key_prefix(
+            content::message::rows::CONTENT_MESSAGE_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("read content message rows: {err}"))?;
+    for (key, value) in content_rows {
+        let row = content::message::rows::decode_content_message_row(&key, &value)?;
+        if row.minute < floor_minute {
+            message_ids.insert(row.message_id);
+        }
+    }
+
+    let live_rows = store
+        .table_rows_with_key_prefix(
+            content::sealed_message::rows::MESSAGE_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("read message rows: {err}"))?;
+    for (key, value) in live_rows {
+        let row = content::sealed_message::rows::decode_message_row(&key, &value)?;
+        if row.minute < floor_minute {
+            message_ids.insert(row.message_id);
+        }
+    }
+
+    let tombstone_rows = store
+        .table_rows_with_key_prefix(
+            content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("read message tombstone rows: {err}"))?;
+    for (key, value) in tombstone_rows {
+        let row = content::sealed_message::rows::decode_message_tombstone_row(&key, &value)?;
+        if row.authored_minute < floor_minute {
+            message_ids.insert(row.message_id);
+        }
+    }
+
+    Ok(message_ids.len())
 }
 
 fn setting_fact(

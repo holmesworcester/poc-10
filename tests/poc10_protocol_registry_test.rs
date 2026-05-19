@@ -64,7 +64,11 @@ fn protocol_registry_names_the_target_surfaces() {
     assert!(PROTOCOL
         .facts
         .iter()
-        .any(|fact| fact.module == "content::sealed_message" && fact.name == "sealed_message"));
+        .any(|fact| fact.module == "content::message" && fact.name == "message"));
+    assert!(PROTOCOL
+        .facts
+        .iter()
+        .any(|fact| fact.module == "content::message_deletion" && fact.name == "message_deletion"));
     assert!(PROTOCOL
         .context_matchers
         .iter()

@@ -124,9 +124,9 @@ fn contains_context_matcher_logic(text: &str) -> bool {
 }
 
 #[test]
-fn sealed_message_intents_do_not_encode_projection_work() {
+fn purge_deleted_message_intent_does_not_encode_projection_work() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let intent = source_text(&root.join("src/protocol/facts/content/sealed_message/intent.rs"));
+    let intent = source_text(&root.join("src/protocol/intents/content/purge_deleted_message.rs"));
 
     for forbidden in [
         "open_message",
@@ -141,7 +141,7 @@ fn sealed_message_intents_do_not_encode_projection_work() {
     ] {
         assert!(
             !intent.contains(forbidden),
-            "content::sealed_message intent layout must not own projection/opening detail: {forbidden}"
+            "purge_deleted_message intent layout must not own projection/opening detail: {forbidden}"
         );
     }
 }

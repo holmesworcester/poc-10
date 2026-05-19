@@ -60,10 +60,15 @@ impl PerfFixture {
             workspace_id: self.workspace_id,
             author_user_id: self.author_user_id,
             created_at_ms,
+            signer_id: id_from_parts(b"signer", sequence as u64),
             frontier_id: self.frontier_id,
+            local_history_node_secret_id: [0; 32],
+            expires_at_minute: u64::MAX,
+            disappearing_setting_id: [0; 32],
             minute: unix_minute_for(created_at_ms),
             leaf_id: id_from_parts(b"message leaf", sequence as u64),
-            sealed_body_ref: id_from_parts(b"sealed body", sequence as u64),
+            nonce: [7; topo::protocol::facts::content::message::fact::NONCE_BYTES],
+            ciphertext: vec![8; topo::protocol::facts::content::message::fact::CIPHERTEXT_BYTES],
         };
         Fact::new(
             message_context::workspace_scope(self.workspace_id),

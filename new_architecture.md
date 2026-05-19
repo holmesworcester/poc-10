@@ -124,7 +124,7 @@ Implemented target slices:
   intents.
 - Handler dispatch that accepts only declared fact inputs and returns facts,
   purges, and follow-up intents.
-- Target tests for signed facts, sealed messages, key wraps, key request
+- Target tests for signed facts, encrypted content messages, key wraps, key request
   healing, recipient-key supersession cleanup, signed key-wrap transit receive,
   transit frame layout, sync context, receive provenance, flat handler
   contracts, black-box invite/accept/link flows, basic content send/messages,
@@ -140,8 +140,9 @@ Current follow-up work outside the active cutover guard:
 - Keep manual projection/download perf fixtures available, but out of the
   default test suite.
 - Finish the intentionally deferred partial-download-progress CLI behavior.
-- Tighten route retry/ack policy beyond the current idempotent eventually
-  consistent network-send path.
+- Keep transport send policy simple: deferred send intents are the durable
+  boundary, network queues are memory-only, TCP owns per-stream delivery, and
+  duplicate delivery must remain harmless.
 
 ## File Organization
 
@@ -1044,6 +1045,12 @@ Projectors may decrypt/open content if the required key material is present in
 context. If a crypto operation needs broad search, private state not present as
 context, or follow-up admission, it should be a deferred intent instead.
 
+Encrypted content can expose authenticated metadata before it opens. For
+messages, `content_message_meta` means the signed message shape, author, and
+signer are valid, so an author deletion can be checked and purged without
+waiting for plaintext. The regular `content_message` offer remains the opened
+message context consumed by files, reactions, and views.
+
 Key requests are shared facts:
 
 ```text
@@ -1171,8 +1178,9 @@ adding new compatibility layers:
    status for expensive throughput fixtures.
 3. Finish the partial-download-progress behavior that is explicitly deferred in
    `content_cli_test.rs`.
-4. Tighten durable route retry/ack policy around network-send without making
-   network delivery itself part of the protocol durability contract.
+4. Preserve the simple transport contract: retry deferred send intents on
+   route/socket failure, keep network queues memory-only, and do not add
+   protocol-level peer acknowledgements.
 ```
 
 ## Guardrails

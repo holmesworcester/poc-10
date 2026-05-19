@@ -16,8 +16,10 @@ context needs/offers, `WakeLoop`, projectors, and handlers.
   material for one frontier.
 - `local_key_secret`: local opened frontier/root secret.
 - `local_history_node_secret`: local retained node in the time/trie key tree.
-- `sealed_message`: shared encrypted content that names its frontier and leaf
-  coordinate.
+- `content_message`: shared signed content fact whose encrypted fields name
+  their frontier and leaf coordinate. `sealed_message` is retained only for
+  legacy layout/row compatibility; it is not a current runtime or transport
+  route.
 - deletion/expiry/floor facts: semantic facts that make content unavailable and
   wake purge/key-retirement behavior.
 
@@ -37,10 +39,10 @@ the root and a deleted descend path have been purged.
 
 Target projection represents this with context:
 
-- sealed content emits a need for secret coverage over its frontier, minute, and
-  leaf coordinate.
+- encrypted content emits a need for secret coverage over its frontier, minute,
+  and leaf coordinate.
 - local key material emits offers for the coverage it can derive.
-- a coverage matcher wakes sealed content when a root, retained node, or leaf
+- a coverage matcher wakes encrypted content when a root, retained node, or leaf
   covers the requested coordinate.
 
 ## Key Wraps
@@ -126,9 +128,16 @@ time-only garbage collector responsible for core key correctness.
 ## Open Content
 
 Opening encrypted content is projector work when all inputs are provided as
-context and the operation is deterministic: load sealed fact context, find
-covering local key material, derive the leaf, decrypt, and emit opened rows via
-atomic row intents.
+context and the operation is deterministic: validate the signed content-message
+context, find covering local key material, derive or validate the leaf, decrypt
+the encrypted fields, and emit opened rows via atomic row intents.
+
+Message metadata is intentionally separate from opened content. After signer
+and author context validate, a content-message projector may emit
+`content_message_meta` so an author deletion can be validated and purged before
+any key material arrives. It emits the normal `content_message` offer and
+opened rows only after decrypting the encrypted fields, so files and reactions
+still depend on opened message context.
 
 If opening ever requires broad scans, IO, clock reads, or external mutation,
 split that step into a bounded intent/handler. Do not create a generic

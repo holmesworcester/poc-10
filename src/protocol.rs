@@ -146,6 +146,18 @@ pub const FACTS: &[FactRegistration] = &[
         projector: "ContentFileSliceProjector",
     },
     FactRegistration {
+        module: "content::message",
+        name: "message",
+        tag: content::message::layout::TYPE_CONTENT_MESSAGE,
+        projector: "ContentMessageProjector",
+    },
+    FactRegistration {
+        module: "content::message_deletion",
+        name: "message_deletion",
+        tag: content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION,
+        projector: "ContentMessageDeletionProjector",
+    },
+    FactRegistration {
         module: "content::reaction",
         name: "reaction",
         tag: content::reaction::layout::TYPE_CONTENT_REACTION,
@@ -272,30 +284,6 @@ pub const FACTS: &[FactRegistration] = &[
         projector: "RemovalFrontierProjector",
     },
     FactRegistration {
-        module: "content::sealed_message",
-        name: "sealed_message",
-        tag: content::sealed_message::layout::TYPE_SEALED_MESSAGE,
-        projector: "SealedMessageProjector",
-    },
-    FactRegistration {
-        module: "content::sealed_message",
-        name: "signer_pubkey",
-        tag: content::sealed_message::layout::TYPE_SIGNER_PUBKEY,
-        projector: "SealedMessageProjector",
-    },
-    FactRegistration {
-        module: "content::sealed_message",
-        name: "secret_node",
-        tag: content::sealed_message::layout::TYPE_SECRET_NODE,
-        projector: "SealedMessageProjector",
-    },
-    FactRegistration {
-        module: "content::sealed_message",
-        name: "deletion",
-        tag: content::sealed_message::layout::TYPE_MESSAGE_DELETION,
-        projector: "SealedMessageProjector",
-    },
-    FactRegistration {
         module: "identity::signed_fact",
         name: "signed_fact",
         tag: identity::signed_fact::layout::TYPE_SIGNED_FACT,
@@ -376,6 +364,10 @@ pub const CONTEXT_MATCHERS: &[ContextMatcherRegistration] = &[
     },
     ContextMatcherRegistration {
         role: "content_message",
+        matcher: "ExactSelectorMatcher",
+    },
+    ContextMatcherRegistration {
+        role: "content_message_meta",
         matcher: "ExactSelectorMatcher",
     },
     ContextMatcherRegistration {
@@ -557,7 +549,7 @@ pub const INTENTS: &[IntentRegistration] = &[
         declared_by: "intents::transport::receive_transit_frame",
     },
     IntentRegistration {
-        kind: content::sealed_message::intent::PURGE_DELETED_MESSAGE,
+        kind: content_intents::purge_deleted_message::PURGE_DELETED_MESSAGE,
         execution: IntentExecutionKind::Deferred,
         declared_by: "intents::content::purge_deleted_message",
     },
@@ -643,7 +635,7 @@ pub const HANDLERS: &[HandlerRegistration] = &[
         module: "content::purge_deleted_message",
         handler: "PurgeDeletedMessageHandler",
         runtime_field: "purge_deleted_message",
-        intents: &[content::sealed_message::intent::PURGE_DELETED_MESSAGE],
+        intents: &[content_intents::purge_deleted_message::PURGE_DELETED_MESSAGE],
     },
     HandlerRegistration {
         module: "content::purge_message_child",
