@@ -2,14 +2,13 @@
 //!
 //! Core is the part of the program a different protocol should be able to
 //! reuse unchanged. It supplies a small row store, opaque byte queues for raw
-//! network traffic, a TCP pump that moves length-prefixed frames, and a tiny
-//! Crux command runner. It must not learn the vocabulary or validity rules of
-//! whatever protocol sits above it.
+//! network traffic, and a TCP pump that moves length-prefixed frames. It must
+//! not learn the vocabulary or validity rules of whatever protocol sits above
+//! it.
 
 pub mod cli;
 pub mod command_context;
 pub mod context;
-pub mod crux_runner;
 pub mod crypto;
 pub mod daemon;
 pub mod facts;
