@@ -61,11 +61,6 @@ fn schema_sources_create_declared_row_tables() {
                 key: b"message/1".to_vec(),
                 value: b"message bytes".to_vec(),
             },
-            TableRow {
-                table: TableName::new("send_network_frame_cursors"),
-                key: b"cursor/1".to_vec(),
-                value: b"cursor bytes".to_vec(),
-            },
         ])
         .expect("insert rows into p8sql-created tables");
 

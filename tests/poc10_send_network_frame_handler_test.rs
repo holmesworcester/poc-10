@@ -104,6 +104,31 @@ fn unreachable_peer_requests_retry_without_consuming_intent() {
     assert!(err.contains("open tcp stream"), "{err}");
 }
 
+#[test]
+fn missing_route_requests_retry_without_consuming_intent() {
+    let store = test_store();
+    let local_endpoint = local_endpoint();
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
+        .expect("seed local endpoint");
+    let (connection_fact, request_fact) =
+        routed_connection_with_route(None, local_endpoint.endpoint);
+    let intent = send_network_frame_intent(SendNetworkFrame {
+        routing_key: connection_fact.id,
+        frame: b"opaque-transport::transit-frame-bytes".to_vec(),
+    });
+
+    let err = SendNetworkFrameHandler::new()
+        .handle(
+            &intent,
+            &HandlerContext::with_facts([connection_fact, request_fact]).with_store(&store),
+        )
+        .expect_err("missing route should request retry");
+
+    assert!(retry_intent_reason(&err).is_some(), "{err}");
+    assert!(err.contains("route unavailable"), "{err}");
+}
+
 fn local_endpoint() -> EndpointFact {
     let secret = [23; 32];
     let signing_secret = [24; 32];
@@ -128,6 +153,13 @@ fn test_store() -> Store {
 }
 
 fn routed_connection(addr: std::net::SocketAddr, local_endpoint: [u8; 32]) -> (Fact, Fact) {
+    routed_connection_with_route(Some(addr), local_endpoint)
+}
+
+fn routed_connection_with_route(
+    addr: Option<std::net::SocketAddr>,
+    local_endpoint: [u8; 32],
+) -> (Fact, Fact) {
     let request = ConnectionRequestFact {
         from_endpoint: [10; 32],
         to_endpoint: local_endpoint,
@@ -138,7 +170,7 @@ fn routed_connection(addr: std::net::SocketAddr, local_endpoint: [u8; 32]) -> (F
         invite_secret_fact_id: [16; 32],
         initiator_ephemeral_secret_fact_id: [17; 32],
         initiator_ephemeral_public_key: [18; 32],
-        from_listen_addr: Some(addr),
+        from_listen_addr: addr,
         to_listen_addr: None,
     };
     let request_fact = Fact::new(

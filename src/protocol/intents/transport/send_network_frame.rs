@@ -4,8 +4,8 @@
 //! transport::transit frame onto a connection's TCP socket. The handler resolves the
 //! connection route from the fact context, stages the frame through core's
 //! outbound queue boundary, and attempts one bounded TCP write. If route
-//! context or the socket is unavailable, returning an error keeps the deferred
-//! intent queued for retry.
+//! context or the socket is unavailable, the handler asks the wake loop to keep
+//! the intent visible so the next sync/daemon pass can try again.
 
 //! Send-network-frame intent layout.
 //!
@@ -81,15 +81,6 @@ pub fn send_network_frame_key(input: &SendNetworkFrame) -> Vec<u8> {
     hash.update(&(input.frame.len() as u32).to_be_bytes());
     hash.update(&input.frame);
     hash.finalize().as_bytes().to_vec()
-}
-
-/// Deterministic digest of the frame bytes used by the cursor fact value.
-pub fn frame_digest(frame: &[u8]) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"topo:send-network-frame-digest:v1:");
-    hash.update(&(frame.len() as u32).to_be_bytes());
-    hash.update(frame);
-    *hash.finalize().as_bytes()
 }
 
 fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -176,7 +167,9 @@ impl IntentHandler for SendNetworkFrameHandler {
                 if err == SEND_NETWORK_FRAME_MISSING_ROUTE
                     || err == "send_network_frame missing connection request fact" =>
             {
-                return Ok(HandlerOutput::new());
+                return Err(retry_intent(format!(
+                    "send_network_frame route unavailable: {err}"
+                )));
             }
             Err(err) => return Err(err),
         };

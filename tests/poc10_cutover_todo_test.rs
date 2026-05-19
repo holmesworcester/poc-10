@@ -919,6 +919,12 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
                 .to_string(),
         );
     }
+    if send_network_frame.contains("fn frame_digest(") {
+        offenders.push(
+            "src/protocol/intents/transport/send_network_frame.rs still carries cursor/ack digest scaffolding"
+                .to_string(),
+        );
+    }
 
     assert!(
         offenders.is_empty(),
@@ -931,6 +937,7 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
 fn cutover_network_queue_storage_class_is_not_ambiguous() {
     let root = root();
     let core_schema = source_text(&root.join("src/core/schema.p8sql"));
+    let intents_schema = source_text(&root.join("src/protocol/intents/schema.p8sql"));
     let network_queues = source_text(&root.join("src/core/network_queues.rs"));
     let runtime = source_text(&root.join("src/protocol/runtime.rs"));
 
@@ -955,6 +962,11 @@ fn cutover_network_queue_storage_class_is_not_ambiguous() {
     if durable_in_core_schema == memory_in_queue_module {
         offenders.push(
             "network queues should have exactly one explicit storage contract: durable schema table or restart-local memory table",
+        );
+    }
+    if intents_schema.contains("send_network_frame_cursors") {
+        offenders.push(
+            "send_network_frame_cursors is durable cursor/ack scaffolding; network send should be regenerated from facts/context instead",
         );
     }
 
