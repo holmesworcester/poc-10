@@ -2,8 +2,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
-use crate::protocol::facts::content::message_deletion;
-use crate::protocol::facts::content::sealed_message::retention;
+use crate::protocol::facts::content::{message::retention, message_deletion};
 
 pub const PURGE_DELETED_MESSAGE: &str = "purge_deleted_message";
 pub const PURGE_TARGET_MESSAGE: u8 = 1;

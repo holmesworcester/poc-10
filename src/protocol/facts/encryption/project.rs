@@ -20,7 +20,7 @@ use super::local_recipient_key::local_recipient_key;
 use super::recipient_key::recipient_key;
 use super::signed_key_wrap::signed_key_wrap;
 use super::validation::require_fact_scope;
-use crate::protocol::facts::{content, identity};
+use crate::protocol::facts::identity;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers;
 
@@ -133,17 +133,7 @@ fn validate_frontier_endpoint_shared_owner(
         }
         return Ok(());
     }
-    let signer =
-        content::sealed_message::decode_signer_pubkey_payload(owner_fact.body()).map_err(|_| {
-            "removal frontier owner context must be endpoint_shared or signer pubkey".to_string()
-        })?;
-    if owner_fact.scope != matchers::workspace_scope(frontier.workspace_id) {
-        return Err("removal frontier signer pubkey workspace mismatch".to_string());
-    }
-    if signer.signer_id != frontier.owner_endpoint_id {
-        return Err("removal frontier signer pubkey endpoint mismatch".to_string());
-    }
-    Ok(())
+    Err("removal frontier owner context must be endpoint_shared".to_string())
 }
 
 fn validate_frontier_local_owner(

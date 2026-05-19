@@ -654,11 +654,11 @@ fn poc10_concrete_protocol_routes_semantic_messages() {
     assert!(runtime.contains("MESSAGE_DELETION_ROWS"));
     assert!(
         !registry.contains("module: \"content::sealed_message\""),
-        "sealed_message is legacy compatibility code, not a current protocol fact registration"
+        "sealed-message compatibility module must not be registered"
     );
     assert!(
         !runtime.contains("TYPE_SEALED_MESSAGE") && !runtime.contains("project_sealed_message"),
-        "normal runtime dispatch must not route sealed-message wrappers"
+        "runtime dispatch must not route sealed-message wrappers"
     );
     assert!(
         !receive.contains("content::sealed_message::TYPE_SEALED_MESSAGE")

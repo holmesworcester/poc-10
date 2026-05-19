@@ -1,4 +1,4 @@
-//! Local sealed-message authoring capabilities.
+//! Local content-message authoring capabilities.
 //!
 //! Sending a message needs two local secrets: the endpoint signing key and the
 //! current local removal-frontier key. This module is the command boundary that
@@ -12,12 +12,12 @@ use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity;
 use crate::protocol::runtime::ProtocolRuntime;
 
-pub struct SealedMessageVault {
+pub struct ContentMessageVault {
     signing: LocalSigningCapability,
     encryption: LocalEncryptionCapability,
 }
 
-impl SealedMessageVault {
+impl ContentMessageVault {
     pub fn for_workspace(
         runtime: &ProtocolRuntime,
         workspace_id: [u8; 32],
@@ -41,7 +41,7 @@ impl SealedMessageVault {
     }
 }
 
-impl IdentityVault for SealedMessageVault {
+impl IdentityVault for ContentMessageVault {
     fn local_signing_capability(
         &self,
         workspace_id: WorkspaceId,

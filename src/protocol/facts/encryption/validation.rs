@@ -1,7 +1,6 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projection::{ProjectionContext, ProjectionOutput};
-use crate::protocol::facts::content;
 use crate::protocol::facts::identity;
 use crate::protocol::matchers::{self, WrapSourceKind, WrapSourceSelector};
 
@@ -78,12 +77,6 @@ pub(super) fn has_matching_signer_public_key(
     projection_context
         .matched_payloads_for(need)
         .any(|(_, payload)| {
-            if let Ok(signer) =
-                content::sealed_message::layout::decode_signer_pubkey(payload.body())
-            {
-                return signer.signer_id.as_slice() == need.selector.as_bytes()
-                    && signer.public_key == *signer_public_key;
-            }
             let Ok(envelope) = identity::signed_fact::layout::decode_signed_fact(payload.body())
             else {
                 return false;

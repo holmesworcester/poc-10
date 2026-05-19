@@ -8,10 +8,7 @@ use topo::protocol::facts::content::message::{
     create as message_create,
     fact::{ContentMessageFact, NONCE_BYTES},
     layout as message_layout,
-    rows::CONTENT_MESSAGE_ROWS,
-};
-use topo::protocol::facts::content::sealed_message::rows::{
-    decode_opened_message_row, OPENED_MESSAGE_ROWS,
+    rows::{decode_opened_message_row, CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS},
 };
 use topo::protocol::facts::encryption::fact::LocalKeySecretFact;
 use topo::protocol::facts::encryption::layout as encryption_layout;

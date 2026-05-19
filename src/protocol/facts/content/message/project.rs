@@ -19,11 +19,6 @@ use crate::core::projection::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
 use crate::protocol::facts::content::message_deletion;
-use crate::protocol::facts::content::sealed_message;
-use crate::protocol::facts::content::sealed_message::rows::{
-    message_key, message_row, message_tombstone_row, opened_message_row, MessageRow,
-    OpenedMessageRow, MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
-};
 use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
@@ -35,7 +30,10 @@ use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_w
 use crate::protocol::matchers;
 
 use super::authority::{self, DecodedPayload};
-use super::rows::{content_message_key, content_message_row, CONTENT_MESSAGE_ROWS};
+use super::rows::{
+    content_message_key, content_message_row, message_tombstone_row, opened_message_row,
+    OpenedMessageRow, CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentMessageProjector;
@@ -142,18 +140,6 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             .offer(matchers::message_offer(fact.id, scope, fact.id))
             .intent(AtomicIntent::PutRow(content_message_row(fact.id, &message)).into_intent())
             .intent(
-                AtomicIntent::PutRow(message_row(MessageRow {
-                    workspace_id: message.workspace_id,
-                    message_id: fact.id,
-                    created_at_ms: message.created_at_ms,
-                    author_user_id: message.author_user_id,
-                    signer_id: message.signer_id,
-                    minute: message.minute,
-                    leaf_id: message.leaf_id,
-                }))
-                .into_intent(),
-            )
-            .intent(
                 AtomicIntent::PutRow(opened_message_row(OpenedMessageRow {
                     workspace_id: message.workspace_id,
                     message_id: fact.id,
@@ -195,29 +181,12 @@ fn context_payload<'a>(
 
 fn validate_signer_context(
     payload: &Fact,
-    need: &ContextNeed,
+    _need: &ContextNeed,
     message: &super::fact::ContentMessageFact,
     envelope: Option<&identity::signed_fact::fact::SignedFactEnvelope>,
 ) -> Result<(), String> {
-    if let Ok(signer) = sealed_message::layout::decode_signer_pubkey(payload.body()) {
-        if payload.scope != need.scope {
-            return Err("content message signer context scope does not match need".to_string());
-        }
-        if signer.signer_id != message.signer_id {
-            return Err("content message signer context payload does not match need".to_string());
-        }
-        if envelope.is_some_and(|envelope| signer.public_key != envelope.signer_public_key) {
-            return Err(
-                "content message signer context public key does not match signed envelope"
-                    .to_string(),
-            );
-        }
-        return Ok(());
-    }
-
-    let endpoint = endpoint_shared_signer(payload).ok_or_else(|| {
-        "content message signer context must be a signer pubkey or endpoint_shared".to_string()
-    })?;
+    let endpoint = endpoint_shared_signer(payload)
+        .ok_or_else(|| "content message signer context must be endpoint_shared".to_string())?;
     if endpoint.workspace_id != message.workspace_id {
         return Err("content message signer endpoint workspace does not match message".to_string());
     }
@@ -288,23 +257,7 @@ fn validate_message_deletion(
         return Ok(());
     }
 
-    let deletion_payload = maybe_signed_payload(
-        payload,
-        sealed_message::TYPE_MESSAGE_DELETION,
-        "message deletion",
-    )?;
-    let deletion = sealed_message::decode_message_deletion_payload(&deletion_payload.payload)
-        .map_err(|_| "message deletion context is not a sealed message deletion".to_string())?;
-    if deletion.workspace_id != workspace_id {
-        return Err("message deletion workspace does not match message".to_string());
-    }
-    if deletion.target_id != target_message_id {
-        return Err("message deletion target does not match message".to_string());
-    }
-    if deletion.author_user_id != author_user_id {
-        return Err("message deletion author does not match message author".to_string());
-    }
-    Ok(())
+    Err("message deletion context is not a content message deletion".to_string())
 }
 
 fn matched_secret_payload<'a>(
@@ -364,7 +317,7 @@ fn expiry_minute_reached(
         return None;
     }
     context.time_reached(
-        &crate::protocol::facts::content::sealed_message::expiration_timeline(),
+        &crate::protocol::facts::content::message::expiration_timeline(),
         message.expires_at_minute,
     )
 }
@@ -379,7 +332,7 @@ fn with_expiry_wake(
     }
     output.time_wake(TimeWake {
         owner,
-        timeline: crate::protocol::facts::content::sealed_message::expiration_timeline(),
+        timeline: crate::protocol::facts::content::message::expiration_timeline(),
         at: message.expires_at_minute,
     })
 }
@@ -389,7 +342,7 @@ fn expired_output(
     message: &super::fact::ContentMessageFact,
     now_minute: u64,
 ) -> ProjectionOutput {
-    let row_key = message_key(message.workspace_id, message_id);
+    let row_key = content_message_key(message.workspace_id, message_id);
     ProjectionOutput::new()
         .intent(
             AtomicIntent::PutRow(message_tombstone_row(
@@ -404,13 +357,6 @@ fn expired_output(
             AtomicIntent::DeleteRow(TableDelete {
                 table: CONTENT_MESSAGE_ROWS,
                 key: content_message_key(message.workspace_id, message_id),
-            })
-            .into_intent(),
-        )
-        .intent(
-            AtomicIntent::DeleteRow(TableDelete {
-                table: MESSAGE_ROWS,
-                key: row_key.clone(),
             })
             .into_intent(),
         )
@@ -435,7 +381,7 @@ fn author_deletion_output(
     message: &super::fact::ContentMessageFact,
     reason_fact_id: FactId,
 ) -> ProjectionOutput {
-    let row_key = message_key(message.workspace_id, message_id);
+    let row_key = content_message_key(message.workspace_id, message_id);
     ProjectionOutput::new()
         .intent(
             AtomicIntent::PutRow(message_tombstone_row(
@@ -450,13 +396,6 @@ fn author_deletion_output(
             AtomicIntent::DeleteRow(TableDelete {
                 table: CONTENT_MESSAGE_ROWS,
                 key: content_message_key(message.workspace_id, message_id),
-            })
-            .into_intent(),
-        )
-        .intent(
-            AtomicIntent::DeleteRow(TableDelete {
-                table: MESSAGE_ROWS,
-                key: row_key.clone(),
             })
             .into_intent(),
         )
@@ -514,11 +453,12 @@ mod projector_tests {
     use topo::protocol::facts::content::message::{layout, project, rows};
     use topo::protocol::facts::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::facts::content::message_deletion::layout as deletion_layout;
-    use topo::protocol::facts::content::sealed_message::{
-        fact::SignerPubkeyFact, layout as signer_layout, rows as legacy_rows,
-    };
     use topo::protocol::facts::encryption::{
         fact::LocalKeySecretFact, layout as encryption_layout,
+    };
+    use topo::protocol::facts::identity::endpoint_shared::{
+        fact::{EndpointRole, EndpointSharedFact},
+        layout as endpoint_shared_layout,
     };
     use topo::protocol::matchers as message_context;
 
@@ -576,7 +516,7 @@ mod projector_tests {
             .offers
             .iter()
             .any(|offer| offer.role == message_context::message_role()));
-        assert_eq!(output.intents.len(), 4);
+        assert_eq!(output.intents.len(), 3);
 
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
         let row = rows::decode_content_message_row(&row.key, &row.value).expect("decode row");
@@ -586,9 +526,9 @@ mod projector_tests {
         assert_eq!(row.signer_id, message.signer_id);
         assert_eq!(row.frontier_id, message.frontier_id);
 
-        let opened = put_row!(output, legacy_rows::OPENED_MESSAGE_ROWS).expect("opened row");
-        let opened = legacy_rows::decode_opened_message_row(&opened.key, &opened.value)
-            .expect("decode opened row");
+        let opened = put_row!(output, rows::OPENED_MESSAGE_ROWS).expect("opened row");
+        let opened =
+            rows::decode_opened_message_row(&opened.key, &opened.value).expect("decode opened row");
         assert_eq!(opened.message_id, fact.id);
         assert_eq!(opened.text, "hello from content message");
     }
@@ -645,7 +585,7 @@ mod projector_tests {
         assert_eq!(output.offers[0].role, message_context::message_meta_role());
         assert_eq!(output.intents.len(), 1);
         assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
-        assert!(put_row!(output, legacy_rows::OPENED_MESSAGE_ROWS).is_none());
+        assert!(put_row!(output, rows::OPENED_MESSAGE_ROWS).is_none());
     }
 
     #[test]
@@ -677,9 +617,8 @@ mod projector_tests {
             .expect("deletion wakes message");
 
         assert!(put_delete!(output, rows::CONTENT_MESSAGE_ROWS).is_some());
-        assert!(put_delete!(output, legacy_rows::MESSAGE_ROWS).is_some());
-        assert!(put_delete!(output, legacy_rows::OPENED_MESSAGE_ROWS).is_some());
-        assert!(put_row!(output, legacy_rows::MESSAGE_TOMBSTONE_ROWS).is_some());
+        assert!(put_delete!(output, rows::OPENED_MESSAGE_ROWS).is_some());
+        assert!(put_row!(output, rows::MESSAGE_TOMBSTONE_ROWS).is_some());
     }
 
     #[test]
@@ -751,14 +690,19 @@ mod projector_tests {
     }
 
     fn signer_fact(message: &ContentMessageFact) -> Fact {
-        let signer = SignerPubkeyFact {
-            signer_id: message.signer_id,
-            public_key: [6; 32],
+        let signer = EndpointSharedFact {
+            created_at_ms: message.created_at_ms,
+            workspace_id: message.workspace_id,
+            user_authority_fact_id: message.author_user_id,
+            endpoint_id: message.signer_id,
+            signing_public_key: [6; 32],
+            endpoint_role: EndpointRole::Device,
+            device_name: "alice-device".to_string(),
         };
         Fact::new(
-            message_context::workspace_scope(message.workspace_id),
+            FactScope::Global,
             message.created_at_ms,
-            signer_layout::encode_signer_pubkey(&signer).expect("encode signer"),
+            endpoint_shared_layout::encode_fact(&signer).expect("encode endpoint shared"),
         )
     }
 

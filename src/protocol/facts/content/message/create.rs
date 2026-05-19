@@ -12,7 +12,7 @@ use crate::protocol::facts::content::message::fact::{
     ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
 };
 use crate::protocol::facts::content::message::layout;
-use crate::protocol::facts::content::sealed_message::rows;
+use crate::protocol::facts::content::message::rows;
 use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::signed_fact::{self, create as signed_fact_create};

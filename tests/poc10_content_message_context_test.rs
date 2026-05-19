@@ -2,24 +2,15 @@ use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::AtomicIntent;
 use topo::core::matchers::ContextMatcher;
-use topo::core::projection::{ProjectionContext, Projector};
 use topo::core::wake_loop::WakeLoop;
 use topo::protocol::facts::content::message::fact::{ContentMessageFact, NONCE_BYTES};
 use topo::protocol::facts::content::message::rows::{
-    decode_content_message_row, CONTENT_MESSAGE_ROWS,
+    decode_content_message_row, decode_message_tombstone_row, CONTENT_MESSAGE_ROWS,
+    MESSAGE_TOMBSTONE_ROWS, OPENED_MESSAGE_ROWS,
 };
 use topo::protocol::facts::content::message::{create as message_create, layout as message_layout};
 use topo::protocol::facts::content::message_deletion::fact::ContentMessageDeletionFact;
 use topo::protocol::facts::content::message_deletion::layout as message_deletion_layout;
-use topo::protocol::facts::content::sealed_message::fact::{
-    MessageDeletionFact as SealedMessageDeletionFact, SealedMessageFact, SecretNodeFact,
-};
-use topo::protocol::facts::content::sealed_message::rows::{
-    decode_message_tombstone_row, MESSAGE_ROWS, MESSAGE_TOMBSTONE_ROWS, OPENED_MESSAGE_ROWS,
-};
-use topo::protocol::facts::content::sealed_message::{
-    layout as sealed_layout, project as sealed_project,
-};
 use topo::protocol::facts::encryption::fact::{LocalKeySecretFact, RemovalFrontierFact};
 use topo::protocol::facts::encryption::layout as encryption_layout;
 use topo::protocol::facts::identity;
@@ -44,7 +35,7 @@ const DEVICE_INVITE_PRIVATE_KEY: [u8; 32] = [0x43; 32];
 const DEFAULT_SECRET: [u8; 32] = [0x66; 32];
 
 #[test]
-fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
+fn content_message_keeps_context_until_secret_coverage_and_deletion() {
     let workspace = [7; 32];
     let signer = [8; 32];
     let frontier = removal_frontier_fact(workspace, [0x71; 32], 9);
@@ -85,7 +76,6 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
     assert_eq!(bus.context(&message.id).unwrap().needs.len(), 4);
     assert_share_intent(bus.intents(), workspace, message.id);
     assert!(find_put_row(bus.intents(), CONTENT_MESSAGE_ROWS).is_none());
-    assert!(find_put_row(bus.intents(), MESSAGE_ROWS).is_none());
     assert!(find_put_row(bus.intents(), OPENED_MESSAGE_ROWS).is_none());
     bus.take_intents();
 
@@ -99,7 +89,6 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
     assert_eq!(standing.needs.len(), 4);
     assert_share_intent(bus.intents(), workspace, message.id);
     assert!(find_put_row(bus.intents(), CONTENT_MESSAGE_ROWS).is_none());
-    assert!(find_put_row(bus.intents(), MESSAGE_ROWS).is_none());
     assert!(find_put_row(bus.intents(), OPENED_MESSAGE_ROWS).is_none());
     bus.take_intents();
 
@@ -119,7 +108,6 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
             .message_id,
         message.id
     );
-    first_put_row(bus.intents(), MESSAGE_ROWS);
     first_put_row(bus.intents(), OPENED_MESSAGE_ROWS);
     bus.take_intents();
 
@@ -130,7 +118,7 @@ fn sealed_message_keeps_context_until_secret_coverage_and_deletion() {
         .expect("deletion wakes covered message");
     assert!(purged.wakes >= 1);
     assert!(bus.context(&message.id).is_none());
-    assert_eq!(count_kind(bus.intents(), "delete_row"), 3);
+    assert_eq!(count_kind(bus.intents(), "delete_row"), 2);
     assert_eq!(count_kind(bus.intents(), "purge_deleted_message"), 1);
     let tombstone = first_put_row(bus.intents(), MESSAGE_TOMBSTONE_ROWS);
     assert_eq!(
@@ -188,7 +176,7 @@ fn deletion_update_purges_message_before_keys_arrive() {
     bus.submit_fact(deletion);
     let waiting_delete = bus
         .drain(&projector, &matchers, 10)
-        .expect("deletion waits for decrypted message context");
+        .expect("deletion waits for authenticated message metadata");
 
     assert!(waiting_delete.wakes <= 1);
     assert!(bus.context(&message.id).is_some());
@@ -203,7 +191,7 @@ fn deletion_update_purges_message_before_keys_arrive() {
         .expect("authenticated metadata lets deletion purge before keys arrive");
     assert!(later_context.wakes >= 2);
     assert_eq!(count_kind(bus.intents(), "purge_deleted_message"), 1);
-    assert_eq!(count_kind(bus.intents(), "delete_row"), 3);
+    assert_eq!(count_kind(bus.intents(), "delete_row"), 2);
     assert!(bus.context(&message.id).is_none());
 
     bus.take_intents();
@@ -276,7 +264,6 @@ fn non_author_deletion_does_not_purge_or_wake_message() {
 
     assert_eq!(bus.context(&message.id).unwrap().needs.len(), 4);
     first_put_row(bus.intents(), CONTENT_MESSAGE_ROWS);
-    first_put_row(bus.intents(), MESSAGE_ROWS);
     first_put_row(bus.intents(), OPENED_MESSAGE_ROWS);
     assert_eq!(count_kind(bus.intents(), "purge_deleted_message"), 0);
 }
@@ -317,12 +304,12 @@ fn deletion_before_message_purges_when_target_later_arrives() {
 
     bus.submit_fact(deletion);
     bus.drain(&projector, &matchers, 10)
-        .expect("deletion waits for target message context");
+        .expect("deletion waits for target message metadata");
     assert!(bus.intents().is_empty());
     bus.submit_fact(message.clone());
     let waiting_message = bus
         .drain(&projector, &matchers, 10)
-        .expect("message waits for key context before deletion can match");
+        .expect("message waits for authenticated context before deletion can match");
 
     assert!(waiting_message.wakes <= 1);
     assert!(bus.context(&message.id).is_some());
@@ -336,7 +323,7 @@ fn deletion_before_message_purges_when_target_later_arrives() {
 
     assert!(purged.wakes >= 2);
     assert!(bus.context(&message.id).is_none());
-    assert_eq!(count_kind(bus.intents(), "delete_row"), 3);
+    assert_eq!(count_kind(bus.intents(), "delete_row"), 2);
     assert_eq!(count_kind(bus.intents(), "purge_deleted_message"), 1);
 
     bus.take_intents();
@@ -350,91 +337,6 @@ fn deletion_before_message_purges_when_target_later_arrives() {
     assert_eq!(count_kind(bus.intents(), "purge_deleted_message"), 0);
     assert!(find_put_row(bus.intents(), CONTENT_MESSAGE_ROWS).is_none());
     assert!(find_put_row(bus.intents(), OPENED_MESSAGE_ROWS).is_none());
-}
-
-#[test]
-fn sealed_message_projector_rejects_body_scope_mismatches() {
-    let workspace = [31; 32];
-    let other_workspace = [32; 32];
-    let signer = [33; 32];
-    let frontier = [34; 32];
-    let message = sealed_message_fact(workspace, signer, frontier, 42, [35; 32]);
-    let projector = sealed_project::SealedMessageProjector::new();
-    let context = ProjectionContext::new(Vec::new());
-
-    let bad_message = Fact::new(
-        workspace_scope(other_workspace),
-        message.timestamp,
-        message.bytes.clone(),
-    );
-    let err = projector
-        .project(&bad_message, &context)
-        .expect_err("message scope mismatch rejects");
-    assert!(err.contains("scope does not match body workspace"), "{err}");
-
-    let secret = secret_node_fact(workspace, frontier, 0, 99, 0, [0; 32]);
-    let bad_secret = Fact::new(
-        workspace_scope(other_workspace),
-        secret.timestamp,
-        secret.bytes.clone(),
-    );
-    let err = projector
-        .project(&bad_secret, &context)
-        .expect_err("secret scope mismatch rejects");
-    assert!(err.contains("scope does not match body workspace"), "{err}");
-
-    let deletion = sealed_deletion_fact(workspace, message.id);
-    let bad_deletion = Fact::new(
-        workspace_scope(other_workspace),
-        deletion.timestamp,
-        deletion.bytes.clone(),
-    );
-    let err = projector
-        .project(&bad_deletion, &context)
-        .expect_err("deletion scope mismatch rejects");
-    assert!(err.contains("scope does not match body workspace"), "{err}");
-}
-
-#[test]
-fn sealed_message_projector_revalidates_secret_context_before_clearing_need() {
-    let workspace = [41; 32];
-    let signer = [42; 32];
-    let frontier = [43; 32];
-    let message = sealed_message_fact(workspace, signer, frontier, 42, [44; 32]);
-    let signer_offer = context::signer_offer([45; 32], workspace_scope(workspace), signer);
-    let wrong_secret_offer = context::secret_offer(
-        [46; 32],
-        workspace_scope(workspace),
-        workspace,
-        [47; 32],
-        0,
-        99,
-        0,
-        [0; 32],
-    );
-    let projector = sealed_project::SealedMessageProjector::new();
-
-    let output = projector
-        .project(
-            &message,
-            &ProjectionContext::new(vec![signer_offer, wrong_secret_offer]),
-        )
-        .expect("project with mismatched context");
-
-    assert!(
-        output
-            .needs
-            .iter()
-            .any(|need| need.role == context::secret_role()),
-        "wrong secret coverage must leave the secret need standing"
-    );
-    assert!(
-        output
-            .intents
-            .iter()
-            .all(|intent| AtomicIntent::from_intent(intent, &[MESSAGE_ROWS]).is_err()),
-        "wrong secret coverage must not materialize a plaintext row"
-    );
 }
 
 fn message_fact(
@@ -466,48 +368,20 @@ fn message_fact(
     )
 }
 
-fn sealed_message_fact(
-    workspace_id: [u8; 32],
-    signer_id: [u8; 32],
-    frontier_id: [u8; 32],
-    minute: u64,
-    leaf_id: [u8; 32],
-) -> Fact {
-    Fact::new(
-        workspace_scope(workspace_id),
-        minute,
-        sealed_layout::encode_sealed_message(&SealedMessageFact {
-            workspace_id,
-            created_at_ms: minute * 60_000,
-            author_user_id: [6; 32],
-            signer_id,
-            frontier_id,
-            local_history_node_secret_id: [10; 32],
-            expires_at_minute: u64::MAX,
-            disappearing_setting_id: [11; 32],
-            minute,
-            leaf_id,
-            nonce: [12; NONCE_BYTES],
-            ciphertext: encrypted_body(workspace_id, frontier_id, minute, DEFAULT_SECRET),
-        })
-        .expect("encode sealed message"),
-    )
-}
-
 fn encrypted_body(
     workspace_id: [u8; 32],
     frontier_id: [u8; 32],
     minute: u64,
     secret_key: [u8; 32],
 ) -> Vec<u8> {
-    let plaintext = message_create::pad_plaintext(b"sealed").expect("pad plaintext");
+    let plaintext = message_create::pad_plaintext(b"hidden").expect("pad plaintext");
     crypto::xchacha20poly1305_encrypt(
         &secret_key,
         &message_create::associated_data(workspace_id, frontier_id, minute),
         &[12; NONCE_BYTES],
         &plaintext,
     )
-    .expect("encrypt sealed test message")
+    .expect("encrypt content message test body")
 }
 
 fn removal_frontier_fact(
@@ -701,40 +575,6 @@ fn deletion_fact_by_author(
         })
         .expect("encode deletion"),
     )
-}
-
-fn sealed_deletion_fact(workspace_id: [u8; 32], target_id: [u8; 32]) -> Fact {
-    Fact::new(
-        workspace_scope(workspace_id),
-        2,
-        sealed_layout::encode_message_deletion(&SealedMessageDeletionFact {
-            workspace_id,
-            created_at_ms: 2,
-            target_id,
-            author_user_id: [6; 32],
-        })
-        .expect("encode sealed deletion"),
-    )
-}
-
-fn secret_node_fact(
-    workspace_id: [u8; 32],
-    frontier_id: [u8; 32],
-    start_minute: u64,
-    end_minute: u64,
-    prefix_bytes: u8,
-    leaf_prefix: [u8; 32],
-) -> Fact {
-    let bytes = sealed_layout::encode_secret_node(&SecretNodeFact {
-        workspace_id,
-        frontier_id,
-        start_minute,
-        end_minute,
-        prefix_bytes,
-        leaf_prefix,
-    })
-    .expect("encode secret node");
-    Fact::new(workspace_scope(workspace_id), start_minute, bytes)
 }
 
 fn count_kind(intents: &[topo::core::intents::Intent], kind: &str) -> usize {

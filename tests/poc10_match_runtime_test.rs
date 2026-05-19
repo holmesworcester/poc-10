@@ -7,9 +7,7 @@ use topo::core::command_context::{
 };
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
-use topo::protocol::facts::content::{
-    message as content_message, sealed_message::rows as sealed_rows,
-};
+use topo::protocol::facts::content::message as content_message;
 use topo::protocol::facts::encryption::{
     fact::{LocalKeySecretFact, RemovalFrontierFact},
     layout as encryption_layout,
@@ -122,14 +120,6 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
     assert!(
         runtime
             .store()
-            .table_rows(sealed_rows::SEALED_MESSAGE_ROWS)
-            .expect("sealed message rows")
-            .is_empty(),
-        "semantic content messages should not materialize sealed-message wrapper rows"
-    );
-    assert!(
-        runtime
-            .store()
             .table_rows(content_message::rows::CONTENT_MESSAGE_ROWS)
             .expect("content message rows")
             .is_empty(),
@@ -138,7 +128,7 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
     assert!(
         runtime
             .store()
-            .table_rows(sealed_rows::OPENED_MESSAGE_ROWS)
+            .table_rows(content_message::rows::OPENED_MESSAGE_ROWS)
             .expect("opened message rows")
             .is_empty(),
         "opened rows wait until author context is available"

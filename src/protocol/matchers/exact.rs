@@ -31,7 +31,7 @@ pub const LOCAL_SIGNER_SECRET_ROLE: &str = "local_signer_secret";
 pub const RECIPIENT_KEY_ROLE: &str = "recipient_key";
 pub const RECIPIENT_SUPERSEDED_ROLE: &str = "recipient_superseded";
 pub const REMOVAL_FRONTIER_ROLE: &str = "encryption_removal_frontier";
-pub const SIGNER_PUBKEY_ROLE: &str = "signer_pubkey";
+pub const CONTENT_SIGNER_ROLE: &str = "content_signer";
 pub const SYNC_EXACT_FACT_ROLE: &str = "sync_exact_fact";
 pub const SYNC_KEY_WRAP_ROLE: &str = "sync_key_wrap";
 pub const TRANSIT_RECEIVED_ROLE: &str = "transport_transit_received";
@@ -492,7 +492,7 @@ pub fn recipient_superseded_offer(
 }
 
 pub fn signer_role() -> Role {
-    protocol_role(SIGNER_PUBKEY_ROLE)
+    protocol_role(CONTENT_SIGNER_ROLE)
 }
 
 pub fn signer_need(owner: FactId, scope: FactScope, signer_id: FactId) -> ContextNeed {

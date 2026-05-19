@@ -331,7 +331,7 @@ fn workspace_retired_from_access(
     let tombstones = runtime
         .store()
         .table_rows_with_key_prefix(
-            content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
+            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
             &workspace_id,
             usize::MAX,
         )
@@ -342,13 +342,13 @@ fn workspace_retired_from_access(
     let live_messages = runtime
         .store()
         .table_rows_with_key_prefix(
-            content::sealed_message::rows::MESSAGE_ROWS,
+            content::message::rows::CONTENT_MESSAGE_ROWS,
             &workspace_id,
             usize::MAX,
         )
         .map_err(|err| format!("load message rows for key access: {err}"))?
         .into_iter()
-        .map(|(key, value)| content::sealed_message::rows::decode_message_row(&key, &value))
+        .map(|(key, value)| content::message::rows::decode_content_message_row(&key, &value))
         .collect::<Result<Vec<_>, _>>()?;
     let horizon_floor = logical_clock::logical_time(runtime.store())?
         .map(|ms| (ms / 60_000).saturating_sub(30 * 24 * 60))

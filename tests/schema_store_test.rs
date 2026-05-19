@@ -57,7 +57,7 @@ fn schema_sources_create_declared_row_tables() {
                 value: b"fact bytes".to_vec(),
             },
             TableRow {
-                table: TableName::new("message_rows"),
+                table: TableName::new("opened_message_rows"),
                 key: b"message/1".to_vec(),
                 value: b"message bytes".to_vec(),
             },

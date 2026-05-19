@@ -6,14 +6,12 @@ use topo::core::projection::{MatchedContext, ProjectionContext, ProjectionOutput
 use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::protocol::facts::content::sealed_message::fact::{
-    SealedMessageFact, SignerPubkeyFact, NONCE_BYTES,
+use topo::protocol::facts::content::message::fact::{ContentMessageFact, NONCE_BYTES};
+use topo::protocol::facts::content::message::rows::{
+    content_message_key, CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
 };
-use topo::protocol::facts::content::sealed_message::rows::{
-    message_key, MESSAGE_ROWS, OPENED_MESSAGE_ROWS, SEALED_MESSAGE_ROWS,
-};
-use topo::protocol::facts::content::sealed_message::{
-    layout as message_layout, project as message_project,
+use topo::protocol::facts::content::message::{
+    create as message_create, layout as message_layout, project as message_project,
 };
 use topo::protocol::facts::encryption::fact::{
     KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact,
@@ -30,7 +28,11 @@ use topo::protocol::facts::encryption::{
     rows as encryption_rows,
 };
 use topo::protocol::facts::identity;
+use topo::protocol::facts::identity::endpoint_shared::fact::{EndpointRole, EndpointSharedFact};
+use topo::protocol::facts::identity::endpoint_shared::layout as endpoint_shared_layout;
 use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::facts::identity::signed_fact::fact::SignedFactEnvelope;
+use topo::protocol::facts::identity::user::{fact::UserFact, layout as user_layout};
 use topo::protocol::intents::encryption::create_key_wrap::CreateKeyWrapHandler;
 use topo::protocol::intents::encryption::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler;
 use topo::protocol::intents::encryption::unwrap_key_wrap::UnwrapKeyWrapHandler;
@@ -99,23 +101,23 @@ fn recipient_key_waits_for_local_signer_secret_before_materializing_wrap() {
     let recipient = recipient_key_fact(workspace, endpoint, NO_PREVIOUS_RECIPIENT_KEY, 10);
     let frontier = removal_frontier_fact(workspace, endpoint, 19);
     let root = local_key_secret_fact(workspace, frontier.id, endpoint, 20);
-    let signer_pubkey = signer_pubkey_fact(workspace, endpoint, [0x88; 32]);
+    let signer_endpoint = signer_endpoint_fact(workspace, endpoint, [0x88; 32]);
     let mut bus = WakeLoop::new();
     let projector = CombinedProjector;
-    let signer_pubkey_matcher = ExactSelectorMatcher::new(message_context::signer_role());
+    let signer_endpoint_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_matcher =
         ExactSelectorMatcher::new(topo::protocol::matchers::local_signer_secret_role());
     let matchers = [
-        &signer_pubkey_matcher as &dyn ContextMatcher,
+        &signer_endpoint_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
         &wrap_matcher as &dyn ContextMatcher,
         &signer_matcher as &dyn ContextMatcher,
     ];
 
     bus.submit_fact(recipient.clone());
-    bus.submit_fact(signer_pubkey);
+    bus.submit_fact(signer_endpoint);
     bus.submit_fact(frontier);
     bus.submit_fact(root);
     bus.drain(&projector, &matchers, 20)
@@ -319,7 +321,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     let recipient = recipient_key_fact(workspace, requester, NO_PREVIOUS_RECIPIENT_KEY, 50);
     let root = local_key_secret_fact(workspace, frontier.id, responder, 10);
     let signer = local_signer_secret_fact(workspace, responder);
-    let signer_pubkey = signer_pubkey_fact(
+    let signer_endpoint = signer_endpoint_fact(
         workspace,
         responder,
         crypto::ed25519_public_key(&[0x42; 32]),
@@ -340,13 +342,13 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
     let wrap_matcher = WrapSourceMatcher::new();
     let signer_secret_matcher =
         ExactSelectorMatcher::new(topo::protocol::matchers::local_signer_secret_role());
-    let signer_pubkey_matcher = ExactSelectorMatcher::new(message_context::signer_role());
+    let signer_endpoint_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let matchers = [
         &recipient_matcher as &dyn ContextMatcher,
         &frontier_matcher as &dyn ContextMatcher,
         &wrap_matcher as &dyn ContextMatcher,
         &signer_secret_matcher as &dyn ContextMatcher,
-        &signer_pubkey_matcher as &dyn ContextMatcher,
+        &signer_endpoint_matcher as &dyn ContextMatcher,
     ];
     let mut bus = WakeLoop::new();
 
@@ -355,7 +357,7 @@ fn key_request_materialize_intent_survives_restart_and_projects_signed_wrap() {
         recipient.clone(),
         root.clone(),
         signer.clone(),
-        signer_pubkey,
+        signer_endpoint,
         request,
     ] {
         bus.submit_fact(fact);
@@ -850,14 +852,23 @@ fn retired_recipient_material_handler_revalidates_exact_local_material() {
 }
 
 #[test]
-fn encryption_history_node_offer_wakes_and_clears_sealed_message_secret_need() {
+fn encryption_history_node_offer_wakes_and_clears_content_message_secret_need() {
     let workspace = [40; 32];
     let signer = [41; 32];
     let frontier = removal_frontier_fact(workspace, [0x76; 32], 54);
     let root = local_key_secret_fact(workspace, frontier.id, [0x76; 32], 54);
     let leaf = [0xab; 32];
-    let message = sealed_message_fact(workspace, signer, frontier.id, 55, leaf, [0x79; 32]);
-    let signer = signer_fact(workspace, signer);
+    let author = user_fact(workspace);
+    let message = content_message_fact(
+        workspace,
+        signer,
+        frontier.id,
+        55,
+        leaf,
+        [0x79; 32],
+        author.id,
+    );
+    let signer = signer_fact(workspace, signer, author.id);
     let history_node = history_node_fact_with_source(
         workspace,
         frontier.id,
@@ -902,7 +913,7 @@ fn encryption_history_node_offer_wakes_and_clears_sealed_message_secret_need() {
         .expect("history node offers secret coverage")
         .clone();
 
-    let message_output = message_project::SealedMessageProjector::new()
+    let message_output = message_project::ContentMessageProjector::new()
         .project(
             &message,
             &ProjectionContext::from_matches(vec![
@@ -912,9 +923,21 @@ fn encryption_history_node_offer_wakes_and_clears_sealed_message_secret_need() {
                     payload: signer,
                 },
                 MatchedContext {
+                    need: topo::protocol::matchers::exact_need(
+                        message.id,
+                        topo::protocol::matchers::user_role(),
+                        author.id,
+                    ),
+                    offer: topo::protocol::matchers::exact_offer(
+                        author.id,
+                        topo::protocol::matchers::user_role(),
+                    ),
+                    payload: author,
+                },
+                MatchedContext {
                     need: message_context::secret_need(
                         message.id,
-                        scope,
+                        scope.clone(),
                         workspace,
                         frontier.id,
                         55,
@@ -931,26 +954,19 @@ fn encryption_history_node_offer_wakes_and_clears_sealed_message_secret_need() {
         .intents
         .iter()
         .filter_map(|intent| {
-            AtomicIntent::from_intent(
-                intent,
-                &[MESSAGE_ROWS, SEALED_MESSAGE_ROWS, OPENED_MESSAGE_ROWS],
-            )
-            .ok()
+            AtomicIntent::from_intent(intent, &[CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS]).ok()
         })
         .collect::<Vec<_>>();
-    assert!(rows
-        .iter()
-        .any(|intent| matches!(intent, AtomicIntent::PutRow(row) if row.table == SEALED_MESSAGE_ROWS && row.key == message_key(workspace, message.id))));
-    assert!(rows
-        .iter()
-        .any(|intent| matches!(intent, AtomicIntent::PutRow(row) if row.table == MESSAGE_ROWS)));
+    assert!(rows.iter().any(
+        |intent| matches!(intent, AtomicIntent::PutRow(row) if row.table == CONTENT_MESSAGE_ROWS && row.key == content_message_key(workspace, message.id))
+    ));
     assert!(rows.iter().any(
         |intent| matches!(intent, AtomicIntent::PutRow(row) if row.table == OPENED_MESSAGE_ROWS)
     ));
-    assert!(!message_output
-        .needs
+    assert!(message_output
+        .offers
         .iter()
-        .any(|need| need.role == message_context::secret_role()));
+        .any(|offer| offer.role == message_context::message_role()));
 }
 
 #[test]
@@ -967,7 +983,7 @@ fn signed_key_wrap_waits_for_context_then_offers_sync_key_and_row() {
         frontier.id,
         recipient.id,
     );
-    let signer = signer_pubkey_fact(
+    let signer = signer_endpoint_fact(
         workspace,
         signer_id,
         crypto::ed25519_public_key(&signer_private_key),
@@ -1071,7 +1087,7 @@ fn signed_key_wrap_waits_for_context_then_offers_sync_key_and_row() {
 }
 
 #[test]
-fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
+fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_content_message() {
     let workspace = [70; 32];
     let signer_id = [71; 32];
     let signer_private_key = [72; 32];
@@ -1084,11 +1100,6 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
     let local_recipient =
         local_recipient_key_fact(workspace, recipient.id, recipient_public, recipient_secret);
     let signer = local_signer_secret_fact_with_private(workspace, signer_id, signer_private_key);
-    let signer_pubkey = signer_pubkey_fact(
-        workspace,
-        signer_id,
-        crypto::ed25519_public_key(&signer_private_key),
-    );
     let materialize = decode_create_key_wrap_intent(
         &topo::protocol::facts::encryption::intent::create_key_wrap_intent(
             recipient.id,
@@ -1107,7 +1118,22 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
     let signed_wrap =
         encryption_create::create_signed_key_wrap_fact(&materialize, &recipient, &root, &signer)
             .expect("materialize signed key wrap");
-    let message = sealed_message_fact(workspace, signer_id, frontier.id, 15, [74; 32], [0x66; 32]);
+    let author = user_fact(workspace);
+    let signer_endpoint = signed_endpoint_shared_fact(
+        workspace,
+        signer_id,
+        crypto::ed25519_public_key(&signer_private_key),
+        author.id,
+    );
+    let message = content_message_fact(
+        workspace,
+        signer_id,
+        frontier.id,
+        15,
+        [74; 32],
+        [0x66; 32],
+        author.id,
+    );
     let projector = CombinedProjector;
     let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
@@ -1115,6 +1141,7 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
     let local_recipient_matcher =
         ExactSelectorMatcher::new(encryption_context::local_recipient_key_role());
     let deletion_matcher = ExactSelectorMatcher::new(message_context::deletion_role());
+    let user_matcher = ExactSelectorMatcher::new(topo::protocol::matchers::user_role());
     let secret_matcher = SecretCoverageMatcher::new();
     let matchers = [
         &signer_matcher as &dyn ContextMatcher,
@@ -1122,21 +1149,23 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
         &frontier_matcher as &dyn ContextMatcher,
         &local_recipient_matcher as &dyn ContextMatcher,
         &deletion_matcher as &dyn ContextMatcher,
+        &user_matcher as &dyn ContextMatcher,
         &secret_matcher as &dyn ContextMatcher,
     ];
     let mut bus = WakeLoop::new();
 
     for fact in [
         signed_wrap.clone(),
-        signer_pubkey,
+        signer_endpoint,
         frontier.clone(),
         recipient.clone(),
+        author,
         message.clone(),
     ] {
         bus.submit_fact(fact);
     }
     bus.drain(&projector, &matchers, 100)
-        .expect("accepted wrap and sealed message project without local recipient");
+        .expect("accepted wrap and content message project without local recipient");
     let wrap_context = bus.context(&signed_wrap.id).expect("signed wrap context");
     assert!(wrap_context.offers.iter().any(|offer| {
         offer.role == sync_context::key_wrap_role()
@@ -1156,10 +1185,10 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
         .iter()
         .any(|need| need.role == message_context::secret_role()));
     assert!(
-        !message_rows(&bus)
+        !opened_message_rows(&bus)
             .iter()
-            .any(|row| row.key == message_key(workspace, message.id)),
-        "sealed message must not materialize plaintext before local unwrap"
+            .any(|row| row.key == content_message_key(workspace, message.id)),
+        "content message must not materialize plaintext before local unwrap"
     );
 
     bus.submit_fact(local_recipient.clone());
@@ -1188,15 +1217,15 @@ fn local_recipient_key_wakes_signed_wrap_unwrap_and_covers_sealed_message() {
     let message_context_after = bus
         .context(&message.id)
         .expect("covered message keeps deletion context");
-    assert!(!message_context_after
-        .needs
+    assert!(message_context_after
+        .offers
         .iter()
-        .any(|need| need.role == message_context::secret_role()));
+        .any(|offer| offer.role == message_context::message_role()));
     assert!(
-        message_rows(&bus)
+        opened_message_rows(&bus)
             .iter()
-            .any(|row| row.key == message_key(workspace, message.id)),
-        "matched local secret coverage opens the sealed message deterministically"
+            .any(|row| row.key == content_message_key(workspace, message.id)),
+        "matched local secret coverage opens the content message deterministically"
     );
 }
 
@@ -1215,7 +1244,7 @@ fn signed_key_wrap_rejects_signer_public_key_mismatch() {
         recipient.id,
     );
     let wrong_signer =
-        signer_pubkey_fact(workspace, signer_id, crypto::ed25519_public_key(&[49; 32]));
+        signer_endpoint_fact(workspace, signer_id, crypto::ed25519_public_key(&[49; 32]));
     let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
@@ -1283,12 +1312,12 @@ fn signed_key_wrap_rejects_frontier_owned_by_someone_else() {
         frontier.id,
         recipient.id,
     );
-    let signer = signer_pubkey_fact(
+    let signer = signer_endpoint_fact(
         workspace,
         signer_id,
         crypto::ed25519_public_key(&signer_private_key),
     );
-    let other_owner_signer = signer_pubkey_fact(workspace, other_owner, [0x89; 32]);
+    let other_owner_signer = signer_endpoint_fact(workspace, other_owner, [0x89; 32]);
     let signer_matcher = ExactSelectorMatcher::new(message_context::signer_role());
     let recipient_matcher = ExactSelectorMatcher::new(recipient_key_role());
     let frontier_matcher = ExactSelectorMatcher::new(frontier_role());
@@ -1389,16 +1418,44 @@ impl Projector for CombinedProjector {
             | Some(encryption_layout::TYPE_LOCAL_KEY_SECRET)
             | Some(encryption_layout::TYPE_LOCAL_HISTORY_NODE_SECRET)
             | Some(encryption_layout::TYPE_LOCAL_RECIPIENT_KEY)
-            | Some(encryption_layout::TYPE_KEY_REQUEST)
-            | Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) => {
+            | Some(encryption_layout::TYPE_KEY_REQUEST) => {
+                encryption_project::EncryptionProjector::new().project(fact, context)
+            }
+            Some(identity::signed_fact::layout::TYPE_SIGNED_FACT) => {
+                let envelope = identity::signed_fact::layout::decode_signed_fact(fact.body())?;
+                if envelope.inner_type == endpoint_shared_layout::TYPE_ENDPOINT_SHARED {
+                    let endpoint = endpoint_shared_layout::decode_fact(&envelope.payload)?;
+                    return endpoint_shared_signer_output(fact, &endpoint);
+                }
                 encryption_project::EncryptionProjector::new().project(fact, context)
             }
             Some(identity::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET) => {
                 identity::signed_fact::project::SignedFactProjector::new().project(fact, context)
             }
-            _ => message_project::SealedMessageProjector::new().project(fact, context),
+            Some(endpoint_shared_layout::TYPE_ENDPOINT_SHARED) => {
+                let endpoint = endpoint_shared_layout::decode_fact(fact.body())?;
+                endpoint_shared_signer_output(fact, &endpoint)
+            }
+            Some(user_layout::TYPE_USER) => Ok(ProjectionOutput::new().offer(
+                topo::protocol::matchers::exact_offer(
+                    fact.id,
+                    topo::protocol::matchers::user_role(),
+                ),
+            )),
+            _ => message_project::ContentMessageProjector::new().project(fact, context),
         }
     }
+}
+
+fn endpoint_shared_signer_output(
+    fact: &Fact,
+    endpoint: &EndpointSharedFact,
+) -> Result<ProjectionOutput, String> {
+    Ok(ProjectionOutput::new().offer(message_context::signer_offer(
+        fact.id,
+        workspace_scope(endpoint.workspace_id),
+        endpoint.endpoint_id,
+    )))
 }
 
 fn create_key_wrap_intents(intents: &[Intent]) -> Vec<CreateKeyWrapIntent> {
@@ -1579,12 +1636,12 @@ fn local_recipient_key_fact(
     )
 }
 
-fn message_rows(bus: &WakeLoop) -> Vec<topo::core::store::TableRow> {
+fn opened_message_rows(bus: &WakeLoop) -> Vec<topo::core::store::TableRow> {
     bus.intents()
         .iter()
-        .filter_map(|intent| AtomicIntent::from_intent(intent, &[MESSAGE_ROWS]).ok())
+        .filter_map(|intent| AtomicIntent::from_intent(intent, &[OPENED_MESSAGE_ROWS]).ok())
         .filter_map(|intent| match intent {
-            AtomicIntent::PutRow(row) if row.table == MESSAGE_ROWS => Some(row),
+            AtomicIntent::PutRow(row) if row.table == OPENED_MESSAGE_ROWS => Some(row),
             _ => None,
         })
         .collect()
@@ -1627,36 +1684,31 @@ fn key_request_matchers() -> (
     )
 }
 
-fn sealed_message_fact(
+fn content_message_fact(
     workspace_id: [u8; 32],
     signer_id: [u8; 32],
     frontier_id: [u8; 32],
     minute: u64,
     leaf_id: [u8; 32],
     secret_key: [u8; 32],
+    author_user_id: [u8; 32],
 ) -> Fact {
     let nonce = [0xa4; NONCE_BYTES];
-    let plaintext =
-        topo::protocol::facts::content::sealed_message::create::pad_plaintext(b"healing")
-            .expect("plaintext");
+    let plaintext = message_create::pad_plaintext(b"healing").expect("plaintext");
     let ciphertext = crypto::xchacha20poly1305_encrypt(
         &secret_key,
-        &topo::protocol::facts::content::sealed_message::create::associated_data(
-            workspace_id,
-            frontier_id,
-            minute,
-        ),
+        &message_create::associated_data(workspace_id, frontier_id, minute),
         &nonce,
         &plaintext,
     )
-    .expect("encrypt sealed test message");
+    .expect("encrypt content test message");
     Fact::new(
         workspace_scope(workspace_id),
         minute,
-        message_layout::encode_sealed_message(&SealedMessageFact {
+        message_layout::encode_fact(&ContentMessageFact {
             workspace_id,
             created_at_ms: minute * 60_000,
-            author_user_id: [0xa1; 32],
+            author_user_id,
             signer_id,
             frontier_id,
             local_history_node_secret_id: [0xa2; 32],
@@ -1671,27 +1723,69 @@ fn sealed_message_fact(
     )
 }
 
-fn signer_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact {
+fn signer_fact(workspace_id: [u8; 32], signer_id: [u8; 32], author_user_id: [u8; 32]) -> Fact {
+    let endpoint = EndpointSharedFact {
+        created_at_ms: 0,
+        workspace_id,
+        user_authority_fact_id: author_user_id,
+        endpoint_id: signer_id,
+        signing_public_key: [0x88; 32],
+        endpoint_role: EndpointRole::Device,
+        device_name: "test-device".to_string(),
+    };
     Fact::new(
-        workspace_scope(workspace_id),
+        FactScope::Global,
         0,
-        message_layout::encode_signer_pubkey(&SignerPubkeyFact {
-            signer_id,
-            public_key: [0x88; 32],
-        })
-        .expect("encode signer"),
+        endpoint_shared_layout::encode_fact(&endpoint).expect("encode endpoint shared"),
     )
 }
 
-fn signer_pubkey_fact(workspace_id: [u8; 32], signer_id: [u8; 32], public_key: [u8; 32]) -> Fact {
+fn signer_endpoint_fact(workspace_id: [u8; 32], signer_id: [u8; 32], public_key: [u8; 32]) -> Fact {
+    signed_endpoint_shared_fact(workspace_id, signer_id, public_key, signer_id)
+}
+
+fn signed_endpoint_shared_fact(
+    workspace_id: [u8; 32],
+    signer_id: [u8; 32],
+    public_key: [u8; 32],
+    user_authority_fact_id: [u8; 32],
+) -> Fact {
+    let endpoint = EndpointSharedFact {
+        created_at_ms: 0,
+        workspace_id,
+        user_authority_fact_id,
+        endpoint_id: signer_id,
+        signing_public_key: public_key,
+        endpoint_role: EndpointRole::Device,
+        device_name: "test-device".to_string(),
+    };
+    let payload = endpoint_shared_layout::encode_fact(&endpoint).expect("encode endpoint shared");
+    let envelope = SignedFactEnvelope {
+        signer_id,
+        signer_public_key: public_key,
+        inner_type: endpoint_shared_layout::TYPE_ENDPOINT_SHARED,
+        payload,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+    };
     Fact::new(
-        workspace_scope(workspace_id),
+        FactScope::Global,
         0,
-        message_layout::encode_signer_pubkey(&SignerPubkeyFact {
-            signer_id,
-            public_key,
-        })
-        .expect("encode signer"),
+        identity::signed_fact::layout::encode_signed_fact(&envelope)
+            .expect("encode signed endpoint shared"),
+    )
+}
+
+fn user_fact(workspace_id: [u8; 32]) -> Fact {
+    let user = UserFact {
+        created_at_ms: 0,
+        workspace_id,
+        public_key: [0x77; 32],
+        username: "author".to_string(),
+    };
+    Fact::new(
+        FactScope::Global,
+        0,
+        user_layout::encode_fact(&user).expect("encode user"),
     )
 }
 
@@ -1783,13 +1877,11 @@ fn signed_key_wrap_rejects_recipient_workspace_mismatch() {
         identity::signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
             .expect("sign key wrap");
     let signed_wrap = Fact::new(workspace_scope(wrap_workspace), 10, bytes);
-    let signer_public_key = topo::core::crypto::ed25519_public_key(&signer_private_key);
-    let signer_fact_bytes = message_layout::encode_signer_pubkey(&SignerPubkeyFact {
+    let signer_fact = signer_endpoint_fact(
+        wrap_workspace,
         signer_id,
-        public_key: signer_public_key,
-    })
-    .expect("encode signer");
-    let signer_fact = Fact::new(workspace_scope(wrap_workspace), 0, signer_fact_bytes);
+        topo::core::crypto::ed25519_public_key(&signer_private_key),
+    );
 
     // Build the matched context directly, bypassing the bus scope gate.
     let scope = workspace_scope(wrap_workspace);
@@ -1870,13 +1962,11 @@ fn signed_key_wrap_rejects_frontier_workspace_mismatch() {
         identity::signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
             .expect("sign key wrap");
     let signed_wrap = Fact::new(workspace_scope(wrap_workspace), 10, bytes);
-    let signer_public_key = topo::core::crypto::ed25519_public_key(&signer_private_key);
-    let signer_fact_bytes = message_layout::encode_signer_pubkey(&SignerPubkeyFact {
+    let signer_fact = signer_endpoint_fact(
+        wrap_workspace,
         signer_id,
-        public_key: signer_public_key,
-    })
-    .expect("encode signer");
-    let signer_fact = Fact::new(workspace_scope(wrap_workspace), 0, signer_fact_bytes);
+        topo::core::crypto::ed25519_public_key(&signer_private_key),
+    );
 
     let scope = workspace_scope(wrap_workspace);
     let signer_need = message_context::signer_need(signed_wrap.id, scope.clone(), signer_id);
@@ -1944,7 +2034,7 @@ fn signed_key_wrap_rejects_mismatched_local_recipient_context() {
         frontier.id,
         recipient.id,
     );
-    let signer = signer_pubkey_fact(
+    let signer = signer_endpoint_fact(
         wrap_workspace,
         signer_id,
         crypto::ed25519_public_key(&signer_private_key),

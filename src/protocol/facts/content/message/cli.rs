@@ -557,7 +557,7 @@ fn resolve_message_selector(
         });
     }
     let message_id = decode_id(selector)?;
-    let key = super::rows::message_key(workspace_id, message_id);
+    let key = super::rows::content_message_key(workspace_id, message_id);
     if let Some(value) = store
         .table_row(super::rows::OPENED_MESSAGE_ROWS, &key)
         .map_err(|err| format!("read opened message row: {err}"))?
@@ -569,10 +569,10 @@ fn resolve_message_selector(
         });
     }
     if let Some(value) = store
-        .table_row(super::rows::SEALED_MESSAGE_ROWS, &key)
-        .map_err(|err| format!("read sealed message row: {err}"))?
+        .table_row(super::rows::CONTENT_MESSAGE_ROWS, &key)
+        .map_err(|err| format!("read content message row: {err}"))?
     {
-        let row = super::rows::decode_sealed_message_row(&key, &value)?;
+        let row = super::rows::decode_content_message_row(&key, &value)?;
         return Ok(MessageSelection {
             message_id,
             author_user_id: row.author_user_id,
@@ -730,14 +730,14 @@ fn message_is_visible(
     workspace_id: FactId,
     message_id: FactId,
 ) -> Result<bool, String> {
-    let key = super::rows::message_key(workspace_id, message_id);
+    let key = super::rows::content_message_key(workspace_id, message_id);
     Ok(store
         .table_row(super::rows::OPENED_MESSAGE_ROWS, &key)
         .map_err(|err| format!("read opened message row: {err}"))?
         .is_some()
         || store
-            .table_row(super::rows::SEALED_MESSAGE_ROWS, &key)
-            .map_err(|err| format!("read sealed message row: {err}"))?
+            .table_row(super::rows::CONTENT_MESSAGE_ROWS, &key)
+            .map_err(|err| format!("read content message row: {err}"))?
             .is_some())
 }
 

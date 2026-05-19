@@ -9,7 +9,7 @@ use topo::protocol::matchers::ExactSelectorMatcher;
 #[test]
 fn deletion_update_offer_wakes_waiting_content_fact_and_emits_purge_intent() {
     let workspace = [4; 32];
-    let target = content_fact(workspace, b"sealed message");
+    let target = content_fact(workspace, b"content message");
     let deletion = deletion_fact(workspace, target.id);
     let primary_matcher = ExactSelectorMatcher::new(primary_role());
     let delete_matcher = ExactSelectorMatcher::new(deletion_role());
@@ -54,7 +54,7 @@ fn deletion_update_offer_wakes_waiting_content_fact_and_emits_purge_intent() {
 #[test]
 fn repeated_deletion_offers_do_not_amplify_purge_intents() {
     let workspace = [5; 32];
-    let target = content_fact(workspace, b"sealed message");
+    let target = content_fact(workspace, b"content message");
     let deletion_a = deletion_fact(workspace, target.id);
     let deletion_b = deletion_fact(workspace, target.id);
     let primary_matcher = ExactSelectorMatcher::new(primary_role());

@@ -60,7 +60,7 @@ impl crate::core::runtime::Runtime<super::Protocol> {
 
         if let Some(current_minute) = current_minute(self.store())? {
             self.wake_time_range(
-                content::sealed_message::expiration_timeline(),
+                content::message::expiration_timeline(),
                 None,
                 current_minute,
                 work_limit,
@@ -138,10 +138,8 @@ const ATOMIC_ROW_TABLES: &[TableName] = &[
     identity::workspace::rows::WORKSPACE_ROWS,
     encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
     encryption::removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
-    content::sealed_message::rows::MESSAGE_ROWS,
-    content::sealed_message::rows::OPENED_MESSAGE_ROWS,
-    content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
-    content::sealed_message::rows::SEALED_MESSAGE_ROWS,
+    content::message::rows::OPENED_MESSAGE_ROWS,
+    content::message::rows::MESSAGE_TOMBSTONE_ROWS,
     sync::compare::rows::SYNC_COMPARE_ROWS,
     sync::have_id::rows::SYNC_HAVE_ID_ROWS,
     sync::need_id::rows::SYNC_NEED_ID_ROWS,

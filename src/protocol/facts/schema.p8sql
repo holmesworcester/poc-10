@@ -1,9 +1,7 @@
 # Initial poc-10 fact-module projection table inventory.
 # Row table declarations list durable ownership without migrating behavior yet.
 
-row_table message_rows;
 row_table opened_message_rows;
-row_table sealed_message_rows;
 row_table message_tombstone_rows;
 row_table file_slice_rows;
 row_table workspace_rows;

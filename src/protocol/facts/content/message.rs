@@ -1,12 +1,20 @@
+pub mod authoring;
 pub mod authority;
+pub mod cli;
 pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;
 pub mod queries;
+pub mod retention;
 pub mod rows;
 
 pub const TYPE_CONTENT_MESSAGE: u8 = layout::TYPE_CONTENT_MESSAGE;
+
+pub fn expiration_timeline() -> crate::core::projection::Timeline {
+    crate::core::projection::Timeline::new("content_message_expiry")
+        .expect("valid content-message expiry timeline")
+}
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentMessageFact, String> {
     layout::decode_fact(bytes)

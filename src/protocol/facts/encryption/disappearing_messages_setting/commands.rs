@@ -194,20 +194,6 @@ pub fn count_messages_below_minute(
 ) -> Result<usize, String> {
     let mut message_ids = BTreeSet::new();
 
-    let sealed_rows = store
-        .table_rows_with_key_prefix(
-            content::sealed_message::rows::SEALED_MESSAGE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("read sealed message rows: {err}"))?;
-    for (key, value) in sealed_rows {
-        let row = content::sealed_message::rows::decode_sealed_message_row(&key, &value)?;
-        if row.minute < floor_minute {
-            message_ids.insert(row.message_id);
-        }
-    }
-
     let content_rows = store
         .table_rows_with_key_prefix(
             content::message::rows::CONTENT_MESSAGE_ROWS,
@@ -222,29 +208,15 @@ pub fn count_messages_below_minute(
         }
     }
 
-    let live_rows = store
-        .table_rows_with_key_prefix(
-            content::sealed_message::rows::MESSAGE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("read message rows: {err}"))?;
-    for (key, value) in live_rows {
-        let row = content::sealed_message::rows::decode_message_row(&key, &value)?;
-        if row.minute < floor_minute {
-            message_ids.insert(row.message_id);
-        }
-    }
-
     let tombstone_rows = store
         .table_rows_with_key_prefix(
-            content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
+            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
             &workspace_id,
             usize::MAX,
         )
         .map_err(|err| format!("read message tombstone rows: {err}"))?;
     for (key, value) in tombstone_rows {
-        let row = content::sealed_message::rows::decode_message_tombstone_row(&key, &value)?;
+        let row = content::message::rows::decode_message_tombstone_row(&key, &value)?;
         if row.authored_minute < floor_minute {
             message_ids.insert(row.message_id);
         }

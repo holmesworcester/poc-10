@@ -157,6 +157,76 @@ This preserves the current full-state replay model. A projector does not need to
 know whether it is running for the first time, after a duplicate wake, after a
 crash, or after a transaction conflict.
 
+## WakeLoop Internal Shape
+
+Do not split `wake_loop.rs` as part of the SQLite-first migration. The SQLite
+work should remove enough long-lived in-memory state that the file can become a
+straight orchestration layer. Keep implementation-local structs in the file when
+they make one transaction step explicit, but avoid creating parallel modules
+until there is a clear post-migration reason.
+
+The public surface should stay small:
+
+```text
+submit_fact
+drain_projection / drain_projection_until_idle
+dispatch_intents
+wake_time_range
+save or flush only if a compatibility bridge still needs it
+```
+
+The private flow should read as a pipeline:
+
+```text
+claim pending owner
+load owner snapshot
+run projector outside transaction
+validate projection output
+commit owner effects in one transaction
+dispatch handler output through one shared path
+```
+
+Useful internal structs:
+
+- `OwnerSnapshot`: owner fact, previous owner context, matched projection
+  context, and any context version/recheck token.
+- `ContextReplacement`: normalized new context plus the owner-local delta
+  against previous needs/offers.
+- `WakeCandidates`: matched need owners and payload refs discovered by exact or
+  custom matcher lookup.
+- `IntentEffects`: atomic row mutations and deferred intents derived from one
+  projection or handler output.
+- `HandlerEffects`: emitted facts, purged facts, emitted intents, and report
+  increments after one handler invocation.
+
+These structs are transaction-local data carriers. They should not rebuild the
+current `WakeLoop` memory model under new names.
+
+As SQLite takes over, delete these current responsibilities from `WakeLoop`
+instead of wrapping them:
+
+- whole-graph fact map
+- owner-to-context map
+- in-memory exact need/offer indexes
+- in-memory time-wake map
+- pending projection deque and owner set
+- intent vector plus in-memory idempotence index
+- dirty/deleted tracking sets
+- whole-graph `load` / dirty `save` as the primary persistence mechanism
+
+Simplification rules for the implementer:
+
+- Prefer one named helper per pipeline step over nested control flow in
+  `drain_inner`.
+- Centralize handler-output application so atomic, deferred, fact-context, and
+  store-context dispatch paths do not duplicate purge/submit/record logic.
+- Replace stringly control flow for retry and missing input with explicit
+  internal result variants where possible.
+- Keep byte encoding and row decoding out of the wake-loop hot path; use shared
+  `wire` helpers and typed SQLite rows.
+- Keep matcher lookup behind helper functions that return candidate rows.
+  `WakeLoop` should decide when to wake, not how each matcher query is built.
+
 ## Context Replacement
 
 Projectors return the complete current context set for the single fact owner
@@ -419,7 +489,11 @@ still decide each affected fact's output.
 7. Add SELECT-only custom matcher SQL support.
 8. Convert `range`, then `coverage`, then `wrap_source` to schema-backed
    declarations and generated/core query plans.
-9. Delete in-memory context maps, exact indexes, dirty sets, and whole-graph
+9. Reshape `wake_loop.rs` into the single-file orchestration facade described
+   above: use owner-local temporary structs, one helper per drain/dispatch step,
+   one shared handler-output application path, and transaction-local effects
+   instead of field-level dirty tracking.
+10. Delete in-memory context maps, exact indexes, dirty sets, and whole-graph
    load/save once the SQLite path owns the runtime.
 
 ## Target Invariant

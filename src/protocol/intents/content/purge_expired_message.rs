@@ -6,7 +6,7 @@
 
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
-use crate::protocol::facts::content::sealed_message::retention;
+use crate::protocol::facts::content::message::retention;
 
 pub const PURGE_EXPIRED_MESSAGE: &str = "purge_expired_message";
 

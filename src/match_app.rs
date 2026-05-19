@@ -333,31 +333,31 @@ const MATCH_CLI_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     },
     CliCommand {
         name: "send",
-        usage: content::sealed_message::cli::SEND_USAGE,
+        usage: content::message::cli::SEND_USAGE,
         help: "",
         run: cli_send,
     },
     CliCommand {
         name: "react",
-        usage: content::sealed_message::cli::REACT_USAGE,
+        usage: content::message::cli::REACT_USAGE,
         help: "",
         run: cli_react,
     },
     CliCommand {
         name: "send-file",
-        usage: content::sealed_message::cli::SEND_FILE_USAGE,
+        usage: content::message::cli::SEND_FILE_USAGE,
         help: "",
         run: cli_send_file,
     },
     CliCommand {
         name: "files",
-        usage: content::sealed_message::cli::FILES_USAGE,
+        usage: content::message::cli::FILES_USAGE,
         help: "",
         run: cli_files,
     },
     CliCommand {
         name: "save-file",
-        usage: content::sealed_message::cli::SAVE_FILE_USAGE,
+        usage: content::message::cli::SAVE_FILE_USAGE,
         help: "",
         run: cli_save_file,
     },
@@ -369,19 +369,19 @@ const MATCH_CLI_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     },
     CliCommand {
         name: "delete-message",
-        usage: content::sealed_message::cli::DELETE_MESSAGE_USAGE,
+        usage: content::message::cli::DELETE_MESSAGE_USAGE,
         help: "",
         run: cli_delete_message,
     },
     CliCommand {
         name: "messages",
-        usage: content::sealed_message::cli::MESSAGES_USAGE,
+        usage: content::message::cli::MESSAGES_USAGE,
         help: "",
         run: cli_messages,
     },
     CliCommand {
         name: "view",
-        usage: content::sealed_message::cli::VIEW_USAGE,
+        usage: content::message::cli::VIEW_USAGE,
         help: "",
         run: cli_view,
     },
@@ -975,7 +975,7 @@ fn run_keys(parsed: ParsedArgs) -> Result<(), String> {
         .map_err(|err| format!("load local history rows: {err}"))?;
     let message_tombstones = store
         .table_rows_with_key_prefix(
-            content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
+            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
             &workspace_id,
             usize::MAX,
         )
@@ -1153,21 +1153,19 @@ fn run_disappearing_status(parsed: ParsedArgs) -> Result<(), String> {
     }
     let raw_message_tombstones = store
         .table_rows_with_key_prefix(
-            content::sealed_message::rows::MESSAGE_TOMBSTONE_ROWS,
+            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
             &workspace_id,
             usize::MAX,
         )
         .map_err(|err| format!("load message tombstones: {err}"))?;
     let message_tombstones = raw_message_tombstones
         .into_iter()
-        .map(|(key, value)| {
-            content::sealed_message::rows::decode_message_tombstone_row(&key, &value)
-        })
+        .map(|(key, value)| content::message::rows::decode_message_tombstone_row(&key, &value))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|row| row.authored_minute >= horizon_floor)
         .count();
-    let live_messages = message_rows(store, workspace_id)?
+    let live_messages = content_message_rows(store, workspace_id)?
         .into_iter()
         .filter(|row| row.minute >= horizon_floor)
         .count();
@@ -1197,7 +1195,7 @@ fn apply_horizon_floor(
     workspace_id: [u8; 32],
     horizon_floor: u64,
 ) -> Result<(), String> {
-    let retired = message_rows(store, workspace_id)?
+    let retired = content_message_rows(store, workspace_id)?
         .into_iter()
         .filter(|row| row.minute < horizon_floor)
         .collect::<Vec<_>>();
@@ -1207,7 +1205,7 @@ fn apply_horizon_floor(
     let tombstones = retired
         .iter()
         .map(|row| {
-            content::sealed_message::rows::message_tombstone_row(
+            content::message::rows::message_tombstone_row(
                 row.workspace_id,
                 row.message_id,
                 row.author_user_id,
@@ -1217,18 +1215,13 @@ fn apply_horizon_floor(
         .collect::<Vec<_>>();
     let keys = retired
         .iter()
-        .map(|row| content::sealed_message::rows::message_key(row.workspace_id, row.message_id))
+        .map(|row| content::message::rows::content_message_key(row.workspace_id, row.message_id))
         .collect::<Vec<_>>();
     store
         .write_transaction(|tx| {
             tx.insert_table_rows_in_tx(tombstones)?;
-            tx.delete_table_rows_in_tx(content::sealed_message::rows::MESSAGE_ROWS, keys.clone())?;
             tx.delete_table_rows_in_tx(content::message::rows::CONTENT_MESSAGE_ROWS, keys.clone())?;
-            tx.delete_table_rows_in_tx(
-                content::sealed_message::rows::OPENED_MESSAGE_ROWS,
-                keys.clone(),
-            )?;
-            tx.delete_table_rows_in_tx(content::sealed_message::rows::SEALED_MESSAGE_ROWS, keys)?;
+            tx.delete_table_rows_in_tx(content::message::rows::OPENED_MESSAGE_ROWS, keys.clone())?;
             Ok(())
         })
         .map_err(|err| format!("apply horizon floor: {err}"))
@@ -1321,26 +1314,24 @@ fn run_send(parsed: ParsedArgs) -> Result<(), String> {
     let workspace_id = parsed
         .command
         .get(1)
-        .ok_or_else(|| content::sealed_message::cli::SEND_USAGE.to_string())
+        .ok_or_else(|| content::message::cli::SEND_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     let text = parsed
         .command
         .get(2)
-        .ok_or_else(|| content::sealed_message::cli::SEND_USAGE.to_string())?
+        .ok_or_else(|| content::message::cli::SEND_USAGE.to_string())?
         .clone();
     let clock = FixedClock(next_cli_timestamp(&runtime)?);
-    let vault = content::sealed_message::authoring::SealedMessageVault::for_workspace(
-        &runtime,
-        workspace_id,
-    )?;
+    let vault =
+        content::message::authoring::ContentMessageVault::for_workspace(&runtime, workspace_id)?;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        content::sealed_message::cli::send(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::message::cli::send(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
-    for line in content::sealed_message::cli::send_output(&receipt, &text).lines {
+    for line in content::message::cli::send_output(&receipt, &text).lines {
         println!("{line}");
     }
     Ok(())
@@ -1355,12 +1346,12 @@ fn run_react(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        content::sealed_message::cli::react(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::message::cli::react(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
-    for line in content::sealed_message::cli::react_output(&receipt).lines {
+    for line in content::message::cli::react_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -1374,21 +1365,19 @@ fn run_send_file(parsed: ParsedArgs) -> Result<(), String> {
     let workspace_id = parsed
         .command
         .get(1)
-        .ok_or_else(|| content::sealed_message::cli::SEND_FILE_USAGE.to_string())
+        .ok_or_else(|| content::message::cli::SEND_FILE_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     let clock = FixedClock(next_cli_timestamp(&runtime)?);
-    let vault = content::sealed_message::authoring::SealedMessageVault::for_workspace(
-        &runtime,
-        workspace_id,
-    )?;
+    let vault =
+        content::message::authoring::ContentMessageVault::for_workspace(&runtime, workspace_id)?;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        content::sealed_message::cli::send_file(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::message::cli::send_file(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
-    for line in content::sealed_message::cli::send_file_output(&receipt).lines {
+    for line in content::message::cli::send_file_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -1405,7 +1394,7 @@ fn run_files(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        content::sealed_message::cli::files(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::message::cli::files(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     for line in output.lines {
         println!("{line}");
@@ -1424,7 +1413,7 @@ fn run_save_file(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        content::sealed_message::cli::save_file(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::message::cli::save_file(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     for line in output.lines {
         println!("{line}");
@@ -1473,12 +1462,12 @@ fn run_delete_message(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        content::sealed_message::cli::delete_message(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::message::cli::delete_message(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
     drain_runtime(&mut runtime)?;
     runtime.save()?;
-    for line in content::sealed_message::cli::delete_message_output(&receipt).lines {
+    for line in content::message::cli::delete_message_output(&receipt).lines {
         println!("{line}");
     }
     Ok(())
@@ -1495,7 +1484,7 @@ fn run_messages(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        content::sealed_message::cli::messages(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::message::cli::messages(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     for line in output.lines {
         println!("{line}");
@@ -1514,7 +1503,7 @@ fn run_view(parsed: ParsedArgs) -> Result<(), String> {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        content::sealed_message::cli::view(&ctx, CliArgs::new(&parsed.command[1..]))?
+        content::message::cli::view(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     for line in output.lines {
         println!("{line}");
@@ -1713,7 +1702,7 @@ fn next_cli_timestamp(runtime: &ProtocolRuntime) -> Result<u64, String> {
 
 fn max_cli_timestamp(store: &crate::core::store::Store) -> Result<u64, String> {
     let mut max_timestamp = content::event::queries::max_timestamp(store)?;
-    max_timestamp = max_timestamp.max(content::sealed_message::queries::max_created_at_ms(store)?);
+    max_timestamp = max_timestamp.max(content::message::queries::max_created_at_ms(store)?);
     max_timestamp = max_timestamp.max(content::message::queries::max_created_at_ms(store)?);
     Ok(max_timestamp)
 }
@@ -1725,7 +1714,7 @@ fn enqueue_floor_retention(
     floor_minute: u64,
 ) -> Result<usize, String> {
     let mut queued = 0usize;
-    for message in message_rows(runtime.store(), workspace_id)? {
+    for message in content_message_rows(runtime.store(), workspace_id)? {
         if message.minute >= floor_minute {
             continue;
         }
@@ -1754,7 +1743,7 @@ fn history_leaf_rows(
     store: &crate::core::store::Store,
     workspace_id: [u8; 32],
 ) -> Result<Vec<HistoryLeafRow>, String> {
-    let messages = message_rows(store, workspace_id)?;
+    let messages = content_message_rows(store, workspace_id)?;
     let live_message_ids = messages
         .iter()
         .map(|message| message.message_id)
@@ -1776,7 +1765,7 @@ fn history_leaf_rows(
         leaves.push(HistoryLeafRow {
             node_id: file.file_fact_id,
             frontier_id: default_frontier,
-            minute: file.created_at_ms / content::sealed_message::fact::UNIX_MINUTE_MS,
+            minute: file.created_at_ms / content::message::fact::UNIX_MINUTE_MS,
             fact_id_in_minute: file.file_id,
         });
     }
@@ -1784,19 +1773,19 @@ fn history_leaf_rows(
     Ok(leaves)
 }
 
-fn message_rows(
+fn content_message_rows(
     store: &crate::core::store::Store,
     workspace_id: [u8; 32],
-) -> Result<Vec<content::sealed_message::rows::MessageRow>, String> {
+) -> Result<Vec<content::message::rows::ContentMessageRow>, String> {
     let mut rows = store
         .table_rows_with_key_prefix(
-            content::sealed_message::rows::MESSAGE_ROWS,
+            content::message::rows::CONTENT_MESSAGE_ROWS,
             &workspace_id,
             usize::MAX,
         )
         .map_err(|err| format!("load message rows: {err}"))?
         .into_iter()
-        .map(|(key, value)| content::sealed_message::rows::decode_message_row(&key, &value))
+        .map(|(key, value)| content::message::rows::decode_content_message_row(&key, &value))
         .collect::<Result<Vec<_>, _>>()?;
     rows.sort_by_key(|row| (row.created_at_ms, row.message_id));
     Ok(rows)

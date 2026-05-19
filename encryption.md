@@ -17,9 +17,8 @@ context needs/offers, `WakeLoop`, projectors, and handlers.
 - `local_key_secret`: local opened frontier/root secret.
 - `local_history_node_secret`: local retained node in the time/trie key tree.
 - `content_message`: shared signed content fact whose encrypted fields name
-  their frontier and leaf coordinate. `sealed_message` is retained only for
-  legacy layout/row compatibility; it is not a current runtime or transport
-  route.
+  their frontier and leaf coordinate. Encryption is modeled as encrypted fields
+  inside the semantic content type, not as a separate message event wrapper.
 - deletion/expiry/floor facts: semantic facts that make content unavailable and
   wake purge/key-retirement behavior.
 

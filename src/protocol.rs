@@ -447,7 +447,7 @@ pub const CONTEXT_MATCHERS: &[ContextMatcherRegistration] = &[
         matcher: "SecretCoverageMatcher",
     },
     ContextMatcherRegistration {
-        role: "signer_pubkey",
+        role: "content_signer",
         matcher: "ExactSelectorMatcher",
     },
     ContextMatcherRegistration {

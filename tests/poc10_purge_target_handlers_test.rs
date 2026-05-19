@@ -2,11 +2,11 @@ use topo::core::facts::Fact;
 use topo::core::wake_loop::WakeLoop;
 use topo::protocol::facts::content;
 use topo::protocol::facts::content::file::fact::ContentFileFact;
-use topo::protocol::facts::content::reaction::fact::{ContentReactionFact, REACTION_NONCE_BYTES};
-use topo::protocol::facts::content::sealed_message::fact::{
-    MessageDeletionFact, SealedMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES,
+use topo::protocol::facts::content::message::fact::{
+    ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES,
 };
-use topo::protocol::facts::content::sealed_message::layout;
+use topo::protocol::facts::content::message_deletion::fact::ContentMessageDeletionFact;
+use topo::protocol::facts::content::reaction::fact::{ContentReactionFact, REACTION_NONCE_BYTES};
 use topo::protocol::facts::encryption;
 use topo::protocol::facts::encryption::disappearing_messages_setting::fact::{
     DisappearingMessagesSettingFact, SCOPE_KIND_WORKSPACE,
@@ -100,28 +100,8 @@ fn cascade_rejects_child_not_bound_to_deleted_parent() {
 }
 
 #[test]
-fn expiry_purges_due_sealed_message() {
-    let message = message_fact(10, 11);
-    let intent = purge_expired_message_intent(PurgeExpiredMessage {
-        workspace_id: WORKSPACE,
-        target_id: message.id,
-        now_minute: 11,
-    });
-    let mut bus = WakeLoop::new();
-
-    bus.submit_fact(message.clone());
-    bus.submit_intent(intent).expect("submit expiry");
-    let report = bus
-        .dispatch_deferred_intents_with_fact_context(&PurgeExpiredMessageHandler::new(), 10)
-        .expect("expiry purge");
-
-    assert_eq!(report.handled, 1);
-    assert!(!bus.has_fact(&message.id));
-}
-
-#[test]
 fn expiry_purges_due_content_message() {
-    let message = content_message_fact(10, 11);
+    let message = message_fact(10, 11);
     let intent = purge_expired_message_intent(PurgeExpiredMessage {
         workspace_id: WORKSPACE,
         target_id: message.id,
@@ -161,7 +141,7 @@ fn expiry_rejects_message_that_is_not_due() {
 }
 
 #[test]
-fn floor_purges_sealed_message_below_retire_minute() {
+fn floor_purges_content_message_below_retire_minute() {
     let setting = setting_fact(30);
     let message = message_fact(29, u64::MAX);
     let intent = purge_below_retention_floor_intent(PurgeBelowRetentionFloor {
@@ -183,7 +163,7 @@ fn floor_purges_sealed_message_below_retire_minute() {
 }
 
 #[test]
-fn floor_rejects_sealed_message_at_or_above_retire_minute() {
+fn floor_rejects_content_message_at_or_above_retire_minute() {
     let setting = setting_fact(30);
     let message = message_fact(30, u64::MAX);
     let intent = purge_below_retention_floor_intent(PurgeBelowRetentionFloor {
@@ -206,10 +186,14 @@ fn floor_rejects_sealed_message_at_or_above_retire_minute() {
 }
 
 fn message_fact(minute: u64, expires_at_minute: u64) -> Fact {
+    content_message_fact(minute, expires_at_minute)
+}
+
+fn content_message_fact(minute: u64, expires_at_minute: u64) -> Fact {
     Fact::new(
         workspace_scope(WORKSPACE),
         minute * 60_000,
-        layout::encode_sealed_message(&SealedMessageFact {
+        content::message::layout::encode_fact(&ContentMessageFact {
             workspace_id: WORKSPACE,
             created_at_ms: minute * 60_000,
             author_user_id: AUTHOR,
@@ -223,28 +207,6 @@ fn message_fact(minute: u64, expires_at_minute: u64) -> Fact {
             nonce: [12; NONCE_BYTES],
             ciphertext: vec![0x55; CIPHERTEXT_BYTES.min(8)],
         })
-        .expect("encode sealed message"),
-    )
-}
-
-fn content_message_fact(minute: u64, expires_at_minute: u64) -> Fact {
-    Fact::new(
-        workspace_scope(WORKSPACE),
-        minute * 60_000,
-        content::message::layout::encode_fact(&content::message::fact::ContentMessageFact {
-            workspace_id: WORKSPACE,
-            created_at_ms: minute * 60_000,
-            author_user_id: AUTHOR,
-            signer_id: [7; 32],
-            frontier_id: [8; 32],
-            local_history_node_secret_id: [9; 32],
-            expires_at_minute,
-            disappearing_setting_id: [10; 32],
-            minute,
-            leaf_id: [11; 32],
-            nonce: [12; content::message::fact::NONCE_BYTES],
-            ciphertext: vec![0x55; CIPHERTEXT_BYTES.min(8)],
-        })
         .expect("encode content message"),
     )
 }
@@ -253,10 +215,10 @@ fn deletion_fact(target_id: [u8; 32]) -> Fact {
     Fact::new(
         workspace_scope(WORKSPACE),
         1,
-        content::sealed_message::layout::encode_message_deletion(&MessageDeletionFact {
+        content::message_deletion::layout::encode_fact(&ContentMessageDeletionFact {
             workspace_id: WORKSPACE,
             created_at_ms: 1,
-            target_id,
+            target_message_id: target_id,
             author_user_id: AUTHOR,
         })
         .expect("encode deletion"),

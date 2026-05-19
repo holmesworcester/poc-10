@@ -797,8 +797,6 @@ fn cutover_content_wire_layouts_use_central_schema_codec() {
         "src/protocol/facts/content/message_deletion/layout.rs",
         "src/protocol/facts/content/reaction/layout.rs",
         "src/protocol/facts/content/reaction/rows.rs",
-        "src/protocol/facts/content/sealed_message/layout.rs",
-        "src/protocol/facts/content/sealed_message/rows.rs",
     ]
     .into_iter()
     .map(|path| root.join(path))

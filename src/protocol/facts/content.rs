@@ -7,4 +7,3 @@ pub mod file_slice;
 pub mod message;
 pub mod message_deletion;
 pub mod reaction;
-pub mod sealed_message;

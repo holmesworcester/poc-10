@@ -87,9 +87,7 @@ reviewable. Concretely:
 - `connection_response/create.rs` — X25519 DH (ee, es), HKDF derivation of
   response key and connection secret, transcript hashing.
 - `content/message/create.rs` — deterministic nonce derivation, AEAD encrypt
-  of message fields, plaintext padding, signed-envelope wrapping. The old
-  `sealed_message` module remains legacy layout/row compatibility, not a
-  canonical authoring, runtime-routing, or transport-admission path.
+  of message fields, plaintext padding, signed-envelope wrapping.
   Its projector exposes authenticated message metadata before decrypt so
   author deletions can purge without keys, while opened message context remains
   gated on successful decryption.
@@ -144,10 +142,10 @@ Open `Vec<u8>` / `String` payloads in `fact.rs`:
 | `content_event/fact.rs:15` | `payload: Vec<u8>` | Pick a max, use `FixedSlot<N>` |
 | `content_file/fact.rs:44` | `sealed_metadata: Vec<u8>` | `FixedSlot<N>` |
 | `content_file_slice/fact.rs:28` | `ciphertext: Vec<u8>` | Already bounded by slice size — type as `[u8; N]` |
+| `content_message/fact.rs:25` | `ciphertext: Vec<u8>` | `[u8; CIPHERTEXT_BYTES]` |
 | `content_reaction/fact.rs:24` | `ciphertext: Vec<u8>` | `[u8; N]` (size constant exists) |
 | `identity_endpoint_shared/fact.rs:51` | `device_name: String` | `FixedSlot<N>` (mirror workspace name) |
 | `identity_user/fact.rs:16` | `username: String` | `FixedSlot<N>` |
-| `sealed_message/fact.rs:28` | `ciphertext: Vec<u8>` | `[u8; CIPHERTEXT_BYTES]` |
 | `signed_fact/fact.rs:23` | `payload: Vec<u8>` | Either pick a max envelope size and use `FixedSlot<N>`, or carve out as the documented bounded-opaque exception |
 | `transit_received/fact.rs:21` | `origin_addr: Vec<u8>` | `FixedSlot<N>` |
 

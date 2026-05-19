@@ -903,7 +903,7 @@ fn cli_delete_message_hides_attached_file_and_rejects_save() {
         stdout(&output),
         stderr(&output)
     );
-    // The public purge signal is `content-count`: the deleted sealed-message
+    // The public purge signal is `content-count`: the deleted content-message
     // event, file descriptor, and file-slice content rows are gone, while
     // `messages`/`files` and `save-file` cover the read-model behavior.
 }

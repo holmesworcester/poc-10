@@ -131,10 +131,8 @@ fn purge_deleted_message_intent_does_not_encode_projection_work() {
     for forbidden in [
         "open_message",
         "OpenMessage",
-        "MESSAGE_ROWS",
-        "SEALED_MESSAGE_ROWS",
-        "message_row",
-        "sealed_message_row",
+        "CONTENT_MESSAGE_ROWS",
+        "OPENED_MESSAGE_ROWS",
         "leaf_id",
         "minute",
         "ciphertext",
@@ -158,12 +156,10 @@ fn handlers_do_not_own_event_module_projection_rows() {
     for path in rust_files(&handler_root) {
         let text = source_text(&path);
         for forbidden in [
-            "MESSAGE_ROWS",
-            "SEALED_MESSAGE_ROWS",
-            "message_rows",
-            "sealed_message_rows",
-            "message_row",
-            "sealed_message_row",
+            "CONTENT_MESSAGE_ROWS",
+            "OPENED_MESSAGE_ROWS",
+            "content_message_row",
+            "opened_message_row",
         ] {
             if text.contains(forbidden) {
                 offenders.push(format!(
@@ -190,13 +186,7 @@ fn purge_deleted_message_handler_must_be_real_retention_work_when_it_exists() {
     }
 
     let text = source_text(&path);
-    for forbidden in [
-        "MESSAGE_ROWS",
-        "SEALED_MESSAGE_ROWS",
-        "message_rows",
-        "sealed_message_rows",
-        "TableDelete",
-    ] {
+    for forbidden in ["CONTENT_MESSAGE_ROWS", "OPENED_MESSAGE_ROWS", "TableDelete"] {
         assert!(
             !text.contains(forbidden),
             "PurgeDeletedMessage handler must not be projection row cleanup: {forbidden}"
@@ -1131,12 +1121,12 @@ fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
             "facts::encryption",
-            "facts::content::sealed_message",
+            "facts::content::message",
             "facts::sync",
             "facts::identity::workspace",
             "decode_key_wrap",
             "encode_key_wrap",
-            "SealedMessage",
+            "ContentMessage",
             "KeyWrapFact",
             "Intent",
             "HandlerOutput",
@@ -1241,7 +1231,7 @@ fn target_schema_dsl_parser_stays_protocol_neutral() {
         "ContextNeed",
         "ContextOffer",
         "workspace",
-        "content::sealed_message",
+        "content::message",
         "recipient_key",
         "connection",
         "sync_index",

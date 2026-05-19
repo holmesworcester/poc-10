@@ -4,9 +4,9 @@ use topo::core::projection::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
 use topo::core::store::Store;
 use topo::core::wake_loop::WakeLoop;
-use topo::protocol::facts::content::sealed_message::rows::{
-    decode_sealed_message_row, message_key, sealed_message_row, SealedMessageRow,
-    SEALED_MESSAGE_ROWS,
+use topo::protocol::facts::content::message::fact::{ContentMessageFact, NONCE_BYTES};
+use topo::protocol::facts::content::message::rows::{
+    content_message_key, content_message_row, decode_content_message_row, CONTENT_MESSAGE_ROWS,
 };
 
 #[test]
@@ -19,10 +19,10 @@ fn projection_drain_applies_atomic_put_and_delete_rows_without_queueing_them() {
     bus.submit_fact(fact.clone());
     let report = bus
         .drain_applying_atomic_rows(
-            &PutSealedRowProjector,
+            &PutContentMessageRowProjector,
             &[],
             &store,
-            &[SEALED_MESSAGE_ROWS],
+            &[CONTENT_MESSAGE_ROWS],
             10,
         )
         .expect("drain atomic row");
@@ -30,31 +30,31 @@ fn projection_drain_applies_atomic_put_and_delete_rows_without_queueing_them() {
     assert_eq!(report.projections, 1);
     assert_eq!(report.intents, 1);
     assert!(bus.intents().is_empty());
-    bus.save_applying_atomic_rows(&store, &[SEALED_MESSAGE_ROWS])
+    bus.save_applying_atomic_rows(&store, &[CONTENT_MESSAGE_ROWS])
         .expect("commit atomic row with wake-loop state");
     assert_eq!(
-        decode_sealed_message_row(
-            &message_key([1; 32], fact.id),
+        decode_content_message_row(
+            &content_message_key([1; 32], fact.id),
             &store
-                .table_row(SEALED_MESSAGE_ROWS, &message_key([1; 32], fact.id))
+                .table_row(CONTENT_MESSAGE_ROWS, &content_message_key([1; 32], fact.id))
                 .expect("read row")
                 .expect("row should be written"),
         )
         .expect("decode row")
-        .ciphertext,
-        b"sealed".to_vec()
+        .frontier_id,
+        [8; 32]
     );
 
     let delete_fact = Fact::new(FactScope::Global, 2, b"delete-sealed-row".to_vec());
     bus.submit_fact(delete_fact);
     let delete_report = bus
         .drain_applying_atomic_rows(
-            &DeleteSealedRowProjector {
+            &DeleteContentMessageRowProjector {
                 message_id: fact.id,
             },
             &[],
             &store,
-            &[SEALED_MESSAGE_ROWS],
+            &[CONTENT_MESSAGE_ROWS],
             10,
         )
         .expect("drain atomic delete");
@@ -62,27 +62,27 @@ fn projection_drain_applies_atomic_put_and_delete_rows_without_queueing_them() {
     assert_eq!(delete_report.projections, 1);
     assert_eq!(delete_report.intents, 1);
     assert!(bus.intents().is_empty());
-    bus.save_applying_atomic_rows(&store, &[SEALED_MESSAGE_ROWS])
+    bus.save_applying_atomic_rows(&store, &[CONTENT_MESSAGE_ROWS])
         .expect("commit atomic delete with wake-loop state");
     assert!(store
-        .table_rows(SEALED_MESSAGE_ROWS)
+        .table_rows(CONTENT_MESSAGE_ROWS)
         .expect("sealed rows after delete")
         .is_empty());
 }
 
-struct PutSealedRowProjector;
+struct PutContentMessageRowProjector;
 
-impl Projector for PutSealedRowProjector {
+impl Projector for PutContentMessageRowProjector {
     fn project(
         &self,
         fact: &Fact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         Ok(ProjectionOutput::new().intent(
-            AtomicIntent::PutRow(
-                sealed_message_row(SealedMessageRow {
+            AtomicIntent::PutRow(content_message_row(
+                fact.id,
+                &ContentMessageFact {
                     workspace_id: [1; 32],
-                    message_id: fact.id,
                     created_at_ms: 42_000,
                     author_user_id: [3; 32],
                     signer_id: [9; 32],
@@ -92,21 +92,20 @@ impl Projector for PutSealedRowProjector {
                     disappearing_setting_id: [6; 32],
                     minute: 42,
                     leaf_id: [5; 32],
-                    nonce: [4; 24],
+                    nonce: [4; NONCE_BYTES],
                     ciphertext: b"sealed".to_vec(),
-                })
-                .expect("sealed row"),
-            )
+                },
+            ))
             .into_intent(),
         ))
     }
 }
 
-struct DeleteSealedRowProjector {
+struct DeleteContentMessageRowProjector {
     message_id: [u8; 32],
 }
 
-impl Projector for DeleteSealedRowProjector {
+impl Projector for DeleteContentMessageRowProjector {
     fn project(
         &self,
         _fact: &Fact,
@@ -114,8 +113,8 @@ impl Projector for DeleteSealedRowProjector {
     ) -> Result<ProjectionOutput, String> {
         Ok(ProjectionOutput::new().intent(
             AtomicIntent::DeleteRow(TableDelete {
-                table: SEALED_MESSAGE_ROWS,
-                key: message_key([1; 32], self.message_id),
+                table: CONTENT_MESSAGE_ROWS,
+                key: content_message_key([1; 32], self.message_id),
             })
             .into_intent(),
         ))

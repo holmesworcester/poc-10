@@ -692,9 +692,7 @@ mod tests {
         assert_eq!(
             table_names(&facts),
             vec![
-                "message_rows",
                 "opened_message_rows",
-                "sealed_message_rows",
                 "message_tombstone_rows",
                 "file_slice_rows",
                 "workspace_rows",

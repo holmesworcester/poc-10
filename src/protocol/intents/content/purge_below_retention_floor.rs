@@ -7,7 +7,7 @@
 use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::{
-    content::sealed_message::retention, encryption::disappearing_messages_setting,
+    content::message::retention, encryption::disappearing_messages_setting,
 };
 
 pub const PURGE_BELOW_RETENTION_FLOOR: &str = "purge_below_retention_floor";

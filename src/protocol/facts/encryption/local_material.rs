@@ -114,7 +114,9 @@ pub(super) fn project_local_history_node_secret(
         .checked_add(node.range_width - 1)
         .ok_or_else(|| "history node range end overflow".to_string())?;
     if node.bit_depth % 8 != 0 {
-        return Err("sealed-message bridge only accepts byte-aligned history prefixes".to_string());
+        return Err(
+            "content-message history coverage only accepts byte-aligned prefixes".to_string(),
+        );
     }
     let prefix_bytes = (node.bit_depth / 8)
         .try_into()
