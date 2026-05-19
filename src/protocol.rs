@@ -62,6 +62,7 @@ pub struct IntentRegistration {
 pub enum IntentExecutionKind {
     Atomic,
     Deferred,
+    Ephemeral,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -485,7 +486,7 @@ pub const INTENTS: &[IntentRegistration] = &[
     },
     IntentRegistration {
         kind: connection_intents::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST,
-        execution: IntentExecutionKind::Deferred,
+        execution: IntentExecutionKind::Ephemeral,
         declared_by: "intents::connection::send_bootstrap_request",
     },
     IntentRegistration {
@@ -540,12 +541,12 @@ pub const INTENTS: &[IntentRegistration] = &[
     },
     IntentRegistration {
         kind: transport_intents::send_network_frame::SEND_NETWORK_FRAME,
-        execution: IntentExecutionKind::Deferred,
+        execution: IntentExecutionKind::Ephemeral,
         declared_by: "intents::transport::send_network_frame",
     },
     IntentRegistration {
         kind: transport_intents::receive_transit_frame::RECEIVE_TRANSIT_FRAME,
-        execution: IntentExecutionKind::Deferred,
+        execution: IntentExecutionKind::Ephemeral,
         declared_by: "intents::transport::receive_transit_frame",
     },
     IntentRegistration {

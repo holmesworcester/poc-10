@@ -12,8 +12,10 @@
 //!
 //! The wake loop is deliberately below storage in this slice. The row schemas
 //! already name durable tables for facts, context, pending projection, and
-//! intents; this module first makes the semantics crisp enough to persist
-//! without carrying forward the old lifecycle vocabulary.
+//! intents. Ephemeral intents share the same in-process scheduling machinery
+//! but are deliberately skipped by persistence; this module first makes the
+//! semantics crisp enough to persist without carrying forward the old lifecycle
+//! vocabulary.
 
 use crate::core::context::{
     ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
@@ -148,7 +150,11 @@ impl WakeLoop {
             .table_rows(INTENTS)
             .map_err(|err| format!("load intents: {err}"))?
         {
-            bus.submit_intent(decode_intent(&value)?)?;
+            let intent = decode_intent(&value)?;
+            if intent.execution == IntentExecution::Ephemeral {
+                return Err("stored wake loop intent cannot be ephemeral".to_string());
+            }
+            bus.submit_intent(intent)?;
         }
         bus.clear_dirty();
         Ok(bus)
@@ -338,6 +344,17 @@ impl WakeLoop {
         })
     }
 
+    pub fn dispatch_ephemeral_intents(
+        &mut self,
+        handler: &(impl IntentHandler + ?Sized),
+        context: &HandlerContext,
+        limit: usize,
+    ) -> Result<DispatchReport, String> {
+        self.dispatch_intents_matching(handler, context, limit, |intent| {
+            intent.execution == IntentExecution::Ephemeral
+        })
+    }
+
     pub fn dispatch_deferred_intents_with_fact_context(
         &mut self,
         handler: &(impl IntentHandler + ?Sized),
@@ -355,18 +372,58 @@ impl WakeLoop {
         self.dispatch_deferred_intents_with_optional_store(handler, Some(store), limit)
     }
 
+    pub fn dispatch_ephemeral_intents_with_fact_context(
+        &mut self,
+        handler: &(impl IntentHandler + ?Sized),
+        limit: usize,
+    ) -> Result<DispatchReport, String> {
+        self.dispatch_intents_with_fact_context_for_execution(
+            handler,
+            IntentExecution::Ephemeral,
+            None,
+            limit,
+        )
+    }
+
+    pub fn dispatch_ephemeral_intents_with_fact_context_and_store(
+        &mut self,
+        handler: &(impl IntentHandler + ?Sized),
+        store: &Store,
+        limit: usize,
+    ) -> Result<DispatchReport, String> {
+        self.dispatch_intents_with_fact_context_for_execution(
+            handler,
+            IntentExecution::Ephemeral,
+            Some(store),
+            limit,
+        )
+    }
+
     fn dispatch_deferred_intents_with_optional_store(
         &mut self,
         handler: &(impl IntentHandler + ?Sized),
         store: Option<&Store>,
         limit: usize,
     ) -> Result<DispatchReport, String> {
+        self.dispatch_intents_with_fact_context_for_execution(
+            handler,
+            IntentExecution::Deferred,
+            store,
+            limit,
+        )
+    }
+
+    fn dispatch_intents_with_fact_context_for_execution(
+        &mut self,
+        handler: &(impl IntentHandler + ?Sized),
+        execution: IntentExecution,
+        store: Option<&Store>,
+        limit: usize,
+    ) -> Result<DispatchReport, String> {
         let mut report = DispatchReport::default();
         while report.handled < limit {
-            let Some((intent_index, intent)) = self
-                .pop_next_intent_matching(handler, |intent| {
-                    intent.execution == IntentExecution::Deferred
-                })?
+            let Some((intent_index, intent)) =
+                self.pop_next_intent_matching(handler, |intent| intent.execution == execution)?
             else {
                 break;
             };
@@ -396,6 +453,7 @@ impl WakeLoop {
                         break;
                     }
                     if err.starts_with("handler context missing fact ") {
+                        report.retries += 1;
                         break;
                     }
                     return Err(err);
@@ -989,6 +1047,7 @@ impl WakeLoop {
     fn dirty_intent_rows(&self) -> Vec<TableRow> {
         self.intents
             .iter()
+            .filter(|intent| intent.execution != IntentExecution::Ephemeral)
             .filter(|intent| self.dirty_intent_keys.contains(&intent_row_key(intent)))
             .map(intent_row)
             .collect()
@@ -1325,6 +1384,7 @@ fn encode_intent(intent: &Intent) -> Vec<u8> {
         match intent.execution {
             IntentExecution::Atomic => 0,
             IntentExecution::Deferred => 1,
+            IntentExecution::Ephemeral => 2,
         },
     );
     put_bytes_u32(&mut out, &intent.key);
@@ -1339,6 +1399,7 @@ fn decode_intent(value: &[u8]) -> Result<Intent, String> {
     let execution = match reader.take_u8()? {
         0 => IntentExecution::Atomic,
         1 => IntentExecution::Deferred,
+        2 => IntentExecution::Ephemeral,
         other => return Err(format!("invalid intent execution tag {other}")),
     };
     let key = reader.take_bytes_u32()?.to_vec();
@@ -1751,7 +1812,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_can_filter_atomic_and_deferred_intents() {
+    fn dispatch_can_filter_atomic_deferred_and_ephemeral_intents() {
         let mut bus = WakeLoop::new();
         bus.submit_intent(Intent::new(
             IntentKind::new("work").unwrap(),
@@ -1767,19 +1828,65 @@ mod tests {
             b"payload",
         ))
         .expect("submit deferred");
+        bus.submit_intent(Intent::new(
+            IntentKind::new("work").unwrap(),
+            IntentExecution::Ephemeral,
+            b"ephemeral",
+            b"payload",
+        ))
+        .expect("submit ephemeral");
 
         let atomic = bus
             .dispatch_atomic_intents(&AcceptAllHandler, &HandlerContext::new(), 10)
             .expect("dispatch atomic");
         assert_eq!(atomic.handled, 1);
-        assert_eq!(bus.intents().len(), 1);
-        assert_eq!(bus.intents()[0].execution, IntentExecution::Deferred);
+        assert_eq!(bus.intents().len(), 2);
+        assert!(bus
+            .intents()
+            .iter()
+            .all(|intent| intent.execution != IntentExecution::Atomic));
 
         let deferred = bus
             .dispatch_deferred_intents(&AcceptAllHandler, &HandlerContext::new(), 10)
             .expect("dispatch deferred");
         assert_eq!(deferred.handled, 1);
+        assert_eq!(bus.intents().len(), 1);
+        assert_eq!(bus.intents()[0].execution, IntentExecution::Ephemeral);
+
+        let ephemeral = bus
+            .dispatch_ephemeral_intents(&AcceptAllHandler, &HandlerContext::new(), 10)
+            .expect("dispatch ephemeral");
+        assert_eq!(ephemeral.handled, 1);
         assert!(bus.intents().is_empty());
+    }
+
+    #[test]
+    fn ephemeral_intents_are_restart_local() {
+        let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE])
+            .expect("open core schema store");
+        let mut bus = WakeLoop::new();
+        bus.submit_intent(Intent::new(
+            IntentKind::new("durable_work").unwrap(),
+            IntentExecution::Deferred,
+            b"durable",
+            b"payload",
+        ))
+        .expect("submit durable");
+        bus.submit_intent(Intent::new(
+            IntentKind::new("socket_write").unwrap(),
+            IntentExecution::Ephemeral,
+            b"ephemeral",
+            b"payload",
+        ))
+        .expect("submit ephemeral");
+
+        bus.save(&store).expect("save bus");
+
+        assert_eq!(bus.intents().len(), 2);
+        let loaded = WakeLoop::load(&store).expect("reload bus");
+        assert_eq!(loaded.intents().len(), 1);
+        assert_eq!(loaded.intents()[0].kind.as_str(), "durable_work");
+        assert_eq!(loaded.intents()[0].execution, IntentExecution::Deferred);
     }
 
     #[test]

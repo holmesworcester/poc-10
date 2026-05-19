@@ -1,4 +1,4 @@
-//! Intent types for atomic and deferred work.
+//! Intent types for atomic, deferred, and ephemeral work.
 
 use crate::core::store::{TableName, TableRow};
 
@@ -29,6 +29,7 @@ impl IntentKind {
 pub enum IntentExecution {
     Atomic,
     Deferred,
+    Ephemeral,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

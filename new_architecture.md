@@ -16,7 +16,7 @@ WakeLoop
 
 The design is not a wrapper around the old worker/blocking model. The end state
 has one fact store, one context matching surface, one projection scheduler, and
-one deferred intent queue.
+one intent scheduling surface.
 
 ## Poc-10 Success Criteria
 
@@ -120,8 +120,8 @@ Implemented target slices:
 - Atomic row intents as the projector-owned path for bounded read-model writes
   and deletes.
 - `WakeLoop` projection drains that replace owner needs/offers, match context
-  deltas, wake matching owners, apply atomic intents, and persist deferred
-  intents.
+  deltas, wake matching owners, apply atomic intents, persist deferred intents,
+  and keep ephemeral IO intents restart-local.
 - Handler dispatch that accepts only declared fact inputs and returns facts,
   purges, and follow-up intents.
 - Target tests for signed facts, encrypted content messages, key wraps, key request
@@ -140,9 +140,9 @@ Current follow-up work outside the active cutover guard:
 - Keep manual projection/download perf fixtures available, but out of the
   default test suite.
 - Finish the intentionally deferred partial-download-progress CLI behavior.
-- Keep transport send policy simple: deferred send intents are the durable
-  boundary, network queues are memory-only, TCP owns per-stream delivery, and
-  duplicate delivery must remain harmless.
+- Keep network/perf coverage honest while preserving the simple transport
+  contract: TCP stream delivery, memory-local byte queues, and idempotent
+  regenerated sends.
 
 ## File Organization
 
@@ -698,11 +698,12 @@ struct Intent {
 enum IntentExecution {
     Atomic,
     Deferred,
+    Ephemeral,
 }
 ```
 
-A given intent kind is always atomic or always deferred. If an operation
-sometimes needs deferred behavior, split it into two intent kinds.
+A given intent kind is always atomic, deferred, or ephemeral. If an operation
+sometimes needs a different execution contract, split it into two intent kinds.
 
 Atomic intents are exact, bounded, deterministic, and safe to apply in the
 projection transaction:
@@ -716,7 +717,8 @@ PurgeExactStorage
 ```
 
 Deferred intents are stateful, retryable, asynchronous, or split across
-transactions:
+transactions. They must be durable because losing them would lose protocol work
+that has already become real through projection:
 
 ```text
 PurgeEvent
@@ -725,10 +727,7 @@ RetireSecret
 MaterializeKeyWraps
 UnwrapKeyWrap
 SendOnConnection
-SendBootstrapRequest
 SendHandshakeResponse
-ReceiveTransit
-NetworkSend
 HandleSync
 StartSync
 SyncIndexUpdate
@@ -738,12 +737,25 @@ ConnectionAttempt
 ConnectionResponse
 ```
 
+Ephemeral intents are bounded IO effects that can be regenerated from durable
+facts/context or repeated by the peer. They use the same idempotence-keyed
+scheduler in memory, but `WakeLoop` does not persist them:
+
+```text
+SendBootstrapRequest
+ReceiveTransit
+NetworkSend
+WakeDaemon
+```
+
 Core applies atomic intents during projection. Deferred intents go into
-`core.intents` and are claimed by registered handlers.
+`core.intents` and are claimed by registered handlers. Ephemeral intents stay in
+the in-process wake loop only; a restart drops them, so only regenerated or
+peer-redelivered IO belongs there.
 
 ## Intent Handlers
 
-Handlers consume deferred intents:
+Handlers consume deferred or ephemeral intents:
 
 ```rust
 fn handle(intent: &Intent, ctx: &HandlerContext) -> Result<HandlerOutput, String>;
@@ -774,7 +786,7 @@ pub fn handle(intent: &Intent, ctx: &HandlerContext) -> HandlerOutput {
 Handler rules:
 
 ```text
-- One handler owns each deferred intent kind.
+- One handler owns each deferred or ephemeral intent kind.
 - Handlers are themed, self-contained files under src/protocol/intents/.
 - Handlers declare exact fact inputs when they need fact context.
 - Handlers do bounded work per call.
@@ -805,6 +817,7 @@ project pending facts
   replace owner needs/offers by diff
   match new needs/offers and enqueue wakes
   persist deferred intents
+  keep ephemeral intents in memory only
 
 dispatch deferred intents
   claim intent
@@ -812,6 +825,12 @@ dispatch deferred intents
   run flat handler
   submit returned facts
   persist returned intents
+
+dispatch ephemeral intents
+  claim in-memory intent
+  build handler context from declared fact ids
+  run flat handler
+  submit returned facts and follow-up intents
 
 repeat until the work budget is exhausted
 ```
@@ -1178,9 +1197,9 @@ adding new compatibility layers:
    status for expensive throughput fixtures.
 3. Finish the partial-download-progress behavior that is explicitly deferred in
    `content_cli_test.rs`.
-4. Preserve the simple transport contract: retry deferred send intents on
-   route/socket failure, keep network queues memory-only, and do not add
-   protocol-level peer acknowledgements.
+4. Continue shrinking deferred intent handlers until every durable deferred step
+   is atomic at its own storage boundary and every network/IO effect is
+   restart-local.
 ```
 
 ## Guardrails
@@ -1195,7 +1214,7 @@ adding new compatibility layers:
   in visible manifests.
 - Generate row and wire boilerplate from the three schema declaration files.
 - Prefer one exact helper per invariant over one flexible helper with flags.
-- Give every deferred intent kind an idempotence key.
+- Give every deferred and ephemeral intent kind an idempotence key.
 - Give every context matcher deterministic tests for new-need-to-old-offer and
   new-offer-to-old-need matching.
 - Keep CLI parsing thin: parse arguments, call one command constructor or read
@@ -1222,6 +1241,6 @@ receive facts record local observations
 WakeLoop coordinates mechanics
 ```
 
-There is one context mechanism, one projection scheduler, and one deferred
-intent queue. Everything else is either fact-module projection state, command
-construction, transport IO, or handler checkpoint state.
+There is one context mechanism, one projection scheduler, and one intent
+scheduling surface. Everything else is either fact-module projection state,
+command construction, transport IO, or handler checkpoint state.
