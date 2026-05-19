@@ -4,8 +4,8 @@
 //! outcomes: message listings, view rendering, sync convergence, key access
 //! loss/recovery, `disappearing-status`, and `content-count` purge effects.
 //! When an older invariant only had an internal row/table observable, the
-//! individual assertion has been replaced by a precise TODO for the public
-//! surface needed to test it without peeking into storage internals.
+//! individual assertion is either covered by an existing public signal or
+//! called out as a precise remaining gap.
 
 mod cli_harness;
 
@@ -63,10 +63,10 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
     assert_eq!(content_event_count(&alice, &workspace_id), "0");
-    // TODO(public observable): expose a non-dev CLI recovery attempt for a
-    // specific message id or minute coordinate. The old assertion used
-    // `key-node` and `cover_summary`, which are internal tree probes, to prove
-    // the retired minute node could not be re-materialized.
+    // Remaining gap: no non-dev CLI recovery attempt targets a specific
+    // message id or minute coordinate. The old assertion used `key-node` and
+    // `cover_summary`, which are internal tree probes, to prove the retired
+    // minute node could not be re-materialized.
 
     // Restart the daemon and tick once more: still no recovery.
     let alice_daemon_again = spawn_daemon(&alice, alice_port);
@@ -154,10 +154,9 @@ fn cli_disappearing_messages_two_peer_convergence() {
         disappearing_value(&bob, &workspace_id, "live_messages"),
         "0"
     );
-    // TODO(public observable): expose a stable, non-secret disappearance
-    // digest in `disappearing-status` so black-box tests can compare
-    // cross-peer cover/tombstone convergence without asserting
-    // `keys.cover_summary` or tombstone row counts.
+    // Remaining gap: `disappearing-status` does not expose a stable,
+    // non-secret cover-state digest for cross-peer convergence. This test
+    // therefore compares the public disappearance and purge outcomes.
 
     // Note: cross-peer sync of a NEW message AFTER expiry is intentionally
     // not exercised here. Empirically, when alice authors a fresh-minute
@@ -386,9 +385,7 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
     wait_for_content_count(&bob, &workspace_id, "0");
     wait_for_key_access(&alice, &workspace_id, &removal_frontier_id_before, "no");
     wait_for_key_access(&bob, &workspace_id, &removal_frontier_id_before, "no");
-    // TODO(public observable): expose a non-secret retained-cover indicator
-    // for each peer. The old test asserted surviving time-tree sibling row
-    // counts via `keys.local_history_node_secrets`; the black-box proof below
+    // There is no separate retained-cover status field. The public proof below
     // is alice successfully authoring a later-minute message after access to
     // the frontier root is gone.
 
@@ -420,12 +417,10 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
 
     assert_key_access(&alice, &workspace_id, &removal_frontier_id_before, "no");
-    // TODO(public observable): expose the active removal-frontier id/count in
-    // a non-internal status command. The old test asserted no rotation by
-    // parsing `keys.frontier` and `keys.removal_frontiers`; here we preserve
-    // the externally visible part: no `key-frontier` command is invoked
-    // between X expiry and successful Y authoring, and root access remains
-    // unavailable afterward.
+    // Remaining gap: no non-mutating status command exposes the active
+    // removal-frontier id/count. The externally visible part is preserved: no
+    // `key-frontier` command is invoked between X expiry and successful Y
+    // authoring, and root access remains unavailable afterward.
 }
 
 // ---------------------------------------------------------------------------
@@ -517,11 +512,9 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
         disappearing_value(&bob, &workspace_id, "effective_floor"),
         "200"
     );
-    // TODO(public observable): expose a cover-state digest in
-    // `disappearing-status`. The old test compared `keys.cover_summary` and
-    // tombstone row counts to prove deterministic independent chops; the
-    // current black-box assertions verify the public floor, key-access loss,
-    // and below-floor authoring wedge.
+    // Remaining gap: `disappearing-status` does not expose a cover-state
+    // digest. The current black-box assertions verify the public floor,
+    // key-access loss, and below-floor authoring wedge.
 
     // Slice-5 known limitation: the chop does not make the old TTL=0 message
     // disappear from the read model. The visible guarantee tested here is that
@@ -726,9 +719,9 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
 // Practical note: per the task and `bdaa60f`, the user-visible wedge
 // message is "no retained ancestor covers the target leaf", surfaced by
 // `derive_event_leaf` on the authoring path. The admit path's exact
-// rejection wording is a secondary signal. A TODO below marks the missing
-// deterministic public admit/drop query needed to test redelivery itself
-// without coupling the test to key-healing side effects.
+// rejection wording is a secondary signal. The assertion below marks the
+// missing deterministic public admit/drop query needed to test redelivery
+// itself without coupling the test to key-healing side effects.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -835,7 +828,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
         "bob must have no content before redelivery"
     );
     assert_eq!(bob_live_messages_before, "0");
-    // TODO(public observable): add `events get <id>` or a filtered
+    // Remaining gap: there is no `events get <id>` or filtered
     // `sync-status --event <id>` command that reports admit/drop state without
     // healing or projecting the event. Reconnecting Alice here is not a stable
     // black-box rejection proof because public key-healing behavior can also
@@ -964,8 +957,8 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
 //     chops the prefix `[0, horizon_floor)` covering the minute-100
 //     authoring slot. The status count must fall to 0.
 //
-// A TODO at the assertion site marks the remaining storage-compaction detail
-// that lacks a non-internal CLI observable.
+// The public `message_tombstones` status count is the compaction observable
+// for this slice.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1040,10 +1033,6 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
     );
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
     assert_eq!(content_event_count(&alice, &workspace_id), "0");
-    // TODO(public observable): expose leaf-tombstone compaction as a
-    // high-level storage-compaction metric. The old test asserted
-    // `keys.local_history_leaves` and local-history tombstone counts, which
-    // are internal tree-table details rather than user-visible behavior.
 }
 
 // ---------------------------------------------------------------------------

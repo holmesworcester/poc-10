@@ -419,17 +419,17 @@ fn cli_received_deletion_hides_message_after_processes_exit() {
 
         // Wait until bob's CLI-visible message listing reflects the deletion.
         wait_for_messages_count(&bob, &workspace_id, "0");
+        wait_for_content_count(&bob, &workspace_id, "0");
     }
 
     // The sync processes are dropped here. A fresh CLI read should still show
-    // that the deleted message is absent.
+    // that the deleted message and its content-event bytes are absent.
     let bob_listing = assert_success(topo(&["--db", &bob, "messages", &workspace_id]));
     assert_eq!(line_value(&bob_listing, "messages"), "0");
     assert!(!bob_listing.contains(sentinel), "{bob_listing}");
-    // TODO(public-observable): expose a CLI-visible deletion audit/status that
-    // proves the deleted event bytes were durably purged and the deletion fact
-    // remains available; this black-box test intentionally avoids reading
-    // internal SQLite tables such as content.message_tombstones.
+    assert_eq!(content_event_count(&bob, &workspace_id), "0");
+    // Remaining gap: there is no CLI-visible deletion-fact audit separate
+    // from the persisted absence in `messages` and `content-count`.
 }
 
 #[test]
@@ -851,9 +851,9 @@ fn cli_send_file_with_explicit_mime_round_trips_bytes() {
     );
     assert_eq!(fs::read(&out_path).expect("read saved file"), payload);
 
-    // TODO(public-observable): add a CLI-visible storage-secrecy check for
-    // encrypted file payload, filename, and MIME bytes at rest. This black-box
-    // CLI test no longer scans the SQLite database file directly.
+    // Remaining gap: no CLI-visible storage-secrecy check proves encrypted
+    // file payload, filename, and MIME bytes are hidden at rest. This
+    // black-box CLI test intentionally avoids scanning the SQLite file.
 }
 
 #[test]
@@ -886,6 +886,7 @@ fn cli_delete_message_hides_attached_file_and_rejects_save() {
     assert_eq!(files_total(&after_files), "0");
     let after_messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert_eq!(line_value(&after_messages, "messages"), "0");
+    assert_eq!(content_event_count(&db, &workspace_id), "0");
 
     let out_path = tmp.path().join("deleted.bin");
     let output = topo(&[
@@ -902,9 +903,9 @@ fn cli_delete_message_hides_attached_file_and_rejects_save() {
         stdout(&output),
         stderr(&output)
     );
-    // TODO(public-observable): expose a CLI-visible storage-purge status for
-    // deleted file descriptors and slices; black-box tests can currently
-    // verify only that messages/files disappear and save-file rejects.
+    // The public purge signal is `content-count`: the deleted sealed-message
+    // event, file descriptor, and file-slice content rows are gone, while
+    // `messages`/`files` and `save-file` cover the read-model behavior.
 }
 
 #[test]
@@ -948,6 +949,7 @@ fn cli_delete_message_hides_attached_file_on_peer_after_sync() {
     // Wait for bob's CLI-visible listings to reflect the synced deletion.
     wait_for_messages_count(&bob, &workspace_id, "0");
     wait_for_files_count(&bob, &workspace_id, "0");
+    wait_for_content_count(&bob, &workspace_id, "0");
 
     let out_path = tmp.path().join("deleted-peer.bin");
     let output = topo(&[
@@ -964,9 +966,8 @@ fn cli_delete_message_hides_attached_file_on_peer_after_sync() {
         stdout(&output),
         stderr(&output)
     );
-    // TODO(public-observable): expose a CLI-visible storage-purge status for
-    // synced deleted file bytes; black-box tests can currently verify only
-    // that the peer listing drops the message/file and save-file rejects.
+    // The public purge signal is `content-count`: bob has no remaining
+    // content-event rows for the synced deleted message/file bytes.
 }
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {
@@ -1228,6 +1229,29 @@ fn invite_link_from_output(output: &str) -> String {
 
 fn wait_for_messages_count(db: &str, workspace_id: &str, expected: &str) {
     wait_for_count(db, "messages", workspace_id, "messages", expected);
+}
+
+fn content_event_count(db: &str, workspace_id: &str) -> String {
+    let out = assert_success(topo(&["--db", db, "content-count", workspace_id]));
+    line_value(&out, "content_events")
+}
+
+fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "content-count", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, "content_events") == expected {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("content count did not reach {expected}:\n{last}");
 }
 
 fn wait_for_files_count(db: &str, workspace_id: &str, expected: &str) {

@@ -272,11 +272,9 @@ fn cli_history_node_tombstone_rejects_derivation_from_retired_path() {
         "{}",
         stderr(&from_retired_root)
     );
-    // TODO(encryption-cli): add a public `topo key-audit-purge
-    // WORKSPACE_ID_HEX EVENT_ID_HEX` (or equivalent) that reports whether
-    // retired key-material bytes are still recoverable from durable storage.
-    // Until that exists, this black-box test can only assert the observable
-    // derivation refusal above, not the private byte-purge property.
+    // Remaining gap: no public CLI audit reports whether retired key-material
+    // bytes are still recoverable from durable storage. This black-box test
+    // can assert only the observable derivation refusal above.
 }
 
 #[test]
@@ -361,11 +359,11 @@ fn cli_peer_recipient_rotation_preserves_fresh_sharing_and_rejects_retired_wraps
     ]));
     wait_for_messages_contains(&bob, &workspace_id, "alice: after bob rotation");
 
-    // TODO(encryption-cli): add a public observable that proves retired
-    // recipient private keys and old wraps are unrecoverable from durable
-    // storage after rotation. The CLI-visible contract covered here is that
-    // retired recipient ids cannot receive new wraps while the replacement key
-    // can still recover and display new messages.
+    // Remaining gap: no public CLI audit proves retired recipient private keys
+    // and old wraps are unrecoverable from durable storage after rotation. The
+    // CLI-visible contract covered here is that retired recipient ids cannot
+    // receive new wraps while the replacement key can still recover and display
+    // new messages.
 }
 
 #[test]
@@ -461,16 +459,21 @@ fn cli_chop_revokes_frontier_rejects_old_wraps_and_allows_fresh_messages() {
         "fresh authoring should not disturb the current local message listing:\n{fresh_messages}"
     );
 
-    // TODO(encryption-cli): add a public durable-storage audit for chop that
-    // proves retired recipient private keys, old wraps, and deleted frontier
-    // bytes are not recoverable.
-    // TODO(encryption-cli): add a public `topo message-open`/decrypt check
-    // whose result depends on live frontier access. `topo messages` lists an
-    // already-open local projection today, so message visibility is not a
-    // reliable observable for whether chopped key material can be recovered.
-    // The public behavior asserted here is loss of access to the chopped
-    // frontier, rejection of new wraps to the retired recipient, and successful
-    // fresh authoring.
+    let _: u64 = line_value(&chop, "purged_event_bytes")
+        .parse()
+        .expect("parse purged_event_bytes");
+    let _: u64 = line_value(&chop, "subsumed_message_tombstones_gcd")
+        .parse()
+        .expect("parse subsumed_message_tombstones_gcd");
+    let _: u64 = line_value(&chop, "subsumed_leaf_tombstones_gcd")
+        .parse()
+        .expect("parse subsumed_leaf_tombstones_gcd");
+
+    // Remaining gaps: no public durable-storage audit proves retired
+    // recipient private keys, old wraps, and deleted frontier bytes are
+    // unrecoverable; and no `topo message-open`/decrypt check depends on live
+    // frontier access. `topo messages` lists an already-open local projection,
+    // so message visibility is not a reliable recovery observable.
 }
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {
