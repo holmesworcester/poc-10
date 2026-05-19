@@ -904,9 +904,19 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
                 .to_string(),
         );
     }
-    if runtime.contains("network_queues::delete_inbound(self.store(), &inbound)?;") {
+    if runtime.contains("network_queues::delete_inbound(self.store(), &inbound)?;")
+        && !runtime.contains("if dispatched.retries == 0")
+    {
         offenders.push(
             "src/protocol/runtime.rs deletes inbound network bytes before the protocol receive effect is proven durable"
+                .to_string(),
+        );
+    }
+    if runtime.contains("network_queues::delete_inbound")
+        && !runtime.contains("dispatched.retries == 0")
+    {
+        offenders.push(
+            "src/protocol/runtime.rs deletes restart-local inbound rows even when receive dispatch asked to retry"
                 .to_string(),
         );
     }
@@ -973,6 +983,59 @@ fn cutover_network_queue_storage_class_is_not_ambiguous() {
     assert!(
         offenders.is_empty(),
         "network queue persistence is ambiguous; choose one storage contract and make runtime/schema/docs/tests agree:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn cutover_network_io_intents_are_restart_local_ephemeral() {
+    let root = root();
+    let wake_loop = source_text(&root.join("src/core/wake_loop.rs"));
+    let protocol = source_text(&root.join("src/protocol.rs"));
+    let network_io_files = [
+        "src/protocol/intents/connection/send_bootstrap_request.rs",
+        "src/protocol/intents/transport/send_network_frame.rs",
+        "src/protocol/intents/transport/receive_transit_frame.rs",
+    ];
+
+    let mut offenders = Vec::new();
+    for relative in network_io_files {
+        let source = source_text(&root.join(relative));
+        if source.contains("IntentExecution::Deferred") {
+            offenders.push(format!(
+                "{relative} still marks direct network IO as a durable deferred intent"
+            ));
+        }
+        if !source.contains("IntentExecution::Ephemeral") {
+            offenders.push(format!(
+                "{relative} does not use the restart-local ephemeral intent lane"
+            ));
+        }
+    }
+    for kind in [
+        "SEND_BOOTSTRAP_CONNECTION_REQUEST",
+        "SEND_NETWORK_FRAME",
+        "RECEIVE_TRANSIT_FRAME",
+    ] {
+        let registration = protocol
+            .split(kind)
+            .nth(1)
+            .and_then(|tail| tail.split("},").next())
+            .unwrap_or("");
+        if !registration.contains("IntentExecutionKind::Ephemeral") {
+            offenders.push(format!(
+                "protocol registry does not mark {kind} as ephemeral"
+            ));
+        }
+    }
+    if !wake_loop.contains("intent.execution != IntentExecution::Ephemeral") {
+        offenders
+            .push("WakeLoop dirty intent rows do not visibly skip ephemeral intents".to_string());
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "network IO effects must be restart-local and regeneratable instead of durable protocol work:\n{}",
         offenders.join("\n")
     );
 }

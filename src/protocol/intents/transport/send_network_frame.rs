@@ -1,11 +1,12 @@
 //! Outbound network-send handler.
 //!
-//! Owns the deferred intent that asks the runtime to push an already-packaged
+//! Owns the ephemeral intent that asks the runtime to push an already-packaged
 //! transport::transit frame onto a connection's TCP socket. The handler resolves the
 //! connection route from the fact context, stages the frame through core's
 //! outbound queue boundary, and attempts one bounded TCP write. If route
 //! context or the socket is unavailable, the handler asks the wake loop to keep
-//! the intent visible so the next sync/daemon pass can try again.
+//! the intent visible in the current process so the next sync/daemon pass can
+//! try again without making network delivery durable protocol state.
 
 //! Send-network-frame intent layout.
 //!
@@ -43,7 +44,7 @@ pub fn send_network_frame_intent(input: SendNetworkFrame) -> Intent {
     push_bytes(&mut payload, &input.frame);
     Intent::new(
         IntentKind::new(SEND_NETWORK_FRAME).expect("valid send network frame intent kind"),
-        IntentExecution::Deferred,
+        IntentExecution::Ephemeral,
         send_network_frame_key(&input),
         payload,
     )
@@ -53,8 +54,8 @@ pub fn decode_send_network_frame(intent: &Intent) -> Result<SendNetworkFrame, St
     if intent.kind.as_str() != SEND_NETWORK_FRAME {
         return Err("expected send_network_frame intent".to_string());
     }
-    if intent.execution != IntentExecution::Deferred {
-        return Err("send_network_frame intent must be deferred".to_string());
+    if intent.execution != IntentExecution::Ephemeral {
+        return Err("send_network_frame intent must be ephemeral".to_string());
     }
 
     let mut reader = Reader::new(&intent.payload);

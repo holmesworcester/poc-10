@@ -1,7 +1,7 @@
 //! Generic target runtime.
 //!
 //! Core owns the mechanics: open the store, load and save `WakeLoop`, submit
-//! facts and intents, drain projection, and dispatch deferred handlers.
+//! facts and intents, drain projection, and dispatch deferred/ephemeral handlers.
 //! Protocol code supplies the projector router, context matchers, handler
 //! registry, schema sources, and atomic row tables.
 
@@ -92,18 +92,33 @@ impl RuntimeHandlers for HandlerSet {
             total.facts += report.facts;
             total.intents += report.intents;
             total.retries += report.retries;
-            if report.handled == 0 && report.retries == 0 {
-                let empty_context = HandlerContext::new().with_store(store);
-                let report = wake_loop.dispatch_atomic_intents(
-                    handler.as_ref(),
-                    &empty_context,
-                    limit_per_handler,
-                )?;
-                total.handled += report.handled;
-                total.facts += report.facts;
-                total.intents += report.intents;
-                total.retries += report.retries;
+            if report.handled > 0 || report.retries > 0 {
+                continue;
             }
+
+            let empty_context = HandlerContext::new().with_store(store);
+            let report = wake_loop.dispatch_atomic_intents(
+                handler.as_ref(),
+                &empty_context,
+                limit_per_handler,
+            )?;
+            total.handled += report.handled;
+            total.facts += report.facts;
+            total.intents += report.intents;
+            total.retries += report.retries;
+            if report.handled > 0 || report.retries > 0 {
+                continue;
+            }
+
+            let report = wake_loop.dispatch_ephemeral_intents_with_fact_context_and_store(
+                handler.as_ref(),
+                store,
+                limit_per_handler,
+            )?;
+            total.handled += report.handled;
+            total.facts += report.facts;
+            total.intents += report.intents;
+            total.retries += report.retries;
         }
         Ok(total)
     }

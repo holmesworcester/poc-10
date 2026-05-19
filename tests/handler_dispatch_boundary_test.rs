@@ -71,8 +71,14 @@ fn intent_execution_metadata_is_protocol_neutral() {
         b"same-work",
         b"route=tcp://127.0.0.1:9999",
     );
+    let ephemeral = Intent::new(
+        IntentKind::new("socket_write").unwrap(),
+        IntentExecution::Ephemeral,
+        b"same-work",
+        b"route=tcp://127.0.0.1:9999",
+    );
 
-    for intent in [atomic, deferred] {
+    for intent in [atomic, deferred, ephemeral] {
         let Intent {
             kind,
             execution,
@@ -87,6 +93,7 @@ fn intent_execution_metadata_is_protocol_neutral() {
         match execution {
             IntentExecution::Atomic => {}
             IntentExecution::Deferred => {}
+            IntentExecution::Ephemeral => {}
         }
     }
 }

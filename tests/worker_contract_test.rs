@@ -197,6 +197,7 @@ fn target_deferred_handler_consumes_only_after_exact_fact_context_exists() {
     assert_eq!(report.handled, 0);
     assert_eq!(report.facts, 0);
     assert_eq!(report.intents, 0);
+    assert_eq!(report.retries, 1);
     assert_eq!(bus.intents().len(), 1);
 
     bus.submit_fact(fact.clone());

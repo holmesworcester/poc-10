@@ -293,7 +293,7 @@ fn wake_loop_receive_dispatch_admits_opened_facts() {
         .expect("queue receive intent");
 
     let report = bus
-        .dispatch_deferred_intents_with_fact_context(&ReceiveTransitFrameHandler::new(), 10)
+        .dispatch_ephemeral_intents_with_fact_context(&ReceiveTransitFrameHandler::new(), 10)
         .expect("dispatch receive transport::transit");
 
     assert_eq!(report.handled, 1);

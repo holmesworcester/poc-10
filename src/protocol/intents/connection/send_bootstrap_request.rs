@@ -33,7 +33,7 @@ pub fn send_bootstrap_connection_request_intent(
     Ok(Intent::new(
         IntentKind::new(SEND_BOOTSTRAP_CONNECTION_REQUEST)
             .expect("valid send bootstrap connection request intent kind"),
-        IntentExecution::Deferred,
+        IntentExecution::Ephemeral,
         send_bootstrap_connection_request_key(&input),
         payload,
     ))
@@ -45,8 +45,8 @@ pub fn decode_send_bootstrap_connection_request(
     if intent.kind.as_str() != SEND_BOOTSTRAP_CONNECTION_REQUEST {
         return Err("expected send_bootstrap_connection_request intent".to_string());
     }
-    if intent.execution != IntentExecution::Deferred {
-        return Err("send_bootstrap_connection_request intent must be deferred".to_string());
+    if intent.execution != IntentExecution::Ephemeral {
+        return Err("send_bootstrap_connection_request intent must be ephemeral".to_string());
     }
     if intent.payload.len() != 1 + 32 + addr::ADDR_BLOCK_BYTES {
         return Err("send_bootstrap_connection_request payload has wrong length".to_string());

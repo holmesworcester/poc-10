@@ -30,7 +30,7 @@ pub fn receive_transit_frame_intent(input: ReceiveTransitFrame) -> Result<Intent
     push_bytes(&mut payload, &input.frame);
     Ok(Intent::new(
         IntentKind::new(RECEIVE_TRANSIT_FRAME).expect("valid receive_transit_frame intent kind"),
-        IntentExecution::Deferred,
+        IntentExecution::Ephemeral,
         receive_transit_key(&input),
         payload,
     ))
@@ -40,8 +40,8 @@ pub fn decode_receive_transit_frame(intent: &Intent) -> Result<ReceiveTransitFra
     if intent.kind.as_str() != RECEIVE_TRANSIT_FRAME {
         return Err("expected receive_transit_frame intent".to_string());
     }
-    if intent.execution != IntentExecution::Deferred {
-        return Err("receive_transit_frame intent must be deferred".to_string());
+    if intent.execution != IntentExecution::Ephemeral {
+        return Err("receive_transit_frame intent must be ephemeral".to_string());
     }
 
     let mut reader = Reader::new(&intent.payload);

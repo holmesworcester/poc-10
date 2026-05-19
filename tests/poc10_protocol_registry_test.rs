@@ -234,7 +234,7 @@ fn handler_intents_are_declared_intents() {
 }
 
 #[test]
-fn row_intents_are_registered_as_atomic_and_effects_as_deferred() {
+fn row_intents_are_registered_as_atomic_deferred_or_ephemeral() {
     let put_row = PROTOCOL
         .intents
         .iter()
@@ -247,5 +247,19 @@ fn row_intents_are_registered_as_atomic_and_effects_as_deferred() {
         .iter()
         .find(|intent| intent.kind == "receive_transit_frame")
         .expect("receive transport::transit intent");
-    assert_eq!(receive_transit.execution, IntentExecutionKind::Deferred);
+    assert_eq!(receive_transit.execution, IntentExecutionKind::Ephemeral);
+
+    let send_network = PROTOCOL
+        .intents
+        .iter()
+        .find(|intent| intent.kind == "send_network_frame")
+        .expect("send network frame intent");
+    assert_eq!(send_network.execution, IntentExecutionKind::Ephemeral);
+
+    let send_facts = PROTOCOL
+        .intents
+        .iter()
+        .find(|intent| intent.kind == "send_facts_on_connection")
+        .expect("send facts on connection intent");
+    assert_eq!(send_facts.execution, IntentExecutionKind::Deferred);
 }

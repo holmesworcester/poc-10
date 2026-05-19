@@ -32,7 +32,7 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         &mut self,
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String> {
-        let handlers = HandlerSet::new_excluding(HANDLER_ROUTES, CLI_DEFERRED_HANDLER_ROUTES);
+        let handlers = HandlerSet::new_excluding(HANDLER_ROUTES, CLI_EFFECT_HANDLER_ROUTES);
         self.dispatch_with_handlers(&handlers, limit_per_handler)
     }
 
@@ -70,8 +70,9 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         let dispatched = self.dispatch_intents(work_limit)?;
         let projection_after_handlers = self.drain_projection_until_idle(4, work_limit)?;
         self.save()?;
-        let received_rows = &inbound;
-        network_queues::delete_inbound(self.store(), received_rows)?;
+        if dispatched.retries == 0 {
+            network_queues::delete_inbound(self.store(), &inbound)?;
+        }
 
         Ok(TickReport {
             accepted_connections: accepted.accepted_connections,
@@ -86,7 +87,7 @@ impl crate::core::runtime::Runtime<super::Protocol> {
     }
 }
 
-const CLI_DEFERRED_HANDLER_ROUTES: &[&str] = &[
+const CLI_EFFECT_HANDLER_ROUTES: &[&str] = &[
     "send_facts_on_connection",
     "send_network_frame",
     "receive_transit_frame",
