@@ -7,9 +7,7 @@
 
 use std::net::SocketAddr;
 
-use crate::core::handler_dispatch::{
-    retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
-};
+use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::facts::connection::request::{addr, layout};
@@ -99,9 +97,7 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
                 retry_key: Some(intent.key.clone()),
             },
         )
-        .map_err(|err| {
-            retry_intent(format!("send_bootstrap_connection_request tcp send: {err}"))
-        })?;
+        .map_err(|err| format!("send_bootstrap_connection_request tcp send: {err}"))?;
         Ok(HandlerOutput::new())
     }
 }
