@@ -9,7 +9,7 @@ use std::thread;
 use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{retry_intent_reason, HandlerContext, IntentHandler};
-use topo::core::network_queues;
+use topo::core::network;
 use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use topo::core::store::Store;
 use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
@@ -122,7 +122,7 @@ fn test_store() -> Store {
             FACTS_SCHEMA_SOURCE,
             INTENTS_SCHEMA_SOURCE,
         ],
-        network_queues::SCHEMAS,
+        network::SCHEMAS,
     )
     .expect("store")
 }

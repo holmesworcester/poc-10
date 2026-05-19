@@ -142,8 +142,7 @@ impl<'a> Reader<'a> {
 use crate::core::handler_dispatch::{
     retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
 };
-use crate::core::network_queues::{NetworkTarget, OutboundNetworkRow};
-use crate::core::tcp;
+use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::facts::{connection, identity::endpoint};
 
 pub const SEND_NETWORK_FRAME_MISSING_ROUTE: &str = "send_network_frame_missing_route";
@@ -180,9 +179,16 @@ impl IntentHandler for SendNetworkFrameHandler {
             }
             Err(err) => return Err(err),
         };
-        let row = OutboundNetworkRow::new(target, input.frame);
-        tcp::send_once(context.store()?, target, vec![row], (), |_, _| Ok(()))
-            .map_err(|err| retry_intent(format!("send_network_frame tcp send: {err}")))?;
+        network::send(
+            context.store()?,
+            target,
+            OutboundFrame {
+                bytes: input.frame,
+                deadline: None,
+                retry_key: Some(intent.key.clone()),
+            },
+        )
+        .map_err(|err| retry_intent(format!("send_network_frame tcp send: {err}")))?;
         Ok(HandlerOutput::new())
     }
 }

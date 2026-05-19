@@ -16,6 +16,7 @@ pub mod handler_dispatch;
 pub mod intents;
 pub mod logical_clock;
 pub mod matchers;
+pub mod network;
 pub mod network_queues;
 pub mod projection;
 pub mod runtime;

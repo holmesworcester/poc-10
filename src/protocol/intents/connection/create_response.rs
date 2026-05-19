@@ -171,8 +171,7 @@ use crate::core::facts::{Fact, FactScope};
 use crate::core::handler_dispatch::{
     retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
 };
-use crate::core::network_queues::{NetworkTarget, OutboundNetworkRow};
-use crate::core::tcp;
+use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::facts::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
 };
@@ -270,9 +269,16 @@ impl IntentHandler for CreateConnectionResponseHandler {
             .from_listen_addr
             .ok_or_else(|| "create_connection_response response route is missing".to_string())?;
         let target = NetworkTarget::new(return_addr);
-        let row = OutboundNetworkRow::new(target, built.fact.bytes.clone());
-        tcp::send_once(context.store()?, target, vec![row], (), |_, _| Ok(()))
-            .map_err(|err| retry_intent(format!("create_connection_response tcp send: {err}")))?;
+        network::send(
+            context.store()?,
+            target,
+            OutboundFrame {
+                bytes: built.fact.bytes.clone(),
+                deadline: None,
+                retry_key: Some(intent.key.clone()),
+            },
+        )
+        .map_err(|err| retry_intent(format!("create_connection_response tcp send: {err}")))?;
 
         Ok(HandlerOutput::new()
             .fact(responder_ephemeral_fact)

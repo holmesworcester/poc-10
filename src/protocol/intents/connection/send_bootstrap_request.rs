@@ -7,10 +7,11 @@
 
 use std::net::SocketAddr;
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::handler_dispatch::{
+    retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
+};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
-use crate::core::network_queues::{NetworkTarget, OutboundNetworkRow};
-use crate::core::tcp;
+use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::facts::connection::request::{addr, layout};
 
 pub const SEND_BOOTSTRAP_CONNECTION_REQUEST: &str = "send_bootstrap_connection_request";
@@ -89,8 +90,18 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
         let request_fact = context.require_fact(&input.request_id)?;
         layout::decode_fact(request_fact.body())?;
         let target = NetworkTarget::new(input.addr);
-        let row = OutboundNetworkRow::new(target, request_fact.bytes.clone());
-        tcp::send_once(context.store()?, target, vec![row], (), |_, _| Ok(()))?;
+        network::send(
+            context.store()?,
+            target,
+            OutboundFrame {
+                bytes: request_fact.bytes.clone(),
+                deadline: None,
+                retry_key: Some(intent.key.clone()),
+            },
+        )
+        .map_err(|err| {
+            retry_intent(format!("send_bootstrap_connection_request tcp send: {err}"))
+        })?;
         Ok(HandlerOutput::new())
     }
 }
