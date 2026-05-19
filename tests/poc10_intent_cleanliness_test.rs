@@ -1368,6 +1368,83 @@ fn target_cli_equivalents_do_not_exist_or_parse_user_commands() {
 }
 
 #[test]
+fn protocol_cli_files_do_not_own_app_runtime_effects() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files_named(&root.join("src/protocol/facts"), "cli.rs") {
+        let text = source_text(&path);
+        for forbidden in [
+            "ProtocolRuntime::open",
+            "Runtime::<",
+            "Store::open",
+            "core::cli::run",
+            "MATCH_CLI_COMMANDS",
+            "dispatch_cli_intents",
+            "dispatch_deferred",
+            "drain_projection",
+            "drain_runtime",
+            ".save(",
+            "println!",
+            "eprintln!",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "protocol cli.rs files should parse argv and format command output, while app/runtime owns store open, dispatch, drain, save, and printing:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn match_app_dispatches_through_core_cli_registry() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("src/match_app.rs");
+    let text = source_text(&path);
+    let production = strip_line_comments(production_text_before_unit_tests(&text));
+
+    assert!(
+        production.contains("core_cli::run(MATCH_CLI_COMMANDS"),
+        "match_app.rs should dispatch through the generic core CLI registry"
+    );
+    assert!(
+        production.contains("core_cli::usage(MATCH_CLI_COMMANDS"),
+        "top-level command usage should be assembled from the registry specs"
+    );
+    assert!(
+        !production.contains("match parsed.command.first"),
+        "match_app.rs must not restore the broad manual command-name router"
+    );
+    for command in [
+        "create-workspace",
+        "invite",
+        "key-recipient",
+        "send",
+        "messages",
+        "generate",
+    ] {
+        let needle = format!("Some(\"{command}\")");
+        assert!(
+            !production.contains(&needle),
+            "match_app.rs must not dispatch protocol command {command:?} through a broad top-level match"
+        );
+    }
+    assert!(
+        production.contains("name: \"start\"")
+            && production.contains("name: \"stop\"")
+            && production.contains("name: \"reset\""),
+        "daemon lifecycle commands should stay registered at the app boundary"
+    );
+}
+
+#[test]
 fn target_handlers_do_not_own_projection_rows_or_projector_context() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let handler_root = root.join("src/protocol/intents");

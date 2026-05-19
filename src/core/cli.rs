@@ -169,7 +169,11 @@ fn hex_nibble(byte: u8, label: &str) -> Result<u8, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_hex_32, encode_hex, encode_hex_32};
+    use super::{decode_hex_32, encode_hex, encode_hex_32, run, CliArgs, CliCommand, CliOutput};
+
+    fn ok_command(_ctx: &mut usize, args: CliArgs<'_>) -> Result<CliOutput, String> {
+        Ok(CliOutput::line(format!("args: {}", args.values().len())))
+    }
 
     #[test]
     fn decode_hex_32_accepts_lowercase_and_uppercase() {
@@ -213,5 +217,42 @@ mod tests {
     fn encode_hex_uses_lowercase() {
         assert_eq!(encode_hex(&[0, 1, 10, 15, 16, 255]), "00010a0f10ff");
         assert_eq!(encode_hex_32(&[0xab; 32]), "ab".repeat(32));
+    }
+
+    #[test]
+    fn run_rejects_duplicate_command_names_before_dispatch() {
+        let commands = [
+            CliCommand {
+                name: "same",
+                usage: "same",
+                help: "",
+                run: ok_command,
+            },
+            CliCommand {
+                name: "same",
+                usage: "same AGAIN",
+                help: "",
+                run: ok_command,
+            },
+        ];
+        let err = run(&commands, &mut 0, &[String::from("same")])
+            .expect_err("duplicate command names fail centrally");
+
+        assert_eq!(err, "duplicate CLI command `same`");
+    }
+
+    #[test]
+    fn run_reports_unknown_commands_with_registry_usage() {
+        let commands = [CliCommand {
+            name: "known",
+            usage: "known ARG",
+            help: "",
+            run: ok_command,
+        }];
+        let err = run(&commands, &mut 0, &[String::from("missing")])
+            .expect_err("unknown command fails centrally");
+
+        assert!(err.contains("unknown command `missing`"), "{err}");
+        assert!(err.contains("match --db PATH known ARG"), "{err}");
     }
 }

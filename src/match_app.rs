@@ -6,8 +6,8 @@
 //! projection code, handler dispatch, or fact construction.
 
 use crate::core::cli::{
-    decode_hex_32_named as core_decode_hex_32, encode_hex as core_encode_hex,
-    encode_hex_32 as core_encode_hex_32, CliArgs,
+    self as core_cli, decode_hex_32_named as core_decode_hex_32, encode_hex as core_encode_hex,
+    encode_hex_32 as core_encode_hex_32, CliArgs, CliCommand, CliOutput,
 };
 use crate::core::command_context::{
     CommandClock, IdentityVault, LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
@@ -29,147 +29,435 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const DELETE_FILE_USAGE: &str = "delete-file WORKSPACE_ID_HEX FILE_SELECTOR";
+const KEY_DERIVE_USAGE: &str = "key-derive [LIMIT]";
+const KEY_NODE_USAGE: &str = "key-node WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX SOURCE_SECRET_ID_HEX RANGE_START RANGE_WIDTH [TOMBSTONE_NODE_ID_HEX]";
+const KEYS_USAGE: &str = "keys WORKSPACE_ID_HEX";
+const CHOP_NOW_USAGE: &str = "chop-now WORKSPACE_ID_HEX FLOOR_MINUTE";
+const DISAPPEARING_SET_USAGE: &str =
+    "disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]";
+const DISAPPEARING_STATUS_USAGE: &str = "disappearing-status WORKSPACE_ID_HEX";
+const DISAPPEARING_TIGHTEN_USAGE: &str =
+    "disappearing-tighten WORKSPACE_ID_HEX TTL_MINUTES [--yes|-y]";
+const DISAPPEARING_COMPACT_USAGE: &str = "disappearing-compact WORKSPACE_ID_HEX";
+const SYNC_STATUS_USAGE: &str = "sync-status";
+const NEGENTROPY_DRAIN_USAGE: &str = "negentropy-drain [LIMIT]";
+const CLOCK_USAGE: &str = "clock [set TIMESTAMP|advance DELTA|clear]";
+const START_USAGE: &str = "start --listen IP PORT [--tick-ms N] [--quiet-ms N]";
+const STOP_USAGE: &str = "stop";
+const RESET_USAGE: &str = "reset";
 
 pub fn run(argv: Vec<String>) -> Result<(), String> {
     let parsed = ParsedArgs::parse(argv)?;
-    match parsed.command.first().map(String::as_str) {
-        None => Err(top_level_usage("missing command")),
-        Some("-h" | "--help" | "help") => {
-            println!("{}", top_level_usage("Topo match CLI"));
-            Ok(())
-        }
-        Some("create-workspace") => run_create_workspace(parsed),
-        Some("invite") => run_invite(parsed),
-        Some("invite-server") => run_invite_server(parsed),
-        Some("accept") => run_accept(parsed),
-        Some("accept-invite-server") => run_accept_invite_server(parsed),
-        Some("link") => run_link(parsed),
-        Some("accept-link") => run_accept_link(parsed),
-        Some("identity") => run_identity(parsed),
-        Some("peers") => run_peers(parsed),
-        Some("workspaces") => run_workspaces(parsed),
-        Some("users") => run_users(parsed),
-        Some("key-recipient") => run_key_recipient(parsed),
-        Some("key-rotate-recipient") => run_key_recipient_rotation(parsed),
-        Some("key-frontier") => run_key_frontier(parsed),
-        Some("key-wrap") => run_key_wrap(parsed),
-        Some("key-access") => run_key_access(parsed),
-        Some("key-derive") => run_key_derive(parsed),
-        Some("key-node") => run_key_node(parsed),
-        Some("keys") => run_keys(parsed),
-        Some("chop-now") => run_chop_now(parsed),
-        Some("disappearing-set") => run_disappearing_set(parsed),
-        Some("disappearing-status") => run_disappearing_status(parsed),
-        Some("disappearing-tighten") => run_disappearing_tighten(parsed),
-        Some("disappearing-compact") => run_disappearing_compact(parsed),
-        Some("send") => run_send(parsed),
-        Some("react") => run_react(parsed),
-        Some("send-file") => run_send_file(parsed),
-        Some("files") => run_files(parsed),
-        Some("save-file") => run_save_file(parsed),
-        Some("delete-file") => run_delete_file(parsed),
-        Some("delete-message") => run_delete_message(parsed),
-        Some("messages") => run_messages(parsed),
-        Some("view") => run_view(parsed),
-        Some("grant-admin") => run_grant_admin(parsed),
-        Some("generate") => run_generate(parsed),
-        Some("generate-deps") => run_generate_deps(parsed),
-        Some("replay-deps-reverse") => run_replay_deps_reverse(parsed),
-        Some("sync-status") => run_sync_status(parsed),
-        Some("negentropy-drain") => run_negentropy_drain(parsed),
-        Some("content-count") => run_content_count(parsed),
-        Some("clock") => run_clock(parsed),
-        Some("count") => run_count(parsed),
-        Some("start") => run_start(parsed),
-        Some("stop") => run_stop(parsed),
-        Some("reset") => run_reset(parsed),
-        Some(command) => Err(top_level_usage(&format!(
-            "command `{command}` is not ported to the target runtime yet"
-        ))),
+    if parsed
+        .command
+        .first()
+        .is_some_and(|command| matches!(command.as_str(), "-h" | "--help" | "help"))
+    {
+        println!("{}", top_level_usage("Topo match CLI"));
+        return Ok(());
     }
+
+    let mut context = MatchCliContext { db: parsed.db };
+    let output = core_cli::run(MATCH_CLI_COMMANDS, &mut context, &parsed.command)
+        .map_err(with_top_level_usage_footer)?;
+    for line in output.lines {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn top_level_usage(reason: &str) -> String {
-    format!(
-        "{reason}\nusage:\n  match --db PATH {create_workspace_usage}\n\
-         match --db PATH {invite_usage}\n\
-         match --db PATH {invite_server_usage}\n\
-         match --db PATH {accept_usage}\n\
-         match --db PATH {accept_invite_server_usage}\n\
-         match --db PATH {link_usage}\n\
-         match --db PATH {accept_link_usage}\n\
-         match --db PATH {identity_usage}\n\
-         match --db PATH {peers_usage}\n\
-         match --db PATH {workspaces_usage}\n\
-         match --db PATH {users_usage}\n\
-         match --db PATH {key_recipient_usage}\n\
-         match --db PATH {key_rotate_recipient_usage}\n\
-         match --db PATH {key_frontier_usage}\n\
-         match --db PATH {key_wrap_usage}\n\
-         match --db PATH {key_access_usage}\n\
-         match --db PATH key-derive [LIMIT]\n\
-         match --db PATH key-node WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX SOURCE_SECRET_ID_HEX RANGE_START RANGE_WIDTH [TOMBSTONE_NODE_ID_HEX]\n\
-         match --db PATH keys WORKSPACE_ID_HEX\n\
-         match --db PATH chop-now WORKSPACE_ID_HEX FLOOR_MINUTE\n\
-         match --db PATH disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]\n\
-         match --db PATH disappearing-status WORKSPACE_ID_HEX\n\
-         match --db PATH disappearing-tighten WORKSPACE_ID_HEX TTL_MINUTES [--yes|-y]\n\
-         match --db PATH disappearing-compact WORKSPACE_ID_HEX\n\
-         match --db PATH {send_usage}\n\
-         match --db PATH {react_usage}\n\
-         match --db PATH {send_file_usage}\n\
-         match --db PATH {files_usage}\n\
-         match --db PATH {save_file_usage}\n\
-         match --db PATH {delete_file_usage}\n\
-         match --db PATH {delete_message_usage}\n\
-         match --db PATH {messages_usage}\n\
-         match --db PATH {view_usage}\n\
-         match --db PATH {grant_admin_usage}\n\
-         match --db PATH {generate_usage}\n\
-         match --db PATH {generate_deps_usage}\n\
-         match --db PATH {replay_deps_reverse_usage}\n\
-         match --db PATH sync-status\n\
-         match --db PATH negentropy-drain [LIMIT]\n\
-         match --db PATH {content_count_usage}\n\
-         match --db PATH clock [set TIMESTAMP|advance DELTA|clear]\n\
-         match --db PATH {count_usage}\n\
-         match --db PATH start --listen IP PORT [--tick-ms N] [--quiet-ms N]\n\
-         match --db PATH stop\n\
-         match --db PATH reset\n\n\
-        available commands run through the target core runtime facade",
-        create_workspace_usage = identity::workspace::cli::CREATE_WORKSPACE_USAGE,
-        invite_usage = identity::invite::cli::INVITE_USAGE,
-        invite_server_usage = identity::invite::cli::INVITE_SERVER_USAGE,
-        accept_usage = identity::invite::cli::ACCEPT_USAGE,
-        accept_invite_server_usage = identity::invite::cli::ACCEPT_INVITE_SERVER_USAGE,
-        link_usage = identity::invite::cli::LINK_USAGE,
-        accept_link_usage = identity::invite::cli::ACCEPT_LINK_USAGE,
-        identity_usage = identity::endpoint_shared::cli::IDENTITY_USAGE,
-        peers_usage = identity::endpoint_shared::cli::PEERS_USAGE,
-        workspaces_usage = identity::workspace::cli::WORKSPACES_USAGE,
-        users_usage = identity::user::cli::USERS_USAGE,
-        key_recipient_usage = encryption::cli::KEY_RECIPIENT_USAGE,
-        key_rotate_recipient_usage = encryption::cli::KEY_ROTATE_RECIPIENT_USAGE,
-        key_frontier_usage = encryption::cli::KEY_FRONTIER_USAGE,
-        key_wrap_usage = encryption::cli::KEY_WRAP_USAGE,
-        key_access_usage = encryption::cli::KEY_ACCESS_USAGE,
-        send_usage = content::sealed_message::cli::SEND_USAGE,
-        react_usage = content::sealed_message::cli::REACT_USAGE,
-        send_file_usage = content::sealed_message::cli::SEND_FILE_USAGE,
-        files_usage = content::sealed_message::cli::FILES_USAGE,
-        save_file_usage = content::sealed_message::cli::SAVE_FILE_USAGE,
-        delete_file_usage = DELETE_FILE_USAGE,
-        delete_message_usage = content::sealed_message::cli::DELETE_MESSAGE_USAGE,
-        messages_usage = content::sealed_message::cli::MESSAGES_USAGE,
-        view_usage = content::sealed_message::cli::VIEW_USAGE,
-        grant_admin_usage = identity::admin::cli::GRANT_ADMIN_USAGE,
-        generate_usage = content::event::cli::GENERATE_USAGE,
-        generate_deps_usage = sync::cascade_fact::cli::GENERATE_DEPS_USAGE,
-        replay_deps_reverse_usage = sync::cascade_fact::cli::REPLAY_DEPS_REVERSE_USAGE,
-        content_count_usage = content::event::cli::CONTENT_COUNT_USAGE,
-        count_usage = identity::workspace::cli::COUNT_USAGE
-    )
+    with_top_level_usage_footer(core_cli::usage(MATCH_CLI_COMMANDS, reason))
 }
+
+fn with_top_level_usage_footer(mut usage: String) -> String {
+    if usage.contains("\nusage:\n") && !usage.contains("target core runtime facade") {
+        usage.push_str("\n\navailable commands run through the target core runtime facade");
+    }
+    usage
+}
+
+struct MatchCliContext {
+    db: Option<PathBuf>,
+}
+
+impl MatchCliContext {
+    fn parsed(&self, command: &str, args: CliArgs<'_>) -> ParsedArgs {
+        let mut values = vec![command.to_string()];
+        values.extend(args.values().iter().cloned());
+        ParsedArgs {
+            db: self.db.clone(),
+            command: values,
+        }
+    }
+}
+
+macro_rules! app_cli_command {
+    ($adapter:ident, $name:literal, $runner:ident) => {
+        fn $adapter(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+            $runner(ctx.parsed($name, args))?;
+            Ok(CliOutput::default())
+        }
+    };
+}
+
+app_cli_command!(
+    cli_create_workspace,
+    "create-workspace",
+    run_create_workspace
+);
+app_cli_command!(cli_invite, "invite", run_invite);
+app_cli_command!(cli_invite_server, "invite-server", run_invite_server);
+app_cli_command!(cli_accept, "accept", run_accept);
+app_cli_command!(
+    cli_accept_invite_server,
+    "accept-invite-server",
+    run_accept_invite_server
+);
+app_cli_command!(cli_link, "link", run_link);
+app_cli_command!(cli_accept_link, "accept-link", run_accept_link);
+app_cli_command!(cli_identity, "identity", run_identity);
+app_cli_command!(cli_peers, "peers", run_peers);
+app_cli_command!(cli_workspaces, "workspaces", run_workspaces);
+app_cli_command!(cli_users, "users", run_users);
+app_cli_command!(cli_key_recipient, "key-recipient", run_key_recipient);
+app_cli_command!(
+    cli_key_recipient_rotation,
+    "key-rotate-recipient",
+    run_key_recipient_rotation
+);
+app_cli_command!(cli_key_frontier, "key-frontier", run_key_frontier);
+app_cli_command!(cli_key_wrap, "key-wrap", run_key_wrap);
+app_cli_command!(cli_key_access, "key-access", run_key_access);
+app_cli_command!(cli_key_derive, "key-derive", run_key_derive);
+app_cli_command!(cli_key_node, "key-node", run_key_node);
+app_cli_command!(cli_keys, "keys", run_keys);
+app_cli_command!(cli_chop_now, "chop-now", run_chop_now);
+app_cli_command!(
+    cli_disappearing_set,
+    "disappearing-set",
+    run_disappearing_set
+);
+app_cli_command!(
+    cli_disappearing_status,
+    "disappearing-status",
+    run_disappearing_status
+);
+app_cli_command!(
+    cli_disappearing_tighten,
+    "disappearing-tighten",
+    run_disappearing_tighten
+);
+app_cli_command!(
+    cli_disappearing_compact,
+    "disappearing-compact",
+    run_disappearing_compact
+);
+app_cli_command!(cli_send, "send", run_send);
+app_cli_command!(cli_react, "react", run_react);
+app_cli_command!(cli_send_file, "send-file", run_send_file);
+app_cli_command!(cli_files, "files", run_files);
+app_cli_command!(cli_save_file, "save-file", run_save_file);
+app_cli_command!(cli_delete_file, "delete-file", run_delete_file);
+app_cli_command!(cli_delete_message, "delete-message", run_delete_message);
+app_cli_command!(cli_messages, "messages", run_messages);
+app_cli_command!(cli_view, "view", run_view);
+app_cli_command!(cli_grant_admin, "grant-admin", run_grant_admin);
+app_cli_command!(cli_generate, "generate", run_generate);
+app_cli_command!(cli_generate_deps, "generate-deps", run_generate_deps);
+app_cli_command!(
+    cli_replay_deps_reverse,
+    "replay-deps-reverse",
+    run_replay_deps_reverse
+);
+app_cli_command!(cli_sync_status, "sync-status", run_sync_status);
+app_cli_command!(
+    cli_negentropy_drain,
+    "negentropy-drain",
+    run_negentropy_drain
+);
+app_cli_command!(cli_content_count, "content-count", run_content_count);
+app_cli_command!(cli_clock, "clock", run_clock);
+app_cli_command!(cli_count, "count", run_count);
+app_cli_command!(cli_start, "start", run_start);
+app_cli_command!(cli_stop, "stop", run_stop);
+app_cli_command!(cli_reset, "reset", run_reset);
+
+// Protocol command specs own command-specific parsing/formatting. The app
+// lifecycle specs below stay here because they open/operate daemon state
+// rather than authoring protocol command outputs.
+const MATCH_CLI_COMMANDS: &[CliCommand<MatchCliContext>] = &[
+    CliCommand {
+        name: "create-workspace",
+        usage: identity::workspace::cli::CREATE_WORKSPACE_USAGE,
+        help: "",
+        run: cli_create_workspace,
+    },
+    CliCommand {
+        name: "invite",
+        usage: identity::invite::cli::INVITE_USAGE,
+        help: "",
+        run: cli_invite,
+    },
+    CliCommand {
+        name: "invite-server",
+        usage: identity::invite::cli::INVITE_SERVER_USAGE,
+        help: "",
+        run: cli_invite_server,
+    },
+    CliCommand {
+        name: "accept",
+        usage: identity::invite::cli::ACCEPT_USAGE,
+        help: "",
+        run: cli_accept,
+    },
+    CliCommand {
+        name: "accept-invite-server",
+        usage: identity::invite::cli::ACCEPT_INVITE_SERVER_USAGE,
+        help: "",
+        run: cli_accept_invite_server,
+    },
+    CliCommand {
+        name: "link",
+        usage: identity::invite::cli::LINK_USAGE,
+        help: "",
+        run: cli_link,
+    },
+    CliCommand {
+        name: "accept-link",
+        usage: identity::invite::cli::ACCEPT_LINK_USAGE,
+        help: "",
+        run: cli_accept_link,
+    },
+    CliCommand {
+        name: "identity",
+        usage: identity::endpoint_shared::cli::IDENTITY_USAGE,
+        help: "",
+        run: cli_identity,
+    },
+    CliCommand {
+        name: "peers",
+        usage: identity::endpoint_shared::cli::PEERS_USAGE,
+        help: "",
+        run: cli_peers,
+    },
+    CliCommand {
+        name: "workspaces",
+        usage: identity::workspace::cli::WORKSPACES_USAGE,
+        help: "",
+        run: cli_workspaces,
+    },
+    CliCommand {
+        name: "users",
+        usage: identity::user::cli::USERS_USAGE,
+        help: "",
+        run: cli_users,
+    },
+    CliCommand {
+        name: "key-recipient",
+        usage: encryption::cli::KEY_RECIPIENT_USAGE,
+        help: "",
+        run: cli_key_recipient,
+    },
+    CliCommand {
+        name: "key-rotate-recipient",
+        usage: encryption::cli::KEY_ROTATE_RECIPIENT_USAGE,
+        help: "",
+        run: cli_key_recipient_rotation,
+    },
+    CliCommand {
+        name: "key-frontier",
+        usage: encryption::cli::KEY_FRONTIER_USAGE,
+        help: "",
+        run: cli_key_frontier,
+    },
+    CliCommand {
+        name: "key-wrap",
+        usage: encryption::cli::KEY_WRAP_USAGE,
+        help: "",
+        run: cli_key_wrap,
+    },
+    CliCommand {
+        name: "key-access",
+        usage: encryption::cli::KEY_ACCESS_USAGE,
+        help: "",
+        run: cli_key_access,
+    },
+    CliCommand {
+        name: "key-derive",
+        usage: KEY_DERIVE_USAGE,
+        help: "",
+        run: cli_key_derive,
+    },
+    CliCommand {
+        name: "key-node",
+        usage: KEY_NODE_USAGE,
+        help: "",
+        run: cli_key_node,
+    },
+    CliCommand {
+        name: "keys",
+        usage: KEYS_USAGE,
+        help: "",
+        run: cli_keys,
+    },
+    CliCommand {
+        name: "chop-now",
+        usage: CHOP_NOW_USAGE,
+        help: "",
+        run: cli_chop_now,
+    },
+    CliCommand {
+        name: "disappearing-set",
+        usage: DISAPPEARING_SET_USAGE,
+        help: "",
+        run: cli_disappearing_set,
+    },
+    CliCommand {
+        name: "disappearing-status",
+        usage: DISAPPEARING_STATUS_USAGE,
+        help: "",
+        run: cli_disappearing_status,
+    },
+    CliCommand {
+        name: "disappearing-tighten",
+        usage: DISAPPEARING_TIGHTEN_USAGE,
+        help: "",
+        run: cli_disappearing_tighten,
+    },
+    CliCommand {
+        name: "disappearing-compact",
+        usage: DISAPPEARING_COMPACT_USAGE,
+        help: "",
+        run: cli_disappearing_compact,
+    },
+    CliCommand {
+        name: "send",
+        usage: content::sealed_message::cli::SEND_USAGE,
+        help: "",
+        run: cli_send,
+    },
+    CliCommand {
+        name: "react",
+        usage: content::sealed_message::cli::REACT_USAGE,
+        help: "",
+        run: cli_react,
+    },
+    CliCommand {
+        name: "send-file",
+        usage: content::sealed_message::cli::SEND_FILE_USAGE,
+        help: "",
+        run: cli_send_file,
+    },
+    CliCommand {
+        name: "files",
+        usage: content::sealed_message::cli::FILES_USAGE,
+        help: "",
+        run: cli_files,
+    },
+    CliCommand {
+        name: "save-file",
+        usage: content::sealed_message::cli::SAVE_FILE_USAGE,
+        help: "",
+        run: cli_save_file,
+    },
+    CliCommand {
+        name: "delete-file",
+        usage: DELETE_FILE_USAGE,
+        help: "",
+        run: cli_delete_file,
+    },
+    CliCommand {
+        name: "delete-message",
+        usage: content::sealed_message::cli::DELETE_MESSAGE_USAGE,
+        help: "",
+        run: cli_delete_message,
+    },
+    CliCommand {
+        name: "messages",
+        usage: content::sealed_message::cli::MESSAGES_USAGE,
+        help: "",
+        run: cli_messages,
+    },
+    CliCommand {
+        name: "view",
+        usage: content::sealed_message::cli::VIEW_USAGE,
+        help: "",
+        run: cli_view,
+    },
+    CliCommand {
+        name: "grant-admin",
+        usage: identity::admin::cli::GRANT_ADMIN_USAGE,
+        help: "",
+        run: cli_grant_admin,
+    },
+    CliCommand {
+        name: "generate",
+        usage: content::event::cli::GENERATE_USAGE,
+        help: "",
+        run: cli_generate,
+    },
+    CliCommand {
+        name: "generate-deps",
+        usage: sync::cascade_fact::cli::GENERATE_DEPS_USAGE,
+        help: "",
+        run: cli_generate_deps,
+    },
+    CliCommand {
+        name: "replay-deps-reverse",
+        usage: sync::cascade_fact::cli::REPLAY_DEPS_REVERSE_USAGE,
+        help: "",
+        run: cli_replay_deps_reverse,
+    },
+    CliCommand {
+        name: "sync-status",
+        usage: SYNC_STATUS_USAGE,
+        help: "",
+        run: cli_sync_status,
+    },
+    CliCommand {
+        name: "negentropy-drain",
+        usage: NEGENTROPY_DRAIN_USAGE,
+        help: "",
+        run: cli_negentropy_drain,
+    },
+    CliCommand {
+        name: "content-count",
+        usage: content::event::cli::CONTENT_COUNT_USAGE,
+        help: "",
+        run: cli_content_count,
+    },
+    CliCommand {
+        name: "clock",
+        usage: CLOCK_USAGE,
+        help: "",
+        run: cli_clock,
+    },
+    CliCommand {
+        name: "count",
+        usage: identity::workspace::cli::COUNT_USAGE,
+        help: "",
+        run: cli_count,
+    },
+    CliCommand {
+        name: "start",
+        usage: START_USAGE,
+        help: "",
+        run: cli_start,
+    },
+    CliCommand {
+        name: "stop",
+        usage: STOP_USAGE,
+        help: "",
+        run: cli_stop,
+    },
+    CliCommand {
+        name: "reset",
+        usage: RESET_USAGE,
+        help: "",
+        run: cli_reset,
+    },
+];
 
 fn run_identity(parsed: ParsedArgs) -> Result<(), String> {
     let db = parsed

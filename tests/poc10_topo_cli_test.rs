@@ -53,11 +53,11 @@ fn match_demo_is_rejected_at_the_product_boundary() {
     );
     let stderr = cli_harness::stderr(&output);
     assert!(
-        stderr.contains("command `demo` is not ported to the target runtime yet")
+        stderr.contains("unknown command `demo`")
             && stderr.contains("match --db PATH create-workspace")
             && stderr.contains("NAME --username USER --devicename DEVICE")
             && !stderr.contains("walkthrough"),
-        "`match demo` should be rejected by the real CLI boundary; got:\n{stderr}"
+        "`match demo` should be rejected by the central CLI registry; got:\n{stderr}"
     );
 }
 
