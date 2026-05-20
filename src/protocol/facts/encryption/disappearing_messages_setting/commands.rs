@@ -4,10 +4,15 @@
 //! a proposed setting fact. Projection and purge execution stay in the target
 //! runtime.
 
+use crate::core::clock;
 use crate::core::command_context::CommandOutput;
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use crate::protocol::facts::{content, identity};
+use crate::protocol::intents::content::purge_below_retention_floor::{
+    purge_below_retention_floor_intent, PurgeBelowRetentionFloor,
+};
 use std::collections::BTreeSet;
 
 use super::fact::{DisappearingMessagesSettingFact, SCOPE_KIND_WORKSPACE};
@@ -63,6 +68,20 @@ pub struct AuthorCompactReport {
     pub ttl_minutes: u32,
     pub previous_floor_minute: u64,
     pub new_floor_minute: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusReport {
+    pub workspace_id: FactId,
+    pub setting_fact_id: Option<FactId>,
+    pub ttl_minutes: Option<u32>,
+    pub setting_floor_minute: u64,
+    pub last_chopped_floor: Option<u64>,
+    pub now_minute: Option<u64>,
+    pub horizon_floor: u64,
+    pub effective_floor: u64,
+    pub live_messages: usize,
+    pub message_tombstones: usize,
 }
 
 pub fn author_set_with_auto_floor(
@@ -223,6 +242,115 @@ pub fn count_messages_below_minute(
     }
 
     Ok(message_ids.len())
+}
+
+pub fn status_report(store: &Store, workspace_id: FactId) -> Result<StatusReport, String> {
+    let active = queries::active_for_workspace(store, workspace_id)?;
+    let setting_fact_id = active.as_ref().map(|row| row.setting_id);
+    let ttl_minutes = active.as_ref().map(|row| row.ttl_minutes);
+    let setting_floor_minute = active.as_ref().map(|row| row.retire_minute).unwrap_or(0);
+    let now_minute = clock::logical_time(store)?.map(|ms| ms / UNIX_MINUTE_MS);
+    let horizon_floor = now_minute
+        .map(|minute| minute.saturating_sub(30 * 24 * 60))
+        .unwrap_or(0);
+    let effective_floor = setting_floor_minute.max(horizon_floor);
+    if horizon_floor > 0 {
+        apply_horizon_floor(store, workspace_id, horizon_floor)?;
+    }
+    let raw_message_tombstones = store
+        .table_rows_with_key_prefix(
+            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("load message tombstones: {err}"))?;
+    let message_tombstones = raw_message_tombstones
+        .into_iter()
+        .map(|(key, value)| content::message::rows::decode_message_tombstone_row(&key, &value))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|row| row.authored_minute >= horizon_floor)
+        .count();
+    let live_messages = content::message::queries::content_message_rows(store, workspace_id)?
+        .into_iter()
+        .filter(|row| row.minute >= horizon_floor)
+        .count();
+    let last_chopped_floor =
+        (horizon_floor > setting_floor_minute && horizon_floor > 0).then_some(horizon_floor);
+
+    Ok(StatusReport {
+        workspace_id,
+        setting_fact_id,
+        ttl_minutes,
+        setting_floor_minute,
+        last_chopped_floor,
+        now_minute,
+        horizon_floor,
+        effective_floor,
+        live_messages,
+        message_tombstones,
+    })
+}
+
+pub fn apply_horizon_floor(
+    store: &Store,
+    workspace_id: FactId,
+    horizon_floor: u64,
+) -> Result<(), String> {
+    let retired = content::message::queries::content_message_rows(store, workspace_id)?
+        .into_iter()
+        .filter(|row| row.minute < horizon_floor)
+        .collect::<Vec<_>>();
+    if retired.is_empty() {
+        return Ok(());
+    }
+    let tombstones = retired
+        .iter()
+        .map(|row| {
+            content::message::rows::message_tombstone_row(
+                row.workspace_id,
+                row.message_id,
+                row.author_user_id,
+                row.created_at_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    let keys = retired
+        .iter()
+        .map(|row| content::message::rows::content_message_key(row.workspace_id, row.message_id))
+        .collect::<Vec<_>>();
+    store
+        .write_transaction(|tx| {
+            tx.insert_table_rows_in_tx(tombstones)?;
+            tx.delete_table_rows_in_tx(content::message::rows::CONTENT_MESSAGE_ROWS, keys.clone())?;
+            tx.delete_table_rows_in_tx(content::message::rows::OPENED_MESSAGE_ROWS, keys.clone())?;
+            Ok(())
+        })
+        .map_err(|err| format!("apply horizon floor: {err}"))
+}
+
+pub fn enqueue_floor_retention(
+    runtime: &mut Runtime,
+    workspace_id: FactId,
+    setting_id: FactId,
+    floor_minute: u64,
+) -> Result<usize, String> {
+    let mut queued = 0usize;
+    for message in content::message::queries::content_message_rows(runtime.store(), workspace_id)? {
+        if message.minute >= floor_minute {
+            continue;
+        }
+        if runtime.submit_intent(purge_below_retention_floor_intent(
+            PurgeBelowRetentionFloor {
+                workspace_id,
+                setting_id,
+                target_id: message.message_id,
+            },
+        ))? {
+            queued += 1;
+        }
+    }
+    Ok(queued)
 }
 
 fn setting_fact(

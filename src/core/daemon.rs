@@ -1,11 +1,19 @@
-//! Process lifecycle for the long-running `match start` command.
+//! Process lifecycle for a long-running protocol `start` command.
 //!
 //! Core owns only the reusable mechanics: parse daemon flags, hold the
 //! per-store lock, bind the TCP listener, publish the readiness line, react to
-//! stop/reset, and call a caller-supplied bounded tick. The tick is where the
-//! selected protocol decides how to turn bytes, facts, and intents into state.
+//! stop/reset, and run a bounded tick from the selected protocol's declarative
+//! daemon description. The tick is protocol-agnostic: accept network bytes,
+//! admit declared inbound intents, process declared time wakes, run
+//! projection/intent/projection work, then delete claimed inbound bytes only
+//! after receive dispatch did not ask to retry.
 
 use crate::core::cli::{CliArgs, CliOutput};
+use crate::core::intents::Intent;
+use crate::core::network;
+use crate::core::projectors::Timeline;
+use crate::core::runtime::Runtime;
+use crate::core::store::Store;
 use crate::core::tcp;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -52,6 +60,133 @@ impl TickActivity {
     pub fn from_bool(active: bool) -> Self {
         Self { active }
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct DaemonDescription {
+    pub inbound_network_intent: Option<InboundNetworkIntent>,
+    pub time_wakes: &'static [DaemonTimeWake],
+}
+
+pub type InboundNetworkIntent = fn(InboundNetworkFrame) -> Result<Intent, String>;
+
+#[derive(Debug, Clone)]
+pub struct InboundNetworkFrame {
+    pub frame: Vec<u8>,
+    pub origin_addr: SocketAddr,
+    pub received_at_local_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct DaemonTimeWake {
+    pub timeline: fn() -> Timeline,
+    pub end_inclusive: fn(&Store) -> Result<Option<u64>, String>,
+}
+
+pub fn tick(
+    description: DaemonDescription,
+    runtime: &mut Runtime,
+    listener: &tcp::Listener,
+    work_limit: usize,
+) -> Result<TickActivity, String> {
+    let accepted = accept_inbound_network(description, runtime, listener, work_limit)?;
+    let inbound = claim_inbound_network(description, runtime, work_limit)?;
+    submit_inbound_network_intents(description, runtime, &inbound)?;
+
+    let due_time_wakes = process_declared_time_wakes(description, runtime, work_limit)?;
+    let projection_before_handlers = runtime.process_projection_until_idle(4, work_limit)?;
+    let dispatched = runtime.dispatch_intents(work_limit)?;
+    let projection_after_handlers = runtime.process_projection_until_idle(4, work_limit)?;
+    delete_claimed_inbound_after_successful_dispatch(runtime, &inbound, dispatched.retried)?;
+
+    Ok(TickActivity::from_bool(
+        accepted.accepted_connections > 0
+            || accepted.value.sent_frames > 0
+            || accepted.value.received_frames > 0
+            || !inbound.is_empty()
+            || due_time_wakes > 0
+            || !projection_before_handlers.is_idle()
+            || !dispatched.is_idle()
+            || !projection_after_handlers.is_idle(),
+    ))
+}
+
+fn accept_inbound_network(
+    description: DaemonDescription,
+    runtime: &Runtime,
+    listener: &tcp::Listener,
+    work_limit: usize,
+) -> Result<tcp::AcceptReport<tcp::StreamReport>, String> {
+    if description.inbound_network_intent.is_none() {
+        return Ok(tcp::AcceptReport {
+            accepted_connections: 0,
+            value: tcp::StreamReport::default(),
+        });
+    }
+    listener.accept_available(runtime.store(), work_limit)
+}
+
+fn claim_inbound_network(
+    description: DaemonDescription,
+    runtime: &Runtime,
+    work_limit: usize,
+) -> Result<Vec<network::InboundNetworkRow>, String> {
+    if description.inbound_network_intent.is_none() {
+        return Ok(Vec::new());
+    }
+    network::claim_inbound(runtime.store(), work_limit)
+}
+
+fn submit_inbound_network_intents(
+    description: DaemonDescription,
+    runtime: &mut Runtime,
+    inbound: &[network::InboundNetworkRow],
+) -> Result<(), String> {
+    let Some(to_intent) = description.inbound_network_intent else {
+        return Ok(());
+    };
+    let received_at_local_ms = now_ms();
+    for row in inbound {
+        runtime.submit_intent(to_intent(InboundNetworkFrame {
+            frame: row.bytes.clone(),
+            origin_addr: row.source.addr(),
+            received_at_local_ms,
+        })?)?;
+    }
+    Ok(())
+}
+
+fn process_declared_time_wakes(
+    description: DaemonDescription,
+    runtime: &mut Runtime,
+    work_limit: usize,
+) -> Result<usize, String> {
+    let mut due = 0;
+    for wake in description.time_wakes {
+        let Some(end_inclusive) = (wake.end_inclusive)(runtime.store())? else {
+            continue;
+        };
+        due += runtime.process_due_time_range((wake.timeline)(), None, end_inclusive, work_limit);
+    }
+    Ok(due)
+}
+
+fn delete_claimed_inbound_after_successful_dispatch(
+    runtime: &Runtime,
+    inbound: &[network::InboundNetworkRow],
+    retried: bool,
+) -> Result<(), String> {
+    if !retried {
+        network::delete_inbound(runtime.store(), inbound)?;
+    }
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod commands;
 pub mod fact;
 pub mod layout;

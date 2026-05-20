@@ -49,3 +49,17 @@ pub fn max_created_at_ms(store: &Store) -> Result<u64, String> {
     }
     Ok(max_timestamp)
 }
+
+pub fn content_message_rows(
+    store: &Store,
+    workspace_id: FactId,
+) -> Result<Vec<rows::ContentMessageRow>, String> {
+    let mut rows = store
+        .table_rows_with_key_prefix(rows::CONTENT_MESSAGE_ROWS, &workspace_id, usize::MAX)
+        .map_err(|err| format!("load message rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| rows::decode_content_message_row(&key, &value))
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.sort_by_key(|row| (row.created_at_ms, row.message_id));
+    Ok(rows)
+}

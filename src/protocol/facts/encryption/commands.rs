@@ -10,6 +10,7 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::runtime::Runtime;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::{content, encryption};
+use std::collections::BTreeSet;
 
 use super::fact::{
     LocalKeySecretFact, LocalRecipientKeyFact, RecipientKeyFact, RemovalFrontierFact,
@@ -112,6 +113,35 @@ pub struct ChopNowReceipt {
     pub purged_event_bytes: usize,
     pub subsumed_message_tombstones_gcd: usize,
     pub subsumed_leaf_tombstones_gcd: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyStatusReport {
+    pub recipient_keys: usize,
+    pub local_recipient_keys: usize,
+    pub removal_frontiers: Vec<RemovalFrontierAccess>,
+    pub key_wraps: usize,
+    pub local_key_secrets: usize,
+    pub local_history_node_secrets: usize,
+    pub local_history_leaves: usize,
+    pub local_history_node_tombstones: usize,
+    pub message_tombstones: usize,
+    pub cover_summary: [u8; 32],
+    pub history_leaves: Vec<HistoryLeafRow>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemovalFrontierAccess {
+    pub frontier_id: FactId,
+    pub access: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryLeafRow {
+    pub node_id: FactId,
+    pub frontier_id: FactId,
+    pub minute: u64,
+    pub fact_id_in_minute: FactId,
 }
 
 pub fn create_recipient_key(
@@ -315,6 +345,75 @@ pub fn workspace_key_wrap_count(runtime: &Runtime, workspace_id: FactId) -> Resu
         .count())
 }
 
+pub fn key_status_report(
+    runtime: &Runtime,
+    workspace_id: FactId,
+) -> Result<KeyStatusReport, String> {
+    let store = runtime.store();
+    let leaves = history_leaf_rows(store, workspace_id)?;
+    let local_history_rows = store
+        .table_rows_with_key_prefix(
+            encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("load local history rows: {err}"))?;
+    let message_tombstones = store
+        .table_rows_with_key_prefix(
+            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("load message tombstones: {err}"))?;
+    let file_tombstones = store
+        .table_rows_with_key_prefix(
+            content::file_deletion::rows::FILE_DELETION_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("load file deletion rows: {err}"))?;
+    let local_key_secret_frontiers = local_key_secret_frontiers(runtime, workspace_id);
+    let recipient_keys = runtime
+        .facts()
+        .filter_map(|fact| layout::decode_recipient_key(&fact.bytes).ok())
+        .filter(|key| key.workspace_id == workspace_id)
+        .count();
+    let local_recipient_keys = runtime
+        .facts()
+        .filter_map(|fact| layout::decode_local_recipient_key(&fact.bytes).ok())
+        .filter(|key| key.workspace_id == workspace_id)
+        .count();
+    let removal_frontiers = runtime
+        .facts()
+        .filter_map(|fact| {
+            layout::decode_removal_frontier(&fact.bytes)
+                .ok()
+                .map(|frontier| (fact.id, frontier))
+        })
+        .filter(|(_, frontier)| frontier.workspace_id == workspace_id)
+        .map(|(frontier_id, _)| RemovalFrontierAccess {
+            frontier_id,
+            access: local_key_secret_frontiers.contains(&frontier_id),
+        })
+        .collect::<Vec<_>>();
+    let key_wraps = workspace_key_wrap_count(runtime, workspace_id)?;
+    let cover_summary = cover_summary(&leaves);
+
+    Ok(KeyStatusReport {
+        recipient_keys,
+        local_recipient_keys,
+        removal_frontiers,
+        key_wraps,
+        local_key_secrets: local_key_secret_frontiers.len(),
+        local_history_node_secrets: local_history_rows.len() + leaves.len(),
+        local_history_leaves: leaves.len(),
+        local_history_node_tombstones: message_tombstones.len() + file_tombstones.len(),
+        message_tombstones: message_tombstones.len(),
+        cover_summary,
+        history_leaves: leaves,
+    })
+}
+
 fn workspace_retired_from_access(runtime: &Runtime, workspace_id: FactId) -> Result<bool, String> {
     let tombstones = runtime
         .store()
@@ -349,6 +448,78 @@ fn workspace_retired_from_access(runtime: &Runtime, workspace_id: FactId) -> Res
         return Ok(true);
     }
     Ok(false)
+}
+
+fn history_leaf_rows(
+    store: &crate::core::store::Store,
+    workspace_id: FactId,
+) -> Result<Vec<HistoryLeafRow>, String> {
+    let messages = content::message::queries::content_message_rows(store, workspace_id)?;
+    let live_message_ids = messages
+        .iter()
+        .map(|message| message.message_id)
+        .collect::<BTreeSet<_>>();
+    let default_frontier = first_removal_frontier_id(store, workspace_id)?.unwrap_or([0; 32]);
+    let mut leaves = messages
+        .into_iter()
+        .map(|message| HistoryLeafRow {
+            node_id: message.message_id,
+            frontier_id: default_frontier,
+            minute: message.minute,
+            fact_id_in_minute: nonzero_or(message.leaf_id, message.message_id),
+        })
+        .collect::<Vec<_>>();
+    for file in content::file::queries::content_file_rows(store, workspace_id)? {
+        if !live_message_ids.contains(&file.message_id) {
+            continue;
+        }
+        leaves.push(HistoryLeafRow {
+            node_id: file.file_fact_id,
+            frontier_id: default_frontier,
+            minute: file.created_at_ms / content::message::fact::UNIX_MINUTE_MS,
+            fact_id_in_minute: file.file_id,
+        });
+    }
+    leaves.sort_by_key(|leaf| (leaf.minute, leaf.node_id));
+    Ok(leaves)
+}
+
+fn first_removal_frontier_id(
+    store: &crate::core::store::Store,
+    workspace_id: FactId,
+) -> Result<Option<FactId>, String> {
+    let mut rows = store
+        .table_rows_with_key_prefix(
+            encryption::removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
+            &workspace_id,
+            usize::MAX,
+        )
+        .map_err(|err| format!("load removal frontier rows: {err}"))?
+        .into_iter()
+        .filter_map(|(key, value)| {
+            encryption::removal_frontier::rows::decode_removal_frontier_row(&key, &value).ok()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| (row.created_at_ms, row.removal_frontier_id));
+    Ok(rows.first().map(|row| row.removal_frontier_id))
+}
+
+fn nonzero_or(value: FactId, fallback: FactId) -> FactId {
+    if value.iter().all(|byte| *byte == 0) {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn cover_summary(leaves: &[HistoryLeafRow]) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    for leaf in leaves {
+        hash.update(&leaf.node_id);
+        hash.update(&leaf.minute.to_be_bytes());
+        hash.update(&leaf.fact_id_in_minute);
+    }
+    *hash.finalize().as_bytes()
 }
 
 pub fn create_history_node(

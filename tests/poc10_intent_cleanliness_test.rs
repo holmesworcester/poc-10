@@ -941,7 +941,7 @@ fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
         "pub(crate) const SCHEMA_SOURCES: &[&str]",
         "pub(crate) const ATOMIC_ROW_TABLES: &[TableName]",
         "pub const FACTS: &[FactRegistration]",
-        "pub const CONTEXT_MATCHERS: &[ContextMatcherRegistration]",
+        "pub const CONTEXT_MATCHERS: &[ContextRoleDeclaration]",
         "pub const INTENTS: &[IntentRegistration]",
         "pub const HANDLERS: &[HandlerRegistration]",
         "pub(crate) const HANDLER_ROUTES: &[HandlerRoute]",

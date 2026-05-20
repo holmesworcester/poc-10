@@ -15,6 +15,10 @@ pub const KEY_FRONTIER_USAGE: &str = "key-frontier WORKSPACE_ID_HEX";
 pub const KEY_WRAP_USAGE: &str =
     "key-wrap WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX RECIPIENT_KEY_ID_HEX";
 pub const KEY_ACCESS_USAGE: &str = "key-access WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX";
+pub const KEY_DERIVE_USAGE: &str = "key-derive [LIMIT]";
+pub const KEY_NODE_USAGE: &str = "key-node WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX SOURCE_SECRET_ID_HEX RANGE_START RANGE_WIDTH [TOMBSTONE_NODE_ID_HEX]";
+pub const KEYS_USAGE: &str = "keys WORKSPACE_ID_HEX";
+pub const CHOP_NOW_USAGE: &str = "chop-now WORKSPACE_ID_HEX FLOOR_MINUTE";
 
 pub fn key_recipient(
     ctx: &CommandContext<'_>,
@@ -151,6 +155,88 @@ pub fn key_access_status_output(status: &commands::KeyAccessStatus) -> CliOutput
     )
 }
 
+pub fn key_derive_limit(args: CliArgs<'_>) -> Result<usize, String> {
+    if args.values().len() > 1 {
+        return Err(KEY_DERIVE_USAGE.to_string());
+    }
+    args.get(0)
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| KEY_DERIVE_USAGE.to_string())
+        })
+        .transpose()
+        .map(|limit| limit.unwrap_or(512))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyNodeArgs {
+    pub workspace_id: [u8; 32],
+    pub removal_frontier_id: [u8; 32],
+    pub source_secret_id: [u8; 32],
+    pub range_start: u64,
+    pub range_width: u64,
+    pub tombstone_node_id: [u8; 32],
+}
+
+pub fn key_node_args(args: CliArgs<'_>) -> Result<KeyNodeArgs, String> {
+    if args.values().len() != 5 && args.values().len() != 6 {
+        return Err(KEY_NODE_USAGE.to_string());
+    }
+    let range_start = args
+        .get(3)
+        .expect("length checked")
+        .parse::<u64>()
+        .map_err(|_| "key-node range_start must be a u64".to_string())?;
+    let range_width = args
+        .get(4)
+        .expect("length checked")
+        .parse::<u64>()
+        .map_err(|_| "key-node range_width must be a u64".to_string())?;
+    let tombstone_node_id = if let Some(value) = args.get(5) {
+        core_decode_hex_32(value, "tombstone node id")?
+    } else {
+        [0; 32]
+    };
+    Ok(KeyNodeArgs {
+        workspace_id: core_decode_hex_32(args.get(0).expect("length checked"), "workspace id")?,
+        removal_frontier_id: core_decode_hex_32(
+            args.get(1).expect("length checked"),
+            "removal frontier id",
+        )?,
+        source_secret_id: core_decode_hex_32(
+            args.get(2).expect("length checked"),
+            "source secret id",
+        )?,
+        range_start,
+        range_width,
+        tombstone_node_id,
+    })
+}
+
+pub fn keys_workspace_id(args: CliArgs<'_>) -> Result<[u8; 32], String> {
+    args.require_len(1, KEYS_USAGE)?;
+    core_decode_hex_32(args.get(0).expect("length checked"), "workspace id")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChopNowArgs {
+    pub workspace_id: [u8; 32],
+    pub floor_minute: u64,
+}
+
+pub fn chop_now_args(args: CliArgs<'_>) -> Result<ChopNowArgs, String> {
+    args.require_len(2, CHOP_NOW_USAGE)?;
+    Ok(ChopNowArgs {
+        workspace_id: core_decode_hex_32(args.get(0).expect("length checked"), "workspace id")?,
+        floor_minute: args
+            .get(1)
+            .expect("length checked")
+            .parse::<u64>()
+            .map_err(|_| "chop-now floor minute must be a u64".to_string())?,
+    })
+}
+
 pub fn history_node_output(receipt: &commands::CreateHistoryNodeReceipt) -> CliOutput {
     CliOutput::lines(vec![
         format!("workspace_id: {}", encode_hex(&receipt.workspace_id)),
@@ -201,6 +287,49 @@ pub fn chop_now_output(receipt: &commands::ChopNowReceipt) -> CliOutput {
             receipt.subsumed_leaf_tombstones_gcd
         ),
     ])
+}
+
+pub fn keys_output(report: &commands::KeyStatusReport) -> CliOutput {
+    let mut lines = vec![
+        format!("recipient_keys: {}", report.recipient_keys),
+        "recipient_key_tombstones: 0".to_string(),
+        format!("local_recipient_keys: {}", report.local_recipient_keys),
+        format!("removal_frontiers: {}", report.removal_frontiers.len()),
+        format!("key_wraps: {}", report.key_wraps),
+        format!("local_key_secrets: {}", report.local_key_secrets),
+        format!(
+            "local_history_node_secrets: {}",
+            report.local_history_node_secrets
+        ),
+        "local_history_minute_nodes: 0".to_string(),
+        format!("local_history_leaves: {}", report.local_history_leaves),
+        "local_history_trie_internals: 0".to_string(),
+        "local_history_time_internals: 0".to_string(),
+        format!(
+            "local_history_node_tombstones: {}",
+            report.local_history_node_tombstones
+        ),
+        format!("message_tombstones: {}", report.message_tombstones),
+        format!("cover_summary: {}", encode_hex(&report.cover_summary)),
+    ];
+    for frontier in &report.removal_frontiers {
+        lines.push(format!(
+            "frontier: {} access={}",
+            encode_hex(&frontier.frontier_id),
+            if frontier.access { "yes" } else { "no" }
+        ));
+    }
+    for leaf in &report.history_leaves {
+        lines.push(format!(
+            "history_node: {} frontier={} start={} width=1 bit_depth=256 prefix={} fact_id_in_minute={} tombstones=none",
+            encode_hex(&leaf.node_id),
+            encode_hex(&leaf.frontier_id),
+            leaf.minute,
+            encode_hex(&leaf.fact_id_in_minute),
+            encode_hex(&leaf.fact_id_in_minute)
+        ));
+    }
+    CliOutput::lines(lines)
 }
 
 pub fn key_access_output(

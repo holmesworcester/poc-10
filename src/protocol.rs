@@ -5,7 +5,7 @@
 //! lives in `protocol::app`.
 
 pub mod app;
-pub(crate) mod command_handlers;
+pub(crate) mod cli;
 pub mod facts;
 pub mod intents;
 pub mod matchers;

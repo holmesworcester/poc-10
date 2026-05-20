@@ -149,6 +149,12 @@ Current follow-up work outside the active cutover guard:
 - Keep network/perf coverage honest while preserving the simple transport
   contract: TCP stream delivery, memory-local byte queues, and idempotent
   regenerated sends.
+- Revisit command-host boundaries for accept/listen flows: accepting an invite
+  currently needs daemon listen-address context, and that should stay visibly
+  owned by core/daemon rather than becoming protocol CLI orchestration.
+- Revisit whether thin protocol command wrappers should explicitly drain local
+  projection/intent work, or whether core should expose a command-host policy
+  that makes those transaction and effect boundaries obvious.
 
 ## File Organization
 
@@ -194,7 +200,7 @@ src/
 
   protocol/
     app.rs
-    command_handlers.rs
+    cli.rs
     facts.rs
     registry.rs
     facts/
@@ -282,14 +288,16 @@ to name protocol factories, but not to own runtime lifecycle, storage opening,
 network IO loops, or daemon policy.
 
 `src/protocol/app.rs` turns that protocol into an executable `MATCH_PROTOCOL`
-description:
+description. The protocol declares the variable daemon pieces; core owns the
+fixed daemon cycle:
 
 ```rust
 pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescription {
     name: "match",
     runtime: MATCH_RUNTIME,
     daemon: DaemonDescription {
-        tick: match_daemon_tick,
+        inbound_network_intent: Some(receive_transit_frame_intent),
+        time_wakes: MATCH_DAEMON_TIME_WAKES,
     },
     commands: MATCH_COMMANDS,
     context: MatchCliContext::new,
@@ -297,9 +305,11 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
 ```
 
 Core consumes that description generically. It may parse `--db`, run daemon
-lifecycle commands, open the declared runtime, and call a registered command
-function. It must not learn protocol command names, handler names, matcher
-roles, or fact tags.
+lifecycle commands, open the declared runtime, accept network bytes, convert
+claimed inbound bytes through the declared protocol constructor, process
+declared time wakes, run projection/intent/projection work, and call a
+registered command function. It must not learn protocol command names, handler
+names, matcher roles, or fact tags.
 
 The registry owns the CLI command table: command name, usage string, and the
 protocol-owned function pointer that core should call. Fact-scope `cli.rs`
