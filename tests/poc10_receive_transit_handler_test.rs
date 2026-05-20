@@ -6,7 +6,6 @@ use topo::core::intent_pipeline::{HandlerContext, IntentHandler};
 use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wire::FixedBytes;
-use topo::protocol::catalog::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::facts::connection::request::layout as connection_request_layout;
 use topo::protocol::facts::connection::response::fact::ConnectionResponseFact;
@@ -33,6 +32,7 @@ use topo::protocol::intents::transport::receive_transit_frame::{
     receive_transit_frame_intent, ReceiveTransitFrame, ReceiveTransitFrameHandler,
     RECEIVE_TRANSIT_FRAME,
 };
+use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 
 const ORIGIN: &[u8] = b"127.0.0.1:41001";
 const RECEIVED_AT: u64 = 1_700_000_222;

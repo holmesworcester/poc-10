@@ -672,7 +672,7 @@ fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
 #[test]
 fn poc10_concrete_protocol_routes_semantic_messages() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let catalog = source_text(&root.join("src/protocol/catalog.rs"));
+    let registry = source_text(&root.join("src/protocol/registry.rs"));
     let runtime = source_text(&root.join("src/protocol/runtime.rs"));
     let receive = source_text(&root.join("src/protocol/facts/transport/transit/receive.rs"));
 
@@ -685,19 +685,19 @@ fn poc10_concrete_protocol_routes_semantic_messages() {
         "ContentMessageDeletionProjector",
     ] {
         assert!(
-            catalog.contains(required) || runtime.contains(required) || receive.contains(required),
+            registry.contains(required) || runtime.contains(required) || receive.contains(required),
             "normal poc-10 messages must route through semantic content::message facts; missing {required}"
         );
     }
-    assert!(runtime.contains("CONTENT_MESSAGE_ROWS"));
-    assert!(runtime.contains("MESSAGE_DELETION_ROWS"));
+    assert!(registry.contains("CONTENT_MESSAGE_ROWS"));
+    assert!(registry.contains("MESSAGE_DELETION_ROWS"));
     assert!(
-        !catalog.contains("module: \"content::sealed_message\""),
+        !registry.contains("module: \"content::sealed_message\""),
         "sealed-message compatibility module must not be registered"
     );
     assert!(
-        !runtime.contains("TYPE_SEALED_MESSAGE") && !runtime.contains("project_sealed_message"),
-        "runtime dispatch must not route sealed-message wrappers"
+        !registry.contains("TYPE_SEALED_MESSAGE") && !registry.contains("project_sealed_message"),
+        "protocol registry must not route sealed-message wrappers"
     );
     assert!(
         !receive.contains("content::sealed_message::TYPE_SEALED_MESSAGE")

@@ -123,7 +123,7 @@ mod tests {
     fn generate_constructs_deterministic_content_facts() {
         let store = Store::open_memory_with_schema_sources(&[
             crate::core::schema_dsl::CORE_SCHEMA_SOURCE,
-            crate::protocol::catalog::FACTS_SCHEMA_SOURCE,
+            crate::protocol::registry::FACTS_SCHEMA_SOURCE,
         ])
         .expect("store");
         let clock = FnClock(|| 1);

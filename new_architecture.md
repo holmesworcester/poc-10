@@ -275,10 +275,15 @@ accumulate behavior. Public concrete protocol namespaces live under
 `topo::protocol::facts` and `topo::protocol::intents` without top-level
 dumping-ground files.
 
-`src/protocol/catalog.rs` is the target protocol catalog. It is a declarative
-table of contents across schema sources, fact registrations, context matcher
-roles, intent kinds, and handlers. `src/protocol/registry.rs` turns that
-protocol into an executable `MATCH_PROTOCOL` description:
+`src/protocol/registry.rs` is the target protocol registry. It is the table of
+contents across CLI commands, schema sources, fact registrations, context
+matcher roles, intent kinds, handlers, and the projector/handler route
+factories that bind those declarations to core runtime traits. It is allowed
+to name protocol factories, but not to own runtime lifecycle, storage opening,
+network IO loops, or daemon policy.
+
+`src/protocol/app.rs` turns that protocol into an executable `MATCH_PROTOCOL`
+description:
 
 ```rust
 pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescription {
@@ -297,12 +302,12 @@ lifecycle commands, open the declared runtime, and call a registered command
 function. It must not learn protocol command names, handler names, matcher
 roles, or fact tags.
 
-`src/protocol/commands.rs` is only the CLI command registry: command name,
-usage string, and the protocol-owned function pointer that core should call.
-Fact-scope `cli.rs` modules still own argv parsing and text formatting for
-their commands. Command wrappers must not become a second app runner: they
-receive the core-opened runtime, call fact-scope command/query functions, and
-return `CliOutput` for core to print. Daemon-sensitive work belongs in facts,
+The registry owns the CLI command table: command name, usage string, and the
+protocol-owned function pointer that core should call. Fact-scope `cli.rs`
+modules still own argv parsing and text formatting for their commands.
+Command host functions must not become a second app runner: they receive the
+core-opened runtime, call fact-scope command/query functions, and return
+`CliOutput` for core to print. Daemon-sensitive work belongs in facts,
 projectors, and intent handlers. For example, accepting an invite creates a
 local `connection_request` fact; projecting that fact schedules the bootstrap
 network intent, so the running daemon owns the network effect.
@@ -594,7 +599,7 @@ local/private state.
 The concrete protocol has one registry file:
 
 ```text
-src/protocol/catalog.rs
+src/protocol/registry.rs
 ```
 
 It may declare:
@@ -723,7 +728,7 @@ When implementing or reviewing a projector:
    invariant they validate.
 9. Add any new context role, need constructor, offer constructor, and matching
    behavior to the relation-specific module under src/protocol/matchers/, then
-   register that matcher in src/protocol/catalog.rs.
+   register that matcher in src/protocol/registry.rs.
 10. If a module is temporarily a row shell because sibling context is not ready,
     document the exact behavior gap in the module docs and remove that gap when
     the sibling context lands.

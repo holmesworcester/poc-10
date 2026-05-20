@@ -5,5 +5,5 @@
 //! commands, projector registry, matchers, and intent handlers.
 
 pub fn run(argv: Vec<String>) -> Result<(), String> {
-    crate::core::app::run(&crate::protocol::registry::MATCH_PROTOCOL, argv)
+    crate::core::app::run(&crate::protocol::app::MATCH_PROTOCOL, argv)
 }

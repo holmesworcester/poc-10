@@ -1003,7 +1003,7 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
 fn cutover_network_io_intents_are_restart_local_ephemeral() {
     let root = root();
     let intent_pipeline = source_text(&root.join("src/core/intent_pipeline.rs"));
-    let protocol = source_text(&root.join("src/protocol/catalog.rs"));
+    let protocol = source_text(&root.join("src/protocol/registry.rs"));
     let network_io_files = [
         "src/protocol/intents/connection/send_bootstrap_request.rs",
         "src/protocol/intents/transport/send_network_frame.rs",

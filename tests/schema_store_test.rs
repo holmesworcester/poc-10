@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use rusqlite::{params, Connection};
 use topo::core::schema_dsl::{parse_schema, CORE_SCHEMA_SOURCE};
 use topo::core::store::{Store, TableName, TableRow};
-use topo::protocol::catalog::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use topo::protocol::facts::content::{file, message, reaction};
+use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 
 fn checked_schema_sources() -> [&'static str; 3] {
     [

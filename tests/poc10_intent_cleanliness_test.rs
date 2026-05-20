@@ -929,18 +929,22 @@ fn target_fact_child_files_use_narrow_slice_names() {
 }
 
 #[test]
-fn target_protocol_registry_is_declarative_only() {
+fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/protocol/catalog.rs");
+    let path = root.join("src/protocol/registry.rs");
     let text = source_text(&path);
 
     for required in [
         "pub const PROTOCOL: ProtocolRegistry",
+        "pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>]",
         "pub const SCHEMAS: &[SchemaRegistration]",
+        "pub(crate) const SCHEMA_SOURCES: &[&str]",
+        "pub(crate) const ATOMIC_ROW_TABLES: &[TableName]",
         "pub const FACTS: &[FactRegistration]",
         "pub const CONTEXT_MATCHERS: &[ContextMatcherRegistration]",
         "pub const INTENTS: &[IntentRegistration]",
         "pub const HANDLERS: &[HandlerRegistration]",
+        "pub(crate) const HANDLER_ROUTES: &[HandlerRoute]",
     ] {
         assert!(
             text.contains(required),
@@ -951,16 +955,10 @@ fn target_protocol_registry_is_declarative_only() {
     let mut offenders = Vec::new();
     for line in meaningful_source_lines(&text) {
         for forbidden in [
-            "fn ",
-            "impl ",
-            "match ",
-            "if ",
-            "for ",
-            "while ",
             "Store",
             "ContextChangePipeline",
-            ".project(",
-            ".handle(",
+            "RuntimeDescription",
+            "match_daemon_tick",
             "open_",
             "std::net",
             "tcp::",
@@ -973,7 +971,7 @@ fn target_protocol_registry_is_declarative_only() {
 
     assert!(
         offenders.is_empty(),
-        "src/protocol/catalog.rs should be a descriptor catalog, not runtime logic:\n{}",
+        "src/protocol/registry.rs should own protocol tables without runtime IO/lifecycle logic:\n{}",
         offenders.join("\n")
     );
 }
@@ -1403,7 +1401,7 @@ fn match_app_selects_protocol_description() {
     let production = strip_line_comments(production_text_before_unit_tests(&text));
 
     assert!(
-        production.contains("core::app::run(&crate::protocol::registry::MATCH_PROTOCOL"),
+        production.contains("core::app::run(&crate::protocol::app::MATCH_PROTOCOL"),
         "match_app.rs should only choose the concrete protocol description"
     );
     assert!(

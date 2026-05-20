@@ -7,7 +7,6 @@ use topo::core::command_context::{
 };
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
-use topo::protocol::catalog::PROTOCOL;
 use topo::protocol::facts::content::message as content_message;
 use topo::protocol::facts::encryption::{
     fact::{LocalKeySecretFact, RemovalFrontierFact},
@@ -17,6 +16,7 @@ use topo::protocol::facts::identity::signed_fact::create as signed_fact_create;
 use topo::protocol::facts::identity::workspace::{
     commands::create_workspace, rows as workspace_rows,
 };
+use topo::protocol::registry::PROTOCOL;
 use topo::protocol::runtime::ProtocolRuntime;
 
 struct FixedClock(Cell<u64>);
@@ -149,7 +149,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
     ] {
         assert!(
             declared.contains(required),
-            "{required} must be declared in src/protocol.rs"
+            "{required} must be declared in the protocol registry"
         );
         assert!(
             dispatched.contains(required),
@@ -168,7 +168,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
 
     assert!(
         missing.is_empty() && unexpected.is_empty(),
-        "HANDLER_ROUTES must stay in lockstep with src/protocol.rs handlers\nmissing from runtime dispatch: {missing:?}\nunexpected runtime dispatch handlers: {unexpected:?}"
+        "HANDLER_ROUTES must stay in lockstep with protocol handler registrations\nmissing from runtime dispatch: {missing:?}\nunexpected runtime dispatch handlers: {unexpected:?}"
     );
 }
 
@@ -253,7 +253,7 @@ fn workspace_scope(workspace_id: [u8; 32]) -> FactScope {
 }
 
 fn runtime_dispatch_handler_routes() -> BTreeSet<String> {
-    let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/runtime.rs");
+    let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/registry.rs");
     let source = std::fs::read_to_string(&runtime_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", runtime_path.display()));
     let const_start = source

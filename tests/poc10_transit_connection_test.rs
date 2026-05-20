@@ -4,7 +4,6 @@ use topo::core::intent_pipeline::{HandlerContext, IntentHandler};
 use topo::core::intents::IntentKind;
 use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::catalog::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use topo::protocol::facts::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::facts::connection::response::layout as connection_response_layout;
 use topo::protocol::facts::encryption;
@@ -20,6 +19,7 @@ use topo::protocol::intents::transport::send_facts_on_connection::{
 use topo::protocol::intents::transport::send_network_frame::{
     decode_send_network_frame, send_network_frame_intent, SendNetworkFrame,
 };
+use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 
 fn connection_fact() -> (Fact, ConnectionResponseFact) {
     let local_endpoint = local_endpoint();

@@ -136,8 +136,8 @@ mod tests {
     use crate::core::facts::{FactScope, ScopeKind};
     use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
-    use crate::protocol::catalog::FACTS_SCHEMA_SOURCE;
     use crate::protocol::facts::sync::shared_fact;
+    use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
     #[test]
     fn seed_connection_sync_intent_round_trips() {
