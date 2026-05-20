@@ -1114,6 +1114,57 @@ mod tests {
     use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
     use std::cell::Cell;
 
+    /// A `Projector` defined by a closure, so a test needing one-off projection
+    /// logic does not have to declare a single-method struct.
+    struct CallProjector<F>(F);
+
+    impl<F> Projector for CallProjector<F>
+    where
+        F: Fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>,
+    {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            (self.0)(fact, context)
+        }
+    }
+
+    /// Constructor that pins the higher-ranked `Fn` bound so closure lifetime
+    /// inference succeeds at the call site.
+    fn call_projector<F>(f: F) -> CallProjector<F>
+    where
+        F: Fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>,
+    {
+        CallProjector(f)
+    }
+
+    /// An `IntentHandler` defined by a closure (default `accepts` / `input_fact_ids`).
+    struct CallHandler<F>(F);
+
+    impl<F> IntentHandler for CallHandler<F>
+    where
+        F: Fn(&Intent, &HandlerContext) -> Result<HandlerOutput, String>,
+    {
+        fn handle(
+            &self,
+            intent: &Intent,
+            context: &HandlerContext,
+        ) -> Result<HandlerOutput, String> {
+            (self.0)(intent, context)
+        }
+    }
+
+    /// Constructor that pins the higher-ranked `Fn` bound so closure lifetime
+    /// inference succeeds at the call site.
+    fn call_handler<F>(f: F) -> CallHandler<F>
+    where
+        F: Fn(&Intent, &HandlerContext) -> Result<HandlerOutput, String>,
+    {
+        CallHandler(f)
+    }
+
     /// Build a v1 offer row by hand: same shape as current encode_offer but
     /// with the trailing payload_ref FactId restored.
     fn encode_v1_offer(offer: &ContextOffer, payload_ref: [u8; 32]) -> Vec<u8> {
@@ -1318,8 +1369,22 @@ mod tests {
         ))
         .expect("submit trigger intent");
 
+        let fact_and_intent_handler = call_handler(|intent, _context| {
+            Ok(HandlerOutput::new()
+                .fact(Fact::new(
+                    FactScope::Global,
+                    44,
+                    b"handler-produced-fact".to_vec(),
+                ))
+                .intent(Intent::new(
+                    IntentKind::new("handler_followup").unwrap(),
+                    IntentExecution::Deferred,
+                    intent.key.clone(),
+                    b"followup",
+                )))
+        });
         let report = bus
-            .dispatch_intents(&FactAndIntentHandler, &HandlerContext::new(), 1)
+            .dispatch_intents(&fact_and_intent_handler, &HandlerContext::new(), 1)
             .expect("dispatch handler");
 
         assert_eq!(report.handled, 1);
@@ -1328,8 +1393,19 @@ mod tests {
         assert_eq!(bus.pending_len(), 1);
         assert_eq!(bus.intents().len(), 1);
 
+        let handler_fact_projector = call_projector(|fact, _context| {
+            if fact.bytes == b"handler-produced-fact" {
+                return Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("projected_handler_fact").unwrap(),
+                    IntentExecution::Atomic,
+                    fact.id,
+                    b"materialized",
+                )));
+            }
+            Ok(ProjectionOutput::new())
+        });
         let drain = bus
-            .drain(&HandlerFactProjector, &[], 10)
+            .drain(&handler_fact_projector, &[], 10)
             .expect("project handler fact");
         assert_eq!(drain.projections, 1);
         assert_eq!(drain.intents, 1);
@@ -1399,9 +1475,13 @@ mod tests {
     #[test]
     fn failed_handler_keeps_intent_available_for_retry() {
         let mut bus = WakeLoop::new();
-        let handler = FailOnceHandler {
-            fail: Cell::new(true),
-        };
+        let fail = Cell::new(true);
+        let handler = call_handler(|_intent, _context| {
+            if fail.replace(false) {
+                return Err("handler unavailable".to_string());
+            }
+            Ok(HandlerOutput::new())
+        });
         bus.submit_intent(Intent::new(
             IntentKind::new("retryable_handler").unwrap(),
             IntentExecution::Deferred,
@@ -1428,7 +1508,8 @@ mod tests {
         let fact = Fact::new(FactScope::Global, 7, b"effect-input".to_vec());
         let mut bus = WakeLoop::new();
         bus.submit_fact(fact.clone());
-        bus.drain(&NoopProjector, &[], 10).expect("clear pending");
+        let noop_projector = call_projector(|_fact, _context| Ok(ProjectionOutput::new()));
+        bus.drain(&noop_projector, &[], 10).expect("clear pending");
         bus.submit_intent(Intent::new(
             IntentKind::new("read_named_fact").unwrap(),
             IntentExecution::Deferred,
@@ -1487,12 +1568,18 @@ mod tests {
         ))
         .expect("submit existing followup");
 
+        let conflicting_intent_handler = call_handler(|_intent, _context| {
+            Ok(HandlerOutput::new()
+                .fact(fact.clone())
+                .intent(Intent::new(
+                    IntentKind::new("followup_conflict").unwrap(),
+                    IntentExecution::Deferred,
+                    b"same",
+                    b"new",
+                )))
+        });
         let err = bus
-            .dispatch_intents(
-                &ConflictingIntentHandler { fact: fact.clone() },
-                &HandlerContext::new(),
-                10,
-            )
+            .dispatch_intents(&conflicting_intent_handler, &HandlerContext::new(), 10)
             .expect_err("handler output conflicts");
 
         assert!(err.contains("intent idempotence key conflict"), "{err}");
@@ -1590,7 +1677,33 @@ mod tests {
         let matcher = ExactSelectorMatcher::new(role.clone());
         let child = Fact::new(FactScope::Global, 1, b"child".to_vec());
         let dep = Fact::new(FactScope::Global, 2, b"dep".to_vec());
-        let projector = DependencyGateProjector::new(role, Selector::from_bytes(dep.id), dep.id);
+        let selector = Selector::from_bytes(dep.id);
+        let dep_id = dep.id;
+        let allow_dep = Cell::new(false);
+        let child_applied = Cell::new(0);
+        let projector = call_projector(|fact, context| {
+            if fact.id == dep_id {
+                if !allow_dep.get() {
+                    return Err("dependency rejected by projector".to_string());
+                }
+                return Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: selector.clone(),
+                }));
+            }
+            if context.offers().is_empty() {
+                return Ok(ProjectionOutput::new().need(ContextNeed {
+                    owner: fact.id,
+                    role: role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: selector.clone(),
+                }));
+            }
+            child_applied.set(child_applied.get() + 1);
+            Ok(ProjectionOutput::new())
+        });
         let mut bus = WakeLoop::new();
 
         bus.submit_fact(child.clone());
@@ -1602,15 +1715,15 @@ mod tests {
             .expect_err("dependency projection fails once");
         assert!(err.contains("dependency rejected by projector"), "{err}");
         assert_eq!(bus.pending_len(), 1);
-        assert_eq!(projector.child_applied.get(), 0);
+        assert_eq!(child_applied.get(), 0);
 
-        projector.allow_dep.set(true);
+        allow_dep.set(true);
         let report = bus
             .drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
             .expect("dependency retry succeeds");
 
         assert_eq!(report.projections, 2);
-        assert_eq!(projector.child_applied.get(), 1);
+        assert_eq!(child_applied.get(), 1);
         assert_eq!(bus.pending_len(), 0);
     }
 
@@ -1623,12 +1736,53 @@ mod tests {
         let dep = Fact::new(FactScope::Global, 1, b"dep".to_vec());
         let child = Fact::new(FactScope::Global, 2, b"child".to_vec());
         let updater = Fact::new(FactScope::Global, 3, b"updater".to_vec());
-        let projector = UpdateWakeProjector::new(
-            base_role,
-            update_role,
-            Selector::from_bytes(dep.id),
-            Selector::from_bytes(child.id),
-        );
+        let base_selector = Selector::from_bytes(dep.id);
+        let update_selector = Selector::from_bytes(child.id);
+        let child_projections = Cell::new(0);
+        let child_saw_update = Cell::new(false);
+        let projector = call_projector(|fact, context| {
+            if fact.bytes == b"dep" {
+                return Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: base_role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: base_selector.clone(),
+                }));
+            }
+            if fact.bytes == b"updater" {
+                return Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: update_role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: update_selector.clone(),
+                }));
+            }
+            let saw_base = context
+                .offers()
+                .iter()
+                .any(|offer| offer.role == base_role);
+            let base_already_projected = child_projections.get() > 0;
+            let saw_update = context
+                .offers()
+                .iter()
+                .any(|offer| offer.role == update_role);
+            if !saw_base && !base_already_projected {
+                return Ok(ProjectionOutput::new().need(ContextNeed {
+                    owner: fact.id,
+                    role: base_role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: base_selector.clone(),
+                }));
+            }
+            child_projections.set(child_projections.get() + 1);
+            child_saw_update.set(saw_update);
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: fact.id,
+                role: update_role.clone(),
+                scope: fact.scope.clone(),
+                selector: update_selector.clone(),
+            }))
+        });
         let mut bus = WakeLoop::new();
 
         bus.submit_fact(dep);
@@ -1642,8 +1796,8 @@ mod tests {
             10,
         )
         .expect("base drain");
-        assert_eq!(projector.child_projections.get(), 1);
-        assert!(!projector.child_saw_update.get());
+        assert_eq!(child_projections.get(), 1);
+        assert!(!child_saw_update.get());
 
         bus.submit_fact(updater);
         let report = bus
@@ -1658,8 +1812,8 @@ mod tests {
             .expect("update drain");
 
         assert_eq!(report.wakes, 1);
-        assert_eq!(projector.child_projections.get(), 2);
-        assert!(projector.child_saw_update.get());
+        assert_eq!(child_projections.get(), 2);
+        assert!(child_saw_update.get());
         assert_eq!(bus.context(&child.id).unwrap().needs.len(), 1);
     }
 
@@ -1671,12 +1825,45 @@ mod tests {
         let update_matcher = ExactSelectorMatcher::new(update_role.clone());
         let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
         let updater = Fact::new(FactScope::Global, 2, b"updater".to_vec());
-        let projector = RetireWaitingProjector::new(
-            primary_role,
-            update_role,
-            Selector::from_bytes([99; 32]),
-            Selector::from_bytes(target.id),
-        );
+        let primary_selector = Selector::from_bytes([99; 32]);
+        let update_selector = Selector::from_bytes(target.id);
+        let target_retired = Cell::new(0);
+        let projector = call_projector(|fact, context| {
+            if fact.bytes == b"updater" {
+                return Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: update_role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: update_selector.clone(),
+                }));
+            }
+            let saw_update = context
+                .offers()
+                .iter()
+                .any(|offer| offer.role == update_role);
+            if saw_update {
+                target_retired.set(target_retired.get() + 1);
+                return Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("retire_fact").unwrap(),
+                    IntentExecution::Atomic,
+                    fact.id,
+                    b"retired".to_vec(),
+                )));
+            }
+            Ok(ProjectionOutput::new()
+                .need(ContextNeed {
+                    owner: fact.id,
+                    role: primary_role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: primary_selector.clone(),
+                })
+                .need(ContextNeed {
+                    owner: fact.id,
+                    role: update_role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: update_selector.clone(),
+                }))
+        });
         let mut bus = WakeLoop::new();
 
         bus.submit_fact(target.clone());
@@ -1704,7 +1891,7 @@ mod tests {
             .expect("update retires target");
 
         assert_eq!(report.wakes, 1);
-        assert_eq!(projector.target_retired.get(), 1);
+        assert_eq!(target_retired.get(), 1);
         assert!(bus.context(&target.id).is_none());
         assert_eq!(bus.intents().len(), 1);
     }
@@ -1714,7 +1901,38 @@ mod tests {
         let role = Role::new("exact").unwrap();
         let matcher = ExactSelectorMatcher::new(role.clone());
         let selector = Selector::from_bytes([8; 32]);
-        let projector = MatchedPayloadProjector::new(role, selector);
+        let matched = Cell::new(0);
+        let projector = call_projector(|fact, context| {
+            if fact.bytes == b"payload-fact" {
+                return Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: selector.clone(),
+                }));
+            }
+            if let Some(matched_ctx) = context.matched_context().first() {
+                matched.set(matched.get() + 1);
+                if matched_ctx.need.selector != selector
+                    || matched_ctx.offer.selector != selector
+                    || matched_ctx.payload.bytes != b"payload-fact"
+                {
+                    return Err("matched context did not preserve edge details".to_string());
+                }
+                return Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("matched_payload").unwrap(),
+                    IntentExecution::Atomic,
+                    fact.id,
+                    matched_ctx.payload.bytes.clone(),
+                )));
+            }
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: fact.id,
+                role: role.clone(),
+                scope: fact.scope.clone(),
+                selector: selector.clone(),
+            }))
+        });
         let need = Fact::new(FactScope::Global, 1, b"need-matched-payload".to_vec());
         let offer = Fact::new(FactScope::Global, 2, b"payload-fact".to_vec());
         let mut bus = WakeLoop::new();
@@ -1728,7 +1946,7 @@ mod tests {
             .expect("offer wakes need");
 
         assert_eq!(report.wakes, 1);
-        assert_eq!(projector.matched.get(), 1);
+        assert_eq!(matched.get(), 1);
         assert_eq!(bus.intents().len(), 1);
         assert_eq!(bus.intents()[0].payload, b"payload-fact");
     }
@@ -1739,7 +1957,44 @@ mod tests {
         let matcher = ExactSelectorMatcher::new(role.clone());
         let wanted = Selector::from_bytes([8; 32]);
         let sibling = Selector::from_bytes([9; 32]);
-        let projector = SiblingOfferProjector::new(role, wanted, sibling);
+        let matched = Cell::new(0);
+        let projector = call_projector(|fact, context| {
+            if fact.bytes == b"sibling-offers" {
+                return Ok(ProjectionOutput::new()
+                    .offer(ContextOffer {
+                        owner: fact.id,
+                        role: role.clone(),
+                        scope: fact.scope.clone(),
+                        selector: wanted.clone(),
+                    })
+                    .offer(ContextOffer {
+                        owner: fact.id,
+                        role: role.clone(),
+                        scope: fact.scope.clone(),
+                        selector: sibling.clone(),
+                    }));
+            }
+            if !context.offers().is_empty() {
+                if context.offers().len() != 1 || context.offers()[0].selector != wanted {
+                    return Err(
+                        "projection context included an unmatched sibling offer".to_string()
+                    );
+                }
+                matched.set(matched.get() + 1);
+                return Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("exact_matched_offer").unwrap(),
+                    IntentExecution::Atomic,
+                    fact.id,
+                    b"exact-offer-only".to_vec(),
+                )));
+            }
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: fact.id,
+                role: role.clone(),
+                scope: fact.scope.clone(),
+                selector: wanted.clone(),
+            }))
+        });
         let need = Fact::new(FactScope::Global, 1, b"need-exact-offer".to_vec());
         let offer = Fact::new(FactScope::Global, 2, b"sibling-offers".to_vec());
         let mut bus = WakeLoop::new();
@@ -1751,7 +2006,7 @@ mod tests {
         bus.drain(&projector, &[&matcher as &dyn ContextMatcher], 10)
             .expect("offer wakes need");
 
-        assert_eq!(projector.matched.get(), 1);
+        assert_eq!(matched.get(), 1);
         assert_eq!(bus.intents().len(), 1);
         assert_eq!(bus.intents()[0].payload, b"exact-offer-only");
     }
@@ -1807,56 +2062,6 @@ mod tests {
         }
     }
 
-    struct DependencyGateProjector {
-        role: Role,
-        selector: Selector,
-        dep_id: FactId,
-        allow_dep: Cell<bool>,
-        child_applied: Cell<usize>,
-    }
-
-    impl DependencyGateProjector {
-        fn new(role: Role, selector: Selector, dep_id: FactId) -> Self {
-            Self {
-                role,
-                selector,
-                dep_id,
-                allow_dep: Cell::new(false),
-                child_applied: Cell::new(0),
-            }
-        }
-    }
-
-    impl Projector for DependencyGateProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.id == self.dep_id {
-                if !self.allow_dep.get() {
-                    return Err("dependency rejected by projector".to_string());
-                }
-                return Ok(ProjectionOutput::new().offer(ContextOffer {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: self.selector.clone(),
-                }));
-            }
-            if context.offers().is_empty() {
-                return Ok(ProjectionOutput::new().need(ContextNeed {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: self.selector.clone(),
-                }));
-            }
-            self.child_applied.set(self.child_applied.get() + 1);
-            Ok(ProjectionOutput::new())
-        }
-    }
-
     struct StandingNeedIntentProjector {
         role: Role,
         selector: Selector,
@@ -1908,29 +2113,6 @@ mod tests {
         }
     }
 
-    struct FactAndIntentHandler;
-
-    impl IntentHandler for FactAndIntentHandler {
-        fn handle(
-            &self,
-            intent: &Intent,
-            _context: &HandlerContext,
-        ) -> Result<HandlerOutput, String> {
-            Ok(HandlerOutput::new()
-                .fact(Fact::new(
-                    FactScope::Global,
-                    44,
-                    b"handler-produced-fact".to_vec(),
-                ))
-                .intent(Intent::new(
-                    IntentKind::new("handler_followup").unwrap(),
-                    IntentExecution::Deferred,
-                    intent.key.clone(),
-                    b"followup",
-                )))
-        }
-    }
-
     struct SelectedHandler;
 
     impl IntentHandler for SelectedHandler {
@@ -1956,64 +2138,6 @@ mod tests {
             _context: &HandlerContext,
         ) -> Result<HandlerOutput, String> {
             Ok(HandlerOutput::new())
-        }
-    }
-
-    struct HandlerFactProjector;
-
-    impl Projector for HandlerFactProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.bytes == b"handler-produced-fact" {
-                return Ok(ProjectionOutput::new().intent(Intent::new(
-                    IntentKind::new("projected_handler_fact").unwrap(),
-                    IntentExecution::Atomic,
-                    fact.id,
-                    b"materialized",
-                )));
-            }
-            Ok(ProjectionOutput::new())
-        }
-    }
-
-    struct FailOnceHandler {
-        fail: Cell<bool>,
-    }
-
-    impl IntentHandler for FailOnceHandler {
-        fn handle(
-            &self,
-            _intent: &Intent,
-            _context: &HandlerContext,
-        ) -> Result<HandlerOutput, String> {
-            if self.fail.replace(false) {
-                return Err("handler unavailable".to_string());
-            }
-            Ok(HandlerOutput::new())
-        }
-    }
-
-    struct ConflictingIntentHandler {
-        fact: Fact,
-    }
-
-    impl IntentHandler for ConflictingIntentHandler {
-        fn handle(
-            &self,
-            _intent: &Intent,
-            _context: &HandlerContext,
-        ) -> Result<HandlerOutput, String> {
-            Ok(HandlerOutput::new()
-                .fact(self.fact.clone())
-                .intent(Intent::new(
-                    IntentKind::new("followup_conflict").unwrap(),
-                    IntentExecution::Deferred,
-                    b"same",
-                    b"new",
-                )))
         }
     }
 
@@ -2053,276 +2177,4 @@ mod tests {
         }
     }
 
-    struct NoopProjector;
-
-    impl Projector for NoopProjector {
-        fn project(
-            &self,
-            _fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new())
-        }
-    }
-
-    struct UpdateWakeProjector {
-        base_role: Role,
-        update_role: Role,
-        base_selector: Selector,
-        update_selector: Selector,
-        child_projections: Cell<usize>,
-        child_saw_update: Cell<bool>,
-    }
-
-    impl UpdateWakeProjector {
-        fn new(
-            base_role: Role,
-            update_role: Role,
-            base_selector: Selector,
-            update_selector: Selector,
-        ) -> Self {
-            Self {
-                base_role,
-                update_role,
-                base_selector,
-                update_selector,
-                child_projections: Cell::new(0),
-                child_saw_update: Cell::new(false),
-            }
-        }
-    }
-
-    impl Projector for UpdateWakeProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.bytes == b"dep" {
-                return Ok(ProjectionOutput::new().offer(ContextOffer {
-                    owner: fact.id,
-                    role: self.base_role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: self.base_selector.clone(),
-                }));
-            }
-            if fact.bytes == b"updater" {
-                return Ok(ProjectionOutput::new().offer(ContextOffer {
-                    owner: fact.id,
-                    role: self.update_role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: self.update_selector.clone(),
-                }));
-            }
-            let saw_base = context
-                .offers()
-                .iter()
-                .any(|offer| offer.role == self.base_role);
-            let base_already_projected = self.child_projections.get() > 0;
-            let saw_update = context
-                .offers()
-                .iter()
-                .any(|offer| offer.role == self.update_role);
-            if !saw_base && !base_already_projected {
-                return Ok(ProjectionOutput::new().need(ContextNeed {
-                    owner: fact.id,
-                    role: self.base_role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: self.base_selector.clone(),
-                }));
-            }
-            self.child_projections.set(self.child_projections.get() + 1);
-            self.child_saw_update.set(saw_update);
-            Ok(ProjectionOutput::new().need(ContextNeed {
-                owner: fact.id,
-                role: self.update_role.clone(),
-                scope: fact.scope.clone(),
-                selector: self.update_selector.clone(),
-            }))
-        }
-    }
-
-    struct RetireWaitingProjector {
-        primary_role: Role,
-        update_role: Role,
-        primary_selector: Selector,
-        update_selector: Selector,
-        target_retired: Cell<usize>,
-    }
-
-    impl RetireWaitingProjector {
-        fn new(
-            primary_role: Role,
-            update_role: Role,
-            primary_selector: Selector,
-            update_selector: Selector,
-        ) -> Self {
-            Self {
-                primary_role,
-                update_role,
-                primary_selector,
-                update_selector,
-                target_retired: Cell::new(0),
-            }
-        }
-    }
-
-    impl Projector for RetireWaitingProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.bytes == b"updater" {
-                return Ok(ProjectionOutput::new().offer(ContextOffer {
-                    owner: fact.id,
-                    role: self.update_role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: self.update_selector.clone(),
-                }));
-            }
-            let saw_update = context
-                .offers()
-                .iter()
-                .any(|offer| offer.role == self.update_role);
-            if saw_update {
-                self.target_retired.set(self.target_retired.get() + 1);
-                return Ok(ProjectionOutput::new().intent(Intent::new(
-                    IntentKind::new("retire_fact").unwrap(),
-                    IntentExecution::Atomic,
-                    fact.id,
-                    b"retired".to_vec(),
-                )));
-            }
-            Ok(ProjectionOutput::new()
-                .need(ContextNeed {
-                    owner: fact.id,
-                    role: self.primary_role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: self.primary_selector.clone(),
-                })
-                .need(ContextNeed {
-                    owner: fact.id,
-                    role: self.update_role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: self.update_selector.clone(),
-                }))
-        }
-    }
-
-    struct MatchedPayloadProjector {
-        role: Role,
-        selector: Selector,
-        matched: Cell<usize>,
-    }
-
-    impl MatchedPayloadProjector {
-        fn new(role: Role, selector: Selector) -> Self {
-            Self {
-                role,
-                selector,
-                matched: Cell::new(0),
-            }
-        }
-    }
-
-    impl Projector for MatchedPayloadProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.bytes == b"payload-fact" {
-                return Ok(ProjectionOutput::new().offer(ContextOffer {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: self.selector.clone(),
-                }));
-            }
-            if let Some(matched) = context.matched_context().first() {
-                self.matched.set(self.matched.get() + 1);
-                if matched.need.selector != self.selector
-                    || matched.offer.selector != self.selector
-                    || matched.payload.bytes != b"payload-fact"
-                {
-                    return Err("matched context did not preserve edge details".to_string());
-                }
-                return Ok(ProjectionOutput::new().intent(Intent::new(
-                    IntentKind::new("matched_payload").unwrap(),
-                    IntentExecution::Atomic,
-                    fact.id,
-                    matched.payload.bytes.clone(),
-                )));
-            }
-            Ok(ProjectionOutput::new().need(ContextNeed {
-                owner: fact.id,
-                role: self.role.clone(),
-                scope: fact.scope.clone(),
-                selector: self.selector.clone(),
-            }))
-        }
-    }
-
-    struct SiblingOfferProjector {
-        role: Role,
-        wanted: Selector,
-        sibling: Selector,
-        matched: Cell<usize>,
-    }
-
-    impl SiblingOfferProjector {
-        fn new(role: Role, wanted: Selector, sibling: Selector) -> Self {
-            Self {
-                role,
-                wanted,
-                sibling,
-                matched: Cell::new(0),
-            }
-        }
-    }
-
-    impl Projector for SiblingOfferProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.bytes == b"sibling-offers" {
-                return Ok(ProjectionOutput::new()
-                    .offer(ContextOffer {
-                        owner: fact.id,
-                        role: self.role.clone(),
-                        scope: fact.scope.clone(),
-                        selector: self.wanted.clone(),
-                    })
-                    .offer(ContextOffer {
-                        owner: fact.id,
-                        role: self.role.clone(),
-                        scope: fact.scope.clone(),
-                        selector: self.sibling.clone(),
-                    }));
-            }
-            if !context.offers().is_empty() {
-                if context.offers().len() != 1 || context.offers()[0].selector != self.wanted {
-                    return Err(
-                        "projection context included an unmatched sibling offer".to_string()
-                    );
-                }
-                self.matched.set(self.matched.get() + 1);
-                return Ok(ProjectionOutput::new().intent(Intent::new(
-                    IntentKind::new("exact_matched_offer").unwrap(),
-                    IntentExecution::Atomic,
-                    fact.id,
-                    b"exact-offer-only".to_vec(),
-                )));
-            }
-            Ok(ProjectionOutput::new().need(ContextNeed {
-                owner: fact.id,
-                role: self.role.clone(),
-                scope: fact.scope.clone(),
-                selector: self.wanted.clone(),
-            }))
-        }
-    }
 }
