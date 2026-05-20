@@ -51,7 +51,6 @@ impl TypedProjector<super::Codec> for SyncKeyWrapAvailableProjector {
                 fact.id,
                 scope.clone(),
                 key.key_wrap_id,
-                fact.id,
             ))
             .offer(matchers::key_wrap_offer(fact.id, scope, key.key_wrap_id)))
     }

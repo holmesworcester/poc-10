@@ -156,7 +156,6 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             fact.id,
             message_matchers::workspace_scope(file.workspace_id),
             fact.id,
-            fact.id,
         ))
         .intent(AtomicIntent::PutRow(content_file_row(fact.id, &file)?).into_intent())
         .intent(share_fact_with_workspace_intent_for_fact(

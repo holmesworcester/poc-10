@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct ContextMatch {
     pub need_owner: FactId,
     pub offer_owner: FactId,
-    pub payload_ref: FactId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,7 +216,6 @@ impl ContextMatcher for ExactSelectorMatcher {
                         matches.insert(ContextMatch {
                             need_owner: need.owner,
                             offer_owner: offer.owner,
-                            payload_ref: offer.payload_ref,
                         });
                     }
                 }
@@ -248,7 +246,6 @@ impl ContextMatcher for ExactSelectorMatcher {
                         matches.insert(ContextMatch {
                             need_owner: need.owner,
                             offer_owner: offer.owner,
-                            payload_ref: offer.payload_ref,
                         });
                     }
                 }
@@ -264,7 +261,6 @@ pub fn exact_selector_match(need: &ContextNeed, offer: &ContextOffer) -> Option<
         Some(ContextMatch {
             need_owner: need.owner,
             offer_owner: offer.owner,
-            payload_ref: offer.payload_ref,
         })
     } else {
         None
@@ -303,7 +299,6 @@ mod tests {
                 .map(|offer| ContextMatch {
                     need_owner: need.owner,
                     offer_owner: offer.owner,
-                    payload_ref: offer.payload_ref,
                 })
                 .collect()
         }
@@ -319,7 +314,6 @@ mod tests {
                 .map(|need| ContextMatch {
                     need_owner: need.owner,
                     offer_owner: offer.owner,
-                    payload_ref: offer.payload_ref,
                 })
                 .collect()
         }
@@ -352,7 +346,6 @@ mod tests {
             role,
             scope: FactScope::Global,
             selector: Selector::from_bytes([8; 32]),
-            payload_ref: [5; 32],
         };
         let delta = ContextSetDelta {
             added_needs: vec![added_need],
@@ -388,7 +381,6 @@ mod tests {
             role,
             scope: FactScope::Global,
             selector: Selector::from_bytes([2; 32]),
-            payload_ref: [4; 32],
         };
         let delta = ContextSetDelta {
             added_needs: vec![need.clone()],
@@ -409,7 +401,6 @@ mod tests {
             vec![ContextMatch {
                 need_owner: [1; 32],
                 offer_owner: [3; 32],
-                payload_ref: [4; 32],
             }]
         );
     }
@@ -428,13 +419,11 @@ mod tests {
             role,
             scope: FactScope::Global,
             selector: Selector::from_bytes([2; 32]),
-            payload_ref: [4; 32],
         };
 
         let matched = exact_selector_match(&need, &offer).unwrap();
         assert_eq!(matched.need_owner, [1; 32]);
         assert_eq!(matched.offer_owner, [3; 32]);
-        assert_eq!(matched.payload_ref, [4; 32]);
     }
 
     #[test]
@@ -453,20 +442,18 @@ mod tests {
                 role: role.clone(),
                 scope: FactScope::Global,
                 selector: Selector::from_bytes([2; 32]),
-                payload_ref: [4; 32],
             },
             ContextOffer {
                 owner: [5; 32],
                 role,
                 scope: FactScope::Local,
                 selector: Selector::from_bytes([2; 32]),
-                payload_ref: [6; 32],
             },
         ];
 
         let matches = matcher.match_new_need(&need, &offers);
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].payload_ref, [4; 32]);
+        assert_eq!(matches[0].offer_owner, [3; 32]);
     }
 
     #[test]
@@ -478,7 +465,6 @@ mod tests {
             role: role.clone(),
             scope: FactScope::Global,
             selector: Selector::from_bytes([2; 32]),
-            payload_ref: [4; 32],
         };
         let needs = vec![ContextNeed {
             owner: [1; 32],

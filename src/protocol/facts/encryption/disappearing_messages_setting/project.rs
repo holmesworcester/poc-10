@@ -109,7 +109,6 @@ impl TypedProjector<super::Codec> for DisappearingMessagesSettingProjector {
                 fact.id,
                 FactScope::Global,
                 fact.id,
-                fact.id,
             ))
             .intent(AtomicIntent::PutRow(row).into_intent())
             .intent(share_fact_with_workspace_intent_for_fact(
@@ -395,12 +394,7 @@ mod projector_tests {
     fn previous_match(owner: [u8; 32], previous: Fact) -> MatchedContext {
         matched(
             sync_matchers::exact_fact_need(owner, FactScope::Global, previous.id),
-            sync_matchers::exact_fact_offer(
-                previous.id,
-                FactScope::Global,
-                previous.id,
-                previous.id,
-            ),
+            sync_matchers::exact_fact_offer(previous.id, FactScope::Global, previous.id),
             previous,
         )
     }

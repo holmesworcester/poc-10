@@ -84,7 +84,6 @@ pub(super) fn signed_key_wrap(
             fact.id,
             scope.clone(),
             fact.id,
-            fact.id,
         ))
         .offer(crate::protocol::matchers::key_wrap_offer(
             fact.id, scope, fact.id,

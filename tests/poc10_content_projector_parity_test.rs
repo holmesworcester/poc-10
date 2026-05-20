@@ -476,12 +476,7 @@ fn message_match(owner: &Fact, message: &Fact) -> MatchedContext {
 fn file_event_match(owner: &Fact, file: &Fact) -> MatchedContext {
     MatchedContext {
         need: topo::protocol::matchers::exact_fact_need(owner.id, file.scope.clone(), file.id),
-        offer: topo::protocol::matchers::exact_fact_offer(
-            file.id,
-            file.scope.clone(),
-            file.id,
-            file.id,
-        ),
+        offer: topo::protocol::matchers::exact_fact_offer(file.id, file.scope.clone(), file.id),
         payload: file.clone(),
     }
 }

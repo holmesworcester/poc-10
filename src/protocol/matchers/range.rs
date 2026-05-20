@@ -59,14 +59,14 @@ const RANGE_OFFER_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
 ];
 
 pub const RANGE_FACT_OFFERS_FOR_NEED_SQL: &str = "
-SELECT owner, selector, payload_ref
+SELECT owner, selector
 FROM context_offers
 WHERE role = :role
   AND scope_key = :scope_key
   AND length(selector) = 104
   AND substr(selector, 1, 8) >= :start
   AND substr(selector, 1, 8) <= :end
-ORDER BY owner, selector, payload_ref";
+ORDER BY owner, selector";
 
 pub const RANGE_FACT_NEEDS_FOR_OFFER_SQL: &str = "
 SELECT owner, selector
@@ -120,7 +120,6 @@ pub fn range_fact_offer(
         role: range_fact_role(),
         scope,
         selector: range_offer_selector(timestamp, fact_id, dependency_id, key_wrap_id),
-        payload_ref: owner,
     }
 }
 
@@ -290,7 +289,6 @@ pub fn range_fact_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Cont
     Some(ContextMatch {
         need_owner: need.owner,
         offer_owner: offer.owner,
-        payload_ref: offer.payload_ref,
     })
 }
 

@@ -108,7 +108,7 @@ const WRAP_OFFER_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
 ];
 
 pub const WRAP_SOURCE_OFFERS_FOR_NEED_SQL: &str = "
-SELECT owner, selector, payload_ref
+SELECT owner, selector
 FROM context_offers
 WHERE role = :role
   AND scope_key = :scope_key
@@ -119,7 +119,7 @@ WHERE role = :role
     (:need_kind = 1 AND substr(selector, 98, 8) >= :min_frontier_created_at_ms)
     OR (:need_kind = 2 AND substr(selector, 34, 32) = :frontier_id)
   )
-ORDER BY owner, selector, payload_ref";
+ORDER BY owner, selector";
 
 pub const WRAP_SOURCE_NEEDS_FOR_OFFER_SQL: &str = "
 SELECT owner, selector
@@ -279,7 +279,6 @@ pub fn wrap_source_offer(
         role: wrap_source_role(),
         scope,
         selector: encode_wrap_source_selector(&source),
-        payload_ref: owner,
     }
 }
 
@@ -555,7 +554,6 @@ fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Context
     matches.then_some(ContextMatch {
         need_owner: need.owner,
         offer_owner: offer.owner,
-        payload_ref: offer.payload_ref,
     })
 }
 

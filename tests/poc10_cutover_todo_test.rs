@@ -773,7 +773,6 @@ fn cutover_context_predicates_replace_manual_payload_matching() {
             "payload_for_need(",
             "matched.payload",
             "matched.need",
-            "offer.payload_ref",
         ],
     );
     assert!(

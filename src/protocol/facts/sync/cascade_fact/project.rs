@@ -60,7 +60,6 @@ impl TypedProjector<super::Codec> for CascadeFactProjector {
                 fact.id,
                 fact.scope.clone(),
                 fact.id,
-                fact.id,
             ));
         }
         Ok(output)

@@ -142,6 +142,7 @@ fn context_matcher_plumbing_is_centralized_by_matching_relation() {
         "coverage".to_string(),
         "exact".to_string(),
         "range".to_string(),
+        "sql".to_string(),
         "wrap_source".to_string(),
     ]);
 

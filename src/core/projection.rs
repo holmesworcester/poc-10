@@ -91,7 +91,7 @@ impl ProjectionContext {
         let Some(matched) = self.matched_entries_for(need).next() else {
             return Ok(None);
         };
-        if matched.offer.payload_ref != matched.payload.id {
+        if matched.offer.owner != matched.payload.id {
             return Err(format!("{label} context offer payload mismatch"));
         }
         Ok(Some(&matched.payload))
@@ -131,7 +131,7 @@ impl ProjectionContext {
         label: &'a str,
     ) -> impl Iterator<Item = Result<(&'a ContextOffer, &'a Fact), String>> + 'a {
         self.matched_entries_for(need).map(move |matched| {
-            if matched.offer.payload_ref != matched.payload.id {
+            if matched.offer.owner != matched.payload.id {
                 Err(format!("{label} context offer payload mismatch"))
             } else {
                 Ok((&matched.offer, &matched.payload))
@@ -154,7 +154,7 @@ impl ProjectionContext {
             })
     }
 
-    pub fn offer_payload_refs_matching<'a>(
+    pub fn offer_owners_matching<'a>(
         &'a self,
         role: &'a crate::core::context::Role,
         scope: &'a crate::core::facts::FactScope,
@@ -165,11 +165,11 @@ impl ProjectionContext {
             .filter(move |offer| {
                 offer.role == *role && offer.scope == *scope && offer.selector == *selector
             })
-            .map(|offer| offer.payload_ref)
+            .map(|offer| offer.owner)
     }
 
-    pub fn payload_refs(&self) -> impl Iterator<Item = FactId> + '_ {
-        self.offers.iter().map(|offer| offer.payload_ref)
+    pub fn offer_owners(&self) -> impl Iterator<Item = FactId> + '_ {
+        self.offers.iter().map(|offer| offer.owner)
     }
 
     pub fn payload_facts(&self) -> impl Iterator<Item = &Fact> + '_ {
@@ -476,7 +476,6 @@ mod tests {
                 role,
                 scope: FactScope::Global,
                 selector,
-                payload_ref: id,
             });
 
         assert_eq!(output.needs.len(), 1);
@@ -581,7 +580,7 @@ mod tests {
             .matched_payloads_as_checked::<FirstByteCodec>(&need, "typed")
             .map(|matched| {
                 let (offer, payload, decoded) = matched?;
-                Ok((offer.payload_ref, payload.id, decoded))
+                Ok((offer.owner, payload.id, decoded))
             })
             .collect::<Result<Vec<_>, String>>()
             .expect("typed matched payloads");
@@ -599,7 +598,7 @@ mod tests {
             selector: Selector::from_bytes([10; 32]),
         };
         let mut matched = matched_context(need.clone(), [7; 32]);
-        matched.offer.payload_ref = [8; 32];
+        matched.offer.owner = [8; 32];
         matched.payload.bytes.clear();
         let context = ProjectionContext::from_matches(vec![matched]);
 
@@ -607,9 +606,20 @@ mod tests {
             .matched_payloads_as_checked::<FirstByteCodec>(&need, "typed")
             .next()
             .expect("matched payload")
-            .expect_err("payload ref mismatch should fail before decode");
+            .expect_err("offer owner mismatch should fail before decode");
 
         assert_eq!(err, "typed context offer payload mismatch");
+    }
+
+    #[test]
+    fn projection_run_rejects_offer_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = BadOfferOwnerProjector;
+
+        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect_err("projection should reject foreign offer owner");
+
+        assert!(err.contains("projector emitted offer with owner"));
     }
 
     #[test]
@@ -653,7 +663,6 @@ mod tests {
             role,
             scope: FactScope::Global,
             selector,
-            payload_ref: [3; 32],
         };
 
         let next = run_projection(&projector, &fact, &previous, vec![offer])
@@ -671,6 +680,8 @@ mod tests {
         selector: Selector,
         intent_kind: IntentKind,
     }
+
+    struct BadOfferOwnerProjector;
 
     struct FirstByteCodec;
 
@@ -698,7 +709,6 @@ mod tests {
                 role: need.role.clone(),
                 scope: need.scope.clone(),
                 selector: need.selector.clone(),
-                payload_ref: payload_id,
             },
             need,
             payload,
@@ -723,9 +733,24 @@ mod tests {
                     self.intent_kind.clone(),
                     IntentExecution::Atomic,
                     fact.id,
-                    context.payload_refs().next().unwrap_or(fact.id),
+                    context.offer_owners().next().unwrap_or(fact.id),
                 )))
             }
+        }
+    }
+
+    impl Projector for BadOfferOwnerProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().offer(ContextOffer {
+                owner: [9; 32],
+                role: Role::new("exact").unwrap(),
+                scope: fact.scope.clone(),
+                selector: Selector::from_bytes(fact.id),
+            }))
         }
     }
 }

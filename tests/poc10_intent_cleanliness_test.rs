@@ -305,7 +305,7 @@ fn target_projectors_use_named_needs_not_positional_authority_flows() {
 #[test]
 fn target_projectors_do_not_read_raw_context_offer_storage_fields() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let forbidden = [".offers()", "payload_ref"];
+    let forbidden = [".offers()"];
     let mut offenders = Vec::new();
 
     for path in projector_implementation_files(root) {
@@ -321,7 +321,7 @@ fn target_projectors_do_not_read_raw_context_offer_storage_fields() {
 
     assert!(
         offenders.is_empty(),
-        "projectors should consume typed matched payloads, not raw standing context rows. Keep offer payload-ref checks in core ProjectionContext helpers and relation decoding in protocol matchers:\n{}",
+        "projectors should consume typed matched payloads, not raw standing context rows. Keep offer owner checks in core ProjectionContext helpers and relation decoding in protocol matchers:\n{}",
         offenders.join("\n")
     );
 }

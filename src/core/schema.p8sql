@@ -24,11 +24,9 @@ table context_offers {
   column role text;
   column scope_key bytes;
   column selector bytes;
-  column payload_ref bytes(32);
-  row_key (owner, role, scope_key, selector, payload_ref);
+  row_key (owner, role, scope_key, selector);
   index by_match (role, scope_key, selector);
   index by_owner (owner);
-  index by_payload (payload_ref);
 }
 table time_wakes {
   column timeline text;
@@ -55,8 +53,7 @@ table pending_context_changes {
   column role text;
   column scope_key bytes;
   column selector bytes;
-  column payload_ref bytes(32);
-  row_key (owner, change_kind, role, scope_key, selector, payload_ref);
+  row_key (owner, change_kind, role, scope_key, selector);
   index by_match (change_kind, role, scope_key, selector);
 }
 table intents {
