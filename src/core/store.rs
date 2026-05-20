@@ -23,7 +23,6 @@ use crate::core::wire::{Reader, WireError, Writer};
 use rusqlite::{
     params, params_from_iter, types::Value, Connection as SqliteConnection, OptionalExtension,
 };
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Duration;
@@ -48,9 +47,9 @@ impl TableName {
 
 /// Where a declared row table is expected to live.
 ///
-/// Durable rows are normal SQLite tables. Memory rows are process-local maps
-/// held by `Store`; they are not SQLite TEMP tables and are never visible to a
-/// second store handle or another process.
+/// Durable rows are normal SQLite tables. Memory rows are SQLite `TEMP` tables:
+/// connection-local, never visible to a second store handle or another process,
+/// and discarded when the store is closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageClass {
     Durable,
@@ -128,15 +127,14 @@ pub enum SelectedValue {
 
 pub type SelectedRow = BTreeMap<String, SelectedValue>;
 
-type MemoryRows = BTreeMap<Vec<u8>, Vec<u8>>;
-type MemoryTables = HashMap<TableName, MemoryRows>;
-
 /// The only durable substrate core offers protocol code.
+///
+/// Durable and memory tables are both ordinary SQLite tables on this one
+/// connection; memory tables are `TEMP` tables. Every row helper is therefore a
+/// single SQL path, and `write_transaction` rollback covers both classes.
 pub struct Store {
     conn: SqliteConnection,
-    table_storage: HashMap<TableName, StorageClass>,
     typed_tables: HashMap<String, TableDeclaration>,
-    memory_tables: RefCell<MemoryTables>,
 }
 
 impl Store {
@@ -206,7 +204,7 @@ impl Store {
     }
 
     fn from_connection(conn: SqliteConnection, schemas: &[Schema]) -> rusqlite::Result<Self> {
-        let store = Self::from_connection_parts(conn, table_storage_map(schemas)?, HashMap::new())?;
+        let store = Self::from_connection_parts(conn, HashMap::new())?;
         store.apply_schemas(schemas)?;
         Ok(store)
     }
@@ -218,7 +216,7 @@ impl Store {
     ) -> rusqlite::Result<Self> {
         let tables = table_declarations_from_schema_sources(sources)?;
         let typed_tables = typed_table_map(&tables)?;
-        let store = Self::from_connection_parts(conn, table_storage_map(schemas)?, typed_tables)?;
+        let store = Self::from_connection_parts(conn, typed_tables)?;
         store.apply_schemas(schemas)?;
         store.apply_schema_source_tables(&tables)?;
         Ok(store)
@@ -226,7 +224,6 @@ impl Store {
 
     fn from_connection_parts(
         conn: SqliteConnection,
-        table_storage: HashMap<TableName, StorageClass>,
         typed_tables: HashMap<String, TableDeclaration>,
     ) -> rusqlite::Result<Self> {
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -234,19 +231,7 @@ impl Store {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;",
         )?;
-        let memory_tables = table_storage
-            .iter()
-            .filter_map(|(table, storage)| {
-                (*storage == StorageClass::Memory).then_some((*table, BTreeMap::new()))
-            })
-            .collect();
-        let store = Self {
-            conn,
-            table_storage,
-            typed_tables,
-            memory_tables: RefCell::new(memory_tables),
-        };
-        Ok(store)
+        Ok(Self { conn, typed_tables })
     }
 
     // Critical path: callers put every atomic row mutation
@@ -260,20 +245,17 @@ impl Store {
         &self,
         apply: impl FnOnce(&Store) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
-        let memory_before = self.memory_tables.borrow().clone();
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = apply(self);
         match result {
             Ok(value) => match self.conn.execute_batch("COMMIT") {
                 Ok(()) => Ok(value),
                 Err(err) => {
-                    *self.memory_tables.borrow_mut() = memory_before;
                     let _ = self.conn.execute_batch("ROLLBACK");
                     Err(err)
                 }
             },
             Err(err) => {
-                *self.memory_tables.borrow_mut() = memory_before;
                 let _ = self.conn.execute_batch("ROLLBACK");
                 Err(err)
             }
@@ -291,10 +273,6 @@ impl Store {
     pub fn insert_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
         let mut inserted = 0;
         for row in rows {
-            if self.storage_for(row.table) == StorageClass::Memory {
-                inserted += self.insert_memory_row(row)?;
-                continue;
-            }
             if let Some(table) = self.typed_table(row.table) {
                 inserted += self.insert_typed_row(table, row, false)?;
                 continue;
@@ -333,11 +311,6 @@ impl Store {
     pub fn replace_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
         let mut replaced = 0;
         for row in rows {
-            if self.storage_for(row.table) == StorageClass::Memory {
-                self.memory_table_mut(row.table).insert(row.key, row.value);
-                replaced += 1;
-                continue;
-            }
             if let Some(table) = self.typed_table(row.table) {
                 replaced += self.insert_typed_row(table, row, true)?;
                 continue;
@@ -371,16 +344,6 @@ impl Store {
         keys: Vec<Vec<u8>>,
     ) -> rusqlite::Result<usize> {
         let mut deleted = 0;
-        if self.storage_for(table) == StorageClass::Memory {
-            let mut tables = self.memory_tables.borrow_mut();
-            let rows = tables.entry(table).or_default();
-            for key in keys {
-                if rows.remove(&key).is_some() {
-                    deleted += 1;
-                }
-            }
-            return Ok(deleted);
-        }
         if let Some(declared) = self.typed_table(table) {
             for key in keys {
                 deleted += self.delete_typed_row(declared, &key)?;
@@ -401,13 +364,6 @@ impl Store {
     // bounded key-range scan are the complete read surface core exposes.
     /// Fetch one row value by exact key.
     pub fn table_row(&self, table: TableName, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
-        if self.storage_for(table) == StorageClass::Memory {
-            return Ok(self
-                .memory_tables
-                .borrow()
-                .get(&table)
-                .and_then(|rows| rows.get(key).cloned()));
-        }
         if let Some(declared) = self.typed_table(table) {
             return self
                 .typed_row_by_key(declared, key)
@@ -425,14 +381,6 @@ impl Store {
 
     /// Count rows in one declared table.
     pub fn table_row_count(&self, table: TableName) -> rusqlite::Result<usize> {
-        if self.storage_for(table) == StorageClass::Memory {
-            return Ok(self
-                .memory_tables
-                .borrow()
-                .get(&table)
-                .map(BTreeMap::len)
-                .unwrap_or_default());
-        }
         if let Some(declared) = self.typed_table(table) {
             return self.typed_row_count(declared);
         }
@@ -446,18 +394,6 @@ impl Store {
 
     /// Scan one declared table in key order.
     pub fn table_rows(&self, table: TableName) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        if self.storage_for(table) == StorageClass::Memory {
-            return Ok(self
-                .memory_tables
-                .borrow()
-                .get(&table)
-                .map(|rows| {
-                    rows.iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect()
-                })
-                .unwrap_or_default());
-        }
         if let Some(declared) = self.typed_table(table) {
             return self.typed_rows(declared);
         }
@@ -479,9 +415,6 @@ impl Store {
     ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         if limit == 0 {
             return Ok(Vec::new());
-        }
-        if self.storage_for(table) == StorageClass::Memory {
-            return Ok(self.memory_rows_with_key_prefix(table, prefix, limit));
         }
         if let Some(declared) = self.typed_table(table) {
             let mut out = Vec::new();
@@ -696,13 +629,15 @@ impl Store {
         storage: StorageClass,
         table: TableName,
     ) -> rusqlite::Result<()> {
-        if storage == StorageClass::Memory {
-            self.memory_tables.borrow_mut().entry(table).or_default();
-            return Ok(());
-        }
         let table_name = quoted_table_name(table)?;
+        // Memory tables are SQLite `TEMP` tables: connection-local, dropped when
+        // the store closes, and rolled back with the enclosing transaction.
+        let temp = match storage {
+            StorageClass::Durable => "",
+            StorageClass::Memory => "TEMP ",
+        };
         self.conn.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS {table_name} (
+            "CREATE {temp}TABLE IF NOT EXISTS {table_name} (
                 row_key BLOB PRIMARY KEY NOT NULL,
                 row_value BLOB NOT NULL
             );"
@@ -769,13 +704,6 @@ impl Store {
             ))?;
         }
         Ok(())
-    }
-
-    fn storage_for(&self, table: TableName) -> StorageClass {
-        self.table_storage
-            .get(&table)
-            .copied()
-            .unwrap_or(StorageClass::Durable)
     }
 
     fn typed_table(&self, table: TableName) -> Option<&TableDeclaration> {
@@ -866,61 +794,6 @@ impl Store {
         ))?;
         let rows = stmt.query_map([], |row| sqlite_row_to_table_row(table, row))?;
         rows.collect()
-    }
-
-    fn memory_table_mut(
-        &self,
-        table: TableName,
-    ) -> std::cell::RefMut<'_, BTreeMap<Vec<u8>, Vec<u8>>> {
-        std::cell::RefMut::map(self.memory_tables.borrow_mut(), |tables| {
-            tables.entry(table).or_default()
-        })
-    }
-
-    fn insert_memory_row(&self, row: TableRow) -> rusqlite::Result<usize> {
-        use std::collections::btree_map::Entry;
-
-        let mut rows = self.memory_table_mut(row.table);
-        match rows.entry(row.key) {
-            Entry::Vacant(entry) => {
-                entry.insert(row.value);
-                Ok(1)
-            }
-            Entry::Occupied(entry) if entry.get() == &row.value => Ok(0),
-            Entry::Occupied(_) => Err(rusqlite::Error::InvalidParameterName(format!(
-                "conflicting row for {}",
-                row.table.as_str()
-            ))),
-        }
-    }
-
-    fn memory_rows_with_key_prefix(
-        &self,
-        table: TableName,
-        prefix: &[u8],
-        limit: usize,
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let tables = self.memory_tables.borrow();
-        let Some(rows) = tables.get(&table) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        if let Some(upper) = prefix_upper_bound(prefix) {
-            for (key, value) in rows.range(prefix.to_vec()..upper) {
-                if out.len() == limit {
-                    break;
-                }
-                out.push((key.clone(), value.clone()));
-            }
-        } else {
-            for (key, value) in rows.range(prefix.to_vec()..) {
-                if !key.starts_with(prefix) || out.len() == limit {
-                    break;
-                }
-                out.push((key.clone(), value.clone()));
-            }
-        }
-        out
     }
 }
 
@@ -1545,23 +1418,6 @@ fn sqlite_type(ty: &ColumnType) -> &'static str {
     }
 }
 
-fn table_storage_map(schemas: &[Schema]) -> rusqlite::Result<HashMap<TableName, StorageClass>> {
-    let mut out = HashMap::new();
-    for schema in schemas {
-        let SchemaDefinition::RowTable(table) = schema.definition;
-        match out.insert(table, schema.storage) {
-            Some(existing) if existing != schema.storage => {
-                return Err(rusqlite::Error::InvalidParameterName(format!(
-                    "table {} declared with multiple storage classes",
-                    table.as_str()
-                )));
-            }
-            _ => {}
-        }
-    }
-    Ok(out)
-}
-
 fn validate_schema_ids(schemas: &[Schema]) -> rusqlite::Result<()> {
     for (left_index, left) in schemas.iter().enumerate() {
         validate_schema_id(left.id)?;
@@ -1687,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_rows_are_store_local_and_not_sqlite_temp_tables() {
+    fn memory_rows_are_connection_local_temp_tables() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("memory-rows.db");
         let schemas = [Schema::memory_row_table("test.memory_rows.v1", MEMORY_ROWS)];
@@ -1719,8 +1575,8 @@ mod tests {
                 )
                 .optional()
                 .expect("query temp schema")
-                .is_none(),
-            "memory row tables should not be SQLite TEMP tables"
+                .is_some(),
+            "memory row tables are SQLite TEMP tables"
         );
     }
 
