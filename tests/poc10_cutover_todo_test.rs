@@ -885,7 +885,7 @@ fn cutover_content_read_models_have_normal_sqlite_tables() {
 fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically() {
     let root = root();
     let context_change_pipeline = source_text(&root.join("src/core/context_change_pipeline.rs"));
-    let app = source_text(&root.join("src/protocol/app.rs"));
+    let core_daemon = source_text(&root.join("src/core/daemon.rs"));
     let send_network_frame =
         source_text(&root.join("src/protocol/intents/transport/send_network_frame.rs"));
 
@@ -904,17 +904,17 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
                 .to_string(),
         );
     }
-    if app.contains("network::delete_inbound(runtime.store(), &inbound)?;")
-        && !app.contains("if !dispatched.retried")
+    if core_daemon.contains("network::delete_inbound(runtime.store(), inbound)?;")
+        && !core_daemon.contains("if !retried")
     {
         offenders.push(
-            "src/protocol/app.rs deletes inbound network bytes before the protocol receive effect is proven durable"
+            "src/core/daemon.rs deletes inbound network bytes before the protocol receive effect is proven durable"
                 .to_string(),
         );
     }
-    if app.contains("network::delete_inbound") && !app.contains("!dispatched.retried") {
+    if core_daemon.contains("network::delete_inbound") && !core_daemon.contains("!retried") {
         offenders.push(
-            "src/protocol/app.rs deletes restart-local inbound rows even when receive dispatch asked to retry"
+            "src/core/daemon.rs deletes restart-local inbound rows even when receive dispatch asked to retry"
                 .to_string(),
         );
     }

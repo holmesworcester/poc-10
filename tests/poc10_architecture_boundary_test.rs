@@ -567,18 +567,18 @@ fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
 }
 
 #[test]
-fn poc10_protocol_command_handlers_use_core_opened_runtime_and_return_output() {
+fn poc10_protocol_cli_hosts_use_core_opened_runtime_and_return_output() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let command_handlers = root.join("src/protocol/command_handlers.rs");
+    let protocol_cli = root.join("src/protocol/cli.rs");
     let offenders = source_code_matches_in_paths(
         root,
-        vec![command_handlers],
+        vec![protocol_cli],
         &["Runtime::open_disk", "println!", "app_cli_command", "_flow"],
     );
 
     assert!(
         offenders.is_empty(),
-        "protocol command handlers should use the core-opened runtime, return CliOutput for core to print, and avoid compatibility wrapper command flows:\n{}",
+        "protocol CLI hosts should use the core-opened runtime, return CliOutput for core to print, and avoid compatibility wrapper command flows:\n{}",
         offenders.join("\n")
     );
 }

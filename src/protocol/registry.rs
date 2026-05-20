@@ -9,22 +9,25 @@
 use crate::core::cli::CliCommand;
 use crate::core::context::Role;
 use crate::core::facts::Fact;
-use crate::core::matchers::{ContextMatcher, ContextMatcherDeclaration, ExactSelectorMatcher};
+use crate::core::matchers::{
+    ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration, ExactSelectorMatcher,
+};
 use crate::core::projectors::{
     EnvelopeRoute, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
 use crate::core::runtime::HandlerRoute;
 use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use crate::core::store::TableName;
-use crate::protocol::command_handlers as command;
+use crate::protocol::cli as command;
 use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
 use crate::protocol::intents::{
     connection as connection_intents, content as content_intents, encryption as encryption_intents,
     sync as sync_intents, transport as transport_intents,
 };
+use crate::protocol::matchers;
 use std::collections::BTreeSet;
 
-pub use crate::protocol::command_handlers::MatchCliContext;
+pub use crate::protocol::cli::MatchCliContext;
 
 pub const FACTS_SCHEMA_SOURCE: &str = include_str!("facts/schema.p8sql");
 pub const INTENTS_SCHEMA_SOURCE: &str = include_str!("intents/schema.p8sql");
@@ -35,7 +38,7 @@ pub struct ProtocolRegistry {
     pub schemas: &'static [SchemaRegistration],
     pub commands: &'static [CliCommand<MatchCliContext>],
     pub facts: &'static [FactRegistration],
-    pub context_matchers: &'static [ContextMatcherRegistration],
+    pub context_matchers: &'static [ContextRoleDeclaration],
     pub intents: &'static [IntentRegistration],
     pub handlers: &'static [HandlerRegistration],
 }
@@ -52,12 +55,6 @@ pub struct FactRegistration {
     pub name: &'static str,
     pub tag: u8,
     pub projector: &'static str,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ContextMatcherRegistration {
-    pub role: &'static str,
-    pub matcher: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -617,131 +614,38 @@ pub const FACTS: &[FactRegistration] = &[
     },
 ];
 
-pub const CONTEXT_MATCHERS: &[ContextMatcherRegistration] = &[
-    ContextMatcherRegistration {
-        role: "connection_ephemeral_secret",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "connection_invite_secret",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "connection_request",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "content_file",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "content_message",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "content_message_meta",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "content_deleted",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_admin",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_device_invite",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_device_invite_key",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_endpoint_shared",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_invite_secret",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_invite_server",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_invite_server_key",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_user",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_user_invite",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_user_invite_key",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "identity_workspace",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "local_recipient_key",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "local_secret_source",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "local_signer_secret",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "recipient_key",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "recipient_superseded",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "encryption_removal_frontier",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "secret_coverage",
-        matcher: "SecretCoverageMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "content_signer",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "sync_exact_fact",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "sync_key_wrap",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "sync_range_fact",
-        matcher: "RangeFactMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "transport_transit_received",
-        matcher: "ExactSelectorMatcher",
-    },
-    ContextMatcherRegistration {
-        role: "wrap_source",
-        matcher: "WrapSourceMatcher",
-    },
+pub const CONTEXT_MATCHERS: &[ContextRoleDeclaration] = &[
+    ContextRoleDeclaration::exact(matchers::CONNECTION_EPHEMERAL_SECRET_ROLE),
+    ContextRoleDeclaration::exact(matchers::CONNECTION_INVITE_SECRET_ROLE),
+    ContextRoleDeclaration::exact(matchers::CONNECTION_REQUEST_ROLE),
+    ContextRoleDeclaration::exact(matchers::CONTENT_FILE_ROLE),
+    ContextRoleDeclaration::exact(matchers::CONTENT_MESSAGE_ROLE),
+    ContextRoleDeclaration::exact(matchers::CONTENT_MESSAGE_META_ROLE),
+    ContextRoleDeclaration::exact(matchers::CONTENT_DELETED_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_ADMIN_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_DEVICE_INVITE_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_DEVICE_INVITE_KEY_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_ENDPOINT_SHARED_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_INVITE_SECRET_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_INVITE_SERVER_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_INVITE_SERVER_KEY_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_USER_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_USER_INVITE_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_USER_INVITE_KEY_ROLE),
+    ContextRoleDeclaration::exact(matchers::IDENTITY_WORKSPACE_ROLE),
+    ContextRoleDeclaration::exact(matchers::LOCAL_RECIPIENT_KEY_ROLE),
+    ContextRoleDeclaration::exact(matchers::LOCAL_SECRET_SOURCE_ROLE),
+    ContextRoleDeclaration::exact(matchers::LOCAL_SIGNER_SECRET_ROLE),
+    ContextRoleDeclaration::exact(matchers::RECIPIENT_KEY_ROLE),
+    ContextRoleDeclaration::exact(matchers::RECIPIENT_SUPERSEDED_ROLE),
+    ContextRoleDeclaration::exact(matchers::REMOVAL_FRONTIER_ROLE),
+    matchers::SECRET_COVERAGE_CONTEXT_ROLE,
+    ContextRoleDeclaration::exact(matchers::CONTENT_SIGNER_ROLE),
+    ContextRoleDeclaration::exact(matchers::SYNC_EXACT_FACT_ROLE),
+    ContextRoleDeclaration::exact(matchers::SYNC_KEY_WRAP_ROLE),
+    matchers::RANGE_FACT_CONTEXT_ROLE,
+    ContextRoleDeclaration::exact(matchers::TRANSIT_RECEIVED_ROLE),
+    matchers::WRAP_SOURCE_CONTEXT_ROLE,
 ];
 
 pub const INTENTS: &[IntentRegistration] = &[
@@ -1325,55 +1229,34 @@ pub struct ProtocolContextMatchers {
 impl ProtocolContextMatchers {
     fn new() -> Self {
         let mut exact_roles = BTreeSet::<Role>::new();
-        let mut custom_matcher_names = BTreeSet::<&'static str>::new();
-        for registration in crate::protocol::registry::CONTEXT_MATCHERS {
-            let declaration = super::matchers::context_role_declaration(registration.role)
-                .unwrap_or_else(|| {
-                    panic!("missing context role declaration {}", registration.role)
-                });
-            match registration.matcher {
-                "ExactSelectorMatcher" => {
-                    assert!(
-                        matches!(
-                            declaration.matcher,
-                            ContextMatcherDeclaration::ExactSelector
-                        ),
-                        "exact matcher registration has non-exact declaration {}",
-                        registration.role
-                    );
+        let mut custom_roles = BTreeSet::<&'static str>::new();
+        for declaration in CONTEXT_MATCHERS {
+            match declaration.matcher {
+                ContextMatcherDeclaration::ExactSelector => {
                     exact_roles.insert(
-                        Role::new(registration.role).expect("registered exact matcher role"),
+                        Role::new(declaration.role).expect("registered exact matcher role"),
                     );
                 }
-                "RangeFactMatcher" | "SecretCoverageMatcher" | "WrapSourceMatcher" => {
-                    assert!(
-                        matches!(
-                            declaration.matcher,
-                            ContextMatcherDeclaration::SelectOnlySql { .. }
-                        ),
-                        "custom matcher registration has no SELECT-only declaration {}",
-                        registration.role
-                    );
-                    custom_matcher_names.insert(registration.matcher);
+                ContextMatcherDeclaration::SelectOnlySql { .. } => {
+                    custom_roles.insert(declaration.role);
                 }
-                other => panic!("unknown context matcher {other}"),
             }
         }
 
         let mut matchers: Vec<Box<dyn ContextMatcher>> =
             exact_roles.into_iter().map(exact_matcher).collect();
-        for matcher in custom_matcher_names {
-            match matcher {
-                "RangeFactMatcher" => {
-                    matchers.push(Box::new(super::matchers::RangeFactMatcher::new()));
+        for role in custom_roles {
+            match role {
+                matchers::SYNC_RANGE_FACT_ROLE => {
+                    matchers.push(Box::new(matchers::RangeFactMatcher::new()));
                 }
-                "SecretCoverageMatcher" => {
-                    matchers.push(Box::new(super::matchers::SecretCoverageMatcher::new()));
+                matchers::SECRET_COVERAGE_ROLE => {
+                    matchers.push(Box::new(matchers::SecretCoverageMatcher::new()));
                 }
-                "WrapSourceMatcher" => {
-                    matchers.push(Box::new(super::matchers::WrapSourceMatcher::new()));
+                matchers::WRAP_SOURCE_ROLE => {
+                    matchers.push(Box::new(matchers::WrapSourceMatcher::new()));
                 }
-                other => panic!("unknown context matcher {other}"),
+                other => panic!("unknown custom context matcher role {other}"),
             }
         }
         Self { matchers }
@@ -1514,8 +1397,13 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let registry_roles = CONTEXT_MATCHERS
             .iter()
-            .filter(|registration| registration.matcher == "ExactSelectorMatcher")
-            .map(|registration| registration.role.to_string())
+            .filter(|declaration| {
+                matches!(
+                    declaration.matcher,
+                    ContextMatcherDeclaration::ExactSelector
+                )
+            })
+            .map(|declaration| declaration.role.to_string())
             .collect::<BTreeSet<_>>();
 
         assert_eq!(runtime_roles, registry_roles);

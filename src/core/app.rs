@@ -1,15 +1,20 @@
 //! Generic protocol application runner.
 //!
 //! Core can launch any protocol that exports a `ProtocolDescription`: the
-//! description names its runtime declaration, daemon tick, and command table.
+//! description names its runtime declaration, daemon declarations, and command
+//! table. Core owns the fixed daemon cycle through `core::daemon`: accept
+//! network bytes, turn inbound bytes into protocol intents, process declared
+//! time wakes, run projections, dispatch intents, run projections again, and
+//! finally delete claimed inbound bytes only after receive dispatch did not ask
+//! to retry.
+//!
 //! Core still does not know command semantics. For non-daemon commands it opens
 //! the declared runtime, constructs the protocol-owned context, calls the
 //! registered function, and prints the returned `CliOutput`.
 
 use crate::core::cli::{self, CliArgs, CliCommand, CliOutput};
-use crate::core::daemon::{self, TickActivity};
+use crate::core::daemon::{self, DaemonDescription};
 use crate::core::runtime::{Runtime, RuntimeDescription};
-use crate::core::tcp;
 use std::path::PathBuf;
 
 pub struct ProtocolDescription<C: 'static> {
@@ -18,11 +23,6 @@ pub struct ProtocolDescription<C: 'static> {
     pub daemon: DaemonDescription,
     pub commands: &'static [CliCommand<C>],
     pub context: fn(Runtime, Option<PathBuf>) -> C,
-}
-
-#[derive(Clone, Copy)]
-pub struct DaemonDescription {
-    pub tick: fn(&mut Runtime, &tcp::Listener, usize) -> Result<TickActivity, String>,
 }
 
 pub fn run<C: 'static>(
@@ -96,7 +96,7 @@ fn run_start<C: 'static>(
     daemon::start(
         &db,
         CliArgs::new(&parsed.command[1..]),
-        |listener, limit| (description.daemon.tick)(&mut runtime, listener, limit),
+        |listener, limit| daemon::tick(description.daemon, &mut runtime, listener, limit),
     )
 }
 
