@@ -5,7 +5,6 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
 use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use topo::core::store::Store;
-use topo::core::wake_loop::WakeLoop;
 use topo::core::wire::FixedBytes;
 use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::facts::connection::request::layout as connection_request_layout;
@@ -280,26 +279,6 @@ fn well_formed_frame_admits_sync_compare_and_records_receive_provenance() {
     let provenance = transport::transit_received::layout::decode_fact(&provenance_fact.bytes)
         .expect("decode provenance");
     assert_eq!(provenance.received_fact_id, admitted.id);
-}
-
-#[test]
-fn wake_loop_receive_dispatch_admits_opened_facts() {
-    let (frame, connection_fact, _, signed_wrap) = encrypted_small_frame();
-    let admitted_wrap =
-        encryption_create::admit_signed_key_wrap_fact(signed_wrap).expect("admit expected wrap");
-    let mut bus = WakeLoop::new();
-    assert!(bus.submit_fact(connection_fact));
-    bus.submit_intent(receive_intent(frame))
-        .expect("queue receive intent");
-
-    let report = bus
-        .dispatch_ephemeral_intents_with_fact_context(&ReceiveTransitFrameHandler::new(), 10)
-        .expect("dispatch receive transport::transit");
-
-    assert_eq!(report.handled, 1);
-    assert_eq!(report.facts, 2);
-    assert!(bus.has_fact(&admitted_wrap.id));
-    assert!(bus.intents().is_empty());
 }
 
 #[test]

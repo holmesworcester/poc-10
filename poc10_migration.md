@@ -26,14 +26,17 @@ The executable TODO list lives in `tests/poc10_cutover_todo_test.rs`.
 ## Success Criteria
 
 - Poc-8 behavior is covered by target black-box tests or target harness tests.
-- Target code uses facts, context needs/offers, matchers, `WakeLoop`,
+- Target code uses facts, context needs/offers, matchers, core projection
+  pipelines,
   projectors, intents, flat handlers, module commands, module queries, and
   module CLI adapters.
 - Runtime is generic core runtime/app plus protocol registry, not
   product-specific runtime logic.
 - No old labels, blocker tables, ready queues, canonical ingress queues,
   recently-valid queues, pending reprojection queues, or worker catalogs remain.
-  No removed-source imports remain.
+  These names are legacy/removal vocabulary only. They must not reappear in
+  target code paths except in tests or documentation. No removed-source imports
+  remain.
 - Reactive work creates new facts through intents and handlers, not through
   commands.
 
@@ -41,9 +44,9 @@ The executable TODO list lives in `tests/poc10_cutover_todo_test.rs`.
 
 | Old responsibility | Target owner |
 | --- | --- |
-| event admission | `WakeLoop::submit_fact` plus fact layout validation |
+| event admission | core runtime fact submission plus fact layout validation |
 | dependency unblock | context needs/offers plus matchers |
-| ready/blocked/reprojection queues | internal projection wakes in `WakeLoop` |
+| ready/blocked/reprojection queues | SQLite pending fact/context-change tables |
 | labels | update/about context offers |
 | canonical ingress + receive metadata | receive facts plus context offers |
 | projection row writes | atomic row intents from projectors |

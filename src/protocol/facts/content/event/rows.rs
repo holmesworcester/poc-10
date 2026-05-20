@@ -29,13 +29,13 @@ pub fn content_event_key(workspace_id: &WorkspaceId, fact_id: &[u8; 32]) -> Vec<
 
 pub fn content_event_row(fact_id: [u8; 32], fact: &ContentEventFact) -> Result<TableRow, String> {
     let payload_bytes: u64 = fact.payload.len() as u64;
-    let mut value = vec![0; ROW_VALUE_BYTES];
-    wire::put_u64be(fact.timestamp, &mut value[0..8]).map_err(wire_err)?;
-    wire::put_u64be(payload_bytes, &mut value[8..16]).map_err(wire_err)?;
+    let mut writer = wire::Writer::with_capacity(ROW_VALUE_BYTES);
+    writer.u64be(fact.timestamp);
+    writer.u64be(payload_bytes);
     Ok(TableRow {
         table: CONTENT_EVENT_ROWS,
         key: content_event_key(&fact.workspace_id, &fact_id),
-        value,
+        value: writer.finish(),
     })
 }
 
@@ -43,15 +43,14 @@ pub fn decode_content_event_row(key: &[u8], value: &[u8]) -> Result<ContentEvent
     if key.len() != 64 {
         return Err("content event row key is malformed".to_string());
     }
-    let mut workspace_id = [0; 32];
-    workspace_id.copy_from_slice(&key[..32]);
-    let mut fact_id = [0; 32];
-    fact_id.copy_from_slice(&key[32..64]);
-    if value.len() != ROW_VALUE_BYTES {
-        return Err("content event row value is malformed".to_string());
-    }
-    let timestamp = wire::take_u64be(&value[0..8]).map_err(wire_err)?;
-    let payload_bytes = wire::take_u64be(&value[8..16]).map_err(wire_err)?;
+    let mut key_reader = wire::Reader::new(key);
+    let workspace_id = key_reader.array().map_err(wire_err)?;
+    let fact_id = key_reader.array().map_err(wire_err)?;
+    key_reader.finish().map_err(wire_err)?;
+    let mut value_reader = wire::Reader::new(value);
+    let timestamp = value_reader.u64be().map_err(wire_err)?;
+    let payload_bytes = value_reader.u64be().map_err(wire_err)?;
+    value_reader.finish().map_err(wire_err)?;
     Ok(ContentEventRow {
         workspace_id,
         fact_id,

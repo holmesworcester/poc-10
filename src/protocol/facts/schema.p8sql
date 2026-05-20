@@ -1,9 +1,35 @@
 # Initial poc-10 fact-module projection table inventory.
-# Row table declarations list durable ownership without migrating behavior yet.
+# Typed tables expose queryable projection state; remaining row_table entries
+# are still opaque module-owned rows awaiting typed schema cleanup.
 
-row_table opened_message_rows;
-row_table message_tombstone_rows;
-row_table file_slice_rows;
+table opened_message_rows {
+  column workspace_id bytes(32);
+  column message_id bytes(32);
+  column created_at_ms u64;
+  column author_user_id bytes(32);
+  column signer_id bytes(32);
+  column text bytes;
+  row_key (workspace_id, message_id);
+  index by_workspace_created (workspace_id, created_at_ms);
+}
+table message_tombstone_rows {
+  column workspace_id bytes(32);
+  column message_id bytes(32);
+  column author_user_id bytes(32);
+  column authored_minute u64;
+  row_key (workspace_id, message_id);
+  index by_workspace_minute (workspace_id, authored_minute);
+}
+table file_slice_rows {
+  column workspace_id bytes(32);
+  column file_id bytes(32);
+  column slice_index u64;
+  column slice_fact_id bytes(32);
+  column created_at_ms u64;
+  column ciphertext bytes;
+  row_key (workspace_id, file_id, slice_index);
+  index by_fact (slice_fact_id);
+}
 row_table workspace_rows;
 row_table recipient_key_rows;
 row_table key_wrap_rows;
@@ -13,7 +39,14 @@ row_table local_endpoint_secret_rows;
 row_table local_endpoint_signing_public_key_rows;
 row_table local_endpoint_signing_secret_rows;
 row_table identity_endpoint_shared_rows;
-row_table content_event_rows;
+table content_event_rows {
+  column workspace_id bytes(32);
+  column fact_id bytes(32);
+  column timestamp u64;
+  column payload_bytes u64;
+  row_key (workspace_id, fact_id);
+  index by_workspace_time (workspace_id, timestamp);
+}
 row_table cascade_staged_fact_rows;
 row_table admin_rows;
 
@@ -74,8 +107,24 @@ row_table sync_compare_rows;
 row_table sync_have_id_rows;
 row_table sync_need_id_rows;
 row_table sync_shareable_fact_rows;
-row_table message_deletion_rows;
-row_table file_deletion_rows;
+table message_deletion_rows {
+  column workspace_id bytes(32);
+  column target_message_id bytes(32);
+  column deletion_id bytes(32);
+  column created_at_ms u64;
+  column author_user_id bytes(32);
+  row_key (workspace_id, target_message_id);
+  index by_deletion (deletion_id);
+}
+table file_deletion_rows {
+  column workspace_id bytes(32);
+  column target_file_id bytes(32);
+  column deletion_id bytes(32);
+  column created_at_ms u64;
+  column author_user_id bytes(32);
+  row_key (workspace_id, target_file_id);
+  index by_deletion (deletion_id);
+}
 row_table removal_frontier_rows;
 row_table local_history_node_secret_rows;
 row_table disappearing_messages_setting_rows;

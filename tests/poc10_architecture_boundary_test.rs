@@ -292,15 +292,15 @@ fn poc10_handler_output_contract_emits_only_facts_purges_and_intents() {
 }
 
 #[test]
-fn poc10_core_wake_loop_exposes_protocol_neutral_vocabulary() {
+fn poc10_core_context_change_pipeline_exposes_protocol_neutral_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let wake_loop_path = root.join("src/core/wake_loop.rs");
+    let context_change_pipeline_path = root.join("src/core/context_change_pipeline.rs");
     assert!(
-        wake_loop_path.is_file(),
-        "missing src/core/wake_loop.rs; when introduced, it must expose protocol-neutral terms for pending projection, context delta matching, and intent output"
+        context_change_pipeline_path.is_file(),
+        "missing src/core/context_change_pipeline.rs; when introduced, it must expose protocol-neutral terms for pending projection, context delta matching, and intent output"
     );
 
-    let text = source_text(&wake_loop_path);
+    let text = source_text(&context_change_pipeline_path);
     let required_terms = [
         (
             "pending projection",
@@ -333,7 +333,7 @@ fn poc10_core_wake_loop_exposes_protocol_neutral_vocabulary() {
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "src/core/wake_loop.rs must expose protocol-neutral wake loop vocabulary:\n{}",
+        "src/core/context_change_pipeline.rs must expose protocol-neutral context change pipeline vocabulary:\n{}",
         missing.join("\n")
     );
 
@@ -371,10 +371,10 @@ fn poc10_core_wake_loop_exposes_protocol_neutral_vocabulary() {
         "pending_connection_attempts",
         "pending_connection_responses",
     ];
-    let offenders = source_matches_in_paths(root, vec![wake_loop_path], &forbidden);
+    let offenders = source_matches_in_paths(root, vec![context_change_pipeline_path], &forbidden);
     assert!(
         offenders.is_empty(),
-        "src/core/wake_loop.rs must not expose old worker queue or event status vocabulary:\n{}",
+        "src/core/context_change_pipeline.rs must not expose old worker queue or event status vocabulary:\n{}",
         offenders.join("\n")
     );
 }
@@ -777,6 +777,7 @@ fn poc10_target_root_manifests_are_declarations_only() {
             .filter(|line| {
                 !(line.starts_with("#[path = ")
                     || line.starts_with("pub mod ")
+                    || line.starts_with("pub(crate) mod ")
                     || line.starts_with("mod ")
                     || line.starts_with("pub use "))
             })

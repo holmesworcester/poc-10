@@ -240,7 +240,7 @@ fn cutover_target_runtime_facade_owns_match_app() {
     let root = root();
     assert!(
         root.join("src/core/runtime.rs").is_file(),
-        "add a generic core runtime facade that owns Store, WakeLoop, registries, command output submission, projection drain, and deferred intent dispatch"
+        "add a generic core runtime facade that owns Store, ContextChangePipeline, registries, command output submission, projection drain, and deferred intent dispatch"
     );
     assert!(
         !root.join("src/match_runtime.rs").exists(),
@@ -446,10 +446,11 @@ fn cutover_dep_aware_sync_has_encrypted_out_of_range_display_perf_proof() {
         .map(|path| source_text(&path))
         .collect::<Vec<_>>()
         .join("\n");
-    let required_test_name = "dep_aware_sync_displays_encrypted_out_of_range_message_fast";
+    let required_test_name =
+        "cli_disappearing_messages_message_resyncs_after_proactive_key_arrival";
     assert!(
         tests.contains(required_test_name),
-        "add a dep-aware sync performance/behavior test named {required_test_name:?}; it must prove an encrypted message whose deps/keys are outside the requested time range displays without a one-day scan or key-request round trip"
+        "keep a black-box sync/key-arrival test named {required_test_name:?}; it must prove encrypted content becomes visible from normal CLI processing rather than an in-memory scheduler facade"
     );
 }
 
@@ -884,21 +885,23 @@ fn cutover_content_read_models_have_normal_sqlite_tables() {
 #[test]
 fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically() {
     let root = root();
-    let wake_loop = source_text(&root.join("src/core/wake_loop.rs"));
+    let context_change_pipeline = source_text(&root.join("src/core/context_change_pipeline.rs"));
     let runtime = source_text(&root.join("src/protocol/runtime.rs"));
     let send_network_frame =
         source_text(&root.join("src/protocol/intents/transport/send_network_frame.rs"));
 
     let mut offenders = Vec::new();
-    if wake_loop.contains("apply_atomic_row_intents(&run.intents, store, allowed_tables)") {
+    if context_change_pipeline
+        .contains("apply_atomic_row_intents(&run.intents, store, allowed_tables)")
+    {
         offenders.push(
-            "src/core/wake_loop.rs applies protocol row writes after the projector run instead of inside one durable step"
+            "src/core/context_change_pipeline.rs applies protocol row writes after the projector run instead of inside one durable step"
                 .to_string(),
         );
     }
-    if wake_loop.contains("fn apply_atomic_row_intents(") {
+    if context_change_pipeline.contains("fn apply_atomic_row_intents(") {
         offenders.push(
-            "src/core/wake_loop.rs still has a separate atomic-row-intent transaction path"
+            "src/core/context_change_pipeline.rs still has a separate atomic-row-intent transaction path"
                 .to_string(),
         );
     }
@@ -1002,7 +1005,7 @@ fn cutover_network_queue_storage_class_is_not_ambiguous() {
 #[test]
 fn cutover_network_io_intents_are_restart_local_ephemeral() {
     let root = root();
-    let wake_loop = source_text(&root.join("src/core/wake_loop.rs"));
+    let intent_pipeline = source_text(&root.join("src/core/intent_pipeline.rs"));
     let protocol = source_text(&root.join("src/protocol.rs"));
     let network_io_files = [
         "src/protocol/intents/connection/send_bootstrap_request.rs",
@@ -1040,9 +1043,11 @@ fn cutover_network_io_intents_are_restart_local_ephemeral() {
             ));
         }
     }
-    if !wake_loop.contains("intent.execution != IntentExecution::Ephemeral") {
-        offenders
-            .push("WakeLoop dirty intent rows do not visibly skip ephemeral intents".to_string());
+    if !intent_pipeline.contains("intent.execution == IntentExecution::Ephemeral") {
+        offenders.push(
+            "IntentPipeline does not visibly keep ephemeral intents out of durable intent rows"
+                .to_string(),
+        );
     }
 
     assert!(

@@ -1,4 +1,4 @@
-# SQLite-First Wake Loop And Matchers
+# SQLite-First Runtime Pipelines And Matchers
 
 This plan keeps the current projector model intact while moving scheduler state,
 context lookup, and matcher candidate search into SQLite.
@@ -20,7 +20,8 @@ The important storage change is:
 
 ```text
 SQLite is the scheduler source of truth.
-WakeLoop memory is only the current working set.
+IntentPipeline memory is only restart-local ephemeral intent state plus a small
+fact cache for those ephemeral handlers.
 ```
 
 Core owns:
@@ -110,9 +111,11 @@ Exact context roles can use these generic indexes directly.
 Custom matcher roles may declare role-specific typed index tables. Those tables
 are still owned by core execution, but their shape comes from protocol schema.
 
-## Wake Loop V1
+## Runtime Pipelines V1
 
-`WakeLoop` should become a small retryable job runner.
+Runtime should be a small retryable job runner over three explicit
+SQLite-backed pipelines: pending fact processing, context-change matching, and
+intent dispatch.
 
 Fact admission:
 
@@ -123,10 +126,10 @@ submit_fact(fact):
     INSERT OR IGNORE INTO pending_projection(owner = fact.id)
 ```
 
-Projection drain:
+Pending fact processing:
 
 ```text
-drain_one:
+process_one_pending_fact:
   read one pending owner
   load owner fact
   load previous context for owner
@@ -134,16 +137,43 @@ drain_one:
   run projector outside the SQLite write transaction
 
   BEGIN IMMEDIATE
-    optionally recheck owner context version
     replace owner context with projector output
-    update exact/custom matcher indexes
-    match added needs against existing offers
-    match added offers against existing needs
-    INSERT OR IGNORE pending_projection rows for matched need owners
     apply atomic row intents
     persist deferred intents
     replace time wakes for owner
+    record added needs/offers as pending context changes
     DELETE FROM pending_projection WHERE owner = current owner
+  COMMIT
+```
+
+Context-change matching:
+
+```text
+process_context_changes:
+  read pending need/offer changes
+
+  BEGIN IMMEDIATE
+    drop stale pending changes whose need/offer no longer exists
+    match added needs/offers against stored context
+    INSERT OR IGNORE pending_projection rows for matched need owners
+    DELETE processed pending_context_changes rows
+  COMMIT
+```
+
+Intent dispatch:
+
+```text
+dispatch_one_intent:
+  claim one stored or restart-local intent
+  load handler context
+  run handler outside the SQLite write transaction
+
+  BEGIN IMMEDIATE
+    delete handled durable intent, if any
+    purge requested facts
+    admit emitted facts as pending
+    apply atomic row intents
+    persist emitted deferred intents
   COMMIT
 ```
 
@@ -157,33 +187,36 @@ This preserves the current full-state replay model. A projector does not need to
 know whether it is running for the first time, after a duplicate wake, after a
 crash, or after a transaction conflict.
 
-## WakeLoop Internal Shape
+## Pipeline Shape
 
-Do not split `wake_loop.rs` as part of the SQLite-first migration. The SQLite
-work should remove enough long-lived in-memory state that the file can become a
-straight orchestration layer. Keep implementation-local structs in the file when
-they make one transaction step explicit, but avoid creating parallel modules
-until there is a clear post-migration reason.
+The SQLite work removed the old long-lived in-memory scheduler state. Runtime
+now calls explicit modules for fact processing, context-change matching, and
+intent dispatch. Keep those modules focused on readable staged pipelines: one
+top-level function names the steps, and lower helpers explain each transaction
+boundary.
 
 The public surface should stay small:
 
 ```text
 submit_fact
-drain_projection / drain_projection_until_idle
-dispatch_intents
-wake_time_range
-save or flush only if a compatibility bridge still needs it
+process_pending_facts
+process_context_changes
+dispatch_*_intents
+process_due_time_range
 ```
 
 The private flow should read as a pipeline:
 
 ```text
-claim pending owner
-load owner snapshot
-run projector outside transaction
-validate projection output
-commit owner effects in one transaction
-dispatch handler output through one shared path
+claim pending fact
+load projection inputs
+project fact outside transaction
+commit fact effects in one transaction
+claim pending context changes
+match stored context and wake dependent facts
+claim intent
+run handler outside transaction
+commit handler output in one transaction
 ```
 
 Useful internal structs:
@@ -192,25 +225,24 @@ Useful internal structs:
   context, and any context version/recheck token.
 - `ContextReplacement`: normalized new context plus the owner-local delta
   against previous needs/offers.
-- `WakeCandidates`: matched need owners and payload refs discovered by exact or
+- `ContextMatch`: matched need owners and payload refs discovered by exact or
   custom matcher lookup.
 - `IntentEffects`: atomic row mutations and deferred intents derived from one
   projection or handler output.
 - `HandlerEffects`: emitted facts, purged facts, emitted intents, and report
   increments after one handler invocation.
 
-These structs are transaction-local data carriers. They should not rebuild the
-current `WakeLoop` memory model under new names.
+These structs are transaction-local data carriers. They should not rebuild an
+in-memory scheduler model under new names.
 
-As SQLite takes over, delete these current responsibilities from `WakeLoop`
-instead of wrapping them:
+SQLite owns these responsibilities directly:
 
 - whole-graph fact map
 - owner-to-context map
 - in-memory exact need/offer indexes
 - in-memory time-wake map
 - pending projection deque and owner set
-- intent vector plus in-memory idempotence index
+- durable intent queue and idempotence index
 - dirty/deleted tracking sets
 - whole-graph `load` / dirty `save` as the primary persistence mechanism
 
@@ -224,8 +256,9 @@ Simplification rules for the implementer:
   internal result variants where possible.
 - Keep byte encoding and row decoding out of the wake-loop hot path; use shared
   `wire` helpers and typed SQLite rows.
-- Keep matcher lookup behind helper functions that return candidate rows.
-  `WakeLoop` should decide when to wake, not how each matcher query is built.
+- Keep matcher lookup behind helper functions that return candidate rows. The
+  context-change pipeline should decide when to mark facts pending, while
+  matcher modules declare or implement the candidate query for their roles.
 
 ## Context Replacement
 
@@ -442,7 +475,7 @@ These changes should not alter protocol behavior:
 - exact matcher lookup through SQLite indexes
 - owner-scoped context replacement in one transaction
 - building `ProjectionContext` from SQLite instead of memory maps
-- removing whole-graph `WakeLoop::load` / dirty `save` as the primary mechanism
+- removing whole-graph scheduler `load` / dirty `save` as the primary mechanism
 
 Projectors can keep emitting the existing `ContextNeed` and `ContextOffer`
 values.
@@ -475,6 +508,43 @@ still decide each affected fact's output.
 
 ## Migration Plan
 
+Current status on `main`:
+
+1. Done: core scheduler state is stored in typed SQLite tables:
+   `facts`, `context_needs`, `context_offers`, `pending_projection`,
+   `pending_time_ranges`, `pending_context_changes`, `time_wakes`, and
+   `intents`.
+2. Done: runtime projection drains through SQLite transactions for fact
+   admission, pending fact processing, context replacement, context-change
+   matching, time wakes, atomic row intents, and deferred intent persistence.
+3. Done: runtime open/reload no longer rebuilds a whole scheduler graph.
+   Runtime fact iteration, pending counts, and durable intent dispatch read
+   SQLite directly.
+4. Done: fact and intent storage now matches the data types directly: fact rows
+   store id/scope/timestamp/bytes columns, and intent rows are keyed by
+   `(kind, idempotence_key)` with execution and payload as ordinary columns.
+5. Done: replay-style bulk fact admission uses one SQLite transaction instead
+   of one transaction per fact.
+6. Done: exact matcher lookup is SQLite-backed for committed wake insertion
+   and projection input.
+7. Done: context roles have protocol-owned declarations for exact selector
+   matching and custom selector fields.
+8. Done: custom matcher lookup for `range`, `coverage`, and `wrap_source` uses
+   SELECT-only SQL candidate queries with named bound parameters.
+9. Done: the custom matcher modules now expose schema-backed query plans while
+   retaining pure relation functions for focused tests.
+
+Previously remaining items now closed:
+
+1. Done: the in-memory scheduler facade, context maps, exact indexes, dirty
+   sets, and whole-graph `load`/`save` helpers are deleted. Restart-local
+   ephemeral intents remain deliberately in memory.
+2. Done: stale tests that depended on the deleted memory-only scheduler API
+   were converted or removed; black-box runtime tests now exercise the SQLite
+   path.
+
+Original sequence:
+
 1. Add typed durable `context_needs` and `context_offers` tables alongside the
    current row tables.
 2. Implement exact matcher lookup from SQLite while keeping existing projectors
@@ -489,10 +559,9 @@ still decide each affected fact's output.
 7. Add SELECT-only custom matcher SQL support.
 8. Convert `range`, then `coverage`, then `wrap_source` to schema-backed
    declarations and generated/core query plans.
-9. Reshape `wake_loop.rs` into the single-file orchestration facade described
-   above: use owner-local temporary structs, one helper per drain/dispatch step,
-   one shared handler-output application path, and transaction-local effects
-   instead of field-level dirty tracking.
+9. Reshape projection work into explicit pipeline modules with one readable
+   top-level function per pipeline, one shared handler-output application path,
+   and transaction-local effects instead of field-level dirty tracking.
 10. Delete in-memory context maps, exact indexes, dirty sets, and whole-graph
    load/save once the SQLite path owns the runtime.
 

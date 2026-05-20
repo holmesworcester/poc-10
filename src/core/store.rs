@@ -59,9 +59,9 @@ pub enum StorageClass {
 /// One schema fragment owned by a core IO module or protocol module scope.
 ///
 /// Most modules should use `Schema::durable_row_table`: the module owns the
-/// table name and persistence decision, while store supplies the uniform
-/// `(row_key BLOB PRIMARY KEY, row_value BLOB)` shape. Raw SQL exists for
-/// future specialized indexes, but it should be uncommon and reviewed harder.
+/// table name and persistence decision, while store supplies either the uniform
+/// `(row_key BLOB PRIMARY KEY, row_value BLOB)` shape or typed tables parsed
+/// from p8sql declarations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Schema {
     pub id: &'static str,
@@ -73,7 +73,6 @@ pub struct Schema {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemaDefinition {
     RowTable(TableName),
-    Sql(&'static str),
 }
 
 impl Schema {
@@ -92,14 +91,6 @@ impl Schema {
     pub const fn memory_row_table(id: &'static str, table: TableName) -> Self {
         Self::row_table(id, StorageClass::Memory, table)
     }
-
-    pub const fn durable(id: &'static str, sql: &'static str) -> Self {
-        Self {
-            id,
-            storage: StorageClass::Durable,
-            definition: SchemaDefinition::Sql(sql),
-        }
-    }
 }
 
 /// One opaque key/value row in one declared table.
@@ -109,6 +100,32 @@ pub struct TableRow {
     pub key: Vec<u8>,
     pub value: Vec<u8>,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub enum ColumnValue<'a> {
+    Bytes(&'a [u8]),
+    Text(&'a str),
+    U64(u64),
+    I64(i64),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectColumn {
+    pub name: &'static str,
+    pub ty: ColumnType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectedValue {
+    Bytes(Vec<u8>),
+    Text(String),
+    U64(u64),
+    I64(i64),
+    Bool(bool),
+}
+
+pub type SelectedRow = BTreeMap<String, SelectedValue>;
 
 type MemoryRows = BTreeMap<Vec<u8>, Vec<u8>>;
 type MemoryTables = HashMap<TableName, MemoryRows>;
@@ -212,7 +229,10 @@ impl Store {
         typed_tables: HashMap<String, TableDeclaration>,
     ) -> rusqlite::Result<Self> {
         conn.busy_timeout(Duration::from_secs(5))?;
-        conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;",
+        )?;
         let memory_tables = table_storage
             .iter()
             .filter_map(|(table, storage)| {
@@ -423,17 +443,6 @@ impl Store {
             .map(|count| count as usize)
     }
 
-    /// SQLite connection-local external write marker.
-    ///
-    /// `PRAGMA data_version` changes when another connection commits to the
-    /// same database, but not for writes made by this `Store`'s own connection.
-    /// Runtime code can use it to avoid broad reloads while still noticing
-    /// sibling CLI processes that appended facts or intents.
-    pub fn data_version(&self) -> rusqlite::Result<i64> {
-        self.conn
-            .query_row("PRAGMA data_version", [], |row| row.get(0))
-    }
-
     /// Scan one declared table in key order.
     pub fn table_rows(&self, table: TableName) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         if self.storage_for(table) == StorageClass::Memory {
@@ -519,73 +528,163 @@ impl Store {
         rows.collect()
     }
 
-    /// Scan one declared table by lexicographic key range.
-    ///
-    /// This is still a row-store primitive, not a protocol index. Protocol
-    /// modules choose key encodings such as `(timestamp, fact_id)` and store
-    /// only asks SQLite for rows whose opaque keys fall in the requested span.
-    pub fn table_rows_in_key_range(
+    pub fn table_rows_where(
         &self,
         table: TableName,
-        lower_inclusive: &[u8],
-        upper_exclusive: Option<&[u8]>,
-        limit: usize,
+        filters: &[(&str, ColumnValue<'_>)],
     ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        if limit == 0 {
-            return Ok(Vec::new());
+        let declared = self.typed_table(table).ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "table {} is not a typed table",
+                table.as_str()
+            ))
+        })?;
+        if filters.is_empty() {
+            return self.typed_rows(declared);
         }
-        if self.storage_for(table) == StorageClass::Memory {
-            return Ok(self.memory_rows_in_key_range(
-                table,
-                lower_inclusive,
-                upper_exclusive,
-                limit,
+        let quoted = quoted_table_name_str(&declared.name)?;
+        let mut values = Vec::with_capacity(filters.len());
+        let mut clauses = Vec::with_capacity(filters.len());
+        for (index, (column_name, value)) in filters.iter().enumerate() {
+            let column = declared.column(column_name).ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed table {} has no column {}",
+                    declared.name, column_name
+                ))
+            })?;
+            values.push(column_value_to_sqlite(&column.ty, *value, column_name)?);
+            clauses.push(format!(
+                "{} = ?{}",
+                quoted_identifier(column_name)?,
+                index + 1
             ));
         }
-        if let Some(declared) = self.typed_table(table) {
-            let mut out = Vec::new();
-            for row in self.typed_rows(declared)? {
-                if row.0.as_slice() < lower_inclusive {
-                    continue;
-                }
-                if upper_exclusive.is_some_and(|upper| row.0.as_slice() >= upper) {
-                    continue;
-                }
-                out.push(row);
-                if out.len() == limit {
-                    break;
-                }
-            }
-            return Ok(out);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM {quoted}
+             WHERE {}
+             ORDER BY {}",
+            table_column_list(declared)?,
+            clauses.join(" AND "),
+            quoted_identifier_list(&declared.row_key.columns)?
+        ))?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            sqlite_row_to_table_row(declared, row)
+        })?;
+        rows.collect()
+    }
+
+    pub fn table_rows_where_in(
+        &self,
+        table: TableName,
+        filters: &[(&str, ColumnValue<'_>)],
+        in_column_name: &str,
+        in_values: &[ColumnValue<'_>],
+    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if in_values.is_empty() {
+            return Ok(Vec::new());
         }
-        let table_name = quoted_table_name(table)?;
-        match upper_exclusive {
-            Some(upper) => {
-                let mut stmt = self.conn.prepare(&format!(
-                    "SELECT row_key, row_value FROM {table_name}
-                         WHERE row_key >= ?1 AND row_key < ?2
-                         ORDER BY row_key
-                         LIMIT ?3"
-                ))?;
-                let rows = stmt
-                    .query_map(params![lower_inclusive, upper, limit as i64], |row| {
-                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-                    })?;
-                rows.collect()
-            }
-            None => {
-                let mut stmt = self.conn.prepare(&format!(
-                    "SELECT row_key, row_value FROM {table_name}
-                         WHERE row_key >= ?1
-                         ORDER BY row_key
-                         LIMIT ?2"
-                ))?;
-                let rows = stmt.query_map(params![lower_inclusive, limit as i64], |row| {
-                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?;
-                rows.collect()
-            }
+        let declared = self.typed_table(table).ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "table {} is not a typed table",
+                table.as_str()
+            ))
+        })?;
+        let in_column = declared.column(in_column_name).ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "typed table {} has no column {}",
+                declared.name, in_column_name
+            ))
+        })?;
+        let quoted = quoted_table_name_str(&declared.name)?;
+        let mut values = Vec::with_capacity(filters.len() + in_values.len());
+        let mut clauses = Vec::with_capacity(filters.len() + 1);
+        for (index, (column_name, value)) in filters.iter().enumerate() {
+            let column = declared.column(column_name).ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed table {} has no column {}",
+                    declared.name, column_name
+                ))
+            })?;
+            values.push(column_value_to_sqlite(&column.ty, *value, column_name)?);
+            clauses.push(format!(
+                "{} = ?{}",
+                quoted_identifier(column_name)?,
+                index + 1
+            ));
         }
+        let in_start = values.len();
+        for value in in_values {
+            values.push(column_value_to_sqlite(
+                &in_column.ty,
+                *value,
+                in_column_name,
+            )?);
+        }
+        let placeholders = (0..in_values.len())
+            .map(|index| format!("?{}", in_start + index + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        clauses.push(format!(
+            "{} IN ({})",
+            quoted_identifier(in_column_name)?,
+            placeholders
+        ));
+
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM {quoted}
+             WHERE {}
+             ORDER BY {}",
+            table_column_list(declared)?,
+            clauses.join(" AND "),
+            quoted_identifier_list(&declared.row_key.columns)?
+        ))?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            sqlite_row_to_table_row(declared, row)
+        })?;
+        rows.collect()
+    }
+
+    pub fn select_only(
+        &self,
+        sql: &str,
+        allowed_tables: &[TableName],
+        params: &[(&str, ColumnValue<'_>)],
+        columns: &[SelectColumn],
+    ) -> rusqlite::Result<Vec<SelectedRow>> {
+        validate_select_only_sql(sql, allowed_tables)?;
+        let bound = params
+            .iter()
+            .map(|(name, value)| {
+                if !name.starts_with(':') {
+                    return Err(rusqlite::Error::InvalidParameterName(format!(
+                        "SELECT-only matcher parameter {name:?} must be named"
+                    )));
+                }
+                Ok((*name, column_value_to_untyped_sqlite(*value)?))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut stmt = self.conn.prepare(sql)?;
+        for (name, value) in &bound {
+            let index = stmt.parameter_index(name)?.ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "SELECT-only matcher SQL does not bind parameter {name}"
+                ))
+            })?;
+            stmt.raw_bind_parameter(index, value)?;
+        }
+
+        let mut rows = stmt.raw_query();
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut selected = BTreeMap::new();
+            for (index, column) in columns.iter().enumerate() {
+                let value = sqlite_selected_value(row, index, column)?;
+                selected.insert(column.name.to_string(), value);
+            }
+            out.push(selected);
+        }
+        Ok(out)
     }
 
     // Schema helpers: core applies declarations from module scopes. It does not
@@ -606,10 +705,8 @@ impl Store {
     }
 
     fn apply_schema(&self, schema: &Schema) -> rusqlite::Result<()> {
-        match schema.definition {
-            SchemaDefinition::RowTable(table) => self.apply_row_table_schema(schema.storage, table),
-            SchemaDefinition::Sql(sql) => self.conn.execute_batch(sql),
-        }
+        let SchemaDefinition::RowTable(table) = schema.definition;
+        self.apply_row_table_schema(schema.storage, table)
     }
 
     fn apply_row_table_schema(
@@ -839,39 +936,6 @@ impl Store {
                     break;
                 }
                 out.push((key.clone(), value.clone()));
-            }
-        }
-        out
-    }
-
-    fn memory_rows_in_key_range(
-        &self,
-        table: TableName,
-        lower_inclusive: &[u8],
-        upper_exclusive: Option<&[u8]>,
-        limit: usize,
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let tables = self.memory_tables.borrow();
-        let Some(rows) = tables.get(&table) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        match upper_exclusive {
-            Some(upper) => {
-                for (key, value) in rows.range(lower_inclusive.to_vec()..upper.to_vec()) {
-                    if out.len() == limit {
-                        break;
-                    }
-                    out.push((key.clone(), value.clone()));
-                }
-            }
-            None => {
-                for (key, value) in rows.range(lower_inclusive.to_vec()..) {
-                    if out.len() == limit {
-                        break;
-                    }
-                    out.push((key.clone(), value.clone()));
-                }
             }
         }
         out
@@ -1136,6 +1200,163 @@ fn sqlite_column_value(
     }
 }
 
+fn column_value_to_sqlite(
+    ty: &ColumnType,
+    value: ColumnValue<'_>,
+    label: &str,
+) -> rusqlite::Result<Value> {
+    match (ty, value) {
+        (ColumnType::Bytes { len }, ColumnValue::Bytes(bytes)) => {
+            if let Some(expected) = *len {
+                if bytes.len() == expected {
+                    return Ok(Value::Blob(bytes.to_vec()));
+                }
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "typed column {label} has {} bytes, expected {}",
+                    bytes.len(),
+                    expected
+                )));
+            }
+            Ok(Value::Blob(bytes.to_vec()))
+        }
+        (ColumnType::Text, ColumnValue::Text(text)) => Ok(Value::Text(text.to_string())),
+        (ColumnType::U64, ColumnValue::U64(value)) => {
+            let value = i64::try_from(value).map_err(|_| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed column {label} exceeds SQLite integer range"
+                ))
+            })?;
+            Ok(Value::Integer(value))
+        }
+        (ColumnType::I64, ColumnValue::I64(value)) => Ok(Value::Integer(value)),
+        (ColumnType::Bool, ColumnValue::Bool(value)) => Ok(Value::Integer(i64::from(value))),
+        _ => Err(rusqlite::Error::InvalidParameterName(format!(
+            "typed column {label} filter value does not match declared type"
+        ))),
+    }
+}
+
+fn column_value_to_untyped_sqlite(value: ColumnValue<'_>) -> rusqlite::Result<Value> {
+    match value {
+        ColumnValue::Bytes(bytes) => Ok(Value::Blob(bytes.to_vec())),
+        ColumnValue::Text(text) => Ok(Value::Text(text.to_string())),
+        ColumnValue::U64(value) => {
+            let value = i64::try_from(value).map_err(|_| {
+                rusqlite::Error::InvalidParameterName(
+                    "SELECT-only parameter exceeds SQLite integer range".to_string(),
+                )
+            })?;
+            Ok(Value::Integer(value))
+        }
+        ColumnValue::I64(value) => Ok(Value::Integer(value)),
+        ColumnValue::Bool(value) => Ok(Value::Integer(i64::from(value))),
+    }
+}
+
+fn sqlite_selected_value(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+    column: &SelectColumn,
+) -> rusqlite::Result<SelectedValue> {
+    match column.ty {
+        ColumnType::Bytes { len } => {
+            let bytes = row.get::<_, Vec<u8>>(index)?;
+            if let Some(expected) = len {
+                if bytes.len() != expected {
+                    return Err(rusqlite::Error::InvalidParameterName(format!(
+                        "SELECT-only column {} has {} bytes, expected {expected}",
+                        column.name,
+                        bytes.len()
+                    )));
+                }
+            }
+            Ok(SelectedValue::Bytes(bytes))
+        }
+        ColumnType::Text => row.get::<_, String>(index).map(SelectedValue::Text),
+        ColumnType::U64 => {
+            let raw = row.get::<_, i64>(index)?;
+            let value = u64::try_from(raw).map_err(|_| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "SELECT-only column {} has negative u64 value",
+                    column.name
+                ))
+            })?;
+            Ok(SelectedValue::U64(value))
+        }
+        ColumnType::I64 => row.get::<_, i64>(index).map(SelectedValue::I64),
+        ColumnType::Bool => match row.get::<_, i64>(index)? {
+            0 => Ok(SelectedValue::Bool(false)),
+            1 => Ok(SelectedValue::Bool(true)),
+            other => Err(rusqlite::Error::InvalidParameterName(format!(
+                "SELECT-only column {} has invalid bool value {other}",
+                column.name
+            ))),
+        },
+    }
+}
+
+fn validate_select_only_sql(sql: &str, allowed_tables: &[TableName]) -> rusqlite::Result<()> {
+    let trimmed = sql.trim_start();
+    if !trimmed
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("select"))
+    {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "matcher SQL must be SELECT-only".to_string(),
+        ));
+    }
+    if sql.contains(';') || sql.contains("--") || sql.contains("/*") {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "matcher SQL must be one comment-free SELECT statement".to_string(),
+        ));
+    }
+
+    let tokens = sql_identifier_tokens(sql);
+    let forbidden = [
+        "insert", "update", "delete", "create", "drop", "alter", "pragma", "attach", "detach",
+        "replace", "vacuum",
+    ];
+    if tokens
+        .iter()
+        .any(|token| forbidden.contains(&token.to_ascii_lowercase().as_str()))
+    {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "matcher SQL cannot contain write, DDL, or pragma keywords".to_string(),
+        ));
+    }
+
+    let allowed = allowed_tables
+        .iter()
+        .map(|table| table.as_str())
+        .collect::<BTreeSet<_>>();
+    for window in tokens.windows(2) {
+        let keyword = window[0].to_ascii_lowercase();
+        if matches!(keyword.as_str(), "from" | "join") && !allowed.contains(window[1].as_str()) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "matcher SQL reads undeclared table {}",
+                window[1]
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn sql_identifier_tokens(sql: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in sql.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
 fn take_exact<'a>(
     bytes: &'a [u8],
     offset: &mut usize,
@@ -1387,16 +1608,15 @@ fn sqlite_type(ty: &ColumnType) -> &'static str {
 fn table_storage_map(schemas: &[Schema]) -> rusqlite::Result<HashMap<TableName, StorageClass>> {
     let mut out = HashMap::new();
     for schema in schemas {
-        if let SchemaDefinition::RowTable(table) = schema.definition {
-            match out.insert(table, schema.storage) {
-                Some(existing) if existing != schema.storage => {
-                    return Err(rusqlite::Error::InvalidParameterName(format!(
-                        "table {} declared with multiple storage classes",
-                        table.as_str()
-                    )));
-                }
-                _ => {}
+        let SchemaDefinition::RowTable(table) = schema.definition;
+        match out.insert(table, schema.storage) {
+            Some(existing) if existing != schema.storage => {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "table {} declared with multiple storage classes",
+                    table.as_str()
+                )));
             }
+            _ => {}
         }
     }
     Ok(out)
@@ -1483,16 +1703,6 @@ fn quoted_identifier_list(columns: &[String]) -> rusqlite::Result<String> {
         .map(|column| quoted_identifier(column))
         .collect::<rusqlite::Result<Vec<_>>>()
         .map(|columns| columns.join(", "))
-}
-
-/// Wrap a row-codec error in the `rusqlite::Error` variant the rest of the
-/// store API uses. Row helpers across the workers and protocol schema files
-/// share this shape: a `String` describing why decoding a row's bytes
-/// failed is lifted to `rusqlite::Error::InvalidParameterName` so it can
-/// flow through `?` alongside genuine SQL errors. Centralizing the
-/// constructor here keeps the variant choice in one place.
-pub fn table_error(err: String) -> rusqlite::Error {
-    rusqlite::Error::InvalidParameterName(err)
 }
 
 #[cfg(test)]

@@ -505,8 +505,7 @@ fn run_invite(parsed: ParsedArgs) -> Result<(), String> {
         identity::invite::cli::invite(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
 
     for line in identity::invite::cli::invite_output(&receipt).lines {
         println!("{line}");
@@ -526,8 +525,7 @@ fn run_invite_server(parsed: ParsedArgs) -> Result<(), String> {
         identity::invite::cli::invite_server(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
 
     for line in identity::invite::cli::invite_output(&receipt).lines {
         println!("{line}");
@@ -548,11 +546,10 @@ fn run_accept(parsed: ParsedArgs) -> Result<(), String> {
         identity::invite::cli::accept(&ctx, CliArgs::new(&parsed.command[1..]), from_listen_addr)?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
+    process_runtime_until_idle(&mut runtime)?;
     if from_listen_addr.is_none() {
         ensure_bootstrap_request_sent(&runtime, receipt.request_id)?;
     }
-    runtime.save()?;
     if from_listen_addr.is_some() {
         connection::response::commands::wait_for_request_response(
             &mut runtime,
@@ -584,8 +581,7 @@ fn run_accept_invite_server(parsed: ParsedArgs) -> Result<(), String> {
         )?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     connection::response::commands::wait_for_request_response(
         &mut runtime,
         receipt.request_id,
@@ -610,8 +606,7 @@ fn run_link(parsed: ParsedArgs) -> Result<(), String> {
         identity::invite::cli::link(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
 
     for line in identity::invite::cli::invite_output(&receipt).lines {
         println!("{line}");
@@ -636,8 +631,7 @@ fn run_accept_link(parsed: ParsedArgs) -> Result<(), String> {
         )?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     if from_listen_addr.is_some() {
         connection::response::commands::wait_for_request_response(
             &mut runtime,
@@ -702,14 +696,13 @@ fn run_create_workspace(parsed: ParsedArgs) -> Result<(), String> {
         identity::workspace::cli::create_workspace(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
+    process_runtime_until_idle(&mut runtime)?;
     let workspace =
         identity::workspace::queries::workspace_by_id(runtime.store(), receipt.workspace_fact_id)?;
     let bootstrap_user_id =
         identity::user::queries::users_in_workspace(runtime.store(), receipt.workspace_fact_id)?
             .first()
             .map(|user| user.user_id);
-    runtime.save()?;
 
     for line in
         identity::workspace::cli::created_workspace_output(&workspace, bootstrap_user_id).lines
@@ -780,8 +773,7 @@ fn run_key_recipient(parsed: ParsedArgs) -> Result<(), String> {
         encryption::cli::key_recipient(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
 
     for line in encryption::cli::key_recipient_output(&receipt).lines {
         println!("{line}");
@@ -799,7 +791,7 @@ fn run_key_recipient_rotation(parsed: ParsedArgs) -> Result<(), String> {
         .get(1)
         .ok_or_else(|| encryption::cli::KEY_ROTATE_RECIPIENT_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
-    drain_runtime(&mut runtime)?;
+    process_runtime_until_idle(&mut runtime)?;
     let previous = encryption::commands::recipient_key_for_rotation(&runtime, workspace_id)?
         .ok_or_else(|| "no existing local recipient key to rotate".to_string())?;
     let clock = SystemClock;
@@ -809,8 +801,7 @@ fn run_key_recipient_rotation(parsed: ParsedArgs) -> Result<(), String> {
         encryption::cli::key_recipient_rotation(&ctx, CliArgs::new(&parsed.command[1..]), previous)?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
 
     for line in encryption::cli::key_recipient_output(&receipt).lines {
         println!("{line}");
@@ -832,8 +823,7 @@ fn run_key_frontier(parsed: ParsedArgs) -> Result<(), String> {
         encryption::cli::key_frontier(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
 
     for line in encryption::cli::key_frontier_output(&receipt).lines {
         println!("{line}");
@@ -847,8 +837,7 @@ fn run_key_wrap(parsed: ParsedArgs) -> Result<(), String> {
         .ok_or_else(|| top_level_usage("key-wrap requires --db PATH"))?;
     let mut runtime = ProtocolRuntime::open_disk(db)?;
     let query = encryption::cli::key_wrap_args(CliArgs::new(&parsed.command[1..]))?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let lookup = encryption::commands::lookup_key_wrap(&runtime, query)?;
     for line in encryption::cli::key_wrap_lookup_output(&lookup).lines {
         println!("{line}");
@@ -862,8 +851,7 @@ fn run_key_access(parsed: ParsedArgs) -> Result<(), String> {
         .ok_or_else(|| top_level_usage("key-access requires --db PATH"))?;
     let mut runtime = ProtocolRuntime::open_disk(db)?;
     let query = encryption::cli::key_access_args(CliArgs::new(&parsed.command[1..]))?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let status = encryption::commands::key_access(&runtime, query)?;
     for line in encryption::cli::key_access_status_output(&status).lines {
         println!("{line}");
@@ -892,14 +880,13 @@ fn run_key_derive(parsed: ParsedArgs) -> Result<(), String> {
     let before = encryption::commands::local_key_secret_count(&runtime);
     let scanned_key_wraps = encryption::commands::key_wrap_count(&runtime)?;
     for _ in 0..4 {
-        runtime.drain_projection_until_idle(8, limit)?;
+        runtime.process_projection_until_idle(8, limit)?;
         let dispatched = runtime.dispatch_cli_intents(limit)?;
         if dispatched.handled == 0 && dispatched.facts == 0 && dispatched.intents == 0 {
             break;
         }
     }
-    runtime.drain_projection_until_idle(8, limit)?;
-    runtime.save()?;
+    runtime.process_projection_until_idle(8, limit)?;
     let after = encryption::commands::local_key_secret_count(&runtime);
     println!("scanned_key_wraps: {scanned_key_wraps}");
     println!("derived_key_secrets: {}", after.saturating_sub(before));
@@ -916,7 +903,7 @@ fn run_key_node(parsed: ParsedArgs) -> Result<(), String> {
         return Err("key-node WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX SOURCE_SECRET_ID_HEX RANGE_START RANGE_WIDTH [TOMBSTONE_NODE_ID_HEX]".to_string());
     }
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
+    process_runtime_until_idle(&mut runtime)?;
     let workspace_id = decode_hex_32(&parsed.command[1], "workspace id")?;
     let frontier_id = decode_hex_32(&parsed.command[2], "removal frontier id")?;
     let source_secret_id = decode_hex_32(&parsed.command[3], "source secret id")?;
@@ -944,8 +931,7 @@ fn run_key_node(parsed: ParsedArgs) -> Result<(), String> {
         },
     )?;
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     for line in encryption::cli::history_node_output(&receipt).lines {
         println!("{line}");
     }
@@ -960,8 +946,7 @@ fn run_keys(parsed: ParsedArgs) -> Result<(), String> {
         return Err("keys WORKSPACE_ID_HEX".to_string());
     }
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let workspace_id = decode_hex_32(&parsed.command[1], "workspace id")?;
     let store = runtime.store();
 
@@ -1061,7 +1046,7 @@ fn run_chop_now(parsed: ParsedArgs) -> Result<(), String> {
         return Err("chop-now WORKSPACE_ID_HEX FLOOR_MINUTE".to_string());
     }
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
+    process_runtime_until_idle(&mut runtime)?;
     let workspace_id = decode_hex_32(&parsed.command[1], "workspace id")?;
     let floor_minute = parsed.command[2]
         .parse::<u64>()
@@ -1074,7 +1059,6 @@ fn run_chop_now(parsed: ParsedArgs) -> Result<(), String> {
             created_at_ms: SystemClock.next_timestamp(),
         },
     )?;
-    runtime.save()?;
     for line in encryption::cli::chop_now_output(&receipt).lines {
         println!("{line}");
     }
@@ -1087,7 +1071,7 @@ fn run_disappearing_set(parsed: ParsedArgs) -> Result<(), String> {
         .ok_or_else(|| top_level_usage("disappearing-set requires --db PATH"))?;
     let args = parse_disappearing_set_args(&parsed.command[1..])?;
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
+    process_runtime_until_idle(&mut runtime)?;
     let now_ms = next_cli_timestamp(&runtime)?;
     let output = encryption::disappearing_messages_setting::commands::author_set_with_auto_floor(
         runtime.store(),
@@ -1099,8 +1083,7 @@ fn run_disappearing_set(parsed: ParsedArgs) -> Result<(), String> {
         },
     )?;
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let delta = receipt
         .new_floor_minute
         .saturating_sub(receipt.previous_floor_minute);
@@ -1124,8 +1107,7 @@ fn run_disappearing_status(parsed: ParsedArgs) -> Result<(), String> {
     }
     let workspace_id = decode_hex_32(&parsed.command[1], "workspace id")?;
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let store = runtime.store();
     let active = encryption::disappearing_messages_setting::queries::active_for_workspace(
         store,
@@ -1236,7 +1218,7 @@ fn run_disappearing_tighten(parsed: ParsedArgs) -> Result<(), String> {
         return Err("disappearing-tighten requires --yes in the target CLI".to_string());
     }
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
+    process_runtime_until_idle(&mut runtime)?;
     let now_ms = next_cli_timestamp(&runtime)?;
     let input = encryption::disappearing_messages_setting::commands::AuthorTighten {
         workspace_id: args.workspace_id,
@@ -1250,15 +1232,14 @@ fn run_disappearing_tighten(parsed: ParsedArgs) -> Result<(), String> {
         input,
     )?;
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
+    process_runtime_until_idle(&mut runtime)?;
     enqueue_floor_retention(
         &mut runtime,
         args.workspace_id,
         receipt.setting_fact_id,
         receipt.target_floor_minute,
     )?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
 
     println!(
         "setting_fact_id: {}",
@@ -1280,7 +1261,7 @@ fn run_disappearing_compact(parsed: ParsedArgs) -> Result<(), String> {
     }
     let workspace_id = decode_hex_32(&parsed.command[1], "workspace id")?;
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
+    process_runtime_until_idle(&mut runtime)?;
     let now_ms = next_cli_timestamp(&runtime)?;
     let output = encryption::disappearing_messages_setting::commands::author_compact(
         runtime.store(),
@@ -1290,8 +1271,7 @@ fn run_disappearing_compact(parsed: ParsedArgs) -> Result<(), String> {
         },
     )?;
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let delta = receipt
         .new_floor_minute
         .saturating_sub(receipt.previous_floor_minute);
@@ -1329,8 +1309,7 @@ fn run_send(parsed: ParsedArgs) -> Result<(), String> {
         content::message::cli::send(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     for line in content::message::cli::send_output(&receipt, &text).lines {
         println!("{line}");
     }
@@ -1349,8 +1328,7 @@ fn run_react(parsed: ParsedArgs) -> Result<(), String> {
         content::message::cli::react(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     for line in content::message::cli::react_output(&receipt).lines {
         println!("{line}");
     }
@@ -1375,8 +1353,7 @@ fn run_send_file(parsed: ParsedArgs) -> Result<(), String> {
         content::message::cli::send_file(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     for line in content::message::cli::send_file_output(&receipt).lines {
         println!("{line}");
     }
@@ -1388,8 +1365,7 @@ fn run_files(parsed: ParsedArgs) -> Result<(), String> {
         .db
         .ok_or_else(|| top_level_usage("files requires --db PATH"))?;
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let clock = SystemClock;
     let vault = EmptyVault;
     let output = {
@@ -1407,8 +1383,7 @@ fn run_save_file(parsed: ParsedArgs) -> Result<(), String> {
         .db
         .ok_or_else(|| top_level_usage("save-file requires --db PATH"))?;
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let clock = SystemClock;
     let vault = EmptyVault;
     let output = {
@@ -1429,7 +1404,7 @@ fn run_delete_file(parsed: ParsedArgs) -> Result<(), String> {
         return Err(DELETE_FILE_USAGE.to_string());
     }
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
+    process_runtime_until_idle(&mut runtime)?;
     let workspace_id = decode_hex_32(&parsed.command[1], "workspace id")?;
     let file = resolve_file_selector(runtime.store(), workspace_id, &parsed.command[2])?;
     let clock = FixedClock(next_cli_timestamp(&runtime)?);
@@ -1444,8 +1419,7 @@ fn run_delete_file(parsed: ParsedArgs) -> Result<(), String> {
         )?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     println!("workspace_id: {}", encode_hex_32(&receipt.workspace_id));
     println!("fact_id: {}", encode_hex_32(&receipt.deletion_fact_id));
     println!("target_file_id: {}", encode_hex_32(&receipt.target_file_id));
@@ -1465,8 +1439,7 @@ fn run_delete_message(parsed: ParsedArgs) -> Result<(), String> {
         content::message::cli::delete_message(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     for line in content::message::cli::delete_message_output(&receipt).lines {
         println!("{line}");
     }
@@ -1478,8 +1451,7 @@ fn run_messages(parsed: ParsedArgs) -> Result<(), String> {
         .db
         .ok_or_else(|| top_level_usage("messages requires --db PATH"))?;
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let clock = SystemClock;
     let vault = EmptyVault;
     let output = {
@@ -1497,8 +1469,7 @@ fn run_view(parsed: ParsedArgs) -> Result<(), String> {
         .db
         .ok_or_else(|| top_level_usage("view requires --db PATH"))?;
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let clock = SystemClock;
     let vault = EmptyVault;
     let output = {
@@ -1523,8 +1494,7 @@ fn run_grant_admin(parsed: ParsedArgs) -> Result<(), String> {
         identity::admin::cli::grant_admin(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    runtime.drain_projection_until_idle(8, 64)?;
-    runtime.save()?;
+    runtime.process_projection_until_idle(8, 64)?;
 
     for line in identity::admin::cli::grant_admin_output(&receipt).lines {
         println!("{line}");
@@ -1544,8 +1514,7 @@ fn run_generate(parsed: ParsedArgs) -> Result<(), String> {
         content::event::cli::generate(&ctx, CliArgs::new(&parsed.command[1..]))?
     };
     let receipt = runtime.submit_command_output(output)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
 
     for line in content::event::cli::generated_output(&receipt, receipt.generated_facts).lines {
         println!("{line}");
@@ -1600,8 +1569,7 @@ fn run_negentropy_drain(parsed: ParsedArgs) -> Result<(), String> {
             .map_err(|_| "negentropy-drain [LIMIT]".to_string())?;
     }
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let status = crate::protocol::facts::sync::shared_fact::sync_status(runtime.store())?;
     println!("drained: 0");
     println!("removed_from_index: 0");
@@ -1622,8 +1590,7 @@ fn run_sync_status(parsed: ParsedArgs) -> Result<(), String> {
         return Err("sync-status".to_string());
     }
     let mut runtime = ProtocolRuntime::open_disk(db)?;
-    drain_runtime(&mut runtime)?;
-    runtime.save()?;
+    process_runtime_until_idle(&mut runtime)?;
     let status = crate::protocol::facts::sync::shared_fact::sync_status(runtime.store())?;
     println!("indexed_facts: {}", status.indexed_facts);
     println!("root_count: {}", status.root_count);
@@ -1952,12 +1919,12 @@ fn parse_disappearing_tighten_args(values: &[String]) -> Result<DisappearingTigh
     })
 }
 
-fn drain_runtime(runtime: &mut ProtocolRuntime) -> Result<(), String> {
+fn process_runtime_until_idle(runtime: &mut ProtocolRuntime) -> Result<(), String> {
     for _ in 0..4 {
-        runtime.drain_projection_until_idle(8, 512)?;
+        runtime.process_projection_until_idle(8, 512)?;
         let dispatched = runtime.dispatch_cli_intents(512)?;
         if dispatched.handled == 0 && dispatched.facts == 0 && dispatched.intents == 0 {
-            runtime.drain_projection_until_idle(8, 512)?;
+            runtime.process_projection_until_idle(8, 512)?;
             return Ok(());
         }
     }
@@ -1968,7 +1935,7 @@ fn ensure_bootstrap_request_sent(
     runtime: &ProtocolRuntime,
     request_id: [u8; 32],
 ) -> Result<(), String> {
-    for intent in runtime.wake_loop().intents() {
+    for intent in runtime.ephemeral_intents() {
         if intent.kind.as_str() != SEND_BOOTSTRAP_CONNECTION_REQUEST {
             continue;
         }

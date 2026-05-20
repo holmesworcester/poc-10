@@ -8,12 +8,13 @@
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};
+use crate::core::wire;
 
 use super::fact::{AuthorId, WorkspaceId};
 
 pub const MESSAGE_DELETION_ROWS: TableName = TableName::new("message_deletion_rows");
 
-pub const ROW_VALUE_BYTES: usize = 1 + 32 + 8 + 32;
+pub const ROW_VALUE_BYTES: usize = 32 + 8 + 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageDeletionRow {
@@ -32,15 +33,14 @@ pub fn message_deletion_key(workspace_id: WorkspaceId, target_message_id: FactId
 }
 
 pub fn message_deletion_row(input: MessageDeletionRow) -> Result<TableRow, String> {
-    let mut value = Vec::with_capacity(ROW_VALUE_BYTES);
-    value.push(1);
-    value.extend_from_slice(&input.deletion_id);
-    value.extend_from_slice(&input.created_at_ms.to_be_bytes());
-    value.extend_from_slice(&input.author_user_id);
+    let mut writer = wire::Writer::with_capacity(ROW_VALUE_BYTES);
+    writer.fixed(&input.deletion_id);
+    writer.u64be(input.created_at_ms);
+    writer.fixed(&input.author_user_id);
     Ok(TableRow {
         table: MESSAGE_DELETION_ROWS,
         key: message_deletion_key(input.workspace_id, input.target_message_id),
-        value,
+        value: writer.finish(),
     })
 }
 
@@ -48,20 +48,26 @@ pub fn decode_message_deletion_row(key: &[u8], value: &[u8]) -> Result<MessageDe
     if key.len() != 64 {
         return Err("message deletion row key is malformed".to_string());
     }
-    if value.len() != ROW_VALUE_BYTES || value[0] != 1 {
-        return Err("message deletion row value is malformed".to_string());
-    }
-    let mut workspace_id = [0; 32];
-    workspace_id.copy_from_slice(&key[..32]);
-    let mut target_message_id = [0; 32];
-    target_message_id.copy_from_slice(&key[32..64]);
+    let mut key_reader = wire::Reader::new(key);
+    let workspace_id = key_reader.array().map_err(wire_err)?;
+    let target_message_id = key_reader.array().map_err(wire_err)?;
+    key_reader.finish().map_err(wire_err)?;
+    let mut value_reader = wire::Reader::new(value);
+    let deletion_id = value_reader.array().map_err(wire_err)?;
+    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
+    let author_user_id = value_reader.array().map_err(wire_err)?;
+    value_reader.finish().map_err(wire_err)?;
     Ok(MessageDeletionRow {
         workspace_id,
         target_message_id,
-        deletion_id: value[1..33].try_into().unwrap(),
-        created_at_ms: u64::from_be_bytes(value[33..41].try_into().unwrap()),
-        author_user_id: value[41..73].try_into().unwrap(),
+        deletion_id,
+        created_at_ms,
+        author_user_id,
     })
+}
+
+fn wire_err(err: wire::WireError) -> String {
+    format!("{err:?}")
 }
 
 #[cfg(test)]

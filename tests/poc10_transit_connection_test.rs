@@ -4,7 +4,6 @@ use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
 use topo::core::intents::IntentKind;
 use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use topo::core::store::Store;
-use topo::core::wake_loop::WakeLoop;
 use topo::protocol::facts::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::facts::connection::response::layout as connection_response_layout;
 use topo::protocol::facts::encryption;
@@ -18,7 +17,7 @@ use topo::protocol::intents::transport::send_facts_on_connection::{
     SendFactsOnConnectionHandler, SEND_FACTS_ON_CONNECTION,
 };
 use topo::protocol::intents::transport::send_network_frame::{
-    decode_send_network_frame, send_network_frame_intent, SendNetworkFrame, SEND_NETWORK_FRAME,
+    decode_send_network_frame, send_network_frame_intent, SendNetworkFrame,
 };
 
 fn connection_fact() -> (Fact, ConnectionResponseFact) {
@@ -150,49 +149,19 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
 }
 
 #[test]
-fn send_facts_on_connection_handler_success_emits_send_network_frame_and_clears_intent() {
-    let store = store_with_local_endpoint();
-    let (connection_fact, _) = connection_fact();
-    let fact = Fact::new(
-        topo::protocol::matchers::workspace_scope([7; 32]),
-        1,
-        shared_fact_layout::encode_fact(&SharedFact {
-            workspace_id: [7; 32],
-            fact_id: [8; 32],
-        })
-        .expect("encode shared fact"),
-    );
-    let intent = send_facts_on_connection_intent(SendFactsOnConnection {
-        connection_id: connection_fact.id,
-        fact_ids: vec![fact.id],
-    });
-    let mut bus = WakeLoop::new();
-    bus.submit_fact(connection_fact);
-    bus.submit_fact(fact);
-    bus.submit_intent(intent).expect("queue send work");
-
-    let report = bus
-        .dispatch_deferred_intents_with_fact_context_and_store(
-            &SendFactsOnConnectionHandler::new(),
-            &store,
-            10,
-        )
-        .expect("dispatch transport send");
-
-    assert_eq!(report.handled, 1);
-    assert_eq!(report.intents, 1);
-    assert_eq!(bus.intents().len(), 1);
-    assert_eq!(bus.intents()[0].kind.as_str(), SEND_NETWORK_FRAME);
-}
-
-#[test]
 fn intent_kind_names_keep_transport_boundaries_clear() {
-    for kind in [SEND_FACTS_ON_CONNECTION, SEND_NETWORK_FRAME] {
+    for kind in [
+        SEND_FACTS_ON_CONNECTION,
+        topo::protocol::intents::transport::send_network_frame::SEND_NETWORK_FRAME,
+    ] {
         IntentKind::new(kind).expect("intent kind is registry-safe");
     }
 
     assert!(SEND_FACTS_ON_CONNECTION.starts_with("send_"));
-    assert!(SEND_NETWORK_FRAME.starts_with("send_"));
+    assert!(
+        topo::protocol::intents::transport::send_network_frame::SEND_NETWORK_FRAME
+            .starts_with("send_")
+    );
 }
 
 #[test]

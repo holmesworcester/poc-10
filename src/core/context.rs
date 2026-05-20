@@ -151,7 +151,7 @@ impl ContextSetDelta {
 
 /// Compare relationship sets as durable facts, not queue entries.
 ///
-/// The wake loop uses this after every projection. Re-emitting the same need or
+/// The context change pipeline uses this after every projection. Re-emitting the same need or
 /// offer is a no-op; changing it is represented as removal plus addition so the
 /// matcher sees only genuinely new possible matches.
 pub fn diff_context_sets(previous: &ContextSet, next: &ContextSet) -> ContextSetDelta {

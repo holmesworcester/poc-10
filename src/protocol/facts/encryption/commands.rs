@@ -375,7 +375,7 @@ pub fn create_history_node(
         .find(|fact| fact.id == input.source_secret_id)
         .ok_or_else(|| "history node source event is missing".to_string())?;
     let (owner_endpoint_id, source_secret) =
-        history_source_material(source, input.workspace_id, input.removal_frontier_id)?;
+        history_source_material(&source, input.workspace_id, input.removal_frontier_id)?;
     if input.tombstone_node_id != [0; 32] {
         let tombstone = runtime
             .facts()
@@ -438,7 +438,7 @@ pub fn chop_now(runtime: &mut ProtocolRuntime, input: ChopNow) -> Result<ChopNow
             )?
         };
         let _ = runtime.submit_command_output(output)?;
-        drain_runtime(runtime)?;
+        process_runtime_until_idle(runtime)?;
     }
     let local_key_secret_ids = runtime
         .facts()
@@ -452,7 +452,7 @@ pub fn chop_now(runtime: &mut ProtocolRuntime, input: ChopNow) -> Result<ChopNow
     for fact_id in &local_key_secret_ids {
         runtime.purge_fact(*fact_id);
     }
-    drain_runtime(runtime)?;
+    process_runtime_until_idle(runtime)?;
     Ok(ChopNowReceipt {
         workspace_id: input.workspace_id,
         floor_minute: input.floor_minute,
@@ -531,12 +531,12 @@ fn history_source_is_tombstoned(
     Ok(false)
 }
 
-fn drain_runtime(runtime: &mut ProtocolRuntime) -> Result<(), String> {
+fn process_runtime_until_idle(runtime: &mut ProtocolRuntime) -> Result<(), String> {
     for _ in 0..4 {
-        runtime.drain_projection_until_idle(8, 512)?;
+        runtime.process_projection_until_idle(8, 512)?;
         let dispatched = runtime.dispatch_intents(512)?;
         if dispatched.handled == 0 && dispatched.facts == 0 && dispatched.intents == 0 {
-            runtime.drain_projection_until_idle(8, 512)?;
+            runtime.process_projection_until_idle(8, 512)?;
             return Ok(());
         }
     }

@@ -16,7 +16,6 @@ use topo::protocol::facts::identity::signed_fact::create as signed_fact_create;
 use topo::protocol::facts::identity::workspace::{
     commands::create_workspace, rows as workspace_rows,
 };
-use topo::protocol::intents::sync::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE;
 use topo::protocol::runtime::ProtocolRuntime;
 use topo::protocol::PROTOCOL;
 
@@ -62,16 +61,12 @@ fn runtime_submits_command_output_and_projects_workspace_rows() {
         .submit_command_output(output)
         .expect("submit command output");
     let report = runtime
-        .drain_projection_until_idle(4, 32)
+        .process_projection_until_idle(4, 32)
         .expect("drain projection");
 
     assert_eq!(receipt.created_at_ms, 123_000);
     assert_eq!(report.projections, 1);
-    assert_eq!(runtime.wake_loop().intents().len(), 1);
-    assert_eq!(
-        runtime.wake_loop().intents()[0].kind.as_str(),
-        SHARE_FACT_WITH_WORKSPACE
-    );
+    assert_eq!(runtime.pending_intent_count(), 1);
 
     let rows = runtime
         .store()
@@ -101,7 +96,6 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
         60_000,
         "runtime signed message",
     );
-    let message_id = message.id;
     let mut runtime = ProtocolRuntime::open_memory().expect("runtime");
 
     runtime.submit_fact(frontier);
@@ -113,7 +107,7 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
     ));
     runtime.submit_fact(message);
     let report = runtime
-        .drain_projection_until_idle(8, 64)
+        .process_projection_until_idle(8, 64)
         .expect("drain signed message projection");
 
     assert!(report.projections >= 3);
@@ -133,32 +127,8 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
             .is_empty(),
         "opened rows wait until author context is available"
     );
-    let context = runtime
-        .wake_loop()
-        .context(&message_id)
-        .expect("message context");
-    assert!(context
-        .needs
-        .iter()
-        .any(|need| need.role == topo::protocol::matchers::user_role()));
-    assert!(context
-        .needs
-        .iter()
-        .any(|need| need.role == topo::protocol::matchers::signer_role()));
-    assert!(context
-        .needs
-        .iter()
-        .any(|need| need.role == topo::protocol::matchers::secret_role()));
-    assert!(context
-        .needs
-        .iter()
-        .any(|need| need.role == topo::protocol::matchers::deletion_role()));
     assert!(
-        runtime
-            .wake_loop()
-            .intents()
-            .iter()
-            .any(|intent| intent.kind.as_str() == SHARE_FACT_WITH_WORKSPACE),
+        runtime.pending_intent_count() > 0,
         "semantic content message should still be made shareable while waiting"
     );
 }

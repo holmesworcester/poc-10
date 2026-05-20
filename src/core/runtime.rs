@@ -1,18 +1,23 @@
 //! Generic target runtime.
 //!
-//! Core owns the mechanics: open the store, load and save `WakeLoop`, submit
-//! facts and intents, drain projection, and dispatch deferred/ephemeral handlers.
+//! Core owns the mechanics: open the store, submit facts and intents, run
+//! pending-fact/context-change pipelines, and dispatch handler work through the
+//! intent pipeline.
 //! Protocol code supplies the projector router, context matchers, handler
 //! registry, schema sources, and atomic row tables.
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
+use crate::core::context_change_pipeline::{
+    persisted_facts, ContextChangePipeline, PipelineReport, INTENTS, PENDING_CONTEXT_CHANGES,
+    PENDING_PROJECTION,
+};
 use crate::core::facts::Fact;
-use crate::core::handler_dispatch::{HandlerContext, IntentHandler};
+use crate::core::handler_dispatch::IntentHandler;
+use crate::core::intent_pipeline::{self, DispatchReport, IntentPipeline};
 use crate::core::intents::Intent;
 use crate::core::matchers::ContextMatcher;
 use crate::core::projection::{Projector, Timeline};
 use crate::core::store::{Schema, Store, TableName};
-use crate::core::wake_loop::{DispatchReport, DrainReport, WakeLoop};
 use std::marker::PhantomData;
 use std::path::Path;
 
@@ -38,8 +43,9 @@ pub trait RuntimeMatchers {
 pub trait RuntimeHandlers {
     fn dispatch(
         &self,
-        wake_loop: &mut WakeLoop,
+        intent_pipeline: &mut IntentPipeline,
         store: &Store,
+        allowed_tables: &[TableName],
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String>;
 }
@@ -77,15 +83,18 @@ impl HandlerSet {
 impl RuntimeHandlers for HandlerSet {
     fn dispatch(
         &self,
-        wake_loop: &mut WakeLoop,
+        intent_pipeline: &mut IntentPipeline,
         store: &Store,
+        allowed_tables: &[TableName],
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String> {
         let mut total = DispatchReport::default();
         for handler in &self.handlers {
-            let report = wake_loop.dispatch_deferred_intents_with_fact_context_and_store(
+            let report = intent_pipeline::dispatch_deferred_intents_from_store_with_fact_context(
+                intent_pipeline,
                 handler.as_ref(),
                 store,
+                allowed_tables,
                 limit_per_handler,
             )?;
             total.handled += report.handled;
@@ -96,10 +105,11 @@ impl RuntimeHandlers for HandlerSet {
                 continue;
             }
 
-            let empty_context = HandlerContext::new().with_store(store);
-            let report = wake_loop.dispatch_atomic_intents(
+            let report = intent_pipeline::dispatch_atomic_intents_from_store(
+                intent_pipeline,
                 handler.as_ref(),
-                &empty_context,
+                store,
+                allowed_tables,
                 limit_per_handler,
             )?;
             total.handled += report.handled;
@@ -110,9 +120,11 @@ impl RuntimeHandlers for HandlerSet {
                 continue;
             }
 
-            let report = wake_loop.dispatch_ephemeral_intents_with_fact_context_and_store(
+            let report = intent_pipeline::dispatch_ephemeral_intents_with_fact_context_and_store(
+                intent_pipeline,
                 handler.as_ref(),
                 store,
+                allowed_tables,
                 limit_per_handler,
             )?;
             total.handled += report.handled;
@@ -127,8 +139,8 @@ impl RuntimeHandlers for HandlerSet {
 /// Runtime for one concrete protocol.
 pub struct Runtime<P: RuntimeProtocol> {
     store: Store,
-    wake_loop: WakeLoop,
-    wake_loop_store_version: i64,
+    context_change_pipeline: ContextChangePipeline,
+    intent_pipeline: IntentPipeline,
     projector: P::Projector,
     matchers: P::Matchers,
     handlers: P::Handlers,
@@ -154,14 +166,10 @@ impl<P: RuntimeProtocol> Runtime<P> {
     }
 
     fn from_store(store: Store) -> Result<Self, String> {
-        let wake_loop = WakeLoop::load(&store)?;
-        let wake_loop_store_version = store
-            .data_version()
-            .map_err(|err| format!("read store data version: {err}"))?;
         Ok(Self {
             store,
-            wake_loop,
-            wake_loop_store_version,
+            context_change_pipeline: ContextChangePipeline::new(),
+            intent_pipeline: IntentPipeline::new(),
             projector: P::projector(),
             matchers: P::matchers(),
             handlers: P::handlers(),
@@ -173,33 +181,36 @@ impl<P: RuntimeProtocol> Runtime<P> {
         &self.store
     }
 
-    pub fn wake_loop(&self) -> &WakeLoop {
-        &self.wake_loop
+    pub fn facts(&self) -> impl Iterator<Item = Fact> {
+        persisted_facts(&self.store)
+            .expect("runtime facts should load from store")
+            .into_iter()
     }
 
-    pub fn reload_wake_loop(&mut self) -> Result<(), String> {
-        self.wake_loop = WakeLoop::load(&self.store)?;
-        self.wake_loop_store_version = self
+    pub fn pending_fact_count(&self) -> usize {
+        self.store
+            .table_row_count(PENDING_PROJECTION)
+            .expect("runtime pending fact count should load from store")
+    }
+
+    pub fn pending_work_count(&self) -> usize {
+        let pending_context_changes = self
             .store
-            .data_version()
-            .map_err(|err| format!("read store data version: {err}"))?;
-        Ok(())
+            .table_row_count(PENDING_CONTEXT_CHANGES)
+            .expect("runtime pending context change count should load from store");
+        self.pending_fact_count() + pending_context_changes
     }
 
-    pub fn reload_wake_loop_if_store_changed(&mut self) -> Result<bool, String> {
-        let current = self
+    pub fn pending_intent_count(&self) -> usize {
+        let stored = self
             .store
-            .data_version()
-            .map_err(|err| format!("read store data version: {err}"))?;
-        if current == self.wake_loop_store_version {
-            return Ok(false);
-        }
-        self.reload_wake_loop()?;
-        Ok(true)
+            .table_row_count(INTENTS)
+            .expect("runtime intent count should load from store");
+        stored + self.intent_pipeline.ephemeral_intents().len()
     }
 
-    pub fn facts(&self) -> impl Iterator<Item = &Fact> {
-        self.wake_loop.facts()
+    pub fn ephemeral_intents(&self) -> &[Intent] {
+        self.intent_pipeline.ephemeral_intents()
     }
 
     pub fn command_context<'a>(
@@ -211,15 +222,41 @@ impl<P: RuntimeProtocol> Runtime<P> {
     }
 
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
-        self.wake_loop.submit_fact(fact)
+        let inserted = self
+            .context_change_pipeline
+            .submit_fact_to_store(&self.store, fact.clone())
+            .expect("runtime fact submission should persist");
+        if inserted {
+            self.intent_pipeline.remember_fact(fact);
+        }
+        inserted
+    }
+
+    pub fn submit_facts(&mut self, facts: impl IntoIterator<Item = Fact>) -> Result<usize, String> {
+        let facts = facts.into_iter().collect::<Vec<_>>();
+        let inserted = self
+            .context_change_pipeline
+            .submit_facts_to_store(&self.store, facts.clone())?;
+        for fact in facts {
+            self.intent_pipeline.remember_fact(fact);
+        }
+        Ok(inserted)
     }
 
     pub fn purge_fact(&mut self, fact_id: crate::core::facts::FactId) -> bool {
-        self.wake_loop.purge_fact(fact_id)
+        let changed = self
+            .context_change_pipeline
+            .purge_fact_from_store(&self.store, fact_id)
+            .expect("runtime fact purge should persist");
+        if changed {
+            self.intent_pipeline.forget_purged_fact(fact_id);
+        }
+        changed
     }
 
     pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
-        self.wake_loop.submit_intent(intent)
+        self.intent_pipeline
+            .submit_intent_to_store(&self.store, intent)
     }
 
     pub fn submit_command_output<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
@@ -232,39 +269,50 @@ impl<P: RuntimeProtocol> Runtime<P> {
         Ok(output.receipt)
     }
 
-    pub fn drain_projection(&mut self, limit: usize) -> Result<DrainReport, String> {
+    pub fn process_projection_work(&mut self, limit: usize) -> Result<PipelineReport, String> {
         let matcher_refs = self.matchers.refs();
-        self.wake_loop.drain_applying_atomic_rows(
-            &self.projector,
-            &matcher_refs,
-            &self.store,
-            P::atomic_row_tables(),
-            limit,
-        )
+        self.context_change_pipeline
+            .process_pending_facts_and_context_changes(
+                &mut self.intent_pipeline,
+                &self.projector,
+                &matcher_refs,
+                &self.store,
+                P::atomic_row_tables(),
+                limit,
+            )
     }
 
-    pub fn drain_projection_until_idle(
+    pub fn process_projection_until_idle(
         &mut self,
         max_rounds: usize,
         limit_per_round: usize,
-    ) -> Result<DrainReport, String> {
-        let mut total = DrainReport::default();
+    ) -> Result<PipelineReport, String> {
+        let mut total = PipelineReport::default();
         for _ in 0..max_rounds {
-            let report = self.drain_projection(limit_per_round)?;
+            let report = self.process_projection_work(limit_per_round)?;
             total.projections += report.projections;
             total.context_matches += report.context_matches;
-            total.wakes += report.wakes;
+            total.woken_facts += report.woken_facts;
             total.intents += report.intents;
-            if report.projections == 0 {
+            if report.projections == 0
+                && report.woken_facts == 0
+                && report.intents == 0
+                && self.pending_work_count() == 0
+            {
                 return Ok(total);
             }
         }
-        Err("projection drain did not become idle within the round limit".to_string())
+        Err("projection work did not become idle within the round limit".to_string())
     }
 
     pub fn dispatch_intents(&mut self, limit_per_handler: usize) -> Result<DispatchReport, String> {
-        self.handlers
-            .dispatch(&mut self.wake_loop, &self.store, limit_per_handler)
+        let report = self.handlers.dispatch(
+            &mut self.intent_pipeline,
+            &self.store,
+            P::atomic_row_tables(),
+            limit_per_handler,
+        )?;
+        Ok(report)
     }
 
     pub fn dispatch_with_handlers(
@@ -272,23 +320,25 @@ impl<P: RuntimeProtocol> Runtime<P> {
         handlers: &impl RuntimeHandlers,
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String> {
-        handlers.dispatch(&mut self.wake_loop, &self.store, limit_per_handler)
+        let report = handlers.dispatch(
+            &mut self.intent_pipeline,
+            &self.store,
+            P::atomic_row_tables(),
+            limit_per_handler,
+        )?;
+        Ok(report)
     }
 
-    pub fn wake_time_range(
+    pub fn process_due_time_range(
         &mut self,
         timeline: Timeline,
         start_exclusive: Option<u64>,
         end_inclusive: u64,
         limit: usize,
     ) -> usize {
-        self.wake_loop
-            .wake_time_range(timeline, start_exclusive, end_inclusive, limit)
-    }
-
-    pub fn save(&mut self) -> Result<(), String> {
-        self.wake_loop
-            .save_applying_atomic_rows(&self.store, P::atomic_row_tables())
+        self.context_change_pipeline
+            .process_due_time_range(&self.store, timeline, start_exclusive, end_inclusive, limit)
+            .expect("runtime time wake should persist pending projection")
     }
 }
 
@@ -326,8 +376,9 @@ mod tests {
     impl RuntimeHandlers for NoHandlers {
         fn dispatch(
             &self,
-            _wake_loop: &mut WakeLoop,
+            _intent_pipeline: &mut IntentPipeline,
             _store: &Store,
+            _allowed_tables: &[TableName],
             _limit_per_handler: usize,
         ) -> Result<DispatchReport, String> {
             Ok(DispatchReport::default())
@@ -361,42 +412,18 @@ mod tests {
     }
 
     #[test]
-    fn reload_wake_loop_if_store_changed_skips_until_external_commit() {
+    fn runtime_reads_store_backed_facts_from_sqlite() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("runtime.db");
-        let mut runtime = Runtime::<TestProtocol>::open_disk(&path).expect("runtime");
-
-        assert!(
-            !runtime
-                .reload_wake_loop_if_store_changed()
-                .expect("unchanged reload check"),
-            "fresh runtime should not reload without an external commit"
-        );
+        let runtime = Runtime::<TestProtocol>::open_disk(&path).expect("runtime");
 
         let external_fact = Fact::new(FactScope::Global, 7, b"external".to_vec());
         let mut writer = Runtime::<TestProtocol>::open_disk(&path).expect("writer runtime");
         assert!(writer.submit_fact(external_fact.clone()));
-        writer.save().expect("writer save");
 
         assert!(
-            runtime.facts().all(|fact| fact.id != external_fact.id),
-            "runtime should not see sibling writes before the conditional reload"
-        );
-        assert!(
-            runtime
-                .reload_wake_loop_if_store_changed()
-                .expect("changed reload check"),
-            "external commit should trigger a reload"
-        );
-        assert!(
             runtime.facts().any(|fact| fact.id == external_fact.id),
-            "conditional reload should load externally committed facts"
-        );
-        assert!(
-            !runtime
-                .reload_wake_loop_if_store_changed()
-                .expect("post-reload check"),
-            "second check should stay cheap until the next external commit"
+            "fact iteration should read externally committed facts from SQLite"
         );
     }
 }

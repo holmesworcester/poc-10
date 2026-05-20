@@ -6,11 +6,158 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::matchers::{ContextMatch, ContextMatcher};
+use crate::core::matchers::{
+    ContextMatch, ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration,
+    SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
+};
+use crate::core::store::{ColumnValue, Store};
 
 use super::exact::protocol_role;
+use super::sql;
 
 pub const WRAP_SOURCE_ROLE: &str = "wrap_source";
+
+const WRAP_NEED_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
+    SelectorFieldDeclaration {
+        name: "variant",
+        ty: SelectorFieldType::U8,
+        offset: 0,
+        len: 1,
+    },
+    SelectorFieldDeclaration {
+        name: "workspace_id",
+        ty: SelectorFieldType::FactId,
+        offset: 1,
+        len: 32,
+    },
+    SelectorFieldDeclaration {
+        name: "min_frontier_created_at_ms",
+        ty: SelectorFieldType::U64,
+        offset: 33,
+        len: 8,
+    },
+    SelectorFieldDeclaration {
+        name: "frontier_id",
+        ty: SelectorFieldType::FactId,
+        offset: 33,
+        len: 32,
+    },
+];
+
+const WRAP_OFFER_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
+    SelectorFieldDeclaration {
+        name: "version",
+        ty: SelectorFieldType::U8,
+        offset: 0,
+        len: 1,
+    },
+    SelectorFieldDeclaration {
+        name: "workspace_id",
+        ty: SelectorFieldType::FactId,
+        offset: 1,
+        len: 32,
+    },
+    SelectorFieldDeclaration {
+        name: "frontier_id",
+        ty: SelectorFieldType::FactId,
+        offset: 33,
+        len: 32,
+    },
+    SelectorFieldDeclaration {
+        name: "owner_endpoint_id",
+        ty: SelectorFieldType::FactId,
+        offset: 65,
+        len: 32,
+    },
+    SelectorFieldDeclaration {
+        name: "frontier_created_at_ms",
+        ty: SelectorFieldType::U64,
+        offset: 97,
+        len: 8,
+    },
+    SelectorFieldDeclaration {
+        name: "kind",
+        ty: SelectorFieldType::U8,
+        offset: 105,
+        len: 1,
+    },
+    SelectorFieldDeclaration {
+        name: "range_start",
+        ty: SelectorFieldType::U64,
+        offset: 106,
+        len: 8,
+    },
+    SelectorFieldDeclaration {
+        name: "range_width",
+        ty: SelectorFieldType::U64,
+        offset: 114,
+        len: 8,
+    },
+    SelectorFieldDeclaration {
+        name: "bit_depth",
+        ty: SelectorFieldType::U16,
+        offset: 122,
+        len: 2,
+    },
+    SelectorFieldDeclaration {
+        name: "fact_id_prefix",
+        ty: SelectorFieldType::FactId,
+        offset: 124,
+        len: 32,
+    },
+];
+
+pub const WRAP_SOURCE_OFFERS_FOR_NEED_SQL: &str = "
+SELECT owner, selector, payload_ref
+FROM context_offers
+WHERE role = :role
+  AND scope_key = :scope_key
+  AND length(selector) = 156
+  AND substr(selector, 1, 1) = x'03'
+  AND substr(selector, 2, 32) = :workspace_id
+  AND (
+    (:need_kind = 1 AND substr(selector, 98, 8) >= :min_frontier_created_at_ms)
+    OR (:need_kind = 2 AND substr(selector, 34, 32) = :frontier_id)
+  )
+ORDER BY owner, selector, payload_ref";
+
+pub const WRAP_SOURCE_NEEDS_FOR_OFFER_SQL: &str = "
+SELECT owner, selector
+FROM context_needs
+WHERE role = :role
+  AND scope_key = :scope_key
+  AND (
+    (
+      length(selector) = 41
+      AND substr(selector, 1, 1) = x'01'
+      AND substr(selector, 2, 32) = :workspace_id
+      AND substr(selector, 34, 8) <= :frontier_created_at_ms
+    )
+    OR
+    (
+      length(selector) = 65
+      AND substr(selector, 1, 1) = x'02'
+      AND substr(selector, 2, 32) = :workspace_id
+      AND substr(selector, 34, 32) = :frontier_id
+    )
+  )
+ORDER BY owner, selector";
+
+pub const WRAP_SOURCE_CONTEXT_ROLE: ContextRoleDeclaration = ContextRoleDeclaration {
+    role: WRAP_SOURCE_ROLE,
+    need_selector: WRAP_NEED_SELECTOR_FIELDS,
+    offer_selector: WRAP_OFFER_SELECTOR_FIELDS,
+    matcher: ContextMatcherDeclaration::SelectOnlySql {
+        added_need: SelectOnlyMatcherSql {
+            sql: WRAP_SOURCE_OFFERS_FOR_NEED_SQL,
+            result: SelectOnlyMatcherResult::OffersForNeed,
+        },
+        added_offer: SelectOnlyMatcherSql {
+            sql: WRAP_SOURCE_NEEDS_FOR_OFFER_SQL,
+            result: SelectOnlyMatcherResult::NeedsForOffer,
+        },
+    },
+};
 
 pub fn wrap_source_role() -> Role {
     protocol_role(WRAP_SOURCE_ROLE)
@@ -282,6 +429,10 @@ impl ContextMatcher for WrapSourceMatcher {
         &self.role
     }
 
+    fn declaration(&self) -> Option<ContextRoleDeclaration> {
+        Some(WRAP_SOURCE_CONTEXT_ROLE)
+    }
+
     fn match_new_need(
         &self,
         need: &ContextNeed,
@@ -308,6 +459,73 @@ impl ContextMatcher for WrapSourceMatcher {
             .iter()
             .filter_map(|need| wrap_source_match(need, offer))
             .collect()
+    }
+
+    fn matching_offers_for_need_from_store(
+        &self,
+        store: &Store,
+        need: &ContextNeed,
+    ) -> Result<Option<Vec<ContextOffer>>, String> {
+        if need.role != self.role {
+            return Ok(Some(Vec::new()));
+        }
+        let (need_kind, workspace_id, frontier_id, min_frontier_created_at_ms) =
+            if let Some((workspace_id, min_frontier_created_at_ms)) =
+                decode_proactive_wrap_need(&need.selector)
+            {
+                (
+                    1,
+                    workspace_id,
+                    [0; 32],
+                    min_frontier_created_at_ms.to_be_bytes(),
+                )
+            } else if let Some((workspace_id, frontier_id)) =
+                decode_requested_wrap_need(&need.selector)
+            {
+                (2, workspace_id, frontier_id, 0u64.to_be_bytes())
+            } else {
+                return Ok(Some(Vec::new()));
+            };
+        let scope_key = sql::scope_key_for_sql(&need.scope);
+        let params = [
+            (":role", ColumnValue::Text(self.role.as_str())),
+            (":scope_key", ColumnValue::Bytes(&scope_key)),
+            (":need_kind", ColumnValue::I64(need_kind)),
+            (":workspace_id", ColumnValue::Bytes(&workspace_id)),
+            (":frontier_id", ColumnValue::Bytes(&frontier_id)),
+            (
+                ":min_frontier_created_at_ms",
+                ColumnValue::Bytes(&min_frontier_created_at_ms),
+            ),
+        ];
+        sql::select_offers_for_need(store, WRAP_SOURCE_OFFERS_FOR_NEED_SQL, &params, need).map(Some)
+    }
+
+    fn matching_needs_for_offer_from_store(
+        &self,
+        store: &Store,
+        offer: &ContextOffer,
+    ) -> Result<Option<Vec<ContextNeed>>, String> {
+        if offer.role != self.role {
+            return Ok(Some(Vec::new()));
+        }
+        let Some(selector) = decode_wrap_source_selector(&offer.selector) else {
+            return Ok(Some(Vec::new()));
+        };
+        let scope_key = sql::scope_key_for_sql(&offer.scope);
+        let frontier_created_at_ms = selector.frontier_created_at_ms.to_be_bytes();
+        let params = [
+            (":role", ColumnValue::Text(self.role.as_str())),
+            (":scope_key", ColumnValue::Bytes(&scope_key)),
+            (":workspace_id", ColumnValue::Bytes(&selector.workspace_id)),
+            (":frontier_id", ColumnValue::Bytes(&selector.frontier_id)),
+            (
+                ":frontier_created_at_ms",
+                ColumnValue::Bytes(&frontier_created_at_ms),
+            ),
+        ];
+        sql::select_needs_for_offer(store, WRAP_SOURCE_NEEDS_FOR_OFFER_SQL, &params, offer)
+            .map(Some)
     }
 }
 
@@ -344,6 +562,9 @@ fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Context
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::context_change_helpers::{context_need_row, context_offer_row};
+    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
+    use crate::core::store::Store;
     use crate::protocol::matchers::workspace_scope;
 
     #[test]
@@ -369,5 +590,39 @@ mod tests {
 
         assert!(wrap_source_match(&need, &old).is_none());
         assert!(wrap_source_match(&need, &new).is_some());
+    }
+
+    #[test]
+    fn wrap_source_matcher_uses_declared_sql_candidate_queries() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let scope = workspace_scope([1; 32]);
+        let requested = requested_wrap_source_need([2; 32], scope.clone(), [1; 32], [3; 32]);
+        let proactive = proactive_wrap_source_need([4; 32], scope.clone(), [1; 32], 50);
+        let matching =
+            frontier_root_wrap_source_offer([5; 32], scope.clone(), [1; 32], [3; 32], [6; 32], 50);
+        let other_frontier =
+            frontier_root_wrap_source_offer([7; 32], scope.clone(), [1; 32], [8; 32], [6; 32], 50);
+        store
+            .insert_table_rows(vec![
+                context_need_row(&requested),
+                context_need_row(&proactive),
+                context_offer_row(&matching),
+                context_offer_row(&other_frontier),
+            ])
+            .expect("insert context rows");
+
+        let matcher = WrapSourceMatcher::new();
+        let offers = matcher
+            .matching_offers_for_need_from_store(&store, &requested)
+            .expect("query offers")
+            .expect("sql query");
+        assert_eq!(offers, vec![matching.clone()]);
+
+        let needs = matcher
+            .matching_needs_for_offer_from_store(&store, &matching)
+            .expect("query needs")
+            .expect("sql query");
+        assert_eq!(needs, vec![requested, proactive]);
     }
 }

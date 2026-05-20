@@ -2,6 +2,7 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, ContextSetDelta, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
+use crate::core::store::Store;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -11,8 +12,68 @@ pub struct ContextMatch {
     pub payload_ref: FactId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextRoleDeclaration {
+    pub role: &'static str,
+    pub need_selector: &'static [SelectorFieldDeclaration],
+    pub offer_selector: &'static [SelectorFieldDeclaration],
+    pub matcher: ContextMatcherDeclaration,
+}
+
+impl ContextRoleDeclaration {
+    pub const fn exact(role: &'static str) -> Self {
+        Self {
+            role,
+            need_selector: &[],
+            offer_selector: &[],
+            matcher: ContextMatcherDeclaration::ExactSelector,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectorFieldDeclaration {
+    pub name: &'static str,
+    pub ty: SelectorFieldType,
+    pub offset: usize,
+    pub len: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectorFieldType {
+    U8,
+    U16,
+    U64,
+    FactId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMatcherDeclaration {
+    ExactSelector,
+    SelectOnlySql {
+        added_need: SelectOnlyMatcherSql,
+        added_offer: SelectOnlyMatcherSql,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectOnlyMatcherSql {
+    pub sql: &'static str,
+    pub result: SelectOnlyMatcherResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectOnlyMatcherResult {
+    OffersForNeed,
+    NeedsForOffer,
+}
+
 pub trait ContextMatcher {
     fn role(&self) -> &Role;
+
+    fn declaration(&self) -> Option<ContextRoleDeclaration> {
+        None
+    }
 
     fn exact_selector_role(&self) -> Option<&Role> {
         None
@@ -29,6 +90,22 @@ pub trait ContextMatcher {
         offer: &ContextOffer,
         existing_needs: &[ContextNeed],
     ) -> Vec<ContextMatch>;
+
+    fn matching_offers_for_need_from_store(
+        &self,
+        _store: &Store,
+        _need: &ContextNeed,
+    ) -> Result<Option<Vec<ContextOffer>>, String> {
+        Ok(None)
+    }
+
+    fn matching_needs_for_offer_from_store(
+        &self,
+        _store: &Store,
+        _offer: &ContextOffer,
+    ) -> Result<Option<Vec<ContextNeed>>, String> {
+        Ok(None)
+    }
 
     fn match_delta(
         &self,

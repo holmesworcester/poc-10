@@ -18,6 +18,8 @@ pub const OPENED_MESSAGE_ROWS: TableName = TableName::new("opened_message_rows")
 pub const MESSAGE_TOMBSTONE_ROWS: TableName = TableName::new("message_tombstone_rows");
 
 pub const ROW_VALUE_BYTES: usize = 32 + 8 + 32 + 32 + 8 + 32 + 1;
+pub const OPENED_MESSAGE_VALUE_PREFIX_BYTES: usize = 8 + 32 + 32 + 4;
+pub const MESSAGE_TOMBSTONE_VALUE_BYTES: usize = 32 + 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentMessageRow {
@@ -104,8 +106,7 @@ pub fn decode_content_message_row(key: &[u8], value: &[u8]) -> Result<ContentMes
 
 pub fn opened_message_row(input: OpenedMessageRow) -> TableRow {
     let text = input.text.as_bytes();
-    let mut writer = wire::Writer::with_capacity(1 + 8 + 32 + 32 + 4 + text.len());
-    writer.u8(1);
+    let mut writer = wire::Writer::with_capacity(OPENED_MESSAGE_VALUE_PREFIX_BYTES + text.len());
     writer.u64be(input.created_at_ms);
     writer.fixed(&input.author_user_id);
     writer.fixed(&input.signer_id);
@@ -120,21 +121,11 @@ pub fn opened_message_row(input: OpenedMessageRow) -> TableRow {
 
 pub fn decode_opened_message_row(key: &[u8], value: &[u8]) -> Result<OpenedMessageRow, String> {
     let (workspace_id, message_id) = decode_message_key(key, "opened message row key")?;
-    if value.len() < 77 || value[0] != 1 {
-        return Err("invalid opened message value".to_string());
-    }
     let mut reader = wire::Reader::new(value);
-    let version = reader.u8().map_err(wire_err)?;
-    if version != 1 {
-        return Err("invalid opened message value".to_string());
-    }
     let created_at_ms = reader.u64be().map_err(wire_err)?;
     let author_user_id = reader.array().map_err(wire_err)?;
     let signer_id = reader.array().map_err(wire_err)?;
     let text_len = reader.u32be().map_err(wire_err)? as usize;
-    if value.len() != 77 + text_len {
-        return Err("opened message text length does not match value".to_string());
-    }
     let text = String::from_utf8(reader.bytes(text_len).map_err(wire_err)?.to_vec())
         .map_err(|err| format!("opened message text is not utf8: {err}"))?;
     reader.finish().map_err(wire_err)?;
@@ -154,8 +145,7 @@ pub fn message_tombstone_row(
     author_user_id: AuthorId,
     created_at_ms: u64,
 ) -> TableRow {
-    let mut writer = wire::Writer::with_capacity(41);
-    writer.u8(1);
+    let mut writer = wire::Writer::with_capacity(MESSAGE_TOMBSTONE_VALUE_BYTES);
     writer.fixed(&author_user_id);
     writer.u64be(created_at_ms / UNIX_MINUTE_MS);
     TableRow {
@@ -170,14 +160,7 @@ pub fn decode_message_tombstone_row(
     value: &[u8],
 ) -> Result<MessageTombstoneRow, String> {
     let (workspace_id, message_id) = decode_message_key(key, "message tombstone key")?;
-    if value.len() != 41 || value[0] != 1 {
-        return Err("invalid message tombstone value".to_string());
-    }
     let mut reader = wire::Reader::new(value);
-    let version = reader.u8().map_err(wire_err)?;
-    if version != 1 {
-        return Err("invalid message tombstone value".to_string());
-    }
     let row = MessageTombstoneRow {
         workspace_id,
         message_id,

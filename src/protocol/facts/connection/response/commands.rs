@@ -18,14 +18,13 @@ pub fn wait_for_request_response(
 ) -> Result<(), String> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        runtime.reload_wake_loop_if_store_changed()?;
         if has_response_for_request(runtime, request_id)? {
             return Ok(());
         }
         if has_local_work(runtime) {
-            runtime.drain_projection_until_idle(4, 64)?;
+            runtime.process_projection_until_idle(4, 64)?;
             runtime.dispatch_intents(64)?;
-            runtime.drain_projection_until_idle(4, 64)?;
+            runtime.process_projection_until_idle(4, 64)?;
             if has_response_for_request(runtime, request_id)? {
                 return Ok(());
             }
@@ -36,7 +35,7 @@ pub fn wait_for_request_response(
 }
 
 fn has_local_work(runtime: &ProtocolRuntime) -> bool {
-    runtime.wake_loop().pending_len() > 0 || !runtime.wake_loop().intents().is_empty()
+    runtime.pending_fact_count() > 0 || runtime.pending_intent_count() > 0
 }
 
 fn has_response_for_request(

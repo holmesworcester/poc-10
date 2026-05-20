@@ -1,7 +1,7 @@
 //! Product runtime count read model for the `count` CLI command.
 //!
 //! This is intentionally separate from workspace row queries. It composes
-//! protocol runtime state across facts, the wake loop, connections, and
+//! protocol runtime state across facts, the context change pipeline, connections, and
 //! accepted invites for one user-facing diagnostic report.
 
 use crate::protocol::facts::connection;
@@ -27,7 +27,7 @@ pub fn runtime_count_report(runtime: &ProtocolRuntime) -> Result<RuntimeCountRep
         .map_err(|err| format!("count workspace rows: {err}"))?;
     let facts = runtime.facts().count();
     let sync_facts = shared_fact::sync_status(runtime.store())?.indexed_facts;
-    let applied_facts = facts.saturating_sub(runtime.wake_loop().pending_len());
+    let applied_facts = facts.saturating_sub(runtime.pending_fact_count());
     let connections = runtime
         .store()
         .table_rows(connection::response::rows::CONNECTION_RESPONSE_ROWS)

@@ -1,8 +1,8 @@
 //! Parser skeleton for the poc-10 schema declaration files.
 //!
-//! This module intentionally stops at a small AST. It does not create store
-//! schemas or row codecs yet; the first step is making durable table ownership
-//! explicit and parseable without embedding SQL or Rust behavior.
+//! This module parses schema declarations into a small AST. `Store` applies
+//! these declarations as typed SQLite tables while protocol modules still own
+//! the semantic encoding of their rows.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -53,7 +53,7 @@ pub struct ColumnDeclaration {
     pub ty: ColumnType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnType {
     Bytes { len: Option<usize> },
     U64,
@@ -680,11 +680,12 @@ mod tests {
             table_names(&core),
             vec![
                 "facts",
-                "inbox",
-                "needs",
-                "offers",
+                "context_needs",
+                "context_offers",
                 "time_wakes",
                 "pending_projection",
+                "pending_time_ranges",
+                "pending_context_changes",
                 "intents",
                 "clock",
             ]
@@ -757,7 +758,23 @@ mod tests {
                         assert!(
                             matches!(
                                 table.name.as_str(),
-                                "content_messages" | "content_reactions" | "content_files"
+                                "facts"
+                                    | "context_needs"
+                                    | "context_offers"
+                                    | "time_wakes"
+                                    | "pending_projection"
+                                    | "pending_time_ranges"
+                                    | "pending_context_changes"
+                                    | "intents"
+                                    | "opened_message_rows"
+                                    | "message_tombstone_rows"
+                                    | "file_slice_rows"
+                                    | "content_event_rows"
+                                    | "content_messages"
+                                    | "content_reactions"
+                                    | "content_files"
+                                    | "message_deletion_rows"
+                                    | "file_deletion_rows"
                             ),
                             "unexpected typed table {}",
                             table.name

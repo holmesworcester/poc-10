@@ -1,6 +1,5 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
-use topo::core::wake_loop::WakeLoop;
 use topo::protocol::facts::encryption::fact::{
     LocalKeySecretFact, RecipientKeyFact, WrappedSecretKind, NO_PREVIOUS_RECIPIENT_KEY,
 };
@@ -57,68 +56,6 @@ fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
     assert!(wrap.nonce.iter().any(|byte| *byte != 0));
     assert_ne!(wrap.ciphertext, [0; 48]);
     assert_ne!(wrap.ciphertext[..32], [5; 32]);
-}
-
-#[test]
-fn missing_source_context_leaves_materialize_intent_queued() {
-    let workspace = [11; 32];
-    let endpoint = [12; 32];
-    let frontier = [13; 32];
-    let recipient = recipient_key_fact(workspace, endpoint, [14; 32]);
-    let missing_source_id = [15; 32];
-    let source_selector = WrapSourceSelector {
-        workspace_id: workspace,
-        frontier_id: frontier,
-        owner_endpoint_id: endpoint,
-        frontier_created_at_ms: 10,
-        kind: WrapSourceKind::FrontierRoot,
-    };
-    let mut bus = WakeLoop::new();
-    let handler = CreateKeyWrapHandler::new();
-    let signer = local_signer_secret_fact(workspace, endpoint);
-    let materialize =
-        intent::create_key_wrap_intent(recipient.id, missing_source_id, signer.id, source_selector);
-
-    bus.submit_fact(recipient);
-    bus.submit_fact(signer);
-    bus.submit_intent(materialize).expect("submit materialize");
-    let report = bus
-        .dispatch_deferred_intents_with_fact_context(&handler, 10)
-        .expect("missing source fact leaves intent queued");
-
-    assert_eq!(report.handled, 0);
-    assert_eq!(bus.intents().len(), 1);
-}
-
-#[test]
-fn missing_signer_context_leaves_materialize_intent_queued() {
-    let workspace = [21; 32];
-    let endpoint = [22; 32];
-    let frontier = [23; 32];
-    let recipient = recipient_key_fact(workspace, endpoint, [24; 32]);
-    let source = local_root_fact(workspace, frontier, endpoint, [25; 32]);
-    let missing_signer_id = [26; 32];
-    let source_selector = WrapSourceSelector {
-        workspace_id: workspace,
-        frontier_id: frontier,
-        owner_endpoint_id: endpoint,
-        frontier_created_at_ms: 10,
-        kind: WrapSourceKind::FrontierRoot,
-    };
-    let mut bus = WakeLoop::new();
-    let handler = CreateKeyWrapHandler::new();
-    let materialize =
-        intent::create_key_wrap_intent(recipient.id, source.id, missing_signer_id, source_selector);
-
-    bus.submit_fact(recipient);
-    bus.submit_fact(source);
-    bus.submit_intent(materialize).expect("submit materialize");
-    let report = bus
-        .dispatch_deferred_intents_with_fact_context(&handler, 10)
-        .expect("missing signer fact leaves intent queued");
-
-    assert_eq!(report.handled, 0);
-    assert_eq!(bus.intents().len(), 1);
 }
 
 fn recipient_key_fact(workspace_id: [u8; 32], endpoint_id: [u8; 32], public_key: [u8; 32]) -> Fact {

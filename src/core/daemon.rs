@@ -472,7 +472,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_poc8_start_compat_flags() {
+    fn parses_daemon_start_flags() {
         let args = vec![
             "--listen".to_string(),
             "127.0.0.1".to_string(),
@@ -490,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn quiet_ms_defaults_to_tick_ms_for_compatibility() {
+    fn quiet_ms_defaults_to_tick_ms() {
         let args = vec![
             "--listen".to_string(),
             "127.0.0.1".to_string(),

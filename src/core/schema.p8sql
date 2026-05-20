@@ -1,11 +1,70 @@
 # Initial poc-10 core table inventory.
-# Row tables stay opaque until the schema compiler owns concrete row layouts.
 
-row_table facts;
-row_table inbox;
-row_table needs;
-row_table offers;
-row_table time_wakes;
-row_table pending_projection;
-row_table intents;
+table facts {
+  column id bytes(32);
+  column scope text;
+  column scope_kind text;
+  column scope_id bytes(32);
+  column timestamp u64;
+  column bytes bytes;
+  row_key (id);
+  index by_scope_time (scope, scope_kind, scope_id, timestamp);
+}
+table context_needs {
+  column owner bytes(32);
+  column role text;
+  column scope_key bytes;
+  column selector bytes;
+  row_key (owner, role, scope_key, selector);
+  index by_match (role, scope_key, selector);
+  index by_owner (owner);
+}
+table context_offers {
+  column owner bytes(32);
+  column role text;
+  column scope_key bytes;
+  column selector bytes;
+  column payload_ref bytes(32);
+  row_key (owner, role, scope_key, selector, payload_ref);
+  index by_match (role, scope_key, selector);
+  index by_owner (owner);
+  index by_payload (payload_ref);
+}
+table time_wakes {
+  column timeline text;
+  column at u64;
+  column owner bytes(32);
+  row_key (timeline, at, owner);
+  index by_owner (owner);
+}
+table pending_projection {
+  column owner bytes(32);
+  row_key (owner);
+}
+table pending_time_ranges {
+  column owner bytes(32);
+  column timeline text;
+  column has_start bool;
+  column start_exclusive u64;
+  column end_inclusive u64;
+  row_key (owner, timeline, has_start, start_exclusive, end_inclusive);
+}
+table pending_context_changes {
+  column owner bytes(32);
+  column change_kind u64;
+  column role text;
+  column scope_key bytes;
+  column selector bytes;
+  column payload_ref bytes(32);
+  row_key (owner, change_kind, role, scope_key, selector, payload_ref);
+  index by_match (change_kind, role, scope_key, selector);
+}
+table intents {
+  column kind text;
+  column idempotence_key bytes;
+  column execution u64;
+  column payload bytes;
+  row_key (kind, idempotence_key);
+  index by_execution (execution, kind);
+}
 row_table clock;

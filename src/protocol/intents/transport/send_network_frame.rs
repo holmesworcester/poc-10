@@ -4,7 +4,7 @@
 //! transport::transit frame onto a connection's TCP socket. The handler resolves the
 //! connection route from the fact context, hands the opaque frame to core's
 //! network boundary, and attempts one bounded TCP write. If route
-//! context or the socket is unavailable, the handler asks the wake loop to keep
+//! context or the socket is unavailable, the handler asks the context change pipeline to keep
 //! the intent visible in the current process so the next sync/daemon pass can
 //! try again without making network delivery durable protocol state. There is
 //! intentionally no protocol-level peer ACK here: TCP handles stream delivery
@@ -209,8 +209,11 @@ fn resolve_target(
     let connection = connection::response::layout::decode_fact(connection_fact.body())?;
     let request_fact = match context.fact(&connection.request_id).cloned() {
         Some(fact) => fact,
-        None => crate::core::wake_loop::persisted_fact(context.store()?, &connection.request_id)?
-            .ok_or_else(|| "send_network_frame missing connection request fact".to_string())?,
+        None => crate::core::context_change_pipeline::persisted_fact(
+            context.store()?,
+            &connection.request_id,
+        )?
+        .ok_or_else(|| "send_network_frame missing connection request fact".to_string())?,
     };
     let request = connection::request::layout::decode_fact(request_fact.body())?;
     let local_endpoint = endpoint::local_endpoint::local_endpoint(context.store()?)?

@@ -450,7 +450,8 @@ fn context_matcher_logic_lives_under_protocol_matchers() {
         }
         let relative = path.strip_prefix(root).unwrap();
         if relative.starts_with("src/core/matchers.rs")
-            || relative.starts_with("src/core/wake_loop.rs")
+            || relative.starts_with("src/core/context_change_pipeline.rs")
+            || relative.starts_with("src/core/context_change_helpers.rs")
             || relative.starts_with("src/protocol/matchers")
         {
             continue;
@@ -461,7 +462,7 @@ fn context_matcher_logic_lives_under_protocol_matchers() {
 
     assert!(
         offenders.is_empty(),
-        "ContextMatcher implementations and relation-specific selector logic belong under src/protocol/matchers, with core-owned generic mechanics in src/core/matchers.rs and src/core/wake_loop.rs:\n{}",
+        "ContextMatcher implementations and relation-specific selector logic belong under src/protocol/matchers, with core-owned generic mechanics in src/core/matchers.rs and src/core/context_change_pipeline.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -720,6 +721,7 @@ fn target_manifests_are_declarations_only() {
         for line in meaningful_source_lines(&text) {
             if !(line.starts_with("#[path = ")
                 || line.starts_with("pub mod ")
+                || line.starts_with("pub(crate) mod ")
                 || line.starts_with("mod ")
                 || line.starts_with("pub use "))
             {
@@ -956,7 +958,7 @@ fn target_protocol_registry_is_declarative_only() {
             "for ",
             "while ",
             "Store",
-            "WakeLoop",
+            "ContextChangePipeline",
             ".project(",
             ".handle(",
             "open_",

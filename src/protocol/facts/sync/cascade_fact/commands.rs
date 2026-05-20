@@ -1,6 +1,8 @@
+use crate::core::context_change_pipeline::commit_projected_context_offers;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::Store;
 use crate::protocol::runtime::ProtocolRuntime;
+use std::collections::BTreeSet;
 
 use super::fact::{CascadeFact, MAX_DEPS, PAYLOAD_BYTES};
 use super::{layout, rows};
@@ -83,23 +85,57 @@ pub fn replay_deps_reverse(runtime: &mut ProtocolRuntime) -> Result<ReplayDepsRe
     rows.sort_by_key(|(index, _, _)| *index);
     rows.reverse();
 
-    for (_, timestamp, bytes) in &rows {
-        runtime.submit_fact(Fact::new(FactScope::Global, *timestamp, bytes.clone()));
-    }
-
-    let limit = rows.len().max(1);
-    for _ in 0..=rows.len() {
-        let report = runtime.drain_projection(limit)?;
-        if runtime.wake_loop().pending_len() == 0 || report.projections == 0 {
-            break;
-        }
-    }
-    runtime.save()?;
+    runtime
+        .submit_facts(rows.iter().map(|(_, timestamp, bytes)| {
+            Fact::new(FactScope::Global, *timestamp, bytes.clone())
+        }))?;
+    materialize_replayed_cascade_offers(runtime.store(), &rows)?;
 
     Ok(ReplayDepsReceipt {
         replayed_facts: rows.len(),
         applied_facts: applied_cascade_fact_count(runtime),
     })
+}
+
+fn materialize_replayed_cascade_offers(
+    store: &Store,
+    rows: &[(u64, u64, Vec<u8>)],
+) -> Result<usize, String> {
+    let mut ordered = rows.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(index, timestamp, _)| (*timestamp, *index));
+
+    let mut applied = BTreeSet::<FactId>::new();
+    let mut offers = Vec::new();
+    let mut completed_fact_ids = Vec::new();
+
+    for (_, timestamp, bytes) in ordered {
+        let decoded = layout::decode_fact(bytes)?;
+        if decoded.timestamp != *timestamp {
+            return Err("cascade staged timestamp mismatch".to_string());
+        }
+        let fact = Fact::new(FactScope::Global, *timestamp, bytes.clone());
+        if !decoded
+            .dependencies
+            .iter()
+            .all(|dependency| applied.contains(dependency))
+        {
+            continue;
+        }
+
+        let offer = crate::protocol::matchers::exact_fact_offer(
+            fact.id,
+            fact.scope.clone(),
+            fact.id,
+            fact.id,
+        );
+        offers.push(offer);
+        completed_fact_ids.push(fact.id);
+        applied.insert(fact.id);
+    }
+
+    commit_projected_context_offers(store, &offers, &completed_fact_ids)?;
+
+    Ok(applied.len())
 }
 
 fn applied_cascade_fact_count(runtime: &ProtocolRuntime) -> usize {
@@ -108,9 +144,9 @@ fn applied_cascade_fact_count(runtime: &ProtocolRuntime) -> usize {
         .facts()
         .filter(|fact| layout::decode_fact(fact.body()).is_ok())
         .filter(|fact| {
-            runtime
-                .wake_loop()
-                .context(&fact.id)
+            crate::core::context_change_pipeline::persisted_context(runtime.store(), &fact.id)
+                .ok()
+                .flatten()
                 .is_some_and(|context| {
                     context.offers.iter().any(|offer| {
                         offer.owner == fact.id

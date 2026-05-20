@@ -50,25 +50,18 @@ fn schema_sources_create_declared_row_tables() {
     );
 
     store
-        .insert_table_rows(vec![
-            TableRow {
-                table: TableName::new("facts"),
-                key: b"fact/1".to_vec(),
-                value: b"fact bytes".to_vec(),
-            },
-            TableRow {
-                table: TableName::new("opened_message_rows"),
-                key: b"message/1".to_vec(),
-                value: b"message bytes".to_vec(),
-            },
-        ])
-        .expect("insert rows into p8sql-created tables");
+        .insert_table_rows(vec![TableRow {
+            table: TableName::new("clock"),
+            key: b"clock".to_vec(),
+            value: 1u64.to_be_bytes().to_vec(),
+        }])
+        .expect("insert row into p8sql-created row table");
 
     assert_eq!(
         store
-            .table_row(TableName::new("facts"), b"fact/1")
-            .expect("read fact row"),
-        Some(b"fact bytes".to_vec())
+            .table_row(TableName::new("clock"), b"clock")
+            .expect("read clock row"),
+        Some(1u64.to_be_bytes().to_vec())
     );
 
     Store::open_disk_with_schema_sources(&path, &sources)

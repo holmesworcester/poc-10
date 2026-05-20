@@ -7,8 +7,9 @@
 use crate::core::context::Role;
 use crate::core::daemon::TickReport;
 use crate::core::facts::Fact;
+use crate::core::intent_pipeline::DispatchReport;
 use crate::core::logical_clock;
-use crate::core::matchers::{ContextMatcher, ExactSelectorMatcher};
+use crate::core::matchers::{ContextMatcher, ContextMatcherDeclaration, ExactSelectorMatcher};
 use crate::core::network_queues;
 use crate::core::projection::{
     EnvelopeRoute, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
@@ -17,7 +18,6 @@ use crate::core::runtime::{HandlerRoute, HandlerSet, RuntimeMatchers, RuntimePro
 use crate::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use crate::core::store::{Schema, TableName};
 use crate::core::tcp;
-use crate::core::wake_loop::DispatchReport;
 use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
 use crate::protocol::intents::{
     connection as connection_intents, content as content_intents, encryption as encryption_intents,
@@ -41,7 +41,6 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         listener: &tcp::Listener,
         work_limit: usize,
     ) -> Result<TickReport, String> {
-        self.reload_wake_loop_if_store_changed()?;
         let accepted = listener.accept_available(self.store(), work_limit)?;
         let inbound = network_queues::claim_inbound(self.store(), work_limit)?;
         for row in &inbound {
@@ -59,17 +58,16 @@ impl crate::core::runtime::Runtime<super::Protocol> {
         }
 
         if let Some(current_minute) = current_minute(self.store())? {
-            self.wake_time_range(
+            self.process_due_time_range(
                 content::message::expiration_timeline(),
                 None,
                 current_minute,
                 work_limit,
             );
         }
-        let projection_before_handlers = self.drain_projection_until_idle(4, work_limit)?;
+        let projection_before_handlers = self.process_projection_until_idle(4, work_limit)?;
         let dispatched = self.dispatch_intents(work_limit)?;
-        let projection_after_handlers = self.drain_projection_until_idle(4, work_limit)?;
-        self.save()?;
+        let projection_after_handlers = self.process_projection_until_idle(4, work_limit)?;
         if dispatched.retries == 0 {
             network_queues::delete_inbound(self.store(), &inbound)?;
         }
@@ -506,13 +504,33 @@ impl ProtocolContextMatchers {
         let mut exact_roles = BTreeSet::<Role>::new();
         let mut custom_matcher_names = BTreeSet::<&'static str>::new();
         for registration in super::CONTEXT_MATCHERS {
+            let declaration = super::matchers::context_role_declaration(registration.role)
+                .unwrap_or_else(|| {
+                    panic!("missing context role declaration {}", registration.role)
+                });
             match registration.matcher {
                 "ExactSelectorMatcher" => {
+                    assert!(
+                        matches!(
+                            declaration.matcher,
+                            ContextMatcherDeclaration::ExactSelector
+                        ),
+                        "exact matcher registration has non-exact declaration {}",
+                        registration.role
+                    );
                     exact_roles.insert(
                         Role::new(registration.role).expect("registered exact matcher role"),
                     );
                 }
                 "RangeFactMatcher" | "SecretCoverageMatcher" | "WrapSourceMatcher" => {
+                    assert!(
+                        matches!(
+                            declaration.matcher,
+                            ContextMatcherDeclaration::SelectOnlySql { .. }
+                        ),
+                        "custom matcher registration has no SELECT-only declaration {}",
+                        registration.role
+                    );
                     custom_matcher_names.insert(registration.matcher);
                 }
                 other => panic!("unknown context matcher {other}"),
