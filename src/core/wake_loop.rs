@@ -49,6 +49,16 @@ pub struct DispatchReport {
     pub intents: usize,
 }
 
+/// How `dispatch_matching` obtains the handler context for each intent.
+#[derive(Clone, Copy)]
+enum DispatchInput<'a> {
+    /// One caller-supplied context shared by every dispatched intent.
+    Shared(&'a HandlerContext<'a>),
+    /// A context built per intent from the handler's declared input facts,
+    /// optionally carrying a store handle for handlers that need one.
+    PerIntentFacts(Option<&'a Store>),
+}
+
 #[derive(Debug, Default)]
 pub struct WakeLoop {
     facts: BTreeMap<FactId, Fact>,
@@ -214,7 +224,7 @@ impl WakeLoop {
         context: &HandlerContext,
         limit: usize,
     ) -> Result<DispatchReport, String> {
-        self.dispatch_intents_matching(handler, context, limit, |_| true)
+        self.dispatch_matching(handler, limit, |_| true, DispatchInput::Shared(context))
     }
 
     pub fn dispatch_atomic_intents(
@@ -223,9 +233,12 @@ impl WakeLoop {
         context: &HandlerContext,
         limit: usize,
     ) -> Result<DispatchReport, String> {
-        self.dispatch_intents_matching(handler, context, limit, |intent| {
-            intent.execution == IntentExecution::Atomic
-        })
+        self.dispatch_matching(
+            handler,
+            limit,
+            |intent| intent.execution == IntentExecution::Atomic,
+            DispatchInput::Shared(context),
+        )
     }
 
     pub fn dispatch_deferred_intents(
@@ -234,9 +247,12 @@ impl WakeLoop {
         context: &HandlerContext,
         limit: usize,
     ) -> Result<DispatchReport, String> {
-        self.dispatch_intents_matching(handler, context, limit, |intent| {
-            intent.execution == IntentExecution::Deferred
-        })
+        self.dispatch_matching(
+            handler,
+            limit,
+            |intent| intent.execution == IntentExecution::Deferred,
+            DispatchInput::Shared(context),
+        )
     }
 
     pub fn dispatch_deferred_intents_with_fact_context(
@@ -244,7 +260,12 @@ impl WakeLoop {
         handler: &impl IntentHandler,
         limit: usize,
     ) -> Result<DispatchReport, String> {
-        self.dispatch_deferred_intents_with_optional_store(handler, None, limit)
+        self.dispatch_matching(
+            handler,
+            limit,
+            |intent| intent.execution == IntentExecution::Deferred,
+            DispatchInput::PerIntentFacts(None),
+        )
     }
 
     pub fn dispatch_deferred_intents_with_fact_context_and_store(
@@ -253,79 +274,25 @@ impl WakeLoop {
         store: &Store,
         limit: usize,
     ) -> Result<DispatchReport, String> {
-        self.dispatch_deferred_intents_with_optional_store(handler, Some(store), limit)
+        self.dispatch_matching(
+            handler,
+            limit,
+            |intent| intent.execution == IntentExecution::Deferred,
+            DispatchInput::PerIntentFacts(Some(store)),
+        )
     }
 
-    fn dispatch_deferred_intents_with_optional_store(
+    // One dispatch loop for every variant: pop the next intent this handler
+    // accepts, build its handler context, run it, and feed the output back. A
+    // failed handler or a conflicting output restores the intent so it stays
+    // queued for retry. In `PerIntentFacts` mode a missing-fact error stops the
+    // batch instead of failing it, since the declared inputs may not exist yet.
+    fn dispatch_matching(
         &mut self,
         handler: &impl IntentHandler,
-        store: Option<&Store>,
-        limit: usize,
-    ) -> Result<DispatchReport, String> {
-        let mut report = DispatchReport::default();
-        while report.handled < limit {
-            let Some((intent_index, intent)) = self
-                .pop_next_intent_matching(handler, |intent| {
-                    intent.execution == IntentExecution::Deferred
-                })?
-            else {
-                break;
-            };
-            let input_ids = match handler.input_fact_ids(&intent) {
-                Ok(input_ids) => input_ids,
-                Err(err) => {
-                    self.restore_intent(intent_index, intent)?;
-                    return Err(err);
-                }
-            };
-            let mut context_facts = BTreeMap::new();
-            for fact_id in input_ids {
-                if let Some(fact) = self.facts.get(&fact_id).cloned() {
-                    context_facts.insert(fact_id, fact);
-                }
-            }
-            let mut context = HandlerContext::with_facts(context_facts.into_values());
-            if let Some(store) = store {
-                context = context.with_store(store);
-            }
-            let output = match handler.handle(&intent, &context) {
-                Ok(output) => output,
-                Err(err) => {
-                    self.restore_intent(intent_index, intent)?;
-                    if err.starts_with("handler context missing fact ") {
-                        break;
-                    }
-                    return Err(err);
-                }
-            };
-            if let Err(err) = self.validate_intents(&output.intents) {
-                self.restore_intent(intent_index, intent)?;
-                return Err(err);
-            }
-            for purged in output.purged_facts {
-                self.purge_fact(purged);
-            }
-            for fact in output.facts {
-                if self.submit_fact(fact) {
-                    report.facts += 1;
-                }
-            }
-            for intent in output.intents {
-                if self.record_intent(intent)? {
-                    report.intents += 1;
-                }
-            }
-            report.handled += 1;
-        }
-        Ok(report)
-    }
-
-    fn dispatch_intents_matching(
-        &mut self,
-        handler: &impl IntentHandler,
-        context: &HandlerContext,
         limit: usize,
         accepts_execution: impl Fn(&Intent) -> bool,
+        input: DispatchInput<'_>,
     ) -> Result<DispatchReport, String> {
         let mut report = DispatchReport::default();
         while report.handled < limit {
@@ -334,10 +301,35 @@ impl WakeLoop {
             else {
                 break;
             };
-            let output = match handler.handle(&intent, context) {
+            let context = match input {
+                DispatchInput::Shared(context) => context.clone(),
+                DispatchInput::PerIntentFacts(store) => {
+                    let input_ids = match handler.input_fact_ids(&intent) {
+                        Ok(input_ids) => input_ids,
+                        Err(err) => {
+                            self.restore_intent(intent_index, intent)?;
+                            return Err(err);
+                        }
+                    };
+                    let facts = input_ids
+                        .into_iter()
+                        .filter_map(|fact_id| self.facts.get(&fact_id).cloned());
+                    let mut context = HandlerContext::with_facts(facts);
+                    if let Some(store) = store {
+                        context = context.with_store(store);
+                    }
+                    context
+                }
+            };
+            let output = match handler.handle(&intent, &context) {
                 Ok(output) => output,
                 Err(err) => {
                     self.restore_intent(intent_index, intent)?;
+                    if matches!(input, DispatchInput::PerIntentFacts(_))
+                        && err.starts_with("handler context missing fact ")
+                    {
+                        break;
+                    }
                     return Err(err);
                 }
             };
