@@ -149,6 +149,12 @@ Current follow-up work outside the active cutover guard:
 - Keep network/perf coverage honest while preserving the simple transport
   contract: TCP stream delivery, memory-local byte queues, and idempotent
   regenerated sends.
+- Revisit command-host boundaries for accept/listen flows: accepting an invite
+  currently needs daemon listen-address context, and that should stay visibly
+  owned by core/daemon rather than becoming protocol CLI orchestration.
+- Revisit whether thin protocol command wrappers should explicitly drain local
+  projection/intent work, or whether core should expose a command-host policy
+  that makes those transaction and effect boundaries obvious.
 
 ## File Organization
 

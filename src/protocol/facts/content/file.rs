@@ -1,6 +1,7 @@
 pub mod fact;
 pub mod layout;
 pub mod project;
+pub mod queries;
 pub mod rows;
 
 pub const TYPE_CONTENT_FILE: u8 = layout::TYPE_CONTENT_FILE;

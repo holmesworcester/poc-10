@@ -7,10 +7,7 @@
 //! command authors work, and drain only local projection/intent work that the
 //! CLI command itself is responsible for observing.
 
-use crate::core::cli::{
-    decode_hex_32_named as core_decode_hex_32, encode_hex as core_encode_hex,
-    encode_hex_32 as core_encode_hex_32, CliArgs, CliOutput,
-};
+use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex_32, CliArgs, CliOutput};
 use crate::core::clock;
 use crate::core::command_context::{
     CommandClock, IdentityVault, LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
@@ -19,26 +16,8 @@ use crate::core::daemon;
 use crate::core::runtime::Runtime;
 use crate::protocol::facts::sync;
 use crate::protocol::facts::{content, encryption, identity};
-use crate::protocol::intents::content::purge_below_retention_floor::{
-    purge_below_retention_floor_intent, PurgeBelowRetentionFloor,
-};
 use crate::protocol::registry::CLI_EFFECT_HANDLER_ROUTES;
-use std::collections::BTreeSet;
 use std::path::PathBuf;
-
-pub(crate) const DELETE_FILE_USAGE: &str = "delete-file WORKSPACE_ID_HEX FILE_SELECTOR";
-pub(crate) const KEY_DERIVE_USAGE: &str = "key-derive [LIMIT]";
-pub(crate) const KEY_NODE_USAGE: &str = "key-node WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX SOURCE_SECRET_ID_HEX RANGE_START RANGE_WIDTH [TOMBSTONE_NODE_ID_HEX]";
-pub(crate) const KEYS_USAGE: &str = "keys WORKSPACE_ID_HEX";
-pub(crate) const CHOP_NOW_USAGE: &str = "chop-now WORKSPACE_ID_HEX FLOOR_MINUTE";
-pub(crate) const DISAPPEARING_SET_USAGE: &str =
-    "disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]";
-pub(crate) const DISAPPEARING_STATUS_USAGE: &str = "disappearing-status WORKSPACE_ID_HEX";
-pub(crate) const DISAPPEARING_TIGHTEN_USAGE: &str =
-    "disappearing-tighten WORKSPACE_ID_HEX TTL_MINUTES [--yes|-y]";
-pub(crate) const DISAPPEARING_COMPACT_USAGE: &str = "disappearing-compact WORKSPACE_ID_HEX";
-pub(crate) const SYNC_STATUS_USAGE: &str = "sync-status";
-pub(crate) const NEGENTROPY_DRAIN_USAGE: &str = "negentropy-drain [LIMIT]";
 pub(crate) const CLOCK_USAGE: &str = "clock [set TIMESTAMP|advance DELTA|clear]";
 
 fn command_error(reason: &str) -> String {
@@ -306,18 +285,7 @@ pub(crate) fn key_derive(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    if args.values().len() > 1 {
-        return Err("key-derive [LIMIT]".to_string());
-    }
-    let limit = args
-        .get(0)
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .map_err(|_| "key-derive [LIMIT]".to_string())
-        })
-        .transpose()?
-        .unwrap_or(512);
+    let limit = encryption::cli::key_derive_limit(args)?;
     let before = encryption::commands::local_key_secret_count(ctx.runtime());
     let scanned_key_wraps = encryption::commands::key_wrap_count(ctx.runtime())?;
     for _ in 0..4 {
@@ -340,38 +308,18 @@ pub(crate) fn key_derive(
 }
 
 pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    if args.values().len() != 5 && args.values().len() != 6 {
-        return Err("key-node WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX SOURCE_SECRET_ID_HEX RANGE_START RANGE_WIDTH [TOMBSTONE_NODE_ID_HEX]".to_string());
-    }
+    let args = encryption::cli::key_node_args(args)?;
     ctx.drain_local_work()?;
-    let workspace_id = decode_hex_32(args.get(0).unwrap(), "workspace id")?;
-    let frontier_id = decode_hex_32(args.get(1).unwrap(), "removal frontier id")?;
-    let source_secret_id = decode_hex_32(args.get(2).unwrap(), "source secret id")?;
-    let range_start = args
-        .get(3)
-        .unwrap()
-        .parse::<u64>()
-        .map_err(|_| "key-node range_start must be a u64".to_string())?;
-    let range_width = args
-        .get(4)
-        .unwrap()
-        .parse::<u64>()
-        .map_err(|_| "key-node range_width must be a u64".to_string())?;
-    let tombstone_node_id = if let Some(value) = args.get(5) {
-        decode_hex_32(value, "tombstone node id")?
-    } else {
-        [0; 32]
-    };
     let output = encryption::commands::create_history_node(
         ctx.runtime(),
         encryption::commands::CreateHistoryNode {
             created_at_ms: SystemClock.next_timestamp(),
-            workspace_id,
-            removal_frontier_id: frontier_id,
-            source_secret_id,
-            range_start,
-            range_width,
-            tombstone_node_id,
+            workspace_id: args.workspace_id,
+            removal_frontier_id: args.removal_frontier_id,
+            source_secret_id: args.source_secret_id,
+            range_start: args.range_start,
+            range_width: args.range_width,
+            tombstone_node_id: args.tombstone_node_id,
         },
     )?;
     let receipt = ctx.runtime_mut().submit_command_output(output)?;
@@ -380,122 +328,20 @@ pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
 }
 
 pub(crate) fn keys(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    if args.values().len() != 1 {
-        return Err("keys WORKSPACE_ID_HEX".to_string());
-    }
+    let workspace_id = encryption::cli::keys_workspace_id(args)?;
     ctx.drain_local_work()?;
-    let workspace_id = decode_hex_32(args.get(0).unwrap(), "workspace id")?;
-    let store = ctx.runtime().store();
-
-    let leaves = history_leaf_rows(store, workspace_id)?;
-    let local_history_rows = store
-        .table_rows_with_key_prefix(
-            crate::protocol::facts::encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load local history rows: {err}"))?;
-    let message_tombstones = store
-        .table_rows_with_key_prefix(
-            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load message tombstones: {err}"))?;
-    let file_tombstones = store
-        .table_rows_with_key_prefix(
-            content::file_deletion::rows::FILE_DELETION_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load file deletion rows: {err}"))?;
-    let local_key_secret_frontiers =
-        encryption::commands::local_key_secret_frontiers(ctx.runtime(), workspace_id);
-    let recipient_keys = ctx
-        .runtime()
-        .facts()
-        .filter_map(|fact| encryption::layout::decode_recipient_key(&fact.bytes).ok())
-        .filter(|key| key.workspace_id == workspace_id)
-        .count();
-    let local_recipient_keys = ctx
-        .runtime()
-        .facts()
-        .filter_map(|fact| encryption::layout::decode_local_recipient_key(&fact.bytes).ok())
-        .filter(|key| key.workspace_id == workspace_id)
-        .count();
-    let removal_frontiers = ctx
-        .runtime()
-        .facts()
-        .filter_map(|fact| {
-            encryption::layout::decode_removal_frontier(&fact.bytes)
-                .ok()
-                .map(|frontier| (fact.id, frontier))
-        })
-        .filter(|(_, frontier)| frontier.workspace_id == workspace_id)
-        .collect::<Vec<_>>();
-    let key_wraps = encryption::commands::workspace_key_wrap_count(ctx.runtime(), workspace_id)?;
-
-    let mut lines = vec![
-        format!("recipient_keys: {recipient_keys}"),
-        "recipient_key_tombstones: 0".to_string(),
-        format!("local_recipient_keys: {local_recipient_keys}"),
-        format!("removal_frontiers: {}", removal_frontiers.len()),
-        format!("key_wraps: {key_wraps}"),
-        format!("local_key_secrets: {}", local_key_secret_frontiers.len()),
-        format!(
-            "local_history_node_secrets: {}",
-            local_history_rows.len() + leaves.len()
-        ),
-        "local_history_minute_nodes: 0".to_string(),
-        format!("local_history_leaves: {}", leaves.len()),
-        "local_history_trie_internals: 0".to_string(),
-        "local_history_time_internals: 0".to_string(),
-        format!(
-            "local_history_node_tombstones: {}",
-            message_tombstones.len() + file_tombstones.len()
-        ),
-        format!("message_tombstones: {}", message_tombstones.len()),
-        format!("cover_summary: {}", cover_summary(&leaves)),
-    ];
-    for (frontier_id, _) in removal_frontiers {
-        let access = local_key_secret_frontiers
-            .iter()
-            .any(|local_frontier_id| *local_frontier_id == frontier_id);
-        lines.push(format!(
-            "frontier: {} access={}",
-            encode_hex_32(&frontier_id),
-            if access { "yes" } else { "no" }
-        ));
-    }
-    for leaf in leaves {
-        lines.push(format!(
-            "history_node: {} frontier={} start={} width=1 bit_depth=256 prefix={} fact_id_in_minute={} tombstones=none",
-            encode_hex_32(&leaf.node_id),
-            encode_hex_32(&leaf.frontier_id),
-            leaf.minute,
-            encode_hex_32(&leaf.fact_id_in_minute),
-            encode_hex_32(&leaf.fact_id_in_minute)
-        ));
-    }
-    Ok(CliOutput::lines(lines))
+    let report = encryption::commands::key_status_report(ctx.runtime(), workspace_id)?;
+    Ok(encryption::cli::keys_output(&report))
 }
 
 pub(crate) fn chop_now(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    if args.values().len() != 2 {
-        return Err("chop-now WORKSPACE_ID_HEX FLOOR_MINUTE".to_string());
-    }
+    let args = encryption::cli::chop_now_args(args)?;
     ctx.drain_local_work()?;
-    let workspace_id = decode_hex_32(args.get(0).unwrap(), "workspace id")?;
-    let floor_minute = args
-        .get(1)
-        .unwrap()
-        .parse::<u64>()
-        .map_err(|_| "chop-now floor minute must be a u64".to_string())?;
     let receipt = encryption::commands::chop_now(
         ctx.runtime_mut(),
         encryption::commands::ChopNow {
-            workspace_id,
-            floor_minute,
+            workspace_id: args.workspace_id,
+            floor_minute: args.floor_minute,
             created_at_ms: SystemClock.next_timestamp(),
         },
     )?;
@@ -506,7 +352,9 @@ pub(crate) fn disappearing_set(
     ctx: &mut MatchCliContext,
     cli_args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let args = parse_disappearing_set_args(cli_args.values())?;
+    let args = encryption::disappearing_messages_setting::cli::parse_disappearing_set_args(
+        cli_args.values(),
+    )?;
     ctx.drain_local_work()?;
     let now_ms = next_cli_timestamp(ctx.runtime())?;
     let output = encryption::disappearing_messages_setting::commands::author_set_with_auto_floor(
@@ -539,118 +387,22 @@ pub(crate) fn disappearing_status(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    if args.values().len() != 1 {
-        return Err("disappearing-status WORKSPACE_ID_HEX".to_string());
-    }
-    let workspace_id = decode_hex_32(args.get(0).unwrap(), "workspace id")?;
+    let workspace_id = encryption::disappearing_messages_setting::cli::status_workspace_id(args)?;
     ctx.drain_local_work()?;
-    let store = ctx.runtime().store();
-    let active = encryption::disappearing_messages_setting::queries::active_for_workspace(
-        store,
+    let report = encryption::disappearing_messages_setting::commands::status_report(
+        ctx.runtime().store(),
         workspace_id,
     )?;
-    let setting_fact_id = active
-        .as_ref()
-        .map(|row| encode_hex_32(&row.setting_id))
-        .unwrap_or_else(|| "none".to_string());
-    let ttl = active
-        .as_ref()
-        .map(|row| row.ttl_minutes.to_string())
-        .unwrap_or_else(|| "unset".to_string());
-    let setting_floor = active.as_ref().map(|row| row.retire_minute).unwrap_or(0);
-    let now_minute = clock::logical_time(store)?.map(|ms| ms / 60_000);
-    let now_minute_str = now_minute
-        .map(|minute| minute.to_string())
-        .unwrap_or_else(|| "unset".to_string());
-    let horizon_floor = now_minute
-        .map(|minute| minute.saturating_sub(30 * 24 * 60))
-        .unwrap_or(0);
-    let effective_floor = setting_floor.max(horizon_floor);
-    if horizon_floor > 0 {
-        apply_horizon_floor(store, workspace_id, horizon_floor)?;
-    }
-    let raw_message_tombstones = store
-        .table_rows_with_key_prefix(
-            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load message tombstones: {err}"))?;
-    let message_tombstones = raw_message_tombstones
-        .into_iter()
-        .map(|(key, value)| content::message::rows::decode_message_tombstone_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|row| row.authored_minute >= horizon_floor)
-        .count();
-    let live_messages = content_message_rows(store, workspace_id)?
-        .into_iter()
-        .filter(|row| row.minute >= horizon_floor)
-        .count();
-    let last_chopped_floor = if horizon_floor > setting_floor && horizon_floor > 0 {
-        horizon_floor.to_string()
-    } else {
-        "none".to_string()
-    };
-
-    Ok(CliOutput::lines(vec![
-        format!("workspace: {}", encode_hex_32(&workspace_id)),
-        format!("setting_fact_id: {setting_fact_id}"),
-        format!("current_ttl_minutes: {ttl}"),
-        format!("current_floor_minute: {setting_floor}"),
-        format!("last_chopped_floor: {last_chopped_floor}"),
-        format!("now_minute: {now_minute_str}"),
-        format!("horizon_floor: {horizon_floor}"),
-        format!("effective_floor: {effective_floor}"),
-        format!("live_messages: {live_messages}"),
-        format!("message_tombstones: {message_tombstones}"),
-        "leaf_tombstones: 0".to_string(),
-        "pending_purges: 0".to_string(),
-    ]))
-}
-
-fn apply_horizon_floor(
-    store: &crate::core::store::Store,
-    workspace_id: [u8; 32],
-    horizon_floor: u64,
-) -> Result<(), String> {
-    let retired = content_message_rows(store, workspace_id)?
-        .into_iter()
-        .filter(|row| row.minute < horizon_floor)
-        .collect::<Vec<_>>();
-    if retired.is_empty() {
-        return Ok(());
-    }
-    let tombstones = retired
-        .iter()
-        .map(|row| {
-            content::message::rows::message_tombstone_row(
-                row.workspace_id,
-                row.message_id,
-                row.author_user_id,
-                row.created_at_ms,
-            )
-        })
-        .collect::<Vec<_>>();
-    let keys = retired
-        .iter()
-        .map(|row| content::message::rows::content_message_key(row.workspace_id, row.message_id))
-        .collect::<Vec<_>>();
-    store
-        .write_transaction(|tx| {
-            tx.insert_table_rows_in_tx(tombstones)?;
-            tx.delete_table_rows_in_tx(content::message::rows::CONTENT_MESSAGE_ROWS, keys.clone())?;
-            tx.delete_table_rows_in_tx(content::message::rows::OPENED_MESSAGE_ROWS, keys.clone())?;
-            Ok(())
-        })
-        .map_err(|err| format!("apply horizon floor: {err}"))
+    Ok(encryption::disappearing_messages_setting::cli::status_output(&report))
 }
 
 pub(crate) fn disappearing_tighten(
     ctx: &mut MatchCliContext,
     cli_args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let args = parse_disappearing_tighten_args(cli_args.values())?;
+    let args = encryption::disappearing_messages_setting::cli::parse_disappearing_tighten_args(
+        cli_args.values(),
+    )?;
     if !args.yes {
         return Err("disappearing-tighten requires --yes in the target CLI".to_string());
     }
@@ -671,7 +423,7 @@ pub(crate) fn disappearing_tighten(
     )?;
     let receipt = ctx.runtime_mut().submit_command_output(output)?;
     ctx.drain_local_work()?;
-    enqueue_floor_retention(
+    encryption::disappearing_messages_setting::commands::enqueue_floor_retention(
         ctx.runtime_mut(),
         args.workspace_id,
         receipt.setting_fact_id,
@@ -694,10 +446,7 @@ pub(crate) fn disappearing_compact(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    if args.values().len() != 1 {
-        return Err("disappearing-compact WORKSPACE_ID_HEX".to_string());
-    }
-    let workspace_id = decode_hex_32(args.get(0).unwrap(), "workspace id")?;
+    let workspace_id = encryption::disappearing_messages_setting::cli::compact_workspace_id(args)?;
     ctx.drain_local_work()?;
     let now_ms = next_cli_timestamp(ctx.runtime())?;
     let output = encryption::disappearing_messages_setting::commands::author_compact(
@@ -799,11 +548,15 @@ pub(crate) fn delete_file(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     if args.values().len() != 2 {
-        return Err(DELETE_FILE_USAGE.to_string());
+        return Err(content::file_deletion::cli::DELETE_FILE_USAGE.to_string());
     }
     ctx.drain_local_work()?;
     let workspace_id = decode_hex_32(args.get(0).unwrap(), "workspace id")?;
-    let file = resolve_file_selector(ctx.runtime().store(), workspace_id, args.get(1).unwrap())?;
+    let file = content::file_deletion::cli::resolve_file_selector(
+        ctx.runtime().store(),
+        workspace_id,
+        args.get(1).unwrap(),
+    )?;
     let clock = FixedClock(next_cli_timestamp(ctx.runtime())?);
     let vault = EmptyVault;
     let output = {
@@ -817,12 +570,7 @@ pub(crate) fn delete_file(
     };
     let receipt = ctx.runtime_mut().submit_command_output(output)?;
     ctx.drain_local_work()?;
-    Ok(CliOutput::lines(vec![
-        format!("workspace_id: {}", encode_hex_32(&receipt.workspace_id)),
-        format!("fact_id: {}", encode_hex_32(&receipt.deletion_fact_id)),
-        format!("target_file_id: {}", encode_hex_32(&receipt.target_file_id)),
-        format!("created_at_ms: {}", receipt.created_at_ms),
-    ]))
+    Ok(content::file_deletion::cli::delete_file_output(&receipt))
 }
 
 pub(crate) fn delete_message(
@@ -914,46 +662,20 @@ pub(crate) fn negentropy_drain(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    if args.values().len() > 1 {
-        return Err("negentropy-drain [LIMIT]".to_string());
-    }
-    if let Some(value) = args.get(0) {
-        let _ = value
-            .parse::<usize>()
-            .map_err(|_| "negentropy-drain [LIMIT]".to_string())?;
-    }
+    let _limit = sync::shared_fact::cli::parse_negentropy_drain_limit(args)?;
     ctx.drain_local_work()?;
     let status = crate::protocol::facts::sync::shared_fact::sync_status(ctx.runtime().store())?;
-    Ok(CliOutput::lines(vec![
-        "drained: 0".to_string(),
-        "removed_from_index: 0".to_string(),
-        format!("remaining_pending: {}", status.pending_purges),
-        format!("new_root_count: {}", status.root_count),
-        format!(
-            "new_root_fingerprint: {}",
-            encode_hex_bytes(&status.root_fingerprint)
-        ),
-    ]))
+    Ok(sync::shared_fact::cli::negentropy_drain_output(&status))
 }
 
 pub(crate) fn sync_status(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    if !args.values().is_empty() {
-        return Err("sync-status".to_string());
-    }
+    sync::shared_fact::cli::require_sync_status_args(args)?;
     ctx.drain_local_work()?;
     let status = crate::protocol::facts::sync::shared_fact::sync_status(ctx.runtime().store())?;
-    Ok(CliOutput::lines(vec![
-        format!("indexed_facts: {}", status.indexed_facts),
-        format!("root_count: {}", status.root_count),
-        format!(
-            "root_fingerprint: {}",
-            encode_hex_bytes(&status.root_fingerprint)
-        ),
-        format!("pending_purges: {}", status.pending_purges),
-    ]))
+    Ok(sync::shared_fact::cli::sync_status_output(&status))
 }
 
 pub(crate) fn content_count(
@@ -1018,251 +740,6 @@ fn max_cli_timestamp(store: &crate::core::store::Store) -> Result<u64, String> {
     Ok(max_timestamp)
 }
 
-fn enqueue_floor_retention(
-    runtime: &mut Runtime,
-    workspace_id: [u8; 32],
-    setting_id: [u8; 32],
-    floor_minute: u64,
-) -> Result<usize, String> {
-    let mut queued = 0usize;
-    for message in content_message_rows(runtime.store(), workspace_id)? {
-        if message.minute >= floor_minute {
-            continue;
-        }
-        if runtime.submit_intent(purge_below_retention_floor_intent(
-            PurgeBelowRetentionFloor {
-                workspace_id,
-                setting_id,
-                target_id: message.message_id,
-            },
-        ))? {
-            queued += 1;
-        }
-    }
-    Ok(queued)
-}
-
-#[derive(Debug, Clone)]
-struct HistoryLeafRow {
-    node_id: [u8; 32],
-    frontier_id: [u8; 32],
-    minute: u64,
-    fact_id_in_minute: [u8; 32],
-}
-
-fn history_leaf_rows(
-    store: &crate::core::store::Store,
-    workspace_id: [u8; 32],
-) -> Result<Vec<HistoryLeafRow>, String> {
-    let messages = content_message_rows(store, workspace_id)?;
-    let live_message_ids = messages
-        .iter()
-        .map(|message| message.message_id)
-        .collect::<BTreeSet<_>>();
-    let default_frontier = first_removal_frontier_id(store, workspace_id)?.unwrap_or([0; 32]);
-    let mut leaves = messages
-        .into_iter()
-        .map(|message| HistoryLeafRow {
-            node_id: message.message_id,
-            frontier_id: default_frontier,
-            minute: message.minute,
-            fact_id_in_minute: nonzero_or(message.leaf_id, message.message_id),
-        })
-        .collect::<Vec<_>>();
-    for file in content_file_rows(store, workspace_id)? {
-        if !live_message_ids.contains(&file.message_id) {
-            continue;
-        }
-        leaves.push(HistoryLeafRow {
-            node_id: file.file_fact_id,
-            frontier_id: default_frontier,
-            minute: file.created_at_ms / content::message::fact::UNIX_MINUTE_MS,
-            fact_id_in_minute: file.file_id,
-        });
-    }
-    leaves.sort_by_key(|leaf| (leaf.minute, leaf.node_id));
-    Ok(leaves)
-}
-
-fn content_message_rows(
-    store: &crate::core::store::Store,
-    workspace_id: [u8; 32],
-) -> Result<Vec<content::message::rows::ContentMessageRow>, String> {
-    let mut rows = store
-        .table_rows_with_key_prefix(
-            content::message::rows::CONTENT_MESSAGE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load message rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| content::message::rows::decode_content_message_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?;
-    rows.sort_by_key(|row| (row.created_at_ms, row.message_id));
-    Ok(rows)
-}
-
-fn content_file_rows(
-    store: &crate::core::store::Store,
-    workspace_id: [u8; 32],
-) -> Result<Vec<content::file::rows::ContentFileRow>, String> {
-    let mut rows = store
-        .table_rows_with_key_prefix(content::file::rows::FILE_ROWS, &workspace_id, usize::MAX)
-        .map_err(|err| format!("load file rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| content::file::rows::decode_content_file_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?;
-    rows.sort_by_key(|row| (row.created_at_ms, row.file_fact_id));
-    Ok(rows)
-}
-
-fn resolve_file_selector(
-    store: &crate::core::store::Store,
-    workspace_id: [u8; 32],
-    selector: &str,
-) -> Result<content::file::rows::ContentFileRow, String> {
-    let files = content_file_rows(store, workspace_id)?;
-    if let Some(index) = selector.strip_prefix('#') {
-        let index = index
-            .parse::<usize>()
-            .map_err(|_| "file selector index must be a positive integer".to_string())?;
-        if index == 0 {
-            return Err("file selector index must be a positive integer".to_string());
-        }
-        return files
-            .get(index - 1)
-            .cloned()
-            .ok_or_else(|| "file selector does not match a file".to_string());
-    }
-    let id = decode_hex_32(selector, "file id")?;
-    files
-        .into_iter()
-        .find(|file| file.file_fact_id == id || file.file_id == id)
-        .ok_or_else(|| "file selector does not match a file".to_string())
-}
-
-fn first_removal_frontier_id(
-    store: &crate::core::store::Store,
-    workspace_id: [u8; 32],
-) -> Result<Option<[u8; 32]>, String> {
-    let mut rows = store
-        .table_rows_with_key_prefix(
-            encryption::removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load removal frontier rows: {err}"))?
-        .into_iter()
-        .filter_map(|(key, value)| {
-            encryption::removal_frontier::rows::decode_removal_frontier_row(&key, &value).ok()
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by_key(|row| (row.created_at_ms, row.removal_frontier_id));
-    Ok(rows.first().map(|row| row.removal_frontier_id))
-}
-
-fn nonzero_or(value: [u8; 32], fallback: [u8; 32]) -> [u8; 32] {
-    if value.iter().all(|byte| *byte == 0) {
-        fallback
-    } else {
-        value
-    }
-}
-
-fn cover_summary(leaves: &[HistoryLeafRow]) -> String {
-    let mut hash = blake3::Hasher::new();
-    for leaf in leaves {
-        hash.update(&leaf.node_id);
-        hash.update(&leaf.minute.to_be_bytes());
-        hash.update(&leaf.fact_id_in_minute);
-    }
-    encode_hex_bytes(hash.finalize().as_bytes())
-}
-
-struct DisappearingSetArgs {
-    workspace_id: [u8; 32],
-    ttl_minutes: u32,
-    explicit_floor: Option<u64>,
-}
-
-fn parse_disappearing_set_args(values: &[String]) -> Result<DisappearingSetArgs, String> {
-    if values.len() < 2 {
-        return Err("disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]".to_string());
-    }
-    let workspace_id = decode_hex_32(&values[0], "workspace id")?;
-    let ttl_minutes = values[1]
-        .parse::<u32>()
-        .map_err(|_| "disappearing-set ttl must be a u32".to_string())?;
-    let mut explicit_floor = None;
-    let mut idx = 2;
-    while idx < values.len() {
-        match values[idx].as_str() {
-            "--floor" => {
-                let value = values
-                    .get(idx + 1)
-                    .ok_or_else(|| "disappearing-set --floor requires a value".to_string())?;
-                explicit_floor = Some(
-                    value
-                        .parse::<u64>()
-                        .map_err(|_| "disappearing-set floor must be a u64".to_string())?,
-                );
-                idx += 2;
-            }
-            arg if arg.starts_with("--floor=") => {
-                let value = arg.trim_start_matches("--floor=");
-                explicit_floor = Some(
-                    value
-                        .parse::<u64>()
-                        .map_err(|_| "disappearing-set floor must be a u64".to_string())?,
-                );
-                idx += 1;
-            }
-            _ => {
-                return Err(
-                    "disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]".to_string(),
-                );
-            }
-        }
-    }
-    Ok(DisappearingSetArgs {
-        workspace_id,
-        ttl_minutes,
-        explicit_floor,
-    })
-}
-
-struct DisappearingTightenArgs {
-    workspace_id: [u8; 32],
-    ttl_minutes: u32,
-    yes: bool,
-}
-
-fn parse_disappearing_tighten_args(values: &[String]) -> Result<DisappearingTightenArgs, String> {
-    if values.len() < 2 {
-        return Err("disappearing-tighten WORKSPACE_ID_HEX TTL_MINUTES [--yes|-y]".to_string());
-    }
-    let workspace_id = decode_hex_32(&values[0], "workspace id")?;
-    let ttl_minutes = values[1]
-        .parse::<u32>()
-        .map_err(|_| "disappearing-tighten ttl must be a u32".to_string())?;
-    let mut yes = false;
-    for value in &values[2..] {
-        match value.as_str() {
-            "--yes" | "-y" => yes = true,
-            _ => {
-                return Err(
-                    "disappearing-tighten WORKSPACE_ID_HEX TTL_MINUTES [--yes|-y]".to_string(),
-                );
-            }
-        }
-    }
-    Ok(DisappearingTightenArgs {
-        workspace_id,
-        ttl_minutes,
-        yes,
-    })
-}
-
 fn process_runtime_until_idle(runtime: &mut Runtime) -> Result<(), String> {
     for _ in 0..4 {
         runtime.process_projection_until_idle(8, 512)?;
@@ -1273,18 +750,6 @@ fn process_runtime_until_idle(runtime: &mut Runtime) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn decode_hex_32(value: &str, label: &str) -> Result<[u8; 32], String> {
-    core_decode_hex_32(value, label)
-}
-
-fn encode_hex_32(bytes: &[u8; 32]) -> String {
-    core_encode_hex_32(bytes)
-}
-
-fn encode_hex_bytes(bytes: &[u8]) -> String {
-    core_encode_hex(bytes)
 }
 
 struct SystemClock;
