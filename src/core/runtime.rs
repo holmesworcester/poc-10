@@ -114,7 +114,7 @@ impl HandlerSet {
     ) -> Result<DispatchReport, String> {
         let mut total = DispatchReport::default();
         for handler in &self.handlers {
-            let report = pipeline::dispatch_deferred_intents_from_store_with_fact_context(
+            let report = pipeline::dispatch_deferred_intents(
                 intent_pipeline,
                 handler.as_ref(),
                 store,
@@ -129,7 +129,7 @@ impl HandlerSet {
                 continue;
             }
 
-            let report = pipeline::dispatch_atomic_intents_from_store(
+            let report = pipeline::dispatch_atomic_intents(
                 intent_pipeline,
                 handler.as_ref(),
                 store,
@@ -144,7 +144,7 @@ impl HandlerSet {
                 continue;
             }
 
-            let report = pipeline::dispatch_ephemeral_intents_with_fact_context_and_store(
+            let report = pipeline::dispatch_ephemeral_intents(
                 intent_pipeline,
                 handler.as_ref(),
                 store,

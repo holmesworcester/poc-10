@@ -1,3 +1,28 @@
+//! Durable storage and row codec for the runtime
+//! [`pipeline`](crate::core::pipeline).
+//!
+//! [`pipeline`](crate::core::pipeline) decides *what* the runtime does with
+//! facts, context, and intents; this module decides *how* that state is stored
+//! in SQLite. It owns three things:
+//!
+//! - **Durable mutations** — [`insert_fact_and_pending_in_tx`],
+//!   [`purge_fact_in_tx`], [`record_intent_in_tx`], and the pending-queue
+//!   helpers: the in-transaction building blocks the pipeline commits with.
+//! - **Context reads** — loading a fact's standing context back out of SQLite
+//!   and matching needs against offers ([`stored_matching_context`],
+//!   [`stored_context_matches`]).
+//! - **Row encoding** — turning facts, context needs and offers, time wakes,
+//!   and intents into rows and back: the `*_row` builders, the `typed_*`
+//!   encoders, and the `decode_*` decoders.
+//!
+//! # Row model
+//!
+//! Every runtime row is a key/value pair of [`wire`](crate::core::wire)-encoded
+//! bytes. Most rows carry all of their fields in the *key* and leave the value
+//! empty, so the store can look a row up by any named column of its key. Facts
+//! and intents are the exception: they hold a variable-length payload, which
+//! lives in the value.
+
 use crate::core::context::{
     ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
 };
@@ -13,8 +38,13 @@ use crate::core::store::{ColumnValue, Store, TableName, TableRow};
 use crate::core::wire::{Reader, WireError, Writer};
 use std::collections::{BTreeMap, BTreeSet};
 
+// === Matching helpers ===
+
+/// Lookup key for exact context matching: a need and an offer match when their
+/// role, scope, and selector are all equal.
 pub(crate) type ExactContextKey = (Role, FactScope, Selector);
 
+/// Build the [`ExactContextKey`] for a role/scope/selector triple.
 pub(crate) fn exact_context_key(
     role: &Role,
     scope: &FactScope,
@@ -23,6 +53,7 @@ pub(crate) fn exact_context_key(
     (role.clone(), scope.clone(), selector.clone())
 }
 
+/// Roles served by exact selector matching rather than a custom matcher.
 pub(crate) fn exact_matcher_roles(matchers: &[&dyn ContextMatcher]) -> BTreeSet<Role> {
     matchers
         .iter()
@@ -30,6 +61,10 @@ pub(crate) fn exact_matcher_roles(matchers: &[&dyn ContextMatcher]) -> BTreeSet<
         .collect()
 }
 
+/// Custom (non-exact) matchers whose role appears somewhere in `delta`.
+///
+/// Context matching only has to consult a custom matcher when the batch of
+/// changes actually touches that matcher's role.
 pub(crate) fn relevant_custom_matchers_for_delta<'a>(
     matchers: &[&'a dyn ContextMatcher],
     delta: &ContextSetDelta,
@@ -51,6 +86,12 @@ pub(crate) fn relevant_custom_matchers_for_delta<'a>(
         .collect()
 }
 
+// === Durable mutations ===
+
+/// Insert a fact and mark it pending for projection.
+///
+/// Facts are immutable and content-addressed, so a fact that already exists is
+/// left untouched. Returns whether the fact was newly inserted.
 pub(crate) fn insert_fact_and_pending_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
     if store.table_row(FACTS, &fact.id)?.is_some() {
         return Ok(false);
@@ -62,6 +103,7 @@ pub(crate) fn insert_fact_and_pending_in_tx(store: &Store, fact: &Fact) -> rusql
     Ok(inserted)
 }
 
+/// Mark `owner` pending so the next projection pass (re)projects it.
 pub(crate) fn insert_pending_owner_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<usize> {
     store.insert_table_rows_in_tx(vec![TableRow {
         table: PENDING_PROJECTION,
@@ -70,65 +112,58 @@ pub(crate) fn insert_pending_owner_in_tx(store: &Store, owner: FactId) -> rusqli
     }])
 }
 
+/// Remove a fact and every durable row keyed to it.
+///
+/// Deletes the fact itself, its context needs and offers, its time wakes, any
+/// pending context-change or time-range rows it owns, and its pending-projection
+/// marker. Returns whether anything was actually removed.
 pub(crate) fn purge_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<bool> {
     let mut changed = store.delete_table_rows_in_tx(FACTS, vec![owner.to_vec()])? > 0;
-
-    let need_keys = store
-        .table_rows_where(CONTEXT_NEEDS, &[("owner", ColumnValue::Bytes(&owner))])?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect::<Vec<_>>();
-    changed |= !need_keys.is_empty();
-    store.delete_table_rows_in_tx(CONTEXT_NEEDS, need_keys)?;
-
-    let offer_keys = store
-        .table_rows_where(CONTEXT_OFFERS, &[("owner", ColumnValue::Bytes(&owner))])?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect::<Vec<_>>();
-    changed |= !offer_keys.is_empty();
-    store.delete_table_rows_in_tx(CONTEXT_OFFERS, offer_keys)?;
-
-    let time_wake_keys = store
-        .table_rows_where(TIME_WAKES, &[("owner", ColumnValue::Bytes(&owner))])?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect::<Vec<_>>();
-    changed |= !time_wake_keys.is_empty();
-    store.delete_table_rows_in_tx(TIME_WAKES, time_wake_keys)?;
-
-    let pending_context_change_keys = store
-        .table_rows_where(
-            PENDING_CONTEXT_CHANGES,
-            &[("owner", ColumnValue::Bytes(&owner))],
-        )?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect::<Vec<_>>();
-    changed |= !pending_context_change_keys.is_empty();
-    store.delete_table_rows_in_tx(PENDING_CONTEXT_CHANGES, pending_context_change_keys)?;
-
-    let pending_time_range_keys = store
-        .table_rows_where(
-            PENDING_TIME_RANGES,
-            &[("owner", ColumnValue::Bytes(&owner))],
-        )?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect::<Vec<_>>();
-    changed |= !pending_time_range_keys.is_empty();
-    store.delete_table_rows_in_tx(PENDING_TIME_RANGES, pending_time_range_keys)?;
-
+    for table in [
+        CONTEXT_NEEDS,
+        CONTEXT_OFFERS,
+        TIME_WAKES,
+        PENDING_CONTEXT_CHANGES,
+        PENDING_TIME_RANGES,
+    ] {
+        changed |= delete_rows_owned_by(store, table, &owner)?;
+    }
     changed |= store.delete_table_rows_in_tx(PENDING_PROJECTION, vec![owner.to_vec()])? > 0;
     Ok(changed)
 }
 
+/// Delete every row in `table` whose `owner` column equals `owner`.
+///
+/// This is the "remove all of one fact's rows from a side table" step that
+/// [`purge_fact_in_tx`] repeats for each table. Returns whether any row matched.
+fn delete_rows_owned_by(
+    store: &Store,
+    table: TableName,
+    owner: &FactId,
+) -> rusqlite::Result<bool> {
+    let keys = store
+        .table_rows_where(table, &[("owner", ColumnValue::Bytes(owner))])?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    let removed = !keys.is_empty();
+    store.delete_table_rows_in_tx(table, keys)?;
+    Ok(removed)
+}
+
+/// Persist an intent, deduplicated by its idempotence key.
+///
+/// Returns whether the intent was newly recorded; an intent whose key already
+/// exists is left in place.
 pub(crate) fn record_intent_in_tx(store: &Store, intent: &Intent) -> rusqlite::Result<bool> {
     store
         .insert_table_rows_in_tx(vec![intent_row(intent)])
         .map(|count| count > 0)
 }
 
+// === Row builders ===
+
+/// Encode a fact as its [`FACTS`] row.
 pub(crate) fn fact_row(fact: &Fact) -> TableRow {
     TableRow {
         table: FACTS,
@@ -137,22 +172,25 @@ pub(crate) fn fact_row(fact: &Fact) -> TableRow {
     }
 }
 
+/// Encode a context need as its (key-only) [`CONTEXT_NEEDS`] row.
 pub(crate) fn context_need_row(need: &ContextNeed) -> TableRow {
     TableRow {
         table: CONTEXT_NEEDS,
-        key: typed_context_need_key(need),
+        key: typed_context_key(&need.owner, &need.role, &need.scope, &need.selector),
         value: Vec::new(),
     }
 }
 
+/// Encode a context offer as its (key-only) [`CONTEXT_OFFERS`] row.
 pub(crate) fn context_offer_row(offer: &ContextOffer) -> TableRow {
     TableRow {
         table: CONTEXT_OFFERS,
-        key: typed_context_offer_key(offer),
+        key: typed_context_key(&offer.owner, &offer.role, &offer.scope, &offer.selector),
         value: Vec::new(),
     }
 }
 
+/// Encode a time wake as its (key-only) [`TIME_WAKES`] row.
 pub(crate) fn time_wake_row(wake: &TimeWake) -> TableRow {
     TableRow {
         table: TIME_WAKES,
@@ -161,6 +199,7 @@ pub(crate) fn time_wake_row(wake: &TimeWake) -> TableRow {
     }
 }
 
+/// Encode a due time range as its (key-only) [`PENDING_TIME_RANGES`] row.
 pub(crate) fn pending_time_range_row(owner: FactId, range: &TimeRange) -> TableRow {
     TableRow {
         table: PENDING_TIME_RANGES,
@@ -169,6 +208,7 @@ pub(crate) fn pending_time_range_row(owner: FactId, range: &TimeRange) -> TableR
     }
 }
 
+/// Encode an intent as its [`INTENTS`] row.
 pub(crate) fn intent_row(intent: &Intent) -> TableRow {
     TableRow {
         table: INTENTS,
@@ -177,6 +217,12 @@ pub(crate) fn intent_row(intent: &Intent) -> TableRow {
     }
 }
 
+// === Atomic-intent rows ===
+
+/// Reject any atomic intent that does not decode into a valid row mutation.
+///
+/// Run before a transaction so a malformed atomic intent fails the projection
+/// or handler rather than the commit.
 pub(crate) fn validate_atomic_row_intents(
     intents: &[Intent],
     allowed_tables: &[TableName],
@@ -189,6 +235,8 @@ pub(crate) fn validate_atomic_row_intents(
     Ok(())
 }
 
+/// Decode atomic intents into the concrete row inserts and deletes they stand
+/// for, so a commit can apply them directly.
 pub(crate) fn atomic_row_mutations(
     intents: &[Intent],
     allowed_tables: &[TableName],
@@ -207,19 +255,49 @@ pub(crate) fn atomic_row_mutations(
     Ok((rows, deletes))
 }
 
+/// Adapt a `String` error into the [`rusqlite::Error`] a transaction closure
+/// must return, so a non-SQL failure can still abort a commit.
 pub(crate) fn sqlite_string_error(err: String) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(err)
 }
 
+/// `change_kind` tag stored in a [`PENDING_CONTEXT_CHANGES`] key for an added
+/// need (versus [`CONTEXT_CHANGE_OFFER`]).
+const CONTEXT_CHANGE_NEED: u64 = 0;
+/// `change_kind` tag stored in a [`PENDING_CONTEXT_CHANGES`] key for an added
+/// offer (versus [`CONTEXT_CHANGE_NEED`]).
+const CONTEXT_CHANGE_OFFER: u64 = 1;
+
+/// Encode every added need and offer in `delta` as [`PENDING_CONTEXT_CHANGES`]
+/// rows for the pipeline's context-matching stage to consume later.
 pub(crate) fn pending_context_change_rows(delta: &ContextSetDelta) -> Vec<TableRow> {
     delta
         .added_needs
         .iter()
-        .map(pending_context_need_row)
-        .chain(delta.added_offers.iter().map(pending_context_offer_row))
+        .map(|need| {
+            pending_context_change_row(
+                &need.owner,
+                CONTEXT_CHANGE_NEED,
+                &need.role,
+                &need.scope,
+                &need.selector,
+            )
+        })
+        .chain(delta.added_offers.iter().map(|offer| {
+            pending_context_change_row(
+                &offer.owner,
+                CONTEXT_CHANGE_OFFER,
+                &offer.role,
+                &offer.scope,
+                &offer.selector,
+            )
+        }))
         .collect()
 }
 
+// === Reading context from the store ===
+
+/// Load a fact's standing context — the needs and offers it currently owns.
 pub(crate) fn stored_context_for_owner(
     store: &Store,
     owner: &FactId,
@@ -231,6 +309,12 @@ pub(crate) fn stored_context_for_owner(
     .normalized())
 }
 
+/// Find the offers that currently satisfy a fact's needs.
+///
+/// This is the input context handed to a projector. For every need in
+/// `context`, matching offers are resolved through exact selector matching or
+/// the relevant custom matcher, and each match is returned with the offering
+/// fact's payload attached.
 pub(crate) fn stored_matching_context(
     store: &Store,
     context: &ContextSet,
@@ -293,6 +377,7 @@ pub(crate) fn stored_matching_context(
     Ok(ProjectionContext::from_matches(matched))
 }
 
+/// Load the due time ranges queued for `owner` by the time-trigger step.
 pub(crate) fn stored_pending_time_ranges_for_owner(
     store: &Store,
     owner: &FactId,
@@ -305,22 +390,19 @@ pub(crate) fn stored_pending_time_ranges_for_owner(
         .collect()
 }
 
+/// Clear the due time ranges queued for `owner`, called once it has projected.
 pub(crate) fn delete_pending_time_ranges_for_owner_in_tx(
     store: &Store,
     owner: FactId,
 ) -> rusqlite::Result<()> {
-    let keys = store
-        .table_rows_where(
-            PENDING_TIME_RANGES,
-            &[("owner", ColumnValue::Bytes(&owner))],
-        )?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect::<Vec<_>>();
-    store.delete_table_rows_in_tx(PENDING_TIME_RANGES, keys)?;
+    delete_rows_owned_by(store, PENDING_TIME_RANGES, &owner)?;
     Ok(())
 }
 
+/// Find the need/offer pairs newly satisfiable because of `delta`.
+///
+/// Given a batch of added needs and offers, return every [`ContextMatch`] that
+/// batch creates, ordered so the oldest waiting fact is woken first.
 pub(crate) fn stored_context_matches(
     store: &Store,
     delta: &ContextSetDelta,
@@ -419,6 +501,7 @@ pub(crate) fn stored_context_matches(
     Ok(out)
 }
 
+/// Load the context needs owned by one fact.
 fn stored_needs_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextNeed>, String> {
     load_context_needs_from_rows(
         store
@@ -427,6 +510,7 @@ fn stored_needs_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextNe
     )
 }
 
+/// Load the context offers owned by one fact.
 fn stored_offers_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextOffer>, String> {
     load_context_offers_from_rows(
         store
@@ -435,6 +519,8 @@ fn stored_offers_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextO
     )
 }
 
+/// Bulk-load the exact-keyed offers that could satisfy `needs`, grouped by
+/// [`ExactContextKey`]. One query per (role, scope) keeps matching batched.
 fn stored_exact_offers_for_needs<'a>(
     store: &Store,
     needs: impl Iterator<Item = &'a ContextNeed>,
@@ -478,6 +564,8 @@ fn stored_exact_offers_for_needs<'a>(
     Ok(out)
 }
 
+/// Bulk-load the exact-keyed needs that `offers` could satisfy, grouped by
+/// [`ExactContextKey`]. The mirror of [`stored_exact_offers_for_needs`].
 fn stored_exact_needs_for_offers<'a>(
     store: &Store,
     offers: impl Iterator<Item = &'a ContextOffer>,
@@ -517,6 +605,8 @@ fn stored_exact_needs_for_offers<'a>(
     Ok(out)
 }
 
+/// Append one deduplicated need/offer match, resolving the offering fact so the
+/// projector receives the payload alongside the match.
 fn push_stored_matched_context(
     store: &Store,
     need: &ContextNeed,
@@ -537,6 +627,7 @@ fn push_stored_matched_context(
     Ok(())
 }
 
+/// Load every context need stored for one (role, scope).
 fn stored_needs_for_role_scope(
     store: &Store,
     role: &Role,
@@ -555,6 +646,7 @@ fn stored_needs_for_role_scope(
     )
 }
 
+/// Load every context offer stored for one (role, scope).
 fn stored_offers_for_role_scope(
     store: &Store,
     role: &Role,
@@ -573,12 +665,14 @@ fn stored_offers_for_role_scope(
     )
 }
 
+/// Decode a batch of raw [`CONTEXT_NEEDS`] rows.
 fn load_context_needs_from_rows(rows: Vec<(Vec<u8>, Vec<u8>)>) -> Result<Vec<ContextNeed>, String> {
     rows.into_iter()
         .map(|(key, value)| decode_context_need_row(&key, &value))
         .collect()
 }
 
+/// Decode a batch of raw [`CONTEXT_OFFERS`] rows.
 fn load_context_offers_from_rows(
     rows: Vec<(Vec<u8>, Vec<u8>)>,
 ) -> Result<Vec<ContextOffer>, String> {
@@ -587,30 +681,29 @@ fn load_context_offers_from_rows(
         .collect()
 }
 
-fn typed_context_need_key(need: &ContextNeed) -> Vec<u8> {
+// === Encoding rows ===
+
+/// Key layout shared by [`CONTEXT_NEEDS`] and [`CONTEXT_OFFERS`] rows:
+/// `owner ++ role ++ scope ++ selector`.
+fn typed_context_key(
+    owner: &FactId,
+    role: &Role,
+    scope: &FactScope,
+    selector: &Selector,
+) -> Vec<u8> {
     encoded_row(|key| {
-        key.fixed(&need.owner);
-        key.string_u32be(need.role.as_str())
+        key.fixed(owner);
+        key.string_u32be(role.as_str())
             .expect("context role fits u32");
-        key.bytes_u32be(&scope_key(&need.scope))
+        key.bytes_u32be(&scope_key(scope))
             .expect("scope key fits u32");
-        key.bytes_u32be(need.selector.as_bytes())
+        key.bytes_u32be(selector.as_bytes())
             .expect("selector fits u32");
     })
 }
 
-fn typed_context_offer_key(offer: &ContextOffer) -> Vec<u8> {
-    encoded_row(|key| {
-        key.fixed(&offer.owner);
-        key.string_u32be(offer.role.as_str())
-            .expect("context role fits u32");
-        key.bytes_u32be(&scope_key(&offer.scope))
-            .expect("scope key fits u32");
-        key.bytes_u32be(offer.selector.as_bytes())
-            .expect("selector fits u32");
-    })
-}
-
+/// Key layout for a [`TIME_WAKES`] row: `timeline ++ at ++ owner`, ordered so a
+/// chronological scan of a timeline walks wakes in firing order.
 fn typed_time_wake_key(wake: &TimeWake) -> Vec<u8> {
     encoded_row(|key| {
         key.string_u32be(wake.timeline.as_str())
@@ -620,6 +713,7 @@ fn typed_time_wake_key(wake: &TimeWake) -> Vec<u8> {
     })
 }
 
+/// Key layout for a [`PENDING_TIME_RANGES`] row.
 fn typed_pending_time_range_key(owner: FactId, range: &TimeRange) -> Vec<u8> {
     encoded_row(|key| {
         key.fixed(&owner);
@@ -631,15 +725,26 @@ fn typed_pending_time_range_key(owner: FactId, range: &TimeRange) -> Vec<u8> {
     })
 }
 
-fn pending_context_need_row(need: &ContextNeed) -> TableRow {
+/// Encode one added need or offer as a [`PENDING_CONTEXT_CHANGES`] row.
+///
+/// `change_kind` is [`CONTEXT_CHANGE_NEED`] or [`CONTEXT_CHANGE_OFFER`]; it sits
+/// in the key right after the owner so that a need and an offer with otherwise
+/// identical fields remain distinct rows.
+fn pending_context_change_row(
+    owner: &FactId,
+    change_kind: u64,
+    role: &Role,
+    scope: &FactScope,
+    selector: &Selector,
+) -> TableRow {
     let key = encoded_row(|key| {
-        key.fixed(&need.owner);
-        key.u64be(0);
-        key.string_u32be(need.role.as_str())
+        key.fixed(owner);
+        key.u64be(change_kind);
+        key.string_u32be(role.as_str())
             .expect("context role fits u32");
-        key.bytes_u32be(&scope_key(&need.scope))
+        key.bytes_u32be(&scope_key(scope))
             .expect("scope key fits u32");
-        key.bytes_u32be(need.selector.as_bytes())
+        key.bytes_u32be(selector.as_bytes())
             .expect("selector fits u32");
     });
     TableRow {
@@ -649,30 +754,15 @@ fn pending_context_need_row(need: &ContextNeed) -> TableRow {
     }
 }
 
-fn pending_context_offer_row(offer: &ContextOffer) -> TableRow {
-    let key = encoded_row(|key| {
-        key.fixed(&offer.owner);
-        key.u64be(1);
-        key.string_u32be(offer.role.as_str())
-            .expect("context role fits u32");
-        key.bytes_u32be(&scope_key(&offer.scope))
-            .expect("scope key fits u32");
-        key.bytes_u32be(offer.selector.as_bytes())
-            .expect("selector fits u32");
-    });
-    TableRow {
-        table: PENDING_CONTEXT_CHANGES,
-        key,
-        value: Vec::new(),
-    }
-}
-
+/// Encode a [`FactScope`] into the bytes used as a row's `scope_key` column.
 pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
     let mut out = Writer::new();
     encode_scope(&mut out, scope);
     out.finish()
 }
 
+/// Key layout for an [`INTENTS`] row: `kind ++ idempotence-key`. Two intents
+/// collide here exactly when they are idempotent duplicates of each other.
 pub(crate) fn intent_row_key(intent: &Intent) -> Vec<u8> {
     encoded_row(|key| {
         key.string_u32be(intent.kind.as_str())
@@ -682,6 +772,7 @@ pub(crate) fn intent_row_key(intent: &Intent) -> Vec<u8> {
     })
 }
 
+/// Encode the value half of a [`FACTS`] row: scope columns, timestamp, payload.
 fn typed_fact_value(fact: &Fact) -> Vec<u8> {
     encoded_row(|out| {
         match &fact.scope {
@@ -696,6 +787,27 @@ fn typed_fact_value(fact: &Fact) -> Vec<u8> {
     })
 }
 
+/// Encode the value half of an [`INTENTS`] row: execution class and payload.
+fn typed_intent_value(intent: &Intent) -> Vec<u8> {
+    encoded_row(|out| {
+        out.u64be(intent_execution_code(intent.execution));
+        out.bytes_u32be(&intent.payload)
+            .expect("intent payload fits u32");
+    })
+}
+
+/// Stable on-disk tag for an [`IntentExecution`] (decoded by [`decode_intent_row`]).
+fn intent_execution_code(execution: IntentExecution) -> u64 {
+    match execution {
+        IntentExecution::Atomic => 0,
+        IntentExecution::Deferred => 1,
+        IntentExecution::Ephemeral => 2,
+    }
+}
+
+// === Reading and decoding rows ===
+
+/// Load a fact by id, returning `None` when no such fact is stored.
 pub fn persisted_fact(store: &Store, id: &FactId) -> Result<Option<Fact>, String> {
     store
         .table_row(FACTS, id)
@@ -704,6 +816,7 @@ pub fn persisted_fact(store: &Store, id: &FactId) -> Result<Option<Fact>, String
         .transpose()
 }
 
+/// Load every stored fact.
 pub fn persisted_facts(store: &Store) -> Result<Vec<Fact>, String> {
     store
         .table_rows(FACTS)
@@ -713,6 +826,7 @@ pub fn persisted_facts(store: &Store) -> Result<Vec<Fact>, String> {
         .collect()
 }
 
+/// Load a fact's standing context, returning `None` when it has none.
 pub fn persisted_context(store: &Store, owner: &FactId) -> Result<Option<ContextSet>, String> {
     let context = stored_context_for_owner(store, owner)?;
     if context.needs.is_empty() && context.offers.is_empty() {
@@ -722,6 +836,8 @@ pub fn persisted_context(store: &Store, owner: &FactId) -> Result<Option<Context
     }
 }
 
+/// Decode a [`FACTS`] row, checking the key matches the content hash of the
+/// payload bytes.
 pub(crate) fn decode_fact_row(key: &[u8], value: &[u8]) -> Result<Fact, String> {
     let id = decode_fact_id(key)?;
     let mut reader = Reader::new(value);
@@ -743,6 +859,7 @@ pub(crate) fn decode_fact_row(key: &[u8], value: &[u8]) -> Result<Fact, String> 
     })
 }
 
+/// Rebuild a [`FactScope`] from the three scope columns of a [`FACTS`] row.
 fn decode_fact_scope_columns(
     scope: &str,
     scope_kind: &str,
@@ -769,16 +886,10 @@ fn decode_fact_scope_columns(
     }
 }
 
+/// Decode a [`CONTEXT_NEEDS`] row.
 pub(crate) fn decode_context_need_row(key: &[u8], value: &[u8]) -> Result<ContextNeed, String> {
-    if !value.is_empty() {
-        return Err("typed context need row should not have value bytes".to_string());
-    }
-    let mut reader = Reader::new(key);
-    let owner = reader.array::<32>().row()?;
-    let role = Role::new(reader.string_u32be().row()?)?;
-    let scope = decode_scope_key(reader.bytes_u32be().row()?)?;
-    let selector = Selector::from_bytes(reader.bytes_u32be().row()?.to_vec());
-    reader.finish().row()?;
+    expect_empty_value(value, "context need")?;
+    let (owner, role, scope, selector) = decode_context_key(key)?;
     Ok(ContextNeed {
         owner,
         role,
@@ -787,16 +898,10 @@ pub(crate) fn decode_context_need_row(key: &[u8], value: &[u8]) -> Result<Contex
     })
 }
 
+/// Decode a [`CONTEXT_OFFERS`] row.
 pub(crate) fn decode_context_offer_row(key: &[u8], value: &[u8]) -> Result<ContextOffer, String> {
-    if !value.is_empty() {
-        return Err("typed context offer row should not have value bytes".to_string());
-    }
-    let mut reader = Reader::new(key);
-    let owner = reader.array::<32>().row()?;
-    let role = Role::new(reader.string_u32be().row()?)?;
-    let scope = decode_scope_key(reader.bytes_u32be().row()?)?;
-    let selector = Selector::from_bytes(reader.bytes_u32be().row()?.to_vec());
-    reader.finish().row()?;
+    expect_empty_value(value, "context offer")?;
+    let (owner, role, scope, selector) = decode_context_key(key)?;
     Ok(ContextOffer {
         owner,
         role,
@@ -805,13 +910,34 @@ pub(crate) fn decode_context_offer_row(key: &[u8], value: &[u8]) -> Result<Conte
     })
 }
 
+/// Decode the `owner ++ role ++ scope ++ selector` key shared by context need
+/// and offer rows (see [`typed_context_key`]).
+fn decode_context_key(key: &[u8]) -> Result<(FactId, Role, FactScope, Selector), String> {
+    let mut reader = Reader::new(key);
+    let owner = reader.array::<32>().row()?;
+    let role = Role::new(reader.string_u32be().row()?)?;
+    let scope = decode_scope_key(reader.bytes_u32be().row()?)?;
+    let selector = Selector::from_bytes(reader.bytes_u32be().row()?.to_vec());
+    reader.finish().row()?;
+    Ok((owner, role, scope, selector))
+}
+
+/// Confirm a key-only row carries no value bytes.
+fn expect_empty_value(value: &[u8], what: &str) -> Result<(), String> {
+    if value.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{what} row should have an empty value"))
+    }
+}
+
+/// Decode a [`PENDING_CONTEXT_CHANGES`] row into the single-entry delta it
+/// records.
 pub(crate) fn decode_pending_context_change_row(
     key: &[u8],
     value: &[u8],
 ) -> Result<ContextSetDelta, String> {
-    if !value.is_empty() {
-        return Err("pending context change row value must be empty".to_string());
-    }
+    expect_empty_value(value, "pending context change")?;
     let mut reader = Reader::new(key);
     let owner = reader.array::<32>().row()?;
     let change_kind = reader.u64be().row()?;
@@ -822,13 +948,13 @@ pub(crate) fn decode_pending_context_change_row(
 
     let mut delta = ContextSetDelta::default();
     match change_kind {
-        0 => delta.added_needs.push(ContextNeed {
+        CONTEXT_CHANGE_NEED => delta.added_needs.push(ContextNeed {
             owner,
             role,
             scope,
             selector,
         }),
-        1 => delta.added_offers.push(ContextOffer {
+        CONTEXT_CHANGE_OFFER => delta.added_offers.push(ContextOffer {
             owner,
             role,
             scope,
@@ -839,10 +965,9 @@ pub(crate) fn decode_pending_context_change_row(
     Ok(delta)
 }
 
+/// Decode a [`TIME_WAKES`] row.
 pub(crate) fn decode_time_wake_row(key: &[u8], value: &[u8]) -> Result<TimeWake, String> {
-    if !value.is_empty() {
-        return Err("time wake row value must be empty".to_string());
-    }
+    expect_empty_value(value, "time wake")?;
     let mut reader = Reader::new(key);
     let timeline = Timeline::new(reader.string_u32be().row()?)?;
     let at = reader.u64be().row()?;
@@ -855,10 +980,9 @@ pub(crate) fn decode_time_wake_row(key: &[u8], value: &[u8]) -> Result<TimeWake,
     })
 }
 
+/// Decode a [`PENDING_TIME_RANGES`] row back into the time range it recorded.
 fn decode_pending_time_range_row(key: &[u8], value: &[u8]) -> Result<TimeRange, String> {
-    if !value.is_empty() {
-        return Err("pending time range row value must be empty".to_string());
-    }
+    expect_empty_value(value, "pending time range")?;
     let mut reader = Reader::new(key);
     let _owner = reader.array::<32>().row()?;
     let timeline = Timeline::new(reader.string_u32be().row()?)?;
@@ -873,22 +997,8 @@ fn decode_pending_time_range_row(key: &[u8], value: &[u8]) -> Result<TimeRange, 
     })
 }
 
-fn typed_intent_value(intent: &Intent) -> Vec<u8> {
-    encoded_row(|out| {
-        out.u64be(intent_execution_code(intent.execution));
-        out.bytes_u32be(&intent.payload)
-            .expect("intent payload fits u32");
-    })
-}
-
-fn intent_execution_code(execution: IntentExecution) -> u64 {
-    match execution {
-        IntentExecution::Atomic => 0,
-        IntentExecution::Deferred => 1,
-        IntentExecution::Ephemeral => 2,
-    }
-}
-
+/// Decode an [`INTENTS`] row: kind and idempotence key from the key, execution
+/// class and payload from the value.
 pub(crate) fn decode_intent_row(key: &[u8], value: &[u8]) -> Result<Intent, String> {
     let mut key_reader = Reader::new(key);
     let kind = IntentKind::new(key_reader.string_u32be().row()?)?;
@@ -907,6 +1017,9 @@ pub(crate) fn decode_intent_row(key: &[u8], value: &[u8]) -> Result<Intent, Stri
     Ok(Intent::new(kind, execution, idempotence_key, payload))
 }
 
+// === Scope codec and wire helpers ===
+
+/// Write a [`FactScope`] as a tagged union of bytes.
 fn encode_scope(out: &mut Writer, scope: &FactScope) {
     match scope {
         FactScope::Global => out.u8(0),
@@ -920,6 +1033,7 @@ fn encode_scope(out: &mut Writer, scope: &FactScope) {
     }
 }
 
+/// Read a [`FactScope`] written by [`encode_scope`].
 fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {
     match reader.u8().row()? {
         0 => Ok(FactScope::Global),
@@ -933,6 +1047,7 @@ fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {
     }
 }
 
+/// Decode a standalone `scope_key` column back into a [`FactScope`].
 fn decode_scope_key(bytes: &[u8]) -> Result<FactScope, String> {
     let mut reader = Reader::new(bytes);
     let scope = decode_scope(&mut reader)?;
@@ -940,26 +1055,34 @@ fn decode_scope_key(bytes: &[u8]) -> Result<FactScope, String> {
     Ok(scope)
 }
 
+/// Interpret a row key as a 32-byte [`FactId`].
 pub(crate) fn decode_fact_id(bytes: &[u8]) -> Result<FactId, String> {
     bytes
         .try_into()
         .map_err(|_| format!("expected 32-byte fact id, got {}", bytes.len()))
 }
 
+/// The all-zero [`FactId`] stored in the scope columns of non-scoped facts.
 const EMPTY_FACT_ID: FactId = [0u8; 32];
 
+/// Run `write` against a fresh [`Writer`] and return the encoded bytes.
 fn encoded_row(write: impl FnOnce(&mut Writer)) -> Vec<u8> {
     let mut out = Writer::new();
     write(&mut out);
     out.finish()
 }
 
+/// Write the three scope columns (`tag`, `kind`, `id`) of a [`FACTS`] row.
 fn write_fact_scope_columns(out: &mut Writer, scope: &str, kind: &str, id: &FactId) {
     out.string_u32be(scope).expect("scope tag fits u32");
     out.string_u32be(kind).expect("scope kind fits u32");
     out.fixed(id);
 }
 
+/// Attach row-decoding context to a [`WireError`].
+///
+/// Decoders call `.row()` on every `wire` read so a malformed row reports
+/// *which layer* failed rather than a bare wire error.
 trait RowWireResult<T> {
     fn row(self) -> Result<T, String>;
 }
