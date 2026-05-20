@@ -885,7 +885,7 @@ fn cutover_content_read_models_have_normal_sqlite_tables() {
 fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically() {
     let root = root();
     let context_change_pipeline = source_text(&root.join("src/core/context_change_pipeline.rs"));
-    let runtime = source_text(&root.join("src/protocol/runtime.rs"));
+    let app = source_text(&root.join("src/protocol/app.rs"));
     let send_network_frame =
         source_text(&root.join("src/protocol/intents/transport/send_network_frame.rs"));
 
@@ -904,17 +904,17 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
                 .to_string(),
         );
     }
-    if runtime.contains("network::delete_inbound(runtime.store(), &inbound)?;")
-        && !runtime.contains("if !dispatched.retried")
+    if app.contains("network::delete_inbound(runtime.store(), &inbound)?;")
+        && !app.contains("if !dispatched.retried")
     {
         offenders.push(
-            "src/protocol/runtime.rs deletes inbound network bytes before the protocol receive effect is proven durable"
+            "src/protocol/app.rs deletes inbound network bytes before the protocol receive effect is proven durable"
                 .to_string(),
         );
     }
-    if runtime.contains("network::delete_inbound") && !runtime.contains("!dispatched.retried") {
+    if app.contains("network::delete_inbound") && !app.contains("!dispatched.retried") {
         offenders.push(
-            "src/protocol/runtime.rs deletes restart-local inbound rows even when receive dispatch asked to retry"
+            "src/protocol/app.rs deletes restart-local inbound rows even when receive dispatch asked to retry"
                 .to_string(),
         );
     }
@@ -947,14 +947,14 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
     let core_schema = source_text(&root.join("src/core/schema.p8sql"));
     let intents_schema = source_text(&root.join("src/protocol/intents/schema.p8sql"));
     let network = source_text(&root.join("src/core/network.rs"));
-    let runtime = source_text(&root.join("src/protocol/runtime.rs"));
+    let app = source_text(&root.join("src/protocol/app.rs"));
 
     let durable_in_core_schema =
         core_schema.contains("table network_in {") || core_schema.contains("table network_out {");
     let memory_in_queue_module = network.contains("memory-local")
         || network.contains("restart-local")
         || network.contains("Schema::memory_row_table");
-    let runtime_loads_queue_schema = runtime.contains("network::SCHEMAS");
+    let runtime_loads_queue_schema = app.contains("network::SCHEMAS");
 
     let mut offenders = Vec::new();
     if durable_in_core_schema && memory_in_queue_module {
@@ -963,9 +963,8 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
         );
     }
     if memory_in_queue_module && !runtime_loads_queue_schema {
-        offenders.push(
-            "network declares memory schemas, but ProtocolRuntime does not load network::SCHEMAS",
-        );
+        offenders
+            .push("network declares memory schemas, but Runtime does not load network::SCHEMAS");
     }
     if source_text(&root.join("src/protocol/intents/schema.p8sql"))
         .contains("send_network_frame_cursors")

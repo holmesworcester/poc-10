@@ -193,11 +193,10 @@ src/
     schema_dsl.rs
 
   protocol/
+    app.rs
     command_handlers.rs
-    commands.rs
     facts.rs
     registry.rs
-    runtime.rs
     facts/
       schema.p8sql
       <module>.rs

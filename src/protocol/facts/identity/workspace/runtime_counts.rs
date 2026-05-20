@@ -4,10 +4,10 @@
 //! protocol runtime state across facts, the context change pipeline, connections, and
 //! accepted invites for one user-facing diagnostic report.
 
+use crate::core::runtime::Runtime;
 use crate::protocol::facts::connection;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::sync::shared_fact;
-use crate::protocol::runtime::ProtocolRuntime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeCountReport {
@@ -20,7 +20,7 @@ pub struct RuntimeCountReport {
     pub invite_accepted: usize,
 }
 
-pub fn runtime_count_report(runtime: &ProtocolRuntime) -> Result<RuntimeCountReport, String> {
+pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, String> {
     let workspace_rows = runtime
         .store()
         .table_row_count(super::rows::WORKSPACE_ROWS)

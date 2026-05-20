@@ -1,7 +1,7 @@
 use crate::core::context_change_pipeline::commit_projected_context_offers;
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::runtime::Runtime;
 use crate::core::store::Store;
-use crate::protocol::runtime::ProtocolRuntime;
 use std::collections::BTreeSet;
 
 use super::fact::{CascadeFact, MAX_DEPS, PAYLOAD_BYTES};
@@ -70,7 +70,7 @@ pub fn generate_deps(
     })
 }
 
-pub fn replay_deps_reverse(runtime: &mut ProtocolRuntime) -> Result<ReplayDepsReceipt, String> {
+pub fn replay_deps_reverse(runtime: &mut Runtime) -> Result<ReplayDepsReceipt, String> {
     let mut rows = runtime
         .store()
         .table_rows(rows::CASCADE_STAGED_FACT_ROWS)
@@ -134,7 +134,7 @@ fn materialize_replayed_cascade_offers(
     Ok(applied.len())
 }
 
-fn applied_cascade_fact_count(runtime: &ProtocolRuntime) -> usize {
+fn applied_cascade_fact_count(runtime: &Runtime) -> usize {
     let role = crate::protocol::matchers::exact_fact_role();
     runtime
         .facts()
@@ -155,10 +155,11 @@ fn applied_cascade_fact_count(runtime: &ProtocolRuntime) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::app::MATCH_RUNTIME;
 
     #[test]
     fn replay_deps_reverse_applies_reverse_staged_dependencies() {
-        let mut runtime = ProtocolRuntime::open_memory().expect("open runtime");
+        let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("open runtime");
         generate_deps(runtime.store(), 2, 1).expect("generate staged deps");
 
         let receipt = replay_deps_reverse(&mut runtime).expect("replay reverse deps");
@@ -175,7 +176,7 @@ mod tests {
 
     #[test]
     fn replay_deps_reverse_counts_only_facts_that_offer_completion() {
-        let mut runtime = ProtocolRuntime::open_memory().expect("open runtime");
+        let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("open runtime");
         generate_deps(runtime.store(), 2, 1).expect("generate staged deps");
         runtime
             .store()

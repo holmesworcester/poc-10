@@ -22,7 +22,7 @@ use crate::protocol::facts::{content, encryption, identity};
 use crate::protocol::intents::content::purge_below_retention_floor::{
     purge_below_retention_floor_intent, PurgeBelowRetentionFloor,
 };
-use crate::protocol::runtime::ProtocolRuntime;
+use crate::protocol::registry::CLI_EFFECT_HANDLER_ROUTES;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -47,15 +47,12 @@ fn command_error(reason: &str) -> String {
 
 pub struct MatchCliContext {
     db: Option<PathBuf>,
-    runtime: ProtocolRuntime,
+    runtime: Runtime,
 }
 
 impl MatchCliContext {
     pub fn new(runtime: Runtime, db: Option<PathBuf>) -> Self {
-        Self {
-            db,
-            runtime: ProtocolRuntime::from_runtime(runtime),
-        }
+        Self { db, runtime }
     }
 
     fn db_path(&self, command: &str) -> Result<&PathBuf, String> {
@@ -64,11 +61,11 @@ impl MatchCliContext {
             .ok_or_else(|| command_error(&format!("{command} requires --db PATH")))
     }
 
-    fn runtime(&self) -> &ProtocolRuntime {
+    fn runtime(&self) -> &Runtime {
         &self.runtime
     }
 
-    fn runtime_mut(&mut self) -> &mut ProtocolRuntime {
+    fn runtime_mut(&mut self) -> &mut Runtime {
         &mut self.runtime
     }
 
@@ -325,7 +322,9 @@ pub(crate) fn key_derive(
     let scanned_key_wraps = encryption::commands::key_wrap_count(ctx.runtime())?;
     for _ in 0..4 {
         ctx.runtime_mut().process_projection_until_idle(8, limit)?;
-        let dispatched = ctx.runtime_mut().dispatch_cli_intents(limit)?;
+        let dispatched = ctx
+            .runtime_mut()
+            .dispatch_intents_excluding(CLI_EFFECT_HANDLER_ROUTES, limit)?;
         if dispatched.is_idle() {
             break;
         }
@@ -1008,7 +1007,7 @@ pub(crate) fn clock(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliO
     ]))
 }
 
-fn next_cli_timestamp(runtime: &ProtocolRuntime) -> Result<u64, String> {
+fn next_cli_timestamp(runtime: &Runtime) -> Result<u64, String> {
     let observed_max = max_cli_timestamp(runtime.store())?;
     clock::next_timestamp(runtime.store(), observed_max)
 }
@@ -1020,7 +1019,7 @@ fn max_cli_timestamp(store: &crate::core::store::Store) -> Result<u64, String> {
 }
 
 fn enqueue_floor_retention(
-    runtime: &mut ProtocolRuntime,
+    runtime: &mut Runtime,
     workspace_id: [u8; 32],
     setting_id: [u8; 32],
     floor_minute: u64,
@@ -1264,10 +1263,10 @@ fn parse_disappearing_tighten_args(values: &[String]) -> Result<DisappearingTigh
     })
 }
 
-fn process_runtime_until_idle(runtime: &mut ProtocolRuntime) -> Result<(), String> {
+fn process_runtime_until_idle(runtime: &mut Runtime) -> Result<(), String> {
     for _ in 0..4 {
         runtime.process_projection_until_idle(8, 512)?;
-        let dispatched = runtime.dispatch_cli_intents(512)?;
+        let dispatched = runtime.dispatch_intents_excluding(CLI_EFFECT_HANDLER_ROUTES, 512)?;
         if dispatched.is_idle() {
             runtime.process_projection_until_idle(8, 512)?;
             return Ok(());

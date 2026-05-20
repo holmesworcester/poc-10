@@ -7,6 +7,8 @@ use topo::core::command_context::{
 };
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
+use topo::core::runtime::Runtime;
+use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::facts::content::message as content_message;
 use topo::protocol::facts::encryption::{
     fact::{LocalKeySecretFact, RemovalFrontierFact},
@@ -17,7 +19,6 @@ use topo::protocol::facts::identity::workspace::{
     commands::create_workspace, rows as workspace_rows,
 };
 use topo::protocol::registry::PROTOCOL;
-use topo::protocol::runtime::ProtocolRuntime;
 
 struct FixedClock(Cell<u64>);
 
@@ -49,7 +50,7 @@ impl IdentityVault for EmptyVault {
 
 #[test]
 fn runtime_submits_command_output_and_projects_workspace_rows() {
-    let mut runtime = ProtocolRuntime::open_memory().expect("runtime");
+    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
     let clock = FixedClock(Cell::new(123_000));
     let vault = EmptyVault;
     let output = {
@@ -96,7 +97,7 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
         60_000,
         "runtime signed message",
     );
-    let mut runtime = ProtocolRuntime::open_memory().expect("runtime");
+    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
 
     runtime.submit_fact(frontier);
     runtime.submit_fact(local_key_secret_fact(

@@ -8,9 +8,9 @@
 use crate::core::command_context::{
     IdentityVault, LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
 };
+use crate::core::runtime::Runtime;
 use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity;
-use crate::protocol::runtime::ProtocolRuntime;
 
 pub struct ContentMessageVault {
     signing: LocalSigningCapability,
@@ -18,10 +18,7 @@ pub struct ContentMessageVault {
 }
 
 impl ContentMessageVault {
-    pub fn for_workspace(
-        runtime: &ProtocolRuntime,
-        workspace_id: [u8; 32],
-    ) -> Result<Self, String> {
+    pub fn for_workspace(runtime: &Runtime, workspace_id: [u8; 32]) -> Result<Self, String> {
         let endpoint = identity::endpoint::local_endpoint::local_endpoint(runtime.store())?
             .ok_or_else(|| "local endpoint is not initialized".to_string())?;
         identity::workspace::local_membership::local_membership(runtime.store(), workspace_id)?
@@ -70,7 +67,7 @@ impl IdentityVault for ContentMessageVault {
 }
 
 fn latest_local_key_secret(
-    runtime: &ProtocolRuntime,
+    runtime: &Runtime,
     workspace_id: [u8; 32],
 ) -> Result<encryption::fact::LocalKeySecretFact, String> {
     runtime

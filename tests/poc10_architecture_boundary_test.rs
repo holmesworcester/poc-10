@@ -573,12 +573,7 @@ fn poc10_protocol_command_handlers_use_core_opened_runtime_and_return_output() {
     let offenders = source_code_matches_in_paths(
         root,
         vec![command_handlers],
-        &[
-            "ProtocolRuntime::open_disk",
-            "println!",
-            "app_cli_command",
-            "_flow",
-        ],
+        &["Runtime::open_disk", "println!", "app_cli_command", "_flow"],
     );
 
     assert!(
@@ -622,10 +617,10 @@ fn poc10_target_projectors_do_not_write_store_rows_directly() {
 #[test]
 fn poc10_runtime_does_not_synthesize_shareable_facts() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let runtime = root.join("src/protocol/runtime.rs");
+    let app = root.join("src/protocol/app.rs");
     let offenders = source_code_matches_in_paths(
         root,
-        vec![runtime],
+        vec![app],
         &[
             "shareable_workspace_id",
             "share_fact_with_workspace_intent_for_fact",
@@ -645,7 +640,6 @@ fn poc10_runtime_does_not_synthesize_shareable_facts() {
 fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let paths = [
-        "src/protocol/runtime.rs",
         "src/protocol/intents/sync/send_compare_response.rs",
         "src/protocol/intents/sync/send_requested_fact.rs",
     ]
@@ -673,7 +667,6 @@ fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
 fn poc10_concrete_protocol_routes_semantic_messages() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let registry = source_text(&root.join("src/protocol/registry.rs"));
-    let runtime = source_text(&root.join("src/protocol/runtime.rs"));
     let receive = source_text(&root.join("src/protocol/facts/transport/transit/receive.rs"));
 
     for required in [
@@ -685,7 +678,7 @@ fn poc10_concrete_protocol_routes_semantic_messages() {
         "ContentMessageDeletionProjector",
     ] {
         assert!(
-            registry.contains(required) || runtime.contains(required) || receive.contains(required),
+            registry.contains(required) || receive.contains(required),
             "normal poc-10 messages must route through semantic content::message facts; missing {required}"
         );
     }

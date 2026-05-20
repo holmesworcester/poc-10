@@ -7,9 +7,9 @@ use crate::core::command_context::{
 };
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::runtime::Runtime;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::{content, encryption};
-use crate::protocol::runtime::ProtocolRuntime;
 
 use super::fact::{
     LocalKeySecretFact, LocalRecipientKeyFact, RecipientKeyFact, RemovalFrontierFact,
@@ -212,7 +212,7 @@ pub fn create_key_frontier(
 }
 
 pub fn latest_local_recipient_key(
-    runtime: &ProtocolRuntime,
+    runtime: &Runtime,
     workspace_id: FactId,
 ) -> Result<Option<FactId>, String> {
     let mut latest = None;
@@ -235,16 +235,13 @@ pub fn latest_local_recipient_key(
 }
 
 pub fn recipient_key_for_rotation(
-    runtime: &ProtocolRuntime,
+    runtime: &Runtime,
     workspace_id: FactId,
 ) -> Result<Option<FactId>, String> {
     latest_local_recipient_key(runtime, workspace_id)
 }
 
-pub fn lookup_key_wrap(
-    runtime: &ProtocolRuntime,
-    query: KeyWrapQuery,
-) -> Result<KeyWrapLookup, String> {
+pub fn lookup_key_wrap(runtime: &Runtime, query: KeyWrapQuery) -> Result<KeyWrapLookup, String> {
     if recipient_key_is_superseded(runtime, query.workspace_id, query.recipient_key_id)? {
         return Err("recipient key is missing or superseded".to_string());
     }
@@ -267,10 +264,7 @@ pub fn lookup_key_wrap(
     })
 }
 
-pub fn key_access(
-    runtime: &ProtocolRuntime,
-    query: KeyAccessQuery,
-) -> Result<KeyAccessStatus, String> {
+pub fn key_access(runtime: &Runtime, query: KeyAccessQuery) -> Result<KeyAccessStatus, String> {
     let access = runtime.facts().any(|fact| {
         layout::decode_local_key_secret(fact.body())
             .map(|secret| {
@@ -286,14 +280,14 @@ pub fn key_access(
     })
 }
 
-pub fn local_key_secret_count(runtime: &ProtocolRuntime) -> usize {
+pub fn local_key_secret_count(runtime: &Runtime) -> usize {
     runtime
         .facts()
         .filter(|fact| layout::decode_local_key_secret(fact.body()).is_ok())
         .count()
 }
 
-pub fn local_key_secret_frontiers(runtime: &ProtocolRuntime, workspace_id: FactId) -> Vec<FactId> {
+pub fn local_key_secret_frontiers(runtime: &Runtime, workspace_id: FactId) -> Vec<FactId> {
     runtime
         .facts()
         .filter_map(|fact| layout::decode_local_key_secret(fact.body()).ok())
@@ -302,7 +296,7 @@ pub fn local_key_secret_frontiers(runtime: &ProtocolRuntime, workspace_id: FactI
         .collect()
 }
 
-pub fn key_wrap_count(runtime: &ProtocolRuntime) -> Result<usize, String> {
+pub fn key_wrap_count(runtime: &Runtime) -> Result<usize, String> {
     runtime
         .store()
         .table_rows(super::rows::KEY_WRAP_ROWS)
@@ -310,10 +304,7 @@ pub fn key_wrap_count(runtime: &ProtocolRuntime) -> Result<usize, String> {
         .map_err(|err| format!("load key wraps: {err}"))
 }
 
-pub fn workspace_key_wrap_count(
-    runtime: &ProtocolRuntime,
-    workspace_id: FactId,
-) -> Result<usize, String> {
+pub fn workspace_key_wrap_count(runtime: &Runtime, workspace_id: FactId) -> Result<usize, String> {
     Ok(runtime
         .store()
         .table_rows(super::rows::KEY_WRAP_ROWS)
@@ -324,10 +315,7 @@ pub fn workspace_key_wrap_count(
         .count())
 }
 
-fn workspace_retired_from_access(
-    runtime: &ProtocolRuntime,
-    workspace_id: FactId,
-) -> Result<bool, String> {
+fn workspace_retired_from_access(runtime: &Runtime, workspace_id: FactId) -> Result<bool, String> {
     let tombstones = runtime
         .store()
         .table_rows_with_key_prefix(
@@ -364,7 +352,7 @@ fn workspace_retired_from_access(
 }
 
 pub fn create_history_node(
-    runtime: &ProtocolRuntime,
+    runtime: &Runtime,
     input: CreateHistoryNode,
 ) -> Result<CommandOutput<CreateHistoryNodeReceipt>, String> {
     if history_source_is_tombstoned(runtime, input.source_secret_id)? {
@@ -421,7 +409,7 @@ pub fn create_history_node(
     .with_facts(vec![fact]))
 }
 
-pub fn chop_now(runtime: &mut ProtocolRuntime, input: ChopNow) -> Result<ChopNowReceipt, String> {
+pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt, String> {
     let old_recipient = latest_local_recipient_key(runtime, input.workspace_id)?;
     if let Some(previous) = old_recipient {
         let clock = FixedClock(input.created_at_ms);
@@ -466,7 +454,7 @@ pub fn chop_now(runtime: &mut ProtocolRuntime, input: ChopNow) -> Result<ChopNow
 }
 
 fn recipient_key_is_superseded(
-    runtime: &ProtocolRuntime,
+    runtime: &Runtime,
     workspace_id: FactId,
     recipient_key_id: FactId,
 ) -> Result<bool, String> {
@@ -517,7 +505,7 @@ fn history_source_material(
 }
 
 fn history_source_is_tombstoned(
-    runtime: &ProtocolRuntime,
+    runtime: &Runtime,
     source_secret_id: FactId,
 ) -> Result<bool, String> {
     for fact in runtime.facts() {
@@ -531,7 +519,7 @@ fn history_source_is_tombstoned(
     Ok(false)
 }
 
-fn process_runtime_until_idle(runtime: &mut ProtocolRuntime) -> Result<(), String> {
+fn process_runtime_until_idle(runtime: &mut Runtime) -> Result<(), String> {
     for _ in 0..4 {
         runtime.process_projection_until_idle(8, 512)?;
         let dispatched = runtime.dispatch_intents(512)?;

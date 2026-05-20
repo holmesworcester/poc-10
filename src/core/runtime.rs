@@ -86,7 +86,7 @@ pub struct HandlerRoute {
     pub factory: HandlerFactory,
 }
 
-pub struct HandlerSet {
+struct HandlerSet {
     handlers: Vec<Box<dyn IntentHandler>>,
 }
 
@@ -346,7 +346,16 @@ impl Runtime {
         Ok(WorkStatus::from_dispatch_report(&report))
     }
 
-    pub fn dispatch_with_handlers(
+    pub fn dispatch_intents_excluding(
+        &mut self,
+        excluded_handler_names: &[&str],
+        limit_per_handler: usize,
+    ) -> Result<WorkStatus, String> {
+        let handlers = HandlerSet::new_excluding(self.description.handlers, excluded_handler_names);
+        self.dispatch_with_handlers(&handlers, limit_per_handler)
+    }
+
+    fn dispatch_with_handlers(
         &mut self,
         handlers: &HandlerSet,
         limit_per_handler: usize,

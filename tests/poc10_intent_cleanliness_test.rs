@@ -977,6 +977,33 @@ fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
 }
 
 #[test]
+fn protocol_runtime_wrapper_does_not_reappear() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !root.join("src/protocol/runtime.rs").exists(),
+        "protocol/runtime.rs should not reappear; core::Runtime owns runtime mechanics"
+    );
+
+    let mut offenders = Vec::new();
+    for path in rust_files(&root.join("src")) {
+        let text = source_text(&path);
+        for needle in ["ProtocolRuntime", "dispatch_cli_intents"] {
+            if text.contains(needle) {
+                offenders.push(format!(
+                    "{} contains {needle}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "protocol runtime wrapper or CLI-specific dispatch API reappeared:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn target_intents_are_themed_handler_files_without_driver_or_intent_submodules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let handler_root = root.join("src/protocol/intents");
@@ -1364,7 +1391,7 @@ fn protocol_cli_files_do_not_own_app_runtime_effects() {
     for path in rust_files_named(&root.join("src/protocol/facts"), "cli.rs") {
         let text = source_text(&path);
         for forbidden in [
-            "ProtocolRuntime::open",
+            "Runtime::open",
             "Runtime::<",
             "Store::open",
             "core::cli::run",
