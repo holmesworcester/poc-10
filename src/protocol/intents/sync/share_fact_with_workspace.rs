@@ -7,8 +7,10 @@
 
 use crate::core::{
     facts::{Fact, FactId},
-    intent_pipeline::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler},
-    intents::{Intent, IntentExecution, IntentKind},
+    intents::{
+        HandlerContext, HandlerFactId, HandlerResult, Intent, IntentExecution, IntentHandler,
+        IntentKind,
+    },
 };
 use crate::protocol::facts::sync::shared_fact;
 use crate::protocol::intents::payload::{PayloadError, PayloadReader, PayloadWriter};

@@ -93,7 +93,7 @@ fn payload_error(err: PayloadError) -> String {
 // connection fact is needed, and returns the opened shared/local facts that
 // core should admit.
 
-use crate::core::intent_pipeline::{
+use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
 use crate::protocol::facts::{

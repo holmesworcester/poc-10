@@ -4,7 +4,7 @@
 //! authorizes removing it. The handler does not scan projection rows; callers
 //! enqueue one intent per child discovered by their own bounded context.
 
-use crate::core::intent_pipeline::{
+use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentExecution, IntentKind};

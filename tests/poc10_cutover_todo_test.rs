@@ -884,23 +884,21 @@ fn cutover_content_read_models_have_normal_sqlite_tables() {
 #[test]
 fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically() {
     let root = root();
-    let context_change_pipeline = source_text(&root.join("src/core/context_change_pipeline.rs"));
+    let pipeline = source_text(&root.join("src/core/pipeline.rs"));
     let app = source_text(&root.join("src/protocol/app.rs"));
     let send_network_frame =
         source_text(&root.join("src/protocol/intents/transport/send_network_frame.rs"));
 
     let mut offenders = Vec::new();
-    if context_change_pipeline
-        .contains("apply_atomic_row_intents(&run.intents, store, allowed_tables)")
-    {
+    if pipeline.contains("apply_atomic_row_intents(&run.intents, store, allowed_tables)") {
         offenders.push(
-            "src/core/context_change_pipeline.rs applies protocol row writes after the projector run instead of inside one durable step"
+            "src/core/pipeline.rs applies protocol row writes after the projector run instead of inside one durable step"
                 .to_string(),
         );
     }
-    if context_change_pipeline.contains("fn apply_atomic_row_intents(") {
+    if pipeline.contains("fn apply_atomic_row_intents(") {
         offenders.push(
-            "src/core/context_change_pipeline.rs still has a separate atomic-row-intent transaction path"
+            "src/core/pipeline.rs still has a separate atomic-row-intent transaction path"
                 .to_string(),
         );
     }
@@ -1001,7 +999,7 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
 #[test]
 fn cutover_network_io_intents_are_restart_local_ephemeral() {
     let root = root();
-    let intent_pipeline = source_text(&root.join("src/core/intent_pipeline.rs"));
+    let pipeline = source_text(&root.join("src/core/pipeline.rs"));
     let protocol = source_text(&root.join("src/protocol/registry.rs"));
     let network_io_files = [
         "src/protocol/intents/connection/send_bootstrap_request.rs",
@@ -1039,7 +1037,7 @@ fn cutover_network_io_intents_are_restart_local_ephemeral() {
             ));
         }
     }
-    if !intent_pipeline.contains("intent.execution == IntentExecution::Ephemeral") {
+    if !pipeline.contains("intent.execution == IntentExecution::Ephemeral") {
         offenders.push(
             "IntentPipeline does not visibly keep ephemeral intents out of durable intent rows"
                 .to_string(),

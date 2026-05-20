@@ -166,7 +166,7 @@ mod tests {
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intent_pipeline::{
+use crate::core::intents::{
     retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult,
     IntentHandler,
 };

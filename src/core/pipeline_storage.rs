@@ -1,13 +1,13 @@
 use crate::core::context::{
     ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
 };
-use crate::core::context_change_pipeline::{
-    CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, INTENTS, PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
-    PENDING_TIME_RANGES, TIME_WAKES,
-};
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
 use crate::core::intents::{AtomicIntent, Intent, IntentExecution, IntentKind, TableDelete};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
+use crate::core::pipeline::{
+    CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, INTENTS, PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
+    PENDING_TIME_RANGES, TIME_WAKES,
+};
 use crate::core::projectors::{MatchedContext, ProjectionContext, TimeRange, TimeWake, Timeline};
 use crate::core::store::{ColumnValue, Store, TableName, TableRow};
 use crate::core::wire::{Reader, WireError, Writer};

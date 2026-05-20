@@ -1,5 +1,5 @@
 use topo::core::facts::{Fact, FactScope};
-use topo::core::intent_pipeline::{HandlerContext, IntentHandler};
+use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::protocol::facts::encryption::fact::{
     LocalKeySecretFact, RecipientKeyFact, WrappedSecretKind, NO_PREVIOUS_RECIPIENT_KEY,
 };

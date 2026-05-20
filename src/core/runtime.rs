@@ -7,15 +7,13 @@
 //! registry, schema sources, and atomic row tables.
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
-use crate::core::context_change_pipeline::{
-    persisted_facts, ContextChangePipeline, PipelineReport, INTENTS, PENDING_CONTEXT_CHANGES,
-    PENDING_PROJECTION,
-};
 use crate::core::facts::Fact;
-use crate::core::intent_pipeline::IntentHandler;
-use crate::core::intent_pipeline::{self, DispatchReport, IntentPipeline};
-use crate::core::intents::Intent;
+use crate::core::intents::{Intent, IntentHandler};
 use crate::core::matchers::ContextMatcher;
+use crate::core::pipeline::{
+    self, persisted_facts, DispatchReport, IntentPipeline, PipelineReport, INTENTS,
+    PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
+};
 use crate::core::projectors::{Projector, Timeline};
 use crate::core::store::{Schema, Store, TableName};
 use std::path::Path;
@@ -115,7 +113,7 @@ impl HandlerSet {
     ) -> Result<DispatchReport, String> {
         let mut total = DispatchReport::default();
         for handler in &self.handlers {
-            let report = intent_pipeline::dispatch_deferred_intents_from_store_with_fact_context(
+            let report = pipeline::dispatch_deferred_intents_from_store_with_fact_context(
                 intent_pipeline,
                 handler.as_ref(),
                 store,
@@ -130,7 +128,7 @@ impl HandlerSet {
                 continue;
             }
 
-            let report = intent_pipeline::dispatch_atomic_intents_from_store(
+            let report = pipeline::dispatch_atomic_intents_from_store(
                 intent_pipeline,
                 handler.as_ref(),
                 store,
@@ -145,7 +143,7 @@ impl HandlerSet {
                 continue;
             }
 
-            let report = intent_pipeline::dispatch_ephemeral_intents_with_fact_context_and_store(
+            let report = pipeline::dispatch_ephemeral_intents_with_fact_context_and_store(
                 intent_pipeline,
                 handler.as_ref(),
                 store,
@@ -165,7 +163,6 @@ impl HandlerSet {
 pub struct Runtime {
     description: &'static RuntimeDescription,
     store: Store,
-    context_change_pipeline: ContextChangePipeline,
     intent_pipeline: IntentPipeline,
     projector: Box<dyn Projector>,
     matchers: Vec<Box<dyn ContextMatcher>>,
@@ -199,7 +196,6 @@ impl Runtime {
         Ok(Self {
             description,
             store,
-            context_change_pipeline: ContextChangePipeline::new(),
             intent_pipeline: IntentPipeline::new(),
             projector: (description.projector)(),
             matchers: (description.matchers)(),
@@ -252,9 +248,7 @@ impl Runtime {
     }
 
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
-        let inserted = self
-            .context_change_pipeline
-            .submit_fact_to_store(&self.store, fact.clone())
+        let inserted = pipeline::submit_fact_to_store(&self.store, fact.clone())
             .expect("runtime fact submission should persist");
         if inserted {
             self.intent_pipeline.remember_fact(fact);
@@ -264,9 +258,7 @@ impl Runtime {
 
     pub fn submit_facts(&mut self, facts: impl IntoIterator<Item = Fact>) -> Result<usize, String> {
         let facts = facts.into_iter().collect::<Vec<_>>();
-        let inserted = self
-            .context_change_pipeline
-            .submit_facts_to_store(&self.store, facts.clone())?;
+        let inserted = pipeline::submit_facts_to_store(&self.store, facts.clone())?;
         for fact in facts {
             self.intent_pipeline.remember_fact(fact);
         }
@@ -274,9 +266,7 @@ impl Runtime {
     }
 
     pub fn purge_fact(&mut self, fact_id: crate::core::facts::FactId) -> bool {
-        let changed = self
-            .context_change_pipeline
-            .purge_fact_from_store(&self.store, fact_id)
+        let changed = pipeline::purge_fact_from_store(&self.store, fact_id)
             .expect("runtime fact purge should persist");
         if changed {
             self.intent_pipeline.forget_purged_fact(fact_id);
@@ -305,15 +295,14 @@ impl Runtime {
             .iter()
             .map(|matcher| matcher.as_ref() as &dyn ContextMatcher)
             .collect::<Vec<_>>();
-        self.context_change_pipeline
-            .process_pending_facts_and_context_changes(
-                &mut self.intent_pipeline,
-                self.projector.as_ref(),
-                &matcher_refs,
-                &self.store,
-                self.description.atomic_row_tables,
-                limit,
-            )
+        pipeline::process_pending_facts_and_context_changes(
+            &mut self.intent_pipeline,
+            self.projector.as_ref(),
+            &matcher_refs,
+            &self.store,
+            self.description.atomic_row_tables,
+            limit,
+        )
     }
 
     pub fn process_projection_until_idle(
@@ -376,9 +365,14 @@ impl Runtime {
         end_inclusive: u64,
         limit: usize,
     ) -> usize {
-        self.context_change_pipeline
-            .process_due_time_range(&self.store, timeline, start_exclusive, end_inclusive, limit)
-            .expect("runtime time wake should persist pending projection")
+        pipeline::process_due_time_range(
+            &self.store,
+            timeline,
+            start_exclusive,
+            end_inclusive,
+            limit,
+        )
+        .expect("runtime time wake should persist pending projection")
     }
 }
 

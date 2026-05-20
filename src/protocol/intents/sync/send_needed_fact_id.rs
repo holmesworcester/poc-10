@@ -1,6 +1,6 @@
 //! Send a sync need-id fact for a peer's advertised missing fact.
 
-use crate::core::intent_pipeline::{
+use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
@@ -78,9 +78,7 @@ impl IntentHandler for SendNeededFactIdHandler {
         let input = decode_send_needed_fact_id(raw)?;
         let have_fact = context.require_fact(&input.have_fact_id)?;
         let have = have_id::layout::decode_fact(&have_fact.bytes)?;
-        if crate::core::context_change_pipeline::persisted_fact(context.store()?, &have.fact_id)?
-            .is_some()
-        {
+        if crate::core::pipeline::persisted_fact(context.store()?, &have.fact_id)?.is_some() {
             return Ok(HandlerOutput::new());
         }
         let need = need_id::fact::SyncNeedIdFact {
