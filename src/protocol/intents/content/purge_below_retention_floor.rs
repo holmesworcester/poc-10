@@ -4,7 +4,7 @@
 //! message fact. The handler purges only when the message minute is below the
 //! setting's monotonic retire floor.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::{
     content::message::retention, encryption::disappearing_messages_setting,

@@ -7,6 +7,7 @@
 //! namespaces are part of the concrete protocol.
 
 pub mod facts;
+pub(crate) mod intent_payload;
 pub mod intents;
 pub mod matchers;
 pub mod runtime;

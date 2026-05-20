@@ -1150,9 +1150,9 @@ fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
 }
 
 #[test]
-fn core_handler_dispatch_stays_protocol_neutral() {
+fn core_intent_pipeline_stays_protocol_neutral() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/core/handler_dispatch.rs");
+    let path = root.join("src/core/intent_pipeline.rs");
     let text = source_text(&path);
     let production = production_text_before_unit_tests(&text);
     let mut offenders = Vec::new();
@@ -1174,7 +1174,7 @@ fn core_handler_dispatch_stays_protocol_neutral() {
 
     assert!(
         offenders.is_empty(),
-        "core handler dispatch must stay generic and protocol-neutral:\n{}",
+        "core intent pipeline must stay generic and protocol-neutral:\n{}",
         offenders.join("\n")
     );
 }

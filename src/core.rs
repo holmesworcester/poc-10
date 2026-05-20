@@ -14,7 +14,6 @@ pub mod context_change_pipeline;
 pub mod crypto;
 pub mod daemon;
 pub mod facts;
-pub mod handler_dispatch;
 pub mod intent_pipeline;
 pub mod intents;
 pub mod logical_clock;

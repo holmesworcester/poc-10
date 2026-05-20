@@ -168,7 +168,7 @@ mod tests {
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::handler_dispatch::{
+use crate::core::intent_pipeline::{
     retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};

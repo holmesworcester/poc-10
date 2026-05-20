@@ -26,14 +26,38 @@ use crate::core::crypto::{
     ED25519_PUBLIC_KEY_BYTES, ED25519_SIGNATURE_BYTES, HASH_BYTES, XCHACHA20_POLY1305_KEY_BYTES,
     XCHACHA20_POLY1305_NONCE_BYTES,
 };
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireError {
     WrongLength { expected: usize, actual: usize },
     ValueTooLarge { max: usize, actual: usize },
     InvalidBool { actual: u8 },
+    UnexpectedU8 { expected: u8, actual: u8 },
+    InvalidUtf8,
     NonZeroPadding { index: usize },
 }
+
+impl fmt::Display for WireError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongLength { expected, actual } => {
+                write!(formatter, "expected {expected} bytes, got {actual}")
+            }
+            Self::ValueTooLarge { max, actual } => {
+                write!(formatter, "value has {actual} bytes, max {max}")
+            }
+            Self::InvalidBool { actual } => write!(formatter, "invalid bool byte {actual}"),
+            Self::UnexpectedU8 { expected, actual } => {
+                write!(formatter, "expected byte {expected}, got {actual}")
+            }
+            Self::InvalidUtf8 => write!(formatter, "invalid utf-8"),
+            Self::NonZeroPadding { index } => write!(formatter, "non-zero padding at {index}"),
+        }
+    }
+}
+
+impl std::error::Error for WireError {}
 
 pub trait FixedLayout: Sized {
     const LEN: usize;
@@ -416,6 +440,14 @@ impl Writer {
         self.bytes.push(value);
     }
 
+    pub fn bool8(&mut self, value: bool) {
+        self.u8(u8::from(value));
+    }
+
+    pub fn u16be(&mut self, value: u16) {
+        self.bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
     pub fn u32be(&mut self, value: u32) {
         self.bytes.extend_from_slice(&value.to_be_bytes());
     }
@@ -426,6 +458,34 @@ impl Writer {
 
     pub fn bytes(&mut self, bytes: &[u8]) {
         self.bytes.extend_from_slice(bytes);
+    }
+
+    pub fn bytes_u16be(&mut self, bytes: &[u8]) -> Result<(), WireError> {
+        let len = u16::try_from(bytes.len()).map_err(|_| WireError::ValueTooLarge {
+            max: u16::MAX as usize,
+            actual: bytes.len(),
+        })?;
+        self.u16be(len);
+        self.bytes(bytes);
+        Ok(())
+    }
+
+    pub fn bytes_u32be(&mut self, bytes: &[u8]) -> Result<(), WireError> {
+        let len = u32::try_from(bytes.len()).map_err(|_| WireError::ValueTooLarge {
+            max: u32::MAX as usize,
+            actual: bytes.len(),
+        })?;
+        self.u32be(len);
+        self.bytes(bytes);
+        Ok(())
+    }
+
+    pub fn string_u16be(&mut self, value: &str) -> Result<(), WireError> {
+        self.bytes_u16be(value.as_bytes())
+    }
+
+    pub fn string_u32be(&mut self, value: &str) -> Result<(), WireError> {
+        self.bytes_u32be(value.as_bytes())
     }
 
     pub fn fixed<const N: usize>(&mut self, bytes: &[u8; N]) {
@@ -479,13 +539,21 @@ impl<'a> Reader<'a> {
         Ok(U8::decode(self.take(U8::LEN)?)?.0)
     }
 
+    pub fn bool8(&mut self) -> Result<bool, WireError> {
+        Ok(Bool8::decode(self.take(Bool8::LEN)?)?.0)
+    }
+
     pub fn expect_u8(&mut self, expected: u8) -> Result<(), WireError> {
         let actual = self.u8()?;
         if actual == expected {
             Ok(())
         } else {
-            Err(WireError::InvalidBool { actual })
+            Err(WireError::UnexpectedU8 { expected, actual })
         }
+    }
+
+    pub fn u16be(&mut self) -> Result<u16, WireError> {
+        Ok(U16be::decode(self.take(U16be::LEN)?)?.0)
     }
 
     pub fn u32be(&mut self) -> Result<u32, WireError> {
@@ -508,6 +576,26 @@ impl<'a> Reader<'a> {
 
     pub fn bytes(&mut self, len: usize) -> Result<&'a [u8], WireError> {
         self.take(len)
+    }
+
+    pub fn bytes_u16be(&mut self) -> Result<&'a [u8], WireError> {
+        let len = self.u16be()? as usize;
+        self.take(len)
+    }
+
+    pub fn bytes_u32be(&mut self) -> Result<&'a [u8], WireError> {
+        let len = self.u32be()? as usize;
+        self.take(len)
+    }
+
+    pub fn string_u16be(&mut self) -> Result<String, WireError> {
+        let bytes = self.bytes_u16be()?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)
+    }
+
+    pub fn string_u32be(&mut self) -> Result<String, WireError> {
+        let bytes = self.bytes_u32be()?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)
     }
 
     pub fn finish(self) -> Result<(), WireError> {

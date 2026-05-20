@@ -10,6 +10,7 @@ use crate::core::intents::{AtomicIntent, Intent, IntentExecution, IntentKind, Ta
 use crate::core::matchers::{ContextMatch, ContextMatcher};
 use crate::core::projection::{MatchedContext, ProjectionContext, TimeRange, TimeWake, Timeline};
 use crate::core::store::{ColumnValue, Store, TableName, TableRow};
+use crate::core::wire::{Reader, WireError, Writer};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) type ExactContextKey = (Role, FactScope, Selector);
@@ -600,50 +601,62 @@ fn load_context_offers_from_rows(
 }
 
 fn typed_context_need_key(need: &ContextNeed) -> Vec<u8> {
-    let mut key = Vec::new();
-    put_id(&mut key, &need.owner);
-    put_bytes_u32(&mut key, need.role.as_str().as_bytes());
-    put_bytes_u32(&mut key, &scope_key(&need.scope));
-    put_bytes_u32(&mut key, need.selector.as_bytes());
-    key
+    encoded_row(|key| {
+        key.fixed(&need.owner);
+        key.string_u32be(need.role.as_str())
+            .expect("context role fits u32");
+        key.bytes_u32be(&scope_key(&need.scope))
+            .expect("scope key fits u32");
+        key.bytes_u32be(need.selector.as_bytes())
+            .expect("selector fits u32");
+    })
 }
 
 fn typed_context_offer_key(offer: &ContextOffer) -> Vec<u8> {
-    let mut key = Vec::new();
-    put_id(&mut key, &offer.owner);
-    put_bytes_u32(&mut key, offer.role.as_str().as_bytes());
-    put_bytes_u32(&mut key, &scope_key(&offer.scope));
-    put_bytes_u32(&mut key, offer.selector.as_bytes());
-    put_id(&mut key, &offer.payload_ref);
-    key
+    encoded_row(|key| {
+        key.fixed(&offer.owner);
+        key.string_u32be(offer.role.as_str())
+            .expect("context role fits u32");
+        key.bytes_u32be(&scope_key(&offer.scope))
+            .expect("scope key fits u32");
+        key.bytes_u32be(offer.selector.as_bytes())
+            .expect("selector fits u32");
+        key.fixed(&offer.payload_ref);
+    })
 }
 
 fn typed_time_wake_key(wake: &TimeWake) -> Vec<u8> {
-    let mut key = Vec::new();
-    put_string_u32(&mut key, wake.timeline.as_str());
-    put_u64(&mut key, wake.at);
-    put_id(&mut key, &wake.owner);
-    key
+    encoded_row(|key| {
+        key.string_u32be(wake.timeline.as_str())
+            .expect("timeline fits u32");
+        key.u64be(wake.at);
+        key.fixed(&wake.owner);
+    })
 }
 
 fn typed_pending_time_range_key(owner: FactId, range: &TimeRange) -> Vec<u8> {
-    let mut key = Vec::new();
-    put_id(&mut key, &owner);
-    put_string_u32(&mut key, range.timeline.as_str());
-    put_bool(&mut key, range.start_exclusive.is_some());
-    put_u64(&mut key, range.start_exclusive.unwrap_or(0));
-    put_u64(&mut key, range.end_inclusive);
-    key
+    encoded_row(|key| {
+        key.fixed(&owner);
+        key.string_u32be(range.timeline.as_str())
+            .expect("timeline fits u32");
+        key.bool8(range.start_exclusive.is_some());
+        key.u64be(range.start_exclusive.unwrap_or(0));
+        key.u64be(range.end_inclusive);
+    })
 }
 
 fn pending_context_need_row(need: &ContextNeed) -> TableRow {
-    let mut key = Vec::new();
-    put_id(&mut key, &need.owner);
-    put_u64(&mut key, 0);
-    put_string_u32(&mut key, need.role.as_str());
-    put_bytes_u32(&mut key, &scope_key(&need.scope));
-    put_bytes_u32(&mut key, need.selector.as_bytes());
-    put_id(&mut key, &[0; 32]);
+    let key = encoded_row(|key| {
+        key.fixed(&need.owner);
+        key.u64be(0);
+        key.string_u32be(need.role.as_str())
+            .expect("context role fits u32");
+        key.bytes_u32be(&scope_key(&need.scope))
+            .expect("scope key fits u32");
+        key.bytes_u32be(need.selector.as_bytes())
+            .expect("selector fits u32");
+        key.fixed(&EMPTY_FACT_ID);
+    });
     TableRow {
         table: PENDING_CONTEXT_CHANGES,
         key,
@@ -652,13 +665,17 @@ fn pending_context_need_row(need: &ContextNeed) -> TableRow {
 }
 
 fn pending_context_offer_row(offer: &ContextOffer) -> TableRow {
-    let mut key = Vec::new();
-    put_id(&mut key, &offer.owner);
-    put_u64(&mut key, 1);
-    put_string_u32(&mut key, offer.role.as_str());
-    put_bytes_u32(&mut key, &scope_key(&offer.scope));
-    put_bytes_u32(&mut key, offer.selector.as_bytes());
-    put_id(&mut key, &offer.payload_ref);
+    let key = encoded_row(|key| {
+        key.fixed(&offer.owner);
+        key.u64be(1);
+        key.string_u32be(offer.role.as_str())
+            .expect("context role fits u32");
+        key.bytes_u32be(&scope_key(&offer.scope))
+            .expect("scope key fits u32");
+        key.bytes_u32be(offer.selector.as_bytes())
+            .expect("selector fits u32");
+        key.fixed(&offer.payload_ref);
+    });
     TableRow {
         table: PENDING_CONTEXT_CHANGES,
         key,
@@ -667,40 +684,32 @@ fn pending_context_offer_row(offer: &ContextOffer) -> TableRow {
 }
 
 pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = Writer::new();
     encode_scope(&mut out, scope);
-    out
+    out.finish()
 }
 
 pub(crate) fn intent_row_key(intent: &Intent) -> Vec<u8> {
-    let mut key = Vec::new();
-    put_string_u32(&mut key, intent.kind.as_str());
-    put_bytes_u32(&mut key, &intent.key);
-    key
+    encoded_row(|key| {
+        key.string_u32be(intent.kind.as_str())
+            .expect("intent kind fits u32");
+        key.bytes_u32be(&intent.key)
+            .expect("intent idempotence key fits u32");
+    })
 }
 
 fn typed_fact_value(fact: &Fact) -> Vec<u8> {
-    let mut out = Vec::new();
-    match &fact.scope {
-        FactScope::Global => {
-            put_string_u32(&mut out, "global");
-            put_string_u32(&mut out, "");
-            put_id(&mut out, &EMPTY_FACT_ID);
+    encoded_row(|out| {
+        match &fact.scope {
+            FactScope::Global => write_fact_scope_columns(out, "global", "", &EMPTY_FACT_ID),
+            FactScope::Local => write_fact_scope_columns(out, "local", "", &EMPTY_FACT_ID),
+            FactScope::Scoped { kind, id } => {
+                write_fact_scope_columns(out, "scoped", kind.as_str(), id)
+            }
         }
-        FactScope::Local => {
-            put_string_u32(&mut out, "local");
-            put_string_u32(&mut out, "");
-            put_id(&mut out, &EMPTY_FACT_ID);
-        }
-        FactScope::Scoped { kind, id } => {
-            put_string_u32(&mut out, "scoped");
-            put_string_u32(&mut out, kind.as_str());
-            put_id(&mut out, id);
-        }
-    }
-    put_u64(&mut out, fact.timestamp);
-    put_bytes_u32(&mut out, &fact.bytes);
-    out
+        out.u64be(fact.timestamp);
+        out.bytes_u32be(&fact.bytes).expect("fact bytes fit u32");
+    })
 }
 
 pub fn persisted_fact(store: &Store, id: &FactId) -> Result<Option<Fact>, String> {
@@ -732,13 +741,13 @@ pub fn persisted_context(store: &Store, owner: &FactId) -> Result<Option<Context
 pub(crate) fn decode_fact_row(key: &[u8], value: &[u8]) -> Result<Fact, String> {
     let id = decode_fact_id(key)?;
     let mut reader = Reader::new(value);
-    let scope_tag = reader.take_string_u32()?;
-    let scope_kind = reader.take_string_u32()?;
-    let scope_id = reader.take_id()?;
+    let scope_tag = reader.string_u32be().row()?;
+    let scope_kind = reader.string_u32be().row()?;
+    let scope_id = reader.array::<32>().row()?;
     let scope = decode_fact_scope_columns(&scope_tag, &scope_kind, &scope_id)?;
-    let timestamp = reader.take_u64()?;
-    let bytes = reader.take_bytes_u32()?.to_vec();
-    reader.finish()?;
+    let timestamp = reader.u64be().row()?;
+    let bytes = reader.bytes_u32be().row()?.to_vec();
+    reader.finish().row()?;
     if fact_id(&bytes) != id {
         return Err("fact row key does not match fact bytes".to_string());
     }
@@ -781,11 +790,11 @@ pub(crate) fn decode_context_need_row(key: &[u8], value: &[u8]) -> Result<Contex
         return Err("typed context need row should not have value bytes".to_string());
     }
     let mut reader = Reader::new(key);
-    let owner = reader.take_id()?;
-    let role = Role::new(reader.take_string_u32()?)?;
-    let scope = decode_scope_key(reader.take_bytes_u32()?)?;
-    let selector = Selector::from_bytes(reader.take_bytes_u32()?.to_vec());
-    reader.finish()?;
+    let owner = reader.array::<32>().row()?;
+    let role = Role::new(reader.string_u32be().row()?)?;
+    let scope = decode_scope_key(reader.bytes_u32be().row()?)?;
+    let selector = Selector::from_bytes(reader.bytes_u32be().row()?.to_vec());
+    reader.finish().row()?;
     Ok(ContextNeed {
         owner,
         role,
@@ -799,12 +808,12 @@ pub(crate) fn decode_context_offer_row(key: &[u8], value: &[u8]) -> Result<Conte
         return Err("typed context offer row should not have value bytes".to_string());
     }
     let mut reader = Reader::new(key);
-    let owner = reader.take_id()?;
-    let role = Role::new(reader.take_string_u32()?)?;
-    let scope = decode_scope_key(reader.take_bytes_u32()?)?;
-    let selector = Selector::from_bytes(reader.take_bytes_u32()?.to_vec());
-    let payload_ref = reader.take_id()?;
-    reader.finish()?;
+    let owner = reader.array::<32>().row()?;
+    let role = Role::new(reader.string_u32be().row()?)?;
+    let scope = decode_scope_key(reader.bytes_u32be().row()?)?;
+    let selector = Selector::from_bytes(reader.bytes_u32be().row()?.to_vec());
+    let payload_ref = reader.array::<32>().row()?;
+    reader.finish().row()?;
     Ok(ContextOffer {
         owner,
         role,
@@ -822,13 +831,13 @@ pub(crate) fn decode_pending_context_change_row(
         return Err("pending context change row value must be empty".to_string());
     }
     let mut reader = Reader::new(key);
-    let owner = reader.take_id()?;
-    let change_kind = reader.take_u64()?;
-    let role = Role::new(reader.take_string_u32()?)?;
-    let scope = decode_scope_key(reader.take_bytes_u32()?)?;
-    let selector = Selector::from_bytes(reader.take_bytes_u32()?.to_vec());
-    let payload_ref = reader.take_id()?;
-    reader.finish()?;
+    let owner = reader.array::<32>().row()?;
+    let change_kind = reader.u64be().row()?;
+    let role = Role::new(reader.string_u32be().row()?)?;
+    let scope = decode_scope_key(reader.bytes_u32be().row()?)?;
+    let selector = Selector::from_bytes(reader.bytes_u32be().row()?.to_vec());
+    let payload_ref = reader.array::<32>().row()?;
+    reader.finish().row()?;
 
     let mut delta = ContextSetDelta::default();
     match change_kind {
@@ -855,10 +864,10 @@ pub(crate) fn decode_time_wake_row(key: &[u8], value: &[u8]) -> Result<TimeWake,
         return Err("time wake row value must be empty".to_string());
     }
     let mut reader = Reader::new(key);
-    let timeline = Timeline::new(reader.take_string_u32()?)?;
-    let at = reader.take_u64()?;
-    let owner = reader.take_id()?;
-    reader.finish()?;
+    let timeline = Timeline::new(reader.string_u32be().row()?)?;
+    let at = reader.u64be().row()?;
+    let owner = reader.array::<32>().row()?;
+    reader.finish().row()?;
     Ok(TimeWake {
         owner,
         timeline,
@@ -871,12 +880,12 @@ fn decode_pending_time_range_row(key: &[u8], value: &[u8]) -> Result<TimeRange, 
         return Err("pending time range row value must be empty".to_string());
     }
     let mut reader = Reader::new(key);
-    let _owner = reader.take_id()?;
-    let timeline = Timeline::new(reader.take_string_u32()?)?;
-    let has_start = reader.take_bool()?;
-    let start = reader.take_u64()?;
-    let end_inclusive = reader.take_u64()?;
-    reader.finish()?;
+    let _owner = reader.array::<32>().row()?;
+    let timeline = Timeline::new(reader.string_u32be().row()?)?;
+    let has_start = reader.bool8().row()?;
+    let start = reader.u64be().row()?;
+    let end_inclusive = reader.u64be().row()?;
+    reader.finish().row()?;
     Ok(TimeRange {
         timeline,
         start_exclusive: has_start.then_some(start),
@@ -885,10 +894,11 @@ fn decode_pending_time_range_row(key: &[u8], value: &[u8]) -> Result<TimeRange, 
 }
 
 fn typed_intent_value(intent: &Intent) -> Vec<u8> {
-    let mut out = Vec::new();
-    put_u64(&mut out, intent_execution_code(intent.execution));
-    put_bytes_u32(&mut out, &intent.payload);
-    out
+    encoded_row(|out| {
+        out.u64be(intent_execution_code(intent.execution));
+        out.bytes_u32be(&intent.payload)
+            .expect("intent payload fits u32");
+    })
 }
 
 fn intent_execution_code(execution: IntentExecution) -> u64 {
@@ -901,41 +911,42 @@ fn intent_execution_code(execution: IntentExecution) -> u64 {
 
 pub(crate) fn decode_intent_row(key: &[u8], value: &[u8]) -> Result<Intent, String> {
     let mut key_reader = Reader::new(key);
-    let kind = IntentKind::new(key_reader.take_string_u32()?)?;
-    let idempotence_key = key_reader.take_bytes_u32()?.to_vec();
-    key_reader.finish()?;
+    let kind = IntentKind::new(key_reader.string_u32be().row()?)?;
+    let idempotence_key = key_reader.bytes_u32be().row()?.to_vec();
+    key_reader.finish().row()?;
 
     let mut value_reader = Reader::new(value);
-    let execution = match value_reader.take_u64()? {
+    let execution = match value_reader.u64be().row()? {
         0 => IntentExecution::Atomic,
         1 => IntentExecution::Deferred,
         2 => IntentExecution::Ephemeral,
         other => return Err(format!("invalid intent execution tag {other}")),
     };
-    let payload = value_reader.take_bytes_u32()?.to_vec();
-    value_reader.finish()?;
+    let payload = value_reader.bytes_u32be().row()?.to_vec();
+    value_reader.finish().row()?;
     Ok(Intent::new(kind, execution, idempotence_key, payload))
 }
 
-fn encode_scope(out: &mut Vec<u8>, scope: &FactScope) {
+fn encode_scope(out: &mut Writer, scope: &FactScope) {
     match scope {
-        FactScope::Global => put_u8(out, 0),
-        FactScope::Local => put_u8(out, 1),
+        FactScope::Global => out.u8(0),
+        FactScope::Local => out.u8(1),
         FactScope::Scoped { kind, id } => {
-            put_u8(out, 2);
-            put_string_u16(out, kind.as_str());
-            put_id(out, id);
+            out.u8(2);
+            out.string_u16be(kind.as_str())
+                .expect("scope kind fits u16");
+            out.fixed(id);
         }
     }
 }
 
 fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {
-    match reader.take_u8()? {
+    match reader.u8().row()? {
         0 => Ok(FactScope::Global),
         1 => Ok(FactScope::Local),
         2 => {
-            let kind = ScopeKind::new(reader.take_string_u16()?)?;
-            let id = reader.take_id()?;
+            let kind = ScopeKind::new(reader.string_u16be().row()?)?;
+            let id = reader.array::<32>().row()?;
             Ok(FactScope::Scoped { kind, id })
         }
         other => Err(format!("invalid fact scope tag {other}")),
@@ -945,7 +956,7 @@ fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {
 fn decode_scope_key(bytes: &[u8]) -> Result<FactScope, String> {
     let mut reader = Reader::new(bytes);
     let scope = decode_scope(&mut reader)?;
-    reader.finish()?;
+    reader.finish().row()?;
     Ok(scope)
 }
 
@@ -957,142 +968,24 @@ pub(crate) fn decode_fact_id(bytes: &[u8]) -> Result<FactId, String> {
 
 const EMPTY_FACT_ID: FactId = [0u8; 32];
 
-fn put_u8(out: &mut Vec<u8>, value: u8) {
-    out.push(value);
+fn encoded_row(write: impl FnOnce(&mut Writer)) -> Vec<u8> {
+    let mut out = Writer::new();
+    write(&mut out);
+    out.finish()
 }
 
-fn put_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_be_bytes());
+fn write_fact_scope_columns(out: &mut Writer, scope: &str, kind: &str, id: &FactId) {
+    out.string_u32be(scope).expect("scope tag fits u32");
+    out.string_u32be(kind).expect("scope kind fits u32");
+    out.fixed(id);
 }
 
-fn put_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_be_bytes());
+trait RowWireResult<T> {
+    fn row(self) -> Result<T, String>;
 }
 
-fn put_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_be_bytes());
-}
-
-fn put_bool(out: &mut Vec<u8>, value: bool) {
-    put_u8(out, u8::from(value));
-}
-
-fn put_id(out: &mut Vec<u8>, id: &FactId) {
-    out.extend_from_slice(id);
-}
-
-fn put_string_u16(out: &mut Vec<u8>, value: &str) {
-    let bytes = value.as_bytes();
-    let len: u16 = bytes.len().try_into().expect("string too long to encode");
-    put_u16(out, len);
-    out.extend_from_slice(bytes);
-}
-
-fn put_string_u32(out: &mut Vec<u8>, value: &str) {
-    put_bytes_u32(out, value.as_bytes());
-}
-
-fn put_bytes_u32(out: &mut Vec<u8>, bytes: &[u8]) {
-    let len: u32 = bytes.len().try_into().expect("bytes too long to encode");
-    put_u32(out, len);
-    out.extend_from_slice(bytes);
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
-    }
-
-    fn take_u8(&mut self) -> Result<u8, String> {
-        Ok(self.take_exact(1)?[0])
-    }
-
-    fn take_bool(&mut self) -> Result<bool, String> {
-        match self.take_u8()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            other => Err(format!("invalid bool byte {other}")),
-        }
-    }
-
-    fn take_u16(&mut self) -> Result<u16, String> {
-        let bytes: [u8; 2] = self
-            .take_exact(2)?
-            .try_into()
-            .expect("slice length checked");
-        Ok(u16::from_be_bytes(bytes))
-    }
-
-    fn take_u32(&mut self) -> Result<u32, String> {
-        let bytes: [u8; 4] = self
-            .take_exact(4)?
-            .try_into()
-            .expect("slice length checked");
-        Ok(u32::from_be_bytes(bytes))
-    }
-
-    fn take_u64(&mut self) -> Result<u64, String> {
-        let bytes: [u8; 8] = self
-            .take_exact(8)?
-            .try_into()
-            .expect("slice length checked");
-        Ok(u64::from_be_bytes(bytes))
-    }
-
-    fn take_id(&mut self) -> Result<FactId, String> {
-        decode_fact_id(self.take_exact(32)?)
-    }
-
-    fn take_string_u16(&mut self) -> Result<String, String> {
-        let len = self.take_u16()? as usize;
-        let bytes = self.take_exact(len)?;
-        std::str::from_utf8(bytes)
-            .map(str::to_string)
-            .map_err(|err| format!("invalid utf-8 string: {err}"))
-    }
-
-    fn take_string_u32(&mut self) -> Result<String, String> {
-        let bytes = self.take_bytes_u32()?;
-        std::str::from_utf8(bytes)
-            .map(str::to_string)
-            .map_err(|err| format!("invalid utf-8 string: {err}"))
-    }
-
-    fn take_bytes_u32(&mut self) -> Result<&'a [u8], String> {
-        let len = self.take_u32()? as usize;
-        self.take_exact(len)
-    }
-
-    fn take_exact(&mut self, len: usize) -> Result<&'a [u8], String> {
-        let end = self
-            .pos
-            .checked_add(len)
-            .ok_or_else(|| "encoded row length overflow".to_string())?;
-        if end > self.bytes.len() {
-            return Err(format!(
-                "encoded row truncated: need {len} bytes at offset {}, total {}",
-                self.pos,
-                self.bytes.len()
-            ));
-        }
-        let out = &self.bytes[self.pos..end];
-        self.pos = end;
-        Ok(out)
-    }
-
-    fn finish(self) -> Result<(), String> {
-        if self.pos == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(format!(
-                "encoded row has {} trailing bytes",
-                self.bytes.len() - self.pos
-            ))
-        }
+impl<T> RowWireResult<T> for Result<T, WireError> {
+    fn row(self) -> Result<T, String> {
+        self.map_err(|err| format!("invalid encoded row: {err}"))
     }
 }

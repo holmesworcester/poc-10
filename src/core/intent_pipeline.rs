@@ -26,13 +26,11 @@ use crate::core::context_change_helpers::{
     validate_atomic_row_intents,
 };
 use crate::core::context_change_pipeline::INTENTS;
-use crate::core::facts::{Fact, FactId};
-use crate::core::handler_dispatch::{
-    retry_intent_reason, HandlerContext, HandlerOutput, IntentHandler,
-};
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{Intent, IntentExecution};
 use crate::core::store::{Store, TableName};
 use std::collections::BTreeMap;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DispatchReport {
@@ -40,6 +38,132 @@ pub struct DispatchReport {
     pub facts: usize,
     pub intents: usize,
     pub retries: usize,
+}
+
+/// Fact ids requested by a handler before it runs.
+pub type HandlerFactId = FactId;
+
+const RETRY_INTENT_PREFIX: &str = "retry intent: ";
+
+/// Mark a handler failure as transient so dispatch leaves the intent queued.
+pub fn retry_intent(reason: impl AsRef<str>) -> String {
+    format!("{RETRY_INTENT_PREFIX}{}", reason.as_ref())
+}
+
+pub fn retry_intent_reason(err: &str) -> Option<&str> {
+    err.strip_prefix(RETRY_INTENT_PREFIX)
+}
+
+/// Read-only inputs handed to an intent handler.
+///
+/// Stored and ephemeral dispatch both build this immediately before `handle`.
+/// The handler gets only the facts it requested plus the store for explicit
+/// query helpers; it cannot reach the runtime pipelines directly.
+#[derive(Clone, Default)]
+pub struct HandlerContext<'a> {
+    facts: BTreeMap<FactId, Fact>,
+    store: Option<&'a Store>,
+}
+
+impl fmt::Debug for HandlerContext<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HandlerContext")
+            .field("facts", &self.facts)
+            .field("has_store", &self.store.is_some())
+            .finish()
+    }
+}
+
+impl<'a> HandlerContext<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_facts(facts: impl IntoIterator<Item = Fact>) -> Self {
+        Self {
+            facts: facts.into_iter().map(|fact| (fact.id, fact)).collect(),
+            store: None,
+        }
+    }
+
+    pub fn with_store(mut self, store: &'a Store) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    pub fn store(&self) -> Result<&Store, String> {
+        self.store
+            .ok_or_else(|| "handler context missing store".to_string())
+    }
+
+    pub fn fact(&self, id: &FactId) -> Option<&Fact> {
+        self.facts.get(id)
+    }
+
+    pub fn facts(&self) -> impl Iterator<Item = &Fact> {
+        self.facts.values()
+    }
+
+    pub fn require_fact(&self, id: &FactId) -> Result<&Fact, String> {
+        self.fact(id)
+            .ok_or_else(|| format!("handler context missing fact {id:?}"))
+    }
+
+    pub fn require_non_local_fact_bytes(&self, id: &FactId) -> Result<&[u8], String> {
+        let fact = self.require_fact(id)?;
+        if fact.scope == FactScope::Local {
+            return Err(format!("handler context refused local fact {id:?}"));
+        }
+        Ok(&fact.bytes)
+    }
+}
+
+/// Handler output feeds facts, purges, and follow-up intents back into the
+/// same dispatch transaction.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HandlerOutput {
+    pub facts: Vec<Fact>,
+    pub purged_facts: Vec<FactId>,
+    pub intents: Vec<Intent>,
+}
+
+impl HandlerOutput {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn fact(mut self, fact: Fact) -> Self {
+        self.facts.push(fact);
+        self
+    }
+
+    pub fn purge_fact(mut self, id: FactId) -> Self {
+        self.purged_facts.push(id);
+        self
+    }
+
+    pub fn intent(mut self, intent: Intent) -> Self {
+        self.intents.push(intent);
+        self
+    }
+}
+
+/// A protocol handler for one or more intent kinds.
+pub trait IntentHandler {
+    fn accepts(&self, _intent: &Intent) -> bool {
+        true
+    }
+
+    fn input_fact_ids(&self, _intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
+        Ok(Vec::new())
+    }
+
+    fn handle(
+        &self,
+        intent: &Intent,
+        context: &HandlerContext<'_>,
+    ) -> Result<HandlerOutput, String>;
 }
 
 /// Restart-local state and SQL-backed dispatch for protocol intents.
@@ -183,6 +307,7 @@ impl IntentPipeline {
     }
 }
 
+/// Dispatch stored deferred intents with the facts requested by the handler.
 pub(crate) fn dispatch_deferred_intents_from_store_with_fact_context(
     intent_pipeline: &mut IntentPipeline,
     handler: &(impl IntentHandler + ?Sized),
@@ -201,6 +326,11 @@ pub(crate) fn dispatch_deferred_intents_from_store_with_fact_context(
     )
 }
 
+/// Dispatch stored atomic intents.
+///
+/// Atomic intents are already part of the runtime's deterministic row-mutation
+/// vocabulary, so handlers receive an empty fact context and the transaction
+/// applies any emitted row changes with the handled-intent deletion.
 pub(crate) fn dispatch_atomic_intents_from_store(
     intent_pipeline: &mut IntentPipeline,
     handler: &(impl IntentHandler + ?Sized),
@@ -219,6 +349,11 @@ pub(crate) fn dispatch_atomic_intents_from_store(
     )
 }
 
+/// Dispatch restart-local intents.
+///
+/// Ephemeral intents are not deleted from SQLite because they were never
+/// persisted. The loop removes one from memory, runs it, and restores it on any
+/// non-committed failure.
 pub(crate) fn dispatch_ephemeral_intents_with_fact_context_and_store(
     intent_pipeline: &mut IntentPipeline,
     handler: &(impl IntentHandler + ?Sized),
@@ -229,6 +364,11 @@ pub(crate) fn dispatch_ephemeral_intents_with_fact_context_and_store(
     dispatch_ephemeral_intents_matching(intent_pipeline, handler, store, allowed_tables, limit)
 }
 
+/// Shared stored-intent loop.
+///
+/// Each iteration follows the visible pipeline: claim one matching intent,
+/// load its handler context, run the handler, prepare output, commit output,
+/// then update restart-local memory and the report.
 fn dispatch_stored_intents_matching(
     intent_pipeline: &mut IntentPipeline,
     handler: &(impl IntentHandler + ?Sized),
@@ -256,6 +396,11 @@ fn dispatch_stored_intents_matching(
     Ok(report)
 }
 
+/// Restart-local sibling of `dispatch_stored_intents_matching`.
+///
+/// The shape is intentionally parallel, but restoration replaces SQL deletion:
+/// until `commit_ephemeral_handler_output` succeeds, the intent is put back at
+/// its original queue position.
 fn dispatch_ephemeral_intents_matching(
     intent_pipeline: &mut IntentPipeline,
     handler: &(impl IntentHandler + ?Sized),
@@ -306,11 +451,14 @@ fn dispatch_ephemeral_intents_matching(
                 return Err(err);
             }
         };
-        if let Err(err) = prepare_ephemeral_handler_output(intent_pipeline, &output, allowed_tables)
+        let output = match prepare_ephemeral_handler_output(intent_pipeline, output, allowed_tables)
         {
-            intent_pipeline.restore_intent(intent_index, intent)?;
-            return Err(err);
-        }
+            Ok(output) => output,
+            Err(err) => {
+                intent_pipeline.restore_intent(intent_index, intent)?;
+                return Err(err);
+            }
+        };
         let commit = match commit_ephemeral_handler_output(store, &output, allowed_tables) {
             Ok(commit) => commit,
             Err(err) => {
@@ -324,22 +472,28 @@ fn dispatch_ephemeral_intents_matching(
     Ok(report)
 }
 
+/// Validate and split ephemeral handler output before the transaction.
 fn prepare_ephemeral_handler_output(
     intent_pipeline: &IntentPipeline,
-    output: &HandlerOutput,
+    output: HandlerOutput,
     allowed_tables: &[TableName],
-) -> Result<(), String> {
+) -> Result<HandlerOutputParts, String> {
     intent_pipeline.validate_intents(&output.intents)?;
-    validate_atomic_row_intents(&output.intents, allowed_tables)
+    validate_atomic_row_intents(&output.intents, allowed_tables)?;
+    Ok(split_handler_output(output))
 }
 
+/// Commit durable effects emitted by an ephemeral handler.
+///
+/// The handled ephemeral intent itself is absent from this transaction because
+/// it only lived in memory.
 fn commit_ephemeral_handler_output(
     store: &Store,
-    output: &HandlerOutput,
+    output: &HandlerOutputParts,
     allowed_tables: &[TableName],
 ) -> Result<EphemeralHandlerCommit, String> {
     let (atomic_rows, atomic_deletes) =
-        atomic_row_mutations(&atomic_intents(&output.intents), allowed_tables)?;
+        atomic_row_mutations(&output.atomic_intents, allowed_tables)?;
     store
         .write_transaction(|tx| {
             for purged in &output.purged_facts {
@@ -359,11 +513,7 @@ fn commit_ephemeral_handler_output(
             }
 
             let mut persisted_intents = 0usize;
-            for intent in output
-                .intents
-                .iter()
-                .filter(|intent| intent.execution == IntentExecution::Deferred)
-            {
+            for intent in &output.durable_intents {
                 if record_intent_in_tx(tx, intent)? {
                     persisted_intents += 1;
                 }
@@ -371,20 +521,17 @@ fn commit_ephemeral_handler_output(
 
             Ok(EphemeralHandlerCommit {
                 facts_inserted,
-                atomic_intents: output
-                    .intents
-                    .iter()
-                    .filter(|intent| intent.execution == IntentExecution::Atomic)
-                    .count(),
+                atomic_intents: output.atomic_intents.len(),
                 persisted_intents,
             })
         })
         .map_err(|err| format!("commit ephemeral handler output: {err}"))
 }
 
+/// Record restart-local effects after an ephemeral handler commit.
 fn finish_ephemeral_handler_output(
     intent_pipeline: &mut IntentPipeline,
-    output: HandlerOutput,
+    output: HandlerOutputParts,
     commit: EphemeralHandlerCommit,
     report: &mut DispatchReport,
 ) -> Result<(), String> {
@@ -395,11 +542,7 @@ fn finish_ephemeral_handler_output(
         intent_pipeline.remember_fact(fact);
     }
     let mut cached_ephemeral = 0usize;
-    for intent in output
-        .intents
-        .into_iter()
-        .filter(|intent| intent.execution == IntentExecution::Ephemeral)
-    {
+    for intent in output.ephemeral_intents {
         if intent_pipeline.record_ephemeral_intent(intent)? {
             cached_ephemeral += 1;
         }
@@ -409,6 +552,7 @@ fn finish_ephemeral_handler_output(
     Ok(())
 }
 
+/// Return the first stored intent accepted by this handler and execution mode.
 fn claim_stored_intent(
     store: &Store,
     handler: &(impl IntentHandler + ?Sized),
@@ -426,6 +570,7 @@ fn claim_stored_intent(
     Ok(None)
 }
 
+/// Build the fact/store view a stored-intent handler requested.
 fn load_handler_context<'a>(
     store: &'a Store,
     handler: &(impl IntentHandler + ?Sized),
@@ -447,6 +592,7 @@ fn load_handler_context<'a>(
     Ok(context.with_store(store))
 }
 
+/// Run a handler and convert retry markers into report state.
 fn run_handler(
     handler: &(impl IntentHandler + ?Sized),
     intent: &Intent,
@@ -466,6 +612,7 @@ fn run_handler(
     }
 }
 
+/// Validate and split stored handler output before opening the commit.
 fn prepare_handler_output(
     intent_pipeline: &IntentPipeline,
     output: HandlerOutput,
@@ -477,6 +624,11 @@ fn prepare_handler_output(
     Ok(split_handler_output(output))
 }
 
+/// Commit the complete output of one stored intent.
+///
+/// This is the durable boundary for stored dispatch: deleting the handled
+/// intent, purging facts, admitting emitted facts, applying atomic rows, and
+/// recording deferred intents happen together.
 fn commit_handler_output(
     store: &Store,
     handled_intent_key: &[u8],
@@ -526,6 +678,7 @@ fn commit_handler_output(
         .map_err(|err| format!("commit stored handler output: {err}"))
 }
 
+/// Update restart-local memory after a stored-intent commit.
 fn finish_handler_output(
     intent_pipeline: &mut IntentPipeline,
     handled_intent_key: Vec<u8>,
@@ -557,6 +710,7 @@ fn finish_handler_output(
     Ok(true)
 }
 
+/// Split handler output by execution class once, before any commit logic.
 fn split_handler_output(output: HandlerOutput) -> HandlerOutputParts {
     let mut atomic_intents = Vec::new();
     let mut durable_intents = Vec::new();
@@ -579,14 +733,6 @@ fn split_handler_output(output: HandlerOutput) -> HandlerOutputParts {
 
 fn is_retryable_handler_error(err: &str) -> bool {
     retry_intent_reason(err).is_some() || err.starts_with("handler context missing fact ")
-}
-
-fn atomic_intents(intents: &[Intent]) -> Vec<Intent> {
-    intents
-        .iter()
-        .filter(|intent| intent.execution == IntentExecution::Atomic)
-        .cloned()
-        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]

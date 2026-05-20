@@ -184,7 +184,7 @@ fn poc10_core_contract_files_are_present() {
         "src/core/matchers.rs",
         "src/core/projection.rs",
         "src/core/intents.rs",
-        "src/core/handler_dispatch.rs",
+        "src/core/intent_pipeline.rs",
     ];
 
     let missing = required
@@ -280,11 +280,11 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
 
 #[test]
 fn poc10_handler_output_contract_emits_only_facts_purges_and_intents() {
-    let topo::core::handler_dispatch::HandlerOutput {
+    let topo::core::intent_pipeline::HandlerOutput {
         facts,
         purged_facts,
         intents,
-    } = topo::core::handler_dispatch::HandlerOutput::default();
+    } = topo::core::intent_pipeline::HandlerOutput::default();
 
     assert!(facts.is_empty());
     assert!(purged_facts.is_empty());

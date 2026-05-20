@@ -4,7 +4,7 @@
 //! due. The handler revalidates the message's embedded expiry stamp before
 //! purging the fact.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::content::message::retention;
 

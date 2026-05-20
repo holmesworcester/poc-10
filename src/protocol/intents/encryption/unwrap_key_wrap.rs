@@ -6,7 +6,7 @@
 // recipient material chosen by projection, then emits the resulting local
 // secret fact back into the common pipeline.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::Intent;
 use crate::protocol::facts::encryption::{create, intent};
 

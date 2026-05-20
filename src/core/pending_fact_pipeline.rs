@@ -9,8 +9,8 @@
 //!
 //! ```text
 //! process_pending_facts
-//!   -> claim_pending_fact
-//!      - reads the next pending fact id from SQLite
+//!   -> pending_owner_batch
+//!      - reads the next pending fact ids from SQLite
 //!      - loads the fact, its previous context, and its projection context
 //!   -> process_pending_fact
 //!      -> project_fact
@@ -52,14 +52,14 @@ use crate::core::store::{Store, TableName};
 ///
 /// This is the readable entry point for the SQL-backed projection path:
 ///
-/// 1. `claim_pending_fact` chooses the next pending fact from SQLite and loads
-///    its projection inputs.
-/// 2. `process_pending_fact` completes all processing for that one fact.
-/// 3. `project_fact` runs protocol projection and groups the outputs.
-/// 4. `commit_projection_effects` commits every durable/atomic effect in one
+/// 1. `pending_owner_batch` chooses pending fact ids from SQLite.
+/// 2. `load_pending_fact` loads each fact's projection inputs.
+/// 3. `process_pending_fact` completes all processing for that one fact.
+/// 4. `project_fact` runs protocol projection and groups the outputs.
+/// 5. `commit_projection_effects` commits every durable/atomic effect in one
 ///    SQLite transaction.
-/// 5. `finish_pending_fact` mirrors the in-memory context-change state and
-///    report after the transaction has succeeded.
+/// 6. `finish_pending_fact` records restart-local effects and
+///    refreshes the report after the transaction has succeeded.
 pub(crate) fn process_pending_facts(
     intent_pipeline: &mut IntentPipeline,
     projector: &impl Projector,
@@ -93,6 +93,10 @@ pub(crate) fn process_pending_facts(
     Ok(report)
 }
 
+/// Read the next pending fact ids without mutating the queue.
+///
+/// The commit step removes the row only after projection succeeds. Missing
+/// facts are handled by the caller as stale pending rows and purged there.
 fn pending_owner_batch(store: &Store, limit: usize) -> Result<Vec<FactId>, String> {
     let mut owners = Vec::<(u64, FactId)>::new();
     for (key, _) in store
@@ -199,6 +203,10 @@ fn finish_pending_fact(
     Ok(())
 }
 
+/// Mirror committed projection state into restart-local intent memory.
+///
+/// This is deliberately after the SQLite commit: ephemeral intents should only
+/// run for a fact whose durable projection effects are visible.
 fn record_committed_ephemeral_intents(
     intent_pipeline: &mut IntentPipeline,
     effects: &ProjectionEffects,
@@ -321,6 +329,10 @@ fn commit_projection_effects(
         .map_err(|err| format!("commit projection effects: {err}"))
 }
 
+/// Replace this fact's standing needs/offers using the previous key set.
+///
+/// Projection owns the complete context set for its fact. Deleting exactly the
+/// previous rows avoids wiping rows emitted by other facts with the same role.
 fn replace_stored_context_owner_rows_from_previous(
     store: &Store,
     previous: &ContextSet,
@@ -347,6 +359,11 @@ fn replace_stored_context_owner_rows_from_previous(
     Ok(())
 }
 
+/// Replace all time wakes owned by this fact.
+///
+/// Time wakes are not appended: projection output is the complete current
+/// schedule for the owner, so old rows must disappear when the projection no
+/// longer emits them.
 fn replace_stored_time_wake_owner_rows(
     store: &Store,
     owner: FactId,

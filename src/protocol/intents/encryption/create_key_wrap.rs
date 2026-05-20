@@ -6,7 +6,7 @@
 // decision upstream prevents this handler from becoming a second, divergent
 // policy engine.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::Intent;
 use crate::protocol::facts::encryption::{create, intent};
 

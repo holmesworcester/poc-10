@@ -6,7 +6,7 @@
 
 use crate::core::{
     facts::{Fact, FactId},
-    handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler},
+    intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler},
     intents::{Intent, IntentExecution, IntentKind},
     store::Store,
 };

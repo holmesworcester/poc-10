@@ -1,5 +1,5 @@
 use topo::core::facts::{Fact, FactScope};
-use topo::core::handler_dispatch::{HandlerContext, HandlerOutput, IntentHandler};
+use topo::core::intent_pipeline::{HandlerContext, HandlerOutput, IntentHandler};
 use topo::core::intents::{Intent, IntentExecution, IntentKind};
 
 struct EmitsFactAndFollowup;
@@ -19,7 +19,7 @@ impl IntentHandler for EmitsFactAndFollowup {
 }
 
 #[test]
-fn handler_dispatch_output_boundary_is_facts_and_followup_intents_only() {
+fn intent_pipeline_output_boundary_is_facts_and_followup_intents_only() {
     let input = Intent::new(
         IntentKind::new("incoming_work").unwrap(),
         IntentExecution::Atomic,

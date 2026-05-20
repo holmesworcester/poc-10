@@ -15,10 +15,10 @@
 //!
 //! The intent carries a routing key (connection id) and the opaque transport::transit
 //! frame bytes that the runtime should push onto that connection's socket.
-//! Codec uses a hand-rolled length-prefix format — `core/wire` is intentionally
-//! not imported here so the handler stays decoupled from on-the-wire layouts.
+//! Payload bytes remain opaque to this handler.
 
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::protocol::intent_payload::{PayloadError, PayloadReader, PayloadWriter};
 
 /// Stable intent kind for outbound network frame sends.
 pub const SEND_NETWORK_FRAME: &str = "send_network_frame";
@@ -42,14 +42,16 @@ pub struct SendNetworkFrame {
 }
 
 pub fn send_network_frame_intent(input: SendNetworkFrame) -> Intent {
-    let mut payload = Vec::with_capacity(32 + 4 + input.frame.len());
-    payload.extend_from_slice(&input.routing_key);
-    push_bytes(&mut payload, &input.frame);
+    let mut payload = PayloadWriter::with_capacity(32 + 4 + input.frame.len());
+    payload.fixed(&input.routing_key);
+    payload
+        .bytes_u32be(&input.frame)
+        .expect("send_network_frame payload fits u32");
     Intent::new(
         IntentKind::new(SEND_NETWORK_FRAME).expect("valid send network frame intent kind"),
         IntentExecution::Ephemeral,
         send_network_frame_key(&input),
-        payload,
+        payload.finish(),
     )
 }
 
@@ -61,12 +63,10 @@ pub fn decode_send_network_frame(intent: &Intent) -> Result<SendNetworkFrame, St
         return Err("send_network_frame intent must be ephemeral".to_string());
     }
 
-    let mut reader = Reader::new(&intent.payload);
-    let routing_bytes = reader.take(32)?;
-    let mut routing_key = [0u8; 32];
-    routing_key.copy_from_slice(routing_bytes);
-    let frame = reader.bytes()?.to_vec();
-    reader.finish()?;
+    let mut reader = PayloadReader::new(&intent.payload);
+    let routing_key = reader.array::<32>().map_err(payload_error)?;
+    let frame = reader.bytes_u32be().map_err(payload_error)?.to_vec();
+    reader.finish().map_err(payload_error)?;
 
     let input = SendNetworkFrame { routing_key, frame };
     if intent.key != send_network_frame_key(&input) {
@@ -87,54 +87,11 @@ pub fn send_network_frame_key(input: &SendNetworkFrame) -> Vec<u8> {
     hash.finalize().as_bytes().to_vec()
 }
 
-fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-    out.extend_from_slice(bytes);
+fn payload_error(err: PayloadError) -> String {
+    format!("invalid send_network_frame payload: {err}")
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn bytes(&mut self) -> Result<&'a [u8], String> {
-        let len = self.u32()? as usize;
-        self.take(len)
-    }
-
-    fn u32(&mut self) -> Result<u32, String> {
-        let bytes = self.take(4)?;
-        Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
-    }
-
-    fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
-        let end = self
-            .offset
-            .checked_add(len)
-            .ok_or_else(|| "send_network_frame payload length overflow".to_string())?;
-        if end > self.bytes.len() {
-            return Err("truncated send_network_frame payload".to_string());
-        }
-        let bytes = &self.bytes[self.offset..end];
-        self.offset = end;
-        Ok(bytes)
-    }
-
-    fn finish(self) -> Result<(), String> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err("send_network_frame payload has trailing bytes".to_string())
-        }
-    }
-}
-
-use crate::core::handler_dispatch::{
+use crate::core::intent_pipeline::{
     retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};

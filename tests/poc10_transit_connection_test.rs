@@ -1,6 +1,6 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::handler_dispatch::{HandlerContext, IntentHandler};
+use topo::core::intent_pipeline::{HandlerContext, IntentHandler};
 use topo::core::intents::IntentKind;
 use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use topo::core::store::Store;

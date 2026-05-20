@@ -1,6 +1,6 @@
 //! Package exact facts into one connection transit frame.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::{
     connection::response,
@@ -10,6 +10,7 @@ use crate::protocol::facts::{
         frame::{self, TransitFactBundle},
     },
 };
+use crate::protocol::intent_payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::intents::transport::send_network_frame::{self, SendNetworkFrame};
 
 pub type HandlerId = [u8; 32];
@@ -25,16 +26,25 @@ pub struct SendFactsOnConnection {
 }
 
 pub fn send_facts_on_connection_intent(input: SendFactsOnConnection) -> Intent {
-    let mut payload = Vec::with_capacity(37 + input.fact_ids.len() * 32);
-    payload.push(1);
-    push_id(&mut payload, &input.connection_id);
-    push_ids(&mut payload, &input.fact_ids);
+    let mut payload = PayloadWriter::with_capacity(37 + input.fact_ids.len() * 32);
+    payload.u8(1);
+    payload.fixed(&input.connection_id);
+    payload.u32be(
+        input
+            .fact_ids
+            .len()
+            .try_into()
+            .expect("fact id count fits u32"),
+    );
+    for fact_id in &input.fact_ids {
+        payload.fixed(fact_id);
+    }
 
     Intent::new(
         IntentKind::new(SEND_FACTS_ON_CONNECTION).expect("valid send_facts_on_connection kind"),
         IntentExecution::Deferred,
         connection_fact_ids_key(input.connection_id, &input.fact_ids),
-        payload,
+        payload.finish(),
     )
 }
 
@@ -45,13 +55,15 @@ pub fn decode_send_facts_on_connection(intent: &Intent) -> Result<SendFactsOnCon
     if intent.execution != IntentExecution::Deferred {
         return Err("send_facts_on_connection intent must be deferred".to_string());
     }
-    if intent.payload.len() < 37 || intent.payload[0] != 1 {
-        return Err("send_facts_on_connection payload is malformed".to_string());
+    let mut reader = PayloadReader::new(&intent.payload);
+    reader.expect_u8(1).map_err(payload_error)?;
+    let connection_id = reader.array::<32>().map_err(payload_error)?;
+    let count = reader.u32be().map_err(payload_error)? as usize;
+    let mut fact_ids = Vec::with_capacity(count);
+    for _ in 0..count {
+        fact_ids.push(reader.array::<32>().map_err(payload_error)?);
     }
-    let mut reader = Reader::new(&intent.payload[1..]);
-    let connection_id = reader.id()?;
-    let fact_ids = reader.ids()?;
-    reader.finish()?;
+    reader.finish().map_err(payload_error)?;
     if fact_ids.is_empty() {
         return Err("send_facts_on_connection must name at least one fact".to_string());
     }
@@ -74,65 +86,8 @@ fn connection_fact_ids_key(connection_id: HandlerId, fact_ids: &[HandlerId]) -> 
     hash.finalize().as_bytes().to_vec()
 }
 
-fn push_id(out: &mut Vec<u8>, id: &HandlerId) {
-    out.extend_from_slice(id);
-}
-
-fn push_ids(out: &mut Vec<u8>, values: &[HandlerId]) {
-    out.extend_from_slice(&(values.len() as u32).to_be_bytes());
-    for value in values {
-        push_id(out, value);
-    }
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn id(&mut self) -> Result<HandlerId, String> {
-        Ok(self.take(32)?.try_into().unwrap())
-    }
-
-    fn ids(&mut self) -> Result<Vec<HandlerId>, String> {
-        let len = self.u32()? as usize;
-        let mut values = Vec::with_capacity(len);
-        for _ in 0..len {
-            values.push(self.id()?);
-        }
-        Ok(values)
-    }
-
-    fn u32(&mut self) -> Result<u32, String> {
-        let bytes = self.take(4)?;
-        Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
-    }
-
-    fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
-        let end = self
-            .offset
-            .checked_add(len)
-            .ok_or_else(|| "intent payload length overflow".to_string())?;
-        if end > self.bytes.len() {
-            return Err("truncated intent payload".to_string());
-        }
-        let bytes = &self.bytes[self.offset..end];
-        self.offset = end;
-        Ok(bytes)
-    }
-
-    fn finish(self) -> Result<(), String> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err("intent payload has trailing bytes".to_string())
-        }
-    }
+fn payload_error(err: PayloadError) -> String {
+    format!("invalid send_facts_on_connection payload: {err}")
 }
 
 #[derive(Debug, Clone, Default)]

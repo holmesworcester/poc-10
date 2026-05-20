@@ -1,6 +1,7 @@
 //! Intent types for atomic, deferred, and ephemeral work.
 
 use crate::core::store::{TableName, TableRow};
+use crate::core::wire::{Reader, WireError, Writer};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IntentKind(String);
@@ -89,18 +90,18 @@ impl AtomicIntent {
         if intent.execution != IntentExecution::Atomic {
             return Err("row intent must be atomic".to_string());
         }
-        let mut reader = IntentReader::new(&intent.payload);
-        reader.expect_u8(1)?;
-        let op = reader.take_u8()?;
-        let table_name = reader.take_sized_u16()?;
+        let mut reader = Reader::new(&intent.payload);
+        reader.expect_u8(1).map_err(row_intent_error)?;
+        let op = reader.u8().map_err(row_intent_error)?;
+        let table_name = reader.bytes_u16be().map_err(row_intent_error)?;
         let table = allowed_tables
             .iter()
             .copied()
             .find(|table| table.as_str().as_bytes() == table_name)
             .ok_or_else(|| "row intent table is not registered".to_string())?;
-        let key = reader.take_sized_u32()?.to_vec();
-        let value = reader.take_sized_u32()?.to_vec();
-        reader.finish()?;
+        let key = reader.bytes_u32be().map_err(row_intent_error)?.to_vec();
+        let value = reader.bytes_u32be().map_err(row_intent_error)?.to_vec();
+        reader.finish().map_err(row_intent_error)?;
 
         if intent.key != row_intent_key(table, &key) {
             return Err("row intent idempotence key does not match payload".to_string());
@@ -138,91 +139,19 @@ fn row_intent_key(table: TableName, row_key: &[u8]) -> Vec<u8> {
 }
 
 fn row_intent_payload(op: u8, table: TableName, row_key: &[u8], row_value: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.push(1);
-    out.push(op);
-    put_sized_u16(&mut out, table.as_str().as_bytes());
-    put_sized_u32(&mut out, row_key);
-    put_sized_u32(&mut out, row_value);
-    out
+    let mut out = Writer::new();
+    out.u8(1);
+    out.u8(op);
+    out.bytes_u16be(table.as_str().as_bytes())
+        .expect("row intent table name fits u16");
+    out.bytes_u32be(row_key).expect("row intent key fits u32");
+    out.bytes_u32be(row_value)
+        .expect("row intent value fits u32");
+    out.finish()
 }
 
-fn put_sized_u16(out: &mut Vec<u8>, bytes: &[u8]) {
-    let len = u16::try_from(bytes.len()).expect("row intent table name fits u16");
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(bytes);
-}
-
-fn put_sized_u32(out: &mut Vec<u8>, bytes: &[u8]) {
-    let len = u32::try_from(bytes.len()).expect("row intent bytes fit u32");
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(bytes);
-}
-
-struct IntentReader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> IntentReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn expect_u8(&mut self, expected: u8) -> Result<(), String> {
-        let actual = self.take_u8()?;
-        if actual == expected {
-            Ok(())
-        } else {
-            Err(format!("expected row intent byte {expected}, got {actual}"))
-        }
-    }
-
-    fn take_u8(&mut self) -> Result<u8, String> {
-        let bytes = self.take_exact(1)?;
-        Ok(bytes[0])
-    }
-
-    fn take_sized_u16(&mut self) -> Result<&'a [u8], String> {
-        let len = self.take_u16()? as usize;
-        self.take_exact(len)
-    }
-
-    fn take_sized_u32(&mut self) -> Result<&'a [u8], String> {
-        let len = self.take_u32()? as usize;
-        self.take_exact(len)
-    }
-
-    fn take_u16(&mut self) -> Result<u16, String> {
-        let bytes = self.take_exact(2)?;
-        Ok(u16::from_be_bytes(bytes.try_into().unwrap()))
-    }
-
-    fn take_u32(&mut self) -> Result<u32, String> {
-        let bytes = self.take_exact(4)?;
-        Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
-    }
-
-    fn take_exact(&mut self, len: usize) -> Result<&'a [u8], String> {
-        let end = self
-            .offset
-            .checked_add(len)
-            .ok_or_else(|| "row intent length overflow".to_string())?;
-        if end > self.bytes.len() {
-            return Err("truncated row intent".to_string());
-        }
-        let out = &self.bytes[self.offset..end];
-        self.offset = end;
-        Ok(out)
-    }
-
-    fn finish(self) -> Result<(), String> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err("row intent has trailing bytes".to_string())
-        }
-    }
+fn row_intent_error(err: WireError) -> String {
+    format!("invalid row intent payload: {err}")
 }
 
 #[cfg(test)]

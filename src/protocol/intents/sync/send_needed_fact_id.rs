@@ -1,6 +1,6 @@
 //! Send a sync need-id fact for a peer's advertised missing fact.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::sync::{have_id, need_id};
 use crate::protocol::intents::transport::send_facts_on_connection::{

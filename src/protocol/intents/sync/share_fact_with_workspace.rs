@@ -7,10 +7,11 @@
 
 use crate::core::{
     facts::{Fact, FactId},
-    handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler},
+    intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler},
     intents::{Intent, IntentExecution, IntentKind},
 };
 use crate::protocol::facts::sync::shared_fact;
+use crate::protocol::intent_payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::intents::sync::seed_connection;
 
 pub const SHARE_FACT_WITH_WORKSPACE: &str = "share_fact_with_workspace";
@@ -25,16 +26,16 @@ pub struct ShareFactWithWorkspace {
 }
 
 pub fn share_fact_with_workspace_intent(input: ShareFactWithWorkspace) -> Intent {
-    let mut payload = Vec::with_capacity(1 + 32 + 32 + 8);
-    payload.push(1);
-    payload.extend_from_slice(&input.workspace_id);
-    payload.extend_from_slice(&input.fact_id);
-    payload.extend_from_slice(&input.timestamp_ms.to_be_bytes());
+    let mut payload = PayloadWriter::with_capacity(1 + 32 + 32 + 8);
+    payload.u8(1);
+    payload.fixed(&input.workspace_id);
+    payload.fixed(&input.fact_id);
+    payload.u64be(input.timestamp_ms);
     Intent::new(
         IntentKind::new(SHARE_FACT_WITH_WORKSPACE).expect("valid share_fact_with_workspace kind"),
         IntentExecution::Deferred,
         share_fact_with_workspace_key(&input),
-        payload,
+        payload.finish(),
     )
 }
 
@@ -53,14 +54,12 @@ pub fn decode_share_fact_with_workspace(intent: &Intent) -> Result<ShareFactWith
     if intent.execution != IntentExecution::Deferred {
         return Err("share_fact_with_workspace intent must be deferred".to_string());
     }
-    let mut reader = Reader::new(&intent.payload);
-    if reader.u8()? != 1 {
-        return Err("share_fact_with_workspace payload version unsupported".to_string());
-    }
-    let workspace_id = reader.id()?;
-    let fact_id = reader.id()?;
-    let timestamp_ms = reader.u64()?;
-    reader.finish()?;
+    let mut reader = PayloadReader::new(&intent.payload);
+    reader.expect_u8(1).map_err(payload_error)?;
+    let workspace_id = reader.array::<32>().map_err(payload_error)?;
+    let fact_id = reader.array::<32>().map_err(payload_error)?;
+    let timestamp_ms = reader.u64be().map_err(payload_error)?;
+    reader.finish().map_err(payload_error)?;
     let input = ShareFactWithWorkspace {
         workspace_id,
         fact_id,
@@ -81,51 +80,8 @@ fn share_fact_with_workspace_key(input: &ShareFactWithWorkspace) -> Vec<u8> {
     hash.finalize().as_bytes().to_vec()
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn u8(&mut self) -> Result<u8, String> {
-        let byte = self.take(1)?;
-        Ok(byte[0])
-    }
-
-    fn u64(&mut self) -> Result<u64, String> {
-        let bytes = self.take(8)?;
-        Ok(u64::from_be_bytes(bytes.try_into().unwrap()))
-    }
-
-    fn id(&mut self) -> Result<[u8; 32], String> {
-        let bytes = self.take(32)?;
-        Ok(bytes.try_into().unwrap())
-    }
-
-    fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
-        let end = self
-            .offset
-            .checked_add(len)
-            .ok_or_else(|| "intent payload length overflow".to_string())?;
-        if end > self.bytes.len() {
-            return Err("truncated intent payload".to_string());
-        }
-        let bytes = &self.bytes[self.offset..end];
-        self.offset = end;
-        Ok(bytes)
-    }
-
-    fn finish(self) -> Result<(), String> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err("intent payload has trailing bytes".to_string())
-        }
-    }
+fn payload_error(err: PayloadError) -> String {
+    format!("invalid share_fact_with_workspace payload: {err}")
 }
 
 #[derive(Debug, Clone, Default)]

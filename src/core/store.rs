@@ -19,6 +19,7 @@
 //! conservative identifier check.
 
 use crate::core::schema_dsl::{self, ColumnType, TableDeclaration, TableKind};
+use crate::core::wire::{Reader, WireError, Writer};
 use rusqlite::{
     params, params_from_iter, types::Value, Connection as SqliteConnection, OptionalExtension,
 };
@@ -533,44 +534,7 @@ impl Store {
         table: TableName,
         filters: &[(&str, ColumnValue<'_>)],
     ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let declared = self.typed_table(table).ok_or_else(|| {
-            rusqlite::Error::InvalidParameterName(format!(
-                "table {} is not a typed table",
-                table.as_str()
-            ))
-        })?;
-        if filters.is_empty() {
-            return self.typed_rows(declared);
-        }
-        let quoted = quoted_table_name_str(&declared.name)?;
-        let mut values = Vec::with_capacity(filters.len());
-        let mut clauses = Vec::with_capacity(filters.len());
-        for (index, (column_name, value)) in filters.iter().enumerate() {
-            let column = declared.column(column_name).ok_or_else(|| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "typed table {} has no column {}",
-                    declared.name, column_name
-                ))
-            })?;
-            values.push(column_value_to_sqlite(&column.ty, *value, column_name)?);
-            clauses.push(format!(
-                "{} = ?{}",
-                quoted_identifier(column_name)?,
-                index + 1
-            ));
-        }
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM {quoted}
-             WHERE {}
-             ORDER BY {}",
-            table_column_list(declared)?,
-            clauses.join(" AND "),
-            quoted_identifier_list(&declared.row_key.columns)?
-        ))?;
-        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
-            sqlite_row_to_table_row(declared, row)
-        })?;
-        rows.collect()
+        self.typed_rows_where(table, filters, None)
     }
 
     pub fn table_rows_where_in(
@@ -583,21 +547,30 @@ impl Store {
         if in_values.is_empty() {
             return Ok(Vec::new());
         }
+        self.typed_rows_where(table, filters, Some((in_column_name, in_values)))
+    }
+
+    fn typed_rows_where(
+        &self,
+        table: TableName,
+        filters: &[(&str, ColumnValue<'_>)],
+        in_filter: Option<(&str, &[ColumnValue<'_>])>,
+    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let declared = self.typed_table(table).ok_or_else(|| {
             rusqlite::Error::InvalidParameterName(format!(
                 "table {} is not a typed table",
                 table.as_str()
             ))
         })?;
-        let in_column = declared.column(in_column_name).ok_or_else(|| {
-            rusqlite::Error::InvalidParameterName(format!(
-                "typed table {} has no column {}",
-                declared.name, in_column_name
-            ))
-        })?;
+        if filters.is_empty() && in_filter.is_none() {
+            return self.typed_rows(declared);
+        }
+
         let quoted = quoted_table_name_str(&declared.name)?;
-        let mut values = Vec::with_capacity(filters.len() + in_values.len());
-        let mut clauses = Vec::with_capacity(filters.len() + 1);
+        let mut values = Vec::with_capacity(
+            filters.len() + in_filter.map(|(_, values)| values.len()).unwrap_or(0),
+        );
+        let mut clauses = Vec::with_capacity(filters.len() + usize::from(in_filter.is_some()));
         for (index, (column_name, value)) in filters.iter().enumerate() {
             let column = declared.column(column_name).ok_or_else(|| {
                 rusqlite::Error::InvalidParameterName(format!(
@@ -612,23 +585,32 @@ impl Store {
                 index + 1
             ));
         }
-        let in_start = values.len();
-        for value in in_values {
-            values.push(column_value_to_sqlite(
-                &in_column.ty,
-                *value,
-                in_column_name,
-            )?);
+
+        if let Some((in_column_name, in_values)) = in_filter {
+            let in_column = declared.column(in_column_name).ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed table {} has no column {}",
+                    declared.name, in_column_name
+                ))
+            })?;
+            let in_start = values.len();
+            for value in in_values {
+                values.push(column_value_to_sqlite(
+                    &in_column.ty,
+                    *value,
+                    in_column_name,
+                )?);
+            }
+            let placeholders = (0..in_values.len())
+                .map(|index| format!("?{}", in_start + index + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            clauses.push(format!(
+                "{} IN ({})",
+                quoted_identifier(in_column_name)?,
+                placeholders
+            ));
         }
-        let placeholders = (0..in_values.len())
-            .map(|index| format!("?{}", in_start + index + 1))
-            .collect::<Vec<_>>()
-            .join(", ");
-        clauses.push(format!(
-            "{} IN ({})",
-            quoted_identifier(in_column_name)?,
-            placeholders
-        ));
 
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} FROM {quoted}
@@ -993,7 +975,7 @@ fn decode_typed_row_values(
     row: &TableRow,
 ) -> rusqlite::Result<Vec<Value>> {
     let key_values = decode_typed_key_values_named(table, &row.key)?;
-    let mut value_offset = 0;
+    let mut value_reader = Reader::new(&row.value);
     let mut values = Vec::with_capacity(table.columns.len());
 
     for column in &table.columns {
@@ -1005,19 +987,15 @@ fn decode_typed_row_values(
         } else {
             values.push(decode_column_value(
                 &column.ty,
-                &row.value,
-                &mut value_offset,
+                &mut value_reader,
                 &format!("{}.{}", table.name, column.name),
             )?);
         }
     }
 
-    if value_offset != row.value.len() {
-        return Err(rusqlite::Error::InvalidParameterName(format!(
-            "typed row for {} has trailing value bytes",
-            table.name
-        )));
-    }
+    value_reader
+        .finish()
+        .map_err(|err| typed_wire_error(&format!("{}.value", table.name), err))?;
     Ok(values)
 }
 
@@ -1034,7 +1012,7 @@ fn decode_typed_key_values_named(
     table: &TableDeclaration,
     key: &[u8],
 ) -> rusqlite::Result<Vec<(String, Value)>> {
-    let mut offset = 0;
+    let mut key_reader = Reader::new(key);
     let mut values = Vec::with_capacity(table.row_key.columns.len());
     for column_name in &table.row_key.columns {
         let column = table.column(column_name).ok_or_else(|| {
@@ -1047,18 +1025,14 @@ fn decode_typed_key_values_named(
             column.name.clone(),
             decode_column_value(
                 &column.ty,
-                key,
-                &mut offset,
+                &mut key_reader,
                 &format!("{}.{}", table.name, column.name),
             )?,
         ));
     }
-    if offset != key.len() {
-        return Err(rusqlite::Error::InvalidParameterName(format!(
-            "typed row for {} has trailing key bytes",
-            table.name
-        )));
-    }
+    key_reader
+        .finish()
+        .map_err(|err| typed_wire_error(&format!("{}.key", table.name), err))?;
     Ok(values)
 }
 
@@ -1066,8 +1040,8 @@ fn sqlite_row_to_table_row(
     table: &TableDeclaration,
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<(Vec<u8>, Vec<u8>)> {
-    let mut key = Vec::new();
-    let mut value = Vec::new();
+    let mut key = Writer::new();
+    let mut value = Writer::new();
     for (index, column) in table.columns.iter().enumerate() {
         let column_value = sqlite_column_value(row, index, &column.ty)?;
         if table
@@ -1081,28 +1055,29 @@ fn sqlite_row_to_table_row(
             encode_column_value(&column.ty, &column_value, &mut value, &column.name)?;
         }
     }
-    Ok((key, value))
+    Ok((key.finish(), value.finish()))
 }
 
 fn decode_column_value(
     ty: &ColumnType,
-    bytes: &[u8],
-    offset: &mut usize,
+    reader: &mut Reader<'_>,
     label: &str,
 ) -> rusqlite::Result<Value> {
     match ty {
         ColumnType::Bytes { len: Some(len) } => {
-            let out = take_exact(bytes, offset, *len, label)?;
+            let out = reader
+                .bytes(*len)
+                .map_err(|err| typed_wire_error(label, err))?;
             Ok(Value::Blob(out.to_vec()))
         }
         ColumnType::Bytes { len: None } => {
-            let len = take_u32(bytes, offset, label)? as usize;
-            let out = take_exact(bytes, offset, len, label)?;
+            let out = reader
+                .bytes_u32be()
+                .map_err(|err| typed_wire_error(label, err))?;
             Ok(Value::Blob(out.to_vec()))
         }
         ColumnType::U64 => {
-            let raw = take_exact(bytes, offset, 8, label)?;
-            let value = u64::from_be_bytes(raw.try_into().unwrap());
+            let value = reader.u64be().map_err(|err| typed_wire_error(label, err))?;
             let value = i64::try_from(value).map_err(|_| {
                 rusqlite::Error::InvalidParameterName(format!(
                     "typed column {label} exceeds SQLite integer range"
@@ -1111,28 +1086,20 @@ fn decode_column_value(
             Ok(Value::Integer(value))
         }
         ColumnType::I64 => {
-            let raw = take_exact(bytes, offset, 8, label)?;
-            Ok(Value::Integer(i64::from_be_bytes(raw.try_into().unwrap())))
+            let raw = reader
+                .array::<8>()
+                .map_err(|err| typed_wire_error(label, err))?;
+            Ok(Value::Integer(i64::from_be_bytes(raw)))
         }
         ColumnType::Text => {
-            let len = take_u32(bytes, offset, label)? as usize;
-            let raw = take_exact(bytes, offset, len, label)?;
-            let text = String::from_utf8(raw.to_vec()).map_err(|err| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "typed column {label} is not utf8: {err}"
-                ))
-            })?;
+            let text = reader
+                .string_u32be()
+                .map_err(|err| typed_wire_error(label, err))?;
             Ok(Value::Text(text))
         }
         ColumnType::Bool => {
-            let raw = take_exact(bytes, offset, 1, label)?[0];
-            match raw {
-                0 => Ok(Value::Integer(0)),
-                1 => Ok(Value::Integer(1)),
-                _ => Err(rusqlite::Error::InvalidParameterName(format!(
-                    "typed column {label} has invalid bool byte {raw}"
-                ))),
-            }
+            let value = reader.bool8().map_err(|err| typed_wire_error(label, err))?;
+            Ok(Value::Integer(i64::from(value)))
         }
     }
 }
@@ -1140,7 +1107,7 @@ fn decode_column_value(
 fn encode_column_value(
     ty: &ColumnType,
     value: &Value,
-    out: &mut Vec<u8>,
+    out: &mut Writer,
     label: &str,
 ) -> rusqlite::Result<()> {
     match (ty, value) {
@@ -1151,10 +1118,11 @@ fn encode_column_value(
                     bytes.len()
                 )));
             }
-            out.extend_from_slice(bytes);
+            out.bytes(bytes);
         }
         (ColumnType::Bytes { len: None }, Value::Blob(bytes)) => {
-            put_sized_u32(out, bytes, label)?;
+            out.bytes_u32be(bytes)
+                .map_err(|err| typed_wire_error(label, err))?;
         }
         (ColumnType::U64, Value::Integer(value)) => {
             let value = u64::try_from(*value).map_err(|_| {
@@ -1162,16 +1130,17 @@ fn encode_column_value(
                     "typed column {label} has negative u64 value"
                 ))
             })?;
-            out.extend_from_slice(&value.to_be_bytes());
+            out.u64be(value);
         }
         (ColumnType::I64, Value::Integer(value)) => {
-            out.extend_from_slice(&value.to_be_bytes());
+            out.bytes(&value.to_be_bytes());
         }
         (ColumnType::Text, Value::Text(text)) => {
-            put_sized_u32(out, text.as_bytes(), label)?;
+            out.string_u32be(text)
+                .map_err(|err| typed_wire_error(label, err))?;
         }
-        (ColumnType::Bool, Value::Integer(0)) => out.push(0),
-        (ColumnType::Bool, Value::Integer(1)) => out.push(1),
+        (ColumnType::Bool, Value::Integer(0)) => out.bool8(false),
+        (ColumnType::Bool, Value::Integer(1)) => out.bool8(true),
         (ColumnType::Bool, Value::Integer(value)) => {
             return Err(rusqlite::Error::InvalidParameterName(format!(
                 "typed column {label} has invalid bool integer {value}"
@@ -1357,37 +1326,8 @@ fn sql_identifier_tokens(sql: &str) -> Vec<String> {
     tokens
 }
 
-fn take_exact<'a>(
-    bytes: &'a [u8],
-    offset: &mut usize,
-    len: usize,
-    label: &str,
-) -> rusqlite::Result<&'a [u8]> {
-    let end = offset.checked_add(len).ok_or_else(|| {
-        rusqlite::Error::InvalidParameterName(format!("typed column {label} length overflows"))
-    })?;
-    if end > bytes.len() {
-        return Err(rusqlite::Error::InvalidParameterName(format!(
-            "typed column {label} is truncated"
-        )));
-    }
-    let out = &bytes[*offset..end];
-    *offset = end;
-    Ok(out)
-}
-
-fn take_u32(bytes: &[u8], offset: &mut usize, label: &str) -> rusqlite::Result<u32> {
-    let raw = take_exact(bytes, offset, 4, label)?;
-    Ok(u32::from_be_bytes(raw.try_into().unwrap()))
-}
-
-fn put_sized_u32(out: &mut Vec<u8>, bytes: &[u8], label: &str) -> rusqlite::Result<()> {
-    let len = u32::try_from(bytes.len()).map_err(|_| {
-        rusqlite::Error::InvalidParameterName(format!("typed column {label} exceeds u32 length"))
-    })?;
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(bytes);
-    Ok(())
+fn typed_wire_error(label: &str, err: WireError) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(format!("typed column {label}: {err}"))
 }
 
 fn table_column_list(table: &TableDeclaration) -> rusqlite::Result<String> {

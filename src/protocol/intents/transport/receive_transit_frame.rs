@@ -7,6 +7,7 @@
 
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::transport::transit_received::addr::normalize_origin_addr_bytes;
+use crate::protocol::intent_payload::{PayloadError, PayloadReader, PayloadWriter};
 
 pub const RECEIVE_TRANSIT_FRAME: &str = "receive_transit_frame";
 
@@ -24,15 +25,20 @@ pub struct ReceiveTransitFrame {
 
 pub fn receive_transit_frame_intent(input: ReceiveTransitFrame) -> Result<Intent, String> {
     let input = normalized_input(input)?;
-    let mut payload = Vec::with_capacity(16 + input.origin_addr.len() + input.frame.len());
-    push_bytes(&mut payload, &input.origin_addr);
-    payload.extend_from_slice(&input.received_at_local_ms.to_be_bytes());
-    push_bytes(&mut payload, &input.frame);
+    let mut payload =
+        PayloadWriter::with_capacity(16 + input.origin_addr.len() + input.frame.len());
+    payload
+        .bytes_u32be(&input.origin_addr)
+        .expect("origin addr fits u32");
+    payload.u64be(input.received_at_local_ms);
+    payload
+        .bytes_u32be(&input.frame)
+        .expect("transit frame fits u32");
     Ok(Intent::new(
         IntentKind::new(RECEIVE_TRANSIT_FRAME).expect("valid receive_transit_frame intent kind"),
         IntentExecution::Ephemeral,
         receive_transit_key(&input),
-        payload,
+        payload.finish(),
     ))
 }
 
@@ -44,11 +50,11 @@ pub fn decode_receive_transit_frame(intent: &Intent) -> Result<ReceiveTransitFra
         return Err("receive_transit_frame intent must be ephemeral".to_string());
     }
 
-    let mut reader = Reader::new(&intent.payload);
-    let origin_addr = normalize_origin_addr_bytes(reader.bytes()?)?;
-    let received_at_local_ms = reader.u64()?;
-    let frame = reader.bytes()?.to_vec();
-    reader.finish()?;
+    let mut reader = PayloadReader::new(&intent.payload);
+    let origin_addr = normalize_origin_addr_bytes(reader.bytes_u32be().map_err(payload_error)?)?;
+    let received_at_local_ms = reader.u64be().map_err(payload_error)?;
+    let frame = reader.bytes_u32be().map_err(payload_error)?.to_vec();
+    reader.finish().map_err(payload_error)?;
 
     let input = ReceiveTransitFrame {
         frame,
@@ -77,56 +83,8 @@ fn receive_transit_key(input: &ReceiveTransitFrame) -> Vec<u8> {
     hash.finalize().as_bytes().to_vec()
 }
 
-fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-    out.extend_from_slice(bytes);
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn bytes(&mut self) -> Result<&'a [u8], String> {
-        let len = self.u32()? as usize;
-        self.take(len)
-    }
-
-    fn u32(&mut self) -> Result<u32, String> {
-        let bytes = self.take(4)?;
-        Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
-    }
-
-    fn u64(&mut self) -> Result<u64, String> {
-        let bytes = self.take(8)?;
-        Ok(u64::from_be_bytes(bytes.try_into().unwrap()))
-    }
-
-    fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
-        let end = self
-            .offset
-            .checked_add(len)
-            .ok_or_else(|| "intent payload length overflow".to_string())?;
-        if end > self.bytes.len() {
-            return Err("truncated intent payload".to_string());
-        }
-        let bytes = &self.bytes[self.offset..end];
-        self.offset = end;
-        Ok(bytes)
-    }
-
-    fn finish(self) -> Result<(), String> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err("intent payload has trailing bytes".to_string())
-        }
-    }
+fn payload_error(err: PayloadError) -> String {
+    format!("invalid receive_transit_frame payload: {err}")
 }
 
 // Handler for inbound transit frame admission.
@@ -135,7 +93,7 @@ impl<'a> Reader<'a> {
 // connection fact is needed, and returns the opened shared/local facts that
 // core should admit.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::protocol::facts::{
     identity::endpoint,
     transport::transit::{

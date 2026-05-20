@@ -1,11 +1,12 @@
-//! Protocol-neutral projection work.
+//! SQL-backed context-change pipeline.
 //!
 //! SQLite is the durable runtime source of truth. This module does one job:
 //! consume committed need/offer changes and mark newly unblocked facts pending.
 //!
 //! The SQL-backed pending-fact projection pipeline lives in
-//! `pending_fact_pipeline.rs`. Runtime calls that module to process pending
-//! facts, passing this pipeline as the context-change state that gets updated.
+//! `pending_fact_pipeline.rs`. Runtime calls both pipelines: fact projection
+//! writes pending context changes, and this pipeline consumes those changes to
+//! mark dependent facts pending.
 //!
 //! Main flows:
 //!
@@ -19,7 +20,7 @@
 //!   -> record pending context changes for newly added needs/offers
 //!
 //! process_context_changes
-//!   -> claim pending context changes from SQLite
+//!   -> read pending context changes from SQLite
 //!   -> run context delta matching against stored context
 //!   -> mark dependent facts pending in the same transaction
 //!
@@ -64,6 +65,12 @@ pub(crate) const PENDING_TIME_RANGES: TableName = TableName::new("pending_time_r
 pub(crate) const PENDING_CONTEXT_CHANGES: TableName = TableName::new("pending_context_changes");
 pub(crate) const INTENTS: TableName = TableName::new("intents");
 
+/// Commit externally projected offers and clear the completed pending facts.
+///
+/// This is used by bounded sync commands that materialize context offers
+/// directly from already-verified rows. It keeps the same transaction rule as
+/// fact projection: newly visible context and completed pending work commit
+/// together.
 pub(crate) fn commit_projected_context_offers(
     store: &Store,
     offers: &[ContextOffer],
@@ -96,14 +103,11 @@ pub struct PipelineReport {
 pub struct ContextChangePipeline;
 
 impl ContextChangePipeline {
-    // Construction.
-
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    // Store-backed intake and purge.
-
+    /// Insert a fact and mark it pending in the same transaction.
     pub(crate) fn submit_fact_to_store(
         &mut self,
         store: &Store,
@@ -115,6 +119,7 @@ impl ContextChangePipeline {
         Ok(inserted)
     }
 
+    /// Bulk insert facts with one transaction and one pending row per insert.
     pub(crate) fn submit_facts_to_store(
         &mut self,
         store: &Store,
@@ -135,6 +140,7 @@ impl ContextChangePipeline {
         Ok(inserted.len())
     }
 
+    /// Remove a fact and all durable runtime state derived from it.
     pub(crate) fn purge_fact_from_store(
         &mut self,
         store: &Store,
@@ -146,6 +152,10 @@ impl ContextChangePipeline {
         Ok(changed)
     }
 
+    /// Turn due time wakes into pending facts plus projection time context.
+    ///
+    /// Time is modeled as another source of context: the fact is marked pending
+    /// and receives the triggering `TimeRange` when it projects.
     pub(crate) fn process_due_time_range(
         &mut self,
         store: &Store,
@@ -195,8 +205,7 @@ impl ContextChangePipeline {
         Ok(inserted)
     }
 
-    // Context-change matching.
-
+    /// Drain pending need/offer changes and wake newly matched facts.
     fn process_context_changes(
         &mut self,
         store: &Store,
@@ -228,6 +237,11 @@ impl ContextChangePipeline {
         Ok(report)
     }
 
+    /// Drive context matching and fact projection until no more work is found.
+    ///
+    /// The two pipelines intentionally alternate: context changes wake facts;
+    /// fact projection writes more context changes. The loop stops when neither
+    /// stage made progress or the projection limit has been reached.
     pub(crate) fn process_pending_facts_and_context_changes(
         &mut self,
         intent_pipeline: &mut IntentPipeline,
@@ -268,6 +282,7 @@ impl ContextChangePipeline {
     }
 }
 
+/// Merge one stage report into the runtime-visible total.
 fn add_pipeline_report(total: &mut PipelineReport, report: PipelineReport) {
     total.projections += report.projections;
     total.context_matches += report.context_matches;
@@ -280,6 +295,11 @@ struct ContextChangeCommit {
     woken_facts: usize,
 }
 
+/// Commit one batch of pending context changes.
+///
+/// Deleting the pending-change rows and inserting dependent pending facts are
+/// one transaction, so a crash cannot replay already-consumed changes without
+/// also preserving the wakeups they produced.
 fn commit_context_change_matching(
     store: &Store,
     pending_keys: Vec<Vec<u8>>,
@@ -309,6 +329,10 @@ fn commit_context_change_matching(
         .map_err(|err| format!("process pending context change: {err}"))
 }
 
+/// Keep only added needs/offers that still exist at commit time.
+///
+/// A fact may have been purged or reprojected after the pending context-change
+/// row was written. Matching against current rows prevents stale wakeups.
 fn current_stored_context_delta(
     store: &Store,
     delta: &ContextSetDelta,

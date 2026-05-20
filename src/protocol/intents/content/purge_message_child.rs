@@ -4,7 +4,7 @@
 //! authorizes removing it. The handler does not scan projection rows; callers
 //! enqueue one intent per child discovered by their own bounded context.
 
-use crate::core::handler_dispatch::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::content::{file, message_deletion, reaction};
 

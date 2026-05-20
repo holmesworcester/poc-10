@@ -12,7 +12,7 @@ use crate::core::context_change_pipeline::{
     PENDING_PROJECTION,
 };
 use crate::core::facts::Fact;
-use crate::core::handler_dispatch::IntentHandler;
+use crate::core::intent_pipeline::IntentHandler;
 use crate::core::intent_pipeline::{self, DispatchReport, IntentPipeline};
 use crate::core::intents::Intent;
 use crate::core::matchers::ContextMatcher;
