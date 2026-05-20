@@ -13,8 +13,8 @@
 //!      - reads the next pending fact ids from SQLite
 //!      - loads the fact, its previous context, and its projection context
 //!   -> process_pending_fact
-//!      -> project_fact
-//!         - calls the Projector and splits the output by durability
+//!      -> prepare_projection_effects
+//!         - calls the Projector, validates output, and splits it by durability
 //!      -> commit_projection_effects
 //!         - one SQLite transaction for this fact's durable/atomic outputs
 //!      -> finish_pending_fact
@@ -27,7 +27,7 @@
 //! recording deferred intents happen together. Matching that context change and
 //! waking dependent facts belongs to `context_change_pipeline`.
 
-use crate::core::context::{ContextSet, ContextSetDelta};
+use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
 use crate::core::context_change_helpers::{
     atomic_row_mutations, context_need_row, context_offer_row, decode_fact_id,
     delete_pending_time_ranges_for_owner_in_tx, pending_context_change_rows, persisted_fact,
@@ -42,9 +42,7 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::intent_pipeline::IntentPipeline;
 use crate::core::intents::{Intent, IntentExecution};
 use crate::core::matchers::ContextMatcher;
-use crate::core::projection::{
-    run_projection_with_context, ProjectionContext, ProjectionRun, Projector, TimeWake,
-};
+use crate::core::projectors::{ProjectionContext, ProjectionOutput, Projector, TimeWake};
 use crate::core::store::{Store, TableName};
 
 /// Process pending facts from SQLite one at a time until there is no work or
@@ -55,14 +53,14 @@ use crate::core::store::{Store, TableName};
 /// 1. `pending_owner_batch` chooses pending fact ids from SQLite.
 /// 2. `load_pending_fact` loads each fact's projection inputs.
 /// 3. `process_pending_fact` completes all processing for that one fact.
-/// 4. `project_fact` runs protocol projection and groups the outputs.
+/// 4. `prepare_projection_effects` runs protocol projection and groups the outputs.
 /// 5. `commit_projection_effects` commits every durable/atomic effect in one
 ///    SQLite transaction.
 /// 6. `finish_pending_fact` records restart-local effects and
 ///    refreshes the report after the transaction has succeeded.
 pub(crate) fn process_pending_facts(
     intent_pipeline: &mut IntentPipeline,
-    projector: &impl Projector,
+    projector: &(impl Projector + ?Sized),
     matchers: &[&dyn ContextMatcher],
     store: &Store,
     allowed_tables: &[TableName],
@@ -148,12 +146,13 @@ fn load_pending_fact(
 fn process_pending_fact(
     intent_pipeline: &mut IntentPipeline,
     pending_fact: PendingFact,
-    projector: &impl Projector,
+    projector: &(impl Projector + ?Sized),
     store: &Store,
     allowed_tables: &[TableName],
     report: &mut PipelineReport,
 ) -> Result<(), String> {
-    let effects = project_fact(intent_pipeline, projector, pending_fact, allowed_tables)?;
+    let effects =
+        prepare_projection_effects(intent_pipeline, projector, pending_fact, allowed_tables)?;
     let commit = commit_projection_effects(store, &effects, allowed_tables)?;
     finish_pending_fact(intent_pipeline, effects, commit, report)
 }
@@ -162,9 +161,9 @@ fn process_pending_fact(
 ///
 /// No rows are written here. The result is an uncommitted `ProjectionEffects`
 /// value that says what should happen if the projection commits.
-fn project_fact(
+fn prepare_projection_effects(
     intent_pipeline: &IntentPipeline,
-    projector: &impl Projector,
+    projector: &(impl Projector + ?Sized),
     pending_fact: PendingFact,
     allowed_tables: &[TableName],
 ) -> Result<ProjectionEffects, String> {
@@ -273,6 +272,68 @@ impl ProjectionEffects {
     }
 }
 
+/// The pure result of running one projector before any SQL writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectionRun {
+    context: ContextSet,
+    context_delta: ContextSetDelta,
+    time_wakes: Vec<TimeWake>,
+    intents: Vec<Intent>,
+}
+
+/// Call the protocol projector and normalize the output for the SQL pipeline.
+///
+/// Projection output is the complete replacement context for this fact. This
+/// helper enforces that projectors only own their own context/time rows, then
+/// computes the context delta that will wake dependent facts after commit.
+fn run_projection_with_context(
+    projector: &(impl Projector + ?Sized),
+    fact: &Fact,
+    previous_context: &ContextSet,
+    context: ProjectionContext,
+) -> Result<ProjectionRun, String> {
+    let output = projector.project(fact, &context)?;
+    enforce_owner_is_self(fact, &output)?;
+    let context = output.context_set();
+    let context_delta = diff_context_sets(previous_context, &context);
+    Ok(ProjectionRun {
+        context,
+        context_delta,
+        time_wakes: output.time_wakes,
+        intents: output.intents,
+    })
+}
+
+/// Reject any projected need, offer, or time wake whose `owner` is not the fact
+/// being projected.
+fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
+    for need in &output.needs {
+        if need.owner != fact.id {
+            return Err(format!(
+                "projector emitted need with owner {:x?} that is not the projected fact {:x?}",
+                need.owner, fact.id
+            ));
+        }
+    }
+    for offer in &output.offers {
+        if offer.owner != fact.id {
+            return Err(format!(
+                "projector emitted offer with owner {:x?} that is not the projected fact {:x?}",
+                offer.owner, fact.id
+            ));
+        }
+    }
+    for wake in &output.time_wakes {
+        if wake.owner != fact.id {
+            return Err(format!(
+                "projector emitted time wake with owner {:x?} that is not the projected fact {:x?}",
+                wake.owner, fact.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The committed SQL result needed to update memory and reporting.
 struct ProjectionCommit {
     persisted_intents: usize,
@@ -377,4 +438,193 @@ fn replace_stored_time_wake_owner_rows(
     store.delete_table_rows_in_tx(TIME_WAKES, delete_keys)?;
     store.insert_table_rows_in_tx(wakes.iter().map(time_wake_row).collect())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
+    use crate::core::facts::FactScope;
+    use crate::core::intents::IntentKind;
+    use crate::core::projectors::Timeline;
+
+    #[test]
+    fn projection_run_rejects_offer_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = BadOfferOwnerProjector;
+
+        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect_err("projection should reject foreign offer owner");
+
+        assert!(err.contains("projector emitted offer with owner"));
+    }
+
+    #[test]
+    fn projection_run_rejects_need_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = BadNeedOwnerProjector;
+
+        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect_err("projection should reject foreign need owner");
+
+        assert!(err.contains("projector emitted need with owner"));
+    }
+
+    #[test]
+    fn projection_run_rejects_time_wake_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = BadTimeWakeOwnerProjector;
+
+        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect_err("projection should reject foreign time-wake owner");
+
+        assert!(err.contains("projector emitted time wake with owner"));
+    }
+
+    #[test]
+    fn projection_run_diffs_standing_context_without_self_waking() {
+        let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
+        let role = Role::new("exact").unwrap();
+        let selector = Selector::from_bytes([9; 32]);
+        let projector = NeedUntilOffer {
+            role,
+            selector,
+            intent_kind: IntentKind::new("followup").unwrap(),
+        };
+
+        let first =
+            run_projection(&projector, &fact, &ContextSet::new(), Vec::new()).expect("first run");
+        assert_eq!(first.context_delta.added_needs.len(), 1);
+        assert_eq!(first.context_delta.removed_needs.len(), 0);
+
+        let second =
+            run_projection(&projector, &fact, &first.context, Vec::new()).expect("second run");
+        assert!(second.context_delta.is_empty());
+        assert_eq!(second.context, first.context);
+        assert!(second.intents.is_empty());
+    }
+
+    #[test]
+    fn projection_run_replaces_need_with_intent_when_context_appears() {
+        let fact = Fact::new(FactScope::Global, 1, b"recoverable".to_vec());
+        let role = Role::new("exact").unwrap();
+        let selector = Selector::from_bytes([9; 32]);
+        let projector = NeedUntilOffer {
+            role: role.clone(),
+            selector: selector.clone(),
+            intent_kind: IntentKind::new("followup").unwrap(),
+        };
+        let previous = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect("previous projection")
+            .context;
+        let offer = ContextOffer {
+            owner: [2; 32],
+            role,
+            scope: FactScope::Global,
+            selector,
+        };
+
+        let next = run_projection(&projector, &fact, &previous, vec![offer])
+            .expect("projection with context");
+
+        assert!(next.context.needs.is_empty());
+        assert_eq!(next.context_delta.removed_needs, previous.needs);
+        assert_eq!(next.context_delta.added_needs.len(), 0);
+        assert_eq!(next.intents.len(), 1);
+        assert_eq!(next.intents[0].kind.as_str(), "followup");
+    }
+
+    fn run_projection(
+        projector: &impl Projector,
+        fact: &Fact,
+        previous_context: &ContextSet,
+        offers: Vec<ContextOffer>,
+    ) -> Result<ProjectionRun, String> {
+        run_projection_with_context(
+            projector,
+            fact,
+            previous_context,
+            ProjectionContext::new(offers),
+        )
+    }
+
+    struct NeedUntilOffer {
+        role: Role,
+        selector: Selector,
+        intent_kind: IntentKind,
+    }
+
+    impl Projector for NeedUntilOffer {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if context.offers().is_empty() {
+                Ok(ProjectionOutput::new().need(ContextNeed {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: self.selector.clone(),
+                }))
+            } else {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    self.intent_kind.clone(),
+                    IntentExecution::Atomic,
+                    fact.id,
+                    context.offer_owners().next().unwrap_or(fact.id),
+                )))
+            }
+        }
+    }
+
+    struct BadOfferOwnerProjector;
+
+    impl Projector for BadOfferOwnerProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().offer(ContextOffer {
+                owner: [9; 32],
+                role: Role::new("exact").unwrap(),
+                scope: fact.scope.clone(),
+                selector: Selector::from_bytes(fact.id),
+            }))
+        }
+    }
+
+    struct BadNeedOwnerProjector;
+
+    impl Projector for BadNeedOwnerProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: [9; 32],
+                role: Role::new("exact").unwrap(),
+                scope: fact.scope.clone(),
+                selector: Selector::from_bytes(fact.id),
+            }))
+        }
+    }
+
+    struct BadTimeWakeOwnerProjector;
+
+    impl Projector for BadTimeWakeOwnerProjector {
+        fn project(
+            &self,
+            _fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().time_wake(TimeWake {
+                owner: [9; 32],
+                timeline: Timeline::new("test").unwrap(),
+                at: 1,
+            }))
+        }
+    }
 }

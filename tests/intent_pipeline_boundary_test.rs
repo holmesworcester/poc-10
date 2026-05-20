@@ -1,11 +1,11 @@
 use topo::core::facts::{Fact, FactScope};
-use topo::core::intent_pipeline::{HandlerContext, HandlerOutput, IntentHandler};
+use topo::core::intent_pipeline::{HandlerContext, HandlerOutput, HandlerResult, IntentHandler};
 use topo::core::intents::{Intent, IntentExecution, IntentKind};
 
 struct EmitsFactAndFollowup;
 
 impl IntentHandler for EmitsFactAndFollowup {
-    fn handle(&self, intent: &Intent, _context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, intent: &Intent, _context: &HandlerContext) -> HandlerResult {
         let fact = Fact::new(FactScope::Local, 42, b"handler-produced-fact".to_vec());
         let followup = Intent::new(
             IntentKind::new("followup_work").unwrap(),

@@ -57,13 +57,13 @@ pub fn decode_create_connection_response_intent(
     intent: &Intent,
 ) -> Result<CreateConnectionResponse, String> {
     if intent.kind.as_str() != CREATE_CONNECTION_RESPONSE {
-        return Err("expected create_connection_response intent".to_string());
+        return Err("expected create_connection_response intent".into());
     }
     if intent.execution != IntentExecution::Deferred {
-        return Err("create_connection_response intent must be deferred".to_string());
+        return Err("create_connection_response intent must be deferred".into());
     }
     if intent.payload.len() != PAYLOAD_BYTES {
-        return Err("create_connection_response payload has wrong length".to_string());
+        return Err("create_connection_response payload has wrong length".into());
     }
     let input = CreateConnectionResponse {
         request_id: take_id(&intent.payload, 0),
@@ -71,9 +71,7 @@ pub fn decode_create_connection_response_intent(
         receive_id: take_id(&intent.payload, 2),
     };
     if intent.key != idempotence_key(&input) {
-        return Err(
-            "create_connection_response idempotence key does not match payload".to_string(),
-        );
+        return Err("create_connection_response idempotence key does not match payload".into());
     }
     Ok(input)
 }
@@ -169,7 +167,8 @@ mod tests {
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intent_pipeline::{
-    retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
+    retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult,
+    IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::facts::connection::ephemeral_secret::{
@@ -207,7 +206,7 @@ impl IntentHandler for CreateConnectionResponseHandler {
         ])
     }
 
-    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_create_connection_response_intent(intent)?;
         let request_fact = context.require_fact(&input.request_id)?;
         let invite_fact = context.require_fact(&input.invite_secret_id)?;
@@ -217,30 +216,31 @@ impl IntentHandler for CreateConnectionResponseHandler {
         let invite = invite_layout::decode_fact(&invite_fact.bytes)?;
         let received =
             transit_received::decode_fact_payload(receive_fact.body()).map_err(|_| {
-                "create_connection_response receive context is not transport::transit provenance"
-                    .to_string()
+                HandlerError::fatal(
+                "create_connection_response receive context is not transport::transit provenance",
+            )
             })?;
 
         if request.invite_secret_fact_id != input.invite_secret_id {
             return Err(
-                "create_connection_response invite context id does not match request".to_string(),
+                "create_connection_response invite context id does not match request".into(),
             );
         }
         if invite_fact.scope != FactScope::Local {
-            return Err("create_connection_response invite context must be local".to_string());
+            return Err("create_connection_response invite context must be local".into());
         }
         if receive_fact.scope != FactScope::Local {
-            return Err("create_connection_response receive context must be local".to_string());
+            return Err("create_connection_response receive context must be local".into());
         }
         request_create::validate_invite_signature(&request, &invite)?;
         validate_receive_provenance(input.request_id, &request, &received)?;
         let endpoint = local_endpoint::local_endpoint(context.store()?)?.ok_or_else(|| {
-            "create_connection_response requires local endpoint state".to_string()
+            HandlerError::fatal("create_connection_response requires local endpoint state")
         })?;
         if endpoint.endpoint != request.to_endpoint
             || endpoint.endpoint != received.local_endpoint_id
         {
-            return Err("create_connection_response endpoint does not match request".to_string());
+            return Err("create_connection_response endpoint does not match request".into());
         }
 
         let responder_ephemeral_private_key = crypto::random_x25519_private_key();
@@ -265,17 +265,15 @@ impl IntentHandler for CreateConnectionResponseHandler {
             responder_ephemeral_secret_fact_id: responder_ephemeral_fact.id,
             created_at_ms: received.received_at_local_ms,
         })?;
-        let return_addr = request
-            .from_listen_addr
-            .ok_or_else(|| "create_connection_response response route is missing".to_string())?;
+        let return_addr = request.from_listen_addr.ok_or_else(|| {
+            HandlerError::fatal("create_connection_response response route is missing")
+        })?;
         let target = NetworkTarget::new(return_addr);
         network::send(
             context.store()?,
             target,
             OutboundFrame {
                 bytes: built.fact.bytes.clone(),
-                deadline: None,
-                retry_key: Some(intent.key.clone()),
             },
         )
         .map_err(|err| retry_intent(format!("create_connection_response tcp send: {err}")))?;
@@ -292,25 +290,21 @@ fn validate_receive_provenance(
     received: &crate::protocol::facts::transport::transit_received::fact::TransitReceivedFact,
 ) -> Result<(), String> {
     if received.received_fact_id != request_id {
-        return Err("create_connection_response receive context targets another fact".to_string());
+        return Err("create_connection_response receive context targets another fact".into());
     }
     if received.transit_kind
         != crate::protocol::facts::transport::transit_received::fact::TRANSIT_KIND_BOOTSTRAP
     {
-        return Err("create_connection_response requires bootstrap receive provenance".to_string());
+        return Err("create_connection_response requires bootstrap receive provenance".into());
     }
     if received.local_endpoint_id != request.to_endpoint {
-        return Err(
-            "create_connection_response request endpoint does not match receive".to_string(),
-        );
+        return Err("create_connection_response request endpoint does not match receive".into());
     }
     if received.sender_endpoint_id != request.from_endpoint {
-        return Err("create_connection_response sender does not match receive".to_string());
+        return Err("create_connection_response sender does not match receive".into());
     }
     if received.request_id != Some(request_id) {
-        return Err(
-            "create_connection_response receive provenance names another request".to_string(),
-        );
+        return Err("create_connection_response receive provenance names another request".into());
     }
     Ok(())
 }

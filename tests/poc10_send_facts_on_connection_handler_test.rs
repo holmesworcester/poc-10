@@ -3,8 +3,9 @@
 use topo::core::crypto;
 use topo::core::facts::Fact;
 use topo::core::intent_pipeline::{HandlerContext, IntentHandler};
-use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::protocol::catalog::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use topo::protocol::facts::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::facts::connection::response::layout as connection_response_layout;
 use topo::protocol::facts::identity::endpoint::fact::EndpointFact;

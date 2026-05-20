@@ -1,6 +1,8 @@
 //! Send sync compare response facts for one inbound compare fact.
 
-use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{
+    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::intents::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -31,20 +33,18 @@ pub fn decode_send_sync_compare_response(
     intent: &Intent,
 ) -> Result<SendSyncCompareResponse, String> {
     if intent.kind.as_str() != SEND_SYNC_COMPARE_RESPONSE {
-        return Err("expected send_sync_compare_response intent".to_string());
+        return Err("expected send_sync_compare_response intent".into());
     }
     if intent.execution != IntentExecution::Deferred {
-        return Err("send_sync_compare_response intent must be deferred".to_string());
+        return Err("send_sync_compare_response intent must be deferred".into());
     }
     if intent.payload.len() != 33 || intent.payload[0] != 1 {
-        return Err("send_sync_compare_response payload is malformed".to_string());
+        return Err("send_sync_compare_response payload is malformed".into());
     }
     let compare_fact_id = intent.payload[1..33].try_into().unwrap();
     let input = SendSyncCompareResponse { compare_fact_id };
     if intent.key != send_sync_compare_response_key(&input) {
-        return Err(
-            "send_sync_compare_response idempotence key does not match payload".to_string(),
-        );
+        return Err("send_sync_compare_response idempotence key does not match payload".into());
     }
     Ok(input)
 }
@@ -75,7 +75,7 @@ impl IntentHandler for SendSyncCompareResponseHandler {
         Ok(vec![input.compare_fact_id])
     }
 
-    fn handle(&self, raw: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_sync_compare_response(raw)?;
         let compare_fact = context.require_fact(&input.compare_fact_id)?;
         let compare =

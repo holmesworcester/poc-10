@@ -12,7 +12,7 @@
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
@@ -21,6 +21,9 @@ use crate::protocol::facts::identity::invite;
 use crate::protocol::facts::transport::transit_received;
 use crate::protocol::intents::connection::create_response::{
     create_connection_response_intent, CreateConnectionResponse,
+};
+use crate::protocol::intents::connection::send_bootstrap_request::{
+    send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
 };
 use crate::protocol::matchers;
 use crate::protocol::matchers as ephemeral_matchers;
@@ -192,9 +195,15 @@ fn materialized_output(
     request_id: [u8; 32],
     request: &ConnectionRequestFact,
 ) -> Result<ProjectionOutput, String> {
-    Ok(ProjectionOutput::new()
+    let mut output = ProjectionOutput::new()
         .offer(matchers::connection_request_offer(request_id, request_id))
-        .intent(AtomicIntent::PutRow(connection_request_row(request_id, request)?).into_intent()))
+        .intent(AtomicIntent::PutRow(connection_request_row(request_id, request)?).into_intent());
+    if let Some(addr) = request.to_listen_addr {
+        output = output.intent(send_bootstrap_connection_request_intent(
+            SendBootstrapConnectionRequest { request_id, addr },
+        )?);
+    }
+    Ok(output)
 }
 
 fn received_materialized_output(
@@ -269,7 +278,7 @@ mod projector_tests {
     use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::AtomicIntent;
-    use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };

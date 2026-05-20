@@ -7,7 +7,7 @@
 
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::transport::transit_received::addr::normalize_origin_addr_bytes;
-use crate::protocol::intent_payload::{PayloadError, PayloadReader, PayloadWriter};
+use crate::protocol::intents::payload::{PayloadError, PayloadReader, PayloadWriter};
 
 pub const RECEIVE_TRANSIT_FRAME: &str = "receive_transit_frame";
 
@@ -44,10 +44,10 @@ pub fn receive_transit_frame_intent(input: ReceiveTransitFrame) -> Result<Intent
 
 pub fn decode_receive_transit_frame(intent: &Intent) -> Result<ReceiveTransitFrame, String> {
     if intent.kind.as_str() != RECEIVE_TRANSIT_FRAME {
-        return Err("expected receive_transit_frame intent".to_string());
+        return Err("expected receive_transit_frame intent".into());
     }
     if intent.execution != IntentExecution::Ephemeral {
-        return Err("receive_transit_frame intent must be ephemeral".to_string());
+        return Err("receive_transit_frame intent must be ephemeral".into());
     }
 
     let mut reader = PayloadReader::new(&intent.payload);
@@ -62,7 +62,7 @@ pub fn decode_receive_transit_frame(intent: &Intent) -> Result<ReceiveTransitFra
         received_at_local_ms,
     };
     if intent.key != receive_transit_key(&input) {
-        return Err("receive_transit_frame idempotence key does not match payload".to_string());
+        return Err("receive_transit_frame idempotence key does not match payload".into());
     }
     Ok(input)
 }
@@ -93,7 +93,9 @@ fn payload_error(err: PayloadError) -> String {
 // connection fact is needed, and returns the opened shared/local facts that
 // core should admit.
 
-use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{
+    HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+};
 use crate::protocol::facts::{
     identity::endpoint,
     transport::transit::{
@@ -136,14 +138,14 @@ impl IntentHandler for ReceiveTransitFrameHandler {
         }
     }
 
-    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_receive_transit_frame(intent)?;
         let facts = match receive::bootstrap_frame_kind(&input.frame)? {
             BootstrapFrameKind::ConnectionRequest(request) => {
                 let invite_fact = context.require_fact(&request.invite_secret_fact_id)?;
                 let local_endpoint = endpoint::local_endpoint::local_endpoint(context.store()?)?
                     .ok_or_else(|| {
-                        "bootstrap request receiver has no local endpoint".to_string()
+                        HandlerError::fatal("bootstrap request receiver has no local endpoint")
                     })?;
                 let opened = receive::open_bootstrap_request(OpenBootstrapRequest {
                     frame: &input.frame,

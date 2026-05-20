@@ -12,7 +12,7 @@ mod secret_path;
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::matchers as history_matchers;
@@ -162,7 +162,7 @@ mod projector_tests {
 
     use topo::core::facts::{Fact, FactScope, ScopeKind};
     use topo::core::intents::AtomicIntent;
-    use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::encryption::fact::LocalKeySecretFact;
     use topo::protocol::facts::encryption::layout as encryption_layout;
     use topo::protocol::facts::encryption::local_history_node_secret::fact::{

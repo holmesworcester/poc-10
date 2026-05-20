@@ -35,26 +35,22 @@ pub struct StartOptions {
     pub work_limit: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TickReport {
-    pub accepted_connections: usize,
-    pub sent_frames: usize,
-    pub received_frames: usize,
-    pub projections: usize,
-    pub handled_intents: usize,
-    pub emitted_facts: usize,
-    pub emitted_intents: usize,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TickActivity {
+    pub active: bool,
 }
 
-impl TickReport {
-    fn has_activity(&self) -> bool {
-        self.accepted_connections > 0
-            || self.sent_frames > 0
-            || self.received_frames > 0
-            || self.projections > 0
-            || self.handled_intents > 0
-            || self.emitted_facts > 0
-            || self.emitted_intents > 0
+impl TickActivity {
+    pub fn active() -> Self {
+        Self { active: true }
+    }
+
+    pub fn idle() -> Self {
+        Self { active: false }
+    }
+
+    pub fn from_bool(active: bool) -> Self {
+        Self { active }
     }
 }
 
@@ -62,41 +58,15 @@ impl TickReport {
 pub struct DaemonReport {
     pub local_addr: Option<SocketAddr>,
     pub ticks: usize,
-    pub accepted_connections: usize,
-    pub sent_frames: usize,
-    pub received_frames: usize,
-    pub projections: usize,
-    pub handled_intents: usize,
-    pub emitted_facts: usize,
-    pub emitted_intents: usize,
 }
 
 impl DaemonReport {
-    fn add_tick(&mut self, tick: TickReport) {
-        self.accepted_connections += tick.accepted_connections;
-        self.sent_frames += tick.sent_frames;
-        self.received_frames += tick.received_frames;
-        self.projections += tick.projections;
-        self.handled_intents += tick.handled_intents;
-        self.emitted_facts += tick.emitted_facts;
-        self.emitted_intents += tick.emitted_intents;
-    }
-
     fn lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(local_addr) = self.local_addr {
             out.push(format!("listening: {local_addr}"));
         }
-        out.extend([
-            format!("ticks: {}", self.ticks),
-            format!("accepted_connections: {}", self.accepted_connections),
-            format!("sent_frames: {}", self.sent_frames),
-            format!("received_frames: {}", self.received_frames),
-            format!("projections: {}", self.projections),
-            format!("handled_intents: {}", self.handled_intents),
-            format!("emitted_facts: {}", self.emitted_facts),
-            format!("emitted_intents: {}", self.emitted_intents),
-        ]);
+        out.push(format!("ticks: {}", self.ticks));
         out
     }
 }
@@ -104,7 +74,7 @@ impl DaemonReport {
 pub fn start(
     db_path: &Path,
     args: CliArgs<'_>,
-    mut tick: impl FnMut(&tcp::Listener, usize) -> Result<TickReport, String>,
+    mut tick: impl FnMut(&tcp::Listener, usize) -> Result<TickActivity, String>,
 ) -> Result<CliOutput, String> {
     let options = parse_start_options(args)?;
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
@@ -121,9 +91,8 @@ pub fn start(
         ..DaemonReport::default()
     };
     while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-        let tick_report = tick(&listener, options.work_limit)?;
-        let sleep_after_tick = sleep_after_tick(&options, &tick_report);
-        report.add_tick(tick_report);
+        let tick_activity = tick(&listener, options.work_limit)?;
+        let sleep_after_tick = sleep_after_tick(&options, tick_activity);
         report.ticks += 1;
         if let Some(duration) = sleep_after_tick {
             std::thread::sleep(duration);
@@ -207,8 +176,8 @@ fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
     })
 }
 
-fn sleep_after_tick(options: &StartOptions, tick: &TickReport) -> Option<Duration> {
-    (!tick.has_activity()).then(|| Duration::from_millis(options.quiet_ms))
+fn sleep_after_tick(options: &StartOptions, tick: TickActivity) -> Option<Duration> {
+    (!tick.active).then(|| Duration::from_millis(options.quiet_ms))
 }
 
 fn parse_positive_u64(value: Option<&str>) -> Result<u64, String> {
@@ -512,14 +481,11 @@ mod tests {
             quiet_ms: 200,
             work_limit: 1,
         };
-        let active = TickReport {
-            handled_intents: 1,
-            ..TickReport::default()
-        };
+        let active = TickActivity::active();
 
-        assert_eq!(sleep_after_tick(&options, &active), None);
+        assert_eq!(sleep_after_tick(&options, active), None);
         assert_eq!(
-            sleep_after_tick(&options, &TickReport::default()),
+            sleep_after_tick(&options, TickActivity::idle()),
             Some(Duration::from_millis(200))
         );
     }

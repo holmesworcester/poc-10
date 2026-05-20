@@ -10,7 +10,7 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::facts::identity;
@@ -184,7 +184,7 @@ mod projector_tests {
 
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::AtomicIntent;
-    use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::encryption::disappearing_messages_setting::fact::{
         DisappearingMessagesSettingFact, SCOPE_KIND_CHANNEL, SCOPE_KIND_WORKSPACE,
     };

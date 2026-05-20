@@ -7,11 +7,11 @@
 
 use crate::core::{
     facts::{Fact, FactId},
-    intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler},
+    intent_pipeline::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler},
     intents::{Intent, IntentExecution, IntentKind},
 };
 use crate::protocol::facts::sync::shared_fact;
-use crate::protocol::intent_payload::{PayloadError, PayloadReader, PayloadWriter};
+use crate::protocol::intents::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::intents::sync::seed_connection;
 
 pub const SHARE_FACT_WITH_WORKSPACE: &str = "share_fact_with_workspace";
@@ -49,10 +49,10 @@ pub fn share_fact_with_workspace_intent_for_fact(workspace_id: HandlerId, fact: 
 
 pub fn decode_share_fact_with_workspace(intent: &Intent) -> Result<ShareFactWithWorkspace, String> {
     if intent.kind.as_str() != SHARE_FACT_WITH_WORKSPACE {
-        return Err("expected share_fact_with_workspace intent".to_string());
+        return Err("expected share_fact_with_workspace intent".into());
     }
     if intent.execution != IntentExecution::Deferred {
-        return Err("share_fact_with_workspace intent must be deferred".to_string());
+        return Err("share_fact_with_workspace intent must be deferred".into());
     }
     let mut reader = PayloadReader::new(&intent.payload);
     reader.expect_u8(1).map_err(payload_error)?;
@@ -66,7 +66,7 @@ pub fn decode_share_fact_with_workspace(intent: &Intent) -> Result<ShareFactWith
         timestamp_ms,
     };
     if intent.key != share_fact_with_workspace_key(&input) {
-        return Err("share_fact_with_workspace idempotence key does not match payload".to_string());
+        return Err("share_fact_with_workspace idempotence key does not match payload".into());
     }
     Ok(input)
 }
@@ -103,7 +103,7 @@ impl IntentHandler for ShareFactWithWorkspaceHandler {
         Ok(vec![input.fact_id])
     }
 
-    fn handle(&self, raw: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_share_fact_with_workspace(raw)?;
         let fact = context.require_fact(&input.fact_id)?;
         context.require_non_local_fact_bytes(&input.fact_id)?;

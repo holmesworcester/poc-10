@@ -45,10 +45,10 @@ pub fn send_message(
 
     let signing = ctx.local_signing_capability(workspace_id)?;
     let encryption = ctx.local_encryption_capability(workspace_id)?;
-    if signing.fact.workspace_id != workspace_id {
+    if signing.workspace_id != workspace_id {
         return Err("signing capability is not bound to this workspace".to_string());
     }
-    if encryption.fact.workspace_id != workspace_id {
+    if encryption.workspace_id != workspace_id {
         return Err("encryption capability is not bound to this workspace".to_string());
     }
 
@@ -75,11 +75,11 @@ pub fn send_message(
         .map(|setting| setting.setting_id)
         .unwrap_or([0; 32]);
 
-    let nonce = deterministic_nonce(workspace_id, signing.fact.signer_id, created_at_ms);
+    let nonce = deterministic_nonce(workspace_id, signing.signer_id, created_at_ms);
     let plaintext = pad_plaintext(text.as_bytes())?;
     let ciphertext = crypto::xchacha20poly1305_encrypt(
-        &encryption.fact.key_secret,
-        &associated_data(workspace_id, encryption.fact.frontier_id, minute),
+        &encryption.key_secret,
+        &associated_data(workspace_id, encryption.frontier_id, minute),
         &nonce,
         &plaintext,
     )?;
@@ -90,13 +90,13 @@ pub fn send_message(
         ));
     }
 
-    let author_user_id = local_author_user_id(ctx, workspace_id)?.unwrap_or(signing.fact.signer_id);
+    let author_user_id = local_author_user_id(ctx, workspace_id)?.unwrap_or(signing.signer_id);
     let message = ContentMessageFact {
         workspace_id,
         created_at_ms,
         author_user_id,
-        signer_id: signing.fact.signer_id,
-        frontier_id: encryption.fact.frontier_id,
+        signer_id: signing.signer_id,
+        frontier_id: encryption.frontier_id,
         local_history_node_secret_id: [0; 32],
         expires_at_minute,
         disappearing_setting_id,
@@ -106,11 +106,8 @@ pub fn send_message(
         ciphertext,
     };
     let payload = layout::encode_fact(&message)?;
-    let envelope_bytes = signed_fact_create::sign_payload_bytes(
-        signing.fact.signer_id,
-        &signing.fact.private_key,
-        payload,
-    )?;
+    let envelope_bytes =
+        signed_fact_create::sign_payload_bytes(signing.signer_id, &signing.private_key, payload)?;
     debug_assert_eq!(envelope_bytes.len(), signed_fact::SIGNED_FACT_BYTES);
 
     let fact = Fact::new(

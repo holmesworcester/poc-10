@@ -12,7 +12,7 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::facts::identity;

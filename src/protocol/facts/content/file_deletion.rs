@@ -13,7 +13,7 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentFileDeletionFact
 
 pub(crate) struct Codec;
 
-impl crate::core::projection::FactCodec for Codec {
+impl crate::core::projectors::FactCodec for Codec {
     type Payload = crate::protocol::facts::content::message::authority::DecodedFact<
         fact::ContentFileDeletionFact,
     >;

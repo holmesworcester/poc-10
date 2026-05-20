@@ -7,7 +7,7 @@
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::projection::FactCodec;
+use crate::core::projectors::FactCodec;
 use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
 
 use super::frame;

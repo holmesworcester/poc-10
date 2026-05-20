@@ -3,9 +3,9 @@
 //! `generate` constructs shared content facts only. Projection remains owned by
 //! `project.rs`; row reads for reports stay in `queries.rs`.
 
+use crate::core::clock;
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::facts::{Fact, FactId};
-use crate::core::logical_clock;
 use crate::protocol::facts::content::event::{fact::ContentEventFact, layout, queries};
 use crate::protocol::facts::identity;
 use crate::protocol::matchers;
@@ -35,7 +35,7 @@ pub fn generate(
     identity::workspace::queries::workspace_by_id(ctx.store(), workspace_id)?;
 
     let observed_max = queries::max_timestamp(ctx.store())?;
-    let first_timestamp = logical_clock::next_timestamp(ctx.store(), observed_max)?;
+    let first_timestamp = clock::next_timestamp(ctx.store(), observed_max)?;
     let last_timestamp = first_timestamp
         .checked_add((count - 1) as u64)
         .ok_or_else(|| "generate timestamp range overflows u64".to_string())?;
@@ -123,7 +123,7 @@ mod tests {
     fn generate_constructs_deterministic_content_facts() {
         let store = Store::open_memory_with_schema_sources(&[
             crate::core::schema_dsl::CORE_SCHEMA_SOURCE,
-            crate::core::schema_dsl::FACTS_SCHEMA_SOURCE,
+            crate::protocol::catalog::FACTS_SCHEMA_SOURCE,
         ])
         .expect("store");
         let clock = FnClock(|| 1);

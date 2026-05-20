@@ -1,6 +1,6 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId};
-use crate::core::projection::ProjectionContext;
+use crate::core::projectors::ProjectionContext;
 use crate::protocol::facts::identity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

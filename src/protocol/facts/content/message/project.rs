@@ -15,7 +15,7 @@ use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{AtomicIntent, TableDelete};
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
 use crate::protocol::facts::content::message_deletion;
@@ -448,7 +448,7 @@ mod projector_tests {
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::AtomicIntent;
-    use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::content::message::fact::ContentMessageFact;
     use topo::protocol::facts::content::message::{layout, project, rows};
     use topo::protocol::facts::content::message_deletion::fact::ContentMessageDeletionFact;

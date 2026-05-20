@@ -1,5 +1,5 @@
 use crate::core::facts::Fact;
-use crate::core::projection::{ProjectionContext, ProjectionOutput};
+use crate::core::projectors::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::fact::KeyRequestFact;
 use crate::protocol::facts::encryption::intent::create_key_wrap_intent;
 use crate::protocol::facts::encryption::layout;

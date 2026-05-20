@@ -11,7 +11,7 @@ context matchers
 projectors
 intents
 intent handlers
-WakeLoop
+runtime pipelines
 ```
 
 The design is not a wrapper around the old worker/blocking model. The end state
@@ -30,9 +30,9 @@ The migration succeeds when:
 - The old mechanisms are gone, not wrapped: label stores, blocked tables,
   ready queues, pending reprojection queues, worker-specific domain queues, and
   receive metadata side channels.
-- Core owns facts, context, command context, context matchers, `WakeLoop`,
-  generic runtime/app mechanics, intents, handler dispatch, storage mechanics,
-  wire field primitives, and crypto helpers.
+- Core owns facts, context, command context, context matchers, generic runtime/app mechanics,
+  pending fact processing, context-change processing, intent dispatch, storage mechanics, wire
+  field primitives, and crypto helpers.
 - Fact modules own fact semantics: layouts, projectors, context roles,
   command constructors, read-model rows, module-local CLI adapters, module
   queries, and protocol validation rules.
@@ -43,8 +43,8 @@ The migration succeeds when:
   storage escape hatch.
 - No fact module, intent handler, command, schema, or wire layout reaches around core
   to call another stage directly.
-- There is no event-bus layer. `WakeLoop` is the target projection and intent
-  coordinator.
+- There is no event-bus layer. The runtime coordinates three explicit
+  SQL-backed pipelines: pending facts, context changes, and intents.
 - The product-facing binary is `match`; the package may still be named `topo`.
 - Product entry is a thin root function that supplies the CLI name and protocol
   registry to generic core runtime/app code. It must not contain
@@ -86,15 +86,16 @@ fixtures and the deferred partial-download-progress content tests.
 
 - `src/main.rs` delegates to the product-facing `match` entrypoint.
 - Product commands are being cut over to a generic core runtime/app facade
-  configured by `src/protocol.rs`. Any product-specific runtime facade is
+  configured by `src/protocol/registry.rs`. Any product-specific runtime facade is
   temporary cutover debt, not the target architecture.
 - Smoke behavior is tested through black-box CLI tests on the real `match`
   binary, not through a demo command or demo source file.
 - The old source island has been removed; new behavior belongs in target
   modules only.
-- `src/core/wake_loop.rs` persists and reloads facts, needs, offers, internal
-  projection wakes, and intents. It also feeds exact declared fact inputs into
-  handlers instead of exposing all facts.
+- The runtime calls SQL-backed core pipelines:
+  `pending_fact_pipeline.rs` projects pending facts, `context_change_pipeline.rs`
+  matches need/offer changes and schedules affected facts, and
+  `intent_pipeline.rs` dispatches deferred and restart-local intents.
 - Target fact modules under `src/protocol/facts/` are exercised by poc-10 tests
   and route production `match` behavior through the target runtime.
 - Target intent handlers under `src/protocol/intents/` are themed files and
@@ -119,9 +120,10 @@ Implemented target slices:
   provenance, deletion/update wakeups, and recipient-key supersession.
 - Atomic row intents as the projector-owned path for bounded read-model writes
   and deletes.
-- `WakeLoop` projection drains that replace owner needs/offers, match context
-  deltas, wake matching owners, apply atomic intents, persist deferred intents,
-  and keep ephemeral IO intents restart-local.
+- Pending-fact and context-change pipelines that replace each fact's
+  needs/offers, match context deltas, schedule matching facts, apply atomic
+  intents, persist deferred intents, and keep ephemeral IO intents
+  restart-local.
 - Handler dispatch that accepts only declared fact inputs and returns facts,
   purges, and follow-up intents.
 - Target tests for signed facts, encrypted content messages, key wraps, key request
@@ -132,6 +134,10 @@ Implemented target slices:
 - `CommandContext` for user-facing target commands that may read projected state
   through module `queries.rs`, but do not drive handlers or transport directly.
   The type lives in `core::command_context`.
+- `ProtocolDescription` as the executable protocol boundary. A binary selects
+  a protocol description; core opens the declared runtime, runs the declared
+  daemon tick, and dispatches registered protocol commands without knowing
+  their names or behavior.
 
 Current follow-up work outside the active cutover guard:
 
@@ -165,23 +171,33 @@ src/
 
   core/
     schema.p8sql
+    app.rs
     command_context.rs
     cli.rs
     runtime.rs
     facts.rs
     context.rs
     matchers.rs
-    projection.rs
+    projectors.rs
     intents.rs
-    handler_dispatch.rs
-    wake_loop.rs
+    pending_fact_pipeline.rs
+    context_change_pipeline.rs
+    intent_pipeline.rs
+    context_change_helpers.rs
     store.rs
+    store/
+      sql.rs
+    payload.rs
     wire.rs
     crypto.rs
     schema_dsl.rs
 
   protocol/
+    command_handlers.rs
+    commands.rs
     facts.rs
+    registry.rs
+    runtime.rs
     facts/
       schema.p8sql
       <module>.rs
@@ -197,6 +213,7 @@ src/
     intents.rs
     intents/
       schema.p8sql
+      payload.rs
       connection.rs
       connection/
         create_response.rs
@@ -258,11 +275,37 @@ accumulate behavior. Public concrete protocol namespaces live under
 `topo::protocol::facts` and `topo::protocol::intents` without top-level
 dumping-ground files.
 
-`src/protocol.rs` is the target protocol registry. It is a declarative table of
-contents across schema sources, fact registrations, context matcher roles,
-intent kinds, and handlers. It does not replace the fact-module or
-intent-handler manifests: those files define Rust namespaces, while
-`protocol.rs` declares which namespaces make up the concrete `match` protocol.
+`src/protocol/catalog.rs` is the target protocol catalog. It is a declarative
+table of contents across schema sources, fact registrations, context matcher
+roles, intent kinds, and handlers. `src/protocol/registry.rs` turns that
+protocol into an executable `MATCH_PROTOCOL` description:
+
+```rust
+pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescription {
+    name: "match",
+    runtime: MATCH_RUNTIME,
+    daemon: DaemonDescription {
+        tick: match_daemon_tick,
+    },
+    commands: MATCH_COMMANDS,
+    context: MatchCliContext::new,
+};
+```
+
+Core consumes that description generically. It may parse `--db`, run daemon
+lifecycle commands, open the declared runtime, and call a registered command
+function. It must not learn protocol command names, handler names, matcher
+roles, or fact tags.
+
+`src/protocol/commands.rs` is only the CLI command registry: command name,
+usage string, and the protocol-owned function pointer that core should call.
+Fact-scope `cli.rs` modules still own argv parsing and text formatting for
+their commands. Command wrappers must not become a second app runner: they
+receive the core-opened runtime, call fact-scope command/query functions, and
+return `CliOutput` for core to print. Daemon-sensitive work belongs in facts,
+projectors, and intent handlers. For example, accepting an invite creates a
+local `connection_request` fact; projecting that fact schedules the bootstrap
+network intent, so the running daemon owns the network effect.
 
 The old source island has been removed. Do not recreate compatibility
 bridges; port behavior into the target runtime, fact modules, intent handlers,
@@ -351,8 +394,10 @@ call module query for the displayed result
 That post-command query is valid only because the runtime step establishes the
 previous state in the local store. If a later step cannot know that prior state
 has projected, it must not query optimistically; it should emit or retain a
-context need and let the wake loop re-run the owning projector when the matching
-offer exists.
+context need and let the runtime pipelines re-run the owning projector when the
+matching offer exists. Commands that hand work to a running daemon should stop after
+durably submitting their facts; the daemon pipeline should perform projection,
+intent dispatch, and network effects.
 
 Avoid broad names such as `utils`, `helpers`, `common`, `misc`, `manager`, and
 `service`. If a helper is real, its file should name the invariant it enforces
@@ -450,7 +495,6 @@ struct ContextOffer {
     role: Role,
     scope: FactScope,
     selector: Selector,
-    payload_ref: FactId,
 }
 ```
 
@@ -465,8 +509,10 @@ model, not protocol helper files. A projector first inspects the supplied
 `ContextOffer`s only after the projector has validated that the fact is valid
 context for that role.
 
-Each projection pass owns the current context surface for its fact. `WakeLoop`
-diffs the new needs/offers against the old needs/offers for the same owner:
+Each projection pass owns the current context surface for its fact. The
+pending-fact pipeline replaces the projected fact's current needs/offers; the
+context-change pipeline diffs the new needs/offers against the old needs/offers
+for the same owner:
 
 ```text
 unchanged need/offer
@@ -548,7 +594,7 @@ local/private state.
 The concrete protocol has one registry file:
 
 ```text
-src/protocol.rs
+src/protocol/catalog.rs
 ```
 
 It may declare:
@@ -614,9 +660,12 @@ pub fn project(fact: &Fact, ctx: &ProjectionContext) -> Result<ProjectionOutput,
 ```
 
 `payload_for` finds the `MatchedContext` for the exact need the projector
-emitted and returns `matched.payload`. It does not query the store, run matcher
-logic, or decide authorization; core already built the context from matched
-needs/offers before invoking the projector.
+emitted and returns the matched offer owner's fact. Offers no longer carry a
+separate payload reference: the offered fact owns its context, and projectors
+must validate that matched fact before emitting rows, offers, or intents. The
+projector does not query the store, run matcher logic, or decide candidate
+matching; core already built the context from matched needs/offers before
+invoking the projector.
 
 When a projector needs offer metadata as well as the fact payload, it should use
 `matched_payloads_for(&need)` so the lookup is still anchored to the concrete
@@ -674,7 +723,7 @@ When implementing or reviewing a projector:
    invariant they validate.
 9. Add any new context role, need constructor, offer constructor, and matching
    behavior to the relation-specific module under src/protocol/matchers/, then
-   register that matcher in src/protocol.rs.
+   register that matcher in src/protocol/catalog.rs.
 10. If a module is temporarily a row shell because sibling context is not ready,
     document the exact behavior gap in the module docs and remove that gap when
     the sibling context lands.
@@ -739,7 +788,7 @@ ConnectionResponse
 
 Ephemeral intents are bounded IO effects that can be regenerated from durable
 facts/context or repeated by the peer. They use the same idempotence-keyed
-scheduler in memory, but `WakeLoop` does not persist them:
+scheduler in memory, but the intent pipeline does not persist them:
 
 ```text
 SendBootstrapRequest
@@ -750,7 +799,7 @@ WakeDaemon
 
 Core applies atomic intents during projection. Deferred intents go into
 `core.intents` and are claimed by registered handlers. Ephemeral intents stay in
-the in-process wake loop only; a restart drops them, so only regenerated or
+the in-process intent pipeline only; a restart drops them, so only regenerated or
 peer-redelivered IO belongs there.
 
 ## Intent Handlers
@@ -801,32 +850,37 @@ Handlers may use sockets, clocks, private keys, broad scans, process-local sync
 indexes, post-commit sequencing, and local retention mutation. Those
 capabilities are precisely why the work is not projector work.
 
-## WakeLoop
+## Runtime Pipelines
 
-`WakeLoop` is the target runtime cycle:
+The runtime cycle is a readable composition of three SQL-backed pipelines:
 
 ```text
 submit fact
   persist fact if new
-  enqueue an internal projection wake
+  enqueue a pending fact
 
-project pending facts
+pending fact pipeline
   load matched context from current needs/offers
   run projector
   apply atomic intents
-  replace owner needs/offers by diff
-  match new needs/offers and enqueue wakes
+  replace the fact's needs/offers
+  record context changes
   persist deferred intents
   keep ephemeral intents in memory only
 
-dispatch deferred intents
+context change pipeline
+  match new needs/offers
+  schedule affected pending facts
+  process due time ranges as offer-like context changes
+
+intent pipeline: deferred intents
   claim intent
   build handler context from declared fact ids
   run flat handler
   submit returned facts
   persist returned intents
 
-dispatch ephemeral intents
+intent pipeline: ephemeral intents
   claim in-memory intent
   build handler context from declared fact ids
   run flat handler
@@ -835,8 +889,8 @@ dispatch ephemeral intents
 repeat until the work budget is exhausted
 ```
 
-`WakeLoop` owns the mechanics. Fact modules and intent handlers own protocol
-meaning.
+Core runtime pipelines own the mechanics and transaction boundaries. Fact
+modules and intent handlers own protocol meaning.
 
 ## Wire And Codecs
 
@@ -975,7 +1029,6 @@ Offer(
     owner = transit_received_fact_id,
     role = "transit_received",
     selector = received_fact_id,
-    payload_ref = transit_received_fact_id,
 )
 ```
 
@@ -1177,7 +1230,7 @@ They are replaced by:
 core.facts
 core.needs
 core.offers
-core.pending_projection as an internal WakeLoop checkpoint
+core.pending_projection as an internal pending-fact checkpoint
 core.intents
 core.inbox
 local receive facts
@@ -1237,7 +1290,7 @@ transit moves bytes
 sync decides ids
 connection proves peer relationships
 receive facts record local observations
-WakeLoop coordinates mechanics
+runtime pipelines coordinate mechanics
 ```
 
 There is one context mechanism, one projection scheduler, and one intent

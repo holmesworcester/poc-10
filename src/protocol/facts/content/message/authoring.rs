@@ -29,14 +29,18 @@ impl ContentMessageVault {
         let encryption = latest_local_key_secret(runtime, workspace_id)?;
         Ok(Self {
             signing: LocalSigningCapability {
-                fact: identity::signed_fact::fact::LocalSignerSecretFact {
-                    workspace_id,
-                    signer_id: endpoint.endpoint,
-                    public_key: endpoint.signing_public_key,
-                    private_key: endpoint.signing_secret,
-                },
+                workspace_id,
+                signer_id: endpoint.endpoint,
+                public_key: endpoint.signing_public_key,
+                private_key: endpoint.signing_secret,
             },
-            encryption: LocalEncryptionCapability { fact: encryption },
+            encryption: LocalEncryptionCapability {
+                workspace_id: encryption.workspace_id,
+                frontier_id: encryption.frontier_id,
+                owner_endpoint_id: encryption.owner_endpoint_id,
+                created_at_ms: encryption.created_at_ms,
+                key_secret: encryption.key_secret,
+            },
         })
     }
 }
@@ -46,7 +50,7 @@ impl IdentityVault for ContentMessageVault {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<LocalSigningCapability, String> {
-        if self.signing.fact.workspace_id == workspace_id {
+        if self.signing.workspace_id == workspace_id {
             Ok(self.signing.clone())
         } else {
             Err("signing capability is not for requested workspace".to_string())
@@ -57,7 +61,7 @@ impl IdentityVault for ContentMessageVault {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<LocalEncryptionCapability, String> {
-        if self.encryption.fact.workspace_id == workspace_id {
+        if self.encryption.workspace_id == workspace_id {
             Ok(self.encryption.clone())
         } else {
             Err("encryption capability is not for requested workspace".to_string())

@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 
 use crate::core::intent_pipeline::{
-    retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
+    retry_intent, HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
@@ -42,16 +42,16 @@ pub fn decode_send_bootstrap_connection_request(
     intent: &Intent,
 ) -> Result<SendBootstrapConnectionRequest, String> {
     if intent.kind.as_str() != SEND_BOOTSTRAP_CONNECTION_REQUEST {
-        return Err("expected send_bootstrap_connection_request intent".to_string());
+        return Err("expected send_bootstrap_connection_request intent".into());
     }
     if intent.execution != IntentExecution::Ephemeral {
-        return Err("send_bootstrap_connection_request intent must be ephemeral".to_string());
+        return Err("send_bootstrap_connection_request intent must be ephemeral".into());
     }
     if intent.payload.len() != 1 + 32 + addr::ADDR_BLOCK_BYTES {
-        return Err("send_bootstrap_connection_request payload has wrong length".to_string());
+        return Err("send_bootstrap_connection_request payload has wrong length".into());
     }
     if intent.payload[0] != 1 {
-        return Err("send_bootstrap_connection_request payload version unsupported".to_string());
+        return Err("send_bootstrap_connection_request payload version unsupported".into());
     }
     let request_id = intent.payload[1..33].try_into().unwrap();
     let mut addr_bytes = [0; addr::ADDR_BLOCK_BYTES];
@@ -60,7 +60,7 @@ pub fn decode_send_bootstrap_connection_request(
         .ok_or_else(|| "send_bootstrap_connection_request addr is missing".to_string())?;
     let input = SendBootstrapConnectionRequest { request_id, addr };
     if intent.key != send_bootstrap_connection_request_key(&input) {
-        return Err("send_bootstrap_connection_request key does not match payload".to_string());
+        return Err("send_bootstrap_connection_request key does not match payload".into());
     }
     Ok(input)
 }
@@ -85,7 +85,7 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
         ])
     }
 
-    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_bootstrap_connection_request(intent)?;
         let request_fact = context.require_fact(&input.request_id)?;
         layout::decode_fact(request_fact.body())?;
@@ -95,8 +95,6 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
             target,
             OutboundFrame {
                 bytes: request_fact.bytes.clone(),
-                deadline: None,
-                retry_key: Some(intent.key.clone()),
             },
         )
         .map_err(|err| {
@@ -122,8 +120,9 @@ mod tests {
     use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intent_pipeline::{retry_intent_reason, IntentHandler};
-    use crate::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
+    use crate::protocol::catalog::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
     use crate::protocol::facts::connection::request::fact::ConnectionRequestFact;
 
     #[test]

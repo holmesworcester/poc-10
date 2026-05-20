@@ -1,5 +1,5 @@
 use crate::core::facts::Fact;
-use crate::core::projection::{ProjectionContext, ProjectionOutput};
+use crate::core::projectors::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::fact::{LocalHistoryNodeSecretFact, LocalKeySecretFact};
 use crate::protocol::facts::encryption::layout;
 use crate::protocol::facts::encryption::local_history_node_secret::fact::{

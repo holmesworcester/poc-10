@@ -10,7 +10,7 @@
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactId};
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
@@ -236,7 +236,7 @@ fn require_payload_as<C>(
     missing: &str,
 ) -> Result<C::Payload, String>
 where
-    C: crate::core::projection::FactCodec,
+    C: crate::core::projectors::FactCodec,
 {
     projection_context
         .payload_as::<C>(need)?

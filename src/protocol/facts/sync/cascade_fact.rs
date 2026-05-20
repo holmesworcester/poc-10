@@ -13,7 +13,7 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::CascadeFact, String> {
 
 pub(crate) struct Codec;
 
-impl crate::core::projection::FactCodec for Codec {
+impl crate::core::projectors::FactCodec for Codec {
     type Payload = fact::CascadeFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {

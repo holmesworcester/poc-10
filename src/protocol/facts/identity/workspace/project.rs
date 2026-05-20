@@ -9,7 +9,7 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;

@@ -6,5 +6,6 @@
 pub mod connection;
 pub mod content;
 pub mod encryption;
+pub mod payload;
 pub mod sync;
 pub mod transport;

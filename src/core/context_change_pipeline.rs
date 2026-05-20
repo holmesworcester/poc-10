@@ -43,7 +43,7 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::intent_pipeline::IntentPipeline;
 use crate::core::matchers::{ContextMatch, ContextMatcher};
 use crate::core::pending_fact_pipeline;
-use crate::core::projection::{Projector, TimeRange, Timeline};
+use crate::core::projectors::{Projector, TimeRange, Timeline};
 use crate::core::store::{Store, TableName};
 
 use crate::core::context_change_helpers::{
@@ -245,7 +245,7 @@ impl ContextChangePipeline {
     pub(crate) fn process_pending_facts_and_context_changes(
         &mut self,
         intent_pipeline: &mut IntentPipeline,
-        projector: &impl Projector,
+        projector: &(impl Projector + ?Sized),
         matchers: &[&dyn ContextMatcher],
         store: &Store,
         allowed_tables: &[TableName],

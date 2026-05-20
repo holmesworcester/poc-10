@@ -20,9 +20,6 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::Store;
 use crate::protocol::facts::connection;
 use crate::protocol::facts::identity;
-use crate::protocol::intents::connection::send_bootstrap_request::{
-    send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
-};
 
 use super::fact::InviteSecretFact;
 
@@ -423,11 +420,6 @@ pub fn accept(
         facts.extend(accepted.facts);
     }
 
-    let send_intent = send_bootstrap_connection_request_intent(SendBootstrapConnectionRequest {
-        request_id: request.receipt.request_id,
-        addr: input.invite.addr,
-    })?;
-
     Ok(CommandOutput::new(AcceptInviteReceipt {
         connected_addr: input.invite.addr,
         workspace_id: input
@@ -439,8 +431,7 @@ pub fn accept(
         endpoint_role: None,
         request_id: request.receipt.request_id,
     })
-    .with_facts(facts)
-    .with_intents(vec![send_intent]))
+    .with_facts(facts))
 }
 
 fn workspace_accept_device_invite_fact(
@@ -523,10 +514,6 @@ pub fn accept_device_link(
     facts.push(endpoint_shared.clone());
     facts.extend(accepted.facts);
 
-    let send_intent = send_bootstrap_connection_request_intent(SendBootstrapConnectionRequest {
-        request_id: request.receipt.request_id,
-        addr: input.invite.addr,
-    })?;
     Ok(CommandOutput::new(AcceptInviteReceipt {
         connected_addr: input.invite.addr,
         workspace_id: Some(input.invite.workspace_id),
@@ -535,8 +522,7 @@ pub fn accept_device_link(
         endpoint_role: Some(InviteEndpointRole::Device),
         request_id: request.receipt.request_id,
     })
-    .with_facts(facts)
-    .with_intents(vec![send_intent]))
+    .with_facts(facts))
 }
 
 pub fn accept_invite_server(
@@ -599,10 +585,6 @@ pub fn accept_invite_server(
     facts.push(endpoint_shared.clone());
     facts.extend(accepted.facts);
 
-    let send_intent = send_bootstrap_connection_request_intent(SendBootstrapConnectionRequest {
-        request_id: request.receipt.request_id,
-        addr: input.invite.addr,
-    })?;
     Ok(CommandOutput::new(AcceptInviteReceipt {
         connected_addr: input.invite.addr,
         workspace_id: Some(input.invite.workspace_id),
@@ -611,8 +593,7 @@ pub fn accept_invite_server(
         endpoint_role: Some(InviteEndpointRole::InviteServer),
         request_id: request.receipt.request_id,
     })
-    .with_facts(facts)
-    .with_intents(vec![send_intent]))
+    .with_facts(facts))
 }
 
 fn endpoint_shared_fact(

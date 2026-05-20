@@ -6,7 +6,9 @@
 // recipient material chosen by projection, then emits the resulting local
 // secret fact back into the common pipeline.
 
-use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{
+    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+};
 use crate::core::intents::Intent;
 use crate::protocol::facts::encryption::{create, intent};
 
@@ -37,7 +39,7 @@ impl IntentHandler for UnwrapKeyWrapHandler {
         ])
     }
 
-    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = intent::decode_unwrap_key_wrap_intent(intent)?;
         let key_wrap = context.require_fact(&input.key_wrap_id)?;
         let local_recipient_key = context.require_fact(&input.local_recipient_key_id)?;

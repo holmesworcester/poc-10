@@ -4,7 +4,9 @@
 //! message fact. The handler purges only when the message minute is below the
 //! setting's monotonic retire floor.
 
-use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{
+    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::{
     content::message::retention, encryption::disappearing_messages_setting,
@@ -35,11 +37,11 @@ pub fn decode_purge_below_retention_floor(
     if intent.kind.as_str() != PURGE_BELOW_RETENTION_FLOOR
         || intent.execution != IntentExecution::Deferred
     {
-        return Err("expected purge_below_retention_floor deferred intent".to_string());
+        return Err("expected purge_below_retention_floor deferred intent".into());
     }
     let input = decode_purge_below_retention_floor_payload(&intent.payload)?;
     if intent.key != purge_below_retention_floor_key(&input) {
-        return Err("purge_below_retention_floor key does not match payload".to_string());
+        return Err("purge_below_retention_floor key does not match payload".into());
     }
     Ok(input)
 }
@@ -65,7 +67,7 @@ fn decode_purge_below_retention_floor_payload(
     payload: &[u8],
 ) -> Result<PurgeBelowRetentionFloor, String> {
     if payload.len() != 97 || payload[0] != 1 {
-        return Err("invalid purge_below_retention_floor payload".to_string());
+        return Err("invalid purge_below_retention_floor payload".into());
     }
     Ok(PurgeBelowRetentionFloor {
         workspace_id: payload[1..33].try_into().unwrap(),
@@ -93,11 +95,7 @@ impl IntentHandler for PurgeBelowRetentionFloorHandler {
         Ok(vec![input.setting_id, input.target_id])
     }
 
-    fn handle(
-        &self,
-        raw_intent: &Intent,
-        context: &HandlerContext,
-    ) -> Result<HandlerOutput, String> {
+    fn handle(&self, raw_intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_purge_below_retention_floor(raw_intent)?;
         let setting = disappearing_messages_setting::layout::decode_fact(
             &context.require_fact(&input.setting_id)?.bytes,
@@ -106,13 +104,13 @@ impl IntentHandler for PurgeBelowRetentionFloorHandler {
         let message = retention::decode_message_fact(target)?;
 
         if setting.workspace_id != input.workspace_id {
-            return Err("purge_below_retention_floor setting workspace mismatch".to_string());
+            return Err("purge_below_retention_floor setting workspace mismatch".into());
         }
         if message.workspace_id != input.workspace_id {
-            return Err("purge_below_retention_floor target workspace mismatch".to_string());
+            return Err("purge_below_retention_floor target workspace mismatch".into());
         }
         if message.minute >= setting.retire_minute {
-            return Err("purge_below_retention_floor target is not below floor".to_string());
+            return Err("purge_below_retention_floor target is not below floor".into());
         }
         if let Ok(store) = context.store() {
             retention::delete_message_projection(

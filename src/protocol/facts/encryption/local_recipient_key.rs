@@ -1,5 +1,5 @@
 use crate::core::facts::Fact;
-use crate::core::projection::{ProjectionContext, ProjectionOutput};
+use crate::core::projectors::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::fact::LocalRecipientKeyFact;
 use crate::protocol::facts::encryption::intent::{
     purge_retired_recipient_material_intent, PurgeRetiredRecipientMaterialIntent,

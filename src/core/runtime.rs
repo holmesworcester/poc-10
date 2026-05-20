@@ -16,38 +16,66 @@ use crate::core::intent_pipeline::IntentHandler;
 use crate::core::intent_pipeline::{self, DispatchReport, IntentPipeline};
 use crate::core::intents::Intent;
 use crate::core::matchers::ContextMatcher;
-use crate::core::projection::{Projector, Timeline};
+use crate::core::projectors::{Projector, Timeline};
 use crate::core::store::{Schema, Store, TableName};
-use std::marker::PhantomData;
 use std::path::Path;
 
-pub trait RuntimeProtocol {
-    type Projector: Projector;
-    type Matchers: RuntimeMatchers;
-    type Handlers: RuntimeHandlers;
+pub type ProjectorFactory = fn() -> Box<dyn Projector>;
+pub type MatchersFactory = fn() -> Vec<Box<dyn ContextMatcher>>;
 
-    fn schema_sources() -> &'static [&'static str];
-    fn schemas() -> &'static [Schema] {
-        &[]
+/// Protocol-owned declarations needed by core's runtime engine.
+#[derive(Clone, Copy)]
+pub struct RuntimeDescription {
+    pub schema_sources: &'static [&'static str],
+    pub schemas: &'static [Schema],
+    pub atomic_row_tables: &'static [TableName],
+    pub projector: ProjectorFactory,
+    pub matchers: MatchersFactory,
+    pub handlers: &'static [HandlerRoute],
+}
+
+/// Public outcome returned by runtime pipeline calls.
+///
+/// Detailed counts stay inside the individual pipelines where they are useful
+/// for tests and local implementation. Runtime callers only need to know
+/// whether a bounded pass moved work forward and whether any handler asked to
+/// retry before irreversible cleanup, such as deleting claimed network input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkStatus {
+    pub progressed: bool,
+    pub retried: bool,
+}
+
+impl WorkStatus {
+    pub fn idle() -> Self {
+        Self::default()
     }
-    fn atomic_row_tables() -> &'static [TableName];
-    fn projector() -> Self::Projector;
-    fn matchers() -> Self::Matchers;
-    fn handlers() -> Self::Handlers;
-}
 
-pub trait RuntimeMatchers {
-    fn refs(&self) -> Vec<&dyn ContextMatcher>;
-}
+    fn from_projection_report(report: &PipelineReport) -> Self {
+        Self {
+            progressed: report.projections > 0
+                || report.context_matches > 0
+                || report.woken_facts > 0
+                || report.intents > 0,
+            retried: false,
+        }
+    }
 
-pub trait RuntimeHandlers {
-    fn dispatch(
-        &self,
-        intent_pipeline: &mut IntentPipeline,
-        store: &Store,
-        allowed_tables: &[TableName],
-        limit_per_handler: usize,
-    ) -> Result<DispatchReport, String>;
+    fn from_dispatch_report(report: &DispatchReport) -> Self {
+        Self {
+            progressed: report.handled > 0 || report.facts > 0 || report.intents > 0,
+            retried: report.retries > 0,
+        }
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.progressed |= other.progressed;
+        self.retried |= other.retried;
+    }
+
+    pub fn is_idle(self) -> bool {
+        !self.progressed && !self.retried
+    }
 }
 
 pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
@@ -78,10 +106,7 @@ impl HandlerSet {
                 .collect(),
         }
     }
-}
-
-impl RuntimeHandlers for HandlerSet {
-    fn dispatch(
+    pub(crate) fn dispatch(
         &self,
         intent_pipeline: &mut IntentPipeline,
         store: &Store,
@@ -136,44 +161,49 @@ impl RuntimeHandlers for HandlerSet {
     }
 }
 
-/// Runtime for one concrete protocol.
-pub struct Runtime<P: RuntimeProtocol> {
+/// Runtime for one concrete protocol description.
+pub struct Runtime {
+    description: &'static RuntimeDescription,
     store: Store,
     context_change_pipeline: ContextChangePipeline,
     intent_pipeline: IntentPipeline,
-    projector: P::Projector,
-    matchers: P::Matchers,
-    handlers: P::Handlers,
-    _protocol: PhantomData<P>,
+    projector: Box<dyn Projector>,
+    matchers: Vec<Box<dyn ContextMatcher>>,
+    handlers: HandlerSet,
 }
 
-impl<P: RuntimeProtocol> Runtime<P> {
-    pub fn open_memory() -> Result<Self, String> {
-        let store =
-            Store::open_memory_with_schema_sources_and_schemas(P::schema_sources(), P::schemas())
-                .map_err(|err| format!("open target memory store: {err}"))?;
-        Self::from_store(store)
+impl Runtime {
+    pub fn open_memory(description: &'static RuntimeDescription) -> Result<Self, String> {
+        let store = Store::open_memory_with_schema_sources_and_schemas(
+            description.schema_sources,
+            description.schemas,
+        )
+        .map_err(|err| format!("open target memory store: {err}"))?;
+        Self::from_store(description, store)
     }
 
-    pub fn open_disk(path: impl AsRef<Path>) -> Result<Self, String> {
+    pub fn open_disk(
+        description: &'static RuntimeDescription,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, String> {
         let store = Store::open_disk_with_schema_sources_and_schemas(
             path,
-            P::schema_sources(),
-            P::schemas(),
+            description.schema_sources,
+            description.schemas,
         )
         .map_err(|err| format!("open target disk store: {err}"))?;
-        Self::from_store(store)
+        Self::from_store(description, store)
     }
 
-    fn from_store(store: Store) -> Result<Self, String> {
+    fn from_store(description: &'static RuntimeDescription, store: Store) -> Result<Self, String> {
         Ok(Self {
+            description,
             store,
             context_change_pipeline: ContextChangePipeline::new(),
             intent_pipeline: IntentPipeline::new(),
-            projector: P::projector(),
-            matchers: P::matchers(),
-            handlers: P::handlers(),
-            _protocol: PhantomData,
+            projector: (description.projector)(),
+            matchers: (description.matchers)(),
+            handlers: HandlerSet::new(description.handlers),
         })
     }
 
@@ -269,15 +299,19 @@ impl<P: RuntimeProtocol> Runtime<P> {
         Ok(output.receipt)
     }
 
-    pub fn process_projection_work(&mut self, limit: usize) -> Result<PipelineReport, String> {
-        let matcher_refs = self.matchers.refs();
+    fn process_projection_work(&mut self, limit: usize) -> Result<PipelineReport, String> {
+        let matcher_refs = self
+            .matchers
+            .iter()
+            .map(|matcher| matcher.as_ref() as &dyn ContextMatcher)
+            .collect::<Vec<_>>();
         self.context_change_pipeline
             .process_pending_facts_and_context_changes(
                 &mut self.intent_pipeline,
-                &self.projector,
+                self.projector.as_ref(),
                 &matcher_refs,
                 &self.store,
-                P::atomic_row_tables(),
+                self.description.atomic_row_tables,
                 limit,
             )
     }
@@ -286,14 +320,11 @@ impl<P: RuntimeProtocol> Runtime<P> {
         &mut self,
         max_rounds: usize,
         limit_per_round: usize,
-    ) -> Result<PipelineReport, String> {
-        let mut total = PipelineReport::default();
+    ) -> Result<WorkStatus, String> {
+        let mut total = WorkStatus::idle();
         for _ in 0..max_rounds {
             let report = self.process_projection_work(limit_per_round)?;
-            total.projections += report.projections;
-            total.context_matches += report.context_matches;
-            total.woken_facts += report.woken_facts;
-            total.intents += report.intents;
+            total.merge(WorkStatus::from_projection_report(&report));
             if report.projections == 0
                 && report.woken_facts == 0
                 && report.intents == 0
@@ -305,28 +336,28 @@ impl<P: RuntimeProtocol> Runtime<P> {
         Err("projection work did not become idle within the round limit".to_string())
     }
 
-    pub fn dispatch_intents(&mut self, limit_per_handler: usize) -> Result<DispatchReport, String> {
+    pub fn dispatch_intents(&mut self, limit_per_handler: usize) -> Result<WorkStatus, String> {
         let report = self.handlers.dispatch(
             &mut self.intent_pipeline,
             &self.store,
-            P::atomic_row_tables(),
+            self.description.atomic_row_tables,
             limit_per_handler,
         )?;
-        Ok(report)
+        Ok(WorkStatus::from_dispatch_report(&report))
     }
 
     pub fn dispatch_with_handlers(
         &mut self,
-        handlers: &impl RuntimeHandlers,
+        handlers: &HandlerSet,
         limit_per_handler: usize,
-    ) -> Result<DispatchReport, String> {
+    ) -> Result<WorkStatus, String> {
         let report = handlers.dispatch(
             &mut self.intent_pipeline,
             &self.store,
-            P::atomic_row_tables(),
+            self.description.atomic_row_tables,
             limit_per_handler,
         )?;
-        Ok(report)
+        Ok(WorkStatus::from_dispatch_report(&report))
     }
 
     pub fn process_due_time_range(
@@ -346,10 +377,8 @@ impl<P: RuntimeProtocol> Runtime<P> {
 mod tests {
     use super::*;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::projection::{ProjectionContext, ProjectionOutput};
+    use crate::core::projectors::{ProjectionContext, ProjectionOutput};
     use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
-
-    struct TestProtocol;
 
     struct NoopProjector;
 
@@ -363,62 +392,31 @@ mod tests {
         }
     }
 
-    struct NoMatchers;
-
-    impl RuntimeMatchers for NoMatchers {
-        fn refs(&self) -> Vec<&dyn ContextMatcher> {
-            Vec::new()
-        }
+    fn noop_projector() -> Box<dyn Projector> {
+        Box::new(NoopProjector)
     }
 
-    struct NoHandlers;
-
-    impl RuntimeHandlers for NoHandlers {
-        fn dispatch(
-            &self,
-            _intent_pipeline: &mut IntentPipeline,
-            _store: &Store,
-            _allowed_tables: &[TableName],
-            _limit_per_handler: usize,
-        ) -> Result<DispatchReport, String> {
-            Ok(DispatchReport::default())
-        }
+    fn no_matchers() -> Vec<Box<dyn ContextMatcher>> {
+        Vec::new()
     }
 
-    impl RuntimeProtocol for TestProtocol {
-        type Projector = NoopProjector;
-        type Matchers = NoMatchers;
-        type Handlers = NoHandlers;
-
-        fn schema_sources() -> &'static [&'static str] {
-            &[CORE_SCHEMA_SOURCE]
-        }
-
-        fn atomic_row_tables() -> &'static [TableName] {
-            &[]
-        }
-
-        fn projector() -> Self::Projector {
-            NoopProjector
-        }
-
-        fn matchers() -> Self::Matchers {
-            NoMatchers
-        }
-
-        fn handlers() -> Self::Handlers {
-            NoHandlers
-        }
-    }
+    const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {
+        schema_sources: &[CORE_SCHEMA_SOURCE],
+        schemas: &[],
+        atomic_row_tables: &[],
+        projector: noop_projector,
+        matchers: no_matchers,
+        handlers: &[],
+    };
 
     #[test]
     fn runtime_reads_store_backed_facts_from_sqlite() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("runtime.db");
-        let runtime = Runtime::<TestProtocol>::open_disk(&path).expect("runtime");
+        let runtime = Runtime::open_disk(&TEST_RUNTIME, &path).expect("runtime");
 
         let external_fact = Fact::new(FactScope::Global, 7, b"external".to_vec());
-        let mut writer = Runtime::<TestProtocol>::open_disk(&path).expect("writer runtime");
+        let mut writer = Runtime::open_disk(&TEST_RUNTIME, &path).expect("writer runtime");
         assert!(writer.submit_fact(external_fact.clone()));
 
         assert!(

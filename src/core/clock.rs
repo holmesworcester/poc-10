@@ -5,19 +5,15 @@
 //! timestamp. Existing event timestamps still win, so setting the clock
 //! backwards cannot make new shared events collide with old ones.
 
-use crate::core::store::{Schema, Store, TableName, TableRow};
+use crate::core::store::{Store, TableName, TableRow};
 
-pub const LOGICAL_CLOCK: TableName = TableName::new("clock");
-pub const SCHEMAS: &[Schema] = &[Schema::durable_row_table(
-    "core.logical_clock.v1",
-    LOGICAL_CLOCK,
-)];
+const CLOCK_TABLE: TableName = TableName::new("clock");
 
 const CLOCK_KEY: &[u8] = b"now";
 
 pub fn logical_time(store: &Store) -> Result<Option<u64>, String> {
     store
-        .table_row(LOGICAL_CLOCK, CLOCK_KEY)
+        .table_row(CLOCK_TABLE, CLOCK_KEY)
         .map_err(|err| format!("load logical clock: {err}"))?
         .map(|value| decode_value(&value))
         .transpose()
@@ -40,7 +36,7 @@ pub fn advance_logical_time(store: &Store, delta: u64) -> Result<u64, String> {
 
 pub fn clear_logical_time(store: &Store) -> Result<(), String> {
     store
-        .delete_table_rows(LOGICAL_CLOCK, vec![CLOCK_KEY.to_vec()])
+        .delete_table_rows(CLOCK_TABLE, vec![CLOCK_KEY.to_vec()])
         .map_err(|err| format!("clear logical clock: {err}"))?;
     Ok(())
 }
@@ -50,13 +46,9 @@ pub fn next_timestamp(store: &Store, observed_max_timestamp: u64) -> Result<u64,
     Ok(from_events.max(logical_time(store)?.unwrap_or(0)))
 }
 
-pub fn max_timestamp_for_next(store: &Store, observed_max_timestamp: u64) -> Result<u64, String> {
-    next_timestamp(store, observed_max_timestamp).map(|timestamp| timestamp.saturating_sub(1))
-}
-
 fn clock_row(timestamp: u64) -> TableRow {
     TableRow {
-        table: LOGICAL_CLOCK,
+        table: CLOCK_TABLE,
         key: CLOCK_KEY.to_vec(),
         value: timestamp.to_be_bytes().to_vec(),
     }
@@ -74,8 +66,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logical_clock_is_a_lower_bound_for_next_timestamp() {
-        let store = Store::open_memory_with_schemas(SCHEMAS).expect("store");
+    fn clock_is_a_lower_bound_for_next_timestamp() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema_dsl::CORE_SCHEMA_SOURCE])
+                .expect("store");
 
         assert_eq!(next_timestamp(&store, 7).expect("next"), 8);
 
@@ -86,7 +80,9 @@ mod tests {
 
     #[test]
     fn advance_and_clear_are_store_local() {
-        let store = Store::open_memory_with_schemas(SCHEMAS).expect("store");
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema_dsl::CORE_SCHEMA_SOURCE])
+                .expect("store");
 
         assert_eq!(advance_logical_time(&store, 5).expect("advance"), 5);
         assert_eq!(advance_logical_time(&store, 7).expect("advance"), 12);

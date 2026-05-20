@@ -217,7 +217,7 @@ fn target_projectors_stay_pure_context_to_intents() {
             "write_transaction",
             "Protocol::",
             "workers::",
-            "network_queues",
+            "core::network",
             "std::net",
             "std::process",
             "Command::new",
@@ -654,7 +654,7 @@ fn target_intent_files_only_encode_intent_payloads() {
             "ContextOffer",
             "insert_table_rows",
             "delete_table_rows",
-            "network_queues",
+            "core::network",
             "std::net",
             "tcp::",
         ] {
@@ -931,7 +931,7 @@ fn target_fact_child_files_use_narrow_slice_names() {
 #[test]
 fn target_protocol_registry_is_declarative_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/protocol.rs");
+    let path = root.join("src/protocol/catalog.rs");
     let text = source_text(&path);
 
     for required in [
@@ -973,7 +973,7 @@ fn target_protocol_registry_is_declarative_only() {
 
     assert!(
         offenders.is_empty(),
-        "src/protocol.rs should be a descriptor registry, not runtime logic:\n{}",
+        "src/protocol/catalog.rs should be a descriptor catalog, not runtime logic:\n{}",
         offenders.join("\n")
     );
 }
@@ -1275,7 +1275,7 @@ fn target_layout_files_do_not_own_projection_intents_handlers_or_cli() {
             "HandlerOutput",
             "HandlerContext",
             "Store",
-            "network_queues",
+            "core::network",
             "std::net",
             "CliArgs",
             "CliOutput",
@@ -1396,23 +1396,23 @@ fn protocol_cli_files_do_not_own_app_runtime_effects() {
 }
 
 #[test]
-fn match_app_dispatches_through_core_cli_registry() {
+fn match_app_selects_protocol_description() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = root.join("src/match_app.rs");
     let text = source_text(&path);
     let production = strip_line_comments(production_text_before_unit_tests(&text));
 
     assert!(
-        production.contains("core_cli::run(MATCH_CLI_COMMANDS"),
-        "match_app.rs should dispatch through the generic core CLI registry"
-    );
-    assert!(
-        production.contains("core_cli::usage(MATCH_CLI_COMMANDS"),
-        "top-level command usage should be assembled from the registry specs"
+        production.contains("core::app::run(&crate::protocol::registry::MATCH_PROTOCOL"),
+        "match_app.rs should only choose the concrete protocol description"
     );
     assert!(
         !production.contains("match parsed.command.first"),
         "match_app.rs must not restore the broad manual command-name router"
+    );
+    assert!(
+        !production.contains("MATCH_COMMANDS") && !production.contains("MATCH_CLI_COMMANDS"),
+        "match_app.rs should not manually wire the protocol command table"
     );
     for command in [
         "create-workspace",
@@ -1428,11 +1428,12 @@ fn match_app_dispatches_through_core_cli_registry() {
             "match_app.rs must not dispatch protocol command {command:?} through a broad top-level match"
         );
     }
+    let core_app = source_text(&root.join("src/core/app.rs"));
     assert!(
-        production.contains("name: \"start\"")
-            && production.contains("name: \"stop\"")
-            && production.contains("name: \"reset\""),
-        "daemon lifecycle commands should stay registered at the app boundary"
+        core_app.contains("\"start\" => run_start")
+            && core_app.contains("\"stop\" => run_stop")
+            && core_app.contains("\"reset\" => run_reset"),
+        "daemon lifecycle commands should stay registered in the generic app boundary"
     );
 }
 

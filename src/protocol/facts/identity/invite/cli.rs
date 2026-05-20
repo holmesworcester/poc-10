@@ -1,8 +1,8 @@
 //! CLI adapter for invite commands.
 //!
 //! This file owns argv parsing and text formatting only. Fact construction
-//! lives in `commands.rs`; runtime admission and handler dispatch stay in
-//! `match_app`/core.
+//! lives in `commands.rs`; runtime admission and handler dispatch stay in the
+//! protocol command handler/core app boundary.
 
 use std::net::SocketAddr;
 

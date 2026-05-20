@@ -12,7 +12,7 @@
 
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
@@ -217,7 +217,7 @@ mod projector_tests {
 
     use topo::core::facts::{Fact, FactId, FactScope};
     use topo::core::intents::AtomicIntent;
-    use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::content::message::{
         fact::ContentMessageFact, layout as message_layout,
     };

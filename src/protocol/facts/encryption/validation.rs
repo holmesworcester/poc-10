@@ -1,6 +1,6 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::projection::{ProjectionContext, ProjectionOutput};
+use crate::core::projectors::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::identity;
 use crate::protocol::matchers::{self, WrapSourceKind, WrapSourceSelector};
 

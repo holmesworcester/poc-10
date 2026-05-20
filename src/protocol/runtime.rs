@@ -2,87 +2,132 @@
 //!
 //! Core owns the runtime mechanics. This module supplies the protocol-specific
 //! projector router, matcher set, handler set, schema sources, and atomic row
-//! tables needed by `core::runtime::Runtime<Protocol>`.
+//! tables needed by `core::runtime::Runtime`.
 
+use crate::core::clock;
 use crate::core::context::Role;
-use crate::core::daemon::TickReport;
+use crate::core::daemon::TickActivity;
 use crate::core::facts::Fact;
-use crate::core::intent_pipeline::DispatchReport;
-use crate::core::logical_clock;
 use crate::core::matchers::{ContextMatcher, ContextMatcherDeclaration, ExactSelectorMatcher};
-use crate::core::network_queues;
-use crate::core::projection::{
+use crate::core::network;
+use crate::core::projectors::{
     EnvelopeRoute, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
-use crate::core::runtime::{HandlerRoute, HandlerSet, RuntimeMatchers, RuntimeProtocol};
-use crate::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
-use crate::core::store::{Schema, TableName};
+use crate::core::runtime::{HandlerRoute, HandlerSet, Runtime, RuntimeDescription, WorkStatus};
+use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
+use crate::core::store::TableName;
 use crate::core::tcp;
+use crate::protocol::catalog::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
 use crate::protocol::intents::{
     connection as connection_intents, content as content_intents, encryption as encryption_intents,
     sync as sync_intents, transport as transport_intents,
 };
 use std::collections::BTreeSet;
+use std::ops::{Deref, DerefMut};
+use std::path::Path;
 
-pub type ProtocolRuntime = crate::core::runtime::Runtime<super::Protocol>;
+pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
+    schema_sources: SCHEMA_SOURCES,
+    schemas: network::SCHEMAS,
+    atomic_row_tables: ATOMIC_ROW_TABLES,
+    projector: protocol_projector,
+    matchers: protocol_context_matchers,
+    handlers: HANDLER_ROUTES,
+};
 
-impl crate::core::runtime::Runtime<super::Protocol> {
-    pub fn dispatch_cli_intents(
-        &mut self,
-        limit_per_handler: usize,
-    ) -> Result<DispatchReport, String> {
+pub struct ProtocolRuntime {
+    runtime: Runtime,
+}
+
+impl ProtocolRuntime {
+    pub fn from_runtime(runtime: Runtime) -> Self {
+        Self { runtime }
+    }
+
+    pub fn open_memory() -> Result<Self, String> {
+        Runtime::open_memory(&MATCH_RUNTIME).map(|runtime| Self { runtime })
+    }
+
+    pub fn open_disk(path: impl AsRef<Path>) -> Result<Self, String> {
+        Runtime::open_disk(&MATCH_RUNTIME, path).map(|runtime| Self { runtime })
+    }
+
+    pub fn dispatch_cli_intents(&mut self, limit_per_handler: usize) -> Result<WorkStatus, String> {
         let handlers = HandlerSet::new_excluding(HANDLER_ROUTES, CLI_EFFECT_HANDLER_ROUTES);
-        self.dispatch_with_handlers(&handlers, limit_per_handler)
+        self.runtime
+            .dispatch_with_handlers(&handlers, limit_per_handler)
     }
 
     pub fn daemon_tick(
         &mut self,
         listener: &tcp::Listener,
         work_limit: usize,
-    ) -> Result<TickReport, String> {
-        let accepted = listener.accept_available(self.store(), work_limit)?;
-        let inbound = network_queues::claim_inbound(self.store(), work_limit)?;
-        for row in &inbound {
-            self.submit_intent(
-                transport_intents::receive_transit_frame::receive_transit_frame_intent(
-                    transport_intents::receive_transit_frame::ReceiveTransitFrame {
-                        frame: row.bytes.clone(),
-                        origin_addr: transport::transit_received::addr::canonical_origin_addr_bytes(
-                            row.source.addr(),
-                        ),
-                        received_at_local_ms: now_ms(),
-                    },
-                )?,
-            )?;
-        }
-
-        if let Some(current_minute) = current_minute(self.store())? {
-            self.process_due_time_range(
-                content::message::expiration_timeline(),
-                None,
-                current_minute,
-                work_limit,
-            );
-        }
-        let projection_before_handlers = self.process_projection_until_idle(4, work_limit)?;
-        let dispatched = self.dispatch_intents(work_limit)?;
-        let projection_after_handlers = self.process_projection_until_idle(4, work_limit)?;
-        if dispatched.retries == 0 {
-            network_queues::delete_inbound(self.store(), &inbound)?;
-        }
-
-        Ok(TickReport {
-            accepted_connections: accepted.accepted_connections,
-            sent_frames: accepted.value.sent_frames,
-            received_frames: accepted.value.received_frames,
-            projections: projection_before_handlers.projections
-                + projection_after_handlers.projections,
-            handled_intents: dispatched.handled,
-            emitted_facts: dispatched.facts,
-            emitted_intents: dispatched.intents,
-        })
+    ) -> Result<TickActivity, String> {
+        match_daemon_tick(&mut self.runtime, listener, work_limit)
     }
+}
+
+impl Deref for ProtocolRuntime {
+    type Target = Runtime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl DerefMut for ProtocolRuntime {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime
+    }
+}
+
+pub fn match_daemon_tick(
+    runtime: &mut Runtime,
+    listener: &tcp::Listener,
+    work_limit: usize,
+) -> Result<TickActivity, String> {
+    let accepted = listener.accept_available(runtime.store(), work_limit)?;
+    let inbound = network::claim_inbound(runtime.store(), work_limit)?;
+    for row in &inbound {
+        runtime.submit_intent(
+            transport_intents::receive_transit_frame::receive_transit_frame_intent(
+                transport_intents::receive_transit_frame::ReceiveTransitFrame {
+                    frame: row.bytes.clone(),
+                    origin_addr: transport::transit_received::addr::canonical_origin_addr_bytes(
+                        row.source.addr(),
+                    ),
+                    received_at_local_ms: now_ms(),
+                },
+            )?,
+        )?;
+    }
+
+    let mut due_time_wakes = 0;
+    if let Some(current_minute) = current_minute(runtime.store())? {
+        due_time_wakes = runtime.process_due_time_range(
+            content::message::expiration_timeline(),
+            None,
+            current_minute,
+            work_limit,
+        );
+    }
+    let projection_before_handlers = runtime.process_projection_until_idle(4, work_limit)?;
+    let dispatched = runtime.dispatch_intents(work_limit)?;
+    let projection_after_handlers = runtime.process_projection_until_idle(4, work_limit)?;
+    if !dispatched.retried {
+        network::delete_inbound(runtime.store(), &inbound)?;
+    }
+
+    let active = accepted.accepted_connections > 0
+        || accepted.value.sent_frames > 0
+        || accepted.value.received_frames > 0
+        || !inbound.is_empty()
+        || due_time_wakes > 0
+        || !projection_before_handlers.is_idle()
+        || !dispatched.is_idle()
+        || !projection_after_handlers.is_idle();
+    Ok(TickActivity::from_bool(active))
 }
 
 const CLI_EFFECT_HANDLER_ROUTES: &[&str] = &[
@@ -99,7 +144,7 @@ fn now_ms() -> u64 {
 }
 
 fn current_minute(store: &crate::core::store::Store) -> Result<Option<u64>, String> {
-    Ok(logical_clock::logical_time(store)?.map(|now_ms| now_ms / 60_000))
+    Ok(clock::logical_time(store)?.map(|now_ms| now_ms / 60_000))
 }
 
 const SCHEMA_SOURCES: &[&str] = &[
@@ -144,34 +189,12 @@ const ATOMIC_ROW_TABLES: &[TableName] = &[
     sync::need_id::rows::SYNC_NEED_ID_ROWS,
 ];
 
-impl RuntimeProtocol for super::Protocol {
-    type Projector = ProtocolProjector;
-    type Matchers = ProtocolContextMatchers;
-    type Handlers = HandlerSet;
+fn protocol_projector() -> Box<dyn Projector> {
+    Box::new(ProtocolProjector)
+}
 
-    fn schema_sources() -> &'static [&'static str] {
-        SCHEMA_SOURCES
-    }
-
-    fn schemas() -> &'static [Schema] {
-        network_queues::SCHEMAS
-    }
-
-    fn atomic_row_tables() -> &'static [TableName] {
-        ATOMIC_ROW_TABLES
-    }
-
-    fn projector() -> Self::Projector {
-        ProtocolProjector
-    }
-
-    fn matchers() -> Self::Matchers {
-        ProtocolContextMatchers::new()
-    }
-
-    fn handlers() -> Self::Handlers {
-        HandlerSet::new(HANDLER_ROUTES)
-    }
+fn protocol_context_matchers() -> Vec<Box<dyn ContextMatcher>> {
+    ProtocolContextMatchers::new().into_matchers()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -503,7 +526,7 @@ impl ProtocolContextMatchers {
     fn new() -> Self {
         let mut exact_roles = BTreeSet::<Role>::new();
         let mut custom_matcher_names = BTreeSet::<&'static str>::new();
-        for registration in super::CONTEXT_MATCHERS {
+        for registration in crate::protocol::catalog::CONTEXT_MATCHERS {
             let declaration = super::matchers::context_role_declaration(registration.role)
                 .unwrap_or_else(|| {
                     panic!("missing context role declaration {}", registration.role)
@@ -556,17 +579,16 @@ impl ProtocolContextMatchers {
         Self { matchers }
     }
 
+    #[cfg(test)]
     fn matcher_refs(&self) -> Vec<&dyn ContextMatcher> {
         self.matchers
             .iter()
             .map(|matcher| matcher.as_ref() as &dyn ContextMatcher)
             .collect()
     }
-}
 
-impl RuntimeMatchers for ProtocolContextMatchers {
-    fn refs(&self) -> Vec<&dyn ContextMatcher> {
-        self.matcher_refs()
+    fn into_matchers(self) -> Vec<Box<dyn ContextMatcher>> {
+        self.matchers
     }
 }
 
@@ -677,12 +699,11 @@ const HANDLER_ROUTES: &[HandlerRoute] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::runtime::RuntimeProtocol;
-    use crate::protocol::{Protocol, CONTEXT_MATCHERS};
+    use crate::protocol::catalog::CONTEXT_MATCHERS;
 
     #[test]
     fn protocol_runtime_matchers_follow_registry_exact_roles() {
-        let runtime_matchers = <Protocol as RuntimeProtocol>::matchers();
+        let runtime_matchers = ProtocolContextMatchers::new();
         let runtime_roles = runtime_matchers
             .matcher_refs()
             .into_iter()

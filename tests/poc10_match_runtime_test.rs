@@ -7,6 +7,7 @@ use topo::core::command_context::{
 };
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
+use topo::protocol::catalog::PROTOCOL;
 use topo::protocol::facts::content::message as content_message;
 use topo::protocol::facts::encryption::{
     fact::{LocalKeySecretFact, RemovalFrontierFact},
@@ -17,7 +18,6 @@ use topo::protocol::facts::identity::workspace::{
     commands::create_workspace, rows as workspace_rows,
 };
 use topo::protocol::runtime::ProtocolRuntime;
-use topo::protocol::PROTOCOL;
 
 struct FixedClock(Cell<u64>);
 
@@ -60,12 +60,12 @@ fn runtime_submits_command_output_and_projects_workspace_rows() {
     let receipt = runtime
         .submit_command_output(output)
         .expect("submit command output");
-    let report = runtime
+    let status = runtime
         .process_projection_until_idle(4, 32)
         .expect("drain projection");
 
     assert_eq!(receipt.created_at_ms, 123_000);
-    assert_eq!(report.projections, 1);
+    assert!(status.progressed);
     assert_eq!(runtime.pending_intent_count(), 1);
 
     let rows = runtime
@@ -106,11 +106,11 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
         key_secret,
     ));
     runtime.submit_fact(message);
-    let report = runtime
+    let status = runtime
         .process_projection_until_idle(8, 64)
         .expect("drain signed message projection");
 
-    assert!(report.projections >= 3);
+    assert!(status.progressed);
     assert!(
         runtime
             .store()

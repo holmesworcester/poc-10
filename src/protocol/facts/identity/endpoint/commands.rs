@@ -60,8 +60,9 @@ pub fn endpoint_fact(created_at_ms: u64, endpoint: EndpointFact) -> Result<Fact,
 
 #[cfg(test)]
 mod tests {
-    use crate::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
+    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
+    use crate::protocol::catalog::FACTS_SCHEMA_SOURCE;
 
     use super::*;
 
@@ -81,5 +82,23 @@ mod tests {
             layout::decode_fact(&output.facts[0].bytes).expect("decode"),
             output.receipt.endpoint
         );
+    }
+
+    #[test]
+    fn local_or_create_reuses_unprojected_local_endpoint_fact() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("open store");
+        let endpoint = create_local_endpoint();
+        let fact = endpoint_fact(10, endpoint.clone()).expect("endpoint fact");
+        crate::core::context_change_pipeline::ContextChangePipeline::new()
+            .submit_fact_to_store(&store, fact)
+            .expect("submit fact");
+
+        let output = local_or_create(&store, 20).expect("reuse endpoint");
+
+        assert!(!output.receipt.created);
+        assert!(output.facts.is_empty());
+        assert_eq!(output.receipt.endpoint, endpoint);
     }
 }

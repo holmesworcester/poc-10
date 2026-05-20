@@ -4,7 +4,9 @@
 //! authorizes removing it. The handler does not scan projection rows; callers
 //! enqueue one intent per child discovered by their own bounded context.
 
-use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{
+    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::content::{file, message_deletion, reaction};
 
@@ -34,11 +36,11 @@ pub fn purge_message_child_intent(input: PurgeMessageChild) -> Intent {
 pub fn decode_purge_message_child(intent: &Intent) -> Result<PurgeMessageChild, String> {
     if intent.kind.as_str() != PURGE_MESSAGE_CHILD || intent.execution != IntentExecution::Deferred
     {
-        return Err("expected purge_message_child deferred intent".to_string());
+        return Err("expected purge_message_child deferred intent".into());
     }
     let input = decode_purge_message_child_payload(&intent.payload)?;
     if intent.key != purge_message_child_key(&input) {
-        return Err("purge_message_child key does not match payload".to_string());
+        return Err("purge_message_child key does not match payload".into());
     }
     Ok(input)
 }
@@ -66,7 +68,7 @@ fn encode_purge_message_child(input: &PurgeMessageChild) -> Vec<u8> {
 
 fn decode_purge_message_child_payload(payload: &[u8]) -> Result<PurgeMessageChild, String> {
     if payload.len() != 130 || payload[0] != 1 {
-        return Err("invalid purge_message_child payload".to_string());
+        return Err("invalid purge_message_child payload".into());
     }
     Ok(PurgeMessageChild {
         workspace_id: payload[1..33].try_into().unwrap(),
@@ -96,19 +98,15 @@ impl IntentHandler for PurgeMessageChildHandler {
         Ok(vec![input.parent_deletion_id, input.child_id])
     }
 
-    fn handle(
-        &self,
-        raw_intent: &Intent,
-        context: &HandlerContext,
-    ) -> Result<HandlerOutput, String> {
+    fn handle(&self, raw_intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_purge_message_child(raw_intent)?;
         let deletion =
             message_deletion::decode_any_fact(context.require_fact(&input.parent_deletion_id)?)?;
         if deletion.workspace_id != input.workspace_id {
-            return Err("cascade parent deletion workspace mismatch".to_string());
+            return Err("cascade parent deletion workspace mismatch".into());
         }
         if deletion.target_message_id != input.parent_message_id {
-            return Err("cascade parent deletion target mismatch".to_string());
+            return Err("cascade parent deletion target mismatch".into());
         }
 
         let child = context.require_fact(&input.child_id)?;
@@ -116,22 +114,22 @@ impl IntentHandler for PurgeMessageChildHandler {
             CASCADE_CHILD_REACTION => {
                 let reaction = reaction::decode_any_fact(child)?;
                 if reaction.workspace_id != input.workspace_id {
-                    return Err("cascade reaction workspace mismatch".to_string());
+                    return Err("cascade reaction workspace mismatch".into());
                 }
                 if reaction.target_message_id != input.parent_message_id {
-                    return Err("cascade reaction parent mismatch".to_string());
+                    return Err("cascade reaction parent mismatch".into());
                 }
             }
             CASCADE_CHILD_FILE => {
                 let file = file::decode_any_fact(child)?;
                 if file.workspace_id != input.workspace_id {
-                    return Err("cascade file workspace mismatch".to_string());
+                    return Err("cascade file workspace mismatch".into());
                 }
                 if file.message_id != input.parent_message_id {
-                    return Err("cascade file parent mismatch".to_string());
+                    return Err("cascade file parent mismatch".into());
                 }
             }
-            _ => return Err("cascade child kind is not supported".to_string()),
+            _ => return Err("cascade child kind is not supported".into()),
         }
 
         Ok(HandlerOutput::new().purge_fact(input.child_id))

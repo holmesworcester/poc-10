@@ -8,7 +8,7 @@
 //!      fact so the owning projector can continue.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::matchers;

@@ -1,6 +1,6 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::projection::{ProjectionContext, Projector};
+use topo::core::projectors::{ProjectionContext, Projector};
 use topo::protocol::facts::encryption::fact::{
     KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, LocalRecipientKeyFact,
     WrappedSecretKind,

@@ -18,7 +18,7 @@
 //! Payload bytes remain opaque to this handler.
 
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
-use crate::protocol::intent_payload::{PayloadError, PayloadReader, PayloadWriter};
+use crate::protocol::intents::payload::{PayloadError, PayloadReader, PayloadWriter};
 
 /// Stable intent kind for outbound network frame sends.
 pub const SEND_NETWORK_FRAME: &str = "send_network_frame";
@@ -57,10 +57,10 @@ pub fn send_network_frame_intent(input: SendNetworkFrame) -> Intent {
 
 pub fn decode_send_network_frame(intent: &Intent) -> Result<SendNetworkFrame, String> {
     if intent.kind.as_str() != SEND_NETWORK_FRAME {
-        return Err("expected send_network_frame intent".to_string());
+        return Err("expected send_network_frame intent".into());
     }
     if intent.execution != IntentExecution::Ephemeral {
-        return Err("send_network_frame intent must be ephemeral".to_string());
+        return Err("send_network_frame intent must be ephemeral".into());
     }
 
     let mut reader = PayloadReader::new(&intent.payload);
@@ -70,7 +70,7 @@ pub fn decode_send_network_frame(intent: &Intent) -> Result<SendNetworkFrame, St
 
     let input = SendNetworkFrame { routing_key, frame };
     if intent.key != send_network_frame_key(&input) {
-        return Err("send_network_frame idempotence key does not match payload".to_string());
+        return Err("send_network_frame idempotence key does not match payload".into());
     }
     Ok(input)
 }
@@ -92,7 +92,8 @@ fn payload_error(err: PayloadError) -> String {
 }
 
 use crate::core::intent_pipeline::{
-    retry_intent, HandlerContext, HandlerFactId, HandlerOutput, IntentHandler,
+    retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult,
+    IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::facts::{connection, identity::endpoint};
@@ -118,27 +119,14 @@ impl IntentHandler for SendNetworkFrameHandler {
         Ok(vec![input.routing_key])
     }
 
-    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_network_frame(intent)?;
         validate_frame(&input)?;
-        let target = match resolve_target(&input.routing_key, context) {
-            Ok(target) => target,
-            Err(err)
-                if err == SEND_NETWORK_FRAME_MISSING_ROUTE
-                    || err == "send_network_frame missing connection request fact" =>
-            {
-                return Err(retry_intent(format!("send_network_frame route: {err}")));
-            }
-            Err(err) => return Err(err),
-        };
+        let target = resolve_target(&input.routing_key, context)?;
         network::send(
             context.store()?,
             target,
-            OutboundFrame {
-                bytes: input.frame,
-                deadline: None,
-                retry_key: Some(intent.key.clone()),
-            },
+            OutboundFrame { bytes: input.frame },
         )
         .map_err(|err| retry_intent(format!("send_network_frame tcp send: {err}")))?;
         Ok(HandlerOutput::new())
@@ -147,7 +135,7 @@ impl IntentHandler for SendNetworkFrameHandler {
 
 fn validate_frame(input: &SendNetworkFrame) -> Result<(), String> {
     if input.frame.is_empty() {
-        return Err("send_network_frame: frame bytes are empty".to_string());
+        return Err("send_network_frame: frame bytes are empty".into());
     }
     if input.frame.len() > MAX_FRAME_BYTES {
         return Err(format!(
@@ -161,7 +149,7 @@ fn validate_frame(input: &SendNetworkFrame) -> Result<(), String> {
 fn resolve_target(
     connection_id: &RoutingKey,
     context: &HandlerContext,
-) -> Result<NetworkTarget, String> {
+) -> Result<NetworkTarget, HandlerError> {
     let connection_fact = context.require_fact(connection_id)?;
     let connection = connection::response::layout::decode_fact(connection_fact.body())?;
     let request_fact = match context.fact(&connection.request_id).cloned() {
@@ -170,20 +158,26 @@ fn resolve_target(
             context.store()?,
             &connection.request_id,
         )?
-        .ok_or_else(|| "send_network_frame missing connection request fact".to_string())?,
+        .ok_or_else(|| {
+            retry_intent(
+                "send_network_frame route: send_network_frame missing connection request fact",
+            )
+        })?,
     };
     let request = connection::request::layout::decode_fact(request_fact.body())?;
     let local_endpoint = endpoint::local_endpoint::local_endpoint(context.store()?)?
-        .ok_or_else(|| "send_network_frame requires local endpoint state".to_string())?;
+        .ok_or_else(|| HandlerError::fatal("send_network_frame requires local endpoint state"))?;
     let addr = if local_endpoint.endpoint == connection.from_endpoint {
         request.from_listen_addr
     } else if local_endpoint.endpoint == connection.to_endpoint {
         request.to_listen_addr
     } else {
-        return Err("send_network_frame local endpoint is not part of connection".to_string());
+        return Err("send_network_frame local endpoint is not part of connection".into());
     };
     let Some(addr) = addr else {
-        return Err(SEND_NETWORK_FRAME_MISSING_ROUTE.to_string());
+        return Err(retry_intent(format!(
+            "send_network_frame route: {SEND_NETWORK_FRAME_MISSING_ROUTE}"
+        )));
     };
     Ok(NetworkTarget::new(addr))
 }

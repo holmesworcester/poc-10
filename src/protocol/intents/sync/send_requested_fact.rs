@@ -1,6 +1,8 @@
 //! Send the fact requested by a sync need-id fact.
 
-use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{
+    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::sync::need_id;
 use crate::protocol::intents::transport::send_facts_on_connection::{
@@ -30,18 +32,18 @@ pub fn send_requested_fact_intent(input: SendRequestedFact) -> Intent {
 
 pub fn decode_send_requested_fact(intent: &Intent) -> Result<SendRequestedFact, String> {
     if intent.kind.as_str() != SEND_REQUESTED_FACT {
-        return Err("expected send_requested_fact intent".to_string());
+        return Err("expected send_requested_fact intent".into());
     }
     if intent.execution != IntentExecution::Deferred {
-        return Err("send_requested_fact intent must be deferred".to_string());
+        return Err("send_requested_fact intent must be deferred".into());
     }
     if intent.payload.len() != 33 || intent.payload[0] != 1 {
-        return Err("send_requested_fact payload is malformed".to_string());
+        return Err("send_requested_fact payload is malformed".into());
     }
     let need_fact_id = intent.payload[1..33].try_into().unwrap();
     let input = SendRequestedFact { need_fact_id };
     if intent.key != send_requested_fact_key(&input) {
-        return Err("send_requested_fact idempotence key does not match payload".to_string());
+        return Err("send_requested_fact idempotence key does not match payload".into());
     }
     Ok(input)
 }
@@ -72,7 +74,7 @@ impl IntentHandler for SendRequestedFactHandler {
         Ok(vec![input.need_fact_id])
     }
 
-    fn handle(&self, raw: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_requested_fact(raw)?;
         let need_fact = context.require_fact(&input.need_fact_id)?;
         let need = need_id::layout::decode_fact(&need_fact.bytes)?;

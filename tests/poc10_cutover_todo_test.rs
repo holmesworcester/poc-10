@@ -904,17 +904,15 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
                 .to_string(),
         );
     }
-    if runtime.contains("network_queues::delete_inbound(self.store(), &inbound)?;")
-        && !runtime.contains("if dispatched.retries == 0")
+    if runtime.contains("network::delete_inbound(runtime.store(), &inbound)?;")
+        && !runtime.contains("if !dispatched.retried")
     {
         offenders.push(
             "src/protocol/runtime.rs deletes inbound network bytes before the protocol receive effect is proven durable"
                 .to_string(),
         );
     }
-    if runtime.contains("network_queues::delete_inbound")
-        && !runtime.contains("dispatched.retries == 0")
-    {
+    if runtime.contains("network::delete_inbound") && !runtime.contains("!dispatched.retried") {
         offenders.push(
             "src/protocol/runtime.rs deletes restart-local inbound rows even when receive dispatch asked to retry"
                 .to_string(),
@@ -944,29 +942,29 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
 }
 
 #[test]
-fn cutover_network_queue_storage_class_is_not_ambiguous() {
+fn cutover_network_row_storage_class_is_not_ambiguous() {
     let root = root();
     let core_schema = source_text(&root.join("src/core/schema.p8sql"));
     let intents_schema = source_text(&root.join("src/protocol/intents/schema.p8sql"));
-    let network_queues = source_text(&root.join("src/core/network_queues.rs"));
+    let network = source_text(&root.join("src/core/network.rs"));
     let runtime = source_text(&root.join("src/protocol/runtime.rs"));
 
     let durable_in_core_schema =
         core_schema.contains("table network_in {") || core_schema.contains("table network_out {");
-    let memory_in_queue_module = network_queues.contains("memory-local")
-        || network_queues.contains("restart-local")
-        || network_queues.contains("Schema::memory_row_table");
-    let runtime_loads_queue_schema = runtime.contains("network_queues::SCHEMAS");
+    let memory_in_queue_module = network.contains("memory-local")
+        || network.contains("restart-local")
+        || network.contains("Schema::memory_row_table");
+    let runtime_loads_queue_schema = runtime.contains("network::SCHEMAS");
 
     let mut offenders = Vec::new();
     if durable_in_core_schema && memory_in_queue_module {
         offenders.push(
-            "network_in/network_out are declared both as durable core schema tables and restart-local network_queues memory tables",
+            "network_in/network_out are declared both as durable core schema tables and restart-local network memory tables",
         );
     }
     if memory_in_queue_module && !runtime_loads_queue_schema {
         offenders.push(
-            "network_queues declares memory schemas, but ProtocolRuntime does not load network_queues::SCHEMAS",
+            "network declares memory schemas, but ProtocolRuntime does not load network::SCHEMAS",
         );
     }
     if source_text(&root.join("src/protocol/intents/schema.p8sql"))
@@ -985,7 +983,7 @@ fn cutover_network_queue_storage_class_is_not_ambiguous() {
     }
     if durable_in_core_schema == memory_in_queue_module {
         offenders.push(
-            "network queues should have exactly one explicit storage contract: durable schema table or restart-local memory table",
+            "network rows should have exactly one explicit storage contract: durable schema table or restart-local memory table",
         );
     }
     if intents_schema.contains("send_network_frame_cursors") {
@@ -996,7 +994,7 @@ fn cutover_network_queue_storage_class_is_not_ambiguous() {
 
     assert!(
         offenders.is_empty(),
-        "network queue persistence is ambiguous; choose one storage contract and make runtime/schema/docs/tests agree:\n{}",
+        "network row persistence is ambiguous; choose one storage contract and make runtime/schema/docs/tests agree:\n{}",
         offenders.join("\n")
     );
 }
@@ -1005,7 +1003,7 @@ fn cutover_network_queue_storage_class_is_not_ambiguous() {
 fn cutover_network_io_intents_are_restart_local_ephemeral() {
     let root = root();
     let intent_pipeline = source_text(&root.join("src/core/intent_pipeline.rs"));
-    let protocol = source_text(&root.join("src/protocol.rs"));
+    let protocol = source_text(&root.join("src/protocol/catalog.rs"));
     let network_io_files = [
         "src/protocol/intents/connection/send_bootstrap_request.rs",
         "src/protocol/intents/transport/send_network_frame.rs",

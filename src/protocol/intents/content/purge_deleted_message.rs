@@ -1,6 +1,8 @@
 //! Handler and deferred intent layout for message-deletion purges.
 
-use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{
+    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::content::{message::retention, message_deletion};
 
@@ -37,7 +39,7 @@ pub fn decode_purge_deleted_message_intent(intent: &Intent) -> Result<PurgeDelet
     if intent.kind.as_str() != PURGE_DELETED_MESSAGE
         || intent.execution != IntentExecution::Deferred
     {
-        return Err("expected purge_deleted_message deferred intent".to_string());
+        return Err("expected purge_deleted_message deferred intent".into());
     }
     let decoded = decode_purge_deleted_message_payload(&intent.payload)?;
     let expected_key = purge_deleted_message_key(
@@ -48,7 +50,7 @@ pub fn decode_purge_deleted_message_intent(intent: &Intent) -> Result<PurgeDelet
         decoded.reason_fact_id,
     );
     if intent.key != expected_key {
-        return Err("purge_deleted_message intent key does not match payload".to_string());
+        return Err("purge_deleted_message intent key does not match payload".into());
     }
     Ok(decoded)
 }
@@ -82,7 +84,7 @@ fn encode_purge_deleted_message_payload(input: &PurgeDeletedMessage) -> Vec<u8> 
 
 fn decode_purge_deleted_message_payload(payload: &[u8]) -> Result<PurgeDeletedMessage, String> {
     if payload.len() != 99 || payload[0] != 1 {
-        return Err("invalid purge_deleted_message intent payload".to_string());
+        return Err("invalid purge_deleted_message intent payload".into());
     }
     Ok(PurgeDeletedMessage {
         workspace_id: payload[1..33].try_into().unwrap(),
@@ -112,17 +114,13 @@ impl IntentHandler for PurgeDeletedMessageHandler {
         Ok(vec![input.target_id, input.reason_fact_id])
     }
 
-    fn handle(
-        &self,
-        raw_intent: &Intent,
-        context: &HandlerContext,
-    ) -> Result<HandlerOutput, String> {
+    fn handle(&self, raw_intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_purge_deleted_message_intent(raw_intent)?;
         if input.target_kind != PURGE_TARGET_MESSAGE {
-            return Err("purge_deleted_message target kind is not supported".to_string());
+            return Err("purge_deleted_message target kind is not supported".into());
         }
         if input.reason_kind != PURGE_REASON_AUTHOR_DELETION {
-            return Err("purge_deleted_message reason kind is not supported".to_string());
+            return Err("purge_deleted_message reason kind is not supported".into());
         }
 
         let target = context.require_fact(&input.target_id)?;

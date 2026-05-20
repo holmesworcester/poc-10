@@ -1,5 +1,5 @@
 use topo::core::facts::{Fact, FactScope};
-use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
+use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
 use topo::protocol::facts::encryption::fact::{
     LocalHistoryNodeSecretFact, LocalKeySecretFact, RemovalFrontierFact,
 };

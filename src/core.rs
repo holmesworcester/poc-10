@@ -6,7 +6,9 @@
 //! not learn the vocabulary or validity rules of whatever protocol sits above
 //! it.
 
+pub mod app;
 pub mod cli;
+pub mod clock;
 pub mod command_context;
 pub mod context;
 pub(crate) mod context_change_helpers;
@@ -16,12 +18,11 @@ pub mod daemon;
 pub mod facts;
 pub mod intent_pipeline;
 pub mod intents;
-pub mod logical_clock;
 pub mod matchers;
 pub mod network;
-pub mod network_queues;
+pub mod payload;
 pub(crate) mod pending_fact_pipeline;
-pub mod projection;
+pub mod projectors;
 pub mod runtime;
 pub mod schema_dsl;
 pub mod store;

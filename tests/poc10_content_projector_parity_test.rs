@@ -1,6 +1,6 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactId, FactScope};
-use topo::core::projection::{MatchedContext, ProjectionContext, Projector};
+use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
 use topo::protocol::facts::content;
 use topo::protocol::facts::identity;
 

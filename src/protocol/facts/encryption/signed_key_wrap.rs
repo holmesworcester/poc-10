@@ -1,6 +1,6 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{ProjectionContext, ProjectionOutput};
+use crate::core::projectors::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::intent::{unwrap_key_wrap_intent, UnwrapKeyWrapIntent};
 use crate::protocol::facts::encryption::layout;
 use crate::protocol::facts::encryption::rows::{key_wrap_row, KeyWrapRow};

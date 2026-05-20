@@ -8,7 +8,7 @@
 
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::intents::sync::send_needed_fact_id::{

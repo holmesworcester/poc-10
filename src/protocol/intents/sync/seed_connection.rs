@@ -6,7 +6,9 @@
 
 use crate::core::{
     facts::{Fact, FactId},
-    intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler},
+    intent_pipeline::{
+        HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+    },
     intents::{Intent, IntentExecution, IntentKind},
     store::Store,
 };
@@ -31,19 +33,19 @@ pub fn seed_connection_sync_intent(input: SeedConnectionSync) -> Intent {
 
 pub fn decode_seed_connection_sync(intent: &Intent) -> Result<SeedConnectionSync, String> {
     if intent.kind.as_str() != SEED_CONNECTION_SYNC {
-        return Err("expected seed_connection_sync intent".to_string());
+        return Err("expected seed_connection_sync intent".into());
     }
     if intent.execution != IntentExecution::Deferred {
-        return Err("seed_connection_sync intent must be deferred".to_string());
+        return Err("seed_connection_sync intent must be deferred".into());
     }
     if intent.payload.len() != 33 || intent.payload[0] != 1 {
-        return Err("invalid seed_connection_sync payload".to_string());
+        return Err("invalid seed_connection_sync payload".into());
     }
     let input = SeedConnectionSync {
         connection_id: intent.payload[1..33].try_into().unwrap(),
     };
     if intent.key != seed_connection_sync_key(input.connection_id) {
-        return Err("seed_connection_sync key does not match payload".to_string());
+        return Err("seed_connection_sync key does not match payload".into());
     }
     Ok(input)
 }
@@ -80,30 +82,25 @@ impl IntentHandler for SeedConnectionSyncHandler {
         Ok(vec![input.connection_id])
     }
 
-    fn handle(&self, raw: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_seed_connection_sync(raw)?;
         let connection_fact = context.require_fact(&input.connection_id)?;
         if connection_fact.id != input.connection_id {
-            return Err("seed_connection_sync context payload id mismatch".to_string());
+            return Err("seed_connection_sync context payload id mismatch".into());
         }
-        connection::response::layout::decode_fact(connection_fact.body())
-            .map_err(|_| "seed_connection_sync context is not a connection response".to_string())?;
+        connection::response::layout::decode_fact(connection_fact.body()).map_err(|_| {
+            HandlerError::fatal("seed_connection_sync context is not a connection response")
+        })?;
         advertise_connection_shareable_facts(context.store()?, input.connection_id)
     }
 }
 
-pub fn advertise_connection_shareable_facts(
-    store: &Store,
-    connection_id: FactId,
-) -> Result<HandlerOutput, String> {
+pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId) -> HandlerResult {
     let facts = sync::shared_fact::shareable_facts_for_connection(store, connection_id)?;
     advertise_facts_on_connection(connection_id, facts)
 }
 
-pub fn advertise_indexed_fact_to_connections(
-    store: &Store,
-    fact: &Fact,
-) -> Result<HandlerOutput, String> {
+pub fn advertise_indexed_fact_to_connections(store: &Store, fact: &Fact) -> HandlerResult {
     let mut output = HandlerOutput::new();
     for connection_id in sync::shared_fact::connection_ids_for_shareable_fact(store, fact.id)? {
         output = append_have_advertisement(output, connection_id, fact)?;
@@ -111,10 +108,7 @@ pub fn advertise_indexed_fact_to_connections(
     Ok(output)
 }
 
-fn advertise_facts_on_connection(
-    connection_id: FactId,
-    facts: Vec<Fact>,
-) -> Result<HandlerOutput, String> {
+fn advertise_facts_on_connection(connection_id: FactId, facts: Vec<Fact>) -> HandlerResult {
     let mut output = HandlerOutput::new();
     for fact in facts {
         output = append_have_advertisement(output, connection_id, &fact)?;
@@ -126,7 +120,7 @@ fn append_have_advertisement(
     output: HandlerOutput,
     connection_id: FactId,
     fact: &Fact,
-) -> Result<HandlerOutput, String> {
+) -> HandlerResult {
     let have_fact = sync::have_id::advertisement_fact(connection_id, fact)?;
     Ok(output.fact(have_fact.clone()).intent(
         send_facts_on_connection::send_facts_on_connection_intent(SendFactsOnConnection {
@@ -140,8 +134,9 @@ fn append_have_advertisement(
 mod tests {
     use super::*;
     use crate::core::facts::{FactScope, ScopeKind};
-    use crate::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
+    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
+    use crate::protocol::catalog::FACTS_SCHEMA_SOURCE;
     use crate::protocol::facts::sync::shared_fact;
 
     #[test]

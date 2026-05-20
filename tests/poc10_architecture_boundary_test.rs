@@ -182,7 +182,7 @@ fn poc10_core_contract_files_are_present() {
         "src/core/facts.rs",
         "src/core/context.rs",
         "src/core/matchers.rs",
-        "src/core/projection.rs",
+        "src/core/projectors.rs",
         "src/core/intents.rs",
         "src/core/intent_pipeline.rs",
     ];
@@ -265,12 +265,12 @@ fn poc10_has_no_product_demo_or_smoke_command_surface() {
 
 #[test]
 fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
-    let topo::core::projection::ProjectionOutput {
+    let topo::core::projectors::ProjectionOutput {
         needs,
         offers,
         time_wakes,
         intents,
-    } = topo::core::projection::ProjectionOutput::default();
+    } = topo::core::projectors::ProjectionOutput::default();
 
     assert!(needs.is_empty());
     assert!(offers.is_empty());
@@ -550,6 +550,45 @@ fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
 }
 
 #[test]
+fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let accept_commands = source_text(&root.join("src/protocol/facts/identity/invite/commands.rs"));
+    let connection_request_projector =
+        source_text(&root.join("src/protocol/facts/connection/request/project.rs"));
+
+    assert!(
+        !accept_commands.contains("send_bootstrap_connection_request_intent"),
+        "accept/link commands should create connection_request facts, not enqueue bootstrap IO directly"
+    );
+    assert!(
+        connection_request_projector.contains("send_bootstrap_connection_request_intent"),
+        "the connection_request projector should schedule bootstrap IO when a local request projects"
+    );
+}
+
+#[test]
+fn poc10_protocol_command_handlers_use_core_opened_runtime_and_return_output() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let command_handlers = root.join("src/protocol/command_handlers.rs");
+    let offenders = source_code_matches_in_paths(
+        root,
+        vec![command_handlers],
+        &[
+            "ProtocolRuntime::open_disk",
+            "println!",
+            "app_cli_command",
+            "_flow",
+        ],
+    );
+
+    assert!(
+        offenders.is_empty(),
+        "protocol command handlers should use the core-opened runtime, return CliOutput for core to print, and avoid compatibility wrapper command flows:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn poc10_target_projectors_do_not_write_store_rows_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let projector_paths = target_projector_files(root);
@@ -633,7 +672,7 @@ fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
 #[test]
 fn poc10_concrete_protocol_routes_semantic_messages() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let registry = source_text(&root.join("src/protocol.rs"));
+    let catalog = source_text(&root.join("src/protocol/catalog.rs"));
     let runtime = source_text(&root.join("src/protocol/runtime.rs"));
     let receive = source_text(&root.join("src/protocol/facts/transport/transit/receive.rs"));
 
@@ -646,14 +685,14 @@ fn poc10_concrete_protocol_routes_semantic_messages() {
         "ContentMessageDeletionProjector",
     ] {
         assert!(
-            registry.contains(required) || runtime.contains(required) || receive.contains(required),
+            catalog.contains(required) || runtime.contains(required) || receive.contains(required),
             "normal poc-10 messages must route through semantic content::message facts; missing {required}"
         );
     }
     assert!(runtime.contains("CONTENT_MESSAGE_ROWS"));
     assert!(runtime.contains("MESSAGE_DELETION_ROWS"));
     assert!(
-        !registry.contains("module: \"content::sealed_message\""),
+        !catalog.contains("module: \"content::sealed_message\""),
         "sealed-message compatibility module must not be registered"
     );
     assert!(

@@ -14,14 +14,13 @@ use topo::core::command_context::{
     WorkspaceId,
 };
 use topo::core::crypto;
-use topo::core::schema_dsl::{CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE};
+use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::protocol::catalog::FACTS_SCHEMA_SOURCE;
 use topo::protocol::facts::content::message::create::{
     associated_data, recover_text, send_message,
 };
 use topo::protocol::facts::content::message::layout::{decode_fact, TYPE_CONTENT_MESSAGE};
-use topo::protocol::facts::encryption::fact::LocalKeySecretFact;
-use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::facts::identity::signed_fact::layout::decode_signed_fact;
 
 struct FixedClock(Cell<u64>);
@@ -55,7 +54,7 @@ impl IdentityVault for TestVault {
             .signing
             .clone()
             .ok_or_else(|| "no signing capability".to_string())?;
-        if capability.fact.workspace_id != workspace_id {
+        if capability.workspace_id != workspace_id {
             return Err("vault has no signing capability for workspace".to_string());
         }
         Ok(capability)
@@ -69,7 +68,7 @@ impl IdentityVault for TestVault {
             .encryption
             .clone()
             .ok_or_else(|| "no encryption capability".to_string())?;
-        if capability.fact.workspace_id != workspace_id {
+        if capability.workspace_id != workspace_id {
             return Err("vault has no encryption capability for workspace".to_string());
         }
         Ok(capability)
@@ -84,21 +83,17 @@ fn seeded_vault(workspace_id: WorkspaceId) -> TestVault {
     let signer_id = [11; 32];
 
     let signing = LocalSigningCapability {
-        fact: LocalSignerSecretFact {
-            workspace_id,
-            signer_id,
-            public_key: signer_public,
-            private_key: signer_private,
-        },
+        workspace_id,
+        signer_id,
+        public_key: signer_public,
+        private_key: signer_private,
     };
     let encryption = LocalEncryptionCapability {
-        fact: LocalKeySecretFact {
-            workspace_id,
-            frontier_id: [22; 32],
-            owner_endpoint_id: [33; 32],
-            created_at_ms: 1,
-            key_secret: [9; crypto::XCHACHA20_POLY1305_KEY_BYTES],
-        },
+        workspace_id,
+        frontier_id: [22; 32],
+        owner_endpoint_id: [33; 32],
+        created_at_ms: 1,
+        key_secret: [9; crypto::XCHACHA20_POLY1305_KEY_BYTES],
     };
     TestVault {
         signing: Some(signing),
@@ -174,7 +169,7 @@ fn send_message_fact_round_trips_through_decode_content_message() {
         .local_encryption_capability(workspace_id)
         .expect("vault encryption capability");
     let plaintext = crypto::xchacha20poly1305_decrypt(
-        &encryption.fact.key_secret,
+        &encryption.key_secret,
         &associated_data(workspace_id, message.frontier_id, message.minute),
         &message.nonce,
         &message.ciphertext,

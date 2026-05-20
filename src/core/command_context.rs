@@ -27,8 +27,6 @@
 
 use crate::core::facts::FactId;
 use crate::core::store::Store;
-use crate::protocol::facts::encryption::fact::LocalKeySecretFact;
-use crate::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
 
 pub type WorkspaceId = FactId;
 
@@ -39,7 +37,10 @@ pub type WorkspaceId = FactId;
 /// capability exists. Absent capability is an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalSigningCapability {
-    pub fact: LocalSignerSecretFact,
+    pub workspace_id: WorkspaceId,
+    pub signer_id: FactId,
+    pub public_key: crate::core::crypto::Ed25519PublicKey,
+    pub private_key: crate::core::crypto::Ed25519PrivateKey,
 }
 
 /// An encryption capability handed to a command by identity.
@@ -48,7 +49,11 @@ pub struct LocalSigningCapability {
 /// not derive, persist, or rotate it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEncryptionCapability {
-    pub fact: LocalKeySecretFact,
+    pub workspace_id: WorkspaceId,
+    pub frontier_id: FactId,
+    pub owner_endpoint_id: FactId,
+    pub created_at_ms: u64,
+    pub key_secret: crate::core::crypto::XChaCha20Poly1305Key,
 }
 
 /// The identity-owned vault.

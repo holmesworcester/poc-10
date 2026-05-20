@@ -1,12 +1,12 @@
 //! User-facing encryption command constructors.
 
+use crate::core::clock;
 use crate::core::command_context::{
     CommandClock, CommandContext, CommandOutput, IdentityVault, LocalEncryptionCapability,
     LocalSigningCapability, WorkspaceId,
 };
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::logical_clock;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::{content, encryption};
 use crate::protocol::runtime::ProtocolRuntime;
@@ -350,7 +350,7 @@ fn workspace_retired_from_access(
         .into_iter()
         .map(|(key, value)| content::message::rows::decode_content_message_row(&key, &value))
         .collect::<Result<Vec<_>, _>>()?;
-    let horizon_floor = logical_clock::logical_time(runtime.store())?
+    let horizon_floor = clock::logical_time(runtime.store())?
         .map(|ms| (ms / 60_000).saturating_sub(30 * 24 * 60))
         .unwrap_or(0);
     if horizon_floor > 0
@@ -535,7 +535,7 @@ fn process_runtime_until_idle(runtime: &mut ProtocolRuntime) -> Result<(), Strin
     for _ in 0..4 {
         runtime.process_projection_until_idle(8, 512)?;
         let dispatched = runtime.dispatch_intents(512)?;
-        if dispatched.handled == 0 && dispatched.facts == 0 && dispatched.intents == 0 {
+        if dispatched.is_idle() {
             runtime.process_projection_until_idle(8, 512)?;
             return Ok(());
         }

@@ -5,7 +5,9 @@
 //! endpoint material for command and handler capability boundaries that are
 //! already authorized to use it.
 
+use crate::core::context_change_pipeline::persisted_facts;
 use crate::core::crypto;
+use crate::core::facts::FactScope;
 use crate::core::store::Store;
 
 use super::fact::EndpointFact;
@@ -29,7 +31,7 @@ pub fn local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
         .map_err(|err| format!("load local endpoint signing secret: {err}"))?;
 
     match (endpoint, secret, signing_public_key, signing_secret) {
-        (None, None, None, None) => Ok(None),
+        (None, None, None, None) => unprojected_local_endpoint(store),
         (Some(endpoint), Some(secret), Some(signing_public_key), Some(signing_secret)) => {
             let endpoint = id32(&endpoint, "local endpoint")?;
             let secret = id32(&secret, "local endpoint secret")?;
@@ -56,6 +58,23 @@ pub fn local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
         (_, _, None, _) => Err("local endpoint signing public key is missing".to_string()),
         (_, _, _, None) => Err("local endpoint signing secret is missing".to_string()),
     }
+}
+
+fn unprojected_local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
+    let mut endpoints = persisted_facts(store)?
+        .into_iter()
+        .filter(|fact| fact.scope == FactScope::Local)
+        .filter_map(|fact| {
+            super::layout::decode_fact(fact.body())
+                .ok()
+                .map(|endpoint| (fact.timestamp, fact.id, endpoint))
+        })
+        .collect::<Vec<_>>();
+    endpoints.sort_by_key(|(timestamp, id, _)| (*timestamp, *id));
+    Ok(endpoints
+        .into_iter()
+        .map(|(_, _, endpoint)| endpoint)
+        .next())
 }
 
 fn id32(value: &[u8], label: &str) -> Result<[u8; 32], String> {

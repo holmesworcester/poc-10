@@ -9,7 +9,7 @@
 //!      their workspace and do not emit row or network work.
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::matchers;

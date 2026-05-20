@@ -1,8 +1,6 @@
 //! Projector contract for fact plus context to needs, offers, and intents.
 
-use crate::core::context::{
-    diff_context_sets, ContextNeed, ContextOffer, ContextSet, ContextSetDelta,
-};
+use crate::core::context::{ContextNeed, ContextOffer, ContextSet};
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::Intent;
 use std::collections::BTreeMap;
@@ -382,82 +380,11 @@ where
     projector.project_typed(fact, payload, context)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectionRun {
-    pub context: ContextSet,
-    pub context_delta: ContextSetDelta,
-    pub time_wakes: Vec<TimeWake>,
-    pub intents: Vec<Intent>,
-}
-
-pub fn run_projection(
-    projector: &impl Projector,
-    fact: &Fact,
-    previous_context: &ContextSet,
-    offers: Vec<ContextOffer>,
-) -> Result<ProjectionRun, String> {
-    run_projection_with_context(
-        projector,
-        fact,
-        previous_context,
-        ProjectionContext::new(offers),
-    )
-}
-
-pub fn run_projection_with_context(
-    projector: &impl Projector,
-    fact: &Fact,
-    previous_context: &ContextSet,
-    context: ProjectionContext,
-) -> Result<ProjectionRun, String> {
-    let output = projector.project(fact, &context)?;
-    enforce_owner_is_self(fact, &output)?;
-    let context = output.context_set();
-    let context_delta = diff_context_sets(previous_context, &context);
-    Ok(ProjectionRun {
-        context,
-        context_delta,
-        time_wakes: output.time_wakes,
-        intents: output.intents,
-    })
-}
-
-/// Reject any projected need, offer, or time wake whose `owner` is not the fact
-/// being projected.
-fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
-    for need in &output.needs {
-        if need.owner != fact.id {
-            return Err(format!(
-                "projector emitted need with owner {:x?} that is not the projected fact {:x?}",
-                need.owner, fact.id
-            ));
-        }
-    }
-    for offer in &output.offers {
-        if offer.owner != fact.id {
-            return Err(format!(
-                "projector emitted offer with owner {:x?} that is not the projected fact {:x?}",
-                offer.owner, fact.id
-            ));
-        }
-    }
-    for wake in &output.time_wakes {
-        if wake.owner != fact.id {
-            return Err(format!(
-                "projector emitted time wake with owner {:x?} that is not the projected fact {:x?}",
-                wake.owner, fact.id
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::context::{Role, Selector};
     use crate::core::facts::FactScope;
-    use crate::core::intents::{IntentExecution, IntentKind};
 
     #[test]
     fn projection_output_keeps_context_and_work_separate() {
@@ -611,104 +538,6 @@ mod tests {
         assert_eq!(err, "typed context offer payload mismatch");
     }
 
-    #[test]
-    fn projection_run_rejects_offer_owned_by_another_fact() {
-        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = BadOfferOwnerProjector;
-
-        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect_err("projection should reject foreign offer owner");
-
-        assert!(err.contains("projector emitted offer with owner"));
-    }
-
-    #[test]
-    fn projection_run_rejects_need_owned_by_another_fact() {
-        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = BadNeedOwnerProjector;
-
-        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect_err("projection should reject foreign need owner");
-
-        assert!(err.contains("projector emitted need with owner"));
-    }
-
-    #[test]
-    fn projection_run_rejects_time_wake_owned_by_another_fact() {
-        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = BadTimeWakeOwnerProjector;
-
-        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect_err("projection should reject foreign time-wake owner");
-
-        assert!(err.contains("projector emitted time wake with owner"));
-    }
-
-    #[test]
-    fn projection_run_diffs_standing_context_without_self_waking() {
-        let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
-        let role = Role::new("exact").unwrap();
-        let selector = Selector::from_bytes([9; 32]);
-        let projector = NeedUntilOffer {
-            role,
-            selector,
-            intent_kind: IntentKind::new("followup").unwrap(),
-        };
-
-        let first = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect("first projection");
-        assert_eq!(first.context_delta.added_needs.len(), 1);
-        assert_eq!(first.context_delta.removed_needs.len(), 0);
-
-        let second = run_projection(&projector, &fact, &first.context, Vec::new())
-            .expect("second projection");
-        assert!(second.context_delta.is_empty());
-        assert_eq!(second.context, first.context);
-        assert!(second.intents.is_empty());
-    }
-
-    #[test]
-    fn projection_run_replaces_need_with_intent_when_context_appears() {
-        let fact = Fact::new(FactScope::Global, 1, b"recoverable".to_vec());
-        let role = Role::new("exact").unwrap();
-        let selector = Selector::from_bytes([9; 32]);
-        let projector = NeedUntilOffer {
-            role: role.clone(),
-            selector: selector.clone(),
-            intent_kind: IntentKind::new("followup").unwrap(),
-        };
-        let previous = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect("previous projection")
-            .context;
-        let offer = ContextOffer {
-            owner: [2; 32],
-            role,
-            scope: FactScope::Global,
-            selector,
-        };
-
-        let next = run_projection(&projector, &fact, &previous, vec![offer])
-            .expect("projection with context");
-
-        assert!(next.context.needs.is_empty());
-        assert_eq!(next.context_delta.removed_needs, previous.needs);
-        assert_eq!(next.context_delta.added_needs.len(), 0);
-        assert_eq!(next.intents.len(), 1);
-        assert_eq!(next.intents[0].kind.as_str(), "followup");
-    }
-
-    struct NeedUntilOffer {
-        role: Role,
-        selector: Selector,
-        intent_kind: IntentKind,
-    }
-
-    struct BadOfferOwnerProjector;
-
-    struct BadNeedOwnerProjector;
-
-    struct BadTimeWakeOwnerProjector;
-
     struct FirstByteCodec;
 
     impl FactCodec for FirstByteCodec {
@@ -738,74 +567,6 @@ mod tests {
             },
             need,
             payload,
-        }
-    }
-
-    impl Projector for NeedUntilOffer {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if context.offers().is_empty() {
-                Ok(ProjectionOutput::new().need(ContextNeed {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    selector: self.selector.clone(),
-                }))
-            } else {
-                Ok(ProjectionOutput::new().intent(Intent::new(
-                    self.intent_kind.clone(),
-                    IntentExecution::Atomic,
-                    fact.id,
-                    context.offer_owners().next().unwrap_or(fact.id),
-                )))
-            }
-        }
-    }
-
-    impl Projector for BadOfferOwnerProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().offer(ContextOffer {
-                owner: [9; 32],
-                role: Role::new("exact").unwrap(),
-                scope: fact.scope.clone(),
-                selector: Selector::from_bytes(fact.id),
-            }))
-        }
-    }
-
-    impl Projector for BadNeedOwnerProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().need(ContextNeed {
-                owner: [9; 32],
-                role: Role::new("exact").unwrap(),
-                scope: fact.scope.clone(),
-                selector: Selector::from_bytes(fact.id),
-            }))
-        }
-    }
-
-    impl Projector for BadTimeWakeOwnerProjector {
-        fn project(
-            &self,
-            _fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().time_wake(TimeWake {
-                owner: [9; 32],
-                timeline: Timeline::new("test").unwrap(),
-                at: 1,
-            }))
         }
     }
 }

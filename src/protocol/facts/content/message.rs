@@ -11,8 +11,8 @@ pub mod rows;
 
 pub const TYPE_CONTENT_MESSAGE: u8 = layout::TYPE_CONTENT_MESSAGE;
 
-pub fn expiration_timeline() -> crate::core::projection::Timeline {
-    crate::core::projection::Timeline::new("content_message_expiry")
+pub fn expiration_timeline() -> crate::core::projectors::Timeline {
+    crate::core::projectors::Timeline::new("content_message_expiry")
         .expect("valid content-message expiry timeline")
 }
 
@@ -22,7 +22,7 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentMessageFact, Str
 
 pub(crate) struct Codec;
 
-impl crate::core::projection::FactCodec for Codec {
+impl crate::core::projectors::FactCodec for Codec {
     type Payload =
         crate::protocol::facts::content::message::authority::DecodedFact<fact::ContentMessageFact>;
 

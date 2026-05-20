@@ -1,6 +1,8 @@
 //! Package exact facts into one connection transit frame.
 
-use crate::core::intent_pipeline::{HandlerContext, HandlerFactId, HandlerOutput, IntentHandler};
+use crate::core::intent_pipeline::{
+    HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+};
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
 use crate::protocol::facts::{
     connection::response,
@@ -10,7 +12,7 @@ use crate::protocol::facts::{
         frame::{self, TransitFactBundle},
     },
 };
-use crate::protocol::intent_payload::{PayloadError, PayloadReader, PayloadWriter};
+use crate::protocol::intents::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::intents::transport::send_network_frame::{self, SendNetworkFrame};
 
 pub type HandlerId = [u8; 32];
@@ -50,10 +52,10 @@ pub fn send_facts_on_connection_intent(input: SendFactsOnConnection) -> Intent {
 
 pub fn decode_send_facts_on_connection(intent: &Intent) -> Result<SendFactsOnConnection, String> {
     if intent.kind.as_str() != SEND_FACTS_ON_CONNECTION {
-        return Err("expected send_facts_on_connection intent".to_string());
+        return Err("expected send_facts_on_connection intent".into());
     }
     if intent.execution != IntentExecution::Deferred {
-        return Err("send_facts_on_connection intent must be deferred".to_string());
+        return Err("send_facts_on_connection intent must be deferred".into());
     }
     let mut reader = PayloadReader::new(&intent.payload);
     reader.expect_u8(1).map_err(payload_error)?;
@@ -65,10 +67,10 @@ pub fn decode_send_facts_on_connection(intent: &Intent) -> Result<SendFactsOnCon
     }
     reader.finish().map_err(payload_error)?;
     if fact_ids.is_empty() {
-        return Err("send_facts_on_connection must name at least one fact".to_string());
+        return Err("send_facts_on_connection must name at least one fact".into());
     }
     if intent.key != connection_fact_ids_key(connection_id, &fact_ids) {
-        return Err("send_facts_on_connection key does not match payload".to_string());
+        return Err("send_facts_on_connection key does not match payload".into());
     }
     Ok(SendFactsOnConnection {
         connection_id,
@@ -112,12 +114,12 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         Ok(ids)
     }
 
-    fn handle(&self, intent: &Intent, context: &HandlerContext) -> Result<HandlerOutput, String> {
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_facts_on_connection(intent)?;
         let connection_fact = context.require_fact(&input.connection_id)?;
         let connection = response::layout::decode_fact(connection_fact.body())?;
         if connection_fact.id != input.connection_id {
-            return Err("send_facts_on_connection connection fact id mismatch".to_string());
+            return Err("send_facts_on_connection connection fact id mismatch".into());
         }
 
         let mut facts = TransitFactBundle::new();
@@ -127,17 +129,18 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         }
 
         let local_endpoint = endpoint::local_endpoint::local_endpoint(context.store()?)?
-            .ok_or_else(|| "send_facts_on_connection requires local endpoint state".to_string())?;
-        let (sender_endpoint, receiver_endpoint) =
-            if local_endpoint.endpoint == connection.from_endpoint {
-                (connection.from_endpoint, connection.to_endpoint)
-            } else if local_endpoint.endpoint == connection.to_endpoint {
-                (connection.to_endpoint, connection.from_endpoint)
-            } else {
-                return Err(
-                    "send_facts_on_connection local endpoint is not part of connection".to_string(),
-                );
-            };
+            .ok_or_else(|| {
+                HandlerError::fatal("send_facts_on_connection requires local endpoint state")
+            })?;
+        let (sender_endpoint, receiver_endpoint) = if local_endpoint.endpoint
+            == connection.from_endpoint
+        {
+            (connection.from_endpoint, connection.to_endpoint)
+        } else if local_endpoint.endpoint == connection.to_endpoint {
+            (connection.to_endpoint, connection.from_endpoint)
+        } else {
+            return Err("send_facts_on_connection local endpoint is not part of connection".into());
+        };
 
         let frame = frame::seal_connection_send_frame(
             input.connection_id,

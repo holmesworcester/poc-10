@@ -43,15 +43,62 @@ pub struct DispatchReport {
 /// Fact ids requested by a handler before it runs.
 pub type HandlerFactId = FactId;
 
-const RETRY_INTENT_PREFIX: &str = "retry intent: ";
-
-/// Mark a handler failure as transient so dispatch leaves the intent queued.
-pub fn retry_intent(reason: impl AsRef<str>) -> String {
-    format!("{RETRY_INTENT_PREFIX}{}", reason.as_ref())
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandlerError {
+    Retry(String),
+    Fatal(String),
 }
 
-pub fn retry_intent_reason(err: &str) -> Option<&str> {
-    err.strip_prefix(RETRY_INTENT_PREFIX)
+impl HandlerError {
+    pub fn fatal(reason: impl Into<String>) -> Self {
+        Self::Fatal(reason.into())
+    }
+
+    pub fn retry(reason: impl Into<String>) -> Self {
+        Self::Retry(reason.into())
+    }
+
+    pub fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
+    }
+}
+
+impl fmt::Display for HandlerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HandlerError::Retry(reason) | HandlerError::Fatal(reason) => {
+                formatter.write_str(reason)
+            }
+        }
+    }
+}
+
+impl std::error::Error for HandlerError {}
+
+impl From<String> for HandlerError {
+    fn from(value: String) -> Self {
+        Self::Fatal(value)
+    }
+}
+
+impl From<&str> for HandlerError {
+    fn from(value: &str) -> Self {
+        Self::Fatal(value.to_string())
+    }
+}
+
+pub type HandlerResult = Result<HandlerOutput, HandlerError>;
+
+/// Mark a handler failure as transient so dispatch leaves the intent queued.
+pub fn retry_intent(reason: impl Into<String>) -> HandlerError {
+    HandlerError::retry(reason)
+}
+
+pub fn retry_intent_reason(err: &HandlerError) -> Option<&str> {
+    match err {
+        HandlerError::Retry(reason) => Some(reason),
+        HandlerError::Fatal(_) => None,
+    }
 }
 
 /// Read-only inputs handed to an intent handler.
@@ -92,9 +139,9 @@ impl<'a> HandlerContext<'a> {
         self
     }
 
-    pub fn store(&self) -> Result<&Store, String> {
+    pub fn store(&self) -> Result<&Store, HandlerError> {
         self.store
-            .ok_or_else(|| "handler context missing store".to_string())
+            .ok_or_else(|| HandlerError::fatal("handler context missing store"))
     }
 
     pub fn fact(&self, id: &FactId) -> Option<&Fact> {
@@ -105,15 +152,17 @@ impl<'a> HandlerContext<'a> {
         self.facts.values()
     }
 
-    pub fn require_fact(&self, id: &FactId) -> Result<&Fact, String> {
+    pub fn require_fact(&self, id: &FactId) -> Result<&Fact, HandlerError> {
         self.fact(id)
-            .ok_or_else(|| format!("handler context missing fact {id:?}"))
+            .ok_or_else(|| HandlerError::retry(format!("handler context missing fact {id:?}")))
     }
 
-    pub fn require_non_local_fact_bytes(&self, id: &FactId) -> Result<&[u8], String> {
+    pub fn require_non_local_fact_bytes(&self, id: &FactId) -> Result<&[u8], HandlerError> {
         let fact = self.require_fact(id)?;
         if fact.scope == FactScope::Local {
-            return Err(format!("handler context refused local fact {id:?}"));
+            return Err(HandlerError::fatal(format!(
+                "handler context refused local fact {id:?}"
+            )));
         }
         Ok(&fact.bytes)
     }
@@ -159,11 +208,7 @@ pub trait IntentHandler {
         Ok(Vec::new())
     }
 
-    fn handle(
-        &self,
-        intent: &Intent,
-        context: &HandlerContext<'_>,
-    ) -> Result<HandlerOutput, String>;
+    fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult;
 }
 
 /// Restart-local state and SQL-backed dispatch for protocol intents.
@@ -442,13 +487,11 @@ fn dispatch_ephemeral_intents_matching(
             Ok(output) => output,
             Err(err) => {
                 intent_pipeline.restore_intent(intent_index, intent)?;
-                if retry_intent_reason(&err).is_some()
-                    || err.starts_with("handler context missing fact ")
-                {
+                if is_retryable_handler_error(&err) {
                     report.retries += 1;
                     break;
                 }
-                return Err(err);
+                return Err(err.to_string());
             }
         };
         let output = match prepare_ephemeral_handler_output(intent_pipeline, output, allowed_tables)
@@ -606,7 +649,7 @@ fn run_handler(
                 report.retries += 1;
                 Ok(None)
             } else {
-                Err(err)
+                Err(err.to_string())
             }
         }
     }
@@ -731,8 +774,8 @@ fn split_handler_output(output: HandlerOutput) -> HandlerOutputParts {
     }
 }
 
-fn is_retryable_handler_error(err: &str) -> bool {
-    retry_intent_reason(err).is_some() || err.starts_with("handler context missing fact ")
+fn is_retryable_handler_error(err: &HandlerError) -> bool {
+    matches!(err, HandlerError::Retry(_))
 }
 
 #[derive(Debug, Clone, Copy)]

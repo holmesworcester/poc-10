@@ -8,8 +8,6 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub const CORE_SCHEMA_SOURCE: &str = include_str!("schema.p8sql");
-pub const FACTS_SCHEMA_SOURCE: &str = include_str!("../protocol/facts/schema.p8sql");
-pub const INTENTS_SCHEMA_SOURCE: &str = include_str!("../protocol/intents/schema.p8sql");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDocument {
@@ -673,8 +671,6 @@ mod tests {
     #[test]
     fn parses_initial_poc10_schema_files() {
         let core = parse_schema(CORE_SCHEMA_SOURCE).expect("core schema parses");
-        let facts = parse_schema(FACTS_SCHEMA_SOURCE).expect("fact module schema parses");
-        let handlers = parse_schema(INTENTS_SCHEMA_SOURCE).expect("handler schema parses");
 
         assert_eq!(
             table_names(&core),
@@ -690,99 +686,6 @@ mod tests {
                 "clock",
             ]
         );
-        assert_eq!(
-            table_names(&facts),
-            vec![
-                "opened_message_rows",
-                "message_tombstone_rows",
-                "file_slice_rows",
-                "workspace_rows",
-                "recipient_key_rows",
-                "key_wrap_rows",
-                "user_rows",
-                "local_endpoint_rows",
-                "local_endpoint_secret_rows",
-                "local_endpoint_signing_public_key_rows",
-                "local_endpoint_signing_secret_rows",
-                "identity_endpoint_shared_rows",
-                "content_event_rows",
-                "cascade_staged_fact_rows",
-                "admin_rows",
-                "content_messages",
-                "content_reactions",
-                "content_files",
-                "connection_ephemeral_secret_rows",
-                "connection_request_rows",
-                "connection_response_rows",
-                "invite_accepted_rows",
-                "invite_server_rows",
-                "user_invite_rows",
-                "device_invite_rows",
-                "invite_secret_rows",
-                "sync_compare_rows",
-                "sync_have_id_rows",
-                "sync_need_id_rows",
-                "sync_shareable_fact_rows",
-                "message_deletion_rows",
-                "file_deletion_rows",
-                "removal_frontier_rows",
-                "local_history_node_secret_rows",
-                "disappearing_messages_setting_rows",
-            ]
-        );
-        assert_eq!(
-            table_names(&handlers),
-            vec![
-                "purge_retire_coords",
-                "sync_index_snapshots",
-                "connection_attempt_checkpoints",
-            ]
-        );
-
-        for document in [&core, &facts, &handlers] {
-            for table in &document.tables {
-                match table.kind {
-                    TableKind::Row => {
-                        assert_eq!(table.row_key.columns, vec!["key"]);
-                        assert_eq!(
-                            table.column("key").map(|column| &column.ty),
-                            Some(&ColumnType::Bytes { len: None })
-                        );
-                        assert_eq!(
-                            table.column("value").map(|column| &column.ty),
-                            Some(&ColumnType::Bytes { len: None })
-                        );
-                        assert!(table.indexes.is_empty());
-                    }
-                    TableKind::Typed => {
-                        assert!(
-                            matches!(
-                                table.name.as_str(),
-                                "facts"
-                                    | "context_needs"
-                                    | "context_offers"
-                                    | "time_wakes"
-                                    | "pending_projection"
-                                    | "pending_time_ranges"
-                                    | "pending_context_changes"
-                                    | "intents"
-                                    | "opened_message_rows"
-                                    | "message_tombstone_rows"
-                                    | "file_slice_rows"
-                                    | "content_event_rows"
-                                    | "content_messages"
-                                    | "content_reactions"
-                                    | "content_files"
-                                    | "message_deletion_rows"
-                                    | "file_deletion_rows"
-                            ),
-                            "unexpected typed table {}",
-                            table.name
-                        );
-                    }
-                }
-            }
-        }
     }
 
     #[test]

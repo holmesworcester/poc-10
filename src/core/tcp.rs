@@ -1,10 +1,10 @@
-//! TCP frame pump over opaque network queue rows.
+//! TCP frame pump over opaque network rows.
 //!
 //! This file is deliberately a byte mover. It opens sockets, reads and writes
-//! `[u32 length][bytes]` frames, represents inbound bytes as core queue rows,
+//! `[u32 length][bytes]` frames, represents inbound bytes as core network rows,
 //! and drains outbound bytes for the connected route.
 //!
-//! The protocol boundary is one shape: opaque network queue rows. Receive paths
+//! The protocol boundary is one shape: opaque network rows. Receive paths
 //! insert `InboundNetworkRow`s for a worker. Send paths accept
 //! `OutboundNetworkRow`s keyed by one `NetworkTarget`; TCP inserts them into the
 //! outbound queue, claims those exact rows, writes their opaque bytes as frames,
@@ -22,7 +22,7 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-use crate::core::network_queues::{
+use crate::core::network::{
     self, InboundNetworkRow, NetworkSource, NetworkTarget, OutboundNetworkRow,
 };
 use crate::core::store::Store;
@@ -157,7 +157,7 @@ fn read_inbound_frames(
         report.received_frames += 1;
 
         let inbound = InboundNetworkRow::new(source, bytes);
-        network_queues::enqueue_inbound(store, std::slice::from_ref(&inbound))?;
+        network::enqueue_inbound(store, std::slice::from_ref(&inbound))?;
     }
 
     Ok(report)
@@ -180,8 +180,8 @@ fn write_outbound<T>(
         return Ok(());
     }
     ensure_target(target, &rows)?;
-    network_queues::enqueue_outbound(store, &rows)?;
-    let claimed = network_queues::claim_exact_outbound(store, &rows)?;
+    network::enqueue_outbound(store, &rows)?;
+    let claimed = network::claim_exact_outbound(store, &rows)?;
     write_claimed_outbound(store, stream, target, claimed, value, on_sent, report)
 }
 
@@ -198,7 +198,7 @@ fn write_claimed_outbound<T>(
     for row in &claimed {
         write_frame(stream, &row.bytes).map_err(|err| format!("write frame: {err}"))?;
     }
-    network_queues::delete_outbound(store, &claimed)?;
+    network::delete_outbound(store, &claimed)?;
     on_sent(&claimed, value)?;
     report.sent_frames += claimed.len();
     Ok(())
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn accept_available_drains_ready_streams_up_to_limit() {
-        let store = Store::open_memory_with_schemas(network_queues::SCHEMAS).expect("open store");
+        let store = Store::open_memory_with_schemas(network::SCHEMAS).expect("open store");
         let listener = listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
         let addr = listener.local_addr();
         let writers = (0..3)
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(second.accepted_connections, 1);
         assert_eq!(second.value.received_frames, 1);
         assert_eq!(
-            network_queues::claim_inbound(&store, 10)
+            network::claim_inbound(&store, 10)
                 .expect("claim inbound")
                 .len(),
             3

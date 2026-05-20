@@ -26,7 +26,9 @@ fn accept_handshake_does_not_create_durable_facts() {
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     let connected = accept_connection_with_retry(&alice, &bob_invite);
     assert!(connected.contains("connected:"), "{connected}");
+    wait_for_connection_count(&alice, 1);
     wait_for_connection_count(&bob, 1);
+    wait_for_connection_fact_count(&alice, 2);
     wait_for_connection_fact_count(&bob, 2);
 
     assert_eq!(
@@ -46,7 +48,7 @@ fn accept_handshake_does_not_create_durable_facts() {
 }
 
 #[test]
-fn wrong_invite_private_key_does_not_project_receiver_connection() {
+fn wrong_invite_private_key_is_rejected_by_daemon_projection() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
@@ -57,16 +59,10 @@ fn wrong_invite_private_key_does_not_project_receiver_connection() {
 
     let _daemon = spawn_daemon(&bob, port);
     let _alice_daemon = spawn_daemon(&alice, alice_port);
-    let connected = accept_invite(&alice, &wrong_invite);
+    let connected = assert_success(accept_invite(&alice, &wrong_invite));
     assert!(
-        !connected.status.success(),
-        "wrong invite unexpectedly connected:\n{}",
-        stdout(&connected)
-    );
-    assert!(
-        stderr(&connected).contains("did not produce a connection"),
-        "stderr:\n{}",
-        stderr(&connected)
+        connected.contains("connected:"),
+        "accept should only record local work; daemon projection rejects the bad invite later:\n{connected}"
     );
     thread::sleep(Duration::from_millis(500));
 
@@ -79,22 +75,20 @@ fn wrong_invite_private_key_does_not_project_receiver_connection() {
 }
 
 #[test]
-fn accept_reports_unreachable_invite_address() {
+fn accept_records_unreachable_invite_for_daemon_processing() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
+    let alice_port = free_port();
     let unreachable_invite = invite(&bob, free_port());
-    let connected = accept_invite(&alice, &unreachable_invite);
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    let connected = assert_success(accept_invite(&alice, &unreachable_invite));
     assert!(
-        !connected.status.success(),
-        "accept unexpectedly reached unused port:\n{}",
-        stdout(&connected)
+        connected.contains("connected:"),
+        "accept should record the request and let the daemon own unreachable IO:\n{connected}"
     );
-    assert!(
-        stderr(&connected).contains("open tcp stream"),
-        "stderr:\n{}",
-        stderr(&connected)
-    );
+    thread::sleep(Duration::from_millis(500));
+
     assert_eq!(sync_fact_count(&alice), 0);
     assert_eq!(connection_count(&alice), 0);
     assert_eq!(connection_fact_count(&alice), 1);

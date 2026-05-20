@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use topo::protocol::{IntentExecutionKind, PROTOCOL};
+use topo::protocol::catalog::{IntentExecutionKind, PROTOCOL};
 
 fn source_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))

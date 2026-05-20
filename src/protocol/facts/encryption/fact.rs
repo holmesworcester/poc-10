@@ -127,7 +127,7 @@ pub enum ProjectionPayload {
 
 pub(crate) struct Codec;
 
-impl crate::core::projection::FactCodec for Codec {
+impl crate::core::projectors::FactCodec for Codec {
     type Payload = ProjectionPayload;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {

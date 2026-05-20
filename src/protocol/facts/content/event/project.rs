@@ -9,7 +9,7 @@
 //!      fact with the workspace.
 use crate::core::facts::Fact;
 use crate::core::intents::AtomicIntent;
-use crate::core::projection::{
+use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 

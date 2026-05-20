@@ -8,7 +8,7 @@ use crate::core::context_change_pipeline::{
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
 use crate::core::intents::{AtomicIntent, Intent, IntentExecution, IntentKind, TableDelete};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
-use crate::core::projection::{MatchedContext, ProjectionContext, TimeRange, TimeWake, Timeline};
+use crate::core::projectors::{MatchedContext, ProjectionContext, TimeRange, TimeWake, Timeline};
 use crate::core::store::{ColumnValue, Store, TableName, TableRow};
 use crate::core::wire::{Reader, WireError, Writer};
 use std::collections::{BTreeMap, BTreeSet};

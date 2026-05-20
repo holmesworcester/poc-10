@@ -49,7 +49,7 @@ fn semantic_message_deletion(
 
 pub(crate) struct Codec;
 
-impl crate::core::projection::FactCodec for Codec {
+impl crate::core::projectors::FactCodec for Codec {
     type Payload = crate::protocol::facts::content::message::authority::DecodedFact<
         fact::ContentMessageDeletionFact,
     >;
