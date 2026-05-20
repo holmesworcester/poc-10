@@ -1,9 +1,9 @@
 // Handler for retired local recipient key material.
 
-use crate::core::intent_pipeline::{
+use crate::core::intents::Intent;
+use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
-use crate::core::intents::Intent;
 use crate::protocol::facts::encryption::{create, intent};
 
 #[derive(Debug, Clone, Default)]

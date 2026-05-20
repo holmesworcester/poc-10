@@ -7,7 +7,7 @@
 
 use std::net::SocketAddr;
 
-use crate::core::intent_pipeline::{
+use crate::core::intents::{
     retry_intent, HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
@@ -119,7 +119,7 @@ mod tests {
     use super::*;
     use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::intent_pipeline::{retry_intent_reason, IntentHandler};
+    use crate::core::intents::{retry_intent_reason, IntentHandler};
     use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::facts::connection::request::fact::ConnectionRequestFact;

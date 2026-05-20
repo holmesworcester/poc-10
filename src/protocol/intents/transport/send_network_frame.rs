@@ -91,7 +91,7 @@ fn payload_error(err: PayloadError) -> String {
     format!("invalid send_network_frame payload: {err}")
 }
 
-use crate::core::intent_pipeline::{
+use crate::core::intents::{
     retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult,
     IntentHandler,
 };
@@ -154,15 +154,12 @@ fn resolve_target(
     let connection = connection::response::layout::decode_fact(connection_fact.body())?;
     let request_fact = match context.fact(&connection.request_id).cloned() {
         Some(fact) => fact,
-        None => crate::core::context_change_pipeline::persisted_fact(
-            context.store()?,
-            &connection.request_id,
-        )?
-        .ok_or_else(|| {
-            retry_intent(
-                "send_network_frame route: send_network_frame missing connection request fact",
-            )
-        })?,
+        None => crate::core::pipeline::persisted_fact(context.store()?, &connection.request_id)?
+            .ok_or_else(|| {
+                retry_intent(
+                    "send_network_frame route: send_network_frame missing connection request fact",
+                )
+            })?,
     };
     let request = connection::request::layout::decode_fact(request_fact.body())?;
     let local_endpoint = endpoint::local_endpoint::local_endpoint(context.store()?)?

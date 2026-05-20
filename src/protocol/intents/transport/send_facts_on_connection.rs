@@ -1,6 +1,6 @@
 //! Package exact facts into one connection transit frame.
 
-use crate::core::intent_pipeline::{
+use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentExecution, IntentKind};

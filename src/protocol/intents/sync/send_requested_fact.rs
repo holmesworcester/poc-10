@@ -1,6 +1,6 @@
 //! Send the fact requested by a sync need-id fact.
 
-use crate::core::intent_pipeline::{
+use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentExecution, IntentKind};
@@ -78,8 +78,7 @@ impl IntentHandler for SendRequestedFactHandler {
         let input = decode_send_requested_fact(raw)?;
         let need_fact = context.require_fact(&input.need_fact_id)?;
         let need = need_id::layout::decode_fact(&need_fact.bytes)?;
-        let Some(fact) =
-            crate::core::context_change_pipeline::persisted_fact(context.store()?, &need.fact_id)?
+        let Some(fact) = crate::core::pipeline::persisted_fact(context.store()?, &need.fact_id)?
         else {
             return Ok(HandlerOutput::new());
         };

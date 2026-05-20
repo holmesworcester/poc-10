@@ -450,8 +450,8 @@ fn context_matcher_logic_lives_under_protocol_matchers() {
         }
         let relative = path.strip_prefix(root).unwrap();
         if relative.starts_with("src/core/matchers.rs")
-            || relative.starts_with("src/core/context_change_pipeline.rs")
-            || relative.starts_with("src/core/context_change_helpers.rs")
+            || relative.starts_with("src/core/pipeline.rs")
+            || relative.starts_with("src/core/pipeline_storage.rs")
             || relative.starts_with("src/protocol/matchers")
         {
             continue;
@@ -462,7 +462,7 @@ fn context_matcher_logic_lives_under_protocol_matchers() {
 
     assert!(
         offenders.is_empty(),
-        "ContextMatcher implementations and relation-specific selector logic belong under src/protocol/matchers, with core-owned generic mechanics in src/core/matchers.rs and src/core/context_change_pipeline.rs:\n{}",
+        "ContextMatcher implementations and relation-specific selector logic belong under src/protocol/matchers, with core-owned generic mechanics in src/core/matchers.rs and src/core/pipeline.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -1175,9 +1175,9 @@ fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
 }
 
 #[test]
-fn core_intent_pipeline_stays_protocol_neutral() {
+fn core_pipeline_stays_protocol_neutral() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/core/intent_pipeline.rs");
+    let path = root.join("src/core/pipeline.rs");
     let text = source_text(&path);
     let production = production_text_before_unit_tests(&text);
     let mut offenders = Vec::new();

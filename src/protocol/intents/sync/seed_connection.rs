@@ -6,10 +6,10 @@
 
 use crate::core::{
     facts::{Fact, FactId},
-    intent_pipeline::{
-        HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+    intents::{
+        HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, Intent,
+        IntentExecution, IntentHandler, IntentKind,
     },
-    intents::{Intent, IntentExecution, IntentKind},
     store::Store,
 };
 use crate::protocol::facts::{connection, sync};

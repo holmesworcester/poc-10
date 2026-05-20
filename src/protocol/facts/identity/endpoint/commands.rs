@@ -91,9 +91,7 @@ mod tests {
                 .expect("open store");
         let endpoint = create_local_endpoint();
         let fact = endpoint_fact(10, endpoint.clone()).expect("endpoint fact");
-        crate::core::context_change_pipeline::ContextChangePipeline::new()
-            .submit_fact_to_store(&store, fact)
-            .expect("submit fact");
+        crate::core::pipeline::submit_fact_to_store(&store, fact).expect("submit fact");
 
         let output = local_or_create(&store, 20).expect("reuse endpoint");
 

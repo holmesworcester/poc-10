@@ -560,7 +560,7 @@ fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Context
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context_change_helpers::{context_need_row, context_offer_row};
+    use crate::core::pipeline_storage::{context_need_row, context_offer_row};
     use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::matchers::workspace_scope;

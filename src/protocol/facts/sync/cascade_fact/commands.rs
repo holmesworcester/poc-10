@@ -1,5 +1,5 @@
-use crate::core::context_change_pipeline::commit_projected_context_offers;
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::pipeline::commit_projected_context_offers;
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use std::collections::BTreeSet;
@@ -140,7 +140,7 @@ fn applied_cascade_fact_count(runtime: &Runtime) -> usize {
         .facts()
         .filter(|fact| layout::decode_fact(fact.body()).is_ok())
         .filter(|fact| {
-            crate::core::context_change_pipeline::persisted_context(runtime.store(), &fact.id)
+            crate::core::pipeline::persisted_context(runtime.store(), &fact.id)
                 .ok()
                 .flatten()
                 .is_some_and(|context| {

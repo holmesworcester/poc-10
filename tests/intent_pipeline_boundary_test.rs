@@ -1,5 +1,5 @@
 use topo::core::facts::{Fact, FactScope};
-use topo::core::intent_pipeline::{HandlerContext, HandlerOutput, HandlerResult, IntentHandler};
+use topo::core::intents::{HandlerContext, HandlerOutput, HandlerResult, IntentHandler};
 use topo::core::intents::{Intent, IntentExecution, IntentKind};
 
 struct EmitsFactAndFollowup;

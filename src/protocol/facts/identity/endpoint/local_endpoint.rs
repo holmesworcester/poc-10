@@ -5,9 +5,9 @@
 //! endpoint material for command and handler capability boundaries that are
 //! already authorized to use it.
 
-use crate::core::context_change_pipeline::persisted_facts;
 use crate::core::crypto;
 use crate::core::facts::FactScope;
+use crate::core::pipeline::persisted_facts;
 use crate::core::store::Store;
 
 use super::fact::EndpointFact;

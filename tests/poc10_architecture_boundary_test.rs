@@ -184,7 +184,7 @@ fn poc10_core_contract_files_are_present() {
         "src/core/matchers.rs",
         "src/core/projectors.rs",
         "src/core/intents.rs",
-        "src/core/intent_pipeline.rs",
+        "src/core/pipeline.rs",
     ];
 
     let missing = required
@@ -280,11 +280,11 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
 
 #[test]
 fn poc10_handler_output_contract_emits_only_facts_purges_and_intents() {
-    let topo::core::intent_pipeline::HandlerOutput {
+    let topo::core::intents::HandlerOutput {
         facts,
         purged_facts,
         intents,
-    } = topo::core::intent_pipeline::HandlerOutput::default();
+    } = topo::core::intents::HandlerOutput::default();
 
     assert!(facts.is_empty());
     assert!(purged_facts.is_empty());
@@ -292,15 +292,15 @@ fn poc10_handler_output_contract_emits_only_facts_purges_and_intents() {
 }
 
 #[test]
-fn poc10_core_context_change_pipeline_exposes_protocol_neutral_vocabulary() {
+fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let context_change_pipeline_path = root.join("src/core/context_change_pipeline.rs");
+    let pipeline_path = root.join("src/core/pipeline.rs");
     assert!(
-        context_change_pipeline_path.is_file(),
-        "missing src/core/context_change_pipeline.rs; when introduced, it must expose protocol-neutral terms for pending projection, context delta matching, and intent output"
+        pipeline_path.is_file(),
+        "missing src/core/pipeline.rs; when introduced, it must expose protocol-neutral terms for pending projection, context delta matching, and intent output"
     );
 
-    let text = source_text(&context_change_pipeline_path);
+    let text = source_text(&pipeline_path);
     let required_terms = [
         (
             "pending projection",
@@ -333,7 +333,7 @@ fn poc10_core_context_change_pipeline_exposes_protocol_neutral_vocabulary() {
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "src/core/context_change_pipeline.rs must expose protocol-neutral context change pipeline vocabulary:\n{}",
+        "src/core/pipeline.rs must expose protocol-neutral context change pipeline vocabulary:\n{}",
         missing.join("\n")
     );
 
@@ -371,10 +371,10 @@ fn poc10_core_context_change_pipeline_exposes_protocol_neutral_vocabulary() {
         "pending_connection_attempts",
         "pending_connection_responses",
     ];
-    let offenders = source_matches_in_paths(root, vec![context_change_pipeline_path], &forbidden);
+    let offenders = source_matches_in_paths(root, vec![pipeline_path], &forbidden);
     assert!(
         offenders.is_empty(),
-        "src/core/context_change_pipeline.rs must not expose old worker queue or event status vocabulary:\n{}",
+        "src/core/pipeline.rs must not expose old worker queue or event status vocabulary:\n{}",
         offenders.join("\n")
     );
 }
