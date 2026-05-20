@@ -332,7 +332,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     },
     CliCommand {
         name: "clock",
-        usage: command::CLOCK_USAGE,
+        usage: crate::core::clock::CLOCK_USAGE,
         help: "",
         run: command::clock,
     },
@@ -344,7 +344,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     },
 ];
 
-pub(crate) const CLI_EFFECT_HANDLER_ROUTES: &[&str] = &[
+pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
     "send_facts_on_connection",
     "send_network_frame",
     "receive_transit_frame",

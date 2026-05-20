@@ -5,11 +5,21 @@
 //! timestamp. Existing event timestamps still win, so setting the clock
 //! backwards cannot make new shared events collide with old ones.
 
+use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::store::{Store, TableName, TableRow};
 
 const CLOCK_TABLE: TableName = TableName::new("clock");
 
 const CLOCK_KEY: &[u8] = b"now";
+
+pub const CLOCK_USAGE: &str = "clock [set TIMESTAMP|advance DELTA|clear]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockReport {
+    pub logical_time: Option<u64>,
+    pub max_event_timestamp: u64,
+    pub next_timestamp: u64,
+}
 
 pub fn logical_time(store: &Store) -> Result<Option<u64>, String> {
     store
@@ -44,6 +54,61 @@ pub fn clear_logical_time(store: &Store) -> Result<(), String> {
 pub fn next_timestamp(store: &Store, observed_max_timestamp: u64) -> Result<u64, String> {
     let from_events = observed_max_timestamp.saturating_add(1);
     Ok(from_events.max(logical_time(store)?.unwrap_or(0)))
+}
+
+pub fn run_cli(
+    store: &Store,
+    args: CliArgs<'_>,
+    observed_max_timestamp: u64,
+) -> Result<CliOutput, String> {
+    let report = apply_cli_args(store, args, observed_max_timestamp)?;
+    Ok(clock_report_output(&report))
+}
+
+pub fn apply_cli_args(
+    store: &Store,
+    args: CliArgs<'_>,
+    observed_max_timestamp: u64,
+) -> Result<ClockReport, String> {
+    match args.values() {
+        [] => {}
+        [command, value] if command == "set" => {
+            let timestamp = value
+                .parse::<u64>()
+                .map_err(|_| "clock set requires a u64 timestamp".to_string())?;
+            set_logical_time(store, timestamp)?;
+        }
+        [command, value] if command == "advance" => {
+            let delta = value
+                .parse::<u64>()
+                .map_err(|_| "clock advance requires a u64 delta".to_string())?;
+            advance_logical_time(store, delta)?;
+        }
+        [command] if command == "clear" => {
+            clear_logical_time(store)?;
+        }
+        _ => return Err(format!("clock usage: {CLOCK_USAGE}")),
+    }
+
+    let logical_time = logical_time(store)?;
+    let next_timestamp = next_timestamp(store, observed_max_timestamp)?;
+    Ok(ClockReport {
+        logical_time,
+        max_event_timestamp: observed_max_timestamp,
+        next_timestamp,
+    })
+}
+
+pub fn clock_report_output(report: &ClockReport) -> CliOutput {
+    let logical_time = report
+        .logical_time
+        .map(|timestamp| timestamp.to_string())
+        .unwrap_or_else(|| "unset".to_string());
+    CliOutput::lines(vec![
+        format!("logical_time: {logical_time}"),
+        format!("max_event_timestamp: {}", report.max_event_timestamp),
+        format!("next_timestamp: {}", report.next_timestamp),
+    ])
 }
 
 fn clock_row(timestamp: u64) -> TableRow {

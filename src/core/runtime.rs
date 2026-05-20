@@ -32,6 +32,7 @@ pub struct RuntimeDescription {
     pub projector: ProjectorFactory,
     pub matchers: MatchersFactory,
     pub handlers: &'static [HandlerRoute],
+    pub command_excluded_handlers: &'static [&'static str],
 }
 
 /// Public outcome returned by runtime pipeline calls.
@@ -355,6 +356,28 @@ impl Runtime {
         self.dispatch_with_handlers(&handlers, limit_per_handler)
     }
 
+    /// Settle all projection and intent work using the protocol's full handler
+    /// set. This is for internal runtime workflows; synchronous CLI commands
+    /// should usually call `process_command_work_until_idle` so daemon/network
+    /// effects remain daemon-owned.
+    pub fn process_all_work_until_idle(
+        &mut self,
+        max_rounds: usize,
+        limit_per_round: usize,
+    ) -> Result<WorkStatus, String> {
+        let mut total = WorkStatus::idle();
+        for _ in 0..max_rounds {
+            total.merge(self.process_projection_until_idle(8, limit_per_round)?);
+            let dispatched = self.dispatch_intents(limit_per_round)?;
+            total.merge(dispatched);
+            if dispatched.is_idle() {
+                total.merge(self.process_projection_until_idle(8, limit_per_round)?);
+                return Ok(total);
+            }
+        }
+        Ok(total)
+    }
+
     fn dispatch_with_handlers(
         &mut self,
         handlers: &HandlerSet,
@@ -367,6 +390,33 @@ impl Runtime {
             limit_per_handler,
         )?;
         Ok(WorkStatus::from_dispatch_report(&report))
+    }
+
+    /// Settle work that a synchronous CLI command should be allowed to observe.
+    ///
+    /// Protocols declare effectful daemon/network handlers as command-excluded
+    /// routes. The command host can then ask runtime to finish local projection
+    /// and non-effect intent work without knowing the pending-fact, context
+    /// change, or intent pipeline schedule.
+    pub fn process_command_work_until_idle(
+        &mut self,
+        max_rounds: usize,
+        limit_per_round: usize,
+    ) -> Result<WorkStatus, String> {
+        let mut total = WorkStatus::idle();
+        for _ in 0..max_rounds {
+            total.merge(self.process_projection_until_idle(8, limit_per_round)?);
+            let dispatched = self.dispatch_intents_excluding(
+                self.description.command_excluded_handlers,
+                limit_per_round,
+            )?;
+            total.merge(dispatched);
+            if dispatched.is_idle() {
+                total.merge(self.process_projection_until_idle(8, limit_per_round)?);
+                return Ok(total);
+            }
+        }
+        Ok(total)
     }
 
     pub fn process_due_time_range(
@@ -416,6 +466,7 @@ mod tests {
         projector: noop_projector,
         matchers: no_matchers,
         handlers: &[],
+        command_excluded_handlers: &[],
     };
 
     #[test]

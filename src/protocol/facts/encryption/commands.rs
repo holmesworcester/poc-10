@@ -597,7 +597,7 @@ pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt,
             )?
         };
         let _ = runtime.submit_command_output(output)?;
-        process_runtime_until_idle(runtime)?;
+        runtime.process_all_work_until_idle(4, 512)?;
     }
     let local_key_secret_ids = runtime
         .facts()
@@ -611,7 +611,7 @@ pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt,
     for fact_id in &local_key_secret_ids {
         runtime.purge_fact(*fact_id);
     }
-    process_runtime_until_idle(runtime)?;
+    runtime.process_all_work_until_idle(4, 512)?;
     Ok(ChopNowReceipt {
         workspace_id: input.workspace_id,
         floor_minute: input.floor_minute,
@@ -688,18 +688,6 @@ fn history_source_is_tombstoned(
         }
     }
     Ok(false)
-}
-
-fn process_runtime_until_idle(runtime: &mut Runtime) -> Result<(), String> {
-    for _ in 0..4 {
-        runtime.process_projection_until_idle(8, 512)?;
-        let dispatched = runtime.dispatch_intents(512)?;
-        if dispatched.is_idle() {
-            runtime.process_projection_until_idle(8, 512)?;
-            return Ok(());
-        }
-    }
-    Ok(())
 }
 
 struct FixedClock(u64);
