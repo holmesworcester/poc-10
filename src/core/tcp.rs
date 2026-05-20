@@ -44,14 +44,6 @@ pub struct AcceptReport<T> {
     pub value: T,
 }
 
-/// Result of serving a fixed number of inbound streams.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServeReport<T> {
-    pub local_addr: SocketAddr,
-    pub accepted_connections: usize,
-    pub value: T,
-}
-
 /// Bound TCP listener that can be polled by a caller-owned loop.
 pub struct Listener {
     listener: TcpListener,
@@ -137,39 +129,6 @@ pub fn send_once<T>(
         .shutdown(Shutdown::Both)
         .map_err(|err| format!("shutdown sent stream: {err}"))?;
     Ok(value)
-}
-
-/// Serve a fixed number of incoming streams into the inbound byte queue.
-pub fn serve_inbound(
-    store: &Store,
-    listen: SocketAddr,
-    accept_count: usize,
-) -> Result<ServeReport<StreamReport>, String> {
-    let listener = TcpListener::bind(listen).map_err(|err| format!("listen: {err}"))?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|err| format!("listener local addr: {err}"))?;
-
-    let mut accepted_connections = 0;
-    let mut value = StreamReport::default();
-    for _ in 0..accept_count {
-        let (mut stream, source_addr) = listener
-            .accept()
-            .map_err(|err| format!("accept tcp stream: {err}"))?;
-        stream
-            .set_nodelay(true)
-            .map_err(|err| format!("set stream nodelay: {err}"))?;
-        let report = read_inbound_frames(store, &mut stream, NetworkSource::new(source_addr))?;
-        value.sent_frames += report.sent_frames;
-        value.received_frames += report.received_frames;
-        accepted_connections += 1;
-    }
-
-    Ok(ServeReport {
-        local_addr,
-        accepted_connections,
-        value,
-    })
 }
 
 // Drive one inbound stream until the remote side closes it. Every frame is
