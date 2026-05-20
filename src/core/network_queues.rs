@@ -95,14 +95,6 @@ impl InboundNetworkRow {
     }
 }
 
-/// Build deterministic queued rows for a target and a set of opaque frames.
-pub fn outbound_rows(target: NetworkTarget, frames: Vec<Vec<u8>>) -> Vec<OutboundNetworkRow> {
-    frames
-        .into_iter()
-        .map(|bytes| OutboundNetworkRow::new(target, bytes))
-        .collect()
-}
-
 /// Insert outbound rows idempotently.
 ///
 /// The store handles the transaction; this helper only converts typed queue
