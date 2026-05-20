@@ -18,7 +18,7 @@
 //! parameters, and table names are accepted only from `TableName` after a
 //! conservative identifier check.
 
-use crate::core::schema_dsl::{self, ColumnType, TableDeclaration};
+use crate::core::schema_dsl::{self, TableDeclaration};
 use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -495,16 +495,14 @@ fn row_table_names_from_schema_sources(sources: &[&str]) -> rusqlite::Result<Vec
 
 fn validate_row_table_declaration(table: &TableDeclaration) -> rusqlite::Result<()> {
     let valid_columns = table.columns.len() == 2
-        && table.columns[0].name == "key"
-        && table.columns[0].ty == (ColumnType::Bytes { len: None })
-        && table.columns[1].name == "value"
-        && table.columns[1].ty == (ColumnType::Bytes { len: None });
-    let valid_row_key = table.row_key.columns.len() == 1 && table.row_key.columns[0] == "key";
-    if valid_columns && valid_row_key && table.indexes.is_empty() {
+        && table.columns[0] == "key"
+        && table.columns[1] == "value";
+    let valid_row_key = table.row_key.len() == 1 && table.row_key[0] == "key";
+    if valid_columns && valid_row_key {
         return Ok(());
     }
     Err(rusqlite::Error::InvalidParameterName(format!(
-        "schema table {} must use row-store shape: `key bytes`, `value bytes`, row_key `(key)`, and no indexes",
+        "schema table {} must use row-store shape: `key bytes`, `value bytes`, and row_key `(key)`",
         table.name
     )))
 }
