@@ -96,7 +96,7 @@ const SECRET_OFFER_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
 ];
 
 pub const SECRET_COVERAGE_OFFERS_FOR_NEED_SQL: &str = "
-SELECT owner, selector, payload_ref
+SELECT owner, selector
 FROM context_offers
 WHERE role = :role
   AND scope_key = :scope_key
@@ -141,7 +141,7 @@ WHERE role = :role
     OR (substr(selector, 82, 1) = x'1F' AND substr(selector, 83, 31) = substr(:leaf_id, 1, 31))
     OR (substr(selector, 82, 1) = x'20' AND substr(selector, 83, 32) = substr(:leaf_id, 1, 32))
   )
-ORDER BY owner, selector, payload_ref";
+ORDER BY owner, selector";
 
 pub const SECRET_COVERAGE_NEEDS_FOR_OFFER_SQL: &str = "
 SELECT owner, selector
@@ -215,7 +215,6 @@ pub fn secret_offer(
             prefix_bytes,
             leaf_prefix,
         ),
-        payload_ref: owner,
     }
 }
 
@@ -449,7 +448,6 @@ fn secret_coverage_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Con
     Some(ContextMatch {
         need_owner,
         offer_owner: offer.owner,
-        payload_ref: offer.payload_ref,
     })
 }
 
@@ -481,7 +479,6 @@ mod tests {
 
         assert_eq!(matched.need_owner, [3; 32]);
         assert_eq!(matched.offer_owner, [4; 32]);
-        assert_eq!(matched.payload_ref, [4; 32]);
     }
 
     #[test]

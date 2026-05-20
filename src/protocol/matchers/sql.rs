@@ -22,10 +22,6 @@ pub(crate) const OFFER_RESULT_COLUMNS: &[SelectColumn] = &[
         name: "selector",
         ty: ColumnType::Bytes { len: None },
     },
-    SelectColumn {
-        name: "payload_ref",
-        ty: ColumnType::Bytes { len: Some(32) },
-    },
 ];
 
 pub(crate) const NEED_RESULT_COLUMNS: &[SelectColumn] = &[
@@ -81,7 +77,6 @@ fn selected_offer(
         role: role.clone(),
         scope: scope.clone(),
         selector: Selector::from_bytes(selected_bytes(&row, "selector")?.to_vec()),
-        payload_ref: selected_fact_id(&row, "payload_ref")?,
     })
 }
 

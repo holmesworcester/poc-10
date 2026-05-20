@@ -128,7 +128,6 @@ impl TypedProjector<super::Codec> for LocalHistoryNodeSecretProjector {
                 fact.id,
                 FactScope::Local,
                 fact.id,
-                fact.id,
             ))
             .offer(history_matchers::source_secret_offer(fact.id, fact.id))
             .offer(crate::protocol::matchers::secret_offer(
@@ -371,7 +370,6 @@ mod projector_tests {
             sync_matchers::exact_fact_offer(
                 frontier.id,
                 workspace_scope(node.workspace_id),
-                frontier.id,
                 frontier.id,
             ),
             frontier,

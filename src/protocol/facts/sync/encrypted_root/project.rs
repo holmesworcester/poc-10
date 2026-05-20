@@ -56,12 +56,7 @@ impl TypedProjector<super::Codec> for SyncEncryptedRootProjector {
                 root.dependency_id,
                 root.key_wrap_id,
             ))
-            .offer(matchers::exact_fact_offer(
-                fact.id,
-                scope,
-                root.fact_id,
-                fact.id,
-            )))
+            .offer(matchers::exact_fact_offer(fact.id, scope, root.fact_id)))
     }
 }
 

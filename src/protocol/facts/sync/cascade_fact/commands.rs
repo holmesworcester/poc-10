@@ -122,12 +122,8 @@ fn materialize_replayed_cascade_offers(
             continue;
         }
 
-        let offer = crate::protocol::matchers::exact_fact_offer(
-            fact.id,
-            fact.scope.clone(),
-            fact.id,
-            fact.id,
-        );
+        let offer =
+            crate::protocol::matchers::exact_fact_offer(fact.id, fact.scope.clone(), fact.id);
         offers.push(offer);
         completed_fact_ids.push(fact.id);
         applied.insert(fact.id);
@@ -149,10 +145,7 @@ fn applied_cascade_fact_count(runtime: &ProtocolRuntime) -> usize {
                 .flatten()
                 .is_some_and(|context| {
                     context.offers.iter().any(|offer| {
-                        offer.owner == fact.id
-                            && offer.role == role
-                            && offer.scope == fact.scope
-                            && offer.payload_ref == fact.id
+                        offer.owner == fact.id && offer.role == role && offer.scope == fact.scope
                     })
                 })
         })

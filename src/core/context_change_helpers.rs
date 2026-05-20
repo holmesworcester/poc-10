@@ -81,22 +81,13 @@ pub(crate) fn purge_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result
     changed |= !need_keys.is_empty();
     store.delete_table_rows_in_tx(CONTEXT_NEEDS, need_keys)?;
 
-    let mut offer_keys = store
+    let offer_keys = store
         .table_rows_where(CONTEXT_OFFERS, &[("owner", ColumnValue::Bytes(&owner))])?
         .into_iter()
         .map(|(key, _)| key)
-        .collect::<BTreeSet<_>>();
-    offer_keys.extend(
-        store
-            .table_rows_where(
-                CONTEXT_OFFERS,
-                &[("payload_ref", ColumnValue::Bytes(&owner))],
-            )?
-            .into_iter()
-            .map(|(key, _)| key),
-    );
+        .collect::<Vec<_>>();
     changed |= !offer_keys.is_empty();
-    store.delete_table_rows_in_tx(CONTEXT_OFFERS, offer_keys.into_iter().collect())?;
+    store.delete_table_rows_in_tx(CONTEXT_OFFERS, offer_keys)?;
 
     let time_wake_keys = store
         .table_rows_where(TIME_WAKES, &[("owner", ColumnValue::Bytes(&owner))])?
@@ -362,7 +353,6 @@ pub(crate) fn stored_context_matches(
                 matches.insert(ContextMatch {
                     need_owner: need.owner,
                     offer_owner: offer.owner,
-                    payload_ref: offer.payload_ref,
                 });
             }
         }
@@ -376,7 +366,6 @@ pub(crate) fn stored_context_matches(
                 matches.insert(ContextMatch {
                     need_owner: need.owner,
                     offer_owner: offer.owner,
-                    payload_ref: offer.payload_ref,
                 });
             }
         }
@@ -393,7 +382,6 @@ pub(crate) fn stored_context_matches(
                 matches.extend(offers.into_iter().map(|offer| ContextMatch {
                     need_owner: need.owner,
                     offer_owner: offer.owner,
-                    payload_ref: offer.payload_ref,
                 }));
             } else {
                 let offers = stored_offers_for_role_scope(store, &need.role, &need.scope)?;
@@ -409,7 +397,6 @@ pub(crate) fn stored_context_matches(
                 matches.extend(needs.into_iter().map(|need| ContextMatch {
                     need_owner: need.owner,
                     offer_owner: offer.owner,
-                    payload_ref: offer.payload_ref,
                 }));
             } else {
                 let needs = stored_needs_for_role_scope(store, &offer.role, &offer.scope)?;
@@ -540,8 +527,8 @@ fn push_stored_matched_context(
     if !seen.insert((need.clone(), offer.clone())) {
         return Ok(());
     }
-    let payload = persisted_fact(store, &offer.payload_ref)?
-        .ok_or_else(|| "context offer payload references unknown fact".to_string())?;
+    let payload = persisted_fact(store, &offer.owner)?
+        .ok_or_else(|| "context offer owner references unknown fact".to_string())?;
     matched.push(MatchedContext {
         need: need.clone(),
         offer,
@@ -621,7 +608,6 @@ fn typed_context_offer_key(offer: &ContextOffer) -> Vec<u8> {
             .expect("scope key fits u32");
         key.bytes_u32be(offer.selector.as_bytes())
             .expect("selector fits u32");
-        key.fixed(&offer.payload_ref);
     })
 }
 
@@ -655,7 +641,6 @@ fn pending_context_need_row(need: &ContextNeed) -> TableRow {
             .expect("scope key fits u32");
         key.bytes_u32be(need.selector.as_bytes())
             .expect("selector fits u32");
-        key.fixed(&EMPTY_FACT_ID);
     });
     TableRow {
         table: PENDING_CONTEXT_CHANGES,
@@ -674,7 +659,6 @@ fn pending_context_offer_row(offer: &ContextOffer) -> TableRow {
             .expect("scope key fits u32");
         key.bytes_u32be(offer.selector.as_bytes())
             .expect("selector fits u32");
-        key.fixed(&offer.payload_ref);
     });
     TableRow {
         table: PENDING_CONTEXT_CHANGES,
@@ -812,14 +796,12 @@ pub(crate) fn decode_context_offer_row(key: &[u8], value: &[u8]) -> Result<Conte
     let role = Role::new(reader.string_u32be().row()?)?;
     let scope = decode_scope_key(reader.bytes_u32be().row()?)?;
     let selector = Selector::from_bytes(reader.bytes_u32be().row()?.to_vec());
-    let payload_ref = reader.array::<32>().row()?;
     reader.finish().row()?;
     Ok(ContextOffer {
         owner,
         role,
         scope,
         selector,
-        payload_ref,
     })
 }
 
@@ -836,7 +818,6 @@ pub(crate) fn decode_pending_context_change_row(
     let role = Role::new(reader.string_u32be().row()?)?;
     let scope = decode_scope_key(reader.bytes_u32be().row()?)?;
     let selector = Selector::from_bytes(reader.bytes_u32be().row()?.to_vec());
-    let payload_ref = reader.array::<32>().row()?;
     reader.finish().row()?;
 
     let mut delta = ContextSetDelta::default();
@@ -852,7 +833,6 @@ pub(crate) fn decode_pending_context_change_row(
             role,
             scope,
             selector,
-            payload_ref,
         }),
         other => return Err(format!("invalid pending context change kind {other}")),
     }

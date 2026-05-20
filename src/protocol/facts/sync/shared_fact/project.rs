@@ -50,7 +50,6 @@ impl TypedProjector<super::Codec> for SyncSharedFactProjector {
             fact.id,
             scope,
             shared.fact_id,
-            fact.id,
         )))
     }
 }

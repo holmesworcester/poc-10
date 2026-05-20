@@ -105,7 +105,6 @@ impl TypedProjector<super::Codec> for RemovalFrontierProjector {
                 fact.id,
                 expected_scope,
                 fact.id,
-                fact.id,
             ))
             .intent(AtomicIntent::PutRow(removal_frontier_row(fact.id, &frontier)?).into_intent())
             .intent(share_fact_with_workspace_intent_for_fact(
@@ -199,7 +198,6 @@ mod projector_tests {
                     ref_a.id,
                     workspace_scope(frontier.workspace_id),
                     ref_a.id,
-                    ref_a.id,
                 ),
                 ref_a.clone(),
             ),
@@ -212,7 +210,6 @@ mod projector_tests {
                 sync_matchers::exact_fact_offer(
                     ref_b.id,
                     workspace_scope(frontier.workspace_id),
-                    ref_b.id,
                     ref_b.id,
                 ),
                 ref_b.clone(),
