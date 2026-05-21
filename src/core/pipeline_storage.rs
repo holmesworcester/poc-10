@@ -33,7 +33,7 @@ use crate::core::pipeline::{
     CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, INTENTS, PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
     PENDING_TIME_RANGES, TIME_WAKES,
 };
-use crate::core::projectors::{MatchedContext, ProjectionContext, TimeRange, TimeWake, Timeline};
+use crate::core::projectors::{MatchedContext, ProjectionContext};
 use crate::core::store::{ColumnValue, Store, TableName, TableRow};
 use crate::core::wire::{Reader, WireError, Writer};
 use std::collections::{BTreeMap, BTreeSet};
@@ -192,24 +192,6 @@ pub(crate) fn context_offer_row(offer: &ContextOffer) -> TableRow {
     TableRow {
         table: CONTEXT_OFFERS,
         key: typed_context_key(&offer.owner, &offer.role, &offer.scope, &offer.selector),
-        value: Vec::new(),
-    }
-}
-
-/// Encode a time wake as its (key-only) [`TIME_WAKES`] row.
-pub(crate) fn time_wake_row(wake: &TimeWake) -> TableRow {
-    TableRow {
-        table: TIME_WAKES,
-        key: typed_time_wake_key(wake),
-        value: Vec::new(),
-    }
-}
-
-/// Encode a due time range as its (key-only) [`PENDING_TIME_RANGES`] row.
-pub(crate) fn pending_time_range_row(owner: FactId, range: &TimeRange) -> TableRow {
-    TableRow {
-        table: PENDING_TIME_RANGES,
-        key: typed_pending_time_range_key(owner, range),
         value: Vec::new(),
     }
 }
@@ -393,82 +375,17 @@ pub(crate) fn stored_matching_context(
     Ok(ProjectionContext::from_matches(matched))
 }
 
-/// Load the due time ranges queued for `owner` by the time-trigger step.
-pub(crate) fn stored_pending_time_ranges_for_owner(
-    store: &Store,
-    owner: &FactId,
-) -> Result<Vec<TimeRange>, String> {
-    store
-        .table_rows_where(PENDING_TIME_RANGES, &[("owner", ColumnValue::Bytes(owner))])
-        .map_err(|err| format!("load pending time ranges: {err}"))?
-        .into_iter()
-        .map(|(key, value)| decode_pending_time_range_row(&key, &value))
-        .collect()
-}
-
-/// Clear the due time ranges queued for `owner`, called once it has projected.
-pub(crate) fn delete_pending_time_ranges_for_owner_in_tx(
-    store: &Store,
-    owner: FactId,
-) -> rusqlite::Result<()> {
-    delete_rows_owned_by(store, PENDING_TIME_RANGES, &owner)?;
-    Ok(())
-}
-
 /// Find the need/offer pairs newly satisfiable because of `delta`.
 ///
 /// Given a batch of added needs and offers, return every [`ContextMatch`] that
-/// batch creates, ordered so the oldest waiting fact is woken first.
+/// custom matchers report. Exact selector wake fanout lives in
+/// `pipeline::context_wake` as SQL over the declared context tables.
 pub(crate) fn stored_context_matches(
     store: &Store,
     delta: &ContextSetDelta,
     matchers: &[&dyn ContextMatcher],
 ) -> Result<Vec<ContextMatch>, String> {
     let mut matches = BTreeSet::new();
-    let exact_roles = exact_matcher_roles(matchers);
-    if !exact_roles.is_empty() {
-        let added_exact_needs = delta
-            .added_needs
-            .iter()
-            .filter(|need| exact_roles.contains(&need.role))
-            .collect::<Vec<_>>();
-        let added_exact_offers = delta
-            .added_offers
-            .iter()
-            .filter(|offer| exact_roles.contains(&offer.role))
-            .collect::<Vec<_>>();
-        let offers_by_key =
-            stored_exact_offers_for_needs(store, added_exact_needs.iter().copied())?;
-        let needs_by_key =
-            stored_exact_needs_for_offers(store, added_exact_offers.iter().copied())?;
-        for need in delta
-            .added_needs
-            .iter()
-            .filter(|need| exact_roles.contains(&need.role))
-        {
-            let key = exact_context_key(&need.role, &need.scope, &need.selector);
-            for offer in offers_by_key.get(&key).into_iter().flatten() {
-                matches.insert(ContextMatch {
-                    need_owner: need.owner,
-                    offer_owner: offer.owner,
-                });
-            }
-        }
-        for offer in delta
-            .added_offers
-            .iter()
-            .filter(|offer| exact_roles.contains(&offer.role))
-        {
-            let key = exact_context_key(&offer.role, &offer.scope, &offer.selector);
-            for need in needs_by_key.get(&key).into_iter().flatten() {
-                matches.insert(ContextMatch {
-                    need_owner: need.owner,
-                    offer_owner: offer.owner,
-                });
-            }
-        }
-    }
-
     let custom_matchers = relevant_custom_matchers_for_delta(matchers, delta);
     for matcher in custom_matchers {
         for need in delta
@@ -580,47 +497,6 @@ fn stored_exact_offers_for_needs<'a>(
     Ok(out)
 }
 
-/// Bulk-load the exact-keyed needs that `offers` could satisfy, grouped by
-/// [`ExactContextKey`]. The mirror of [`stored_exact_offers_for_needs`].
-fn stored_exact_needs_for_offers<'a>(
-    store: &Store,
-    offers: impl Iterator<Item = &'a ContextOffer>,
-) -> Result<BTreeMap<ExactContextKey, Vec<ContextNeed>>, String> {
-    let mut groups = BTreeMap::<(Role, Vec<u8>), BTreeSet<Vec<u8>>>::new();
-    for offer in offers {
-        groups
-            .entry((offer.role.clone(), scope_key(&offer.scope)))
-            .or_default()
-            .insert(offer.selector.as_bytes().to_vec());
-    }
-
-    let mut out = BTreeMap::<ExactContextKey, Vec<ContextNeed>>::new();
-    for ((role, scope_key), selectors) in groups {
-        let selector_values = selectors
-            .iter()
-            .map(|selector| ColumnValue::Bytes(selector.as_slice()))
-            .collect::<Vec<_>>();
-        for need in load_context_needs_from_rows(
-            store
-                .table_rows_where_in(
-                    CONTEXT_NEEDS,
-                    &[
-                        ("role", ColumnValue::Text(role.as_str())),
-                        ("scope_key", ColumnValue::Bytes(&scope_key)),
-                    ],
-                    "selector",
-                    &selector_values,
-                )
-                .map_err(|err| format!("load exact context needs: {err}"))?,
-        )? {
-            out.entry(exact_context_key(&need.role, &need.scope, &need.selector))
-                .or_default()
-                .push(need);
-        }
-    }
-    Ok(out)
-}
-
 /// Append one deduplicated need/offer match, resolving the offering fact so the
 /// projector receives the payload alongside the match.
 fn push_stored_matched_context(
@@ -715,29 +591,6 @@ fn typed_context_key(
             .expect("scope key fits u32");
         key.bytes_u32be(selector.as_bytes())
             .expect("selector fits u32");
-    })
-}
-
-/// Key layout for a [`TIME_WAKES`] row: `timeline ++ at ++ owner`, ordered so a
-/// chronological scan of a timeline walks wakes in firing order.
-fn typed_time_wake_key(wake: &TimeWake) -> Vec<u8> {
-    encoded_row(|key| {
-        key.string_u32be(wake.timeline.as_str())
-            .expect("timeline fits u32");
-        key.u64be(wake.at);
-        key.fixed(&wake.owner);
-    })
-}
-
-/// Key layout for a [`PENDING_TIME_RANGES`] row.
-fn typed_pending_time_range_key(owner: FactId, range: &TimeRange) -> Vec<u8> {
-    encoded_row(|key| {
-        key.fixed(&owner);
-        key.string_u32be(range.timeline.as_str())
-            .expect("timeline fits u32");
-        key.bool8(range.start_exclusive.is_some());
-        key.u64be(range.start_exclusive.unwrap_or(0));
-        key.u64be(range.end_inclusive);
     })
 }
 
@@ -969,38 +822,6 @@ pub(crate) fn decode_pending_context_change_row(
         other => return Err(format!("invalid pending context change kind {other}")),
     }
     Ok(delta)
-}
-
-/// Decode a [`TIME_WAKES`] row.
-pub(crate) fn decode_time_wake_row(key: &[u8], value: &[u8]) -> Result<TimeWake, String> {
-    expect_empty_value(value, "time wake")?;
-    let mut reader = Reader::new(key);
-    let timeline = Timeline::new(reader.string_u32be().row()?)?;
-    let at = reader.u64be().row()?;
-    let owner = reader.array::<32>().row()?;
-    reader.finish().row()?;
-    Ok(TimeWake {
-        owner,
-        timeline,
-        at,
-    })
-}
-
-/// Decode a [`PENDING_TIME_RANGES`] row back into the time range it recorded.
-fn decode_pending_time_range_row(key: &[u8], value: &[u8]) -> Result<TimeRange, String> {
-    expect_empty_value(value, "pending time range")?;
-    let mut reader = Reader::new(key);
-    let _owner = reader.array::<32>().row()?;
-    let timeline = Timeline::new(reader.string_u32be().row()?)?;
-    let has_start = reader.bool8().row()?;
-    let start = reader.u64be().row()?;
-    let end_inclusive = reader.u64be().row()?;
-    reader.finish().row()?;
-    Ok(TimeRange {
-        timeline,
-        start_exclusive: has_start.then_some(start),
-        end_inclusive,
-    })
 }
 
 /// Decode an [`INTENTS`] row: kind and idempotence key from the key, payload

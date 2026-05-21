@@ -85,6 +85,10 @@ Accountable criteria:
   `local_intents` is declared as a memory row table in `src/core/schema.p8sql`.
 - Done in this branch: `driver.rs` is now `fact_context.rs`, and due time
   wakes live with the fact/context fixed-point loop.
+- Done in this branch: due time wake admission, pending projection selection,
+  exact context wake fanout, pending time range load/delete, and projection
+  context/time-wake replacement now use declared SQLite columns in their owning
+  pipeline modules instead of byte-row scans in `pipeline_storage.rs`.
 - Done in this branch: row writes are `RowMutation` output, not `Intent`
   values. `IntentExecution::Atomic`, `AtomicIntent`, and the atomic dispatch
   pass are gone from production code.
@@ -210,8 +214,10 @@ Good candidates:
    LIMIT :limit;
    ```
 
-3. Exact context wake insertion can be an `INSERT OR IGNORE ... SELECT` over
-   needs and offers instead of decoding broad Rust deltas.
+3. Done in this branch: due time wake selection uses typed SQL; pending
+   projection selection uses typed SQL; exact context wake fanout uses typed
+   SQL in `context_wake.rs`. Exact context insertion is still one typed insert
+   per woken owner rather than a single `INSERT OR IGNORE ... SELECT`.
 
 Add narrow store helpers for bounded ordered selects, delete-by-filter, and
 known insert-select fanout. Avoid scattering raw SQL through protocol code.

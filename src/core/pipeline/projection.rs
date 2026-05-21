@@ -4,16 +4,17 @@ use crate::core::matchers::ContextMatcher;
 use crate::core::pipeline::report::PipelineReport;
 use crate::core::pipeline::{
     commit_pipeline_effects_in_tx, persisted_fact, PipelineEffectCounts, PipelineEffects,
-    CONTEXT_NEEDS, CONTEXT_OFFERS, PENDING_PROJECTION, TIME_WAKES,
+    CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
 };
 use crate::core::pipeline_storage::{
-    context_need_row, context_offer_row, decode_fact_id,
-    delete_pending_time_ranges_for_owner_in_tx, pending_context_change_rows, purge_fact_in_tx,
-    stored_context_for_owner, stored_matching_context, stored_pending_time_ranges_for_owner,
-    time_wake_row,
+    pending_context_change_rows, purge_fact_in_tx, scope_key, stored_context_for_owner,
+    stored_matching_context,
 };
-use crate::core::projectors::{ProjectionContext, ProjectionOutput, Projector, TimeWake};
-use crate::core::store::{Store, TableName};
+use crate::core::projectors::{
+    ProjectionContext, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
+};
+use crate::core::schema_dsl::ColumnType;
+use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
 
 // === Pending-fact projection ===
 
@@ -60,20 +61,36 @@ pub(crate) fn process_pending_facts(
 /// The commit step removes the row only after projection succeeds. Missing
 /// facts are handled by the caller as stale pending rows and purged there.
 fn pending_owner_batch(store: &Store, limit: usize) -> Result<Vec<FactId>, String> {
-    let mut owners = Vec::<(u64, FactId)>::new();
-    for (key, _) in store
-        .table_rows(PENDING_PROJECTION)
+    store
+        .select_only(
+            r#"
+            SELECT p.owner
+            FROM pending_projection p
+            LEFT JOIN facts f ON f.id = p.owner
+            ORDER BY COALESCE(f.timestamp, 9223372036854775807), p.owner
+            LIMIT :limit
+            "#,
+            &[PENDING_PROJECTION, FACTS],
+            &[(":limit", ColumnValue::U64(limit as u64))],
+            &[SelectColumn {
+                name: "owner",
+                ty: ColumnType::Bytes { len: Some(32) },
+            }],
+        )
         .map_err(|err| format!("load pending projection: {err}"))?
-    {
-        let owner = decode_fact_id(&key)?;
-        let timestamp = persisted_fact(store, &owner)?
-            .map(|fact| fact.timestamp)
-            .unwrap_or(u64::MAX);
-        owners.push((timestamp, owner));
+        .into_iter()
+        .map(decode_pending_owner)
+        .collect()
+}
+
+fn decode_pending_owner(row: SelectedRow) -> Result<FactId, String> {
+    match row.get("owner") {
+        Some(SelectedValue::Bytes(bytes)) => bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "pending projection owner should be 32 bytes".to_string()),
+        _ => Err("pending projection row missing owner".to_string()),
     }
-    owners.sort_unstable();
-    owners.truncate(limit);
-    Ok(owners.into_iter().map(|(_, owner)| owner).collect())
 }
 
 /// Load everything projection needs for one fact.
@@ -90,7 +107,7 @@ fn load_pending_fact(
         return Ok(None);
     };
     let previous_context = stored_context_for_owner(store, &fact_id)?;
-    let time_ranges = stored_pending_time_ranges_for_owner(store, &fact_id)?;
+    let time_ranges = pending_time_ranges_for_owner(store, &fact_id)?;
     let projection_context =
         stored_matching_context(store, &previous_context, matchers)?.with_time_ranges(time_ranges);
     Ok(Some(PendingFact {
@@ -99,6 +116,66 @@ fn load_pending_fact(
         previous_context,
         projection_context,
     }))
+}
+
+fn pending_time_ranges_for_owner(store: &Store, owner: &FactId) -> Result<Vec<TimeRange>, String> {
+    store
+        .select_only(
+            r#"
+            SELECT timeline, has_start, start_exclusive, end_inclusive
+            FROM pending_time_ranges
+            WHERE owner = :owner
+            ORDER BY timeline, has_start, start_exclusive, end_inclusive
+            "#,
+            &[PENDING_TIME_RANGES],
+            &[(":owner", ColumnValue::Bytes(owner))],
+            &[
+                SelectColumn {
+                    name: "timeline",
+                    ty: ColumnType::Text,
+                },
+                SelectColumn {
+                    name: "has_start",
+                    ty: ColumnType::Bool,
+                },
+                SelectColumn {
+                    name: "start_exclusive",
+                    ty: ColumnType::U64,
+                },
+                SelectColumn {
+                    name: "end_inclusive",
+                    ty: ColumnType::U64,
+                },
+            ],
+        )
+        .map_err(|err| format!("load pending time ranges: {err}"))?
+        .into_iter()
+        .map(decode_pending_time_range)
+        .collect()
+}
+
+fn decode_pending_time_range(row: SelectedRow) -> Result<TimeRange, String> {
+    let timeline = match row.get("timeline") {
+        Some(SelectedValue::Text(value)) => Timeline::new(value.clone())?,
+        _ => return Err("pending time range row missing timeline".to_string()),
+    };
+    let has_start = match row.get("has_start") {
+        Some(SelectedValue::Bool(value)) => *value,
+        _ => return Err("pending time range row missing has_start".to_string()),
+    };
+    let start = match row.get("start_exclusive") {
+        Some(SelectedValue::U64(value)) => *value,
+        _ => return Err("pending time range row missing start_exclusive".to_string()),
+    };
+    let end_inclusive = match row.get("end_inclusive") {
+        Some(SelectedValue::U64(value)) => *value,
+        _ => return Err("pending time range row missing end_inclusive".to_string()),
+    };
+    Ok(TimeRange {
+        timeline,
+        start_exclusive: has_start.then_some(start),
+        end_inclusive,
+    })
 }
 
 /// Complete all projection work for one pending fact.
@@ -135,7 +212,7 @@ fn prepare_projection_effects(
     } = pending_fact;
     let run = run_projection_with_context(projector, &fact, &previous_context, projection_context)?;
     run.pipeline.validate(allowed_tables)?;
-    Ok(ProjectionEffects::from_run(fact_id, previous_context, run))
+    Ok(ProjectionEffects::from_run(fact_id, run))
 }
 
 /// Update compatibility memory and the report after a projection commit.
@@ -162,7 +239,6 @@ struct PendingFact {
 /// The uncommitted output of projecting one pending fact.
 struct ProjectionEffects {
     fact_id: FactId,
-    previous_context: ContextSet,
     next_context: ContextSet,
     next_time_wakes: Vec<TimeWake>,
     context_delta: ContextSetDelta,
@@ -170,10 +246,9 @@ struct ProjectionEffects {
 }
 
 impl ProjectionEffects {
-    fn from_run(fact_id: FactId, previous_context: ContextSet, run: ProjectionRun) -> Self {
+    fn from_run(fact_id: FactId, run: ProjectionRun) -> Self {
         Self {
             fact_id,
-            previous_context,
             next_context: run.context,
             next_time_wakes: run.time_wakes,
             context_delta: run.context_delta,
@@ -274,11 +349,7 @@ fn commit_projection_effects(
         .write_transaction(|tx| {
             tx.delete_table_rows_in_tx(PENDING_PROJECTION, vec![effects.fact_id.to_vec()])?;
             delete_pending_time_ranges_for_owner_in_tx(tx, effects.fact_id)?;
-            replace_stored_context_owner_rows_from_previous(
-                tx,
-                &effects.previous_context,
-                &effects.next_context,
-            )?;
+            replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
             replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
 
             tx.insert_table_rows_in_tx(pending_context_change_rows(&effects.context_delta))?;
@@ -290,33 +361,50 @@ fn commit_projection_effects(
         .map_err(|err| format!("commit projection effects: {err}"))
 }
 
-/// Replace this fact's standing needs/offers using the previous key set.
-///
-/// Projection owns the complete context set for its fact. Deleting exactly the
-/// previous rows avoids wiping rows emitted by other facts with the same role.
-fn replace_stored_context_owner_rows_from_previous(
+fn delete_pending_time_ranges_for_owner_in_tx(
     store: &Store,
-    previous: &ContextSet,
+    owner: FactId,
+) -> rusqlite::Result<usize> {
+    store.delete_typed_rows_where_in_tx(
+        PENDING_TIME_RANGES,
+        &[("owner", ColumnValue::Bytes(&owner))],
+    )
+}
+
+/// Replace this fact's standing needs/offers by owner.
+///
+/// Projection owns the complete context set for its fact. The owner column is
+/// the fact id, so deleting by owner replaces exactly this fact's rows.
+fn replace_stored_context_owner_rows(
+    store: &Store,
+    owner: FactId,
     context: &ContextSet,
 ) -> rusqlite::Result<()> {
-    store.delete_table_rows_in_tx(
-        CONTEXT_NEEDS,
-        previous
-            .needs
-            .iter()
-            .map(|need| context_need_row(need).key)
-            .collect(),
-    )?;
-    store.delete_table_rows_in_tx(
-        CONTEXT_OFFERS,
-        previous
-            .offers
-            .iter()
-            .map(|offer| context_offer_row(offer).key)
-            .collect(),
-    )?;
-    store.insert_table_rows_in_tx(context.needs.iter().map(context_need_row).collect())?;
-    store.insert_table_rows_in_tx(context.offers.iter().map(context_offer_row).collect())?;
+    store.delete_typed_rows_where_in_tx(CONTEXT_NEEDS, &[("owner", ColumnValue::Bytes(&owner))])?;
+    store
+        .delete_typed_rows_where_in_tx(CONTEXT_OFFERS, &[("owner", ColumnValue::Bytes(&owner))])?;
+    for need in &context.needs {
+        store.insert_typed_row_in_tx(
+            CONTEXT_NEEDS,
+            &[
+                ("owner", ColumnValue::Bytes(&need.owner)),
+                ("role", ColumnValue::Text(need.role.as_str())),
+                ("scope_key", ColumnValue::Bytes(&scope_key(&need.scope))),
+                ("selector", ColumnValue::Bytes(need.selector.as_bytes())),
+            ],
+        )?;
+    }
+    for offer in &context.offers {
+        store.insert_typed_row_in_tx(
+            CONTEXT_OFFERS,
+            &[
+                ("owner", ColumnValue::Bytes(&offer.owner)),
+                ("role", ColumnValue::Text(offer.role.as_str())),
+                ("scope_key", ColumnValue::Bytes(&scope_key(&offer.scope))),
+                ("selector", ColumnValue::Bytes(offer.selector.as_bytes())),
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -330,13 +418,17 @@ fn replace_stored_time_wake_owner_rows(
     owner: FactId,
     wakes: &[TimeWake],
 ) -> rusqlite::Result<()> {
-    let delete_keys = store
-        .table_rows_with_key_prefix(TIME_WAKES, &owner, usize::MAX)?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect::<Vec<_>>();
-    store.delete_table_rows_in_tx(TIME_WAKES, delete_keys)?;
-    store.insert_table_rows_in_tx(wakes.iter().map(time_wake_row).collect())?;
+    store.delete_typed_rows_where_in_tx(TIME_WAKES, &[("owner", ColumnValue::Bytes(&owner))])?;
+    for wake in wakes {
+        store.insert_typed_row_in_tx(
+            TIME_WAKES,
+            &[
+                ("timeline", ColumnValue::Text(wake.timeline.as_str())),
+                ("at", ColumnValue::U64(wake.at)),
+                ("owner", ColumnValue::Bytes(&wake.owner)),
+            ],
+        )?;
+    }
     Ok(())
 }
 

@@ -2,12 +2,14 @@ use crate::core::matchers::ContextMatcher;
 use crate::core::pipeline::context_wake::process_context_changes;
 use crate::core::pipeline::projection::process_pending_facts;
 use crate::core::pipeline::report::{add_pipeline_report, PipelineReport};
-use crate::core::pipeline::TIME_WAKES;
-use crate::core::pipeline_storage::{
-    decode_time_wake_row, insert_pending_owner_in_tx, pending_time_range_row,
-};
+use crate::core::pipeline::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
 use crate::core::projectors::{Projector, TimeRange, Timeline};
-use crate::core::store::{Store, TableName};
+use crate::core::schema_dsl::ColumnType;
+use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
+
+struct DueTimeWake {
+    owner: [u8; 32],
+}
 
 /// Turn due time wakes into pending facts plus projection time context.
 ///
@@ -28,37 +30,89 @@ pub(crate) fn process_due_time_range(
         start_exclusive,
         end_inclusive,
     };
-    let mut due = store
-        .table_rows(TIME_WAKES)
-        .map_err(|err| format!("load time wakes: {err}"))?
-        .into_iter()
-        .map(|(key, value)| decode_time_wake_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|wake| wake.timeline == range.timeline && range.contains(wake.at))
-        .collect::<Vec<_>>();
-    due.sort_by(|left, right| {
-        left.at
-            .cmp(&right.at)
-            .then_with(|| left.owner.cmp(&right.owner))
-            .then_with(|| left.timeline.cmp(&right.timeline))
-    });
-    due.dedup();
-    due.truncate(limit);
+    let due = due_time_wakes(store, &range, limit)?;
 
     let inserted = store
         .write_transaction(|tx| {
             let mut inserted = 0usize;
-            let mut time_range_rows = Vec::new();
             for wake in &due {
-                inserted += insert_pending_owner_in_tx(tx, wake.owner)?;
-                time_range_rows.push(pending_time_range_row(wake.owner, &range));
+                if tx.insert_typed_row_in_tx(
+                    PENDING_PROJECTION,
+                    &[("owner", ColumnValue::Bytes(&wake.owner))],
+                )? {
+                    inserted += 1;
+                }
+                tx.insert_typed_row_in_tx(
+                    PENDING_TIME_RANGES,
+                    &[
+                        ("owner", ColumnValue::Bytes(&wake.owner)),
+                        ("timeline", ColumnValue::Text(range.timeline.as_str())),
+                        (
+                            "has_start",
+                            ColumnValue::Bool(range.start_exclusive.is_some()),
+                        ),
+                        (
+                            "start_exclusive",
+                            ColumnValue::U64(range.start_exclusive.unwrap_or(0)),
+                        ),
+                        ("end_inclusive", ColumnValue::U64(range.end_inclusive)),
+                    ],
+                )?;
             }
-            tx.insert_table_rows_in_tx(time_range_rows)?;
             Ok(inserted)
         })
         .map_err(|err| format!("process due time range: {err}"))?;
     Ok(inserted)
+}
+
+fn due_time_wakes(
+    store: &Store,
+    range: &TimeRange,
+    limit: usize,
+) -> Result<Vec<DueTimeWake>, String> {
+    let rows = store
+        .select_only(
+            r#"
+            SELECT owner
+            FROM time_wakes
+            WHERE timeline = :timeline
+              AND (:has_start = 0 OR at > :start_exclusive)
+              AND at <= :end_inclusive
+            ORDER BY at, owner
+            LIMIT :limit
+            "#,
+            &[TIME_WAKES],
+            &[
+                (":timeline", ColumnValue::Text(range.timeline.as_str())),
+                (
+                    ":has_start",
+                    ColumnValue::Bool(range.start_exclusive.is_some()),
+                ),
+                (
+                    ":start_exclusive",
+                    ColumnValue::U64(range.start_exclusive.unwrap_or(0)),
+                ),
+                (":end_inclusive", ColumnValue::U64(range.end_inclusive)),
+                (":limit", ColumnValue::U64(limit as u64)),
+            ],
+            &[SelectColumn {
+                name: "owner",
+                ty: ColumnType::Bytes { len: Some(32) },
+            }],
+        )
+        .map_err(|err| format!("load due time wakes: {err}"))?;
+    rows.into_iter().map(decode_due_time_wake).collect()
+}
+
+fn decode_due_time_wake(row: SelectedRow) -> Result<DueTimeWake, String> {
+    let owner = match row.get("owner") {
+        Some(SelectedValue::Bytes(bytes)) => bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "due time wake owner should be 32 bytes".to_string())?,
+        _ => return Err("due time wake row missing owner".to_string()),
+    };
+    Ok(DueTimeWake { owner })
 }
 
 /// Drive context matching and fact projection until no more work is found.

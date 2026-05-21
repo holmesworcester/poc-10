@@ -20,7 +20,7 @@
 
 use crate::core::schema_dsl::{ColumnType, TableDeclaration, TableStorage};
 use rusqlite::{params, params_from_iter, Connection as SqliteConnection, OptionalExtension};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
@@ -294,6 +294,86 @@ impl Store {
         Ok(inserted)
     }
 
+    /// Insert one complete typed table row by declared column values.
+    ///
+    /// This is the SQL-first path for core-owned tables that already have a
+    /// typed schema. It preserves the row-store idempotence rule: an identical
+    /// duplicate is ignored, but a duplicate key with different column values
+    /// is rejected.
+    pub(crate) fn insert_typed_row_in_tx(
+        &self,
+        table: TableName,
+        values: &[(&str, ColumnValue<'_>)],
+    ) -> rusqlite::Result<bool> {
+        let declared = self.typed_table(table).ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "table {} is not a typed table",
+                table.as_str()
+            ))
+        })?;
+
+        let table_columns = declared
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let provided = values
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<BTreeSet<_>>();
+        if values.len() != declared.columns.len() || provided != table_columns {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "typed row for {} does not match declared columns",
+                declared.name
+            )));
+        }
+
+        let sqlite_values = declared
+            .columns
+            .iter()
+            .map(|column| {
+                let value = values
+                    .iter()
+                    .find(|(name, _)| *name == column.name.as_str())
+                    .map(|(_, value)| *value)
+                    .expect("provided columns were checked against declared columns");
+                column_value_to_sqlite(&column.ty, value, &column.name)
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let key_values = declared
+            .row_key
+            .columns
+            .iter()
+            .map(|column_name| {
+                let index = declared
+                    .columns
+                    .iter()
+                    .position(|column| &column.name == column_name)
+                    .expect("schema row key columns are validated");
+                sqlite_values[index].clone()
+            })
+            .collect::<Vec<_>>();
+        let quoted = quoted_table_name_str(&declared.name)?;
+        let columns = table_column_list(declared)?;
+        let placeholders = placeholders(declared.columns.len());
+        let changed = self.conn.execute(
+            &format!("INSERT OR IGNORE INTO {quoted} ({columns}) VALUES ({placeholders})"),
+            params_from_iter(sqlite_values.iter()),
+        )?;
+        if changed == 0 {
+            match self.typed_values_by_key(declared, &key_values)? {
+                Some(existing) if existing == sqlite_values => {}
+                _ => {
+                    return Err(rusqlite::Error::InvalidParameterName(format!(
+                        "conflicting row for {}",
+                        table.as_str()
+                    )));
+                }
+            }
+        }
+        Ok(changed > 0)
+    }
+
     /// Replace rows in their declared tables.
     pub fn replace_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
         let mut replaced = 0;
@@ -345,6 +425,46 @@ impl Store {
             )?;
         }
         Ok(deleted)
+    }
+
+    /// Delete typed rows matching declared column filters.
+    pub(crate) fn delete_typed_rows_where_in_tx(
+        &self,
+        table: TableName,
+        filters: &[(&str, ColumnValue<'_>)],
+    ) -> rusqlite::Result<usize> {
+        if filters.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "typed delete requires at least one filter".to_string(),
+            ));
+        }
+        let declared = self.typed_table(table).ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "table {} is not a typed table",
+                table.as_str()
+            ))
+        })?;
+        let quoted = quoted_table_name_str(&declared.name)?;
+        let mut values = Vec::with_capacity(filters.len());
+        let mut clauses = Vec::with_capacity(filters.len());
+        for (index, (column_name, value)) in filters.iter().enumerate() {
+            let column = declared.column(column_name).ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "typed table {} has no column {}",
+                    declared.name, column_name
+                ))
+            })?;
+            values.push(column_value_to_sqlite(&column.ty, *value, column_name)?);
+            clauses.push(format!(
+                "{} = ?{}",
+                quoted_identifier(column_name)?,
+                index + 1
+            ));
+        }
+        self.conn.execute(
+            &format!("DELETE FROM {quoted} WHERE {}", clauses.join(" AND ")),
+            params_from_iter(values.iter()),
+        )
     }
 
     // Row reads: exact lookup, count, full scan, bounded prefix scan, and
@@ -781,6 +901,14 @@ impl Store {
         key: &[u8],
     ) -> rusqlite::Result<Option<(Vec<u8>, Vec<u8>)>> {
         let key_values = decode_typed_key_values(table, key)?;
+        self.typed_row_by_decoded_key(table, &key_values)
+    }
+
+    fn typed_row_by_decoded_key(
+        &self,
+        table: &TableDeclaration,
+        key_values: &[rusqlite::types::Value],
+    ) -> rusqlite::Result<Option<(Vec<u8>, Vec<u8>)>> {
         let quoted = quoted_table_name_str(&table.name)?;
         self.conn
             .query_row(
@@ -791,6 +919,32 @@ impl Store {
                 ),
                 params_from_iter(key_values.iter()),
                 |row| sqlite_row_to_table_row(table, row),
+            )
+            .optional()
+    }
+
+    fn typed_values_by_key(
+        &self,
+        table: &TableDeclaration,
+        key_values: &[rusqlite::types::Value],
+    ) -> rusqlite::Result<Option<Vec<rusqlite::types::Value>>> {
+        let quoted = quoted_table_name_str(&table.name)?;
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM {quoted} WHERE {}",
+                    table_column_list(table)?,
+                    row_key_where_clause(table)?
+                ),
+                params_from_iter(key_values.iter()),
+                |row| {
+                    table
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .map(|(index, column)| sqlite_column_value(row, index, &column.ty))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                },
             )
             .optional()
     }

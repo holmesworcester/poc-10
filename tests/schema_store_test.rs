@@ -70,6 +70,42 @@ fn schema_sources_create_declared_row_tables() {
 }
 
 #[test]
+fn schema_source_memory_row_tables_are_temp() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("schema-memory-store.db");
+    let local_intents = TableName::new("local_intents");
+
+    let store = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
+        .expect("open store with core schema");
+    store
+        .insert_table_rows(vec![TableRow {
+            table: local_intents,
+            key: b"local".to_vec(),
+            value: b"intent".to_vec(),
+        }])
+        .expect("insert temp local intent row");
+    assert_eq!(
+        store
+            .table_row(local_intents, b"local")
+            .expect("read temp row"),
+        Some(b"intent".to_vec())
+    );
+    assert!(
+        !sqlite_table_names(&path).contains("local_intents"),
+        "memory schema table should not be durable"
+    );
+
+    let reopened = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
+        .expect("reopen store with core schema");
+    assert_eq!(
+        reopened
+            .table_row(local_intents, b"local")
+            .expect("read temp row after reopen"),
+        None
+    );
+}
+
+#[test]
 fn schema_sources_reject_existing_table_with_wrong_shape() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("schema-store.db");
