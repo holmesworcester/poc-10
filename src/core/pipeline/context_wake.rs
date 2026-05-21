@@ -7,10 +7,11 @@ use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store};
 use std::collections::BTreeSet;
 
-use super::context_store::{
-    delete_pending_context_change_in_tx, pending_context_change_batch, scope_key,
-    stored_context_matches, PendingContextChange,
+use super::context_codec::scope_key;
+use super::context_queue::{
+    delete_pending_context_change_in_tx, pending_context_change_batch, PendingContextChange,
 };
+use super::context_store::stored_context_matches;
 use super::effects::sqlite_string_error;
 
 /// Drain pending need/offer changes and wake newly matched facts.

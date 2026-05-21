@@ -13,10 +13,9 @@ use crate::core::projectors::{
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
 
-use super::context_store::{
-    insert_pending_context_changes_in_tx, scope_key, stored_context_for_owner,
-    stored_matching_context,
-};
+use super::context_codec::scope_key;
+use super::context_queue::insert_pending_context_changes_in_tx;
+use super::context_store::{stored_context_for_owner, stored_matching_context};
 
 // === Pending-fact projection ===
 

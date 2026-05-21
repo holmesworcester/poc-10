@@ -1,172 +1,24 @@
 //! SQL-backed context storage and matching helpers.
 //!
-//! Context rows are declared typed SQLite tables. This module owns the narrow
-//! conversions between generic context values and those declared columns.
+//! Context rows are declared typed SQLite tables. This module keeps the
+//! higher-level reads and matcher queries over those tables.
 
+use super::context_codec::{
+    scope_key, selected_fact_id, selected_role, selected_scope, selected_selector,
+    CONTEXT_ROW_COLUMNS,
+};
 use crate::core::context::{
     ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
 };
-use crate::core::facts::{FactId, FactScope, ScopeKind};
+use crate::core::facts::{FactId, FactScope};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
-use crate::core::pipeline::{CONTEXT_NEEDS, CONTEXT_OFFERS, PENDING_CONTEXT_CHANGES};
+use crate::core::pipeline::{CONTEXT_NEEDS, CONTEXT_OFFERS};
 use crate::core::pipeline_storage::persisted_fact;
 use crate::core::projectors::{MatchedContext, ProjectionContext};
-use crate::core::schema_dsl::ColumnType;
-#[cfg(test)]
-use crate::core::store::TableRow;
-use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store};
-use crate::core::wire::{Reader, WireError, Writer};
+use crate::core::store::{ColumnValue, SelectedRow, Store};
 use std::collections::{BTreeMap, BTreeSet};
 
-const CONTEXT_CHANGE_NEED: u64 = 0;
-const CONTEXT_CHANGE_OFFER: u64 = 1;
-
-const CONTEXT_ROW_COLUMNS: &[SelectColumn] = &[
-    SelectColumn {
-        name: "owner",
-        ty: ColumnType::Bytes { len: Some(32) },
-    },
-    SelectColumn {
-        name: "role",
-        ty: ColumnType::Text,
-    },
-    SelectColumn {
-        name: "scope_key",
-        ty: ColumnType::Bytes { len: None },
-    },
-    SelectColumn {
-        name: "selector",
-        ty: ColumnType::Bytes { len: None },
-    },
-];
-
-const PENDING_CONTEXT_CHANGE_COLUMNS: &[SelectColumn] = &[
-    SelectColumn {
-        name: "owner",
-        ty: ColumnType::Bytes { len: Some(32) },
-    },
-    SelectColumn {
-        name: "change_kind",
-        ty: ColumnType::U64,
-    },
-    SelectColumn {
-        name: "role",
-        ty: ColumnType::Text,
-    },
-    SelectColumn {
-        name: "scope_key",
-        ty: ColumnType::Bytes { len: None },
-    },
-    SelectColumn {
-        name: "selector",
-        ty: ColumnType::Bytes { len: None },
-    },
-];
-
 type ExactContextKey = (Role, FactScope, Selector);
-
-pub(super) struct PendingContextChange {
-    owner: FactId,
-    change_kind: u64,
-    role: Role,
-    scope_key: Vec<u8>,
-    scope: FactScope,
-    selector: Selector,
-}
-
-impl PendingContextChange {
-    pub(super) fn add_to_delta(&self, delta: &mut ContextSetDelta) {
-        match self.change_kind {
-            CONTEXT_CHANGE_NEED => delta.added_needs.push(ContextNeed {
-                owner: self.owner,
-                role: self.role.clone(),
-                scope: self.scope.clone(),
-                selector: self.selector.clone(),
-            }),
-            CONTEXT_CHANGE_OFFER => delta.added_offers.push(ContextOffer {
-                owner: self.owner,
-                role: self.role.clone(),
-                scope: self.scope.clone(),
-                selector: self.selector.clone(),
-            }),
-            _ => unreachable!("pending context changes are validated on read"),
-        }
-    }
-}
-
-/// Insert every added need and offer in `delta` into the pending context queue.
-pub(super) fn insert_pending_context_changes_in_tx(
-    store: &Store,
-    delta: &ContextSetDelta,
-) -> rusqlite::Result<usize> {
-    let mut inserted = 0usize;
-    for need in &delta.added_needs {
-        if insert_pending_context_change_in_tx(
-            store,
-            &need.owner,
-            CONTEXT_CHANGE_NEED,
-            &need.role,
-            &need.scope,
-            &need.selector,
-        )? {
-            inserted += 1;
-        }
-    }
-    for offer in &delta.added_offers {
-        if insert_pending_context_change_in_tx(
-            store,
-            &offer.owner,
-            CONTEXT_CHANGE_OFFER,
-            &offer.role,
-            &offer.scope,
-            &offer.selector,
-        )? {
-            inserted += 1;
-        }
-    }
-    Ok(inserted)
-}
-
-pub(super) fn pending_context_change_batch(
-    store: &Store,
-    limit: usize,
-) -> Result<Vec<PendingContextChange>, String> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    store
-        .select_only(
-            r#"
-            SELECT owner, change_kind, role, scope_key, selector
-            FROM pending_context_changes
-            ORDER BY owner, change_kind, role, scope_key, selector
-            LIMIT :limit
-            "#,
-            &[PENDING_CONTEXT_CHANGES],
-            &[(":limit", ColumnValue::U64(limit as u64))],
-            PENDING_CONTEXT_CHANGE_COLUMNS,
-        )
-        .map_err(|err| format!("load pending context changes: {err}"))?
-        .into_iter()
-        .map(selected_pending_context_change)
-        .collect()
-}
-
-pub(super) fn delete_pending_context_change_in_tx(
-    store: &Store,
-    change: &PendingContextChange,
-) -> rusqlite::Result<usize> {
-    store.delete_typed_rows_where_in_tx(
-        PENDING_CONTEXT_CHANGES,
-        &[
-            ("owner", ColumnValue::Bytes(&change.owner)),
-            ("change_kind", ColumnValue::U64(change.change_kind)),
-            ("role", ColumnValue::Text(change.role.as_str())),
-            ("scope_key", ColumnValue::Bytes(&change.scope_key)),
-            ("selector", ColumnValue::Bytes(change.selector.as_bytes())),
-        ],
-    )
-}
 
 /// Load a fact's standing context, returning `None` when it has none.
 pub(crate) fn persisted_context(
@@ -324,30 +176,6 @@ pub(super) fn insert_context_offer_in_tx(
             ("selector", ColumnValue::Bytes(offer.selector.as_bytes())),
         ],
     )
-}
-
-pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
-    let mut out = Writer::new();
-    encode_scope(&mut out, scope);
-    out.finish()
-}
-
-#[cfg(test)]
-pub(crate) fn context_need_row(need: &ContextNeed) -> TableRow {
-    TableRow {
-        table: CONTEXT_NEEDS,
-        key: typed_context_key(&need.owner, &need.role, &need.scope, &need.selector),
-        value: Vec::new(),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn context_offer_row(offer: &ContextOffer) -> TableRow {
-    TableRow {
-        table: CONTEXT_OFFERS,
-        key: typed_context_key(&offer.owner, &offer.role, &offer.scope, &offer.selector),
-        value: Vec::new(),
-    }
 }
 
 fn exact_context_key(role: &Role, scope: &FactScope, selector: &Selector) -> ExactContextKey {
@@ -559,149 +387,4 @@ fn selected_context_offer(row: SelectedRow) -> Result<ContextOffer, String> {
         scope: selected_scope(&row)?,
         selector: selected_selector(&row)?,
     })
-}
-
-fn selected_pending_context_change(row: SelectedRow) -> Result<PendingContextChange, String> {
-    let change_kind = selected_u64(&row, "change_kind")?;
-    if !matches!(change_kind, CONTEXT_CHANGE_NEED | CONTEXT_CHANGE_OFFER) {
-        return Err(format!("invalid pending context change kind {change_kind}"));
-    }
-    let scope_key = selected_bytes(&row, "scope_key")?.to_vec();
-    let scope = decode_scope_key(&scope_key)?;
-    Ok(PendingContextChange {
-        owner: selected_fact_id(&row, "owner")?,
-        change_kind,
-        role: selected_role(&row)?,
-        scope_key,
-        scope,
-        selector: selected_selector(&row)?,
-    })
-}
-
-fn selected_fact_id(row: &SelectedRow, name: &str) -> Result<FactId, String> {
-    selected_bytes(row, name)?
-        .try_into()
-        .map_err(|_| format!("context SQL column {name} is not a fact id"))
-}
-
-fn selected_role(row: &SelectedRow) -> Result<Role, String> {
-    match row.get("role") {
-        Some(SelectedValue::Text(value)) => Role::new(value.clone()),
-        Some(_) => Err("context SQL column role is not text".to_string()),
-        None => Err("context SQL did not return column role".to_string()),
-    }
-}
-
-fn selected_scope(row: &SelectedRow) -> Result<FactScope, String> {
-    decode_scope_key(selected_bytes(row, "scope_key")?)
-}
-
-fn selected_selector(row: &SelectedRow) -> Result<Selector, String> {
-    Ok(Selector::from_bytes(
-        selected_bytes(row, "selector")?.to_vec(),
-    ))
-}
-
-fn selected_u64(row: &SelectedRow, name: &str) -> Result<u64, String> {
-    match row.get(name) {
-        Some(SelectedValue::U64(value)) => Ok(*value),
-        Some(_) => Err(format!("context SQL column {name} is not u64")),
-        None => Err(format!("context SQL did not return column {name}")),
-    }
-}
-
-fn selected_bytes<'a>(row: &'a SelectedRow, name: &str) -> Result<&'a [u8], String> {
-    match row.get(name) {
-        Some(SelectedValue::Bytes(bytes)) => Ok(bytes),
-        Some(_) => Err(format!("context SQL column {name} is not bytes")),
-        None => Err(format!("context SQL did not return column {name}")),
-    }
-}
-
-fn insert_pending_context_change_in_tx(
-    store: &Store,
-    owner: &FactId,
-    change_kind: u64,
-    role: &Role,
-    scope: &FactScope,
-    selector: &Selector,
-) -> rusqlite::Result<bool> {
-    store.insert_typed_row_in_tx(
-        PENDING_CONTEXT_CHANGES,
-        &[
-            ("owner", ColumnValue::Bytes(owner)),
-            ("change_kind", ColumnValue::U64(change_kind)),
-            ("role", ColumnValue::Text(role.as_str())),
-            ("scope_key", ColumnValue::Bytes(&scope_key(scope))),
-            ("selector", ColumnValue::Bytes(selector.as_bytes())),
-        ],
-    )
-}
-
-#[cfg(test)]
-fn typed_context_key(
-    owner: &FactId,
-    role: &Role,
-    scope: &FactScope,
-    selector: &Selector,
-) -> Vec<u8> {
-    encoded_row(|key| {
-        key.fixed(owner);
-        key.string_u32be(role.as_str())
-            .expect("context role fits u32");
-        key.bytes_u32be(&scope_key(scope))
-            .expect("scope key fits u32");
-        key.bytes_u32be(selector.as_bytes())
-            .expect("selector fits u32");
-    })
-}
-
-fn encode_scope(out: &mut Writer, scope: &FactScope) {
-    match scope {
-        FactScope::Global => out.u8(0),
-        FactScope::Local => out.u8(1),
-        FactScope::Scoped { kind, id } => {
-            out.u8(2);
-            out.string_u16be(kind.as_str())
-                .expect("scope kind fits u16");
-            out.fixed(id);
-        }
-    }
-}
-
-fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {
-    match reader.u8().row()? {
-        0 => Ok(FactScope::Global),
-        1 => Ok(FactScope::Local),
-        2 => {
-            let kind = ScopeKind::new(reader.string_u16be().row()?)?;
-            let id = reader.array::<32>().row()?;
-            Ok(FactScope::Scoped { kind, id })
-        }
-        other => Err(format!("invalid fact scope tag {other}")),
-    }
-}
-
-fn decode_scope_key(bytes: &[u8]) -> Result<FactScope, String> {
-    let mut reader = Reader::new(bytes);
-    let scope = decode_scope(&mut reader)?;
-    reader.finish().row()?;
-    Ok(scope)
-}
-
-#[cfg(test)]
-fn encoded_row(write: impl FnOnce(&mut Writer)) -> Vec<u8> {
-    let mut out = Writer::new();
-    write(&mut out);
-    out.finish()
-}
-
-trait RowWireResult<T> {
-    fn row(self) -> Result<T, String>;
-}
-
-impl<T> RowWireResult<T> for Result<T, WireError> {
-    fn row(self) -> Result<T, String> {
-        self.map_err(|err| format!("invalid encoded row: {err}"))
-    }
 }

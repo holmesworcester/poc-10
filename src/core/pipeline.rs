@@ -12,6 +12,8 @@
 //! - `effects`: shared pipeline side effects and commit helpers.
 
 mod admission;
+mod context_codec;
+mod context_queue;
 mod context_store;
 mod context_wake;
 mod dispatch;
@@ -30,9 +32,10 @@ pub(crate) use admission::{
     commit_projected_context_offers, purge_fact_from_store, submit_fact_to_store,
     submit_facts_to_store,
 };
+pub(crate) use context_codec::scope_key;
 #[cfg(test)]
-pub(crate) use context_store::{context_need_row, context_offer_row};
-pub(crate) use context_store::{persisted_context, scope_key};
+pub(crate) use context_codec::{context_need_row, context_offer_row};
+pub(crate) use context_store::persisted_context;
 pub use dispatch::DispatchReport;
 pub(crate) use dispatch::{
     dispatch_durable_intents, dispatch_local_intents, submit_intent_to_store,
