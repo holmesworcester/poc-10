@@ -5,58 +5,13 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::matchers::{
-    ContextMatcherDeclaration, ContextRoleDeclaration, SelectOnlyMatcherResult,
-    SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
-};
+use crate::core::matchers::ContextRoleDeclaration;
 use crate::core::select;
 
 use super::exact::protocol_role;
 use super::sql;
 
 pub const SYNC_RANGE_FACT_ROLE: &str = "sync_range_fact";
-
-const RANGE_NEED_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
-    SelectorFieldDeclaration {
-        name: "start",
-        ty: SelectorFieldType::U64,
-        offset: 0,
-        len: 8,
-    },
-    SelectorFieldDeclaration {
-        name: "end",
-        ty: SelectorFieldType::U64,
-        offset: 8,
-        len: 8,
-    },
-];
-
-const RANGE_OFFER_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
-    SelectorFieldDeclaration {
-        name: "timestamp",
-        ty: SelectorFieldType::U64,
-        offset: 0,
-        len: 8,
-    },
-    SelectorFieldDeclaration {
-        name: "fact_id",
-        ty: SelectorFieldType::FactId,
-        offset: 8,
-        len: 32,
-    },
-    SelectorFieldDeclaration {
-        name: "dependency_id",
-        ty: SelectorFieldType::FactId,
-        offset: 40,
-        len: 32,
-    },
-    SelectorFieldDeclaration {
-        name: "key_wrap_id",
-        ty: SelectorFieldType::FactId,
-        offset: 72,
-        len: 32,
-    },
-];
 
 pub const RANGE_FACT_OFFERS_FOR_NEED_SQL: &str = "
 SELECT owner, selector
@@ -67,17 +22,6 @@ WHERE direction = 'offer'
   AND length(selector) = 104
   AND substr(selector, 1, 8) >= :start
   AND substr(selector, 1, 8) <= :end
-ORDER BY owner, selector";
-
-pub const RANGE_FACT_NEEDS_FOR_OFFER_SQL: &str = "
-SELECT owner, selector
-FROM context_edges
-WHERE direction = 'need'
-  AND role = :role
-  AND scope_key = :scope_key
-  AND length(selector) = 16
-  AND substr(selector, 1, 8) <= :timestamp
-  AND substr(selector, 9, 8) >= :timestamp
 ORDER BY owner, selector";
 
 pub const RANGE_FACT_WAKE_FOR_NEED_SQL: &str = "
@@ -103,21 +47,8 @@ WHERE n.direction = 'need'
   AND substr(n.selector, 9, 8) >= :timestamp
 ORDER BY a.received_at, n.owner";
 
-pub const RANGE_FACT_CONTEXT_ROLE: ContextRoleDeclaration = ContextRoleDeclaration {
-    role: SYNC_RANGE_FACT_ROLE,
-    need_selector: RANGE_NEED_SELECTOR_FIELDS,
-    offer_selector: RANGE_OFFER_SELECTOR_FIELDS,
-    matcher: ContextMatcherDeclaration::SelectOnlySql {
-        added_need: SelectOnlyMatcherSql {
-            sql: RANGE_FACT_OFFERS_FOR_NEED_SQL,
-            result: SelectOnlyMatcherResult::OffersForNeed,
-        },
-        added_offer: SelectOnlyMatcherSql {
-            sql: RANGE_FACT_NEEDS_FOR_OFFER_SQL,
-            result: SelectOnlyMatcherResult::NeedsForOffer,
-        },
-    },
-};
+pub const RANGE_FACT_CONTEXT_ROLE: ContextRoleDeclaration =
+    ContextRoleDeclaration::sql(SYNC_RANGE_FACT_ROLE);
 
 pub fn range_fact_role() -> Role {
     protocol_role(SYNC_RANGE_FACT_ROLE)
@@ -222,7 +153,6 @@ impl Default for RangeFactMatcher {
 
 sql::sql_backed_matcher! {
     RangeFactMatcher {
-        declaration: RANGE_FACT_CONTEXT_ROLE,
         offers_for_need: RANGE_FACT_OFFERS_FOR_NEED_SQL => range_need_query_params,
         wake_for_need: RANGE_FACT_WAKE_FOR_NEED_SQL => range_need_wake_params,
         wake_for_offer: RANGE_FACT_WAKE_FOR_OFFER_SQL => range_offer_wake_params,

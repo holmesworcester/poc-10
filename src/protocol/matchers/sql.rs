@@ -24,7 +24,6 @@ pub(crate) fn wake_select(sql: &'static str, params: Vec<select::Param>) -> sele
 macro_rules! sql_backed_matcher {
     (
         $matcher:ty {
-            declaration: $declaration:expr,
             offers_for_need: $offers_for_need_sql:expr => $need_params:path,
             wake_for_need: $wake_for_need_sql:expr => $wake_need_params:path,
             wake_for_offer: $wake_for_offer_sql:expr => $wake_offer_params:path $(,)?
@@ -33,10 +32,6 @@ macro_rules! sql_backed_matcher {
         impl $crate::core::matchers::ContextMatcher for $matcher {
             fn role(&self) -> &$crate::core::context::Role {
                 &self.role
-            }
-
-            fn declaration(&self) -> Option<$crate::core::matchers::ContextRoleDeclaration> {
-                Some($declaration)
             }
 
             fn matching_offers_for_need_from_store(

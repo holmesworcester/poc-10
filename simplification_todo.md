@@ -181,6 +181,9 @@ Accountable criteria:
   was deleted. Executable protocol tables (`MATCH_COMMANDS`, schema sources,
   row-mutation tables, projector routes, context matchers, and handler routes)
   are now the source of truth.
+- Done in this branch: stale context matcher declaration metadata was deleted.
+  Matcher registry entries now declare only role plus exact-vs-SQL kind, while
+  executable SQL lives with the matcher implementation.
 
 ## 1. Store All Intents In SQLite Queues
 

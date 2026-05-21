@@ -8,7 +8,7 @@ use crate::core::cli::CliCommand;
 use crate::core::context::Role;
 use crate::core::facts::Fact;
 use crate::core::matchers::{
-    ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration, ExactSelectorMatcher,
+    ContextMatcher, ContextMatcherKind, ContextRoleDeclaration, ExactSelectorMatcher,
 };
 use crate::core::network;
 use crate::core::projectors::{
@@ -408,13 +408,13 @@ impl ProtocolContextMatchers {
         let mut exact_roles = BTreeSet::<Role>::new();
         let mut custom_roles = BTreeSet::<&'static str>::new();
         for declaration in CONTEXT_MATCHERS {
-            match declaration.matcher {
-                ContextMatcherDeclaration::ExactSelector => {
+            match declaration.kind {
+                ContextMatcherKind::Exact => {
                     exact_roles.insert(
                         Role::new(declaration.role).expect("registered exact matcher role"),
                     );
                 }
-                ContextMatcherDeclaration::SelectOnlySql { .. } => {
+                ContextMatcherKind::Sql => {
                     custom_roles.insert(declaration.role);
                 }
             }
@@ -572,12 +572,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let registry_roles = CONTEXT_MATCHERS
             .iter()
-            .filter(|declaration| {
-                matches!(
-                    declaration.matcher,
-                    ContextMatcherDeclaration::ExactSelector
-                )
-            })
+            .filter(|declaration| matches!(declaration.kind, ContextMatcherKind::Exact))
             .map(|declaration| declaration.role.to_string())
             .collect::<BTreeSet<_>>();
 

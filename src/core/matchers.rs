@@ -7,65 +7,33 @@ use crate::core::store::Store;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextRoleDeclaration {
     pub role: &'static str,
-    pub need_selector: &'static [SelectorFieldDeclaration],
-    pub offer_selector: &'static [SelectorFieldDeclaration],
-    pub matcher: ContextMatcherDeclaration,
+    pub kind: ContextMatcherKind,
 }
 
 impl ContextRoleDeclaration {
     pub const fn exact(role: &'static str) -> Self {
         Self {
             role,
-            need_selector: &[],
-            offer_selector: &[],
-            matcher: ContextMatcherDeclaration::ExactSelector,
+            kind: ContextMatcherKind::Exact,
+        }
+    }
+
+    pub const fn sql(role: &'static str) -> Self {
+        Self {
+            role,
+            kind: ContextMatcherKind::Sql,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SelectorFieldDeclaration {
-    pub name: &'static str,
-    pub ty: SelectorFieldType,
-    pub offset: usize,
-    pub len: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectorFieldType {
-    U8,
-    U16,
-    U64,
-    FactId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContextMatcherDeclaration {
-    ExactSelector,
-    SelectOnlySql {
-        added_need: SelectOnlyMatcherSql,
-        added_offer: SelectOnlyMatcherSql,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SelectOnlyMatcherSql {
-    pub sql: &'static str,
-    pub result: SelectOnlyMatcherResult,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectOnlyMatcherResult {
-    OffersForNeed,
-    NeedsForOffer,
+pub enum ContextMatcherKind {
+    Exact,
+    Sql,
 }
 
 pub trait ContextMatcher {
     fn role(&self) -> &Role;
-
-    fn declaration(&self) -> Option<ContextRoleDeclaration> {
-        None
-    }
 
     fn exact_selector_role(&self) -> Option<&Role> {
         None

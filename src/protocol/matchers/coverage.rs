@@ -6,94 +6,13 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::matchers::{
-    ContextMatcherDeclaration, ContextRoleDeclaration, SelectOnlyMatcherResult,
-    SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
-};
+use crate::core::matchers::ContextRoleDeclaration;
 use crate::core::select;
 
 use super::exact::protocol_role;
 use super::sql;
 
 pub const SECRET_COVERAGE_ROLE: &str = "secret_coverage";
-
-const SECRET_NEED_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
-    SelectorFieldDeclaration {
-        name: "version",
-        ty: SelectorFieldType::U8,
-        offset: 0,
-        len: 1,
-    },
-    SelectorFieldDeclaration {
-        name: "workspace_id",
-        ty: SelectorFieldType::FactId,
-        offset: 1,
-        len: 32,
-    },
-    SelectorFieldDeclaration {
-        name: "frontier_id",
-        ty: SelectorFieldType::FactId,
-        offset: 33,
-        len: 32,
-    },
-    SelectorFieldDeclaration {
-        name: "minute",
-        ty: SelectorFieldType::U64,
-        offset: 65,
-        len: 8,
-    },
-    SelectorFieldDeclaration {
-        name: "leaf_id",
-        ty: SelectorFieldType::FactId,
-        offset: 73,
-        len: 32,
-    },
-];
-
-const SECRET_OFFER_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
-    SelectorFieldDeclaration {
-        name: "version",
-        ty: SelectorFieldType::U8,
-        offset: 0,
-        len: 1,
-    },
-    SelectorFieldDeclaration {
-        name: "workspace_id",
-        ty: SelectorFieldType::FactId,
-        offset: 1,
-        len: 32,
-    },
-    SelectorFieldDeclaration {
-        name: "frontier_id",
-        ty: SelectorFieldType::FactId,
-        offset: 33,
-        len: 32,
-    },
-    SelectorFieldDeclaration {
-        name: "start_minute",
-        ty: SelectorFieldType::U64,
-        offset: 65,
-        len: 8,
-    },
-    SelectorFieldDeclaration {
-        name: "end_minute",
-        ty: SelectorFieldType::U64,
-        offset: 73,
-        len: 8,
-    },
-    SelectorFieldDeclaration {
-        name: "prefix_bytes",
-        ty: SelectorFieldType::U8,
-        offset: 81,
-        len: 1,
-    },
-    SelectorFieldDeclaration {
-        name: "leaf_prefix",
-        ty: SelectorFieldType::FactId,
-        offset: 82,
-        len: 32,
-    },
-];
 
 pub const SECRET_COVERAGE_OFFERS_FOR_NEED_SQL: &str = "
 SELECT owner, selector
@@ -142,21 +61,6 @@ WHERE direction = 'offer'
     OR (substr(selector, 82, 1) = x'1F' AND substr(selector, 83, 31) = substr(:leaf_id, 1, 31))
     OR (substr(selector, 82, 1) = x'20' AND substr(selector, 83, 32) = substr(:leaf_id, 1, 32))
   )
-ORDER BY owner, selector";
-
-pub const SECRET_COVERAGE_NEEDS_FOR_OFFER_SQL: &str = "
-SELECT owner, selector
-FROM context_edges
-WHERE direction = 'need'
-  AND role = :role
-  AND scope_key = :scope_key
-  AND length(selector) = 105
-  AND substr(selector, 1, 1) = x'01'
-  AND substr(selector, 2, 32) = :workspace_id
-  AND substr(selector, 34, 32) = :frontier_id
-  AND substr(selector, 66, 8) >= :start_minute
-  AND substr(selector, 66, 8) <= :end_minute
-  AND substr(selector, 74, :prefix_len) = :leaf_prefix
 ORDER BY owner, selector";
 
 pub const SECRET_COVERAGE_WAKE_FOR_NEED_SQL: &str = "
@@ -224,21 +128,8 @@ WHERE n.direction = 'need'
   AND substr(n.selector, 74, :prefix_len) = :leaf_prefix
 ORDER BY a.received_at, n.owner";
 
-pub const SECRET_COVERAGE_CONTEXT_ROLE: ContextRoleDeclaration = ContextRoleDeclaration {
-    role: SECRET_COVERAGE_ROLE,
-    need_selector: SECRET_NEED_SELECTOR_FIELDS,
-    offer_selector: SECRET_OFFER_SELECTOR_FIELDS,
-    matcher: ContextMatcherDeclaration::SelectOnlySql {
-        added_need: SelectOnlyMatcherSql {
-            sql: SECRET_COVERAGE_OFFERS_FOR_NEED_SQL,
-            result: SelectOnlyMatcherResult::OffersForNeed,
-        },
-        added_offer: SelectOnlyMatcherSql {
-            sql: SECRET_COVERAGE_NEEDS_FOR_OFFER_SQL,
-            result: SelectOnlyMatcherResult::NeedsForOffer,
-        },
-    },
-};
+pub const SECRET_COVERAGE_CONTEXT_ROLE: ContextRoleDeclaration =
+    ContextRoleDeclaration::sql(SECRET_COVERAGE_ROLE);
 
 pub fn secret_role() -> Role {
     protocol_role(SECRET_COVERAGE_ROLE)
@@ -393,7 +284,6 @@ impl Default for SecretCoverageMatcher {
 
 sql::sql_backed_matcher! {
     SecretCoverageMatcher {
-        declaration: SECRET_COVERAGE_CONTEXT_ROLE,
         offers_for_need: SECRET_COVERAGE_OFFERS_FOR_NEED_SQL => secret_need_query_params,
         wake_for_need: SECRET_COVERAGE_WAKE_FOR_NEED_SQL => secret_need_wake_params,
         wake_for_offer: SECRET_COVERAGE_WAKE_FOR_OFFER_SQL => secret_offer_wake_params,

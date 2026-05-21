@@ -6,106 +6,13 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::matchers::{
-    ContextMatcherDeclaration, ContextRoleDeclaration, SelectOnlyMatcherResult,
-    SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
-};
+use crate::core::matchers::ContextRoleDeclaration;
 use crate::core::select;
 
 use super::exact::protocol_role;
 use super::sql;
 
 pub const WRAP_SOURCE_ROLE: &str = "wrap_source";
-
-const WRAP_NEED_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
-    SelectorFieldDeclaration {
-        name: "variant",
-        ty: SelectorFieldType::U8,
-        offset: 0,
-        len: 1,
-    },
-    SelectorFieldDeclaration {
-        name: "workspace_id",
-        ty: SelectorFieldType::FactId,
-        offset: 1,
-        len: 32,
-    },
-    SelectorFieldDeclaration {
-        name: "min_frontier_created_at_ms",
-        ty: SelectorFieldType::U64,
-        offset: 33,
-        len: 8,
-    },
-    SelectorFieldDeclaration {
-        name: "frontier_id",
-        ty: SelectorFieldType::FactId,
-        offset: 33,
-        len: 32,
-    },
-];
-
-const WRAP_OFFER_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
-    SelectorFieldDeclaration {
-        name: "version",
-        ty: SelectorFieldType::U8,
-        offset: 0,
-        len: 1,
-    },
-    SelectorFieldDeclaration {
-        name: "workspace_id",
-        ty: SelectorFieldType::FactId,
-        offset: 1,
-        len: 32,
-    },
-    SelectorFieldDeclaration {
-        name: "frontier_id",
-        ty: SelectorFieldType::FactId,
-        offset: 33,
-        len: 32,
-    },
-    SelectorFieldDeclaration {
-        name: "owner_endpoint_id",
-        ty: SelectorFieldType::FactId,
-        offset: 65,
-        len: 32,
-    },
-    SelectorFieldDeclaration {
-        name: "frontier_created_at_ms",
-        ty: SelectorFieldType::U64,
-        offset: 97,
-        len: 8,
-    },
-    SelectorFieldDeclaration {
-        name: "kind",
-        ty: SelectorFieldType::U8,
-        offset: 105,
-        len: 1,
-    },
-    SelectorFieldDeclaration {
-        name: "range_start",
-        ty: SelectorFieldType::U64,
-        offset: 106,
-        len: 8,
-    },
-    SelectorFieldDeclaration {
-        name: "range_width",
-        ty: SelectorFieldType::U64,
-        offset: 114,
-        len: 8,
-    },
-    SelectorFieldDeclaration {
-        name: "bit_depth",
-        ty: SelectorFieldType::U16,
-        offset: 122,
-        len: 2,
-    },
-    SelectorFieldDeclaration {
-        name: "fact_id_prefix",
-        ty: SelectorFieldType::FactId,
-        offset: 124,
-        len: 32,
-    },
-];
 
 pub const WRAP_SOURCE_OFFERS_FOR_NEED_SQL: &str = "
 SELECT owner, selector
@@ -119,29 +26,6 @@ WHERE direction = 'offer'
   AND (
     (:need_kind = 1 AND substr(selector, 98, 8) >= :min_frontier_created_at_ms)
     OR (:need_kind = 2 AND substr(selector, 34, 32) = :frontier_id)
-  )
-ORDER BY owner, selector";
-
-pub const WRAP_SOURCE_NEEDS_FOR_OFFER_SQL: &str = "
-SELECT owner, selector
-FROM context_edges
-WHERE direction = 'need'
-  AND role = :role
-  AND scope_key = :scope_key
-  AND (
-    (
-      length(selector) = 41
-      AND substr(selector, 1, 1) = x'01'
-      AND substr(selector, 2, 32) = :workspace_id
-      AND substr(selector, 34, 8) <= :frontier_created_at_ms
-    )
-    OR
-    (
-      length(selector) = 65
-      AND substr(selector, 1, 1) = x'02'
-      AND substr(selector, 2, 32) = :workspace_id
-      AND substr(selector, 34, 32) = :frontier_id
-    )
   )
 ORDER BY owner, selector";
 
@@ -184,21 +68,8 @@ WHERE n.direction = 'need'
   )
 ORDER BY a.received_at, n.owner";
 
-pub const WRAP_SOURCE_CONTEXT_ROLE: ContextRoleDeclaration = ContextRoleDeclaration {
-    role: WRAP_SOURCE_ROLE,
-    need_selector: WRAP_NEED_SELECTOR_FIELDS,
-    offer_selector: WRAP_OFFER_SELECTOR_FIELDS,
-    matcher: ContextMatcherDeclaration::SelectOnlySql {
-        added_need: SelectOnlyMatcherSql {
-            sql: WRAP_SOURCE_OFFERS_FOR_NEED_SQL,
-            result: SelectOnlyMatcherResult::OffersForNeed,
-        },
-        added_offer: SelectOnlyMatcherSql {
-            sql: WRAP_SOURCE_NEEDS_FOR_OFFER_SQL,
-            result: SelectOnlyMatcherResult::NeedsForOffer,
-        },
-    },
-};
+pub const WRAP_SOURCE_CONTEXT_ROLE: ContextRoleDeclaration =
+    ContextRoleDeclaration::sql(WRAP_SOURCE_ROLE);
 
 pub fn wrap_source_role() -> Role {
     protocol_role(WRAP_SOURCE_ROLE)
@@ -466,7 +337,6 @@ impl Default for WrapSourceMatcher {
 
 sql::sql_backed_matcher! {
     WrapSourceMatcher {
-        declaration: WRAP_SOURCE_CONTEXT_ROLE,
         offers_for_need: WRAP_SOURCE_OFFERS_FOR_NEED_SQL => wrap_need_query_params,
         wake_for_need: WRAP_SOURCE_WAKE_FOR_NEED_SQL => wrap_need_wake_params,
         wake_for_offer: WRAP_SOURCE_WAKE_FOR_OFFER_SQL => wrap_offer_wake_params,
