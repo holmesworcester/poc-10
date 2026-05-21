@@ -16,6 +16,7 @@ mod context_codec;
 mod context_queue;
 mod context_store;
 mod context_wake;
+mod context_wake_sql;
 mod dispatch;
 mod effects;
 mod fact_context;
