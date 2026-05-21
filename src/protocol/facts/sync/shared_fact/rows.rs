@@ -157,17 +157,47 @@ pub fn shareable_fact_for_connection(
 
 pub fn connection_ids_for_shareable_fact(
     store: &Store,
-    fact_id: FactId,
+    fact: &Fact,
 ) -> Result<Vec<FactId>, String> {
     let mut connection_ids = Vec::new();
+    let workspace_ids = shareable_workspaces_for_fact(store, fact)?;
+    let Some(local_endpoint) = identity::endpoint::local_endpoint::local_endpoint(store)? else {
+        return Ok(Vec::new());
+    };
+    let endpoint_memberships = endpoint_memberships(store)?;
     for connection in connection_response_rows(store)? {
-        if shareable_fact_for_connection(store, connection.connection_id, fact_id)?.is_some() {
+        let Some(remote_endpoint) =
+            remote_endpoint_for_connection(&connection, local_endpoint.endpoint)
+        else {
+            continue;
+        };
+        let connection_workspaces = connection_workspaces(store, &connection)?;
+        if workspace_ids.iter().any(|workspace_id| {
+            endpoint_memberships.contains(&(*workspace_id, remote_endpoint))
+                || connection_workspaces.contains(workspace_id)
+        }) {
             connection_ids.push(connection.connection_id);
         }
     }
     connection_ids.sort();
     connection_ids.dedup();
     Ok(connection_ids)
+}
+
+fn shareable_workspaces_for_fact(store: &Store, fact: &Fact) -> Result<Vec<FactId>, String> {
+    if let FactScope::Scoped { kind, id } = &fact.scope {
+        if kind.as_str() == "workspace" {
+            return Ok(vec![*id]);
+        }
+    }
+    let mut workspace_ids = shareable_fact_rows(store)?
+        .into_iter()
+        .filter(|row| row.fact_id == fact.id)
+        .map(|row| row.workspace_id)
+        .collect::<Vec<_>>();
+    workspace_ids.sort();
+    workspace_ids.dedup();
+    Ok(workspace_ids)
 }
 
 fn connection_response_rows(

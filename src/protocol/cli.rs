@@ -45,7 +45,7 @@ impl MatchCliContext {
 
     fn settle_local_command_work(&mut self) -> Result<(), String> {
         self.runtime
-            .process_command_work_until_idle(4, 512)
+            .process_command_work_until_idle(4, 4096)
             .map(|_| ())
     }
 

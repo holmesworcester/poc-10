@@ -154,6 +154,9 @@ fn read_inbound_frames(
             Err(err) if is_stream_closed(&err) => break,
             Err(err) => return Err(format!("read frame: {err}")),
         };
+        if bytes.is_empty() {
+            continue;
+        }
         report.received_frames += 1;
 
         let inbound = InboundNetworkRow::new(source, bytes);
@@ -379,6 +382,34 @@ mod tests {
                 .expect("claim inbound")
                 .len(),
             3
+        );
+    }
+
+    #[test]
+    fn empty_frame_is_tcp_heartbeat_not_protocol_input() {
+        let store = Store::open_memory_with_schemas(network::SCHEMAS).expect("open store");
+        let listener = listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
+        let addr = listener.local_addr();
+        let writer = thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            write_frame_with_budget(&mut stream, b"", Duration::from_secs(1))
+                .expect("write heartbeat");
+            stream.shutdown(Shutdown::Write).expect("shutdown write");
+        });
+        thread::sleep(Duration::from_millis(50));
+
+        let report = listener
+            .accept_available(&store, 1)
+            .expect("accept heartbeat");
+        writer.join().expect("writer thread");
+
+        assert_eq!(report.accepted_connections, 1);
+        assert_eq!(report.value.received_frames, 0);
+        assert_eq!(
+            network::claim_inbound(&store, 10)
+                .expect("claim inbound")
+                .len(),
+            0
         );
     }
 }
