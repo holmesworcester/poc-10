@@ -202,7 +202,7 @@ Next steps:
 ## 2. Stop Modeling Row Mutations As Intents
 
 `AtomicIntent` is not queue work. It is a deterministic row mutation that must
-commit with projection or handler output.
+commit through the same effect boundary as facts and follow-up intents.
 
 Target:
 
@@ -211,26 +211,19 @@ ProjectionOutput {
     needs,
     offers,
     time_wakes,
-    row_mutations,
-    intents,
-    local_intents,
-}
-
-HandlerOutput {
-    facts,
-    purged_facts,
-    row_mutations,
-    intents,
-    local_intents,
+    effects: PipelineEffects,
 }
 ```
 
 Migration:
 
 1. Done: introduce `RowMutation::{PutRow, DeleteRow}`.
-2. Done: add `row_mutations` to projection and handler output.
+2. Done: add `row_mutations` to the shared effect shape.
 3. Done: migrate protocol projectors and tests off row intents.
 4. Done: remove `IntentExecution::Atomic` and the atomic dispatch pass.
+5. Done: delete `HandlerOutput`; handlers now return `PipelineEffects`
+   directly, and `ProjectionOutput` embeds `PipelineEffects` for row/intents
+   side effects.
 
 ## 3. Split `pipeline.rs` By Queue Responsibility
 
@@ -384,15 +377,15 @@ PipelineEffects {
   facts,
   purged_facts,
   row_mutations,
-  durable_intents,
+  intents,
   local_intents,
 }
 ```
 
-Status: started. Handler output and command output now reduce to
-`PipelineEffects`, and projection stores its row/intents side effects inside
-`PipelineEffects` while keeping projection-owned context and time-wake changes
-separate.
+Status: done for the current output shapes. `PipelineEffects` now lives in
+`core::effects`; handlers return it directly, commands carry it alongside
+their typed receipt, and projection stores its row/intents side effects inside
+it while keeping projection-owned context and time-wake changes separate.
 
 ## 11. Defer Parallelism
 

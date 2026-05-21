@@ -126,8 +126,8 @@ mod tests {
         })
         .expect("create");
 
-        assert_eq!(output.facts.len(), 1);
-        assert_eq!(output.receipt.user_invite_id, output.facts[0].id);
+        assert_eq!(output.effects.facts.len(), 1);
+        assert_eq!(output.receipt.user_invite_id, output.effects.facts[0].id);
         assert_eq!(
             output.receipt.public_key,
             crypto::ed25519_public_key(&private)

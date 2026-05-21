@@ -1,8 +1,7 @@
 //! Send the fact requested by a sync need-id fact.
 
-use crate::core::intents::{
-    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
-};
+use crate::core::effects::PipelineEffects;
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::sync::need_id;
 use crate::protocol::intents::transport::send_facts_on_connection::{
@@ -72,7 +71,7 @@ impl IntentHandler for SendRequestedFactHandler {
         let need = need_id::layout::decode_fact(&need_fact.bytes)?;
         let Some(fact) = crate::core::fact_store::persisted_fact(context.store()?, &need.fact_id)?
         else {
-            return Ok(HandlerOutput::new());
+            return Ok(PipelineEffects::new());
         };
         if crate::protocol::facts::sync::shared_fact::shareable_fact_for_connection(
             context.store()?,
@@ -81,11 +80,11 @@ impl IntentHandler for SendRequestedFactHandler {
         )?
         .is_none()
         {
-            return Ok(HandlerOutput::new());
+            return Ok(PipelineEffects::new());
         }
         crate::protocol::facts::transport::transit::create::require_sendable_fact(&fact)?;
         Ok(
-            HandlerOutput::new().intent(send_facts_on_connection_intent(SendFactsOnConnection {
+            PipelineEffects::new().intent(send_facts_on_connection_intent(SendFactsOnConnection {
                 connection_id: need.connection_id,
                 fact_ids: vec![need.fact_id],
             })),

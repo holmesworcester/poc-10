@@ -7,8 +7,9 @@
 
 use std::net::SocketAddr;
 
+use crate::core::effects::PipelineEffects;
 use crate::core::intents::{
-    retry_intent, HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+    retry_intent, HandlerContext, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentKind};
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
@@ -92,7 +93,7 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
         .map_err(|err| {
             retry_intent(format!("send_bootstrap_connection_request tcp send: {err}"))
         })?;
-        Ok(HandlerOutput::new())
+        Ok(PipelineEffects::new())
     }
 }
 

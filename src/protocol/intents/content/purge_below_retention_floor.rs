@@ -4,9 +4,8 @@
 //! message fact. The handler purges only when the message minute is below the
 //! setting's monotonic retire floor.
 
-use crate::core::intents::{
-    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
-};
+use crate::core::effects::PipelineEffects;
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::{
     content::message::retention, encryption::disappearing_messages_setting,
@@ -114,6 +113,6 @@ impl IntentHandler for PurgeBelowRetentionFloorHandler {
             )?;
         }
 
-        Ok(HandlerOutput::new().purge_fact(input.target_id))
+        Ok(PipelineEffects::new().purge_fact(input.target_id))
     }
 }

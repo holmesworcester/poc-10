@@ -94,7 +94,7 @@ pub fn create_workspace_with_identity(
         identity.device_name,
         device_invite.id,
         endpoint.signing_secret,
-        endpoint_output.facts.first(),
+        endpoint_output.effects.facts.first(),
         ctx.store(),
     )?;
     let mut facts = vec![
@@ -113,7 +113,7 @@ pub fn create_workspace_with_identity(
             identity.ttl_minutes.unwrap_or(60),
         )?);
     }
-    facts.extend(endpoint_output.facts);
+    facts.extend(endpoint_output.effects.facts);
     Ok(CommandOutput::new(CreateWorkspaceReceipt {
         workspace_fact_id: workspace_id,
         created_at_ms,

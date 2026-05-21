@@ -1,8 +1,9 @@
 //! Helpers for bounded message retention purges.
 
+use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{RowMutation, TableDeleteWhere};
-use crate::core::pipeline::{commit_pipeline_effects_to_store, PipelineEffects};
+use crate::core::pipeline::commit_pipeline_effects_to_store;
 use crate::core::select::Value;
 use crate::core::store::Store;
 use crate::core::store::TableName;

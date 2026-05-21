@@ -4,11 +4,12 @@
 //! handler reads the shareable-fact index and advertises eligible facts by
 //! emitting deterministic `sync_have_id` facts plus transport send intents.
 
+use crate::core::effects::PipelineEffects;
 use crate::core::{
     facts::{Fact, FactId},
     intents::{
-        HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, Intent,
-        IntentHandler, IntentKind,
+        HandlerContext, HandlerError, HandlerFactId, HandlerResult, Intent, IntentHandler,
+        IntentKind,
     },
     store::Store,
 };
@@ -93,7 +94,7 @@ pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId
 }
 
 pub fn advertise_indexed_fact_to_connections(store: &Store, fact: &Fact) -> HandlerResult {
-    let mut output = HandlerOutput::new();
+    let mut output = PipelineEffects::new();
     for connection_id in sync::shared_fact::connection_ids_for_shareable_fact(store, fact.id)? {
         output = append_have_advertisement(output, connection_id, fact)?;
     }
@@ -101,7 +102,7 @@ pub fn advertise_indexed_fact_to_connections(store: &Store, fact: &Fact) -> Hand
 }
 
 fn advertise_facts_on_connection(connection_id: FactId, facts: Vec<Fact>) -> HandlerResult {
-    let mut output = HandlerOutput::new();
+    let mut output = PipelineEffects::new();
     for fact in facts {
         output = append_have_advertisement(output, connection_id, &fact)?;
     }
@@ -109,7 +110,7 @@ fn advertise_facts_on_connection(connection_id: FactId, facts: Vec<Fact>) -> Han
 }
 
 fn append_have_advertisement(
-    output: HandlerOutput,
+    output: PipelineEffects,
     connection_id: FactId,
     fact: &Fact,
 ) -> HandlerResult {

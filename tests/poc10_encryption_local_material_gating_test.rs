@@ -21,7 +21,7 @@ fn local_key_secret_waits_for_frontier_then_offers_root_material() {
     let waiting = projector
         .project(&root, &ProjectionContext::default())
         .expect("missing frontier waits");
-    assert!(waiting.intents.is_empty());
+    assert!(waiting.effects.intents.is_empty());
     assert!(waiting.offers.is_empty());
     assert_eq!(waiting.needs.len(), 1);
     assert_eq!(waiting.needs[0].role, encryption_context::frontier_role());
@@ -58,7 +58,7 @@ fn local_history_node_waits_for_frontier_source_and_tombstone_context() {
     let waiting = projector
         .project(&node, &ProjectionContext::default())
         .expect("missing context waits");
-    assert!(waiting.intents.is_empty());
+    assert!(waiting.effects.intents.is_empty());
     assert!(waiting.offers.is_empty());
     assert_eq!(waiting.needs.len(), 2);
 
@@ -91,7 +91,7 @@ fn local_history_node_waits_for_frontier_source_and_tombstone_context() {
             ]),
         )
         .expect("missing tombstone waits");
-    assert!(waiting_for_tombstone.intents.is_empty());
+    assert!(waiting_for_tombstone.effects.intents.is_empty());
     assert!(waiting_for_tombstone
         .needs
         .iter()

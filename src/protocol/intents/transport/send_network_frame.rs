@@ -17,6 +17,7 @@
 //! frame bytes that the runtime should push onto that connection's socket.
 //! Payload bytes remain opaque to this handler.
 
+use crate::core::effects::PipelineEffects;
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::intents::payload::{PayloadError, PayloadReader, PayloadWriter};
 
@@ -88,8 +89,7 @@ fn payload_error(err: PayloadError) -> String {
 }
 
 use crate::core::intents::{
-    retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult,
-    IntentHandler,
+    retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::facts::{connection, identity::endpoint};
@@ -121,7 +121,7 @@ impl IntentHandler for SendNetworkFrameHandler {
             OutboundFrame { bytes: input.frame },
         )
         .map_err(|err| retry_intent(format!("send_network_frame tcp send: {err}")))?;
-        Ok(HandlerOutput::new())
+        Ok(PipelineEffects::new())
     }
 }
 

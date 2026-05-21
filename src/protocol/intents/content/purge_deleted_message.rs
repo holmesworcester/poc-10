@@ -1,8 +1,7 @@
 //! Handler and deferred intent layout for message-deletion purges.
 
-use crate::core::intents::{
-    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
-};
+use crate::core::effects::PipelineEffects;
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::content::{message::retention, message_deletion};
 
@@ -121,19 +120,19 @@ impl IntentHandler for PurgeDeletedMessageHandler {
         let message = retention::decode_message_fact(target)?;
         let deletion = message_deletion::decode_any_fact(reason)?;
         if message.workspace_id != input.workspace_id {
-            return Ok(HandlerOutput::new());
+            return Ok(PipelineEffects::new());
         }
         if deletion.workspace_id != input.workspace_id {
-            return Ok(HandlerOutput::new());
+            return Ok(PipelineEffects::new());
         }
         if deletion.target_message_id != input.target_id {
-            return Ok(HandlerOutput::new());
+            return Ok(PipelineEffects::new());
         }
         if deletion.author_user_id != message.author_user_id {
-            return Ok(HandlerOutput::new());
+            return Ok(PipelineEffects::new());
         }
 
-        Ok(HandlerOutput::new().purge_fact(input.target_id))
+        Ok(PipelineEffects::new().purge_fact(input.target_id))
     }
 }
 

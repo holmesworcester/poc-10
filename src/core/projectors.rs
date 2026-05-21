@@ -1,6 +1,7 @@
 //! Projector contract for fact plus context to needs, offers, and intents.
 
 use crate::core::context::{ContextNeed, ContextOffer, ContextSet};
+use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, RowMutation};
 use std::collections::BTreeMap;
@@ -244,9 +245,7 @@ pub struct ProjectionOutput {
     pub needs: Vec<ContextNeed>,
     pub offers: Vec<ContextOffer>,
     pub time_wakes: Vec<TimeWake>,
-    pub row_mutations: Vec<RowMutation>,
-    pub intents: Vec<Intent>,
-    pub local_intents: Vec<Intent>,
+    pub effects: PipelineEffects,
 }
 
 impl ProjectionOutput {
@@ -270,17 +269,17 @@ impl ProjectionOutput {
     }
 
     pub fn row_mutation(mut self, mutation: RowMutation) -> Self {
-        self.row_mutations.push(mutation);
+        self.effects.row_mutations.push(mutation);
         self
     }
 
     pub fn intent(mut self, intent: Intent) -> Self {
-        self.intents.push(intent);
+        self.effects.intents.push(intent);
         self
     }
 
     pub fn local_intent(mut self, intent: Intent) -> Self {
-        self.local_intents.push(intent);
+        self.effects.local_intents.push(intent);
         self
     }
 
@@ -419,7 +418,7 @@ mod tests {
 
         assert_eq!(output.needs.len(), 1);
         assert_eq!(output.offers.len(), 1);
-        assert!(output.intents.is_empty());
+        assert!(output.effects.intents.is_empty());
     }
 
     #[test]

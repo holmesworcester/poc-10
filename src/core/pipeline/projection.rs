@@ -1,5 +1,6 @@
 //! Pending fact projection orchestration.
 
+use super::effects::validate_pipeline_effects;
 use super::projection_commit::{commit_projection_effects, ProjectionCommit, ProjectionEffects};
 use super::projection_queue::{load_pending_fact, pending_owner_batch, PendingFact};
 use super::projection_run::{run_projection_with_context, ProjectionRun};
@@ -89,7 +90,7 @@ fn prepare_projection_effects(
         projection_context,
     } = pending_fact;
     let run = run_projection_with_context(projector, &fact, &previous_context, projection_context)?;
-    run.pipeline.validate(allowed_tables)?;
+    validate_pipeline_effects(&run.pipeline, allowed_tables)?;
     Ok(projection_effects_from_run(fact_id, run))
 }
 

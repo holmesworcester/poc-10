@@ -4,9 +4,8 @@
 //! due. The handler revalidates the message's embedded expiry stamp before
 //! purging the fact.
 
-use crate::core::intents::{
-    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
-};
+use crate::core::effects::PipelineEffects;
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::content::message::retention;
 
@@ -102,6 +101,6 @@ impl IntentHandler for PurgeExpiredMessageHandler {
                 "delete expired message rows",
             )?;
         }
-        Ok(HandlerOutput::new().purge_fact(input.target_id))
+        Ok(PipelineEffects::new().purge_fact(input.target_id))
     }
 }

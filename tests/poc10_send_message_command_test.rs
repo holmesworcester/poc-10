@@ -119,12 +119,16 @@ fn send_message_happy_path_emits_one_content_message_fact() {
 
     assert_eq!(output.receipt.workspace_id, workspace_id);
     assert_eq!(output.receipt.created_at_ms, 60_000);
-    assert_eq!(output.facts.len(), 1, "one fact per send_message");
-    assert!(output.intents.is_empty(), "no intents in the first cut");
+    assert_eq!(output.effects.facts.len(), 1, "one fact per send_message");
+    assert!(
+        output.effects.intents.is_empty(),
+        "no intents in the first cut"
+    );
 
     // The fact id is the blake3 of the signed envelope bytes. Peel the
     // envelope to recover the inner content-message payload before decoding.
-    let envelope = decode_signed_fact(&output.facts[0].bytes).expect("decode signed envelope");
+    let envelope =
+        decode_signed_fact(&output.effects.facts[0].bytes).expect("decode signed envelope");
     assert_eq!(envelope.inner_type, TYPE_CONTENT_MESSAGE);
     let message = decode_fact(&envelope.payload).expect("decode inner content message");
     assert_eq!(message.workspace_id, workspace_id);
@@ -158,7 +162,8 @@ fn send_message_fact_round_trips_through_decode_content_message() {
     let text = "round-trip me through decode_fact";
     let output = send_message(&ctx, workspace_id, text).expect("send_message");
 
-    let envelope = decode_signed_fact(&output.facts[0].bytes).expect("decode signed envelope");
+    let envelope =
+        decode_signed_fact(&output.effects.facts[0].bytes).expect("decode signed envelope");
     assert_eq!(envelope.inner_type, TYPE_CONTENT_MESSAGE);
     let message = decode_fact(&envelope.payload).expect("decode inner content message");
 

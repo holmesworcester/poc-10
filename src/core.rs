@@ -13,6 +13,7 @@ pub mod command_context;
 pub mod context;
 pub mod crypto;
 pub mod daemon;
+pub mod effects;
 pub(crate) mod fact_store;
 pub mod facts;
 pub mod intents;

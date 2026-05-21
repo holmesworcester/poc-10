@@ -182,7 +182,7 @@ pub fn send_file(
         created_at_ms,
         file::layout::encode_fact(&descriptor)?,
     );
-    let mut facts = message_output.facts;
+    let mut facts = message_output.effects.facts;
     facts.push(descriptor_fact.clone());
     for (slice_index, chunk) in payload.chunks(FILE_SLICE_BYTES).enumerate() {
         let slice = file_slice::fact::ContentFileSliceFact {

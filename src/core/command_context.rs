@@ -25,7 +25,9 @@
 //! `CommandContext` with a hand-built vault; production code wires identity's
 //! own vault implementation.
 
-use crate::core::facts::FactId;
+use crate::core::effects::PipelineEffects;
+use crate::core::facts::{Fact, FactId};
+use crate::core::intents::Intent;
 use crate::core::store::Store;
 
 pub type WorkspaceId = FactId;
@@ -160,34 +162,34 @@ impl<'a> CommandContext<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput<T> {
     pub receipt: T,
-    pub facts: Vec<crate::core::facts::Fact>,
-    pub intents: Vec<crate::core::intents::Intent>,
-    pub local_intents: Vec<crate::core::intents::Intent>,
+    pub effects: PipelineEffects,
 }
 
 impl<T> CommandOutput<T> {
     pub fn new(receipt: T) -> Self {
         Self {
             receipt,
-            facts: Vec::new(),
-            intents: Vec::new(),
-            local_intents: Vec::new(),
+            effects: PipelineEffects::new(),
         }
     }
 
-    pub fn with_facts(mut self, facts: Vec<crate::core::facts::Fact>) -> Self {
-        self.facts = facts;
+    pub fn with_facts(mut self, facts: Vec<Fact>) -> Self {
+        self.effects.facts = facts;
         self
     }
 
-    pub fn with_intents(mut self, intents: Vec<crate::core::intents::Intent>) -> Self {
-        self.intents = intents;
+    pub fn with_intents(mut self, intents: Vec<Intent>) -> Self {
+        self.effects.intents = intents;
         self
     }
 
-    pub fn with_local_intents(mut self, intents: Vec<crate::core::intents::Intent>) -> Self {
-        self.local_intents = intents;
+    pub fn with_local_intents(mut self, intents: Vec<Intent>) -> Self {
+        self.effects.local_intents = intents;
         self
+    }
+
+    pub fn into_parts(self) -> (T, PipelineEffects) {
+        (self.receipt, self.effects)
     }
 }
 

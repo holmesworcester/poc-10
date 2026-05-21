@@ -273,7 +273,7 @@ impl Runtime {
     }
 
     pub fn submit_command_output<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
-        let (receipt, effects) = pipeline::PipelineEffects::from_command_output(output);
+        let (receipt, effects) = output.into_parts();
         pipeline::commit_pipeline_effects_to_store(
             &self.store,
             &effects,

@@ -7,7 +7,7 @@
 //! - `fact_context`: wake due facts and run the fact/context fixed-point loop.
 //! - `projection`: claim one pending fact and commit projection effects.
 //! - `dispatch`: claim one intent and commit handler intent output.
-//! - `effects`: shared pipeline side effects and commit helpers.
+//! - `effects`: validation and SQL commit helpers for shared core effects.
 
 mod admission;
 #[cfg(test)]
@@ -39,6 +39,5 @@ pub(crate) use dispatch::{
     submit_local_intent_to_store,
 };
 pub(crate) use effects::commit_pipeline_effects_to_store;
-pub use effects::PipelineEffects;
 pub(crate) use fact_context::{drain_pending_projection, process_due_time_range};
 pub(crate) use report::PipelineReport;

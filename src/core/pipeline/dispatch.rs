@@ -1,12 +1,13 @@
+use crate::core::effects::PipelineEffects;
 use crate::core::fact_store::persisted_fact;
-use crate::core::intents::{
-    HandlerContext, HandlerError, HandlerOutput, Intent, IntentHandler, IntentKind,
-};
+use crate::core::intents::{HandlerContext, HandlerError, Intent, IntentHandler, IntentKind};
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::{Store, TableName};
 use rusqlite::{params, OptionalExtension};
 
-use super::effects::{commit_pipeline_effects_in_tx, PipelineEffectCounts, PipelineEffects};
+use super::effects::{
+    commit_pipeline_effects_in_tx, validate_pipeline_effects, PipelineEffectCounts,
+};
 use super::intent_queue::record_intent_in_table_in_tx;
 
 // === Intent dispatch ===
@@ -161,7 +162,7 @@ fn run_handler(
     intent: &Intent,
     context: &HandlerContext<'_>,
     report: &mut DispatchReport,
-) -> Result<Option<HandlerOutput>, String> {
+) -> Result<Option<PipelineEffects>, String> {
     match handler.handle(intent, context) {
         Ok(output) => Ok(Some(output)),
         Err(err) => {
@@ -176,11 +177,10 @@ fn run_handler(
 }
 
 fn prepare_handler_output(
-    output: HandlerOutput,
+    effects: PipelineEffects,
     allowed_tables: &[TableName],
 ) -> Result<PipelineEffects, String> {
-    let effects = PipelineEffects::from(output);
-    effects.validate(allowed_tables)?;
+    validate_pipeline_effects(&effects, allowed_tables)?;
     Ok(effects)
 }
 

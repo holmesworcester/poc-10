@@ -453,6 +453,7 @@ mod projector_tests {
     macro_rules! put_row {
         ($output:expr, $table:expr) => {
             $output
+                .effects
                 .row_mutations
                 .iter()
                 .find_map(|mutation| match mutation {
@@ -465,6 +466,7 @@ mod projector_tests {
     macro_rules! put_delete {
         ($output:expr, $table:expr) => {
             $output
+                .effects
                 .row_mutations
                 .iter()
                 .find_map(|mutation| match mutation {
@@ -504,8 +506,8 @@ mod projector_tests {
             .offers
             .iter()
             .any(|offer| offer.role == message_context::message_role()));
-        assert_eq!(output.intents.len(), 1);
-        assert_eq!(output.row_mutations.len(), 2);
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(output.effects.row_mutations.len(), 2);
 
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
         assert_eq!(
@@ -551,7 +553,7 @@ mod projector_tests {
 
         assert_eq!(output.offers.len(), 0);
         assert_eq!(output.needs.len(), 4);
-        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.effects.intents.len(), 1);
         assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
         assert!(output
             .needs
@@ -590,7 +592,7 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 4);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, message_context::message_meta_role());
-        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.effects.intents.len(), 1);
         assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
         assert!(put_row!(output, rows::OPENED_MESSAGE_ROWS).is_none());
     }

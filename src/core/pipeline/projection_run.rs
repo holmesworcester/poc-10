@@ -1,7 +1,7 @@
 //! Pure projector execution for one fact.
 
-use super::effects::PipelineEffects;
 use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
+use crate::core::effects::PipelineEffects;
 use crate::core::facts::Fact;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput, Projector, TimeWake};
 
@@ -33,18 +33,16 @@ pub(super) fn run_projection_with_context(
         context,
         context_delta,
         time_wakes: output.time_wakes,
-        pipeline: PipelineEffects {
-            row_mutations: output.row_mutations,
-            durable_intents: output.intents,
-            local_intents: output.local_intents,
-            ..PipelineEffects::default()
-        },
+        pipeline: output.effects,
     })
 }
 
 /// Reject any projected need, offer, or time wake whose `owner` is not the fact
 /// being projected.
 fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
+    if !output.effects.facts.is_empty() || !output.effects.purged_facts.is_empty() {
+        return Err("projector output cannot emit or purge facts".to_string());
+    }
     for need in &output.needs {
         if need.owner != fact.id {
             return Err(format!(

@@ -1,9 +1,6 @@
-use crate::core::command_context::CommandOutput;
+use crate::core::effects::PipelineEffects;
 use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
-use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{
-    HandlerOutput, Intent, RowMutation, TableDelete, TableDeleteWhere, TableInsert,
-};
+use crate::core::intents::{Intent, RowMutation, TableDelete, TableDeleteWhere, TableInsert};
 use crate::core::schema::LOCAL_INTENTS;
 use crate::core::select::Value as SqlValue;
 use crate::core::store::{Store, TableName, TableRow};
@@ -12,93 +9,27 @@ use std::collections::BTreeMap;
 
 use super::intent_queue::{record_intent_in_table_in_tx, record_intent_in_tx};
 
-/// Durable effects produced by one pipeline step.
-///
-/// Projection, intent handlers, and command submission all eventually reduce to
-/// this shape: admit facts, purge facts, mutate protocol-owned row tables, and
-/// enqueue durable or restart-local intents.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PipelineEffects {
-    pub facts: Vec<Fact>,
-    pub purged_facts: Vec<FactId>,
-    pub row_mutations: Vec<RowMutation>,
-    pub durable_intents: Vec<Intent>,
-    pub local_intents: Vec<Intent>,
-}
-
-impl PipelineEffects {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn fact(mut self, fact: Fact) -> Self {
-        self.facts.push(fact);
-        self
-    }
-
-    pub fn purge_fact(mut self, id: FactId) -> Self {
-        self.purged_facts.push(id);
-        self
-    }
-
-    pub fn row_mutation(mut self, mutation: RowMutation) -> Self {
-        self.row_mutations.push(mutation);
-        self
-    }
-
-    pub fn intent(mut self, intent: Intent) -> Self {
-        self.durable_intents.push(intent);
-        self
-    }
-
-    pub fn local_intent(mut self, intent: Intent) -> Self {
-        self.local_intents.push(intent);
-        self
-    }
-
-    pub(crate) fn from_command_output<T>(output: CommandOutput<T>) -> (T, Self) {
-        (
-            output.receipt,
-            Self {
-                facts: output.facts,
-                durable_intents: output.intents,
-                local_intents: output.local_intents,
-                ..Self::default()
-            },
-        )
-    }
-
-    pub(crate) fn validate(&self, allowed_tables: &[TableName]) -> Result<(), String> {
-        validate_intents(&self.durable_intents)?;
-        validate_intents(&self.local_intents)?;
-        validate_row_mutations(&self.row_mutations, allowed_tables)?;
-        Ok(())
-    }
-}
-
-impl From<HandlerOutput> for PipelineEffects {
-    fn from(output: HandlerOutput) -> Self {
-        Self {
-            facts: output.facts,
-            purged_facts: output.purged_facts,
-            row_mutations: output.row_mutations,
-            durable_intents: output.intents,
-            local_intents: output.local_intents,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PipelineEffectCounts {
     pub facts: usize,
-    pub durable_intents: usize,
+    pub intents: usize,
     pub local_intents: usize,
 }
 
 impl PipelineEffectCounts {
     pub(crate) fn intents(self) -> usize {
-        self.durable_intents + self.local_intents
+        self.intents + self.local_intents
     }
+}
+
+pub(crate) fn validate_pipeline_effects(
+    effects: &PipelineEffects,
+    allowed_tables: &[TableName],
+) -> Result<(), String> {
+    validate_intents(&effects.intents)?;
+    validate_intents(&effects.local_intents)?;
+    validate_row_mutations(&effects.row_mutations, allowed_tables)?;
+    Ok(())
 }
 
 /// Validate that a batch can be written to a single intent queue.
@@ -189,7 +120,7 @@ pub(crate) fn commit_pipeline_effects_to_store(
     allowed_tables: &[TableName],
     label: &str,
 ) -> Result<PipelineEffectCounts, String> {
-    effects.validate(allowed_tables)?;
+    validate_pipeline_effects(effects, allowed_tables)?;
     store
         .write_transaction(|tx| commit_pipeline_effects_in_tx(tx, effects, allowed_tables))
         .map_err(|err| format!("{label}: {err}"))
@@ -229,10 +160,10 @@ pub(crate) fn commit_pipeline_effects_in_tx(
         }
     }
 
-    let mut durable_intents = 0usize;
-    for intent in &effects.durable_intents {
+    let mut intents = 0usize;
+    for intent in &effects.intents {
         if record_intent_in_tx(tx, intent)? {
-            durable_intents += 1;
+            intents += 1;
         }
     }
 
@@ -245,7 +176,7 @@ pub(crate) fn commit_pipeline_effects_in_tx(
 
     Ok(PipelineEffectCounts {
         facts,
-        durable_intents,
+        intents,
         local_intents,
     })
 }

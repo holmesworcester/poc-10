@@ -218,7 +218,7 @@ mod projector_tests {
         let waiting = projector
             .project(&fact, &ProjectionContext::default())
             .expect("missing authority waits");
-        assert!(waiting.intents.is_empty());
+        assert!(waiting.effects.intents.is_empty());
         assert_eq!(waiting.needs.len(), 1);
 
         let projected = projector
@@ -229,15 +229,15 @@ mod projector_tests {
                 )]),
             )
             .expect("project setting");
-        assert_eq!(projected.intents.len(), 1);
-        assert_eq!(projected.row_mutations.len(), 1);
+        assert_eq!(projected.effects.intents.len(), 1);
+        assert_eq!(projected.effects.row_mutations.len(), 1);
         assert!(projected
             .offers
             .iter()
             .any(|offer| offer.role == sync_matchers::exact_fact_role()));
-        assert_share_intent(&projected.intents, setting.workspace_id, fact.id);
+        assert_share_intent(&projected.effects.intents, setting.workspace_id, fact.id);
 
-        let row = decode_single_put_row(&projected.row_mutations[0]);
+        let row = decode_single_put_row(&projected.effects.row_mutations[0]);
         assert_eq!(row.workspace_id, setting.workspace_id);
         assert_eq!(row.setting_id, fact.id);
         assert_eq!(row.scope_kind, SCOPE_KIND_WORKSPACE);
@@ -277,7 +277,7 @@ mod projector_tests {
                 )]),
             )
             .expect("missing previous waits");
-        assert!(waiting.intents.is_empty());
+        assert!(waiting.effects.intents.is_empty());
         assert_eq!(waiting.needs.len(), 2);
 
         let projected = projector
@@ -289,8 +289,8 @@ mod projector_tests {
                 ]),
             )
             .expect("matched previous projects");
-        assert_share_intent(&projected.intents, setting.workspace_id, fact.id);
-        let row = decode_single_put_row(&projected.row_mutations[0]);
+        assert_share_intent(&projected.effects.intents, setting.workspace_id, fact.id);
+        let row = decode_single_put_row(&projected.effects.row_mutations[0]);
         assert_eq!(row.scope_kind, SCOPE_KIND_CHANNEL);
         assert_eq!(row.scope_id, [9; 32]);
         assert_eq!(row.supersedes_setting_id, Some(previous_fact.id));

@@ -56,7 +56,7 @@ fn projection_run_diffs_standing_context_without_self_waking() {
     let second = run_projection(&projector, &fact, &first.context, Vec::new()).expect("second run");
     assert!(second.context_delta.is_empty());
     assert_eq!(second.context, first.context);
-    assert!(second.pipeline.durable_intents.is_empty());
+    assert!(second.pipeline.intents.is_empty());
 }
 
 #[test]
@@ -85,8 +85,8 @@ fn projection_run_replaces_need_with_intent_when_context_appears() {
     assert!(next.context.needs.is_empty());
     assert_eq!(next.context_delta.removed_needs, previous.needs);
     assert_eq!(next.context_delta.added_needs.len(), 0);
-    assert_eq!(next.pipeline.durable_intents.len(), 1);
-    assert_eq!(next.pipeline.durable_intents[0].kind.as_str(), "followup");
+    assert_eq!(next.pipeline.intents.len(), 1);
+    assert_eq!(next.pipeline.intents[0].kind.as_str(), "followup");
 }
 
 fn run_projection(

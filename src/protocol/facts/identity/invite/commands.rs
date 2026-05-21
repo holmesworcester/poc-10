@@ -117,7 +117,7 @@ pub fn create(
             (
                 user_invite.receipt.user_invite_id,
                 workspace_id,
-                user_invite.facts,
+                user_invite.effects.facts,
             )
         }
         None => (
@@ -139,7 +139,7 @@ pub fn create(
         super::layout::encode_fact(&invite_secret)?,
     );
     facts.push(invite_secret_fact.clone());
-    facts.splice(0..0, endpoint_output.facts);
+    facts.splice(0..0, endpoint_output.effects.facts);
 
     let link = format_invite(Invite {
         endpoint: local.endpoint,
@@ -211,7 +211,7 @@ pub fn create_device_link(
         input.created_at_ms.saturating_add(2),
         super::layout::encode_fact(&invite_secret)?,
     );
-    let mut facts = endpoint_output.facts;
+    let mut facts = endpoint_output.effects.facts;
     facts.push(device_invite_fact.clone());
     facts.push(invite_secret_fact.clone());
 
@@ -271,7 +271,7 @@ pub fn create_invite_server(
         input.created_at_ms.saturating_add(2),
         super::layout::encode_fact(&invite_secret)?,
     );
-    let mut facts = endpoint_output.facts;
+    let mut facts = endpoint_output.effects.facts;
     facts.push(invite_server_fact.clone());
     facts.push(invite_secret_fact.clone());
 
@@ -359,8 +359,8 @@ pub fn accept(
             to_listen_addr: Some(input.invite.addr),
         },
     )?;
-    let mut facts = endpoint_output.facts;
-    facts.extend(request.facts);
+    let mut facts = endpoint_output.effects.facts;
+    facts.extend(request.effects.facts);
 
     let mut user_id = None;
     if input.invite.identity_scope {
@@ -386,7 +386,7 @@ pub fn accept(
                 username,
             })?;
         user_id = Some(user.receipt.user_id);
-        facts.extend(user.facts);
+        facts.extend(user.effects.facts);
 
         let device_invite = workspace_accept_device_invite_fact(
             input.created_at_ms.saturating_add(5),
@@ -417,7 +417,7 @@ pub fn accept(
                 invite_fact_id: input.invite.invite_fact_id,
             },
         )?;
-        facts.extend(accepted.facts);
+        facts.extend(accepted.effects.facts);
     }
 
     Ok(CommandOutput::new(AcceptInviteReceipt {
@@ -509,10 +509,10 @@ pub fn accept_device_link(
             invite_fact_id: input.invite.invite_fact_id,
         },
     )?;
-    let mut facts = endpoint_output.facts;
-    facts.extend(request.facts);
+    let mut facts = endpoint_output.effects.facts;
+    facts.extend(request.effects.facts);
     facts.push(endpoint_shared.clone());
-    facts.extend(accepted.facts);
+    facts.extend(accepted.effects.facts);
 
     Ok(CommandOutput::new(AcceptInviteReceipt {
         connected_addr: input.invite.addr,
@@ -580,10 +580,10 @@ pub fn accept_invite_server(
             invite_fact_id: input.invite.invite_fact_id,
         },
     )?;
-    let mut facts = endpoint_output.facts;
-    facts.extend(request.facts);
+    let mut facts = endpoint_output.effects.facts;
+    facts.extend(request.effects.facts);
     facts.push(endpoint_shared.clone());
-    facts.extend(accepted.facts);
+    facts.extend(accepted.effects.facts);
 
     Ok(CommandOutput::new(AcceptInviteReceipt {
         connected_addr: input.invite.addr,

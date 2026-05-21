@@ -174,7 +174,7 @@ mod projector_tests {
         let waiting = projector
             .project(&fact, &ProjectionContext::default())
             .expect("missing context waits");
-        assert!(waiting.intents.is_empty());
+        assert!(waiting.effects.intents.is_empty());
         assert_eq!(waiting.needs.len(), 3);
 
         let context = ProjectionContext::from_matches(vec![
@@ -220,12 +220,12 @@ mod projector_tests {
         let projected = projector
             .project(&fact, &context)
             .expect("matched context projects");
-        assert_eq!(projected.intents.len(), 1);
-        assert_eq!(projected.row_mutations.len(), 1);
+        assert_eq!(projected.effects.intents.len(), 1);
+        assert_eq!(projected.effects.row_mutations.len(), 1);
         assert_eq!(projected.offers.len(), 1);
-        assert_share_intent(&projected.intents, frontier.workspace_id, fact.id);
+        assert_share_intent(&projected.effects.intents, frontier.workspace_id, fact.id);
 
-        let row = decode_single_put_row(&projected.row_mutations[0]);
+        let row = decode_single_put_row(&projected.effects.row_mutations[0]);
         assert_eq!(row.workspace_id, [1; 32]);
         assert_eq!(row.removal_frontier_id, fact.id);
         assert_eq!(row.created_at_ms, 1234);

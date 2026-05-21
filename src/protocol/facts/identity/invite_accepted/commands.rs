@@ -85,11 +85,18 @@ mod tests {
         })
         .expect("accept");
 
-        assert_eq!(output.facts.len(), 2);
-        assert_eq!(output.receipt.invite_secret_fact_id, output.facts[0].id);
-        assert_eq!(output.receipt.invite_accepted_fact_id, output.facts[1].id);
+        assert_eq!(output.effects.facts.len(), 2);
+        assert_eq!(
+            output.receipt.invite_secret_fact_id,
+            output.effects.facts[0].id
+        );
+        assert_eq!(
+            output.receipt.invite_accepted_fact_id,
+            output.effects.facts[1].id
+        );
 
-        let secret = invite_layout::decode_fact(&output.facts[0].bytes).expect("decode secret");
+        let secret =
+            invite_layout::decode_fact(&output.effects.facts[0].bytes).expect("decode secret");
         assert_eq!(secret.workspace_id, Some([1; 32]));
         assert_eq!(secret.invite_fact_id, Some([2; 32]));
     }

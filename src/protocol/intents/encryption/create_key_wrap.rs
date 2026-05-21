@@ -6,10 +6,9 @@
 // decision upstream prevents this handler from becoming a second, divergent
 // policy engine.
 
+use crate::core::effects::PipelineEffects;
 use crate::core::intents::Intent;
-use crate::core::intents::{
-    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
-};
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::protocol::facts::encryption::{create, intent};
 
 #[derive(Debug, Clone, Default)]
@@ -39,6 +38,6 @@ impl IntentHandler for CreateKeyWrapHandler {
         let source = context.require_fact(&input.source_fact_id)?;
         let signer_secret = context.require_fact(&input.signer_secret_fact_id)?;
         let wrap = create::create_signed_key_wrap_fact(&input, recipient, source, signer_secret)?;
-        Ok(HandlerOutput::new().fact(wrap))
+        Ok(PipelineEffects::new().fact(wrap))
     }
 }

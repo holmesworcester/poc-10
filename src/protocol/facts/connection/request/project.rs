@@ -416,7 +416,7 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project waits");
 
-        assert!(output.intents.is_empty());
+        assert!(output.effects.intents.is_empty());
         assert_eq!(output.needs.len(), 2);
         assert!(
             output
@@ -437,7 +437,7 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project waits");
 
-        assert!(output.intents.is_empty());
+        assert!(output.effects.intents.is_empty());
         assert_eq!(output.needs.len(), 2);
         assert!(output
             .needs
@@ -458,14 +458,14 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project request");
 
-        assert!(output.intents.is_empty());
-        assert_eq!(output.row_mutations.len(), 1);
+        assert!(output.effects.intents.is_empty());
+        assert_eq!(output.effects.row_mutations.len(), 1);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(
             output.offers[0].role.as_str(),
             request_matchers::CONNECTION_REQUEST_ROLE
         );
-        let RowMutation::PutRow(row) = &output.row_mutations[0] else {
+        let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
         };
         let row = rows::decode_connection_request_row(&row.key, &row.value)
@@ -493,13 +493,14 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project received request");
 
-        assert_eq!(output.intents.len(), 1);
-        assert_eq!(output.row_mutations.len(), 1);
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(output.effects.row_mutations.len(), 1);
         assert_eq!(
             output.offers[0].role.as_str(),
             request_matchers::CONNECTION_REQUEST_ROLE
         );
         let response_intent = output
+            .effects
             .intents
             .iter()
             .find(|intent| intent.kind.as_str() == CREATE_CONNECTION_RESPONSE)
@@ -524,6 +525,7 @@ mod projector_tests {
             .expect("project received request");
 
         let response_intents = output
+            .effects
             .intents
             .iter()
             .filter(|intent| intent.kind.as_str() == CREATE_CONNECTION_RESPONSE)

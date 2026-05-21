@@ -209,7 +209,7 @@ mod projector_tests {
         let waiting = projector
             .project(&fact, &ProjectionContext::default())
             .expect("missing context waits");
-        assert!(waiting.intents.is_empty());
+        assert!(waiting.effects.intents.is_empty());
         assert_eq!(waiting.needs.len(), 2);
 
         let projected = projector
@@ -221,14 +221,14 @@ mod projector_tests {
                 ]),
             )
             .expect("matched context projects history node");
-        assert!(projected.intents.is_empty());
-        assert_eq!(projected.row_mutations.len(), 1);
+        assert!(projected.effects.intents.is_empty());
+        assert_eq!(projected.effects.row_mutations.len(), 1);
         assert!(projected
             .offers
             .iter()
             .any(|offer| offer.role == matchers::source_secret_role()));
 
-        let row = decode_single_put_row(&projected.row_mutations[0]);
+        let row = decode_single_put_row(&projected.effects.row_mutations[0]);
         assert_eq!(row.workspace_id, [1; 32]);
         assert_eq!(row.removal_frontier_id, node.removal_frontier_id);
         assert_eq!(row.local_history_node_secret_id, fact.id);
@@ -278,7 +278,7 @@ mod projector_tests {
             )
             .expect("project leaf");
 
-        let row = decode_single_put_row(&projected.row_mutations[0]);
+        let row = decode_single_put_row(&projected.effects.row_mutations[0]);
         assert_eq!(row.bit_depth, TRIE_LEAF_BIT_DEPTH);
         assert_eq!(row.fact_id_prefix, [9; 32]);
         assert_eq!(row.node_secret, [7; NODE_SECRET_BYTES]);
@@ -313,7 +313,7 @@ mod projector_tests {
             )
             .expect("missing tombstone waits");
 
-        assert!(waiting.intents.is_empty());
+        assert!(waiting.effects.intents.is_empty());
         assert!(waiting
             .needs
             .iter()

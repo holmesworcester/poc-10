@@ -1,8 +1,7 @@
 //! Send sync compare response facts for one inbound compare fact.
 
-use crate::core::intents::{
-    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
-};
+use crate::core::effects::PipelineEffects;
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::intents::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -79,7 +78,7 @@ impl IntentHandler for SendSyncCompareResponseHandler {
             )?,
             Err(_) => context.facts().cloned().collect(),
         };
-        let mut output = HandlerOutput::new();
+        let mut output = PipelineEffects::new();
         let response_facts = crate::protocol::facts::sync::compare::create::response_facts(
             compare_fact,
             available_facts.iter(),

@@ -269,50 +269,31 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
         needs,
         offers,
         time_wakes,
-        row_mutations,
-        intents,
-        local_intents,
+        effects,
     } = topo::core::projectors::ProjectionOutput::default();
 
     assert!(needs.is_empty());
     assert!(offers.is_empty());
     assert!(time_wakes.is_empty());
-    assert!(row_mutations.is_empty());
-    assert!(intents.is_empty());
-    assert!(local_intents.is_empty());
+    assert!(effects.row_mutations.is_empty());
+    assert!(effects.intents.is_empty());
+    assert!(effects.local_intents.is_empty());
 }
 
 #[test]
-fn poc10_handler_output_contract_emits_facts_purges_rows_and_intents() {
-    let topo::core::intents::HandlerOutput {
+fn poc10_pipeline_effects_names_the_common_commit_shape() {
+    let topo::core::effects::PipelineEffects {
         facts,
         purged_facts,
         row_mutations,
         intents,
         local_intents,
-    } = topo::core::intents::HandlerOutput::default();
+    } = topo::core::effects::PipelineEffects::new();
 
     assert!(facts.is_empty());
     assert!(purged_facts.is_empty());
     assert!(row_mutations.is_empty());
     assert!(intents.is_empty());
-    assert!(local_intents.is_empty());
-}
-
-#[test]
-fn poc10_pipeline_effects_names_the_common_commit_shape() {
-    let topo::core::pipeline::PipelineEffects {
-        facts,
-        purged_facts,
-        row_mutations,
-        durable_intents,
-        local_intents,
-    } = topo::core::pipeline::PipelineEffects::new();
-
-    assert!(facts.is_empty());
-    assert!(purged_facts.is_empty());
-    assert!(row_mutations.is_empty());
-    assert!(durable_intents.is_empty());
     assert!(local_intents.is_empty());
 }
 
@@ -637,7 +618,7 @@ fn poc10_target_projectors_do_not_write_store_rows_directly() {
 
     assert!(
         offenders.is_empty(),
-        "poc-10 target projectors must not write store rows directly; emit RowMutation values through ProjectionOutput::row_mutations instead:\n{}",
+        "poc-10 target projectors must not write store rows directly; emit RowMutation values through ProjectionOutput::effects instead:\n{}",
         offenders.join("\n")
     );
 }

@@ -75,11 +75,11 @@ mod tests {
         let output = local_or_create(&store, 10).expect("create endpoint");
 
         assert!(output.receipt.created);
-        assert_eq!(output.facts.len(), 1);
-        assert_eq!(output.facts[0].scope, FactScope::Local);
-        assert_eq!(output.facts[0].timestamp, 10);
+        assert_eq!(output.effects.facts.len(), 1);
+        assert_eq!(output.effects.facts[0].scope, FactScope::Local);
+        assert_eq!(output.effects.facts[0].timestamp, 10);
         assert_eq!(
-            layout::decode_fact(&output.facts[0].bytes).expect("decode"),
+            layout::decode_fact(&output.effects.facts[0].bytes).expect("decode"),
             output.receipt.endpoint
         );
     }
@@ -96,7 +96,7 @@ mod tests {
         let output = local_or_create(&store, 20).expect("reuse endpoint");
 
         assert!(!output.receipt.created);
-        assert!(output.facts.is_empty());
+        assert!(output.effects.facts.is_empty());
         assert_eq!(output.receipt.endpoint, endpoint);
     }
 }

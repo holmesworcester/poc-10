@@ -1,9 +1,8 @@
 // Handler for retired local recipient key material.
 
+use crate::core::effects::PipelineEffects;
 use crate::core::intents::Intent;
-use crate::core::intents::{
-    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
-};
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::protocol::facts::encryption::{create, intent};
 
 #[derive(Debug, Clone, Default)]
@@ -25,6 +24,6 @@ impl IntentHandler for PurgeRetiredRecipientMaterialHandler {
         let input = intent::decode_purge_retired_recipient_material_intent(raw_intent)?;
         let local = context.require_fact(&input.local_recipient_key_id)?;
         create::validate_retired_recipient_material(&input, local)?;
-        Ok(HandlerOutput::new().purge_fact(input.local_recipient_key_id))
+        Ok(PipelineEffects::new().purge_fact(input.local_recipient_key_id))
     }
 }

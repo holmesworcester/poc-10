@@ -6,9 +6,10 @@
 
 use crate::core::clock;
 use crate::core::command_context::CommandOutput;
+use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{commit_pipeline_effects_to_store, PipelineEffects};
+use crate::core::pipeline::commit_pipeline_effects_to_store;
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use crate::protocol::facts::{content, identity};

@@ -1,7 +1,8 @@
 //! Package exact facts into one connection transit frame.
 
+use crate::core::effects::PipelineEffects;
 use crate::core::intents::{
-    HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+    HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::{
@@ -144,7 +145,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         )?;
 
         Ok(
-            HandlerOutput::new().local_intent(send_network_frame::send_network_frame_intent(
+            PipelineEffects::new().local_intent(send_network_frame::send_network_frame_intent(
                 SendNetworkFrame {
                     routing_key: input.connection_id,
                     frame,

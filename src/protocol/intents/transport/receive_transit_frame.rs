@@ -5,6 +5,7 @@
 //! The intent payload carries the opaque outer frame bytes plus normalized local
 //! receive metadata; cryptographic material is loaded from fact context.
 
+use crate::core::effects::PipelineEffects;
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::transport::transit_received::addr::normalize_origin_addr_bytes;
 use crate::protocol::intents::payload::{PayloadError, PayloadReader, PayloadWriter};
@@ -90,7 +91,7 @@ fn payload_error(err: PayloadError) -> String {
 // core should admit.
 
 use crate::core::intents::{
-    HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
+    HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::protocol::facts::{
     identity::endpoint,
@@ -166,7 +167,7 @@ impl IntentHandler for ReceiveTransitFrameHandler {
                 })?
             }
         };
-        let mut output = HandlerOutput::new();
+        let mut output = PipelineEffects::new();
         for fact in facts {
             output = output.fact(fact);
         }

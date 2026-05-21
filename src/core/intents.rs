@@ -1,5 +1,6 @@
-//! Intent and handler-output types.
+//! Intent and handler contract types.
 
+use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::select::Value as SqlValue;
 use crate::core::store::{Store, TableName, TableRow};
@@ -123,7 +124,7 @@ impl From<&str> for HandlerError {
     }
 }
 
-pub type HandlerResult = Result<HandlerOutput, HandlerError>;
+pub type HandlerResult = Result<PipelineEffects, HandlerError>;
 
 /// Mark a handler failure as transient so dispatch leaves the intent queued.
 pub fn retry_intent(reason: impl Into<String>) -> HandlerError {
@@ -205,48 +206,6 @@ impl<'a> HandlerContext<'a> {
     }
 }
 
-/// Handler output feeds facts, purges, and follow-up intents back into the
-/// same dispatch transaction.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HandlerOutput {
-    pub facts: Vec<Fact>,
-    pub purged_facts: Vec<FactId>,
-    pub row_mutations: Vec<RowMutation>,
-    pub intents: Vec<Intent>,
-    pub local_intents: Vec<Intent>,
-}
-
-impl HandlerOutput {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn fact(mut self, fact: Fact) -> Self {
-        self.facts.push(fact);
-        self
-    }
-
-    pub fn purge_fact(mut self, id: FactId) -> Self {
-        self.purged_facts.push(id);
-        self
-    }
-
-    pub fn row_mutation(mut self, mutation: RowMutation) -> Self {
-        self.row_mutations.push(mutation);
-        self
-    }
-
-    pub fn intent(mut self, intent: Intent) -> Self {
-        self.intents.push(intent);
-        self
-    }
-
-    pub fn local_intent(mut self, intent: Intent) -> Self {
-        self.local_intents.push(intent);
-        self
-    }
-}
-
 /// A protocol handler for one or more intent kinds.
 pub trait IntentHandler {
     fn input_fact_ids(&self, _intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
@@ -279,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn handler_output_tracks_row_mutations_separately_from_intents() {
+    fn pipeline_effects_track_row_mutations_separately_from_intents() {
         let row_a = TableRow {
             table: TEST_TABLE,
             key: b"row-key".to_vec(),
@@ -290,7 +249,7 @@ mod tests {
             key: b"row-key".to_vec(),
         };
 
-        let output = HandlerOutput::new()
+        let output = PipelineEffects::new()
             .row_mutation(RowMutation::PutRow(row_a.clone()))
             .row_mutation(RowMutation::DeleteRow(delete.clone()))
             .intent(Intent::new(

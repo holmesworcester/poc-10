@@ -48,12 +48,13 @@ fn create_workspace_emits_decodable_workspace_fact() {
     let public_key = [7u8; 32];
     let output = create_workspace(&ctx, public_key, "Research").expect("create_workspace");
 
-    assert_eq!(output.facts.len(), 1, "one workspace fact");
-    assert!(output.intents.is_empty());
+    assert_eq!(output.effects.facts.len(), 1, "one workspace fact");
+    assert!(output.effects.intents.is_empty());
     assert_eq!(output.receipt.created_at_ms, 60_000);
-    assert_eq!(output.receipt.workspace_fact_id, output.facts[0].id);
+    assert_eq!(output.receipt.workspace_fact_id, output.effects.facts[0].id);
 
-    let decoded = workspace_layout::decode_fact(&output.facts[0].bytes).expect("decode fact");
+    let decoded =
+        workspace_layout::decode_fact(&output.effects.facts[0].bytes).expect("decode fact");
     assert_eq!(decoded.public_key, public_key);
     assert_eq!(decoded.name, "Research");
     assert_eq!(decoded.created_at_ms, 60_000);

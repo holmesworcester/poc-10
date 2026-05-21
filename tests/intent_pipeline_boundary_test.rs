@@ -1,5 +1,6 @@
+use topo::core::effects::PipelineEffects;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::intents::{HandlerContext, HandlerOutput, HandlerResult, IntentHandler};
+use topo::core::intents::{HandlerContext, HandlerResult, IntentHandler};
 use topo::core::intents::{Intent, IntentKind};
 
 struct EmitsFactAndFollowup;
@@ -13,7 +14,7 @@ impl IntentHandler for EmitsFactAndFollowup {
             b"followup-payload".to_vec(),
         );
 
-        Ok(HandlerOutput::new().fact(fact).intent(followup))
+        Ok(PipelineEffects::new().fact(fact).intent(followup))
     }
 }
 
@@ -29,7 +30,7 @@ fn intent_pipeline_output_boundary_is_facts_and_followup_intents_only() {
         .handle(&input, &HandlerContext::new())
         .expect("handler output");
 
-    let HandlerOutput {
+    let PipelineEffects {
         facts,
         purged_facts,
         row_mutations,

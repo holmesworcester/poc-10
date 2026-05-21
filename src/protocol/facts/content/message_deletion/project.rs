@@ -245,9 +245,9 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 2);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, message_context::deletion_role());
-        assert_eq!(output.intents.len(), 1);
-        assert_eq!(output.row_mutations.len(), 1);
-        let RowMutation::InsertValues(stored) = &output.row_mutations[0] else {
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        let RowMutation::InsertValues(stored) = &output.effects.row_mutations[0] else {
             panic!("expected insert values mutation");
         };
         assert_eq!(stored.table, rows::MESSAGE_DELETION_ROWS);
@@ -280,7 +280,7 @@ mod projector_tests {
             .project(&fact, &ProjectionContext::default())
             .expect("missing context is a need, not an unauthorized delete");
 
-        assert!(output.intents.is_empty());
+        assert!(output.effects.intents.is_empty());
         assert!(output.offers.is_empty());
         assert_eq!(output.needs.len(), 2);
         assert!(output.needs.contains(&message_context::message_meta_need(
@@ -311,7 +311,7 @@ mod projector_tests {
             )
             .expect("missing author is a need, not an unauthorized delete");
 
-        assert!(output.intents.is_empty());
+        assert!(output.effects.intents.is_empty());
         assert!(output.offers.is_empty());
         assert_eq!(output.needs.len(), 2);
         assert!(output.needs.contains(&message_context::message_meta_need(

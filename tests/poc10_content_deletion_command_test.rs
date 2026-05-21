@@ -53,13 +53,13 @@ fn delete_message_emits_decodable_target_fact() {
 
     let output = delete_message(&ctx, [1; 32], [2; 32], [3; 32]).expect("delete message");
 
-    assert_eq!(output.facts.len(), 1);
-    assert!(output.intents.is_empty());
+    assert_eq!(output.effects.facts.len(), 1);
+    assert!(output.effects.intents.is_empty());
     assert_eq!(output.receipt.created_at_ms, 100);
-    assert_eq!(output.receipt.deletion_fact_id, output.facts[0].id);
+    assert_eq!(output.receipt.deletion_fact_id, output.effects.facts[0].id);
 
-    let decoded =
-        message_deletion_layout::decode_fact(&output.facts[0].bytes).expect("decode deletion");
+    let decoded = message_deletion_layout::decode_fact(&output.effects.facts[0].bytes)
+        .expect("decode deletion");
     assert_eq!(decoded.workspace_id, [1; 32]);
     assert_eq!(decoded.created_at_ms, 100);
     assert_eq!(decoded.target_message_id, [2; 32]);
@@ -75,13 +75,13 @@ fn delete_file_emits_decodable_target_fact() {
 
     let output = delete_file(&ctx, [4; 32], [5; 32], [6; 32]).expect("delete file");
 
-    assert_eq!(output.facts.len(), 1);
-    assert!(output.intents.is_empty());
+    assert_eq!(output.effects.facts.len(), 1);
+    assert!(output.effects.intents.is_empty());
     assert_eq!(output.receipt.created_at_ms, 200);
-    assert_eq!(output.receipt.deletion_fact_id, output.facts[0].id);
+    assert_eq!(output.receipt.deletion_fact_id, output.effects.facts[0].id);
 
     let decoded =
-        file_deletion_layout::decode_fact(&output.facts[0].bytes).expect("decode deletion");
+        file_deletion_layout::decode_fact(&output.effects.facts[0].bytes).expect("decode deletion");
     assert_eq!(decoded.workspace_id, [4; 32]);
     assert_eq!(decoded.created_at_ms, 200);
     assert_eq!(decoded.target_file_id, [5; 32]);

@@ -28,7 +28,7 @@ fn signed_content_event_waits_for_endpoint_shared_signer_context() {
         .project(&fact, &ProjectionContext::default())
         .expect("missing signer waits");
 
-    assert!(output.intents.is_empty());
+    assert!(output.effects.intents.is_empty());
     assert!(output.offers.is_empty());
     assert!(output.needs.contains(&topo::protocol::matchers::exact_need(
         fact.id,
@@ -56,7 +56,7 @@ fn signed_content_event_defers_signature_check_until_signer_context_exists() {
     let waiting = content::event::project::ContentEventProjector::new()
         .project(&fact, &ProjectionContext::default())
         .expect("missing signer context should still wait");
-    assert!(waiting.intents.is_empty());
+    assert!(waiting.effects.intents.is_empty());
     assert!(waiting.offers.is_empty());
     assert!(waiting
         .needs
@@ -163,7 +163,7 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
         .project(&fact, &ProjectionContext::default())
         .expect("missing context waits");
 
-    assert!(output.intents.is_empty());
+    assert!(output.effects.intents.is_empty());
     assert!(output.offers.is_empty());
     assert!(output.needs.contains(&topo::protocol::matchers::exact_need(
         fact.id,
@@ -266,7 +266,7 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
         )
         .expect("missing signer waits");
 
-    assert!(output.intents.is_empty());
+    assert!(output.effects.intents.is_empty());
     assert!(output.offers.is_empty());
     assert!(output.needs.contains(&topo::protocol::matchers::exact_need(
         fact.id,

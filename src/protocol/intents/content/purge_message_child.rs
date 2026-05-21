@@ -4,9 +4,8 @@
 //! authorizes removing it. The handler does not scan projection rows; callers
 //! enqueue one intent per child discovered by their own bounded context.
 
-use crate::core::intents::{
-    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
-};
+use crate::core::effects::PipelineEffects;
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::content::{file, message_deletion, reaction};
 
@@ -126,6 +125,6 @@ impl IntentHandler for PurgeMessageChildHandler {
             _ => return Err("cascade child kind is not supported".into()),
         }
 
-        Ok(HandlerOutput::new().purge_fact(input.child_id))
+        Ok(PipelineEffects::new().purge_fact(input.child_id))
     }
 }

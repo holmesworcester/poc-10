@@ -2,10 +2,9 @@
 
 use super::context_rows::{insert_context_need_in_tx, insert_context_offer_in_tx};
 use super::context_wakes::wake_context_matches_in_tx;
-use super::effects::{
-    commit_pipeline_effects_in_tx, sqlite_string_error, PipelineEffectCounts, PipelineEffects,
-};
+use super::effects::{commit_pipeline_effects_in_tx, sqlite_string_error, PipelineEffectCounts};
 use crate::core::context::{ContextSet, ContextSetDelta};
+use crate::core::effects::PipelineEffects;
 use crate::core::facts::FactId;
 use crate::core::matchers::ContextMatcher;
 use crate::core::projectors::TimeWake;

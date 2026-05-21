@@ -22,6 +22,7 @@
 //! This module intentionally does not pull in the core wire vocabulary:
 //! the layout is a simple concatenation of fixed-width 32-byte ids.
 
+use crate::core::effects::PipelineEffects;
 use crate::core::intents::{Intent, IntentKind};
 
 /// 32-byte fact id, named locally to avoid pulling fact module types into
@@ -163,8 +164,7 @@ mod tests {
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{
-    retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult,
-    IntentHandler,
+    retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::facts::connection::ephemeral_secret::{
@@ -270,7 +270,7 @@ impl IntentHandler for CreateConnectionResponseHandler {
         )
         .map_err(|err| retry_intent(format!("create_connection_response tcp send: {err}")))?;
 
-        Ok(HandlerOutput::new()
+        Ok(PipelineEffects::new()
             .fact(responder_ephemeral_fact)
             .fact(built.fact))
     }

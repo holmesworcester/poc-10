@@ -131,7 +131,7 @@ mod tests {
         let ctx = CommandContext::new(&store, &clock, &vault);
         let workspace = identity::workspace::commands::create_workspace(&ctx, [7; 32], "workspace")
             .expect("workspace command");
-        let workspace_fact = workspace.facts.first().expect("workspace fact");
+        let workspace_fact = workspace.effects.facts.first().expect("workspace fact");
         let workspace_body =
             identity::workspace::layout::decode_fact(&workspace_fact.bytes).expect("decode");
         store
@@ -146,7 +146,7 @@ mod tests {
             generate(&ctx, workspace.receipt.workspace_fact_id, 2, 17).expect("generate command");
         assert_eq!(output.receipt.first_timestamp, 1);
         assert_eq!(output.receipt.last_timestamp, 2);
-        assert_eq!(output.facts.len(), 2);
-        assert_eq!(output.facts[0], output.facts[0].clone());
+        assert_eq!(output.effects.facts.len(), 2);
+        assert_eq!(output.effects.facts[0], output.effects.facts[0].clone());
     }
 }

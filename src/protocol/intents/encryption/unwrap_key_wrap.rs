@@ -6,10 +6,9 @@
 // recipient material chosen by projection, then emits the resulting local
 // secret fact back into the common pipeline.
 
+use crate::core::effects::PipelineEffects;
 use crate::core::intents::Intent;
-use crate::core::intents::{
-    HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
-};
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::protocol::facts::encryption::{create, intent};
 
 #[derive(Debug, Clone, Default)]
@@ -48,6 +47,6 @@ impl IntentHandler for UnwrapKeyWrapHandler {
             recipient,
             frontier,
         )?;
-        Ok(HandlerOutput::new().fact(secret))
+        Ok(PipelineEffects::new().fact(secret))
     }
 }

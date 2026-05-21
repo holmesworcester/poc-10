@@ -150,14 +150,14 @@ mod tests {
         })
         .expect("create request");
 
-        assert_eq!(output.facts.len(), 3);
-        assert_eq!(output.receipt.invite_secret_id, output.facts[0].id);
+        assert_eq!(output.effects.facts.len(), 3);
+        assert_eq!(output.receipt.invite_secret_id, output.effects.facts[0].id);
         assert_eq!(
             output.receipt.initiator_ephemeral_secret_id,
-            output.facts[1].id
+            output.effects.facts[1].id
         );
-        assert_eq!(output.receipt.request_id, output.facts[2].id);
-        let request = layout::decode_fact(&output.facts[2].bytes).expect("decode request");
+        assert_eq!(output.receipt.request_id, output.effects.facts[2].id);
+        let request = layout::decode_fact(&output.effects.facts[2].bytes).expect("decode request");
         let public_key = crypto::ed25519_public_key(&[7; 32]);
         assert!(crypto::ed25519_verify(
             &public_key,

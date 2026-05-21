@@ -514,7 +514,7 @@ mod projector_tests {
             .project(&scenario.response_fact, &context)
             .expect("project waits");
 
-        assert!(output.intents.is_empty());
+        assert!(output.effects.intents.is_empty());
         assert!(output
             .needs
             .iter()
@@ -537,9 +537,9 @@ mod projector_tests {
             .project(&scenario.response_fact, &context)
             .expect("project response");
 
-        assert_eq!(output.intents.len(), 1);
-        assert_eq!(output.row_mutations.len(), 1);
-        let RowMutation::PutRow(row) = &output.row_mutations[0] else {
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
         };
         let response = layout::decode_fact(&scenario.response_fact.bytes).expect("decode response");
@@ -580,9 +580,9 @@ mod projector_tests {
             .project(&scenario.response_fact, &context)
             .expect("project received response");
 
-        assert_eq!(output.intents.len(), 1);
-        assert_eq!(output.row_mutations.len(), 1);
-        let RowMutation::PutRow(row) = &output.row_mutations[0] else {
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
         };
         let row = rows::decode_connection_response_row(&row.key, &row.value)
