@@ -1,7 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use topo::protocol::registry::{IntentQueueKind, PROTOCOL};
+use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
+use topo::protocol::registry::CONTEXT_MATCHERS;
 
 fn source_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
@@ -53,34 +54,29 @@ fn production_text_before_unit_tests(text: &str) -> &str {
 }
 
 #[test]
-fn protocol_registry_names_the_target_surfaces() {
-    assert_eq!(PROTOCOL.name, "match");
-    assert_eq!(PROTOCOL.schemas.len(), 4);
-    assert!(PROTOCOL
-        .schemas
+fn executable_protocol_tables_name_the_target_surfaces() {
+    assert_eq!(MATCH_PROTOCOL.name, "match");
+    assert_eq!(MATCH_RUNTIME.schema_sources.len(), 3);
+    assert!(MATCH_RUNTIME
+        .schema_sources
         .iter()
-        .any(|schema| schema.name == "network"));
+        .any(|source| source.contains("network_out")));
 
-    assert!(PROTOCOL
-        .facts
+    assert!(MATCH_PROTOCOL
+        .commands
         .iter()
-        .any(|fact| fact.module == "encryption" && fact.name == "key_wrap"));
-    assert!(PROTOCOL
-        .facts
+        .any(|command| command.name == "send"));
+    assert!(MATCH_PROTOCOL
+        .commands
         .iter()
-        .any(|fact| fact.module == "content::message" && fact.name == "message"));
-    assert!(PROTOCOL
-        .facts
-        .iter()
-        .any(|fact| fact.module == "content::message_deletion" && fact.name == "message_deletion"));
-    assert!(PROTOCOL
-        .context_matchers
+        .any(|command| command.name == "assert"));
+    assert!(CONTEXT_MATCHERS
         .iter()
         .any(|matcher| matcher.role == "secret_coverage"));
-    assert!(PROTOCOL
+    assert!(MATCH_RUNTIME
         .handlers
         .iter()
-        .any(|handler| handler.module == "transport::receive_transit_frame"));
+        .any(|handler| handler.name == "receive_transit_frame"));
 }
 
 #[test]
@@ -93,8 +89,7 @@ fn target_context_roles_are_registered() {
             role_names_declared_in(production_text_before_unit_tests(&text))
         })
         .collect::<BTreeSet<_>>();
-    let registered_roles = PROTOCOL
-        .context_matchers
+    let registered_roles = CONTEXT_MATCHERS
         .iter()
         .map(|matcher| matcher.role.to_string())
         .collect::<BTreeSet<_>>();
@@ -162,106 +157,37 @@ fn context_matcher_plumbing_is_centralized_by_matching_relation() {
 }
 
 #[test]
-fn duplicate_fact_names_are_known_migration_debt() {
-    let mut by_name = BTreeMap::<&str, Vec<&str>>::new();
-    for fact in PROTOCOL.facts {
-        by_name.entry(fact.name).or_default().push(fact.module);
-    }
-
-    let mut duplicates = by_name
-        .into_iter()
-        .filter_map(|(name, mut modules)| {
-            modules.sort_unstable();
-            modules.dedup();
-            (modules.len() > 1).then_some((
-                name.to_string(),
-                modules.into_iter().map(str::to_string).collect::<Vec<_>>(),
-            ))
-        })
-        .collect::<Vec<_>>();
-    duplicates.sort();
-
-    let expected = vec![
-        (
-            "local_history_node_secret".to_string(),
-            vec![
-                "encryption".to_string(),
-                "encryption::local_history_node_secret".to_string(),
-            ],
-        ),
-        (
-            "removal_frontier".to_string(),
-            vec![
-                "encryption".to_string(),
-                "encryption::removal_frontier".to_string(),
-            ],
-        ),
-    ];
-
+fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit() {
+    let names = MATCH_RUNTIME
+        .handlers
+        .iter()
+        .map(|handler| handler.name)
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        duplicates, expected,
-        "new duplicate fact names must not enter the protocol registry silently; collapse the known encryption split duplicates instead of adding more"
+        names.len(),
+        MATCH_RUNTIME.handlers.len(),
+        "runtime handler route names must be unique"
     );
-}
 
-#[test]
-fn fact_type_tags_are_globally_unique() {
-    let mut by_tag = BTreeMap::<u8, Vec<String>>::new();
-    for fact in PROTOCOL.facts {
-        by_tag
-            .entry(fact.tag)
-            .or_default()
-            .push(format!("{}/{}", fact.module, fact.name));
+    for required in [
+        "send_bootstrap_connection_request",
+        "send_network_frame",
+        "receive_transit_frame",
+    ] {
+        assert!(
+            names.contains(required),
+            "runtime handler route missing {required}"
+        );
     }
 
-    let duplicates = by_tag
-        .into_iter()
-        .filter_map(|(tag, facts)| (facts.len() > 1).then_some((tag, facts)))
-        .collect::<Vec<_>>();
-
-    assert!(
-        duplicates.is_empty(),
-        "fact tags must be globally unique so runtime dispatch never guesses between fact types:\n{duplicates:?}"
-    );
-}
-
-#[test]
-fn handler_intents_are_declared_intents() {
-    for handler in PROTOCOL.handlers {
-        for handled_kind in handler.intents {
-            assert!(
-                PROTOCOL
-                    .intents
-                    .iter()
-                    .any(|intent| intent.kind == *handled_kind),
-                "{} handles undeclared intent {}",
-                handler.handler,
-                handled_kind
-            );
-        }
+    for excluded in [
+        "send_facts_on_connection",
+        "send_network_frame",
+        "receive_transit_frame",
+    ] {
+        assert!(
+            MATCH_RUNTIME.command_excluded_handlers.contains(&excluded),
+            "command runtime should exclude network handler {excluded}"
+        );
     }
-}
-
-#[test]
-fn handler_intents_declare_their_queue_class() {
-    let receive_transit = PROTOCOL
-        .intents
-        .iter()
-        .find(|intent| intent.kind == "receive_transit_frame")
-        .expect("receive transport::transit intent");
-    assert_eq!(receive_transit.queue, IntentQueueKind::Local);
-
-    let send_network = PROTOCOL
-        .intents
-        .iter()
-        .find(|intent| intent.kind == "send_network_frame")
-        .expect("send network frame intent");
-    assert_eq!(send_network.queue, IntentQueueKind::Local);
-
-    let send_facts = PROTOCOL
-        .intents
-        .iter()
-        .find(|intent| intent.kind == "send_facts_on_connection")
-        .expect("send facts on connection intent");
-    assert_eq!(send_facts.queue, IntentQueueKind::Durable);
 }

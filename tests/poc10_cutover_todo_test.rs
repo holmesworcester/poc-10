@@ -1005,7 +1005,11 @@ fn cutover_network_io_intents_are_restart_local_queue_work() {
         pipeline.push_str(&source_text(&path));
     }
     let core_schema = source_text(&root.join("src/core/schema.p8sql"));
-    let protocol = source_text(&root.join("src/protocol/registry.rs"));
+    let request_projector =
+        source_text(&root.join("src/protocol/facts/connection/request/project.rs"));
+    let send_facts_handler =
+        source_text(&root.join("src/protocol/intents/transport/send_facts_on_connection.rs"));
+    let daemon = source_text(&root.join("src/core/daemon.rs"));
     let network_io_files = [
         "src/protocol/intents/connection/send_bootstrap_request.rs",
         "src/protocol/intents/transport/send_network_frame.rs",
@@ -1021,21 +1025,20 @@ fn cutover_network_io_intents_are_restart_local_queue_work() {
             ));
         }
     }
-    for kind in [
-        "SEND_BOOTSTRAP_CONNECTION_REQUEST",
-        "SEND_NETWORK_FRAME",
-        "RECEIVE_TRANSIT_FRAME",
-    ] {
-        let registration = protocol
-            .split(kind)
-            .nth(1)
-            .and_then(|tail| tail.split("},").next())
-            .unwrap_or("");
-        if !registration.contains("IntentQueueKind::Local") {
-            offenders.push(format!(
-                "protocol registry does not mark {kind} for the local queue"
-            ));
-        }
+    if !request_projector.contains(".local_intent(send_bootstrap_connection_request_intent") {
+        offenders.push(
+            "connection request projection does not emit bootstrap sends as local intents"
+                .to_string(),
+        );
+    }
+    if !send_facts_handler.contains("HandlerOutput::new().local_intent") {
+        offenders.push(
+            "send_facts_on_connection does not emit network frames as local intents".to_string(),
+        );
+    }
+    if !daemon.contains("runtime.submit_local_intent(to_intent") {
+        offenders
+            .push("daemon inbound network frames are not submitted as local intents".to_string());
     }
     if !pipeline.contains("LOCAL_INTENTS")
         || !core_schema.contains("memory table local_intents")

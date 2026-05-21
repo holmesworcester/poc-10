@@ -173,6 +173,10 @@ Accountable criteria:
   compact declaration macros for commands, facts, projector routes, and handler
   routes. Tests now compare the runtime handler descriptor directly instead of
   parsing source text.
+- Done in this branch: the documentation-only `ProtocolRegistry` metadata layer
+  was deleted. Executable protocol tables (`MATCH_COMMANDS`, schema sources,
+  row-mutation tables, projector routes, context matchers, and handler routes)
+  are now the source of truth.
 
 ## 1. Store All Intents In SQLite Queues
 
@@ -184,8 +188,8 @@ restart-local handler work -> TEMP LOCAL_INTENTS table
 ```
 
 The storage table determines durability. `Intent` carries only kind,
-idempotence key, and payload. Protocol metadata now declares durable/local
-queue class without changing the queued row format.
+idempotence key, and payload. Producers choose durable versus local by emitting
+through the durable or local effect path; the queued row format is unchanged.
 
 Next steps:
 

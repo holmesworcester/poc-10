@@ -936,15 +936,10 @@ fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
     let text = source_text(&path);
 
     for required in [
-        "pub const PROTOCOL: ProtocolRegistry",
         "pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>]",
-        "pub const SCHEMAS: &[SchemaRegistration]",
         "pub(crate) const SCHEMA_SOURCES: &[&str]",
         "pub(crate) const ROW_MUTATION_TABLES: &[TableName]",
-        "pub const FACTS: &[FactRegistration]",
         "pub const CONTEXT_MATCHERS: &[ContextRoleDeclaration]",
-        "pub const INTENTS: &[IntentRegistration]",
-        "pub const HANDLERS: &[HandlerRegistration]",
         "pub(crate) const HANDLER_ROUTES: &[HandlerRoute]",
     ] {
         assert!(

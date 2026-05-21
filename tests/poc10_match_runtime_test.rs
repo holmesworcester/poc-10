@@ -18,7 +18,6 @@ use topo::protocol::facts::identity::signed_fact::create as signed_fact_create;
 use topo::protocol::facts::identity::workspace::{
     commands::create_workspace, rows as workspace_rows,
 };
-use topo::protocol::registry::PROTOCOL;
 
 struct FixedClock(Cell<u64>);
 
@@ -132,12 +131,11 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
 
 #[test]
 fn runtime_dispatches_every_protocol_handler_registration() {
-    let declared = PROTOCOL
+    let dispatched = MATCH_RUNTIME
         .handlers
         .iter()
-        .map(|handler| handler.runtime_field.to_string())
+        .map(|handler| handler.name.to_string())
         .collect::<BTreeSet<_>>();
-    let dispatched = runtime_dispatch_handler_routes();
 
     for required in [
         "purge_message_child",
@@ -145,27 +143,13 @@ fn runtime_dispatches_every_protocol_handler_registration() {
         "purge_below_retention_floor",
     ] {
         assert!(
-            declared.contains(required),
-            "{required} must be declared in the protocol registry"
-        );
-        assert!(
             dispatched.contains(required),
             "{required} must be included by HANDLER_ROUTES"
         );
     }
-
-    let missing = declared
-        .difference(&dispatched)
-        .cloned()
-        .collect::<Vec<_>>();
-    let unexpected = dispatched
-        .difference(&declared)
-        .cloned()
-        .collect::<Vec<_>>();
-
     assert!(
-        missing.is_empty() && unexpected.is_empty(),
-        "HANDLER_ROUTES must stay in lockstep with protocol handler registrations\nmissing from runtime dispatch: {missing:?}\nunexpected runtime dispatch handlers: {unexpected:?}"
+        dispatched.len() == MATCH_RUNTIME.handlers.len(),
+        "HANDLER_ROUTES must not contain duplicate runtime handler names"
     );
 }
 
@@ -247,12 +231,4 @@ fn workspace_scope(workspace_id: [u8; 32]) -> FactScope {
         kind: ScopeKind::new("workspace").expect("valid workspace scope"),
         id: workspace_id,
     }
-}
-
-fn runtime_dispatch_handler_routes() -> BTreeSet<String> {
-    MATCH_RUNTIME
-        .handlers
-        .iter()
-        .map(|route| route.name.to_string())
-        .collect()
 }
