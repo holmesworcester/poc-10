@@ -371,7 +371,7 @@ fn prefix_matches(value: &FactId, prefix: &FactId, prefix_bytes: u8) -> bool {
 mod tests {
     use super::*;
     use crate::core::matchers::ContextMatcher;
-    use crate::core::pipeline::context_rows::{
+    use crate::core::pipeline::context::{
         insert_context_need_for_test, insert_context_offer_for_test,
     };
     use crate::core::schema::CORE_SCHEMA_SOURCE;

@@ -93,9 +93,9 @@ Accountable criteria:
 - Done in this branch: context edge reads, context matching, and scope-key
   handling use declared typed SQLite rows instead of byte-row scans.
 - Done in this branch: `context_store.rs` was removed as a sink. Standing
-  context row access now lives in `pipeline/context_rows.rs`; matcher assembly
-  and context wake assembly live in `pipeline/context_matching.rs`; reusable
-  checked insert-select execution lives in `core::select`.
+  context row access, matcher assembly, and context wake assembly now live in
+  `pipeline/context.rs`; reusable checked insert-select execution lives in
+  `core::select`.
 - Done in this branch: separate `context_needs` and `context_offers` storage
   was collapsed into one typed `context_edges` relation keyed by
   `(owner, direction, role, scope_key, selector)`.
@@ -249,6 +249,7 @@ Target modules:
 src/core/pipeline.rs              facade / runtime entry points
 src/core/pipeline/admission.rs    submit facts, bulk submit, purge
 src/core/pipeline/fact_context.rs fact/context loop, due time wake admission
+src/core/pipeline/context.rs      context rows, matching, and wake fanout
 src/core/pipeline/projection.rs   pending_projection worker
 src/core/pipeline/dispatch.rs     intent queue worker
 src/core/pipeline/effects.rs      common commit helpers
@@ -256,8 +257,8 @@ src/core/pipeline/effects.rs      common commit helpers
 
 The current split is intentionally conservative and keeps behavior unchanged.
 Further cleanup should simplify module internals. `core::fact_store` owns fact
-storage and fact purge helpers; context row access and matching now live with
-the context/projection pipeline modules.
+storage and fact purge helpers; context row access, matching, and wake fanout
+now live with the context/projection pipeline modules.
 
 ## 4. Process One Queue Item At A Time
 

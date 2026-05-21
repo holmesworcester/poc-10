@@ -1,9 +1,8 @@
 //! Pending fact projection orchestration.
 
-use super::context_matching::stored_matching_context;
-use super::context_matching::wake_context_matches_in_tx;
-use super::context_rows::{
+use super::context::{
     insert_context_need_in_tx, insert_context_offer_in_tx, stored_context_for_owner,
+    stored_matching_context, wake_context_matches_in_tx,
 };
 use super::effects::validate_pipeline_effects;
 use super::effects::{commit_pipeline_effects_in_tx, sqlite_string_error};

@@ -5,8 +5,7 @@ use crate::core::matchers::ContextMatchers;
 use crate::core::store::Store;
 use rusqlite::params;
 
-use super::context_matching::wake_context_matches_in_tx;
-use super::context_rows::insert_context_offer_in_tx;
+use super::context::{insert_context_offer_in_tx, wake_context_matches_in_tx};
 use super::effects::sqlite_string_error;
 
 /// Commit externally projected offers and clear the completed pending facts.

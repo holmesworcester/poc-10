@@ -214,7 +214,7 @@ pub fn range_fact_match(need: &ContextNeed, offer: &ContextOffer) -> bool {
 mod tests {
     use super::*;
     use crate::core::matchers::ContextMatcher;
-    use crate::core::pipeline::context_rows::{
+    use crate::core::pipeline::context::{
         insert_context_need_for_test, insert_context_offer_for_test,
     };
     use crate::core::schema::CORE_SCHEMA_SOURCE;

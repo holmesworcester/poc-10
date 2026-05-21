@@ -139,7 +139,7 @@ fn applied_cascade_fact_count(runtime: &Runtime) -> usize {
         .facts()
         .filter(|fact| layout::decode_fact(fact.body()).is_ok())
         .filter(|fact| {
-            crate::core::pipeline::context_rows::persisted_context(runtime.store(), &fact.id)
+            crate::core::pipeline::context::persisted_context(runtime.store(), &fact.id)
                 .ok()
                 .flatten()
                 .is_some_and(|context| {

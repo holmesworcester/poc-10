@@ -10,8 +10,7 @@
 //! - `effects`: validation and SQL commit helpers for shared core effects.
 
 mod admission;
-mod context_matching;
-pub(crate) mod context_rows;
+pub(crate) mod context;
 mod dispatch;
 mod effects;
 mod fact_context;
