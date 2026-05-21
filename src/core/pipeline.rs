@@ -5,24 +5,26 @@
 //! responsibility:
 //!
 //! - `admission`: submit and purge facts, plus externally projected context.
-//! - `time_wake`: convert due time ranges into pending projections.
+//! - `fact_context`: wake due facts and run the fact/context fixed-point loop.
 //! - `context_wake`: context delta matching that wakes newly satisfiable facts.
 //! - `projection`: claim one pending fact and commit projection effects.
 //! - `dispatch`: claim one intent and commit handler intent output.
-//! - `queues`: small shared queue helpers.
+//! - `effects`: shared pipeline side effects and commit helpers.
 
 mod admission;
 mod context_wake;
 mod dispatch;
-mod driver;
+mod effects;
+mod fact_context;
 mod projection;
-mod queues;
 mod report;
-mod tables;
-mod time_wake;
 
 pub(crate) use crate::core::pipeline_storage::{
     persisted_context, persisted_fact, persisted_facts,
+};
+pub(crate) use crate::core::schema::{
+    CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, INTENTS, LOCAL_INTENTS, PENDING_CONTEXT_CHANGES,
+    PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
 };
 pub(crate) use admission::{
     commit_projected_context_offers, purge_fact_from_store, submit_fact_to_store,
@@ -33,10 +35,9 @@ pub(crate) use dispatch::{
     dispatch_durable_intents, dispatch_local_intents, submit_intent_to_store,
     submit_local_intent_to_store,
 };
-pub(crate) use driver::process_pending_facts_and_context_changes;
-pub use report::PipelineReport;
-pub(crate) use tables::{
-    CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, INTENTS, LOCAL_INTENTS, PENDING_CONTEXT_CHANGES,
-    PENDING_PROJECTION, PENDING_TIME_RANGES, SCHEMAS, TIME_WAKES,
+pub use effects::PipelineEffects;
+pub(crate) use effects::{
+    commit_pipeline_effects_in_tx, commit_pipeline_effects_to_store, PipelineEffectCounts,
 };
-pub(crate) use time_wake::process_due_time_range;
+pub(crate) use fact_context::{process_due_time_range, process_pending_facts_and_context_changes};
+pub use report::PipelineReport;

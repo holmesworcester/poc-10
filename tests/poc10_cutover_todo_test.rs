@@ -1003,6 +1003,7 @@ fn cutover_network_io_intents_are_restart_local_queue_work() {
     for path in rust_files_under(&root.join("src/core/pipeline")) {
         pipeline.push_str(&source_text(&path));
     }
+    let core_schema = source_text(&root.join("src/core/schema.p8sql"));
     let protocol = source_text(&root.join("src/protocol/registry.rs"));
     let network_io_files = [
         "src/protocol/intents/connection/send_bootstrap_request.rs",
@@ -1036,7 +1037,7 @@ fn cutover_network_io_intents_are_restart_local_queue_work() {
         }
     }
     if !pipeline.contains("LOCAL_INTENTS")
-        || !pipeline.contains("Schema::memory_row_table")
+        || !core_schema.contains("memory row_table local_intents")
         || !pipeline.contains("submit_local_intent_to_store")
     {
         offenders.push(

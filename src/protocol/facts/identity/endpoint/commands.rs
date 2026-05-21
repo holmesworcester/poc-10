@@ -60,7 +60,7 @@ pub fn endpoint_fact(created_at_ms: u64, endpoint: EndpointFact) -> Result<Fact,
 
 #[cfg(test)]
 mod tests {
-    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
+    use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 

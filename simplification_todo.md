@@ -32,6 +32,11 @@ queues have explicit claim/lease state.
   `ephemeral_intents()` surface are gone.
 - Done in this branch: `Intent` no longer carries durability. The destination
   queue table owns durable versus restart-local storage.
+- Done in this branch: common commit work now flows through `PipelineEffects`.
+- Done in this branch: core pipeline table names moved to `core::schema`, and
+  `local_intents` is declared as a memory row table in `src/core/schema.p8sql`.
+- Done in this branch: `driver.rs` is now `fact_context.rs`, and due time
+  wakes live with the fact/context fixed-point loop.
 - Done in this branch: row writes are `RowMutation` output, not `Intent`
   values. `IntentExecution::Atomic`, `AtomicIntent`, and the atomic dispatch
   pass are gone from production code.
@@ -104,17 +109,17 @@ Target modules:
 ```text
 src/core/pipeline.rs              facade / runtime entry points
 src/core/pipeline/admission.rs    submit facts, bulk submit, purge
+src/core/pipeline/fact_context.rs fact/context loop, due time wake admission
 src/core/pipeline/projection.rs   pending_projection worker
 src/core/pipeline/context_wake.rs context matching worker
-src/core/pipeline/time_wake.rs    time_wakes -> pending_projection
 src/core/pipeline/dispatch.rs     intent queue worker
 src/core/pipeline/effects.rs      common commit helpers
-src/core/pipeline/queues.rs       queue table helpers and claim APIs
 ```
 
 The current split is intentionally conservative and keeps behavior unchanged.
-Further cleanup should simplify module internals, not move code for its own
-sake.
+Further cleanup should simplify module internals. `pipeline_storage.rs` is the
+main remaining complexity sink because it still mixes row codecs, mutation
+helpers, context reads, and matching queries.
 
 ## 4. Process One Queue Item At A Time
 
@@ -228,7 +233,7 @@ Use one common effect boundary for commands, incoming network work, handlers,
 and eventually projection:
 
 ```text
-RuntimeEffects {
+PipelineEffects {
   facts,
   purged_facts,
   row_mutations,
@@ -237,8 +242,10 @@ RuntimeEffects {
 }
 ```
 
-That merges command handling and received/incoming facts at the runtime boundary
-without making commands or network handlers know about pipeline internals.
+Status: started. Handler output and command output now reduce to
+`PipelineEffects`, and projection stores its row/intents side effects inside
+`PipelineEffects` while keeping projection-owned context and time-wake changes
+separate.
 
 ## 11. Defer Parallelism
 

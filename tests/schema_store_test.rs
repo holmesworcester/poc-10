@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use rusqlite::{params, Connection};
-use topo::core::schema_dsl::{parse_schema, CORE_SCHEMA_SOURCE};
+use topo::core::schema::CORE_SCHEMA_SOURCE;
+use topo::core::schema_dsl::{parse_schema, TableStorage};
 use topo::core::store::{Store, TableName, TableRow};
 use topo::protocol::facts::content::{file, message, reaction};
 use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
@@ -18,6 +19,7 @@ fn declared_table_names(sources: &[&str]) -> BTreeSet<String> {
     sources
         .iter()
         .flat_map(|source| parse_schema(source).expect("schema parses").tables)
+        .filter(|table| table.storage == TableStorage::Durable)
         .map(|table| table.name)
         .collect()
 }

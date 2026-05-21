@@ -62,4 +62,5 @@ table intents {
   column payload bytes;
   row_key (kind, idempotence_key);
 }
+memory row_table local_intents;
 row_table clock;

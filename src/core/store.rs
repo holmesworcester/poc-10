@@ -18,7 +18,7 @@
 //! parameters, and table names are accepted only from `TableName` after a
 //! conservative identifier check.
 
-use crate::core::schema_dsl::{ColumnType, TableDeclaration};
+use crate::core::schema_dsl::{ColumnType, TableDeclaration, TableStorage};
 use rusqlite::{params, params_from_iter, Connection as SqliteConnection, OptionalExtension};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -653,17 +653,25 @@ impl Store {
 
     fn apply_schema_source_table(&self, table: &TableDeclaration) -> rusqlite::Result<()> {
         if is_row_table_declaration(table) {
-            return self.apply_schema_source_row_table(&table.name);
+            return self.apply_schema_source_row_table(table.storage, &table.name);
         }
         self.apply_schema_source_typed_table(table)
     }
 
-    fn apply_schema_source_row_table(&self, table_name: &str) -> rusqlite::Result<()> {
+    fn apply_schema_source_row_table(
+        &self,
+        storage: TableStorage,
+        table_name: &str,
+    ) -> rusqlite::Result<()> {
         let quoted = quoted_table_name_str(table_name)?;
         let existing = sqlite_table_columns(&self.conn, &quoted)?;
         if existing.is_empty() {
+            let temp = match storage {
+                TableStorage::Durable => "",
+                TableStorage::Memory => "TEMP ",
+            };
             return self.conn.execute_batch(&format!(
-                "CREATE TABLE {quoted} (
+                "CREATE {temp}TABLE {quoted} (
                     row_key BLOB PRIMARY KEY NOT NULL,
                     row_value BLOB NOT NULL
                 );"
@@ -678,6 +686,10 @@ impl Store {
         if !existing.is_empty() {
             return validate_sqlite_typed_table(&self.conn, table, &existing);
         }
+        let temp = match table.storage {
+            TableStorage::Durable => "",
+            TableStorage::Memory => "TEMP ",
+        };
 
         let mut declarations = table
             .columns
@@ -695,7 +707,7 @@ impl Store {
             quoted_identifier_list(&table.row_key.columns)?
         ));
         self.conn.execute_batch(&format!(
-            "CREATE TABLE {quoted} (
+            "CREATE {temp}TABLE {quoted} (
                 {}
             );",
             declarations.join(",\n                ")

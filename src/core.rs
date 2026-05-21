@@ -22,6 +22,7 @@ pub mod pipeline;
 pub(crate) mod pipeline_storage;
 pub mod projectors;
 pub mod runtime;
+pub mod schema;
 pub mod schema_dsl;
 pub mod store;
 pub mod tcp;

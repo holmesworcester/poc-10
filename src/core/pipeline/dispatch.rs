@@ -1,14 +1,9 @@
-use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{
-    HandlerContext, HandlerError, HandlerOutput, Intent, IntentHandler, RowMutation,
+use crate::core::intents::{HandlerContext, HandlerError, HandlerOutput, Intent, IntentHandler};
+use crate::core::pipeline::{
+    commit_pipeline_effects_in_tx, persisted_fact, PipelineEffectCounts, PipelineEffects, INTENTS,
+    LOCAL_INTENTS,
 };
-use crate::core::pipeline::queues::validate_intents_ignoring_key;
-use crate::core::pipeline::{persisted_fact, INTENTS, LOCAL_INTENTS};
-use crate::core::pipeline_storage::{
-    decode_intent_row, insert_fact_and_pending_in_tx, purge_fact_in_tx,
-    record_intent_in_table_in_tx, record_intent_in_tx, row_mutation_rows, sqlite_string_error,
-    validate_row_mutations,
-};
+use crate::core::pipeline_storage::{decode_intent_row, record_intent_in_table_in_tx};
 use crate::core::store::{Store, TableName};
 
 // === Intent dispatch ===
@@ -77,12 +72,12 @@ fn dispatch_stored_intents(
         let Some(output) = run_handler(handler, &stored.intent, &context, &mut report)? else {
             break;
         };
-        let output = prepare_handler_output(output, Some(&stored.key), allowed_tables)?;
+        let effects = prepare_handler_output(output, Some(&stored.key), allowed_tables)?;
         let handled = HandledIntent {
             table: queue_table,
             key: &stored.key,
         };
-        let commit = commit_handler_output(store, Some(handled), &output, allowed_tables)?;
+        let commit = commit_handler_output(store, Some(handled), &effects, allowed_tables)?;
         if !finish_handler_output(commit, &mut report)? {
             continue;
         }
@@ -181,17 +176,10 @@ fn prepare_handler_output(
     output: HandlerOutput,
     handled_intent_key: Option<&[u8]>,
     allowed_tables: &[TableName],
-) -> Result<HandlerOutputParts, String> {
-    validate_intents_ignoring_key(&output.intents, handled_intent_key)?;
-    validate_intents_ignoring_key(&output.local_intents, handled_intent_key)?;
-    validate_row_mutations(&output.row_mutations, allowed_tables)?;
-    Ok(HandlerOutputParts {
-        facts: output.facts,
-        purged_facts: output.purged_facts,
-        row_mutations: output.row_mutations,
-        durable_intents: output.intents,
-        local_intents: output.local_intents,
-    })
+) -> Result<PipelineEffects, String> {
+    let effects = PipelineEffects::from(output);
+    effects.validate_ignoring_intent_key(handled_intent_key, allowed_tables)?;
+    Ok(effects)
 }
 
 /// Commit the complete output of one handled intent in a single transaction.
@@ -203,7 +191,7 @@ fn prepare_handler_output(
 fn commit_handler_output(
     store: &Store,
     handled_intent: Option<HandledIntent<'_>>,
-    output: &HandlerOutputParts,
+    effects: &PipelineEffects,
     allowed_tables: &[TableName],
 ) -> Result<HandlerCommit, String> {
     store
@@ -217,43 +205,11 @@ fn commit_handler_output(
                 }
             }
 
-            for purged in &output.purged_facts {
-                purge_fact_in_tx(tx, *purged)?;
-            }
-
-            let mut facts = 0usize;
-            for fact in &output.facts {
-                if insert_fact_and_pending_in_tx(tx, fact)? {
-                    facts += 1;
-                }
-            }
-
-            let (rows, deletes) = row_mutation_rows(&output.row_mutations, allowed_tables)
-                .map_err(sqlite_string_error)?;
-            tx.insert_table_rows_in_tx(rows)?;
-            for delete in deletes {
-                tx.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
-            }
-
-            let mut persisted_intents = 0usize;
-            for intent in &output.durable_intents {
-                if record_intent_in_tx(tx, intent)? {
-                    persisted_intents += 1;
-                }
-            }
-
-            let mut local_intents = 0usize;
-            for intent in &output.local_intents {
-                if record_intent_in_table_in_tx(tx, LOCAL_INTENTS, intent)? {
-                    local_intents += 1;
-                }
-            }
+            let counts = commit_pipeline_effects_in_tx(tx, effects, allowed_tables)?;
 
             Ok(HandlerCommit {
                 handled: true,
-                facts,
-                persisted_intents,
-                local_intents,
+                effects: counts,
             })
         })
         .map_err(|err| format!("commit handler output: {err}"))
@@ -273,8 +229,8 @@ fn finish_handler_output(
     }
 
     report.handled += 1;
-    report.facts += commit.facts;
-    report.intents += commit.persisted_intents + commit.local_intents;
+    report.facts += commit.effects.facts;
+    report.intents += commit.effects.intents();
     Ok(true)
 }
 
@@ -304,15 +260,5 @@ struct HandlerCommit {
     /// Whether the transaction took effect. `false` only when the queued intent
     /// row was already gone.
     handled: bool,
-    facts: usize,
-    persisted_intents: usize,
-    local_intents: usize,
-}
-
-struct HandlerOutputParts {
-    facts: Vec<Fact>,
-    purged_facts: Vec<FactId>,
-    row_mutations: Vec<RowMutation>,
-    durable_intents: Vec<Intent>,
-    local_intents: Vec<Intent>,
+    effects: PipelineEffectCounts,
 }

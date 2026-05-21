@@ -1,18 +1,16 @@
 use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{Intent, RowMutation};
 use crate::core::matchers::ContextMatcher;
-use crate::core::pipeline::queues::validate_intents;
 use crate::core::pipeline::report::PipelineReport;
 use crate::core::pipeline::{
-    persisted_fact, CONTEXT_NEEDS, CONTEXT_OFFERS, LOCAL_INTENTS, PENDING_PROJECTION, TIME_WAKES,
+    commit_pipeline_effects_in_tx, persisted_fact, PipelineEffectCounts, PipelineEffects,
+    CONTEXT_NEEDS, CONTEXT_OFFERS, PENDING_PROJECTION, TIME_WAKES,
 };
 use crate::core::pipeline_storage::{
     context_need_row, context_offer_row, decode_fact_id,
     delete_pending_time_ranges_for_owner_in_tx, pending_context_change_rows, purge_fact_in_tx,
-    record_intent_in_table_in_tx, record_intent_in_tx, row_mutation_rows, sqlite_string_error,
     stored_context_for_owner, stored_matching_context, stored_pending_time_ranges_for_owner,
-    time_wake_row, validate_row_mutations,
+    time_wake_row,
 };
 use crate::core::projectors::{ProjectionContext, ProjectionOutput, Projector, TimeWake};
 use crate::core::store::{Store, TableName};
@@ -136,9 +134,7 @@ fn prepare_projection_effects(
         projection_context,
     } = pending_fact;
     let run = run_projection_with_context(projector, &fact, &previous_context, projection_context)?;
-    validate_intents(&run.intents)?;
-    validate_intents(&run.local_intents)?;
-    validate_row_mutations(&run.row_mutations, allowed_tables)?;
+    run.pipeline.validate(allowed_tables)?;
     Ok(ProjectionEffects::from_run(fact_id, previous_context, run))
 }
 
@@ -150,10 +146,8 @@ fn finish_pending_fact(
     commit: ProjectionCommit,
     report: &mut PipelineReport,
 ) -> Result<(), String> {
-    let intents = commit.persisted_intents + commit.local_intents;
-
     report.projections += 1;
-    report.intents += intents;
+    report.intents += commit.effects.intents();
     Ok(())
 }
 
@@ -172,9 +166,7 @@ struct ProjectionEffects {
     next_context: ContextSet,
     next_time_wakes: Vec<TimeWake>,
     context_delta: ContextSetDelta,
-    row_mutations: Vec<RowMutation>,
-    durable_intents: Vec<Intent>,
-    local_intents: Vec<Intent>,
+    pipeline: PipelineEffects,
 }
 
 impl ProjectionEffects {
@@ -185,9 +177,7 @@ impl ProjectionEffects {
             next_context: run.context,
             next_time_wakes: run.time_wakes,
             context_delta: run.context_delta,
-            row_mutations: run.row_mutations,
-            durable_intents: run.intents,
-            local_intents: run.local_intents,
+            pipeline: run.pipeline,
         }
     }
 }
@@ -198,9 +188,7 @@ struct ProjectionRun {
     context: ContextSet,
     context_delta: ContextSetDelta,
     time_wakes: Vec<TimeWake>,
-    row_mutations: Vec<RowMutation>,
-    intents: Vec<Intent>,
-    local_intents: Vec<Intent>,
+    pipeline: PipelineEffects,
 }
 
 /// Call the protocol projector and normalize the output for the SQL pipeline.
@@ -222,9 +210,12 @@ fn run_projection_with_context(
         context,
         context_delta,
         time_wakes: output.time_wakes,
-        row_mutations: output.row_mutations,
-        intents: output.intents,
-        local_intents: output.local_intents,
+        pipeline: PipelineEffects {
+            row_mutations: output.row_mutations,
+            durable_intents: output.intents,
+            local_intents: output.local_intents,
+            ..PipelineEffects::default()
+        },
     })
 }
 
@@ -260,8 +251,7 @@ fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), S
 
 /// The committed SQL result needed to update memory and reporting.
 struct ProjectionCommit {
-    persisted_intents: usize,
-    local_intents: usize,
+    effects: PipelineEffectCounts,
 }
 
 /// Commit all durable projection effects in one SQLite transaction.
@@ -293,31 +283,9 @@ fn commit_projection_effects(
 
             tx.insert_table_rows_in_tx(pending_context_change_rows(&effects.context_delta))?;
 
-            let (rows, deletes) = row_mutation_rows(&effects.row_mutations, allowed_tables)
-                .map_err(sqlite_string_error)?;
-            tx.insert_table_rows_in_tx(rows)?;
-            for delete in deletes {
-                tx.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
-            }
+            let counts = commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables)?;
 
-            let mut persisted_intents = 0usize;
-            for intent in &effects.durable_intents {
-                if record_intent_in_tx(tx, intent)? {
-                    persisted_intents += 1;
-                }
-            }
-
-            let mut local_intents = 0usize;
-            for intent in &effects.local_intents {
-                if record_intent_in_table_in_tx(tx, LOCAL_INTENTS, intent)? {
-                    local_intents += 1;
-                }
-            }
-
-            Ok(ProjectionCommit {
-                persisted_intents,
-                local_intents,
-            })
+            Ok(ProjectionCommit { effects: counts })
         })
         .map_err(|err| format!("commit projection effects: {err}"))
 }
@@ -377,7 +345,7 @@ mod tests {
     use super::*;
     use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
     use crate::core::facts::FactScope;
-    use crate::core::intents::IntentKind;
+    use crate::core::intents::{Intent, IntentKind};
     use crate::core::projectors::Timeline;
 
     #[test]
@@ -433,7 +401,7 @@ mod tests {
             run_projection(&projector, &fact, &first.context, Vec::new()).expect("second run");
         assert!(second.context_delta.is_empty());
         assert_eq!(second.context, first.context);
-        assert!(second.intents.is_empty());
+        assert!(second.pipeline.durable_intents.is_empty());
     }
 
     #[test]
@@ -462,8 +430,8 @@ mod tests {
         assert!(next.context.needs.is_empty());
         assert_eq!(next.context_delta.removed_needs, previous.needs);
         assert_eq!(next.context_delta.added_needs.len(), 0);
-        assert_eq!(next.intents.len(), 1);
-        assert_eq!(next.intents[0].kind.as_str(), "followup");
+        assert_eq!(next.pipeline.durable_intents.len(), 1);
+        assert_eq!(next.pipeline.durable_intents[0].kind.as_str(), "followup");
     }
 
     fn run_projection(

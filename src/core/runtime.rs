@@ -15,6 +15,7 @@ use crate::core::pipeline::{
     PENDING_PROJECTION,
 };
 use crate::core::projectors::{Projector, Timeline};
+use crate::core::schema::CORE_SCHEMA_SOURCE;
 use crate::core::store::{Schema, Store, TableName};
 use std::path::Path;
 
@@ -153,12 +154,10 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn open_memory(description: &'static RuntimeDescription) -> Result<Self, String> {
+        let schema_sources = runtime_schema_sources(description);
         let schemas = runtime_schemas(description);
-        let store = Store::open_memory_with_schema_sources_and_schemas(
-            description.schema_sources,
-            &schemas,
-        )
-        .map_err(|err| format!("open target memory store: {err}"))?;
+        let store = Store::open_memory_with_schema_sources_and_schemas(&schema_sources, &schemas)
+            .map_err(|err| format!("open target memory store: {err}"))?;
         Self::from_store(description, store)
     }
 
@@ -166,13 +165,11 @@ impl Runtime {
         description: &'static RuntimeDescription,
         path: impl AsRef<Path>,
     ) -> Result<Self, String> {
+        let schema_sources = runtime_schema_sources(description);
         let schemas = runtime_schemas(description);
-        let store = Store::open_disk_with_schema_sources_and_schemas(
-            path,
-            description.schema_sources,
-            &schemas,
-        )
-        .map_err(|err| format!("open target disk store: {err}"))?;
+        let store =
+            Store::open_disk_with_schema_sources_and_schemas(path, &schema_sources, &schemas)
+                .map_err(|err| format!("open target disk store: {err}"))?;
         Self::from_store(description, store)
     }
 
@@ -253,16 +250,14 @@ impl Runtime {
     }
 
     pub fn submit_command_output<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
-        for fact in output.facts {
-            self.submit_fact(fact);
-        }
-        for intent in output.intents {
-            self.submit_intent(intent)?;
-        }
-        for intent in output.local_intents {
-            self.submit_local_intent(intent)?;
-        }
-        Ok(output.receipt)
+        let (receipt, effects) = pipeline::PipelineEffects::from_command_output(output);
+        pipeline::commit_pipeline_effects_to_store(
+            &self.store,
+            &effects,
+            self.description.row_mutation_tables,
+            "submit command output",
+        )?;
+        Ok(receipt)
     }
 
     fn process_projection_work(&mut self, limit: usize) -> Result<PipelineReport, String> {
@@ -399,10 +394,14 @@ impl Runtime {
 }
 
 fn runtime_schemas(description: &RuntimeDescription) -> Vec<Schema> {
-    let mut schemas = Vec::with_capacity(pipeline::SCHEMAS.len() + description.schemas.len());
-    schemas.extend_from_slice(pipeline::SCHEMAS);
-    schemas.extend_from_slice(description.schemas);
-    schemas
+    description.schemas.to_vec()
+}
+
+fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<&'static str> {
+    let mut sources = Vec::with_capacity(1 + description.schema_sources.len());
+    sources.push(CORE_SCHEMA_SOURCE);
+    sources.extend_from_slice(description.schema_sources);
+    sources
 }
 
 #[cfg(test)]
@@ -410,7 +409,6 @@ mod tests {
     use super::*;
     use crate::core::facts::{Fact, FactScope};
     use crate::core::projectors::{ProjectionContext, ProjectionOutput};
-    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
 
     struct NoopProjector;
 
@@ -433,7 +431,7 @@ mod tests {
     }
 
     const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {
-        schema_sources: &[CORE_SCHEMA_SOURCE],
+        schema_sources: &[],
         schemas: &[],
         row_mutation_tables: &[],
         projector: noop_projector,

@@ -13,7 +13,7 @@ use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::network;
-use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
+use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::facts::connection::ephemeral_secret::layout as ephemeral_layout;
 use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;

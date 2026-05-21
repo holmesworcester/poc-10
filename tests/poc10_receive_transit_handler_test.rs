@@ -3,7 +3,7 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
-use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
+use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wire::FixedBytes;
 use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;

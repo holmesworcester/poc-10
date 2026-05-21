@@ -95,7 +95,7 @@ impl IntentHandler for SendNeededFactIdHandler {
 mod tests {
     use super::*;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
+    use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::facts::sync::have_id::fact::SyncHaveIdFact;
     use crate::protocol::facts::sync::have_id::layout as sync_have_id_layout;

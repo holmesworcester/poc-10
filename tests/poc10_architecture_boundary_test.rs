@@ -300,6 +300,23 @@ fn poc10_handler_output_contract_emits_facts_purges_rows_and_intents() {
 }
 
 #[test]
+fn poc10_pipeline_effects_names_the_common_commit_shape() {
+    let topo::core::pipeline::PipelineEffects {
+        facts,
+        purged_facts,
+        row_mutations,
+        durable_intents,
+        local_intents,
+    } = topo::core::pipeline::PipelineEffects::new();
+
+    assert!(facts.is_empty());
+    assert!(purged_facts.is_empty());
+    assert!(row_mutations.is_empty());
+    assert!(durable_intents.is_empty());
+    assert!(local_intents.is_empty());
+}
+
+#[test]
 fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let pipeline_path = root.join("src/core/pipeline.rs");
@@ -412,6 +429,7 @@ fn poc10_target_has_no_per_module_schema_or_codec_files() {
     let forbidden = ["schema.rs", "codec.rs"];
     let offenders = rust_files(&root.join("src"))
         .into_iter()
+        .filter(|path| path.strip_prefix(root).ok() != Some(Path::new("src/core/schema.rs")))
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())

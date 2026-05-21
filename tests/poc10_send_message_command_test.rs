@@ -14,7 +14,7 @@ use topo::core::command_context::{
     WorkspaceId,
 };
 use topo::core::crypto;
-use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
+use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::facts::content::message::create::{
     associated_data, recover_text, send_message,

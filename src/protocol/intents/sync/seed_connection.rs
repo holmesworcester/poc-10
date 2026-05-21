@@ -130,7 +130,7 @@ fn append_have_advertisement(
 mod tests {
     use super::*;
     use crate::core::facts::{FactScope, ScopeKind};
-    use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
+    use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::facts::sync::shared_fact;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;

@@ -10,7 +10,7 @@ use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{retry_intent_reason, HandlerContext, IntentHandler};
 use topo::core::network;
-use topo::core::schema_dsl::CORE_SCHEMA_SOURCE;
+use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::facts::connection::request::layout as connection_request_layout;

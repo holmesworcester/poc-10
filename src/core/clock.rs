@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn clock_is_a_lower_bound_for_next_timestamp() {
         let store =
-            Store::open_memory_with_schema_sources(&[crate::core::schema_dsl::CORE_SCHEMA_SOURCE])
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("store");
 
         assert_eq!(next_timestamp(&store, 7).expect("next"), 8);
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn advance_and_clear_are_store_local() {
         let store =
-            Store::open_memory_with_schema_sources(&[crate::core::schema_dsl::CORE_SCHEMA_SOURCE])
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("store");
 
         assert_eq!(advance_logical_time(&store, 5).expect("advance"), 5);

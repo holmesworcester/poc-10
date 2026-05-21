@@ -1219,7 +1219,9 @@ fn target_schema_dsl_files_are_declarative_only() {
         let text = source_text(&path);
         for line in meaningful_source_lines(&text) {
             if !(line.starts_with("table ")
+                || line.starts_with("memory table ")
                 || line.starts_with("row_table ")
+                || line.starts_with("memory row_table ")
                 || line.starts_with("column ")
                 || line.starts_with("row_key ")
                 || line.starts_with("index ")

@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn generate_constructs_deterministic_content_facts() {
         let store = Store::open_memory_with_schema_sources(&[
-            crate::core::schema_dsl::CORE_SCHEMA_SOURCE,
+            crate::core::schema::CORE_SCHEMA_SOURCE,
             crate::protocol::registry::FACTS_SCHEMA_SOURCE,
         ])
         .expect("store");

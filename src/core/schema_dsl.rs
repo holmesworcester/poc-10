@@ -7,8 +7,6 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-pub const CORE_SCHEMA_SOURCE: &str = include_str!("schema.p8sql");
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDocument {
     pub tables: Vec<TableDeclaration>,
@@ -24,6 +22,7 @@ impl SchemaDocument {
 pub struct TableDeclaration {
     pub name: String,
     pub kind: TableKind,
+    pub storage: TableStorage,
     pub columns: Vec<ColumnDeclaration>,
     pub row_key: RowKeyDeclaration,
     pub indexes: Vec<IndexDeclaration>,
@@ -43,6 +42,12 @@ impl TableDeclaration {
 pub enum TableKind {
     Row,
     Typed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableStorage {
+    Durable,
+    Memory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,10 +138,7 @@ impl<'a> Parser<'a> {
         let mut table_names = BTreeSet::new();
 
         while !matches!(self.lookahead.kind, TokenKind::Eof) {
-            let table = match &self.lookahead.kind {
-                TokenKind::Ident(keyword) if keyword == "row_table" => self.parse_row_table()?,
-                _ => self.parse_table()?,
-            };
+            let table = self.parse_table_declaration()?;
             if !table_names.insert(table.name.clone()) {
                 return Err(self.error(format!("duplicate table declaration `{}`", table.name)));
             }
@@ -146,7 +148,22 @@ impl<'a> Parser<'a> {
         Ok(SchemaDocument { tables })
     }
 
-    fn parse_table(&mut self) -> Result<TableDeclaration, ParseError> {
+    fn parse_table_declaration(&mut self) -> Result<TableDeclaration, ParseError> {
+        let storage = if matches!(&self.lookahead.kind, TokenKind::Ident(keyword) if keyword == "memory")
+        {
+            self.expect_keyword("memory")?;
+            TableStorage::Memory
+        } else {
+            TableStorage::Durable
+        };
+
+        match &self.lookahead.kind {
+            TokenKind::Ident(keyword) if keyword == "row_table" => self.parse_row_table(storage),
+            _ => self.parse_table(storage),
+        }
+    }
+
+    fn parse_table(&mut self, storage: TableStorage) -> Result<TableDeclaration, ParseError> {
         let table_token = self.expect_keyword("table")?;
         let name = self.parse_name()?;
         self.expect_symbol('{')?;
@@ -236,13 +253,14 @@ impl<'a> Parser<'a> {
         Ok(TableDeclaration {
             name,
             kind: TableKind::Typed,
+            storage,
             columns,
             row_key,
             indexes,
         })
     }
 
-    fn parse_row_table(&mut self) -> Result<TableDeclaration, ParseError> {
+    fn parse_row_table(&mut self, storage: TableStorage) -> Result<TableDeclaration, ParseError> {
         self.expect_keyword("row_table")?;
         let name = self.parse_name()?;
         self.expect_symbol(';')?;
@@ -250,6 +268,7 @@ impl<'a> Parser<'a> {
         Ok(TableDeclaration {
             name,
             kind: TableKind::Row,
+            storage,
             columns: vec![
                 ColumnDeclaration {
                     name: "key".to_string(),
@@ -619,6 +638,7 @@ fn is_ident_continue(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::schema::CORE_SCHEMA_SOURCE;
 
     #[test]
     fn parses_tables_row_keys_indexes_and_byte_lengths() {
@@ -683,8 +703,13 @@ mod tests {
                 "pending_time_ranges",
                 "pending_context_changes",
                 "intents",
+                "local_intents",
                 "clock",
             ]
+        );
+        assert_eq!(
+            core.table("local_intents").map(|table| table.storage),
+            Some(TableStorage::Memory)
         );
     }
 

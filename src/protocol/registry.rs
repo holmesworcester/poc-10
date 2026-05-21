@@ -16,7 +16,7 @@ use crate::core::projectors::{
     EnvelopeRoute, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
 use crate::core::runtime::HandlerRoute;
-use crate::core::schema_dsl::CORE_SCHEMA_SOURCE;
+use crate::core::schema::CORE_SCHEMA_SOURCE;
 use crate::core::store::TableName;
 use crate::protocol::cli as command;
 use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
@@ -840,11 +840,7 @@ pub const HANDLERS: &[HandlerRegistration] = &[
     },
 ];
 
-pub(crate) const SCHEMA_SOURCES: &[&str] = &[
-    CORE_SCHEMA_SOURCE,
-    FACTS_SCHEMA_SOURCE,
-    INTENTS_SCHEMA_SOURCE,
-];
+pub(crate) const SCHEMA_SOURCES: &[&str] = &[FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE];
 
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::cascade_fact::rows::CASCADE_STAGED_FACT_ROWS,
