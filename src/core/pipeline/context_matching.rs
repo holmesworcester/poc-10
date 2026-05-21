@@ -1,4 +1,4 @@
-//! Build projection context and custom context wake matches from SQL rows.
+//! Build projection context from stored context edges.
 
 use super::context_codec::scope_key;
 use super::context_rows::{stored_offers_for_exact_match, stored_offers_for_role_scope};

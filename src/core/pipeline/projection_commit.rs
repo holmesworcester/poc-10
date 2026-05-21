@@ -1,9 +1,7 @@
 //! Atomic SQL writes for one completed projection.
 
 use super::context_rows::{insert_context_need_in_tx, insert_context_offer_in_tx};
-use super::context_wake_sql::{
-    exact_role_delta, wake_custom_context_matches_in_tx, wake_exact_context_matches_in_tx,
-};
+use super::context_wakes::wake_context_matches_in_tx;
 use super::effects::sqlite_string_error;
 use crate::core::context::{ContextSet, ContextSetDelta};
 use crate::core::facts::FactId;
@@ -14,7 +12,6 @@ use crate::core::pipeline::{
 };
 use crate::core::projectors::TimeWake;
 use crate::core::store::{ColumnValue, Store, TableName};
-use std::collections::BTreeSet;
 
 /// The uncommitted output of projecting one pending fact.
 pub(super) struct ProjectionEffects {
@@ -56,8 +53,7 @@ pub(super) struct ProjectionCommit {
 /// - Clear this fact's pending row.
 /// - Replace this fact's standing context.
 /// - Replace this fact's time wakes.
-/// - Wake exact context matches directly.
-/// - Wake custom context matches directly.
+/// - Wake context matches directly.
 /// - Apply row mutations.
 /// - Record durable intents.
 /// - Record restart-local intents in the temp local queue.
@@ -67,7 +63,6 @@ pub(super) fn commit_projection_effects(
     matchers: &[&dyn ContextMatcher],
     allowed_tables: &[TableName],
 ) -> Result<ProjectionCommit, String> {
-    let matcher_roles = ContextMatcherRoles::from_matchers(matchers);
     store
         .write_transaction(|tx| {
             tx.delete_table_rows_in_tx(PENDING_PROJECTION, vec![effects.fact_id.to_vec()])?;
@@ -75,9 +70,7 @@ pub(super) fn commit_projection_effects(
             replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
             replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
 
-            let exact_delta = exact_role_delta(&effects.context_delta, &matcher_roles.exact);
-            let mut woken_facts = wake_exact_context_matches_in_tx(tx, &exact_delta)?;
-            woken_facts += wake_custom_context_matches_in_tx(tx, &effects.context_delta, matchers)
+            let woken_facts = wake_context_matches_in_tx(tx, &effects.context_delta, matchers)
                 .map_err(sqlite_string_error)?;
 
             let counts = commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables)?;
@@ -88,22 +81,6 @@ pub(super) fn commit_projection_effects(
             })
         })
         .map_err(|err| format!("commit projection effects: {err}"))
-}
-
-struct ContextMatcherRoles {
-    exact: BTreeSet<crate::core::context::Role>,
-}
-
-impl ContextMatcherRoles {
-    fn from_matchers(matchers: &[&dyn ContextMatcher]) -> Self {
-        let mut exact = BTreeSet::new();
-        for matcher in matchers {
-            if let Some(role) = matcher.exact_selector_role() {
-                exact.insert(role.clone());
-            }
-        }
-        Self { exact }
-    }
 }
 
 fn delete_pending_time_ranges_for_owner_in_tx(

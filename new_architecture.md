@@ -94,7 +94,7 @@ fixtures and the deferred partial-download-progress content tests.
   modules only.
 - The runtime calls SQL-backed core pipeline workers under
   `src/core/pipeline/`: `projection.rs` projects pending facts,
-  `projection_commit.rs` wakes exact and custom matcher dependents,
+  `projection_commit.rs` wakes context-matcher dependents,
   `fact_context.rs` runs the single-threaded fact/context loop and time wakes, and `dispatch.rs` dispatches
   durable and restart-local intents.
 - Target fact modules under `src/protocol/facts/` are exercised by poc-10 tests
@@ -121,8 +121,8 @@ Implemented target slices:
   provenance, deletion/update wakeups, and recipient-key supersession.
 - Row mutations as the projector- and handler-owned path for bounded read-model
   writes and deletes.
-- Pending-fact projection replaces each fact's needs/offers, wakes exact and
-  custom context matches in the projection commit, applies row mutations,
+- Pending-fact projection replaces each fact's needs/offers, wakes context
+  matches in the projection commit, applies row mutations,
   persists durable intents, and keeps restart-local IO intents in TEMP SQLite
   storage.
 - Handler dispatch that accepts only declared fact inputs and returns facts,
@@ -897,7 +897,7 @@ pending projection worker
   run projector
   apply row mutations
   replace the fact's context_edges
-  wake exact and custom matches with SQL
+  wake context matches with SQL
   persist durable intents
   persist restart-local intents in TEMP local_intents
 

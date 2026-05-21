@@ -11,7 +11,7 @@ use crate::core::matchers::{
     SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
 use crate::core::store::{ColumnValue, Store};
-use crate::core::wake::{WakeParam, WakePlan};
+use crate::core::wake;
 
 use super::exact::protocol_role;
 use super::sql;
@@ -569,9 +569,12 @@ impl ContextMatcher for WrapSourceMatcher {
             .map(Some)
     }
 
-    fn wake_plan_for_added_need(&self, need: &ContextNeed) -> Result<Option<WakePlan>, String> {
+    fn wake_select_for_added_need(
+        &self,
+        need: &ContextNeed,
+    ) -> Result<Option<wake::Select>, String> {
         if need.role != self.role {
-            return Ok(Some(empty_wake_plan()));
+            return Ok(Some(wake::Select::empty()));
         }
         let (need_kind, workspace_id, frontier_id, min_frontier_created_at_ms) =
             if let Some((workspace_id, min_frontier_created_at_ms)) =
@@ -588,49 +591,48 @@ impl ContextMatcher for WrapSourceMatcher {
             {
                 (2, workspace_id, frontier_id, 0u64.to_be_bytes())
             } else {
-                return Ok(Some(empty_wake_plan()));
+                return Ok(Some(wake::Select::empty()));
             };
         let scope_key = sql::scope_key_for_sql(&need.scope);
-        Ok(Some(sql::wake_plan(
+        Ok(Some(sql::wake_select(
             WRAP_SOURCE_WAKE_FOR_NEED_SQL,
             vec![
-                WakeParam::bytes(":need_owner", need.owner),
-                WakeParam::text(":role", self.role.as_str()),
-                WakeParam::bytes(":scope_key", scope_key),
-                WakeParam::i64(":need_kind", need_kind),
-                WakeParam::bytes(":workspace_id", workspace_id),
-                WakeParam::bytes(":frontier_id", frontier_id),
-                WakeParam::bytes(":min_frontier_created_at_ms", min_frontier_created_at_ms),
+                wake::Param::bytes(":need_owner", need.owner),
+                wake::Param::text(":role", self.role.as_str()),
+                wake::Param::bytes(":scope_key", scope_key),
+                wake::Param::i64(":need_kind", need_kind),
+                wake::Param::bytes(":workspace_id", workspace_id),
+                wake::Param::bytes(":frontier_id", frontier_id),
+                wake::Param::bytes(":min_frontier_created_at_ms", min_frontier_created_at_ms),
             ],
         )))
     }
 
-    fn wake_plan_for_added_offer(&self, offer: &ContextOffer) -> Result<Option<WakePlan>, String> {
+    fn wake_select_for_added_offer(
+        &self,
+        offer: &ContextOffer,
+    ) -> Result<Option<wake::Select>, String> {
         if offer.role != self.role {
-            return Ok(Some(empty_wake_plan()));
+            return Ok(Some(wake::Select::empty()));
         }
         let Some(selector) = decode_wrap_source_selector(&offer.selector) else {
-            return Ok(Some(empty_wake_plan()));
+            return Ok(Some(wake::Select::empty()));
         };
         let scope_key = sql::scope_key_for_sql(&offer.scope);
-        Ok(Some(sql::wake_plan(
+        Ok(Some(sql::wake_select(
             WRAP_SOURCE_WAKE_FOR_OFFER_SQL,
             vec![
-                WakeParam::text(":role", self.role.as_str()),
-                WakeParam::bytes(":scope_key", scope_key),
-                WakeParam::bytes(":workspace_id", selector.workspace_id),
-                WakeParam::bytes(":frontier_id", selector.frontier_id),
-                WakeParam::bytes(
+                wake::Param::text(":role", self.role.as_str()),
+                wake::Param::bytes(":scope_key", scope_key),
+                wake::Param::bytes(":workspace_id", selector.workspace_id),
+                wake::Param::bytes(":frontier_id", selector.frontier_id),
+                wake::Param::bytes(
                     ":frontier_created_at_ms",
                     selector.frontier_created_at_ms.to_be_bytes(),
                 ),
             ],
         )))
     }
-}
-
-fn empty_wake_plan() -> WakePlan {
-    sql::wake_plan("SELECT NULL AS owner WHERE 0", Vec::new())
 }
 
 pub fn wrap_source_offer_matches_need(

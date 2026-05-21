@@ -14,7 +14,7 @@ mod admission;
 mod context_codec;
 mod context_matching;
 mod context_rows;
-mod context_wake_sql;
+mod context_wakes;
 mod dispatch;
 mod effects;
 mod fact_context;

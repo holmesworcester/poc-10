@@ -1,23 +1,27 @@
-//! Checked SQL wake plans for queue fanout.
+//! Checked SQL SELECTs for queue fanout.
 //!
-//! A wake plan is a read-only SELECT over declared tables. Pipeline workers
-//! choose the destination queue table and columns; the plan only describes the
+//! A wake select is a read-only SELECT over declared tables. Pipeline workers
+//! choose the destination queue table and columns; the select only describes the
 //! bounded source rows and bound parameters.
 
 use crate::core::store::{ColumnValue, Store, TableName};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WakePlan {
+pub struct Select {
     pub sql: &'static str,
     pub allowed_tables: &'static [TableName],
-    pub params: Vec<WakeParam>,
+    pub params: Vec<Param>,
 }
 
-impl WakePlan {
+impl Select {
+    pub fn empty() -> Self {
+        Self::new("SELECT NULL AS owner WHERE 0", &[], Vec::new())
+    }
+
     pub fn new(
         sql: &'static str,
         allowed_tables: &'static [TableName],
-        params: Vec<WakeParam>,
+        params: Vec<Param>,
     ) -> Self {
         Self {
             sql,
@@ -28,44 +32,44 @@ impl WakePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WakeParam {
+pub struct Param {
     pub name: &'static str,
-    pub value: WakeValue,
+    pub value: Value,
 }
 
-impl WakeParam {
+impl Param {
     pub fn bytes(name: &'static str, value: impl Into<Vec<u8>>) -> Self {
         Self {
             name,
-            value: WakeValue::Bytes(value.into()),
+            value: Value::Bytes(value.into()),
         }
     }
 
     pub fn text(name: &'static str, value: impl Into<String>) -> Self {
         Self {
             name,
-            value: WakeValue::Text(value.into()),
+            value: Value::Text(value.into()),
         }
     }
 
     pub fn u64(name: &'static str, value: u64) -> Self {
         Self {
             name,
-            value: WakeValue::U64(value),
+            value: Value::U64(value),
         }
     }
 
     pub fn i64(name: &'static str, value: i64) -> Self {
         Self {
             name,
-            value: WakeValue::I64(value),
+            value: Value::I64(value),
         }
     }
 
     pub fn bool(name: &'static str, value: bool) -> Self {
         Self {
             name,
-            value: WakeValue::Bool(value),
+            value: Value::Bool(value),
         }
     }
 
@@ -75,7 +79,7 @@ impl WakeParam {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WakeValue {
+pub enum Value {
     Bytes(Vec<u8>),
     Text(String),
     U64(u64),
@@ -83,7 +87,7 @@ pub enum WakeValue {
     Bool(bool),
 }
 
-impl WakeValue {
+impl Value {
     fn as_column_value(&self) -> ColumnValue<'_> {
         match self {
             Self::Bytes(value) => ColumnValue::Bytes(value),
@@ -95,13 +99,13 @@ impl WakeValue {
     }
 }
 
-pub(crate) fn execute_wake_plan_in_tx(
+pub(crate) fn insert_select_in_tx(
     store: &Store,
     target_table: TableName,
     target_columns: &[&str],
-    plan: &WakePlan,
+    select: &Select,
 ) -> rusqlite::Result<usize> {
-    let params = plan
+    let params = select
         .params
         .iter()
         .map(|param| (param.name, param.as_column_value()))
@@ -109,8 +113,8 @@ pub(crate) fn execute_wake_plan_in_tx(
     store.insert_typed_rows_from_select_in_tx(
         target_table,
         target_columns,
-        plan.sql,
-        plan.allowed_tables,
+        select.sql,
+        select.allowed_tables,
         &params,
     )
 }

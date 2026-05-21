@@ -4,7 +4,7 @@ use crate::core::pipeline::report::{add_pipeline_report, PipelineReport};
 use crate::core::pipeline::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
 use crate::core::projectors::{Projector, TimeRange, Timeline};
 use crate::core::store::{Store, TableName};
-use crate::core::wake::{execute_wake_plan_in_tx, WakeParam, WakePlan};
+use crate::core::wake;
 
 const TIME_WAKE_TABLES: &[TableName] = &[TIME_WAKES];
 
@@ -65,21 +65,21 @@ fn enqueue_due_time_wakes_in_tx(
     let has_start = range.start_exclusive.is_some();
     let start_exclusive = range.start_exclusive.unwrap_or(0);
     let params = vec![
-        WakeParam::text(":timeline", range.timeline.as_str()),
-        WakeParam::bool(":has_start", has_start),
-        WakeParam::u64(":start_exclusive", start_exclusive),
-        WakeParam::u64(":end_inclusive", range.end_inclusive),
-        WakeParam::u64(":limit", limit as u64),
+        wake::Param::text(":timeline", range.timeline.as_str()),
+        wake::Param::bool(":has_start", has_start),
+        wake::Param::u64(":start_exclusive", start_exclusive),
+        wake::Param::u64(":end_inclusive", range.end_inclusive),
+        wake::Param::u64(":limit", limit as u64),
     ];
 
-    let inserted = execute_wake_plan_in_tx(
+    let inserted = wake::insert_select_in_tx(
         store,
         PENDING_PROJECTION,
         &["owner"],
-        &WakePlan::new(DUE_TIME_WAKE_OWNER_SQL, TIME_WAKE_TABLES, params.clone()),
+        &wake::Select::new(DUE_TIME_WAKE_OWNER_SQL, TIME_WAKE_TABLES, params.clone()),
     )?;
 
-    execute_wake_plan_in_tx(
+    wake::insert_select_in_tx(
         store,
         PENDING_TIME_RANGES,
         &[
@@ -89,7 +89,7 @@ fn enqueue_due_time_wakes_in_tx(
             "start_exclusive",
             "end_inclusive",
         ],
-        &WakePlan::new(DUE_TIME_RANGE_SQL, TIME_WAKE_TABLES, params),
+        &wake::Select::new(DUE_TIME_RANGE_SQL, TIME_WAKE_TABLES, params),
     )?;
 
     Ok(inserted)
@@ -97,9 +97,8 @@ fn enqueue_due_time_wakes_in_tx(
 
 /// Drive fact projection until no more work is found.
 ///
-/// Projection commits context edges and immediately wakes exact and custom
-/// context matches. The loop stops when no fact projected or the projection
-/// limit has been reached.
+/// Projection commits context edges and immediately wakes matching facts. The
+/// loop stops when no fact projected or the projection limit has been reached.
 pub(crate) fn process_pending_facts_and_context_changes(
     projector: &(impl Projector + ?Sized),
     matchers: &[&dyn ContextMatcher],

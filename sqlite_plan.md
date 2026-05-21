@@ -95,8 +95,8 @@ WHERE n.direction = 'need'
 ORDER BY f.timestamp, n.owner;
 ```
 
-Custom matcher roles also supply SELECT-only wake queries. Core executes those
-plans during projection commit and inserts affected owners directly into
+Custom matcher roles also supply wake selects. Core executes those selects
+during projection commit and inserts affected owners directly into
 `pending_projection`.
 
 ## Ownership Rules
@@ -113,11 +113,11 @@ plans during projection commit and inserts affected owners directly into
 ## Current Status
 
 - Durable and restart-local intent queues are both SQLite-backed.
-- Exact and custom context wake fanout use typed `INSERT OR IGNORE ... SELECT`
-  during projection commit.
+- Context wake fanout uses typed `INSERT OR IGNORE ... SELECT` during
+  projection commit.
 - Time wake admission uses the same checked insert-select pattern from
   `time_wakes` into `pending_projection` and `pending_time_ranges`.
-- `core::wake::WakePlan` is the shared read-only SELECT shape for this fanout;
+- `core::wake::Select` is the shared read-only SELECT shape for this fanout;
   pipeline workers still choose the target queue table and columns.
 - Custom matcher candidate lookup for range, coverage, and wrap-source roles is
   SELECT-only SQL over `context_edges`.

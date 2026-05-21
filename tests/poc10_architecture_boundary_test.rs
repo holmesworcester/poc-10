@@ -343,9 +343,9 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
             &[
                 "ContextWake",
                 "context_wake",
+                "context_wakes",
                 "context wake",
-                "wake_exact_context_matches",
-                "wake_custom_context_matches",
+                "wake_context_matches",
             ][..],
         ),
         (

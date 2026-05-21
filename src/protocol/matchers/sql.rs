@@ -9,7 +9,7 @@ use crate::core::facts::{FactId, FactScope};
 use crate::core::pipeline::{scope_key, CONTEXT_EDGES, FACTS};
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
-use crate::core::wake::{WakeParam, WakePlan};
+use crate::core::wake;
 
 pub(crate) const CONTEXT_MATCHER_TABLES: &[TableName] = &[CONTEXT_EDGES];
 pub(crate) const CONTEXT_WAKE_TABLES: &[TableName] = &[CONTEXT_EDGES, FACTS];
@@ -40,8 +40,8 @@ pub(crate) fn scope_key_for_sql(scope: &FactScope) -> Vec<u8> {
     scope_key(scope)
 }
 
-pub(crate) fn wake_plan(sql: &'static str, params: Vec<WakeParam>) -> WakePlan {
-    WakePlan::new(sql, CONTEXT_WAKE_TABLES, params)
+pub(crate) fn wake_select(sql: &'static str, params: Vec<wake::Param>) -> wake::Select {
+    wake::Select::new(sql, CONTEXT_WAKE_TABLES, params)
 }
 
 pub(crate) fn select_offers_for_need(
