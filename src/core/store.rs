@@ -19,6 +19,9 @@
 //! conservative identifier check.
 
 use crate::core::schema_dsl::{TableDeclaration, TableStorage};
+use crate::core::sqlite_names::{
+    quoted_identifier, quoted_identifier_list, quoted_table_name, quoted_table_name_str,
+};
 use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
 use std::collections::HashSet;
 use std::path::Path;
@@ -371,7 +374,7 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         declarations.push(format!(
             "PRIMARY KEY ({})",
-            quoted_identifier_list(&table.row_key.columns)?
+            quoted_identifier_list(table.row_key.columns.iter().map(String::as_str))?
         ));
         self.conn.execute_batch(&format!(
             "CREATE {temp}TABLE {quoted} (
@@ -386,7 +389,7 @@ impl Store {
             self.conn.execute_batch(&format!(
                 "CREATE {unique}INDEX IF NOT EXISTS {index_name}
                  ON {quoted} ({});",
-                quoted_identifier_list(&index.columns)?
+                quoted_identifier_list(index.columns.iter().map(String::as_str))?
             ))?;
         }
         Ok(())

@@ -208,10 +208,6 @@ impl Runtime {
             .expect("runtime pending fact count should load from store")
     }
 
-    pub fn pending_work_count(&self) -> usize {
-        self.pending_fact_count()
-    }
-
     pub fn pending_intent_count(&self) -> usize {
         let stored = self
             .store
@@ -310,7 +306,7 @@ impl Runtime {
             if report.projections == 0
                 && report.woken_facts == 0
                 && report.intents == 0
-                && self.pending_work_count() == 0
+                && self.pending_fact_count() == 0
             {
                 return Ok(total);
             }
@@ -319,21 +315,7 @@ impl Runtime {
     }
 
     pub fn dispatch_intents(&mut self, limit_per_handler: usize) -> Result<WorkStatus, String> {
-        let report = self.handlers.dispatch(
-            &self.store,
-            self.description.row_mutation_tables,
-            limit_per_handler,
-        )?;
-        Ok(WorkStatus::from_dispatch_report(&report))
-    }
-
-    pub fn dispatch_intents_excluding(
-        &mut self,
-        excluded_handler_names: &[&str],
-        limit_per_handler: usize,
-    ) -> Result<WorkStatus, String> {
-        let handlers = HandlerSet::new_excluding(self.description.handlers, excluded_handler_names);
-        self.dispatch_with_handlers(&handlers, limit_per_handler)
+        self.dispatch_with_handlers(&self.handlers, limit_per_handler)
     }
 
     /// Settle all projection and intent work using the protocol's full handler
@@ -345,21 +327,11 @@ impl Runtime {
         max_rounds: usize,
         limit_per_round: usize,
     ) -> Result<WorkStatus, String> {
-        let mut total = WorkStatus::idle();
-        for _ in 0..max_rounds {
-            total.merge(self.process_projection_until_idle(8, limit_per_round)?);
-            let dispatched = self.dispatch_intents(limit_per_round)?;
-            total.merge(dispatched);
-            if dispatched.is_idle() {
-                total.merge(self.process_projection_until_idle(8, limit_per_round)?);
-                return Ok(total);
-            }
-        }
-        Ok(total)
+        self.process_work_until_idle(max_rounds, limit_per_round, None)
     }
 
     fn dispatch_with_handlers(
-        &mut self,
+        &self,
         handlers: &HandlerSet,
         limit_per_handler: usize,
     ) -> Result<WorkStatus, String> {
@@ -369,6 +341,26 @@ impl Runtime {
             limit_per_handler,
         )?;
         Ok(WorkStatus::from_dispatch_report(&report))
+    }
+
+    fn process_work_until_idle(
+        &mut self,
+        max_rounds: usize,
+        limit_per_round: usize,
+        handlers: Option<&HandlerSet>,
+    ) -> Result<WorkStatus, String> {
+        let mut total = WorkStatus::idle();
+        for _ in 0..max_rounds {
+            total.merge(self.process_projection_until_idle(8, limit_per_round)?);
+            let dispatched =
+                self.dispatch_with_handlers(handlers.unwrap_or(&self.handlers), limit_per_round)?;
+            total.merge(dispatched);
+            if dispatched.is_idle() {
+                total.merge(self.process_projection_until_idle(8, limit_per_round)?);
+                return Ok(total);
+            }
+        }
+        Ok(total)
     }
 
     /// Settle work that a synchronous CLI command should be allowed to observe.
@@ -382,20 +374,11 @@ impl Runtime {
         max_rounds: usize,
         limit_per_round: usize,
     ) -> Result<WorkStatus, String> {
-        let mut total = WorkStatus::idle();
-        for _ in 0..max_rounds {
-            total.merge(self.process_projection_until_idle(8, limit_per_round)?);
-            let dispatched = self.dispatch_intents_excluding(
-                self.description.command_excluded_handlers,
-                limit_per_round,
-            )?;
-            total.merge(dispatched);
-            if dispatched.is_idle() {
-                total.merge(self.process_projection_until_idle(8, limit_per_round)?);
-                return Ok(total);
-            }
-        }
-        Ok(total)
+        let handlers = HandlerSet::new_excluding(
+            self.description.handlers,
+            self.description.command_excluded_handlers,
+        );
+        self.process_work_until_idle(max_rounds, limit_per_round, Some(&handlers))
     }
 
     pub fn process_due_time_range(

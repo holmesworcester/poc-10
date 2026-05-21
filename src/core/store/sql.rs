@@ -1,5 +1,5 @@
-use super::*;
 use crate::core::schema_dsl::{self, ColumnType, TableDeclaration, TableKind};
+use crate::core::sqlite_names::quoted_table_name_str;
 use rusqlite::Connection as SqliteConnection;
 use std::collections::BTreeSet;
 
@@ -237,41 +237,4 @@ pub(super) fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
         }
     }
     None
-}
-
-/// Quote a declared table name after rejecting unsafe identifier bytes.
-pub(super) fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
-    quoted_table_name_str(table.as_str())
-}
-
-pub(super) fn quoted_table_name_str(name: &str) -> rusqlite::Result<String> {
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
-    {
-        return Err(rusqlite::Error::InvalidParameterName(format!(
-            "invalid table name {name}"
-        )));
-    }
-    Ok(format!("\"{name}\""))
-}
-
-pub(super) fn quoted_identifier(name: &str) -> rusqlite::Result<String> {
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return Err(rusqlite::Error::InvalidParameterName(format!(
-            "invalid identifier {name}"
-        )));
-    }
-    Ok(format!("\"{name}\""))
-}
-
-pub(super) fn quoted_identifier_list(columns: &[String]) -> rusqlite::Result<String> {
-    columns
-        .iter()
-        .map(|column| quoted_identifier(column))
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map(|columns| columns.join(", "))
 }

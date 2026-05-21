@@ -51,17 +51,9 @@ impl ProjectionContext {
         &self.offers
     }
 
-    pub fn matched_context(&self) -> &[MatchedContext] {
-        &self.matched
-    }
-
     pub fn with_time_ranges(mut self, time_ranges: Vec<TimeRange>) -> Self {
         self.time_ranges = time_ranges;
         self
-    }
-
-    pub fn time_ranges(&self) -> &[TimeRange] {
-        &self.time_ranges
     }
 
     pub fn time_reached(&self, timeline: &Timeline, at: u64) -> Option<u64> {
@@ -103,39 +95,12 @@ impl ProjectionContext {
         self.payload_for(need).map(C::decode_fact).transpose()
     }
 
-    pub fn payload_as_checked<C>(
-        &self,
-        need: &ContextNeed,
-        label: &str,
-    ) -> Result<Option<C::Payload>, String>
-    where
-        C: FactCodec,
-    {
-        self.payload_for_checked(need, label)?
-            .map(C::decode_fact)
-            .transpose()
-    }
-
     pub fn matched_payloads_for<'a>(
         &'a self,
         need: &'a ContextNeed,
     ) -> impl Iterator<Item = (&'a ContextOffer, &'a Fact)> + 'a {
         self.matched_entries_for(need)
             .map(|matched| (&matched.offer, &matched.payload))
-    }
-
-    pub fn matched_payloads_for_checked<'a>(
-        &'a self,
-        need: &'a ContextNeed,
-        label: &'a str,
-    ) -> impl Iterator<Item = Result<(&'a ContextOffer, &'a Fact), String>> + 'a {
-        self.matched_entries_for(need).map(move |matched| {
-            if matched.offer.owner != matched.payload.id {
-                Err(format!("{label} context offer payload mismatch"))
-            } else {
-                Ok((&matched.offer, &matched.payload))
-            }
-        })
     }
 
     pub fn matched_payloads_as_checked<'a, C>(
@@ -146,33 +111,14 @@ impl ProjectionContext {
     where
         C: FactCodec + 'a,
     {
-        self.matched_payloads_for_checked(need, label)
-            .map(|matched| {
-                let (offer, payload) = matched?;
-                C::decode_fact(payload).map(|decoded| (offer, payload, decoded))
-            })
-    }
-
-    pub fn offer_owners_matching<'a>(
-        &'a self,
-        role: &'a crate::core::context::Role,
-        scope: &'a crate::core::facts::FactScope,
-        selector: &'a crate::core::context::Selector,
-    ) -> impl Iterator<Item = FactId> + 'a {
-        self.offers
-            .iter()
-            .filter(move |offer| {
-                offer.role == *role && offer.scope == *scope && offer.selector == *selector
-            })
-            .map(|offer| offer.owner)
-    }
-
-    pub fn offer_owners(&self) -> impl Iterator<Item = FactId> + '_ {
-        self.offers.iter().map(|offer| offer.owner)
-    }
-
-    pub fn payload_facts(&self) -> impl Iterator<Item = &Fact> + '_ {
-        self.matched.iter().map(|matched| &matched.payload)
+        self.matched_entries_for(need).map(move |matched| {
+            if matched.offer.owner != matched.payload.id {
+                Err(format!("{label} context offer payload mismatch"))
+            } else {
+                C::decode_fact(&matched.payload)
+                    .map(|decoded| (&matched.offer, &matched.payload, decoded))
+            }
+        })
     }
 
     fn matched_entries_for<'a>(
@@ -485,10 +431,6 @@ mod tests {
         let context = ProjectionContext::from_matches(vec![matched_context(need.clone(), [7; 32])]);
 
         assert_eq!(context.payload_as::<FirstByteCodec>(&need), Ok(Some(7)));
-        assert_eq!(
-            context.payload_as_checked::<FirstByteCodec>(&need, "typed"),
-            Ok(Some(7))
-        );
         assert_eq!(
             context.payload_as::<FirstByteCodec>(&ContextNeed {
                 owner: [2; 32],

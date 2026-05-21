@@ -4,6 +4,7 @@
 //! the destination queue table and columns; the select only describes the
 //! bounded source rows and bound parameters.
 
+use crate::core::sqlite_names::{quoted_identifier_list, quoted_table_name};
 use crate::core::store::{Store, TableName};
 use rusqlite::types::Value as SqliteValue;
 
@@ -119,11 +120,7 @@ pub(crate) fn insert_select_in_tx(
     }
     validate_select_sql(select.sql, select.allowed_tables)?;
     let table_name = quoted_table_name(target_table)?;
-    let columns = target_columns
-        .iter()
-        .map(|column| quoted_identifier(column))
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .join(", ");
+    let columns = quoted_identifier_list(target_columns.iter().copied())?;
     let sql = format!(
         "INSERT OR IGNORE INTO {table_name} ({columns}) {}",
         select.sql
@@ -186,31 +183,4 @@ fn sql_identifier_tokens(sql: &str) -> Vec<String> {
         tokens.push(current);
     }
     tokens
-}
-
-fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
-    let name = table.as_str();
-    if name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
-    {
-        Ok(format!("\"{name}\""))
-    } else {
-        Err(rusqlite::Error::InvalidParameterName(format!(
-            "invalid table name {name}"
-        )))
-    }
-}
-
-fn quoted_identifier(name: &str) -> rusqlite::Result<String> {
-    if name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        Ok(format!("\"{name}\""))
-    } else {
-        Err(rusqlite::Error::InvalidParameterName(format!(
-            "invalid identifier {name}"
-        )))
-    }
 }

@@ -126,7 +126,11 @@ impl Projector for NeedUntilOffer {
             Ok(ProjectionOutput::new().intent(Intent::new(
                 self.intent_kind.clone(),
                 fact.id,
-                context.offer_owners().next().unwrap_or(fact.id),
+                context
+                    .offers()
+                    .first()
+                    .map(|offer| offer.owner)
+                    .unwrap_or(fact.id),
             )))
         }
     }

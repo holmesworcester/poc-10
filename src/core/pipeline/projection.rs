@@ -3,9 +3,8 @@
 use super::effects::validate_pipeline_effects;
 use super::projection_commit::{commit_projection_effects, ProjectionCommit, ProjectionEffects};
 use super::projection_queue::{load_pending_fact, pending_owner_batch, PendingFact};
-use super::projection_run::{run_projection_with_context, ProjectionRun};
+use super::projection_run::run_projection_with_context;
 use crate::core::fact_store::purge_fact_in_tx;
-use crate::core::facts::FactId;
 use crate::core::matchers::ContextMatcher;
 use crate::core::pipeline::report::PipelineReport;
 use crate::core::projectors::Projector;
@@ -71,7 +70,8 @@ fn process_pending_fact(
 ) -> Result<(), String> {
     let effects = prepare_projection_effects(projector, pending_fact, allowed_tables)?;
     let commit = commit_projection_effects(store, &effects, matchers, allowed_tables)?;
-    finish_pending_fact(commit, report)
+    finish_pending_fact(commit, report);
+    Ok(())
 }
 
 /// Run the protocol projector for one fact and split its output.
@@ -91,29 +91,21 @@ fn prepare_projection_effects(
     } = pending_fact;
     let run = run_projection_with_context(projector, &fact, &previous_context, projection_context)?;
     validate_pipeline_effects(&run.pipeline, allowed_tables)?;
-    Ok(projection_effects_from_run(fact_id, run))
-}
-
-fn projection_effects_from_run(fact_id: FactId, run: ProjectionRun) -> ProjectionEffects {
-    ProjectionEffects::new(
+    Ok(ProjectionEffects {
         fact_id,
-        run.context,
-        run.time_wakes,
-        run.context_delta,
-        run.pipeline,
-    )
+        next_context: run.context,
+        next_time_wakes: run.time_wakes,
+        context_delta: run.context_delta,
+        pipeline: run.pipeline,
+    })
 }
 
 /// Update compatibility memory and the report after a projection commit.
 ///
 /// This function runs after SQLite has accepted the durable work and any
 /// restart-local temp rows.
-fn finish_pending_fact(
-    commit: ProjectionCommit,
-    report: &mut PipelineReport,
-) -> Result<(), String> {
+fn finish_pending_fact(commit: ProjectionCommit, report: &mut PipelineReport) {
     report.projections += 1;
     report.intents += commit.effects.intents();
     report.woken_facts += commit.woken_facts;
-    Ok(())
 }

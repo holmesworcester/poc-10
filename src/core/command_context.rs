@@ -27,7 +27,6 @@
 
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::Intent;
 use crate::core::store::Store;
 
 pub type WorkspaceId = FactId;
@@ -175,16 +174,6 @@ impl<T> CommandOutput<T> {
 
     pub fn with_facts(mut self, facts: Vec<Fact>) -> Self {
         self.effects.facts = facts;
-        self
-    }
-
-    pub fn with_intents(mut self, intents: Vec<Intent>) -> Self {
-        self.effects.intents = intents;
-        self
-    }
-
-    pub fn with_local_intents(mut self, intents: Vec<Intent>) -> Self {
-        self.effects.local_intents = intents;
         self
     }
 

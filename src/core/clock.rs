@@ -13,13 +13,6 @@ const CLOCK_KEY: &str = "now";
 
 pub const CLOCK_USAGE: &str = "clock [set TIMESTAMP|advance DELTA|clear]";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClockReport {
-    pub logical_time: Option<u64>,
-    pub max_event_timestamp: u64,
-    pub next_timestamp: u64,
-}
-
 pub fn logical_time(store: &Store) -> Result<Option<u64>, String> {
     store
         .conn()
@@ -74,15 +67,14 @@ pub fn run_cli(
     args: CliArgs<'_>,
     observed_max_timestamp: u64,
 ) -> Result<CliOutput, String> {
-    let report = apply_cli_args(store, args, observed_max_timestamp)?;
-    Ok(clock_report_output(&report))
+    apply_cli_args(store, args, observed_max_timestamp)
 }
 
-pub fn apply_cli_args(
+fn apply_cli_args(
     store: &Store,
     args: CliArgs<'_>,
     observed_max_timestamp: u64,
-) -> Result<ClockReport, String> {
+) -> Result<CliOutput, String> {
     match args.values() {
         [] => {}
         [command, value] if command == "set" => {
@@ -105,23 +97,14 @@ pub fn apply_cli_args(
 
     let logical_time = logical_time(store)?;
     let next_timestamp = next_timestamp(store, observed_max_timestamp)?;
-    Ok(ClockReport {
-        logical_time,
-        max_event_timestamp: observed_max_timestamp,
-        next_timestamp,
-    })
-}
-
-pub fn clock_report_output(report: &ClockReport) -> CliOutput {
-    let logical_time = report
-        .logical_time
+    let logical_time = logical_time
         .map(|timestamp| timestamp.to_string())
         .unwrap_or_else(|| "unset".to_string());
-    CliOutput::lines(vec![
+    Ok(CliOutput::lines(vec![
         format!("logical_time: {logical_time}"),
-        format!("max_event_timestamp: {}", report.max_event_timestamp),
-        format!("next_timestamp: {}", report.next_timestamp),
-    ])
+        format!("max_event_timestamp: {observed_max_timestamp}"),
+        format!("next_timestamp: {next_timestamp}"),
+    ]))
 }
 
 fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {

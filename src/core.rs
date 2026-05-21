@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod schema;
 pub mod schema_dsl;
 pub mod select;
+pub(crate) mod sqlite_names;
 pub mod store;
 pub mod tcp;
 pub mod wire;

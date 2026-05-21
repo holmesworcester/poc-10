@@ -70,14 +70,14 @@ fn dispatch_stored_intents(
         let Some(output) = run_handler(handler, &stored.intent, &context, &mut report)? else {
             break;
         };
-        let effects = prepare_handler_output(output, allowed_tables)?;
+        validate_pipeline_effects(&output, allowed_tables)?;
         let handled = HandledIntent {
             table: queue_table,
             kind: stored.intent.kind.as_str(),
             idempotence_key: &stored.intent.key,
         };
-        let commit = commit_handler_output(store, handled, &effects, allowed_tables)?;
-        if !finish_handler_output(commit, &mut report)? {
+        let commit = commit_handler_output(store, handled, &output, allowed_tables)?;
+        if !finish_handler_output(commit, &mut report) {
             continue;
         }
     }
@@ -166,7 +166,7 @@ fn run_handler(
     match handler.handle(intent, context) {
         Ok(output) => Ok(Some(output)),
         Err(err) => {
-            if is_retryable_handler_error(&err) {
+            if matches!(err, HandlerError::Retry(_)) {
                 report.retries += 1;
                 Ok(None)
             } else {
@@ -174,14 +174,6 @@ fn run_handler(
             }
         }
     }
-}
-
-fn prepare_handler_output(
-    effects: PipelineEffects,
-    allowed_tables: &[TableName],
-) -> Result<PipelineEffects, String> {
-    validate_pipeline_effects(&effects, allowed_tables)?;
-    Ok(effects)
 }
 
 /// Commit the complete output of one handled intent in a single transaction.
@@ -220,22 +212,15 @@ fn commit_handler_output(
 /// Runs only after [`commit_handler_output`] succeeds. Returns whether the commit
 /// took effect — `false` only when another dispatcher had already claimed the
 /// stored intent.
-fn finish_handler_output(
-    commit: HandlerCommit,
-    report: &mut DispatchReport,
-) -> Result<bool, String> {
+fn finish_handler_output(commit: HandlerCommit, report: &mut DispatchReport) -> bool {
     if !commit.handled {
-        return Ok(false);
+        return false;
     }
 
     report.handled += 1;
     report.facts += commit.effects.facts;
     report.intents += commit.effects.intents();
-    Ok(true)
-}
-
-fn is_retryable_handler_error(err: &HandlerError) -> bool {
-    matches!(err, HandlerError::Retry(_))
+    true
 }
 
 struct StoredIntent {

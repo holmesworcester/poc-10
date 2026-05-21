@@ -5,8 +5,7 @@
 //! operations should happen.
 
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
-use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS, PENDING_TIME_RANGES, TIME_WAKES};
-use crate::core::store::{Store, TableName};
+use crate::core::store::Store;
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
 
@@ -43,44 +42,19 @@ pub(crate) fn purge_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result
         .conn()
         .execute("DELETE FROM facts WHERE id = ?1", params![owner.as_slice()])?
         > 0;
-    for table in [
-        LOCAL_FACT_ADMISSIONS,
-        CONTEXT_EDGES,
-        TIME_WAKES,
-        PENDING_TIME_RANGES,
+    for sql in [
+        "DELETE FROM local_fact_admissions WHERE fact_id = ?1",
+        "DELETE FROM context_edges WHERE owner = ?1",
+        "DELETE FROM time_wakes WHERE owner = ?1",
+        "DELETE FROM pending_time_ranges WHERE owner = ?1",
     ] {
-        changed |= delete_rows_owned_by(store, table, &owner)?;
+        changed |= store.conn().execute(sql, params![owner.as_slice()])? > 0;
     }
     changed |= store.conn().execute(
         "DELETE FROM pending_projection WHERE owner = ?1",
         params![owner.as_slice()],
     )? > 0;
     Ok(changed)
-}
-
-/// Delete every row in `table` whose `owner` column equals `owner`.
-///
-/// This is the "remove all of one fact's rows from a side table" step that
-/// [`purge_fact_in_tx`] repeats for each table. Returns whether any row matched.
-fn delete_rows_owned_by(store: &Store, table: TableName, owner: &FactId) -> rusqlite::Result<bool> {
-    let sql = if table == LOCAL_FACT_ADMISSIONS {
-        "DELETE FROM local_fact_admissions WHERE fact_id = ?1"
-    } else if table == CONTEXT_EDGES {
-        "DELETE FROM context_edges WHERE owner = ?1"
-    } else if table == TIME_WAKES {
-        "DELETE FROM time_wakes WHERE owner = ?1"
-    } else if table == PENDING_TIME_RANGES {
-        "DELETE FROM pending_time_ranges WHERE owner = ?1"
-    } else {
-        return Err(rusqlite::Error::InvalidParameterName(format!(
-            "table {} is not fact-keyed core state",
-            table.as_str()
-        )));
-    };
-    store
-        .conn()
-        .execute(sql, params![owner.as_slice()])
-        .map(|removed| removed > 0)
 }
 
 fn insert_fact_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
@@ -229,21 +203,17 @@ fn decode_fact_scope_columns(
     scope_id: &FactId,
 ) -> rusqlite::Result<FactScope> {
     match scope {
-        "global" => {
+        "global" | "local" => {
             if !scope_kind.is_empty() || scope_id != &EMPTY_FACT_ID {
-                return Err(rusqlite::Error::InvalidParameterName(
-                    "global fact scope has scoped columns set".to_string(),
-                ));
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "{scope} fact scope has scoped columns set"
+                )));
             }
-            Ok(FactScope::Global)
-        }
-        "local" => {
-            if !scope_kind.is_empty() || scope_id != &EMPTY_FACT_ID {
-                return Err(rusqlite::Error::InvalidParameterName(
-                    "local fact scope has scoped columns set".to_string(),
-                ));
-            }
-            Ok(FactScope::Local)
+            Ok(if scope == "global" {
+                FactScope::Global
+            } else {
+                FactScope::Local
+            })
         }
         "scoped" => Ok(FactScope::Scoped {
             kind: ScopeKind::new(scope_kind.to_string())

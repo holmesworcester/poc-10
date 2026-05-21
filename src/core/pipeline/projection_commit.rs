@@ -13,29 +13,11 @@ use rusqlite::params;
 
 /// The uncommitted output of projecting one pending fact.
 pub(super) struct ProjectionEffects {
-    fact_id: FactId,
-    next_context: ContextSet,
-    next_time_wakes: Vec<TimeWake>,
-    context_delta: ContextSetDelta,
-    pipeline: PipelineEffects,
-}
-
-impl ProjectionEffects {
-    pub(super) fn new(
-        fact_id: FactId,
-        next_context: ContextSet,
-        next_time_wakes: Vec<TimeWake>,
-        context_delta: ContextSetDelta,
-        pipeline: PipelineEffects,
-    ) -> Self {
-        Self {
-            fact_id,
-            next_context,
-            next_time_wakes,
-            context_delta,
-            pipeline,
-        }
-    }
+    pub(super) fact_id: FactId,
+    pub(super) next_context: ContextSet,
+    pub(super) next_time_wakes: Vec<TimeWake>,
+    pub(super) context_delta: ContextSetDelta,
+    pub(super) pipeline: PipelineEffects,
 }
 
 /// The committed SQL result needed to update memory and reporting.

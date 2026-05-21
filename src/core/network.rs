@@ -70,12 +70,6 @@ pub struct OutboundFrame {
     pub bytes: Vec<u8>,
 }
 
-impl OutboundFrame {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundNetworkRow {
     pub key: Vec<u8>,
@@ -206,14 +200,6 @@ pub fn claim_inbound(store: &Store, limit: usize) -> Result<Vec<InboundNetworkRo
         .into_iter()
         .map(|(key, value)| decode_inbound(key, &value))
         .collect()
-}
-
-/// Remove inbound rows inside a caller-owned transaction after admission.
-pub fn delete_inbound_in_tx(store: &Store, rows: &[InboundNetworkRow]) -> rusqlite::Result<usize> {
-    store.delete_table_rows_in_tx(
-        INBOUND_TABLE,
-        rows.iter().map(|row| row.key.clone()).collect(),
-    )
 }
 
 fn outbound_table_row(row: &OutboundNetworkRow) -> TableRow {

@@ -38,7 +38,6 @@ extern "C" fn handle_termination_signal(_signal: libc::c_int) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartOptions {
     pub listen: SocketAddr,
-    pub tick_ms: u64,
     pub quiet_ms: u64,
     pub work_limit: usize,
 }
@@ -46,20 +45,6 @@ pub struct StartOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TickActivity {
     pub active: bool,
-}
-
-impl TickActivity {
-    pub fn active() -> Self {
-        Self { active: true }
-    }
-
-    pub fn idle() -> Self {
-        Self { active: false }
-    }
-
-    pub fn from_bool(active: bool) -> Self {
-        Self { active }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -99,8 +84,8 @@ pub fn tick(
     let projection_after_handlers = runtime.process_projection_until_idle(4, work_limit)?;
     delete_claimed_inbound_after_successful_dispatch(runtime, &inbound, dispatched.retried)?;
 
-    Ok(TickActivity::from_bool(
-        accepted.accepted_connections > 0
+    Ok(TickActivity {
+        active: accepted.accepted_connections > 0
             || accepted.value.sent_frames > 0
             || accepted.value.received_frames > 0
             || !inbound.is_empty()
@@ -108,7 +93,7 @@ pub fn tick(
             || !projection_before_handlers.is_idle()
             || !dispatched.is_idle()
             || !projection_after_handlers.is_idle(),
-    ))
+    })
 }
 
 fn accept_inbound_network(
@@ -305,7 +290,6 @@ fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
     }
     Ok(StartOptions {
         listen: listen.ok_or_else(|| START_USAGE.to_string())?,
-        tick_ms,
         quiet_ms: quiet_ms.unwrap_or(tick_ms),
         work_limit: DEFAULT_WORK_LIMIT,
     })
@@ -589,7 +573,6 @@ mod tests {
         let parsed = parse_start_options(CliArgs::new(&args)).expect("parse");
 
         assert_eq!(parsed.listen, "127.0.0.1:41000".parse().unwrap());
-        assert_eq!(parsed.tick_ms, 100);
         assert_eq!(parsed.quiet_ms, 200);
     }
 
@@ -604,7 +587,6 @@ mod tests {
         ];
         let parsed = parse_start_options(CliArgs::new(&args)).expect("parse");
 
-        assert_eq!(parsed.tick_ms, 125);
         assert_eq!(parsed.quiet_ms, 125);
     }
 
@@ -612,15 +594,14 @@ mod tests {
     fn active_ticks_run_next_tick_without_injected_sleep() {
         let options = StartOptions {
             listen: "127.0.0.1:41000".parse().unwrap(),
-            tick_ms: 100,
             quiet_ms: 200,
             work_limit: 1,
         };
-        let active = TickActivity::active();
+        let active = TickActivity { active: true };
 
         assert_eq!(sleep_after_tick(&options, active), None);
         assert_eq!(
-            sleep_after_tick(&options, TickActivity::idle()),
+            sleep_after_tick(&options, TickActivity { active: false }),
             Some(Duration::from_millis(200))
         );
     }
