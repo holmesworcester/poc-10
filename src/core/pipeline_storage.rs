@@ -8,19 +8,14 @@
 //! - **Durable mutations** — [`insert_fact_and_pending_in_tx`],
 //!   [`purge_fact_in_tx`], and the pending-projection helper.
 //! - **Fact reads** — loading immutable facts from the declared `facts` table.
-//! - **Protocol row mutations** — validating and splitting opaque row-table
-//!   mutations emitted through [`PipelineEffects`](crate::core::pipeline::PipelineEffects).
 
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
-use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::pipeline::{
     CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
     PENDING_TIME_RANGES, TIME_WAKES,
 };
 use crate::core::schema_dsl::ColumnType;
-use crate::core::store::{
-    ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName, TableRow,
-};
+use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
 
 const FACT_COLUMNS: &[SelectColumn] = &[
     SelectColumn {
@@ -127,60 +122,6 @@ fn fact_scope_columns(scope: &FactScope) -> (&'static str, &str, &FactId) {
         FactScope::Local => ("local", "", &EMPTY_FACT_ID),
         FactScope::Scoped { kind, id } => ("scoped", kind.as_str(), id),
     }
-}
-
-// === Row mutations ===
-
-/// Reject any row mutation targeting a table this runtime has not registered.
-pub(crate) fn validate_row_mutations(
-    mutations: &[RowMutation],
-    allowed_tables: &[TableName],
-) -> Result<(), String> {
-    for mutation in mutations {
-        validate_row_mutation_table(mutation, allowed_tables)?;
-    }
-    Ok(())
-}
-
-/// Split row mutations into inserts and deletes so a commit can apply them.
-pub(crate) fn row_mutation_rows(
-    mutations: &[RowMutation],
-    allowed_tables: &[TableName],
-) -> Result<(Vec<TableRow>, Vec<TableDelete>), String> {
-    let mut rows = Vec::new();
-    let mut deletes = Vec::<TableDelete>::new();
-    for mutation in mutations {
-        validate_row_mutation_table(mutation, allowed_tables)?;
-        match mutation {
-            RowMutation::PutRow(row) => rows.push(row.clone()),
-            RowMutation::DeleteRow(delete) => deletes.push(delete.clone()),
-        }
-    }
-    Ok((rows, deletes))
-}
-
-fn validate_row_mutation_table(
-    mutation: &RowMutation,
-    allowed_tables: &[TableName],
-) -> Result<(), String> {
-    let table = match mutation {
-        RowMutation::PutRow(row) => row.table,
-        RowMutation::DeleteRow(delete) => delete.table,
-    };
-    if allowed_tables.contains(&table) {
-        Ok(())
-    } else {
-        Err(format!(
-            "row mutation table {} is not registered",
-            table.as_str()
-        ))
-    }
-}
-
-/// Adapt a `String` error into the [`rusqlite::Error`] a transaction closure
-/// must return, so a non-SQL failure can still abort a commit.
-pub(crate) fn sqlite_string_error(err: String) -> rusqlite::Error {
-    rusqlite::Error::InvalidParameterName(err)
 }
 
 // === Reading and decoding rows ===

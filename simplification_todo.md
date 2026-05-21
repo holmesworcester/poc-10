@@ -98,6 +98,9 @@ Accountable criteria:
 - Done in this branch: fact insertion, pending-projection marking, and fact
   reads use declared typed SQLite columns; `pipeline_storage.rs` is now fact
   storage plus generic row-mutation helpers.
+- Done in this branch: row-mutation validation and splitting moved into
+  `pipeline/effects.rs`; `pipeline_storage.rs` is below the 250-line target and
+  is limited to fact storage and fact purge helpers.
 - Done in this branch: row writes are `RowMutation` output, not `Intent`
   values. `IntentExecution::Atomic`, `AtomicIntent`, and the atomic dispatch
   pass are gone from production code.

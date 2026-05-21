@@ -3,7 +3,6 @@ use crate::core::context::{ContextNeed, ContextOffer, Role};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
 use crate::core::pipeline::report::PipelineReport;
 use crate::core::pipeline::{persisted_fact, CONTEXT_NEEDS, CONTEXT_OFFERS, PENDING_PROJECTION};
-use crate::core::pipeline_storage::sqlite_string_error;
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store};
 use std::collections::BTreeSet;
@@ -12,6 +11,7 @@ use super::context_store::{
     delete_pending_context_change_in_tx, pending_context_change_batch, scope_key,
     stored_context_matches, PendingContextChange,
 };
+use super::effects::sqlite_string_error;
 
 /// Drain pending need/offer changes and wake newly matched facts.
 pub(super) fn process_context_changes(

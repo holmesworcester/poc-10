@@ -1,12 +1,9 @@
 use crate::core::command_context::CommandOutput;
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{HandlerOutput, Intent, RowMutation};
+use crate::core::intents::{HandlerOutput, Intent, RowMutation, TableDelete};
 use crate::core::pipeline::LOCAL_INTENTS;
-use crate::core::pipeline_storage::{
-    insert_fact_and_pending_in_tx, purge_fact_in_tx, row_mutation_rows, sqlite_string_error,
-    validate_row_mutations,
-};
-use crate::core::store::{Store, TableName};
+use crate::core::pipeline_storage::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
+use crate::core::store::{Store, TableName, TableRow};
 use std::collections::BTreeMap;
 
 use super::intent_queue::{intent_row_key, record_intent_in_table_in_tx, record_intent_in_tx};
@@ -117,6 +114,58 @@ impl PipelineEffectCounts {
 /// conflicting duplicates within one destination queue.
 fn validate_intents(intents: &[Intent]) -> Result<(), String> {
     validate_intents_ignoring_key(intents, None)
+}
+
+/// Reject any row mutation targeting a table this runtime has not registered.
+fn validate_row_mutations(
+    mutations: &[RowMutation],
+    allowed_tables: &[TableName],
+) -> Result<(), String> {
+    for mutation in mutations {
+        validate_row_mutation_table(mutation, allowed_tables)?;
+    }
+    Ok(())
+}
+
+/// Split row mutations into inserts and deletes so a commit can apply them.
+fn row_mutation_rows(
+    mutations: &[RowMutation],
+    allowed_tables: &[TableName],
+) -> Result<(Vec<TableRow>, Vec<TableDelete>), String> {
+    let mut rows = Vec::new();
+    let mut deletes = Vec::<TableDelete>::new();
+    for mutation in mutations {
+        validate_row_mutation_table(mutation, allowed_tables)?;
+        match mutation {
+            RowMutation::PutRow(row) => rows.push(row.clone()),
+            RowMutation::DeleteRow(delete) => deletes.push(delete.clone()),
+        }
+    }
+    Ok((rows, deletes))
+}
+
+fn validate_row_mutation_table(
+    mutation: &RowMutation,
+    allowed_tables: &[TableName],
+) -> Result<(), String> {
+    let table = match mutation {
+        RowMutation::PutRow(row) => row.table,
+        RowMutation::DeleteRow(delete) => delete.table,
+    };
+    if allowed_tables.contains(&table) {
+        Ok(())
+    } else {
+        Err(format!(
+            "row mutation table {} is not registered",
+            table.as_str()
+        ))
+    }
+}
+
+/// Adapt a `String` error into the [`rusqlite::Error`] a transaction closure
+/// must return, so a non-SQL failure can still abort a commit.
+pub(super) fn sqlite_string_error(err: String) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(err)
 }
 
 /// As [`validate_intents`], with the handled row key reserved for the intent
