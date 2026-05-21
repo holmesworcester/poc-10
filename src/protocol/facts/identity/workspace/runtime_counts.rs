@@ -1,7 +1,7 @@
 //! Product runtime count read model for the `count` CLI command.
 //!
 //! This is intentionally separate from workspace row queries. It composes
-//! protocol runtime state across facts, the context change pipeline, connections, and
+//! protocol runtime state across facts, context projection, connections, and
 //! accepted invites for one user-facing diagnostic report.
 
 use crate::core::runtime::Runtime;

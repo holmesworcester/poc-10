@@ -64,14 +64,6 @@ pub(super) fn selected_selector(row: &SelectedRow) -> Result<Selector, String> {
     ))
 }
 
-pub(super) fn selected_u64(row: &SelectedRow, name: &str) -> Result<u64, String> {
-    match row.get(name) {
-        Some(SelectedValue::U64(value)) => Ok(*value),
-        Some(_) => Err(format!("context SQL column {name} is not u64")),
-        None => Err(format!("context SQL did not return column {name}")),
-    }
-}
-
 pub(super) fn selected_bytes<'a>(row: &'a SelectedRow, name: &str) -> Result<&'a [u8], String> {
     match row.get(name) {
         Some(SelectedValue::Bytes(bytes)) => Ok(bytes),

@@ -8,7 +8,8 @@ use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
 use crate::core::matchers::{
     ContextMatch, ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration,
-    SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
+    ContextSqlParam, ContextWakeSql, SelectOnlyMatcherResult, SelectOnlyMatcherSql,
+    SelectorFieldDeclaration, SelectorFieldType,
 };
 use crate::core::store::{ColumnValue, Store};
 
@@ -144,6 +145,45 @@ WHERE direction = 'need'
     )
   )
 ORDER BY owner, selector";
+
+pub const WRAP_SOURCE_WAKE_FOR_NEED_SQL: &str = "
+SELECT :need_owner AS owner
+FROM context_edges
+WHERE direction = 'offer'
+  AND role = :role
+  AND scope_key = :scope_key
+  AND length(selector) = 156
+  AND substr(selector, 1, 1) = x'03'
+  AND substr(selector, 2, 32) = :workspace_id
+  AND (
+    (:need_kind = 1 AND substr(selector, 98, 8) >= :min_frontier_created_at_ms)
+    OR (:need_kind = 2 AND substr(selector, 34, 32) = :frontier_id)
+  )
+ORDER BY owner, selector";
+
+pub const WRAP_SOURCE_WAKE_FOR_OFFER_SQL: &str = "
+SELECT n.owner
+FROM context_edges n
+JOIN facts f ON f.id = n.owner
+WHERE n.direction = 'need'
+  AND n.role = :role
+  AND n.scope_key = :scope_key
+  AND (
+    (
+      length(n.selector) = 41
+      AND substr(n.selector, 1, 1) = x'01'
+      AND substr(n.selector, 2, 32) = :workspace_id
+      AND substr(n.selector, 34, 8) <= :frontier_created_at_ms
+    )
+    OR
+    (
+      length(n.selector) = 65
+      AND substr(n.selector, 1, 1) = x'02'
+      AND substr(n.selector, 2, 32) = :workspace_id
+      AND substr(n.selector, 34, 32) = :frontier_id
+    )
+  )
+ORDER BY f.timestamp, n.owner";
 
 pub const WRAP_SOURCE_CONTEXT_ROLE: ContextRoleDeclaration = ContextRoleDeclaration {
     role: WRAP_SOURCE_ROLE,
@@ -528,6 +568,75 @@ impl ContextMatcher for WrapSourceMatcher {
         sql::select_needs_for_offer(store, WRAP_SOURCE_NEEDS_FOR_OFFER_SQL, &params, offer)
             .map(Some)
     }
+
+    fn wake_sql_for_added_need(
+        &self,
+        need: &ContextNeed,
+    ) -> Result<Option<ContextWakeSql>, String> {
+        if need.role != self.role {
+            return Ok(Some(empty_wake_sql()));
+        }
+        let (need_kind, workspace_id, frontier_id, min_frontier_created_at_ms) =
+            if let Some((workspace_id, min_frontier_created_at_ms)) =
+                decode_proactive_wrap_need(&need.selector)
+            {
+                (
+                    1,
+                    workspace_id,
+                    [0; 32],
+                    min_frontier_created_at_ms.to_be_bytes(),
+                )
+            } else if let Some((workspace_id, frontier_id)) =
+                decode_requested_wrap_need(&need.selector)
+            {
+                (2, workspace_id, frontier_id, 0u64.to_be_bytes())
+            } else {
+                return Ok(Some(empty_wake_sql()));
+            };
+        let scope_key = sql::scope_key_for_sql(&need.scope);
+        Ok(Some(sql::wake_sql(
+            WRAP_SOURCE_WAKE_FOR_NEED_SQL,
+            vec![
+                ContextSqlParam::bytes(":need_owner", need.owner),
+                ContextSqlParam::text(":role", self.role.as_str()),
+                ContextSqlParam::bytes(":scope_key", scope_key),
+                ContextSqlParam::i64(":need_kind", need_kind),
+                ContextSqlParam::bytes(":workspace_id", workspace_id),
+                ContextSqlParam::bytes(":frontier_id", frontier_id),
+                ContextSqlParam::bytes(":min_frontier_created_at_ms", min_frontier_created_at_ms),
+            ],
+        )))
+    }
+
+    fn wake_sql_for_added_offer(
+        &self,
+        offer: &ContextOffer,
+    ) -> Result<Option<ContextWakeSql>, String> {
+        if offer.role != self.role {
+            return Ok(Some(empty_wake_sql()));
+        }
+        let Some(selector) = decode_wrap_source_selector(&offer.selector) else {
+            return Ok(Some(empty_wake_sql()));
+        };
+        let scope_key = sql::scope_key_for_sql(&offer.scope);
+        Ok(Some(sql::wake_sql(
+            WRAP_SOURCE_WAKE_FOR_OFFER_SQL,
+            vec![
+                ContextSqlParam::text(":role", self.role.as_str()),
+                ContextSqlParam::bytes(":scope_key", scope_key),
+                ContextSqlParam::bytes(":workspace_id", selector.workspace_id),
+                ContextSqlParam::bytes(":frontier_id", selector.frontier_id),
+                ContextSqlParam::bytes(
+                    ":frontier_created_at_ms",
+                    selector.frontier_created_at_ms.to_be_bytes(),
+                ),
+            ],
+        )))
+    }
+}
+
+fn empty_wake_sql() -> ContextWakeSql {
+    sql::wake_sql("SELECT NULL AS owner WHERE 0", Vec::new())
 }
 
 pub fn wrap_source_offer_matches_need(

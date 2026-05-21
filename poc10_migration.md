@@ -46,10 +46,10 @@ The executable TODO list lives in `tests/poc10_cutover_todo_test.rs`.
 | --- | --- |
 | event admission | core runtime fact submission plus fact layout validation |
 | dependency unblock | context needs/offers plus matchers |
-| ready/blocked/reprojection queues | SQLite pending fact/context-change tables |
+| ready/blocked/reprojection queues | SQLite pending fact table plus direct context wake fanout |
 | labels | update/about context offers |
 | canonical ingress + receive metadata | receive facts plus context offers |
-| projection row writes | atomic row intents from projectors |
+| projection row writes | row mutations from projectors |
 | content purge | purge intents and purge handlers |
 | key unwrap/materialization | encryption projectors plus key handlers |
 | transit in/out | receive/transit/network handlers |

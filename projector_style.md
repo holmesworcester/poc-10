@@ -274,7 +274,7 @@ shape.
 - Opaque keyed byte tables use explicit `row_table name;`.
 - Queryable read-model tables should be typed `table` declarations with
   columns, indexes, uniqueness, and byte lengths in the DSL.
-- Projectors emit row intents through module row helpers.
+- Projectors emit row mutations through module row helpers.
 
 Good:
 
@@ -285,7 +285,8 @@ materialized_output(fact, invite, needs.output())
 where `materialized_output` calls:
 
 ```rust
-AtomicIntent::PutRow(device_invite_row(fact.id, invite)?).into_intent()
+ProjectionOutput::new()
+    .row_mutation(RowMutation::PutRow(device_invite_row(fact.id, invite)?))
 ```
 
 Bad:

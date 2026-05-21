@@ -31,20 +31,20 @@ The migration succeeds when:
   ready queues, pending reprojection queues, worker-specific domain queues, and
   receive metadata side channels.
 - Core owns facts, context, command context, context matchers, generic runtime/app mechanics,
-  pending fact processing, context-change processing, intent dispatch, storage mechanics, wire
+  pending fact processing, context wake fanout, intent dispatch, storage mechanics, wire
   field primitives, and crypto helpers.
 - Fact modules own fact semantics: layouts, projectors, context roles,
   command constructors, read-model rows, module-local CLI adapters, module
   queries, and protocol validation rules.
 - Intent handlers own bounded stateful work and handler checkpoint state.
-- Projectors return only needs, offers, and intents.
-- Intent handlers return only facts and intents. The current `purged_facts`
-  output is a migration checkpoint for exact retained fact purge, not a broad
-  storage escape hatch.
+- Projectors return needs, offers, time wakes, row mutations, and intents.
+- Intent handlers return facts, purged facts, row mutations, and intents.
+  Purge output remains a bounded core-owned escape hatch for exact fact
+  removal, not a broad storage API.
 - No fact module, intent handler, command, schema, or wire layout reaches around core
   to call another stage directly.
-- There is no event-bus layer. The runtime coordinates three explicit
-  SQL-backed pipelines: pending facts, context changes, and intents.
+- There is no event-bus layer. The runtime coordinates explicit SQL-backed
+  queues: pending facts, time wakes, durable intents, and restart-local intents.
 - The product-facing binary is `match`; the package may still be named `topo`.
 - Product entry is a thin root function that supplies the CLI name and protocol
   registry to generic core runtime/app code. It must not contain
@@ -94,8 +94,8 @@ fixtures and the deferred partial-download-progress content tests.
   modules only.
 - The runtime calls SQL-backed core pipeline workers under
   `src/core/pipeline/`: `projection.rs` projects pending facts,
-  `context_wake.rs` handles custom matcher wakeups, `fact_context.rs` runs the
-  single-threaded fact/context loop and time wakes, and `dispatch.rs` dispatches
+  `projection_commit.rs` wakes exact and custom matcher dependents,
+  `fact_context.rs` runs the single-threaded fact/context loop and time wakes, and `dispatch.rs` dispatches
   durable and restart-local intents.
 - Target fact modules under `src/protocol/facts/` are exercised by poc-10 tests
   and route production `match` behavior through the target runtime.
@@ -119,12 +119,12 @@ Implemented target slices:
 - Core fact/context/intent/projector contracts.
 - Context needs/offers/matchers for exact facts, secret coverage, receive
   provenance, deletion/update wakeups, and recipient-key supersession.
-- Atomic row intents as the projector-owned path for bounded read-model writes
-  and deletes.
-- Pending-fact and context-change pipelines that replace each fact's
-  needs/offers, match context deltas, schedule matching facts, apply atomic
-  intents, persist deferred intents, and keep ephemeral IO intents
-  restart-local.
+- Row mutations as the projector- and handler-owned path for bounded read-model
+  writes and deletes.
+- Pending-fact projection replaces each fact's needs/offers, wakes exact and
+  custom context matches in the projection commit, applies row mutations,
+  persists durable intents, and keeps restart-local IO intents in TEMP SQLite
+  storage.
 - Handler dispatch that accepts only declared fact inputs and returns facts,
   purges, and follow-up intents.
 - Target tests for signed facts, encrypted content messages, key wraps, key request
@@ -196,7 +196,6 @@ src/
       projection_queue.rs
       context_rows.rs
       context_matching.rs
-      context_wake.rs
       dispatch.rs
       effects.rs
       intent_queue.rs
@@ -541,9 +540,8 @@ context_edges(owner, direction, role, scope_key, selector)
 ```
 
 `direction` is `need` or `offer`. The projection worker replaces the projected
-fact's current edges; exact selector roles wake facts with SQL immediately
-after the edge replacement; only custom matcher roles use the
-`pending_context_changes` queue:
+fact's current edges; exact selector roles and custom matcher roles wake facts
+with SQL immediately after the edge replacement:
 
 ```text
 unchanged need/offer
@@ -898,15 +896,9 @@ pending projection worker
   run projector
   apply row mutations
   replace the fact's context_edges
-  wake exact matches with SQL
-  queue custom matcher context changes
+  wake exact and custom matches with SQL
   persist durable intents
   persist restart-local intents in TEMP local_intents
-
-context wake worker
-  match queued custom need/offer changes
-  schedule affected pending facts
-  process due time ranges as offer-like context changes
 
 intent pipeline: durable intents
   claim intent

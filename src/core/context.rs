@@ -147,9 +147,9 @@ impl ContextSetDelta {
 
 /// Compare relationship sets as durable facts, not queue entries.
 ///
-/// The context change pipeline uses this after every projection. Re-emitting the same need or
-/// offer is a no-op; changing it is represented as removal plus addition so the
-/// matcher sees only genuinely new possible matches.
+/// Projection commit uses this after every projection. Re-emitting the same
+/// need or offer is a no-op; changing it is represented as removal plus
+/// addition so the matcher sees only genuinely new possible matches.
 pub fn diff_context_sets(previous: &ContextSet, next: &ContextSet) -> ContextSetDelta {
     let previous_needs = previous.needs.iter().cloned().collect::<BTreeSet<_>>();
     let next_needs = next.needs.iter().cloned().collect::<BTreeSet<_>>();

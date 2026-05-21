@@ -83,8 +83,9 @@ Reviewer instructions:
 - [ ] Projectors may use `core::crypto` for deterministic verification,
   signing/envelope checks, and encryption/decryption that is genuinely part of
   projection.
-- [ ] Projectors return only needs, offers, and intents. Atomic row writes are
-  intents; deferred work is an intent handled elsewhere.
+- [ ] Projectors return needs, offers, time wakes, row mutations, and intents.
+  Row mutations commit with projection; deferred work is an intent handled
+  elsewhere.
 - [ ] Root/local facts with no context requirements are explicitly identified;
   every other row-only projector is suspect until proven against poc-8.
 

@@ -1343,7 +1343,7 @@ fn target_projectors_do_not_define_row_tables_or_row_shapes() {
 
     assert!(
         offenders.is_empty(),
-        "project.rs should emit row intents through row helpers, not define row tables or shapes:\n{}",
+        "project.rs should emit row mutations through row helpers, not define row tables or shapes:\n{}",
         offenders.join("\n")
     );
 }

@@ -39,15 +39,6 @@ table pending_time_ranges {
   column end_inclusive u64;
   row_key (owner, timeline, has_start, start_exclusive, end_inclusive);
 }
-table pending_context_changes {
-  column owner bytes(32);
-  column change_kind u64;
-  column role text;
-  column scope_key bytes;
-  column selector bytes;
-  row_key (owner, change_kind, role, scope_key, selector);
-  index by_match (change_kind, role, scope_key, selector);
-}
 table intents {
   column kind text;
   column idempotence_key bytes;

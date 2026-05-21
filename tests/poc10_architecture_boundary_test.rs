@@ -322,7 +322,7 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
     let pipeline_path = root.join("src/core/pipeline.rs");
     assert!(
         pipeline_path.is_file(),
-        "missing src/core/pipeline.rs; when introduced, it must expose protocol-neutral terms for pending projection, context delta matching, and intent output"
+        "missing src/core/pipeline.rs; it must expose protocol-neutral terms for pending projection, context wake fanout, and intent output"
     );
 
     let mut text = source_text(&pipeline_path);
@@ -339,13 +339,13 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
             ][..],
         ),
         (
-            "context delta matching",
+            "context wake fanout",
             &[
-                "ContextDeltaMatching",
-                "ContextDeltaMatcher",
-                "context_delta_matching",
-                "context_delta_match",
-                "context delta matching",
+                "ContextWake",
+                "context_wake",
+                "context wake",
+                "wake_exact_context_matches",
+                "wake_custom_context_matches",
             ][..],
         ),
         (
@@ -361,7 +361,7 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "src/core/pipeline.rs must expose protocol-neutral context change pipeline vocabulary:\n{}",
+        "src/core/pipeline.rs must expose protocol-neutral pipeline vocabulary:\n{}",
         missing.join("\n")
     );
 

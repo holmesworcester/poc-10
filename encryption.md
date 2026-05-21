@@ -128,7 +128,7 @@ time-only garbage collector responsible for core key correctness.
 Opening encrypted content is projector work when all inputs are provided as
 context and the operation is deterministic: validate the signed content-message
 context, find covering local key material, derive or validate the leaf, decrypt
-the encrypted fields, and emit opened rows via atomic row intents.
+the encrypted fields, and emit opened rows via row mutations.
 
 Message metadata is intentionally separate from opened content. After signer
 and author context validate, a content-message projector may emit

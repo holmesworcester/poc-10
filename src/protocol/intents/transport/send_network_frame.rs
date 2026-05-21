@@ -4,8 +4,8 @@
 //! transport::transit frame onto a connection's TCP socket. The handler resolves the
 //! connection route from the fact context, hands the opaque frame to core's
 //! network boundary, and attempts one bounded TCP write. If route
-//! context or the socket is unavailable, the handler asks the context change pipeline to keep
-//! the intent visible in the current process so the next sync/daemon pass can
+//! context or the socket is unavailable, the handler keeps the restart-local
+//! intent visible in the current process so the next sync/daemon pass can
 //! try again without making network delivery durable protocol state. There is
 //! intentionally no protocol-level peer ACK here: TCP handles stream delivery
 //! for a single write, and duplicated transit frames are harmless because fact

@@ -700,7 +700,6 @@ mod tests {
                 "time_wakes",
                 "pending_projection",
                 "pending_time_ranges",
-                "pending_context_changes",
                 "intents",
                 "local_intents",
                 "clock",

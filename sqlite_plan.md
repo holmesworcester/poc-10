@@ -11,7 +11,6 @@ Core runtime state is a small set of SQLite-backed queues and declared tables:
 ```text
 fact admission -> pending_projection
 projection -> context_edges, time_wakes, row mutations, intents
-context matching -> pending_projection
 time wakes -> pending_projection
 intent dispatch -> facts, purges, row mutations, follow-up intents
 commands / incoming frames -> facts and intents
@@ -52,14 +51,6 @@ pending_time_ranges(
   has_start,
   start_exclusive,
   end_inclusive
-)
-
-pending_context_changes(
-  owner,
-  change_kind,
-  role,
-  scope_key,
-  selector
 )
 
 time_wakes(timeline, at, owner)
@@ -104,9 +95,9 @@ WHERE n.direction = 'need'
 ORDER BY f.timestamp, n.owner;
 ```
 
-Custom matcher roles keep SELECT-only protocol-owned candidate queries. Those
-queries also read `context_edges` with an explicit `direction` predicate.
-`pending_context_changes` is only the queue for custom matcher fanout.
+Custom matcher roles also supply SELECT-only wake queries. Core executes those
+plans during projection commit and inserts affected owners directly into
+`pending_projection`.
 
 ## Ownership Rules
 
@@ -122,8 +113,10 @@ queries also read `context_edges` with an explicit `direction` predicate.
 ## Current Status
 
 - Durable and restart-local intent queues are both SQLite-backed.
-- Exact context wake fanout uses typed `INSERT OR IGNORE ... SELECT` during
-  projection commit.
+- Exact and custom context wake fanout use typed `INSERT OR IGNORE ... SELECT`
+  during projection commit.
+- Time wake admission uses the same checked insert-select pattern from
+  `time_wakes` into `pending_projection` and `pending_time_ranges`.
 - Custom matcher candidate lookup for range, coverage, and wrap-source roles is
   SELECT-only SQL over `context_edges`.
 - The runtime no longer rebuilds a whole scheduler graph in memory.

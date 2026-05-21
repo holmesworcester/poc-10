@@ -9,7 +9,7 @@
 //!   provenance, a proposed user fact, and a connection request.
 //!
 //! This module does not write rows or run projection. It returns command output
-//! that the runtime admits through the normal context change pipeline.
+//! that the runtime admits through the normal projection pipeline.
 
 use std::net::SocketAddr;
 use std::str::FromStr;

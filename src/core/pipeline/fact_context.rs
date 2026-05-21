@@ -1,15 +1,33 @@
 use crate::core::matchers::ContextMatcher;
-use crate::core::pipeline::context_wake::process_context_changes;
 use crate::core::pipeline::projection::process_pending_facts;
 use crate::core::pipeline::report::{add_pipeline_report, PipelineReport};
 use crate::core::pipeline::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
 use crate::core::projectors::{Projector, TimeRange, Timeline};
-use crate::core::schema_dsl::ColumnType;
-use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
+use crate::core::store::{ColumnValue, Store, TableName};
 
-struct DueTimeWake {
-    owner: [u8; 32],
-}
+const DUE_TIME_WAKE_OWNER_SQL: &str = r#"
+SELECT owner
+FROM time_wakes
+WHERE timeline = :timeline
+  AND (:has_start = 0 OR at > :start_exclusive)
+  AND at <= :end_inclusive
+ORDER BY at, owner
+LIMIT :limit
+"#;
+
+const DUE_TIME_RANGE_SQL: &str = r#"
+SELECT owner,
+       :timeline AS timeline,
+       :has_start AS has_start,
+       :start_exclusive AS start_exclusive,
+       :end_inclusive AS end_inclusive
+FROM time_wakes
+WHERE timeline = :timeline
+  AND (:has_start = 0 OR at > :start_exclusive)
+  AND at <= :end_inclusive
+ORDER BY at, owner
+LIMIT :limit
+"#;
 
 /// Turn due time wakes into pending facts plus projection time context.
 ///
@@ -30,96 +48,57 @@ pub(crate) fn process_due_time_range(
         start_exclusive,
         end_inclusive,
     };
-    let due = due_time_wakes(store, &range, limit)?;
 
-    let inserted = store
-        .write_transaction(|tx| {
-            let mut inserted = 0usize;
-            for wake in &due {
-                if tx.insert_typed_row_in_tx(
-                    PENDING_PROJECTION,
-                    &[("owner", ColumnValue::Bytes(&wake.owner))],
-                )? {
-                    inserted += 1;
-                }
-                tx.insert_typed_row_in_tx(
-                    PENDING_TIME_RANGES,
-                    &[
-                        ("owner", ColumnValue::Bytes(&wake.owner)),
-                        ("timeline", ColumnValue::Text(range.timeline.as_str())),
-                        (
-                            "has_start",
-                            ColumnValue::Bool(range.start_exclusive.is_some()),
-                        ),
-                        (
-                            "start_exclusive",
-                            ColumnValue::U64(range.start_exclusive.unwrap_or(0)),
-                        ),
-                        ("end_inclusive", ColumnValue::U64(range.end_inclusive)),
-                    ],
-                )?;
-            }
-            Ok(inserted)
-        })
-        .map_err(|err| format!("process due time range: {err}"))?;
-    Ok(inserted)
+    store
+        .write_transaction(|tx| enqueue_due_time_wakes_in_tx(tx, &range, limit))
+        .map_err(|err| format!("process due time range: {err}"))
 }
 
-fn due_time_wakes(
+fn enqueue_due_time_wakes_in_tx(
     store: &Store,
     range: &TimeRange,
     limit: usize,
-) -> Result<Vec<DueTimeWake>, String> {
-    let rows = store
-        .select_only(
-            r#"
-            SELECT owner
-            FROM time_wakes
-            WHERE timeline = :timeline
-              AND (:has_start = 0 OR at > :start_exclusive)
-              AND at <= :end_inclusive
-            ORDER BY at, owner
-            LIMIT :limit
-            "#,
-            &[TIME_WAKES],
-            &[
-                (":timeline", ColumnValue::Text(range.timeline.as_str())),
-                (
-                    ":has_start",
-                    ColumnValue::Bool(range.start_exclusive.is_some()),
-                ),
-                (
-                    ":start_exclusive",
-                    ColumnValue::U64(range.start_exclusive.unwrap_or(0)),
-                ),
-                (":end_inclusive", ColumnValue::U64(range.end_inclusive)),
-                (":limit", ColumnValue::U64(limit as u64)),
-            ],
-            &[SelectColumn {
-                name: "owner",
-                ty: ColumnType::Bytes { len: Some(32) },
-            }],
-        )
-        .map_err(|err| format!("load due time wakes: {err}"))?;
-    rows.into_iter().map(decode_due_time_wake).collect()
+) -> rusqlite::Result<usize> {
+    let has_start = range.start_exclusive.is_some();
+    let start_exclusive = range.start_exclusive.unwrap_or(0);
+    let params = [
+        (":timeline", ColumnValue::Text(range.timeline.as_str())),
+        (":has_start", ColumnValue::Bool(has_start)),
+        (":start_exclusive", ColumnValue::U64(start_exclusive)),
+        (":end_inclusive", ColumnValue::U64(range.end_inclusive)),
+        (":limit", ColumnValue::U64(limit as u64)),
+    ];
+
+    let inserted = store.insert_typed_rows_from_select_in_tx(
+        PENDING_PROJECTION,
+        &["owner"],
+        DUE_TIME_WAKE_OWNER_SQL,
+        &[TIME_WAKES],
+        &params,
+    )?;
+
+    store.insert_typed_rows_from_select_in_tx(
+        PENDING_TIME_RANGES,
+        &[
+            "owner",
+            "timeline",
+            "has_start",
+            "start_exclusive",
+            "end_inclusive",
+        ],
+        DUE_TIME_RANGE_SQL,
+        &[TIME_WAKES],
+        &params,
+    )?;
+
+    Ok(inserted)
 }
 
-fn decode_due_time_wake(row: SelectedRow) -> Result<DueTimeWake, String> {
-    let owner = match row.get("owner") {
-        Some(SelectedValue::Bytes(bytes)) => bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| "due time wake owner should be 32 bytes".to_string())?,
-        _ => return Err("due time wake row missing owner".to_string()),
-    };
-    Ok(DueTimeWake { owner })
-}
-
-/// Drive context matching and fact projection until no more work is found.
+/// Drive fact projection until no more work is found.
 ///
-/// The two pipelines intentionally alternate: context changes wake facts;
-/// fact projection writes more context changes. The loop stops when neither
-/// stage made progress or the projection limit has been reached.
+/// Projection commits context edges and immediately wakes exact and custom
+/// context matches. The loop stops when no fact projected or the projection
+/// limit has been reached.
 pub(crate) fn process_pending_facts_and_context_changes(
     projector: &(impl Projector + ?Sized),
     matchers: &[&dyn ContextMatcher],
@@ -130,10 +109,6 @@ pub(crate) fn process_pending_facts_and_context_changes(
     let mut total = PipelineReport::default();
 
     loop {
-        let context_report = process_context_changes(store, matchers, limit)?;
-        let context_woke_facts = context_report.woken_facts > 0;
-        add_pipeline_report(&mut total, context_report);
-
         if total.projections >= limit {
             break;
         }
@@ -148,7 +123,7 @@ pub(crate) fn process_pending_facts_and_context_changes(
         let projected_facts = projection_report.projections > 0;
         add_pipeline_report(&mut total, projection_report);
 
-        if !context_woke_facts && !projected_facts {
+        if !projected_facts {
             break;
         }
     }

@@ -1,8 +1,8 @@
 //! Generic target runtime.
 //!
 //! Core owns the mechanics: open the store, submit facts and intents, run
-//! pending-fact/context-change pipelines, and dispatch handler work through
-//! SQLite-backed intent queues.
+//! pending fact projection, and dispatch handler work through SQLite-backed
+//! intent queues.
 //! Protocol code supplies the projector router, context matchers, handler
 //! registry, schema sources, and row mutation tables.
 
@@ -11,8 +11,7 @@ use crate::core::facts::Fact;
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::matchers::ContextMatcher;
 use crate::core::pipeline::{
-    self, persisted_facts, DispatchReport, PipelineReport, INTENTS, PENDING_CONTEXT_CHANGES,
-    PENDING_PROJECTION,
+    self, persisted_facts, DispatchReport, PipelineReport, INTENTS, PENDING_PROJECTION,
 };
 use crate::core::projectors::{Projector, Timeline};
 use crate::core::schema::CORE_SCHEMA_SOURCE;
@@ -200,11 +199,7 @@ impl Runtime {
     }
 
     pub fn pending_work_count(&self) -> usize {
-        let pending_context_changes = self
-            .store
-            .table_row_count(PENDING_CONTEXT_CHANGES)
-            .expect("runtime pending context change count should load from store");
-        self.pending_fact_count() + pending_context_changes
+        self.pending_fact_count()
     }
 
     pub fn pending_intent_count(&self) -> usize {

@@ -13,7 +13,6 @@ queue.
 ```text
 fact admission -> pending_projection
 projection -> context_edges, row mutations, intents, time wakes
-context matching -> pending_projection
 time wakes -> pending_projection
 intent dispatch -> facts, purges, row mutations, follow-up intents
 incoming frames / commands -> facts and intents
@@ -35,9 +34,9 @@ Accountable criteria:
    projection commit policy, or intent dispatch policy.
 2. Each pipeline worker owns the SQL for the tables it drains or updates:
    `fact_context.rs` owns due time wake admission, `projection.rs` owns pending
-   projection selection and fact-owned context/time-wake replacement,
-   `context_wake.rs` owns context-match fanout, and `dispatch.rs` owns intent
-   queue claim/delete/ordering.
+   projection selection, `projection_commit.rs` owns fact-owned context/time-wake
+   replacement and context-match fanout, and `dispatch.rs` owns intent queue
+   claim/delete/ordering.
 3. Pipeline control flow no longer sorts or filters decoded table rows in Rust
    when the same operation is an indexed SQLite query. In particular, pending
    projection order, due time wake selection, and exact context wake insertion
@@ -92,21 +91,24 @@ Accountable criteria:
 - Done in this branch: intent queue row encoding, decoding, and insertion live
   with the pipeline queue code in `pipeline/intent_queue.rs`, not in the
   generic fact/context storage module.
-- Done in this branch: context edge reads, context matching, scope-key
-  handling, and pending context-change queue operations use declared typed
-  SQLite rows instead of byte-row scans.
+- Done in this branch: context edge reads, context matching, and scope-key
+  handling use declared typed SQLite rows instead of byte-row scans.
 - Done in this branch: `context_store.rs` was removed as a sink. Standing
   context row access now lives in `pipeline/context_rows.rs`; matcher assembly
-  and custom matcher fanout live in `pipeline/context_matching.rs`.
+  lives in `pipeline/context_matching.rs`; context wake SQL lives in
+  `pipeline/context_wake_sql.rs`.
 - Done in this branch: separate `context_needs` and `context_offers` storage
   was collapsed into one typed `context_edges` relation keyed by
   `(owner, direction, role, scope_key, selector)`.
 - Done in this branch: fact insertion, pending-projection marking, and fact
   reads use declared typed SQLite columns; `pipeline_storage.rs` is now fact
   storage plus generic row-mutation helpers.
-- Done in this branch: exact context wake fanout runs inside projection commit
-  with typed `INSERT OR IGNORE ... SELECT`; `pending_context_changes` is now
-  only populated for custom matcher roles.
+- Done in this branch: exact and custom context wake fanout run inside
+  projection commit with typed `INSERT OR IGNORE ... SELECT`; the
+  `pending_context_changes` queue and table are gone.
+- Done in this branch: time wake admission now uses the same checked
+  insert-select wake shape. The scheduler supplies the current timeline range
+  instead of an incoming offer.
 - Done in this branch: row-mutation validation and splitting moved into
   `pipeline/effects.rs`; `pipeline_storage.rs` is below the 250-line target and
   is limited to fact storage and fact purge helpers.
@@ -184,7 +186,6 @@ src/core/pipeline.rs              facade / runtime entry points
 src/core/pipeline/admission.rs    submit facts, bulk submit, purge
 src/core/pipeline/fact_context.rs fact/context loop, due time wake admission
 src/core/pipeline/projection.rs   pending_projection worker
-src/core/pipeline/context_wake.rs context matching worker
 src/core/pipeline/dispatch.rs     intent queue worker
 src/core/pipeline/effects.rs      common commit helpers
 ```
@@ -206,8 +207,8 @@ commit effects in one transaction
 return WorkStatus
 ```
 
-This applies to projection, context wake, time wake, and intent dispatch. The
-single-threaded scheduler can then drain queues using a clear policy loop.
+This applies to projection, time wake, and intent dispatch. The single-threaded
+scheduler can then drain queues using a clear policy loop.
 
 ## 5. Push More Fanout Into SQLite
 
@@ -235,24 +236,25 @@ Good candidates:
    LIMIT :limit;
    ```
 
-3. Done in this branch: due time wake selection uses typed SQL; pending
-   projection selection uses typed SQL; exact context wake fanout uses typed
-   `INSERT OR IGNORE ... SELECT` during projection commit.
+3. Done in this branch: due time wake admission uses checked insert-selects;
+   pending projection selection uses typed SQL; exact and custom context wake
+   fanout use typed `INSERT OR IGNORE ... SELECT` during projection commit.
 
 Done in this branch: add narrow store helpers for bounded ordered selects,
 delete-by-filter, and checked insert-select fanout. Avoid scattering raw SQL
 through protocol code.
 
-## 6. Reconsider `pending_context_changes`
+## 6. Remove `pending_context_changes`
 
-Exact context wake insertion now runs during projection commit. Keep the
-separate context-change queue only for custom matchers or where bounded
-scheduling matters.
+Exact and custom context wake insertion now run during projection commit. The
+separate context delta queue no longer exists.
 
 Bias:
 
 - Done: insert exact wakes with SQL immediately after context edges are updated.
-- Done: stop tracking exact context changes as scheduler work.
+- Done: stop tracking exact context additions as scheduler work.
+- Done: insert custom matcher wakes from protocol-owned SELECT-only wake plans.
+- Done: remove the `pending_context_changes` table and queue worker.
 - Still true: stop tracking removed context as scheduler work unless a concrete
   use appears.
 

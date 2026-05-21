@@ -11,8 +11,7 @@
 
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
 use crate::core::pipeline::{
-    CONTEXT_EDGES, FACTS, PENDING_CONTEXT_CHANGES, PENDING_PROJECTION, PENDING_TIME_RANGES,
-    TIME_WAKES,
+    CONTEXT_EDGES, FACTS, PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
 };
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
@@ -70,17 +69,12 @@ pub(crate) fn insert_pending_owner_in_tx(store: &Store, owner: FactId) -> rusqli
 
 /// Remove a fact and every durable row keyed to it.
 ///
-/// Deletes the fact itself, its context edges, its time wakes, any
-/// pending context-change or time-range rows it owns, and its pending-projection
-/// marker. Returns whether anything was actually removed.
+/// Deletes the fact itself, its context edges, its time wakes, any pending
+/// time-range rows it owns, and its pending-projection marker. Returns whether
+/// anything was actually removed.
 pub(crate) fn purge_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<bool> {
     let mut changed = store.delete_table_rows_in_tx(FACTS, vec![owner.to_vec()])? > 0;
-    for table in [
-        CONTEXT_EDGES,
-        TIME_WAKES,
-        PENDING_CONTEXT_CHANGES,
-        PENDING_TIME_RANGES,
-    ] {
+    for table in [CONTEXT_EDGES, TIME_WAKES, PENDING_TIME_RANGES] {
         changed |= delete_rows_owned_by(store, table, &owner)?;
     }
     changed |= store.delete_typed_rows_where_in_tx(

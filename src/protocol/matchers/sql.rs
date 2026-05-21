@@ -6,11 +6,13 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::pipeline::{scope_key, CONTEXT_EDGES};
+use crate::core::matchers::{ContextSqlParam, ContextWakeSql};
+use crate::core::pipeline::{scope_key, CONTEXT_EDGES, FACTS};
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
 
 pub(crate) const CONTEXT_MATCHER_TABLES: &[TableName] = &[CONTEXT_EDGES];
+pub(crate) const CONTEXT_WAKE_TABLES: &[TableName] = &[CONTEXT_EDGES, FACTS];
 
 pub(crate) const OFFER_RESULT_COLUMNS: &[SelectColumn] = &[
     SelectColumn {
@@ -36,6 +38,14 @@ pub(crate) const NEED_RESULT_COLUMNS: &[SelectColumn] = &[
 
 pub(crate) fn scope_key_for_sql(scope: &FactScope) -> Vec<u8> {
     scope_key(scope)
+}
+
+pub(crate) fn wake_sql(sql: &'static str, params: Vec<ContextSqlParam>) -> ContextWakeSql {
+    ContextWakeSql {
+        sql,
+        allowed_tables: CONTEXT_WAKE_TABLES,
+        params,
+    }
 }
 
 pub(crate) fn select_offers_for_need(

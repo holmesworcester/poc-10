@@ -13,7 +13,7 @@ has been removed; new behavior belongs in `src/core` or `src/protocol`.
   projection when matched by a context matcher. Core stores and matches them;
   projectors decide what they mean.
 - `WakeLoop` owns admission, pending projection, context matching, projection
-  drain, atomic row intents, deferred intent queueing, handler dispatch, and
+  drain, row mutations, deferred intent queueing, handler dispatch, and
   persistence.
 - Intent handlers own bounded stateful work. They consume intents and exact
   declared fact inputs, then return facts, purged fact ids, and follow-up
@@ -68,7 +68,7 @@ has been removed; new behavior belongs in `src/core` or `src/protocol`.
   key. The payload must name exact fact inputs when the handler needs fact
   context.
 - Intent type determines whether work is atomic or deferred.
-- Atomic row intents are bounded read-model mutations and are applied by
+- Row mutations are bounded read-model mutations and are applied by
   `WakeLoop` during projection drain.
 - Deferred handlers must be retry-safe: if required inputs or external effects
   are unavailable, return an error so the intent remains queued.

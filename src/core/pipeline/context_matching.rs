@@ -1,14 +1,10 @@
 //! Build projection context and custom context wake matches from SQL rows.
 
 use super::context_codec::scope_key;
-use super::context_rows::{
-    stored_needs_for_role_scope, stored_offers_for_exact_match, stored_offers_for_role_scope,
-};
-use crate::core::context::{
-    ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
-};
+use super::context_rows::{stored_offers_for_exact_match, stored_offers_for_role_scope};
+use crate::core::context::{ContextNeed, ContextOffer, ContextSet, Role, Selector};
 use crate::core::facts::FactScope;
-use crate::core::matchers::{ContextMatch, ContextMatcher};
+use crate::core::matchers::ContextMatcher;
 use crate::core::pipeline_storage::persisted_fact;
 use crate::core::projectors::{MatchedContext, ProjectionContext};
 use crate::core::store::Store;
@@ -79,61 +75,6 @@ pub(super) fn stored_matching_context(
     Ok(ProjectionContext::from_matches(matched))
 }
 
-/// Find the need/offer pairs newly satisfiable because of `delta`.
-pub(super) fn stored_context_matches(
-    store: &Store,
-    delta: &ContextSetDelta,
-    matchers: &[&dyn ContextMatcher],
-) -> Result<Vec<ContextMatch>, String> {
-    let mut matches = BTreeSet::new();
-    let custom_matchers = relevant_custom_matchers_for_delta(matchers, delta);
-    for matcher in custom_matchers {
-        for need in delta
-            .added_needs
-            .iter()
-            .filter(|need| matcher.role() == &need.role)
-        {
-            if let Some(offers) = matcher.matching_offers_for_need_from_store(store, need)? {
-                matches.extend(offers.into_iter().map(|offer| ContextMatch {
-                    need_owner: need.owner,
-                    offer_owner: offer.owner,
-                }));
-            } else {
-                let offers = stored_offers_for_role_scope(store, &need.role, &need.scope)?;
-                matches.extend(matcher.match_new_need(need, &offers));
-            }
-        }
-        for offer in delta
-            .added_offers
-            .iter()
-            .filter(|offer| matcher.role() == &offer.role)
-        {
-            if let Some(needs) = matcher.matching_needs_for_offer_from_store(store, offer)? {
-                matches.extend(needs.into_iter().map(|need| ContextMatch {
-                    need_owner: need.owner,
-                    offer_owner: offer.owner,
-                }));
-            } else {
-                let needs = stored_needs_for_role_scope(store, &offer.role, &offer.scope)?;
-                matches.extend(matcher.match_new_offer(offer, &needs));
-            }
-        }
-    }
-
-    let mut out = matches.into_iter().collect::<Vec<_>>();
-    out.sort_by_key(|matched| {
-        (
-            persisted_fact(store, &matched.need_owner)
-                .ok()
-                .flatten()
-                .map(|fact| fact.timestamp)
-                .unwrap_or(u64::MAX),
-            matched.need_owner,
-        )
-    });
-    Ok(out)
-}
-
 fn exact_context_key(role: &Role, scope: &FactScope, selector: &Selector) -> ExactContextKey {
     (role.clone(), scope.clone(), selector.clone())
 }
@@ -142,27 +83,6 @@ fn exact_matcher_roles(matchers: &[&dyn ContextMatcher]) -> BTreeSet<Role> {
     matchers
         .iter()
         .filter_map(|matcher| matcher.exact_selector_role().cloned())
-        .collect()
-}
-
-fn relevant_custom_matchers_for_delta<'a>(
-    matchers: &[&'a dyn ContextMatcher],
-    delta: &ContextSetDelta,
-) -> Vec<&'a dyn ContextMatcher> {
-    matchers
-        .iter()
-        .copied()
-        .filter(|matcher| {
-            matcher.exact_selector_role().is_none()
-                && (delta
-                    .added_needs
-                    .iter()
-                    .any(|need| &need.role == matcher.role())
-                    || delta
-                        .added_offers
-                        .iter()
-                        .any(|offer| &offer.role == matcher.role()))
-        })
         .collect()
 }
 
