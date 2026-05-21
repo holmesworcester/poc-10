@@ -729,6 +729,70 @@ impl Store {
         Ok(out)
     }
 
+    /// Insert rows into a typed table from a bounded SELECT expression.
+    ///
+    /// This is the write-side companion to `select_only` for core queue
+    /// fanout: callers choose a declared target table and columns, while the
+    /// source rows must be a single validated SELECT over declared tables.
+    pub(crate) fn insert_typed_rows_from_select_in_tx(
+        &self,
+        target_table: TableName,
+        target_columns: &[&str],
+        select_sql: &str,
+        allowed_select_tables: &[TableName],
+        params: &[(&str, ColumnValue<'_>)],
+    ) -> rusqlite::Result<usize> {
+        if target_columns.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "typed insert-select requires at least one target column".to_string(),
+            ));
+        }
+        let declared = self.typed_table(target_table).ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "table {} is not a typed table",
+                target_table.as_str()
+            ))
+        })?;
+        for column_name in target_columns {
+            if declared.column(column_name).is_none() {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "typed table {} has no column {}",
+                    declared.name, column_name
+                )));
+            }
+        }
+        validate_select_only_sql(select_sql, allowed_select_tables)?;
+        let bound = params
+            .iter()
+            .map(|(name, value)| {
+                if !name.starts_with(':') {
+                    return Err(rusqlite::Error::InvalidParameterName(format!(
+                        "insert-select parameter {name:?} must be named"
+                    )));
+                }
+                Ok((*name, column_value_to_untyped_sqlite(*value)?))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let quoted = quoted_table_name_str(&declared.name)?;
+        let columns = target_columns
+            .iter()
+            .map(|column| column.to_string())
+            .collect::<Vec<_>>();
+        let columns = quoted_identifier_list(&columns)?;
+        let sql = format!("INSERT OR IGNORE INTO {quoted} ({columns}) {select_sql}");
+        let mut stmt = self.conn.prepare(&sql)?;
+        for (name, value) in &bound {
+            let index = stmt.parameter_index(name)?.ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName(format!(
+                    "insert-select SQL does not bind parameter {name}"
+                ))
+            })?;
+            stmt.raw_bind_parameter(index, value)?;
+        }
+        stmt.raw_execute()
+    }
+
     // Schema helpers: core applies declarations from module scopes. It does not
     // build protocol tables from central knowledge.
     fn apply_schemas(&self, schemas: &[Schema]) -> rusqlite::Result<()> {

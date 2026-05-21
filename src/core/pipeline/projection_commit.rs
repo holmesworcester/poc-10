@@ -1,15 +1,20 @@
 //! Atomic SQL writes for one completed projection.
 
 use super::context_codec::scope_key;
-use super::context_queue::insert_pending_context_changes_in_tx;
+use super::context_queue::insert_pending_context_changes_for_roles_in_tx;
+use super::context_wake_sql::{
+    custom_role_delta, exact_role_delta, wake_exact_context_matches_in_tx,
+};
 use crate::core::context::{ContextSet, ContextSetDelta};
 use crate::core::facts::FactId;
+use crate::core::matchers::ContextMatcher;
 use crate::core::pipeline::{
     commit_pipeline_effects_in_tx, PipelineEffectCounts, PipelineEffects, CONTEXT_NEEDS,
     CONTEXT_OFFERS, PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
 };
 use crate::core::projectors::TimeWake;
 use crate::core::store::{ColumnValue, Store, TableName};
+use std::collections::BTreeSet;
 
 /// The uncommitted output of projecting one pending fact.
 pub(super) struct ProjectionEffects {
@@ -41,6 +46,7 @@ impl ProjectionEffects {
 /// The committed SQL result needed to update memory and reporting.
 pub(super) struct ProjectionCommit {
     pub(super) effects: PipelineEffectCounts,
+    pub(super) woken_facts: usize,
 }
 
 /// Commit all durable projection effects in one SQLite transaction.
@@ -50,15 +56,18 @@ pub(super) struct ProjectionCommit {
 /// - Clear this fact's pending row.
 /// - Replace this fact's standing context.
 /// - Replace this fact's time wakes.
-/// - Record the pending context change.
+/// - Wake exact context matches directly.
+/// - Record only custom-matcher pending context changes.
 /// - Apply row mutations.
 /// - Record durable intents.
 /// - Record restart-local intents in the temp local queue.
 pub(super) fn commit_projection_effects(
     store: &Store,
     effects: &ProjectionEffects,
+    matchers: &[&dyn ContextMatcher],
     allowed_tables: &[TableName],
 ) -> Result<ProjectionCommit, String> {
+    let matcher_roles = ContextMatcherRoles::from_matchers(matchers);
     store
         .write_transaction(|tx| {
             tx.delete_table_rows_in_tx(PENDING_PROJECTION, vec![effects.fact_id.to_vec()])?;
@@ -66,13 +75,43 @@ pub(super) fn commit_projection_effects(
             replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
             replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
 
-            insert_pending_context_changes_in_tx(tx, &effects.context_delta)?;
+            let exact_delta = exact_role_delta(&effects.context_delta, &matcher_roles.exact);
+            let woken_facts = wake_exact_context_matches_in_tx(tx, &exact_delta)?;
+            let custom_delta = custom_role_delta(&effects.context_delta, &matcher_roles.custom);
+            insert_pending_context_changes_for_roles_in_tx(
+                tx,
+                &custom_delta,
+                &matcher_roles.custom,
+            )?;
 
             let counts = commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables)?;
 
-            Ok(ProjectionCommit { effects: counts })
+            Ok(ProjectionCommit {
+                effects: counts,
+                woken_facts,
+            })
         })
         .map_err(|err| format!("commit projection effects: {err}"))
+}
+
+struct ContextMatcherRoles {
+    exact: BTreeSet<crate::core::context::Role>,
+    custom: BTreeSet<crate::core::context::Role>,
+}
+
+impl ContextMatcherRoles {
+    fn from_matchers(matchers: &[&dyn ContextMatcher]) -> Self {
+        let mut exact = BTreeSet::new();
+        let mut custom = BTreeSet::new();
+        for matcher in matchers {
+            if let Some(role) = matcher.exact_selector_role() {
+                exact.insert(role.clone());
+            } else {
+                custom.insert(matcher.role().clone());
+            }
+        }
+        Self { exact, custom }
+    }
 }
 
 fn delete_pending_time_ranges_for_owner_in_tx(

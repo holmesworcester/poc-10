@@ -9,6 +9,7 @@ use crate::core::facts::{FactId, FactScope};
 use crate::core::pipeline::PENDING_CONTEXT_CHANGES;
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, Store};
+use std::collections::BTreeSet;
 
 const CONTEXT_CHANGE_NEED: u64 = 0;
 const CONTEXT_CHANGE_OFFER: u64 = 1;
@@ -65,13 +66,18 @@ impl PendingContextChange {
     }
 }
 
-/// Insert every added need and offer in `delta` into the pending context queue.
-pub(super) fn insert_pending_context_changes_in_tx(
+/// Insert added need/offer rows that still require Rust matcher fanout.
+pub(super) fn insert_pending_context_changes_for_roles_in_tx(
     store: &Store,
     delta: &ContextSetDelta,
+    roles: &BTreeSet<Role>,
 ) -> rusqlite::Result<usize> {
     let mut inserted = 0usize;
-    for need in &delta.added_needs {
+    for need in delta
+        .added_needs
+        .iter()
+        .filter(|need| roles.contains(&need.role))
+    {
         if insert_pending_context_change_in_tx(
             store,
             &need.owner,
@@ -83,7 +89,11 @@ pub(super) fn insert_pending_context_changes_in_tx(
             inserted += 1;
         }
     }
-    for offer in &delta.added_offers {
+    for offer in delta
+        .added_offers
+        .iter()
+        .filter(|offer| roles.contains(&offer.role))
+    {
         if insert_pending_context_change_in_tx(
             store,
             &offer.owner,

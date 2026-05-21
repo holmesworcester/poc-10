@@ -4,7 +4,7 @@ use crate::core::pipeline::PENDING_PROJECTION;
 use crate::core::pipeline_storage::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
 use crate::core::store::Store;
 
-use super::context_store::insert_context_offer_in_tx;
+use super::context_rows::insert_context_offer_in_tx;
 
 /// Commit externally projected offers and clear the completed pending facts.
 ///

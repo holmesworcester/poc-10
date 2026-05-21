@@ -93,11 +93,17 @@ Accountable criteria:
   with the pipeline queue code in `pipeline/intent_queue.rs`, not in the
   generic fact/context storage module.
 - Done in this branch: context row reads, context matching, scope-key handling,
-  and pending context-change queue operations live in `pipeline/context_store.rs`
-  and use declared typed SQLite rows instead of byte-row scans.
+  and pending context-change queue operations use declared typed SQLite rows
+  instead of byte-row scans.
+- Done in this branch: `context_store.rs` was removed as a sink. Standing
+  context row access now lives in `pipeline/context_rows.rs`; matcher assembly
+  and custom matcher fanout live in `pipeline/context_matching.rs`.
 - Done in this branch: fact insertion, pending-projection marking, and fact
   reads use declared typed SQLite columns; `pipeline_storage.rs` is now fact
   storage plus generic row-mutation helpers.
+- Done in this branch: exact context wake fanout runs inside projection commit
+  with typed `INSERT OR IGNORE ... SELECT`; `pending_context_changes` is now
+  only populated for custom matcher roles.
 - Done in this branch: row-mutation validation and splitting moved into
   `pipeline/effects.rs`; `pipeline_storage.rs` is below the 250-line target and
   is limited to fact storage and fact purge helpers.
@@ -181,9 +187,9 @@ src/core/pipeline/effects.rs      common commit helpers
 ```
 
 The current split is intentionally conservative and keeps behavior unchanged.
-Further cleanup should simplify module internals. `pipeline_storage.rs` is the
-main remaining complexity sink because it still mixes row codecs, mutation
-helpers, context reads, and matching queries.
+Further cleanup should simplify module internals. `pipeline_storage.rs` has
+been narrowed to fact storage and fact purge helpers; context row access and
+matching now live with the context/projection pipeline modules.
 
 ## 4. Process One Queue Item At A Time
 
@@ -228,22 +234,24 @@ Good candidates:
 
 3. Done in this branch: due time wake selection uses typed SQL; pending
    projection selection uses typed SQL; exact context wake fanout uses typed
-   SQL in `context_wake.rs`. Exact context insertion is still one typed insert
-   per woken owner rather than a single `INSERT OR IGNORE ... SELECT`.
+   `INSERT OR IGNORE ... SELECT` during projection commit.
 
-Add narrow store helpers for bounded ordered selects, delete-by-filter, and
-known insert-select fanout. Avoid scattering raw SQL through protocol code.
+Done in this branch: add narrow store helpers for bounded ordered selects,
+delete-by-filter, and checked insert-select fanout. Avoid scattering raw SQL
+through protocol code.
 
 ## 6. Reconsider `pending_context_changes`
 
-Exact context wake insertion can probably merge into projection commit. Keep a
+Exact context wake insertion now runs during projection commit. Keep the
 separate context-change queue only for custom matchers or where bounded
 scheduling matters.
 
 Bias:
 
-- Insert exact wakes with SQL immediately after context rows are updated.
-- Stop tracking removed context as scheduler work unless a concrete use appears.
+- Done: insert exact wakes with SQL immediately after context rows are updated.
+- Done: stop tracking exact context changes as scheduler work.
+- Still true: stop tracking removed context as scheduler work unless a concrete
+  use appears.
 
 ## 7. Make Context More Generic
 

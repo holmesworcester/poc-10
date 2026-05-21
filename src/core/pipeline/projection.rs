@@ -42,7 +42,14 @@ pub(crate) fn process_pending_facts(
                 .map_err(|err| format!("purge stale pending fact: {err}"))?;
             continue;
         };
-        process_pending_fact(pending_fact, projector, store, allowed_tables, &mut report)?;
+        process_pending_fact(
+            pending_fact,
+            projector,
+            matchers,
+            store,
+            allowed_tables,
+            &mut report,
+        )?;
     }
 
     Ok(report)
@@ -56,12 +63,13 @@ pub(crate) fn process_pending_facts(
 fn process_pending_fact(
     pending_fact: PendingFact,
     projector: &(impl Projector + ?Sized),
+    matchers: &[&dyn ContextMatcher],
     store: &Store,
     allowed_tables: &[TableName],
     report: &mut PipelineReport,
 ) -> Result<(), String> {
     let effects = prepare_projection_effects(projector, pending_fact, allowed_tables)?;
-    let commit = commit_projection_effects(store, &effects, allowed_tables)?;
+    let commit = commit_projection_effects(store, &effects, matchers, allowed_tables)?;
     finish_pending_fact(commit, report)
 }
 
@@ -105,5 +113,6 @@ fn finish_pending_fact(
 ) -> Result<(), String> {
     report.projections += 1;
     report.intents += commit.effects.intents();
+    report.woken_facts += commit.woken_facts;
     Ok(())
 }

@@ -1,50 +1,75 @@
-//! SQL helpers for matching pending context changes against current rows.
+//! SQL helpers for matching context changes against current rows.
 
 use super::context_codec::scope_key;
 use crate::core::context::ContextSetDelta;
 use crate::core::context::{ContextNeed, ContextOffer, Role};
-use crate::core::matchers::{ContextMatch, ContextMatcher};
-use crate::core::pipeline::{CONTEXT_NEEDS, CONTEXT_OFFERS};
+use crate::core::pipeline::{CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, PENDING_PROJECTION};
 use crate::core::schema_dsl::ColumnType;
-use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store};
+use crate::core::store::{ColumnValue, SelectColumn, Store};
 use std::collections::BTreeSet;
 
-pub(super) fn exact_context_matches(
+pub(super) fn wake_exact_context_matches_in_tx(
     store: &Store,
     delta: &ContextSetDelta,
-    matchers: &[&dyn ContextMatcher],
-) -> rusqlite::Result<Vec<ContextMatch>> {
-    let exact_roles = exact_matcher_roles(matchers);
-    if exact_roles.is_empty() {
-        return Ok(Vec::new());
+) -> rusqlite::Result<usize> {
+    let mut inserted = 0usize;
+    for need in &delta.added_needs {
+        inserted += wake_exact_offers_for_need_in_tx(store, need)?;
     }
+    for offer in &delta.added_offers {
+        inserted += wake_exact_needs_for_offer_in_tx(store, offer)?;
+    }
+    Ok(inserted)
+}
 
-    let mut matches = BTreeSet::new();
-    for need in delta
-        .added_needs
-        .iter()
-        .filter(|need| exact_roles.contains(&need.role))
-    {
-        for offer_owner in exact_offer_owners_for_need(store, need)? {
-            matches.insert(ContextMatch {
-                need_owner: need.owner,
-                offer_owner,
-            });
-        }
+pub(super) fn exact_role_delta(
+    delta: &ContextSetDelta,
+    exact_roles: &BTreeSet<Role>,
+) -> ContextSetDelta {
+    if exact_roles.is_empty() {
+        return ContextSetDelta::default();
     }
-    for offer in delta
-        .added_offers
-        .iter()
-        .filter(|offer| exact_roles.contains(&offer.role))
-    {
-        for need_owner in exact_need_owners_for_offer(store, offer)? {
-            matches.insert(ContextMatch {
-                need_owner,
-                offer_owner: offer.owner,
-            });
-        }
+    ContextSetDelta {
+        added_needs: delta
+            .added_needs
+            .iter()
+            .filter(|need| exact_roles.contains(&need.role))
+            .cloned()
+            .collect(),
+        removed_needs: Vec::new(),
+        added_offers: delta
+            .added_offers
+            .iter()
+            .filter(|offer| exact_roles.contains(&offer.role))
+            .cloned()
+            .collect(),
+        removed_offers: Vec::new(),
     }
-    Ok(matches.into_iter().collect())
+}
+
+pub(super) fn custom_role_delta(
+    delta: &ContextSetDelta,
+    custom_roles: &BTreeSet<Role>,
+) -> ContextSetDelta {
+    if custom_roles.is_empty() {
+        return ContextSetDelta::default();
+    }
+    ContextSetDelta {
+        added_needs: delta
+            .added_needs
+            .iter()
+            .filter(|need| custom_roles.contains(&need.role))
+            .cloned()
+            .collect(),
+        removed_needs: Vec::new(),
+        added_offers: delta
+            .added_offers
+            .iter()
+            .filter(|offer| custom_roles.contains(&offer.role))
+            .cloned()
+            .collect(),
+        removed_offers: Vec::new(),
+    }
 }
 
 /// Keep only added needs/offers that still exist at commit time.
@@ -69,45 +94,39 @@ pub(super) fn current_stored_context_delta(
     Ok(current)
 }
 
-fn exact_matcher_roles(matchers: &[&dyn ContextMatcher]) -> BTreeSet<Role> {
-    matchers
-        .iter()
-        .filter_map(|matcher| matcher.exact_selector_role().cloned())
-        .collect()
-}
-
-fn exact_offer_owners_for_need(
-    store: &Store,
-    need: &ContextNeed,
-) -> rusqlite::Result<Vec<[u8; 32]>> {
+fn wake_exact_offers_for_need_in_tx(store: &Store, need: &ContextNeed) -> rusqlite::Result<usize> {
     let scope_key = scope_key(&need.scope);
-    select_owner_ids(
-        store,
+    store.insert_typed_rows_from_select_in_tx(
+        PENDING_PROJECTION,
+        &["owner"],
         r#"
-        SELECT owner
-        FROM context_offers
-        WHERE role = :role
-          AND scope_key = :scope_key
-          AND selector = :selector
-        ORDER BY owner
+        SELECT :need_owner AS owner
+        WHERE EXISTS (
+            SELECT 1
+            FROM context_offers
+            WHERE role = :role
+              AND scope_key = :scope_key
+              AND selector = :selector
+        )
         "#,
-        CONTEXT_OFFERS,
+        &[CONTEXT_OFFERS],
         &[
+            (":need_owner", ColumnValue::Bytes(&need.owner)),
             (":role", ColumnValue::Text(need.role.as_str())),
             (":scope_key", ColumnValue::Bytes(&scope_key)),
             (":selector", ColumnValue::Bytes(need.selector.as_bytes())),
         ],
-        "exact offer owner",
     )
 }
 
-fn exact_need_owners_for_offer(
+fn wake_exact_needs_for_offer_in_tx(
     store: &Store,
     offer: &ContextOffer,
-) -> rusqlite::Result<Vec<[u8; 32]>> {
+) -> rusqlite::Result<usize> {
     let scope_key = scope_key(&offer.scope);
-    select_owner_ids(
-        store,
+    store.insert_typed_rows_from_select_in_tx(
+        PENDING_PROJECTION,
+        &["owner"],
         r#"
         SELECT n.owner
         FROM context_needs n
@@ -117,47 +136,13 @@ fn exact_need_owners_for_offer(
           AND n.selector = :selector
         ORDER BY f.timestamp, n.owner
         "#,
-        CONTEXT_NEEDS,
+        &[CONTEXT_NEEDS, FACTS],
         &[
             (":role", ColumnValue::Text(offer.role.as_str())),
             (":scope_key", ColumnValue::Bytes(&scope_key)),
             (":selector", ColumnValue::Bytes(offer.selector.as_bytes())),
         ],
-        "exact need owner",
     )
-}
-
-fn select_owner_ids(
-    store: &Store,
-    sql: &str,
-    table: crate::core::store::TableName,
-    params: &[(&str, ColumnValue<'_>)],
-    label: &str,
-) -> rusqlite::Result<Vec<[u8; 32]>> {
-    store
-        .select_only(
-            sql,
-            &[table, crate::core::schema::FACTS],
-            params,
-            &[SelectColumn {
-                name: "owner",
-                ty: ColumnType::Bytes { len: Some(32) },
-            }],
-        )?
-        .into_iter()
-        .map(|row| selected_owner_id(row, label))
-        .collect()
-}
-
-fn selected_owner_id(row: SelectedRow, label: &str) -> rusqlite::Result<[u8; 32]> {
-    match row.get("owner") {
-        Some(SelectedValue::Bytes(bytes)) => bytes.as_slice().try_into().map_err(|_| {
-            rusqlite::Error::InvalidParameterName(format!("{label} should be 32 bytes"))
-        }),
-        _ => Err(rusqlite::Error::InvalidParameterName(format!(
-            "{label} query did not return owner"
-        ))),
-    }
 }
 
 fn context_need_exists(store: &Store, need: &ContextNeed) -> rusqlite::Result<bool> {

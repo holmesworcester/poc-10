@@ -5,11 +5,11 @@ use crate::core::pipeline::{persisted_fact, PENDING_PROJECTION};
 use crate::core::store::{ColumnValue, Store};
 use std::collections::BTreeSet;
 
+use super::context_matching::stored_context_matches;
 use super::context_queue::{
     delete_pending_context_change_in_tx, pending_context_change_batch, PendingContextChange,
 };
-use super::context_store::stored_context_matches;
-use super::context_wake_sql::{current_stored_context_delta, exact_context_matches};
+use super::context_wake_sql::current_stored_context_delta;
 use super::effects::sqlite_string_error;
 
 /// Drain pending need/offer changes and wake newly matched facts.
@@ -59,16 +59,13 @@ fn commit_context_change_matching(
                 delete_pending_context_change_in_tx(tx, change)?;
             }
             let current_delta = current_stored_context_delta(tx, delta)?;
-            let mut context_matches = exact_context_matches(tx, &current_delta, matchers)?;
             let custom_matchers = matchers
                 .iter()
                 .copied()
                 .filter(|matcher| matcher.exact_selector_role().is_none())
                 .collect::<Vec<_>>();
-            context_matches.extend(
-                stored_context_matches(tx, &current_delta, &custom_matchers)
-                    .map_err(sqlite_string_error)?,
-            );
+            let context_matches = stored_context_matches(tx, &current_delta, &custom_matchers)
+                .map_err(sqlite_string_error)?;
             let context_matches = context_matches.into_iter().collect::<BTreeSet<_>>();
             let woken_facts = wake_matched_facts(tx, &context_matches)?;
             Ok(ContextChangeCommit {

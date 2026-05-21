@@ -1,49 +1,20 @@
-//! SQL-backed context storage and matching helpers.
-//!
-//! Context rows are declared typed SQLite tables. This module keeps the
-//! higher-level reads and matcher queries over those tables.
+//! Build projection context and custom context wake matches from SQL rows.
 
-use super::context_codec::{
-    scope_key, selected_fact_id, selected_role, selected_scope, selected_selector,
-    CONTEXT_ROW_COLUMNS,
+use super::context_codec::scope_key;
+use super::context_rows::{
+    stored_needs_for_role_scope, stored_offers_for_exact_match, stored_offers_for_role_scope,
 };
 use crate::core::context::{
     ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
 };
-use crate::core::facts::{FactId, FactScope};
+use crate::core::facts::FactScope;
 use crate::core::matchers::{ContextMatch, ContextMatcher};
-use crate::core::pipeline::{CONTEXT_NEEDS, CONTEXT_OFFERS};
 use crate::core::pipeline_storage::persisted_fact;
 use crate::core::projectors::{MatchedContext, ProjectionContext};
-use crate::core::store::{ColumnValue, SelectedRow, Store};
+use crate::core::store::Store;
 use std::collections::{BTreeMap, BTreeSet};
 
 type ExactContextKey = (Role, FactScope, Selector);
-
-/// Load a fact's standing context, returning `None` when it has none.
-pub(crate) fn persisted_context(
-    store: &Store,
-    owner: &FactId,
-) -> Result<Option<ContextSet>, String> {
-    let context = stored_context_for_owner(store, owner)?;
-    if context.needs.is_empty() && context.offers.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(context))
-    }
-}
-
-/// Load a fact's standing context: the needs and offers it currently owns.
-pub(super) fn stored_context_for_owner(
-    store: &Store,
-    owner: &FactId,
-) -> Result<ContextSet, String> {
-    Ok(ContextSet {
-        needs: stored_needs_for_owner(store, owner)?,
-        offers: stored_offers_for_owner(store, owner)?,
-    }
-    .normalized())
-}
 
 /// Find the offers that currently satisfy a fact's needs.
 pub(super) fn stored_matching_context(
@@ -163,21 +134,6 @@ pub(super) fn stored_context_matches(
     Ok(out)
 }
 
-pub(super) fn insert_context_offer_in_tx(
-    store: &Store,
-    offer: &ContextOffer,
-) -> rusqlite::Result<bool> {
-    store.insert_typed_row_in_tx(
-        CONTEXT_OFFERS,
-        &[
-            ("owner", ColumnValue::Bytes(&offer.owner)),
-            ("role", ColumnValue::Text(offer.role.as_str())),
-            ("scope_key", ColumnValue::Bytes(&scope_key(&offer.scope))),
-            ("selector", ColumnValue::Bytes(offer.selector.as_bytes())),
-        ],
-    )
-}
-
 fn exact_context_key(role: &Role, scope: &FactScope, selector: &Selector) -> ExactContextKey {
     (role.clone(), scope.clone(), selector.clone())
 }
@@ -210,32 +166,6 @@ fn relevant_custom_matchers_for_delta<'a>(
         .collect()
 }
 
-fn stored_needs_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextNeed>, String> {
-    select_context_needs(
-        store,
-        r#"
-        SELECT owner, role, scope_key, selector
-        FROM context_needs
-        WHERE owner = :owner
-        ORDER BY owner, role, scope_key, selector
-        "#,
-        &[(":owner", ColumnValue::Bytes(owner))],
-    )
-}
-
-fn stored_offers_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextOffer>, String> {
-    select_context_offers(
-        store,
-        r#"
-        SELECT owner, role, scope_key, selector
-        FROM context_offers
-        WHERE owner = :owner
-        ORDER BY owner, role, scope_key, selector
-        "#,
-        &[(":owner", ColumnValue::Bytes(owner))],
-    )
-}
-
 fn stored_exact_offers_for_needs<'a>(
     store: &Store,
     needs: impl Iterator<Item = &'a ContextNeed>,
@@ -251,22 +181,7 @@ fn stored_exact_offers_for_needs<'a>(
     let mut out = BTreeMap::<ExactContextKey, Vec<ContextOffer>>::new();
     for ((role, scope_key), selectors) in groups {
         for selector in selectors {
-            let offers = select_context_offers(
-                store,
-                r#"
-                SELECT owner, role, scope_key, selector
-                FROM context_offers
-                WHERE role = :role
-                  AND scope_key = :scope_key
-                  AND selector = :selector
-                ORDER BY owner
-                "#,
-                &[
-                    (":role", ColumnValue::Text(role.as_str())),
-                    (":scope_key", ColumnValue::Bytes(&scope_key)),
-                    (":selector", ColumnValue::Bytes(&selector)),
-                ],
-            )?;
+            let offers = stored_offers_for_exact_match(store, &role, &scope_key, &selector)?;
             for offer in offers {
                 out.entry(exact_context_key(
                     &offer.role,
@@ -299,92 +214,4 @@ fn push_stored_matched_context(
         payload,
     });
     Ok(())
-}
-
-fn stored_needs_for_role_scope(
-    store: &Store,
-    role: &Role,
-    scope: &FactScope,
-) -> Result<Vec<ContextNeed>, String> {
-    let scope_key = scope_key(scope);
-    select_context_needs(
-        store,
-        r#"
-        SELECT owner, role, scope_key, selector
-        FROM context_needs
-        WHERE role = :role
-          AND scope_key = :scope_key
-        ORDER BY owner, selector
-        "#,
-        &[
-            (":role", ColumnValue::Text(role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
-        ],
-    )
-}
-
-fn stored_offers_for_role_scope(
-    store: &Store,
-    role: &Role,
-    scope: &FactScope,
-) -> Result<Vec<ContextOffer>, String> {
-    let scope_key = scope_key(scope);
-    select_context_offers(
-        store,
-        r#"
-        SELECT owner, role, scope_key, selector
-        FROM context_offers
-        WHERE role = :role
-          AND scope_key = :scope_key
-        ORDER BY owner, selector
-        "#,
-        &[
-            (":role", ColumnValue::Text(role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
-        ],
-    )
-}
-
-fn select_context_needs(
-    store: &Store,
-    sql: &str,
-    params: &[(&str, ColumnValue<'_>)],
-) -> Result<Vec<ContextNeed>, String> {
-    store
-        .select_only(sql, &[CONTEXT_NEEDS], params, CONTEXT_ROW_COLUMNS)
-        .map_err(|err| format!("load context needs: {err}"))?
-        .into_iter()
-        .map(selected_context_need)
-        .collect()
-}
-
-fn select_context_offers(
-    store: &Store,
-    sql: &str,
-    params: &[(&str, ColumnValue<'_>)],
-) -> Result<Vec<ContextOffer>, String> {
-    store
-        .select_only(sql, &[CONTEXT_OFFERS], params, CONTEXT_ROW_COLUMNS)
-        .map_err(|err| format!("load context offers: {err}"))?
-        .into_iter()
-        .map(selected_context_offer)
-        .collect()
-}
-
-fn selected_context_need(row: SelectedRow) -> Result<ContextNeed, String> {
-    Ok(ContextNeed {
-        owner: selected_fact_id(&row, "owner")?,
-        role: selected_role(&row)?,
-        scope: selected_scope(&row)?,
-        selector: selected_selector(&row)?,
-    })
-}
-
-fn selected_context_offer(row: SelectedRow) -> Result<ContextOffer, String> {
-    Ok(ContextOffer {
-        owner: selected_fact_id(&row, "owner")?,
-        role: selected_role(&row)?,
-        scope: selected_scope(&row)?,
-        selector: selected_selector(&row)?,
-    })
 }

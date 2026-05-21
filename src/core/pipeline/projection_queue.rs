@@ -1,6 +1,7 @@
 //! Pending projection queue reads and per-fact projection input loading.
 
-use super::context_store::{stored_context_for_owner, stored_matching_context};
+use super::context_matching::stored_matching_context;
+use super::context_rows::stored_context_for_owner;
 use crate::core::context::ContextSet;
 use crate::core::facts::{Fact, FactId};
 use crate::core::matchers::ContextMatcher;

@@ -13,8 +13,9 @@
 
 mod admission;
 mod context_codec;
+mod context_matching;
 mod context_queue;
-mod context_store;
+mod context_rows;
 mod context_wake;
 mod context_wake_sql;
 mod dispatch;
@@ -41,7 +42,7 @@ pub(crate) use admission::{
 pub(crate) use context_codec::scope_key;
 #[cfg(test)]
 pub(crate) use context_codec::{context_need_row, context_offer_row};
-pub(crate) use context_store::persisted_context;
+pub(crate) use context_rows::persisted_context;
 pub use dispatch::DispatchReport;
 pub(crate) use dispatch::{
     dispatch_durable_intents, dispatch_local_intents, submit_intent_to_store,
