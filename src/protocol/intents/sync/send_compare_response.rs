@@ -1,4 +1,4 @@
-//! Send sync compare response facts for one inbound compare fact.
+//! Send sync compare continuation facts for one compare fact.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
@@ -79,15 +79,13 @@ impl IntentHandler for SendSyncCompareResponseHandler {
             Err(_) => context.facts().cloned().collect(),
         };
         let mut output = PipelineEffects::new();
-        let response_facts = crate::protocol::facts::sync::compare::create::response_facts(
+        let plan = crate::protocol::facts::sync::compare::create::response_plan(
             compare_fact,
             available_facts.iter(),
         )?;
-        let fact_ids = response_facts
-            .iter()
-            .map(|fact| fact.id)
-            .collect::<Vec<_>>();
-        for fact in response_facts {
+        let mut fact_ids = plan.facts.iter().map(|fact| fact.id).collect::<Vec<_>>();
+        fact_ids.extend(plan.send_fact_ids);
+        for fact in plan.facts {
             output = output.fact(fact);
         }
         if !fact_ids.is_empty() {

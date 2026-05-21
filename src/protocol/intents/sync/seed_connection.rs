@@ -1,8 +1,9 @@
 //! Bounded sync seeding for one connection.
 //!
 //! Projection emits this intent when a connection row becomes durable. The
-//! handler reads the shareable-fact index and advertises eligible facts by
-//! emitting deterministic `sync_have_id` facts plus transport send intents.
+//! handler reads the connection-scoped shareable-fact index, sends one root
+//! negentropy compare for the initial round, and coalesces newly shareable
+//! facts into timestamp-bucket tail sends.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::{
@@ -14,7 +15,10 @@ use crate::core::{
     store::Store,
 };
 use crate::protocol::facts::{connection, sync};
-use crate::protocol::intents::transport::send_facts_on_connection::{self, SendFactsOnConnection};
+use crate::protocol::intents::transport::send_facts_on_connection::{
+    send_facts_on_connection_intent, send_shareable_bucket_on_connection_intent,
+    SendFactsOnConnection,
+};
 
 pub const SEED_CONNECTION_SYNC: &str = "seed_connection_sync";
 
@@ -90,37 +94,32 @@ impl IntentHandler for SeedConnectionSyncHandler {
 
 pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId) -> HandlerResult {
     let facts = sync::shared_fact::shareable_facts_for_connection(store, connection_id)?;
-    advertise_facts_on_connection(connection_id, facts)
+    let compare = sync::compare::create::start_compare_fact(connection_id, facts.iter())?;
+    Ok(PipelineEffects::new()
+        .fact(compare.clone())
+        .intent(send_facts_on_connection_intent(SendFactsOnConnection {
+            connection_id,
+            fact_ids: vec![compare.id],
+        })))
 }
 
 pub fn advertise_indexed_fact_to_connections(store: &Store, fact: &Fact) -> HandlerResult {
     let mut output = PipelineEffects::new();
-    for connection_id in sync::shared_fact::connection_ids_for_shareable_fact(store, fact.id)? {
-        output = append_have_advertisement(output, connection_id, fact)?;
+    for connection_id in sync::shared_fact::connection_ids_for_shareable_fact(store, fact)? {
+        output = append_live_tail_send(output, connection_id, fact)?;
     }
     Ok(output)
 }
 
-fn advertise_facts_on_connection(connection_id: FactId, facts: Vec<Fact>) -> HandlerResult {
-    let mut output = PipelineEffects::new();
-    for fact in facts {
-        output = append_have_advertisement(output, connection_id, &fact)?;
-    }
-    Ok(output)
-}
-
-fn append_have_advertisement(
+fn append_live_tail_send(
     output: PipelineEffects,
     connection_id: FactId,
     fact: &Fact,
 ) -> HandlerResult {
-    let have_fact = sync::have_id::advertisement_fact(connection_id, fact)?;
-    Ok(output.fact(have_fact.clone()).intent(
-        send_facts_on_connection::send_facts_on_connection_intent(SendFactsOnConnection {
-            connection_id,
-            fact_ids: vec![have_fact.id],
-        }),
-    ))
+    Ok(output.intent(send_shareable_bucket_on_connection_intent(
+        connection_id,
+        fact.timestamp,
+    )))
 }
 
 #[cfg(test)]
@@ -143,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn advertise_connection_shareable_facts_emits_have_and_send_intents() {
+    fn advertise_connection_shareable_facts_emits_root_compare_and_send_intent() {
         let store =
             Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
                 .expect("store");
@@ -184,9 +183,12 @@ mod tests {
 
         let output = advertise_connection_shareable_facts(&store, connection_id).expect("seed");
 
-        assert!(
-            output.facts.is_empty(),
-            "workspace authorization is not proven by this minimal fixture"
-        );
+        assert_eq!(output.facts.len(), 1);
+        let compare =
+            sync::compare::layout::decode_fact(&output.facts[0].bytes).expect("compare fact");
+        assert_eq!(compare.connection_id, connection_id);
+        assert_eq!(compare.range, sync::compare::fact::TimestampRange::ROOT);
+        assert!(compare.response_requested);
+        assert_eq!(output.intents.len(), 1);
     }
 }

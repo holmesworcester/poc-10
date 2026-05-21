@@ -389,6 +389,69 @@ fn cli_daemon_download_perf_times_send_to_peer_receipt() {
 }
 
 #[test]
+#[ignore = "manual sync throughput fixture; run with --ignored when measuring two-daemon catch-up"]
+fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice-sync-perf.db");
+    let bob = temp_db(&tmp, "bob-sync-perf.db");
+    let alice_port = free_port();
+    let bob_port = free_port();
+    let event_count = env_usize("TOPO_SYNC_PERF_EVENTS").unwrap_or(10_000);
+    let event_size = env_usize("TOPO_SYNC_PERF_EVENT_BYTES").unwrap_or(128);
+    let timeout_ms = env_usize("TOPO_SYNC_PERF_TIMEOUT_MS")
+        .map(|value| value as u64)
+        .unwrap_or_else(|| 120_000_u64.max(event_count as u64 * 120));
+
+    let workspace = create_workspace(&alice, "sync-perf", "alice", "alice-laptop");
+    let invite = workspace_invite_for_addr(&alice, &workspace, alice_port);
+
+    let mut alice_daemon = spawn_daemon(&alice, alice_port);
+    let mut bob_daemon = spawn_daemon(&bob, bob_port);
+    let accepted = accept_with_identity_retry(&bob, &invite, "bob", "bob-phone");
+    assert_eq!(line_value(&accepted, "workspace_id"), workspace);
+    alice_daemon.assert_running();
+    bob_daemon.assert_running();
+    poll_for_workspace_member(&bob, &workspace, "bob", 10_000);
+    drop(alice_daemon);
+    drop(bob_daemon);
+
+    let authoring_started = Instant::now();
+    let generated = generate(&alice, &workspace, event_count, event_size);
+    let authoring_elapsed = authoring_started.elapsed();
+    assert_eq!(
+        line_value(&generated, "generated_facts"),
+        event_count.to_string()
+    );
+    assert_content_count(&bob, &workspace, 0);
+
+    let sync_started = Instant::now();
+    let mut alice_daemon = spawn_daemon(&alice, alice_port);
+    let mut bob_daemon = spawn_daemon(&bob, bob_port);
+    let daemons_ready_at = Instant::now();
+    alice_daemon.assert_running();
+    bob_daemon.assert_running();
+
+    let projected = poll_for_content_count_at_least(&bob, &workspace, event_count, timeout_ms);
+    let sync_elapsed = sync_started.elapsed();
+    let ready_elapsed = daemons_ready_at.elapsed();
+    assert_eq!(projected, event_count);
+
+    let seconds = sync_elapsed.as_secs_f64().max(0.001);
+    let events_per_second = event_count as f64 / seconds;
+    eprintln!(
+        "black_box_generated_content_sync_perf events={} event_bytes={} timeout_ms={} authoring_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} events_per_s={:.2}",
+        event_count,
+        event_size,
+        timeout_ms,
+        authoring_elapsed.as_millis(),
+        sync_elapsed.as_millis(),
+        ready_elapsed.as_millis(),
+        events_per_second
+    );
+    assert!(events_per_second.is_finite() && events_per_second > 0.0);
+}
+
+#[test]
 fn cli_three_long_running_daemons_converge_messages_among_late_joiner() {
     // alice runs a daemon. bob accepts alice's daemon-served invite, then
     // carol does the same. All three converge on shared messages from alice
@@ -864,6 +927,28 @@ fn assert_content_count(db: &str, workspace: &str, expected: usize) {
     );
 }
 
+fn poll_for_content_count_at_least(
+    db: &str,
+    workspace: &str,
+    expected: usize,
+    timeout_ms: u64,
+) -> usize {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        let out = assert_success(topo(&["--db", db, "content-count", workspace]));
+        let observed = line_value(&out, "content_events")
+            .parse()
+            .expect("content_events usize");
+        if observed >= expected {
+            return observed;
+        }
+        last = out;
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("content count did not reach {expected}; last output:\n{last}");
+}
+
 fn wait_for_content_count(db: &str, workspace: &str, expected: usize) {
     let mut last = String::new();
     for _ in 0..300 {
@@ -875,4 +960,15 @@ fn wait_for_content_count(db: &str, workspace: &str, expected: usize) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("content count did not reach {expected}; last output:\n{last}");
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} must be a positive integer"))
+        })
+        .filter(|value| *value > 0)
 }
