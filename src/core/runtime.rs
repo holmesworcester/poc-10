@@ -48,7 +48,7 @@ struct HandlerSet {
 }
 
 struct HandlerEntry {
-    route: &'static HandlerRoute,
+    intent_kind: &'static str,
     handler: Box<dyn IntentHandler>,
 }
 
@@ -58,7 +58,7 @@ impl HandlerSet {
             entries: routes
                 .iter()
                 .map(|route| HandlerEntry {
-                    route,
+                    intent_kind: route.intent_kind,
                     handler: (route.factory)(),
                 })
                 .collect(),
@@ -71,39 +71,45 @@ impl HandlerSet {
                 .iter()
                 .filter(|route| !excluded_names.contains(&route.name))
                 .map(|route| HandlerEntry {
-                    route,
+                    intent_kind: route.intent_kind,
                     handler: (route.factory)(),
                 })
                 .collect(),
         }
     }
+
+    fn intent_kinds(&self) -> Vec<&'static str> {
+        self.entries.iter().map(|entry| entry.intent_kind).collect()
+    }
+
+    fn handler_for_kind(&self, kind: &str) -> Option<&dyn IntentHandler> {
+        self.entries
+            .iter()
+            .find(|entry| entry.intent_kind == kind)
+            .map(|entry| entry.handler.as_ref())
+    }
+
     pub(crate) fn dispatch(
         &self,
         store: &Store,
         allowed_tables: &[TableName],
-        limit_per_handler: usize,
+        limit: usize,
     ) -> Result<WorkStatus, String> {
         let mut total = WorkStatus::idle();
-        for entry in &self.entries {
-            let status = pipeline::dispatch_durable_intents(
-                entry.handler.as_ref(),
-                entry.route.intent_kind,
-                store,
-                allowed_tables,
-                limit_per_handler,
-            )?;
+        let kinds = self.intent_kinds();
+        for _ in 0..limit {
+            let Some(queued) = pipeline::next_queued_intent(store, &kinds)? else {
+                break;
+            };
+            let kind = queued.intent.kind.as_str();
+            let handler = self
+                .handler_for_kind(kind)
+                .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
+            let status = pipeline::dispatch_queued_intent(handler, store, allowed_tables, queued)?;
             total.merge(status);
-            if status.progressed || status.retried {
-                continue;
+            if status.retried {
+                break;
             }
-
-            total.merge(pipeline::dispatch_local_intents(
-                entry.handler.as_ref(),
-                entry.route.intent_kind,
-                store,
-                allowed_tables,
-                limit_per_handler,
-            )?);
         }
         Ok(total)
     }
@@ -267,8 +273,8 @@ impl Runtime {
         Err("projection work did not become idle within the round limit".to_string())
     }
 
-    pub fn dispatch_intents(&mut self, limit_per_handler: usize) -> Result<WorkStatus, String> {
-        self.dispatch_with_handlers(&self.handlers, limit_per_handler)
+    pub fn dispatch_intents(&mut self, limit: usize) -> Result<WorkStatus, String> {
+        self.dispatch_with_handlers(&self.handlers, limit)
     }
 
     /// Settle all projection and intent work using the protocol's full handler
@@ -286,13 +292,9 @@ impl Runtime {
     fn dispatch_with_handlers(
         &self,
         handlers: &HandlerSet,
-        limit_per_handler: usize,
+        limit: usize,
     ) -> Result<WorkStatus, String> {
-        handlers.dispatch(
-            &self.store,
-            self.description.row_mutation_tables,
-            limit_per_handler,
-        )
+        handlers.dispatch(&self.store, self.description.row_mutation_tables, limit)
     }
 
     fn process_work_until_idle(

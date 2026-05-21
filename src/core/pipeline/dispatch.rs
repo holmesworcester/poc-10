@@ -3,10 +3,10 @@ use crate::core::fact_store::persisted_fact;
 use crate::core::intents::{HandlerContext, HandlerError, Intent, IntentHandler, IntentKind};
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::{Store, TableName};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, params_from_iter, OptionalExtension};
 
 use super::effects::{commit_pipeline_effects_in_tx, validate_pipeline_effects};
-use super::intent_queue::record_intent_in_table_in_tx;
+use super::intent_queue::{intent_table_name, record_intent_in_table_in_tx};
 use super::WorkStatus;
 
 // === Intent dispatch ===
@@ -26,105 +26,75 @@ fn submit_intent_to_table(store: &Store, table: TableName, intent: Intent) -> Re
     Ok(inserted)
 }
 
-/// Dispatch durable queued intents, each with the input facts its handler asks
-/// for.
-pub(crate) fn dispatch_durable_intents(
-    handler: &(impl IntentHandler + ?Sized),
-    intent_kind: &str,
+pub(crate) fn next_queued_intent(
     store: &Store,
-    allowed_tables: &[TableName],
-    limit: usize,
-) -> Result<WorkStatus, String> {
-    dispatch_stored_intents(handler, intent_kind, store, INTENTS, allowed_tables, limit)
+    allowed_kinds: &[&str],
+) -> Result<Option<QueuedIntent>, String> {
+    if allowed_kinds.is_empty() {
+        return Ok(None);
+    }
+    match next_queued_intent_in_table(store, INTENTS, allowed_kinds)? {
+        Some(intent) => Ok(Some(intent)),
+        None => next_queued_intent_in_table(store, LOCAL_INTENTS, allowed_kinds),
+    }
 }
 
-/// Shared loop for dispatching queued intents.
-///
-/// Each iteration follows the prepare/commit/finish rhythm: claim one matching
-/// intent, load the handler context, run the handler, then prepare, commit, and
-/// finish its output. A `false` from [`finish_handler_output`] means another
-/// dispatcher claimed the intent first, so the loop simply moves to the next.
-fn dispatch_stored_intents(
+pub(crate) fn dispatch_queued_intent(
     handler: &(impl IntentHandler + ?Sized),
-    intent_kind: &str,
     store: &Store,
-    queue_table: TableName,
     allowed_tables: &[TableName],
-    limit: usize,
+    queued: QueuedIntent,
 ) -> Result<WorkStatus, String> {
     let mut status = WorkStatus::idle();
-    let mut handled = 0;
-    while handled < limit {
-        let Some(stored) = next_intent_for_kind(store, queue_table, intent_kind)? else {
-            break;
-        };
-        let context = load_handler_context(store, handler, &stored.intent)?;
-        let Some(output) = run_handler(handler, &stored.intent, &context, &mut status)? else {
-            break;
-        };
-        validate_pipeline_effects(&output, allowed_tables)?;
-        let handled_intent = HandledIntent {
-            table: queue_table,
-            kind: stored.intent.kind.as_str(),
-            idempotence_key: &stored.intent.key,
-        };
-        if !commit_handler_output(store, handled_intent, &output, allowed_tables)? {
-            continue;
-        }
-        handled += 1;
-        status.progressed = true;
-    }
+    let context = load_handler_context(store, handler, &queued.intent)?;
+    let Some(output) = run_handler(handler, &queued.intent, &context, &mut status)? else {
+        return Ok(status);
+    };
+    validate_pipeline_effects(&output, allowed_tables)?;
+    let handled = HandledIntent {
+        table: queued.table,
+        kind: queued.intent.kind.as_str(),
+        idempotence_key: &queued.intent.key,
+    };
+    status.progressed = commit_handler_output(store, handled, &output, allowed_tables)?;
     Ok(status)
 }
 
-/// Dispatch restart-local intents from the temp local-intent queue.
-pub(crate) fn dispatch_local_intents(
-    handler: &(impl IntentHandler + ?Sized),
-    intent_kind: &str,
-    store: &Store,
-    allowed_tables: &[TableName],
-    limit: usize,
-) -> Result<WorkStatus, String> {
-    dispatch_stored_intents(
-        handler,
-        intent_kind,
-        store,
-        LOCAL_INTENTS,
-        allowed_tables,
-        limit,
-    )
-}
-
-/// Return the first queued intent for a declared handler route.
-fn next_intent_for_kind(
+/// Return the first queued intent matching a declared handler route.
+fn next_queued_intent_in_table(
     store: &Store,
     queue_table: TableName,
-    intent_kind: &str,
-) -> Result<Option<StoredIntent>, String> {
+    allowed_kinds: &[&str],
+) -> Result<Option<QueuedIntent>, String> {
     let table_name = intent_table_name(queue_table).map_err(|err| err.to_string())?;
     let order = if queue_table == LOCAL_INTENTS {
         "rowid"
     } else {
         "kind, idempotence_key"
     };
+    let placeholders = (1..=allowed_kinds.len())
+        .map(|idx| format!("?{idx}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     store
         .conn()
         .query_row(
             &format!(
                 "SELECT kind, idempotence_key, payload
                  FROM {table_name}
-                 WHERE kind = ?1
+                 WHERE kind IN ({placeholders})
                  ORDER BY {order}
                  LIMIT 1"
             ),
-            params![intent_kind],
+            params_from_iter(allowed_kinds.iter().copied()),
             |row| {
                 let kind = IntentKind::new(row.get::<_, String>(0)?).map_err(|err| {
                     rusqlite::Error::InvalidParameterName(format!(
                         "invalid queued intent kind: {err}"
                     ))
                 })?;
-                Ok(StoredIntent {
+                Ok(QueuedIntent {
+                    table: queue_table,
                     intent: Intent::new(kind, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?),
                 })
             },
@@ -174,7 +144,7 @@ fn run_handler(
 /// This is the boundary for intent dispatch: deleting the handled queued intent,
 /// purging facts, admitting emitted facts, applying row mutations, and recording
 /// follow-up intents all happen together. If the handled row is already gone,
-/// nothing commits and the returned [`HandlerCommit::handled`] is `false`.
+/// nothing commits and the returned value is `false`.
 fn commit_handler_output(
     store: &Store,
     handled: HandledIntent<'_>,
@@ -196,8 +166,9 @@ fn commit_handler_output(
         .map_err(|err| format!("commit handler output: {err}"))
 }
 
-struct StoredIntent {
-    intent: Intent,
+pub(crate) struct QueuedIntent {
+    pub(crate) table: TableName,
+    pub(crate) intent: Intent,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -218,17 +189,4 @@ fn delete_intent_in_tx(
         &format!("DELETE FROM {table_name} WHERE kind = ?1 AND idempotence_key = ?2"),
         params![kind, idempotence_key],
     )
-}
-
-fn intent_table_name(table: TableName) -> rusqlite::Result<&'static str> {
-    if table == INTENTS {
-        Ok("\"intents\"")
-    } else if table == LOCAL_INTENTS {
-        Ok("\"local_intents\"")
-    } else {
-        Err(rusqlite::Error::InvalidParameterName(format!(
-            "table {} is not an intent queue",
-            table.as_str()
-        )))
-    }
 }

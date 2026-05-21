@@ -54,7 +54,7 @@ pub(crate) fn record_intent_in_table_in_tx(
     Ok(changed > 0)
 }
 
-fn intent_table_name(table: TableName) -> rusqlite::Result<&'static str> {
+pub(super) fn intent_table_name(table: TableName) -> rusqlite::Result<&'static str> {
     if table == INTENTS {
         Ok("\"intents\"")
     } else if table == LOCAL_INTENTS {

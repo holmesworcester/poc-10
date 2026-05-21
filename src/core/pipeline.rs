@@ -59,7 +59,7 @@ pub(crate) use admission::{
     submit_facts_to_store,
 };
 pub(crate) use dispatch::{
-    dispatch_durable_intents, dispatch_local_intents, submit_intent_to_store,
+    dispatch_queued_intent, next_queued_intent, submit_intent_to_store,
     submit_local_intent_to_store,
 };
 pub(crate) use effects::commit_pipeline_effects_to_store;
