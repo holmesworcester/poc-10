@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::schema_dsl::{parse_schema, TableStorage};
 use topo::core::store::{Store, TableName, TableRow};
+use topo::core::wire::Writer;
 use topo::protocol::facts::content::{file, message, reaction};
 use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 
@@ -52,7 +53,7 @@ fn schema_sources_create_declared_row_tables() {
 
     store
         .insert_table_rows(vec![TableRow {
-            table: TableName::new("clock"),
+            table: TableName::new("workspace_rows"),
             key: b"clock".to_vec(),
             value: 1u64.to_be_bytes().to_vec(),
         }])
@@ -60,8 +61,8 @@ fn schema_sources_create_declared_row_tables() {
 
     assert_eq!(
         store
-            .table_row(TableName::new("clock"), b"clock")
-            .expect("read clock row"),
+            .table_row(TableName::new("workspace_rows"), b"clock")
+            .expect("read p8sql row"),
         Some(1u64.to_be_bytes().to_vec())
     );
 
@@ -78,17 +79,18 @@ fn schema_source_memory_row_tables_are_temp() {
     let store = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
         .expect("open store with core schema");
     store
-        .insert_table_rows(vec![TableRow {
-            table: local_intents,
-            key: b"local".to_vec(),
-            value: b"intent".to_vec(),
-        }])
+        .insert_table_rows(vec![typed_intent_row(
+            local_intents,
+            "local",
+            b"k",
+            b"intent",
+        )])
         .expect("insert temp local intent row");
     assert_eq!(
         store
-            .table_row(local_intents, b"local")
+            .table_row(local_intents, &typed_intent_key("local", b"k"))
             .expect("read temp row"),
-        Some(b"intent".to_vec())
+        Some(typed_intent_value(b"intent"))
     );
     assert!(
         !sqlite_table_names(&path).contains("local_intents"),
@@ -99,10 +101,31 @@ fn schema_source_memory_row_tables_are_temp() {
         .expect("reopen store with core schema");
     assert_eq!(
         reopened
-            .table_row(local_intents, b"local")
+            .table_row(local_intents, &typed_intent_key("local", b"k"))
             .expect("read temp row after reopen"),
         None
     );
+}
+
+fn typed_intent_row(table: TableName, kind: &str, key: &[u8], payload: &[u8]) -> TableRow {
+    TableRow {
+        table,
+        key: typed_intent_key(kind, key),
+        value: typed_intent_value(payload),
+    }
+}
+
+fn typed_intent_key(kind: &str, key: &[u8]) -> Vec<u8> {
+    let mut out = Writer::new();
+    out.string_u32be(kind).expect("kind fits");
+    out.bytes_u32be(key).expect("key fits");
+    out.finish()
+}
+
+fn typed_intent_value(payload: &[u8]) -> Vec<u8> {
+    let mut out = Writer::new();
+    out.bytes_u32be(payload).expect("payload fits");
+    out.finish()
 }
 
 #[test]

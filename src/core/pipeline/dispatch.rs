@@ -1,12 +1,13 @@
 use crate::core::fact_store::persisted_fact;
-use crate::core::intents::{HandlerContext, HandlerError, HandlerOutput, Intent, IntentHandler};
+use crate::core::intents::{
+    HandlerContext, HandlerError, HandlerOutput, Intent, IntentHandler, IntentKind,
+};
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::{Store, TableName};
+use rusqlite::{params, OptionalExtension};
 
 use super::effects::{commit_pipeline_effects_in_tx, PipelineEffectCounts, PipelineEffects};
-use super::intent_queue::{
-    decode_intent_row, intent_key_matches_kind, record_intent_in_table_in_tx,
-};
+use super::intent_queue::record_intent_in_table_in_tx;
 
 // === Intent dispatch ===
 
@@ -76,7 +77,8 @@ fn dispatch_stored_intents(
         let effects = prepare_handler_output(output, allowed_tables)?;
         let handled = HandledIntent {
             table: queue_table,
-            key: &stored.key,
+            kind: stored.intent.kind.as_str(),
+            idempotence_key: &stored.intent.key,
         };
         let commit = commit_handler_output(store, handled, &effects, allowed_tables)?;
         if !finish_handler_output(commit, &mut report)? {
@@ -110,23 +112,36 @@ fn next_intent_for_kind(
     queue_table: TableName,
     intent_kind: &str,
 ) -> Result<Option<StoredIntent>, String> {
-    let rows = if queue_table == LOCAL_INTENTS {
-        store
-            .row_table_rows_in_insertion_order(queue_table)
-            .map_err(|err| format!("load local intents: {err}"))?
+    let table_name = intent_table_name(queue_table).map_err(|err| err.to_string())?;
+    let order = if queue_table == LOCAL_INTENTS {
+        "rowid"
     } else {
-        store
-            .table_rows(queue_table)
-            .map_err(|err| format!("load stored intents: {err}"))?
+        "kind, idempotence_key"
     };
-    for (key, value) in rows {
-        if !intent_key_matches_kind(&key, intent_kind)? {
-            continue;
-        }
-        let intent = decode_intent_row(&key, &value)?;
-        return Ok(Some(StoredIntent { key, intent }));
-    }
-    Ok(None)
+    store
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT kind, idempotence_key, payload
+                 FROM {table_name}
+                 WHERE kind = ?1
+                 ORDER BY {order}
+                 LIMIT 1"
+            ),
+            params![intent_kind],
+            |row| {
+                let kind = IntentKind::new(row.get::<_, String>(0)?).map_err(|err| {
+                    rusqlite::Error::InvalidParameterName(format!(
+                        "invalid queued intent kind: {err}"
+                    ))
+                })?;
+                Ok(StoredIntent {
+                    intent: Intent::new(kind, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?),
+                })
+            },
+        )
+        .optional()
+        .map_err(|err| format!("load queued intent: {err}"))
 }
 
 /// Build the fact/store view a stored-intent handler requested.
@@ -188,11 +203,11 @@ fn commit_handler_output(
 ) -> Result<HandlerCommit, String> {
     store
         .write_transaction(|tx| {
-            if tx.delete_table_rows_in_tx(handled.table, vec![handled.key.to_vec()])? == 0 {
+            if delete_intent_in_tx(tx, handled.table, handled.kind, handled.idempotence_key)? == 0 {
                 return Ok(HandlerCommit::default());
             }
             if handled.table == INTENTS {
-                tx.delete_table_rows_in_tx(LOCAL_INTENTS, vec![handled.key.to_vec()])?;
+                delete_intent_in_tx(tx, LOCAL_INTENTS, handled.kind, handled.idempotence_key)?;
             }
 
             let counts = commit_pipeline_effects_in_tx(tx, effects, allowed_tables)?;
@@ -229,14 +244,14 @@ fn is_retryable_handler_error(err: &HandlerError) -> bool {
 }
 
 struct StoredIntent {
-    key: Vec<u8>,
     intent: Intent,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct HandledIntent<'a> {
     table: TableName,
-    key: &'a [u8],
+    kind: &'a str,
+    idempotence_key: &'a [u8],
 }
 
 /// Counts from one committed handler transaction.
@@ -246,4 +261,30 @@ struct HandlerCommit {
     /// row was already gone.
     handled: bool,
     effects: PipelineEffectCounts,
+}
+
+fn delete_intent_in_tx(
+    store: &Store,
+    table: TableName,
+    kind: &str,
+    idempotence_key: &[u8],
+) -> rusqlite::Result<usize> {
+    let table_name = intent_table_name(table)?;
+    store.conn().execute(
+        &format!("DELETE FROM {table_name} WHERE kind = ?1 AND idempotence_key = ?2"),
+        params![kind, idempotence_key],
+    )
+}
+
+fn intent_table_name(table: TableName) -> rusqlite::Result<&'static str> {
+    if table == INTENTS {
+        Ok("\"intents\"")
+    } else if table == LOCAL_INTENTS {
+        Ok("\"local_intents\"")
+    } else {
+        Err(rusqlite::Error::InvalidParameterName(format!(
+            "table {} is not an intent queue",
+            table.as_str()
+        )))
+    }
 }

@@ -1,72 +1,21 @@
 //! Encoding and decoding helpers for context-related SQL rows.
 
-#[cfg(test)]
-use crate::core::context::{scope_key, ContextNeed, ContextOffer};
-use crate::core::context::{Role, Selector};
-use crate::core::facts::{FactId, FactScope, ScopeKind};
+use crate::core::facts::{FactScope, ScopeKind};
 #[cfg(test)]
 use crate::core::schema::CONTEXT_EDGES;
-use crate::core::schema_dsl::ColumnType;
 #[cfg(test)]
 use crate::core::store::TableRow;
-use crate::core::store::{SelectColumn, SelectedRow, SelectedValue};
 #[cfg(test)]
 use crate::core::wire::Writer;
 use crate::core::wire::{Reader, WireError};
+#[cfg(test)]
+use crate::core::{
+    context::{scope_key, ContextNeed, ContextOffer, Role, Selector},
+    facts::FactId,
+};
 
 pub(super) const CONTEXT_NEED_DIRECTION: &str = "need";
 pub(super) const CONTEXT_OFFER_DIRECTION: &str = "offer";
-
-pub(super) const CONTEXT_EDGE_VALUE_COLUMNS: &[SelectColumn] = &[
-    SelectColumn {
-        name: "owner",
-        ty: ColumnType::Bytes { len: Some(32) },
-    },
-    SelectColumn {
-        name: "role",
-        ty: ColumnType::Text,
-    },
-    SelectColumn {
-        name: "scope_key",
-        ty: ColumnType::Bytes { len: None },
-    },
-    SelectColumn {
-        name: "selector",
-        ty: ColumnType::Bytes { len: None },
-    },
-];
-
-pub(super) fn selected_fact_id(row: &SelectedRow, name: &str) -> Result<FactId, String> {
-    selected_bytes(row, name)?
-        .try_into()
-        .map_err(|_| format!("context SQL column {name} is not a fact id"))
-}
-
-pub(super) fn selected_role(row: &SelectedRow) -> Result<Role, String> {
-    match row.get("role") {
-        Some(SelectedValue::Text(value)) => Role::new(value.clone()),
-        Some(_) => Err("context SQL column role is not text".to_string()),
-        None => Err("context SQL did not return column role".to_string()),
-    }
-}
-
-pub(super) fn selected_scope(row: &SelectedRow) -> Result<FactScope, String> {
-    decode_scope_key(selected_bytes(row, "scope_key")?)
-}
-
-pub(super) fn selected_selector(row: &SelectedRow) -> Result<Selector, String> {
-    Ok(Selector::from_bytes(
-        selected_bytes(row, "selector")?.to_vec(),
-    ))
-}
-
-pub(super) fn selected_bytes<'a>(row: &'a SelectedRow, name: &str) -> Result<&'a [u8], String> {
-    match row.get(name) {
-        Some(SelectedValue::Bytes(bytes)) => Ok(bytes),
-        Some(_) => Err(format!("context SQL column {name} is not bytes")),
-        None => Err(format!("context SQL did not return column {name}")),
-    }
-}
 
 #[cfg(test)]
 pub(crate) fn context_need_row(need: &ContextNeed) -> TableRow {
@@ -132,7 +81,7 @@ fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {
     }
 }
 
-fn decode_scope_key(bytes: &[u8]) -> Result<FactScope, String> {
+pub(super) fn decode_scope_key(bytes: &[u8]) -> Result<FactScope, String> {
     let mut reader = Reader::new(bytes);
     let scope = decode_scope(&mut reader)?;
     reader.finish().row()?;

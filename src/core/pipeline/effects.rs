@@ -6,7 +6,7 @@ use crate::core::schema::LOCAL_INTENTS;
 use crate::core::store::{Store, TableName, TableRow};
 use std::collections::BTreeMap;
 
-use super::intent_queue::{intent_row_key, record_intent_in_table_in_tx, record_intent_in_tx};
+use super::intent_queue::{record_intent_in_table_in_tx, record_intent_in_tx};
 
 /// Durable effects produced by one pipeline step.
 ///
@@ -104,7 +104,7 @@ impl PipelineEffectCounts {
 fn validate_intents(intents: &[Intent]) -> Result<(), String> {
     let mut proposed = BTreeMap::<Vec<u8>, &Intent>::new();
     for intent in intents {
-        let key = intent_row_key(intent);
+        let key = intent_validation_key(intent);
         if let Some(existing) = proposed.insert(key, intent) {
             if existing != intent {
                 return Err(format!(
@@ -115,6 +115,13 @@ fn validate_intents(intents: &[Intent]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn intent_validation_key(intent: &Intent) -> Vec<u8> {
+    let mut key = intent.kind.as_str().as_bytes().to_vec();
+    key.push(0);
+    key.extend_from_slice(&intent.key);
+    key
 }
 
 /// Reject any row mutation targeting a table this runtime has not registered.

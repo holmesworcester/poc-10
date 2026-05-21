@@ -7,9 +7,8 @@ use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId};
 use crate::core::matchers::ContextMatcher;
 use crate::core::projectors::{ProjectionContext, TimeRange, Timeline};
-use crate::core::schema::{FACTS, PENDING_PROJECTION, PENDING_TIME_RANGES};
-use crate::core::schema_dsl::ColumnType;
-use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store};
+use crate::core::store::Store;
+use rusqlite::params;
 
 /// A fact that has been claimed from the pending queue and is ready to project.
 pub(super) struct PendingFact {
@@ -24,26 +23,27 @@ pub(super) struct PendingFact {
 /// The commit step removes the row only after projection succeeds. Missing
 /// facts are handled by the caller as stale pending rows and purged there.
 pub(super) fn pending_owner_batch(store: &Store, limit: usize) -> Result<Vec<FactId>, String> {
-    store
-        .select_only(
+    let limit =
+        i64::try_from(limit).map_err(|_| "pending projection limit exceeds i64".to_string())?;
+    let mut stmt = store
+        .conn()
+        .prepare(
             r#"
             SELECT p.owner
             FROM pending_projection p
-            LEFT JOIN facts f ON f.id = p.owner
-            ORDER BY COALESCE(f.timestamp, 9223372036854775807), p.owner
-            LIMIT :limit
+            LEFT JOIN local_fact_admissions m ON m.fact_id = p.owner
+            ORDER BY COALESCE(m.received_at, 9223372036854775807), p.owner
+            LIMIT ?1
             "#,
-            &[PENDING_PROJECTION, FACTS],
-            &[(":limit", ColumnValue::U64(limit as u64))],
-            &[SelectColumn {
-                name: "owner",
-                ty: ColumnType::Bytes { len: Some(32) },
-            }],
         )
-        .map_err(|err| format!("load pending projection: {err}"))?
-        .into_iter()
-        .map(decode_pending_owner)
-        .collect()
+        .map_err(|err| format!("load pending projection: {err}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")
+        })
+        .map_err(|err| format!("load pending projection: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("load pending projection: {err}"))
 }
 
 /// Load everything projection needs for one fact.
@@ -71,72 +71,53 @@ pub(super) fn load_pending_fact(
     }))
 }
 
-fn decode_pending_owner(row: SelectedRow) -> Result<FactId, String> {
-    match row.get("owner") {
-        Some(SelectedValue::Bytes(bytes)) => bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| "pending projection owner should be 32 bytes".to_string()),
-        _ => Err("pending projection row missing owner".to_string()),
-    }
-}
-
 fn pending_time_ranges_for_owner(store: &Store, owner: &FactId) -> Result<Vec<TimeRange>, String> {
-    store
-        .select_only(
+    let mut stmt = store
+        .conn()
+        .prepare(
             r#"
             SELECT timeline, has_start, start_exclusive, end_inclusive
             FROM pending_time_ranges
-            WHERE owner = :owner
+            WHERE owner = ?1
             ORDER BY timeline, has_start, start_exclusive, end_inclusive
             "#,
-            &[PENDING_TIME_RANGES],
-            &[(":owner", ColumnValue::Bytes(owner))],
-            &[
-                SelectColumn {
-                    name: "timeline",
-                    ty: ColumnType::Text,
-                },
-                SelectColumn {
-                    name: "has_start",
-                    ty: ColumnType::Bool,
-                },
-                SelectColumn {
-                    name: "start_exclusive",
-                    ty: ColumnType::U64,
-                },
-                SelectColumn {
-                    name: "end_inclusive",
-                    ty: ColumnType::U64,
-                },
-            ],
         )
-        .map_err(|err| format!("load pending time ranges: {err}"))?
-        .into_iter()
-        .map(decode_pending_time_range)
-        .collect()
+        .map_err(|err| format!("load pending time ranges: {err}"))?;
+    let rows = stmt
+        .query_map(params![owner.as_slice()], decode_pending_time_range)
+        .map_err(|err| format!("load pending time ranges: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("load pending time ranges: {err}"))
 }
 
-fn decode_pending_time_range(row: SelectedRow) -> Result<TimeRange, String> {
-    let timeline = match row.get("timeline") {
-        Some(SelectedValue::Text(value)) => Timeline::new(value.clone())?,
-        _ => return Err("pending time range row missing timeline".to_string()),
+fn decode_pending_time_range(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimeRange> {
+    let timeline =
+        Timeline::new(row.get::<_, String>(0)?).map_err(rusqlite::Error::InvalidParameterName)?;
+    let has_start = match row.get::<_, i64>(1)? {
+        0 => false,
+        1 => true,
+        other => {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "pending time range has invalid bool {other}"
+            )));
+        }
     };
-    let has_start = match row.get("has_start") {
-        Some(SelectedValue::Bool(value)) => *value,
-        _ => return Err("pending time range row missing has_start".to_string()),
-    };
-    let start = match row.get("start_exclusive") {
-        Some(SelectedValue::U64(value)) => *value,
-        _ => return Err("pending time range row missing start_exclusive".to_string()),
-    };
-    let end_inclusive = match row.get("end_inclusive") {
-        Some(SelectedValue::U64(value)) => *value,
-        _ => return Err("pending time range row missing end_inclusive".to_string()),
-    };
+    let start = u64_column(row.get::<_, i64>(2)?, "start_exclusive")?;
+    let end_inclusive = u64_column(row.get::<_, i64>(3)?, "end_inclusive")?;
     Ok(TimeRange {
         timeline,
         start_exclusive: has_start.then_some(start),
         end_inclusive,
     })
+}
+
+fn fact_id_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<FactId> {
+    bytes.try_into().map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("{name} is not a 32-byte fact id"))
+    })
+}
+
+fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
+    u64::try_from(value)
+        .map_err(|_| rusqlite::Error::InvalidParameterName(format!("{name} is negative")))
 }

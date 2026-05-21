@@ -1,13 +1,10 @@
 //! Typed SQL rows for standing fact context.
 
-use super::context_codec::{
-    selected_fact_id, selected_role, selected_scope, selected_selector, CONTEXT_EDGE_VALUE_COLUMNS,
-    CONTEXT_NEED_DIRECTION, CONTEXT_OFFER_DIRECTION,
-};
-use crate::core::context::{scope_key, ContextNeed, ContextOffer, ContextSet, Role};
+use super::context_codec::{decode_scope_key, CONTEXT_NEED_DIRECTION, CONTEXT_OFFER_DIRECTION};
+use crate::core::context::{scope_key, ContextNeed, ContextOffer, ContextSet, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::schema::CONTEXT_EDGES;
-use crate::core::store::{ColumnValue, SelectedRow, Store};
+use crate::core::store::Store;
+use rusqlite::params;
 
 /// Load a fact's standing context, returning `None` when it has none.
 pub(crate) fn persisted_context(
@@ -79,8 +76,8 @@ pub(super) fn stored_needs_for_role_scope(
         ORDER BY owner, selector
         "#,
         &[
-            (":role", ColumnValue::Text(role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
+            (":role", text(role.as_str())),
+            (":scope_key", bytes(&scope_key)),
         ],
     )
 }
@@ -102,8 +99,8 @@ pub(super) fn stored_offers_for_role_scope(
         ORDER BY owner, selector
         "#,
         &[
-            (":role", ColumnValue::Text(role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
+            (":role", text(role.as_str())),
+            (":scope_key", bytes(&scope_key)),
         ],
     )
 }
@@ -126,9 +123,9 @@ pub(super) fn stored_offers_for_exact_match(
         ORDER BY owner
         "#,
         &[
-            (":role", ColumnValue::Text(role.as_str())),
-            (":scope_key", ColumnValue::Bytes(scope_key)),
-            (":selector", ColumnValue::Bytes(selector)),
+            (":role", text(role.as_str())),
+            (":scope_key", bytes(scope_key)),
+            (":selector", bytes(selector)),
         ],
     )
 }
@@ -143,7 +140,7 @@ fn stored_needs_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextNe
           AND direction = 'need'
         ORDER BY owner, role, scope_key, selector
         "#,
-        &[(":owner", ColumnValue::Bytes(owner))],
+        &[(":owner", bytes(owner))],
     )
 }
 
@@ -157,34 +154,44 @@ fn stored_offers_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextO
           AND direction = 'offer'
         ORDER BY owner, role, scope_key, selector
         "#,
-        &[(":owner", ColumnValue::Bytes(owner))],
+        &[(":owner", bytes(owner))],
     )
 }
 
 fn select_context_needs(
     store: &Store,
     sql: &str,
-    params: &[(&str, ColumnValue<'_>)],
+    params: &[(&str, rusqlite::types::Value)],
 ) -> Result<Vec<ContextNeed>, String> {
-    store
-        .select_only(sql, &[CONTEXT_EDGES], params, CONTEXT_EDGE_VALUE_COLUMNS)
-        .map_err(|err| format!("load context needs: {err}"))?
-        .into_iter()
-        .map(selected_context_need)
-        .collect()
+    let mut stmt = store
+        .conn()
+        .prepare(sql)
+        .map_err(|err| format!("load context needs: {err}"))?;
+    bind_named_params(&mut stmt, params).map_err(|err| format!("load context needs: {err}"))?;
+    let rows = stmt
+        .raw_query()
+        .mapped(selected_context_need)
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("load context needs: {err}"))?;
+    Ok(rows)
 }
 
 fn select_context_offers(
     store: &Store,
     sql: &str,
-    params: &[(&str, ColumnValue<'_>)],
+    params: &[(&str, rusqlite::types::Value)],
 ) -> Result<Vec<ContextOffer>, String> {
-    store
-        .select_only(sql, &[CONTEXT_EDGES], params, CONTEXT_EDGE_VALUE_COLUMNS)
-        .map_err(|err| format!("load context offers: {err}"))?
-        .into_iter()
-        .map(selected_context_offer)
-        .collect()
+    let mut stmt = store
+        .conn()
+        .prepare(sql)
+        .map_err(|err| format!("load context offers: {err}"))?;
+    bind_named_params(&mut stmt, params).map_err(|err| format!("load context offers: {err}"))?;
+    let rows = stmt
+        .raw_query()
+        .mapped(selected_context_offer)
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("load context offers: {err}"))?;
+    Ok(rows)
 }
 
 fn insert_context_edge_in_tx(
@@ -195,32 +202,69 @@ fn insert_context_edge_in_tx(
     scope: &FactScope,
     selector: &[u8],
 ) -> rusqlite::Result<bool> {
-    store.insert_typed_row_in_tx(
-        CONTEXT_EDGES,
-        &[
-            ("owner", ColumnValue::Bytes(owner)),
-            ("direction", ColumnValue::Text(direction)),
-            ("role", ColumnValue::Text(role.as_str())),
-            ("scope_key", ColumnValue::Bytes(&scope_key(scope))),
-            ("selector", ColumnValue::Bytes(selector)),
-        ],
-    )
+    let scope_key = scope_key(scope);
+    store
+        .conn()
+        .execute(
+            "INSERT OR IGNORE INTO context_edges
+                (owner, direction, role, scope_key, selector)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                owner.as_slice(),
+                direction,
+                role.as_str(),
+                scope_key.as_slice(),
+                selector
+            ],
+        )
+        .map(|count| count > 0)
 }
 
-fn selected_context_need(row: SelectedRow) -> Result<ContextNeed, String> {
+fn selected_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNeed> {
     Ok(ContextNeed {
-        owner: selected_fact_id(&row, "owner")?,
-        role: selected_role(&row)?,
-        scope: selected_scope(&row)?,
-        selector: selected_selector(&row)?,
+        owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
+        role: Role::new(row.get::<_, String>(1)?).map_err(rusqlite::Error::InvalidParameterName)?,
+        scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
+            .map_err(rusqlite::Error::InvalidParameterName)?,
+        selector: Selector::from_bytes(row.get::<_, Vec<u8>>(3)?),
     })
 }
 
-fn selected_context_offer(row: SelectedRow) -> Result<ContextOffer, String> {
+fn selected_context_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextOffer> {
     Ok(ContextOffer {
-        owner: selected_fact_id(&row, "owner")?,
-        role: selected_role(&row)?,
-        scope: selected_scope(&row)?,
-        selector: selected_selector(&row)?,
+        owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
+        role: Role::new(row.get::<_, String>(1)?).map_err(rusqlite::Error::InvalidParameterName)?,
+        scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
+            .map_err(rusqlite::Error::InvalidParameterName)?,
+        selector: Selector::from_bytes(row.get::<_, Vec<u8>>(3)?),
     })
+}
+
+fn bind_named_params(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: &[(&str, rusqlite::types::Value)],
+) -> rusqlite::Result<()> {
+    for (name, value) in params {
+        let index = stmt.parameter_index(name)?.ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "context SQL does not bind parameter {name}"
+            ))
+        })?;
+        stmt.raw_bind_parameter(index, value)?;
+    }
+    Ok(())
+}
+
+fn fact_id_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<FactId> {
+    bytes.try_into().map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("context SQL column {name} is not a fact id"))
+    })
+}
+
+fn bytes(value: &[u8]) -> rusqlite::types::Value {
+    rusqlite::types::Value::Blob(value.to_vec())
+}
+
+fn text(value: &str) -> rusqlite::types::Value {
+    rusqlite::types::Value::Text(value.to_string())
 }

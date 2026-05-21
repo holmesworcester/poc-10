@@ -7,7 +7,7 @@ use crate::core::store::TableName;
 
 pub const CORE_SCHEMA_SOURCE: &str = include_str!("schema.p8sql");
 
-pub(crate) const FACTS: TableName = TableName::new("facts");
+pub(crate) const LOCAL_FACT_ADMISSIONS: TableName = TableName::new("local_fact_admissions");
 pub(crate) const CONTEXT_EDGES: TableName = TableName::new("context_edges");
 pub(crate) const TIME_WAKES: TableName = TableName::new("time_wakes");
 pub(crate) const PENDING_PROJECTION: TableName = TableName::new("pending_projection");

@@ -15,7 +15,7 @@ use crate::core::matchers::ContextMatcher;
 use crate::core::pipeline::{self, DispatchReport, PipelineReport};
 use crate::core::projectors::{Projector, Timeline};
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION};
-use crate::core::store::{Schema, Store, TableName};
+use crate::core::store::{Store, TableName};
 use std::path::Path;
 
 pub type ProjectorFactory = fn() -> Box<dyn Projector>;
@@ -25,7 +25,6 @@ pub type MatchersFactory = fn() -> Vec<Box<dyn ContextMatcher>>;
 #[derive(Clone, Copy)]
 pub struct RuntimeDescription {
     pub schema_sources: &'static [&'static str],
-    pub schemas: &'static [Schema],
     pub row_mutation_tables: &'static [TableName],
     pub projector: ProjectorFactory,
     pub matchers: MatchersFactory,
@@ -168,8 +167,7 @@ pub struct Runtime {
 impl Runtime {
     pub fn open_memory(description: &'static RuntimeDescription) -> Result<Self, String> {
         let schema_sources = runtime_schema_sources(description);
-        let schemas = runtime_schemas(description);
-        let store = Store::open_memory_with_schema_sources_and_schemas(&schema_sources, &schemas)
+        let store = Store::open_memory_with_schema_sources(&schema_sources)
             .map_err(|err| format!("open target memory store: {err}"))?;
         Self::from_store(description, store)
     }
@@ -179,10 +177,8 @@ impl Runtime {
         path: impl AsRef<Path>,
     ) -> Result<Self, String> {
         let schema_sources = runtime_schema_sources(description);
-        let schemas = runtime_schemas(description);
-        let store =
-            Store::open_disk_with_schema_sources_and_schemas(path, &schema_sources, &schemas)
-                .map_err(|err| format!("open target disk store: {err}"))?;
+        let store = Store::open_disk_with_schema_sources(path, &schema_sources)
+            .map_err(|err| format!("open target disk store: {err}"))?;
         Self::from_store(description, store)
     }
 
@@ -420,10 +416,6 @@ impl Runtime {
     }
 }
 
-fn runtime_schemas(description: &RuntimeDescription) -> Vec<Schema> {
-    description.schemas.to_vec()
-}
-
 fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<&'static str> {
     let mut sources = Vec::with_capacity(1 + description.schema_sources.len());
     sources.push(CORE_SCHEMA_SOURCE);
@@ -459,7 +451,6 @@ mod tests {
 
     const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[],
-        schemas: &[],
         row_mutation_tables: &[],
         projector: noop_projector,
         matchers: no_matchers,

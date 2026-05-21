@@ -18,7 +18,7 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-use crate::core::store::{Schema, Store, TableName, TableRow};
+use crate::core::store::{Store, TableName, TableRow};
 use crate::core::tcp;
 
 pub const OUTBOUND_TABLE: TableName = TableName::new("network_out");
@@ -26,14 +26,14 @@ pub const INBOUND_TABLE: TableName = TableName::new("network_in");
 
 /// Store declarations for the two core-owned byte queues.
 ///
-/// Network rows are core IO state, so their schemas live here rather than in
-/// the protocol registry. They still use the same generic row-table shape as
-/// module-owned tables, and they are memory-only so a restart never turns stale
-/// socket staging into protocol-visible work.
-pub const SCHEMAS: &[Schema] = &[
-    Schema::memory_row_table("core.network.outbound.v1", OUTBOUND_TABLE),
-    Schema::memory_row_table("core.network.inbound.v1", INBOUND_TABLE),
-];
+/// Network rows are core IO state, so their schema source lives next to this
+/// queue code and the concrete runtime includes it like any other declaration.
+/// The rows are memory-only so a restart never turns stale socket staging into
+/// protocol-visible work.
+pub const SCHEMA_SOURCE: &str = r#"
+memory row_table network_out;
+memory row_table network_in;
+"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetworkTarget {

@@ -233,13 +233,11 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
 }
 
 fn test_store() -> Store {
-    Store::open_memory_with_schema_sources_and_schemas(
-        &[
-            CORE_SCHEMA_SOURCE,
-            FACTS_SCHEMA_SOURCE,
-            INTENTS_SCHEMA_SOURCE,
-        ],
-        network::SCHEMAS,
-    )
+    Store::open_memory_with_schema_sources(&[
+        CORE_SCHEMA_SOURCE,
+        network::SCHEMA_SOURCE,
+        FACTS_SCHEMA_SOURCE,
+        INTENTS_SCHEMA_SOURCE,
+    ])
     .expect("store")
 }

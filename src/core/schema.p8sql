@@ -2,13 +2,24 @@
 
 table facts {
   column id bytes(32);
+  column bytes bytes;
+  row_key (id);
+}
+# Local-only admission facts about durable fact bytes. This relation is not a
+# protocol-synced fact stream. The received_at column is the admission time in
+# the target model; the current Rust Fact.timestamp field still feeds it until
+# event-time ordering moves fully into protocol-derived indexes.
+table local_fact_admissions {
+  column id bytes(32);
+  column fact_id bytes(32);
   column scope text;
   column scope_kind text;
   column scope_id bytes(32);
-  column timestamp u64;
+  column received_at u64;
   column bytes bytes;
   row_key (id);
-  index by_scope_time (scope, scope_kind, scope_id, timestamp);
+  unique index by_fact (fact_id);
+  index by_scope_received_at (scope, scope_kind, scope_id, received_at);
 }
 table context_edges {
   column owner bytes(32);
@@ -45,5 +56,14 @@ table intents {
   column payload bytes;
   row_key (kind, idempotence_key);
 }
-memory row_table local_intents;
-row_table clock;
+memory table local_intents {
+  column kind text;
+  column idempotence_key bytes;
+  column payload bytes;
+  row_key (kind, idempotence_key);
+}
+table clock {
+  column key text;
+  column timestamp u64;
+  row_key (key);
+}

@@ -11,7 +11,7 @@ use crate::core::matchers::{
     SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
 use crate::core::select;
-use crate::core::store::{ColumnValue, Store};
+use crate::core::store::Store;
 
 use super::exact::protocol_role;
 use super::sql;
@@ -164,7 +164,7 @@ ORDER BY owner, selector";
 pub const WRAP_SOURCE_WAKE_FOR_OFFER_SQL: &str = "
 SELECT n.owner
 FROM context_edges n
-JOIN facts f ON f.id = n.owner
+JOIN local_fact_admissions a ON a.fact_id = n.owner
 WHERE n.direction = 'need'
   AND n.role = :role
   AND n.scope_key = :scope_key
@@ -183,7 +183,7 @@ WHERE n.direction = 'need'
       AND substr(n.selector, 34, 32) = :frontier_id
     )
   )
-ORDER BY f.timestamp, n.owner";
+ORDER BY a.received_at, n.owner";
 
 pub const WRAP_SOURCE_CONTEXT_ROLE: ContextRoleDeclaration = ContextRoleDeclaration {
     role: WRAP_SOURCE_ROLE,
@@ -528,16 +528,13 @@ impl ContextMatcher for WrapSourceMatcher {
                 return Ok(Some(Vec::new()));
             };
         let scope_key = sql::scope_key_for_sql(&need.scope);
-        let params = [
-            (":role", ColumnValue::Text(self.role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
-            (":need_kind", ColumnValue::I64(need_kind)),
-            (":workspace_id", ColumnValue::Bytes(&workspace_id)),
-            (":frontier_id", ColumnValue::Bytes(&frontier_id)),
-            (
-                ":min_frontier_created_at_ms",
-                ColumnValue::Bytes(&min_frontier_created_at_ms),
-            ),
+        let params = vec![
+            select::Param::text(":role", self.role.as_str()),
+            select::Param::bytes(":scope_key", scope_key),
+            select::Param::i64(":need_kind", need_kind),
+            select::Param::bytes(":workspace_id", workspace_id),
+            select::Param::bytes(":frontier_id", frontier_id),
+            select::Param::bytes(":min_frontier_created_at_ms", min_frontier_created_at_ms),
         ];
         sql::select_offers_for_need(store, WRAP_SOURCE_OFFERS_FOR_NEED_SQL, &params, need).map(Some)
     }
@@ -555,15 +552,12 @@ impl ContextMatcher for WrapSourceMatcher {
         };
         let scope_key = sql::scope_key_for_sql(&offer.scope);
         let frontier_created_at_ms = selector.frontier_created_at_ms.to_be_bytes();
-        let params = [
-            (":role", ColumnValue::Text(self.role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
-            (":workspace_id", ColumnValue::Bytes(&selector.workspace_id)),
-            (":frontier_id", ColumnValue::Bytes(&selector.frontier_id)),
-            (
-                ":frontier_created_at_ms",
-                ColumnValue::Bytes(&frontier_created_at_ms),
-            ),
+        let params = vec![
+            select::Param::text(":role", self.role.as_str()),
+            select::Param::bytes(":scope_key", scope_key),
+            select::Param::bytes(":workspace_id", selector.workspace_id),
+            select::Param::bytes(":frontier_id", selector.frontier_id),
+            select::Param::bytes(":frontier_created_at_ms", frontier_created_at_ms),
         ];
         sql::select_needs_for_offer(store, WRAP_SOURCE_NEEDS_FOR_OFFER_SQL, &params, offer)
             .map(Some)

@@ -9,8 +9,8 @@ use crate::core::context::{ContextSet, ContextSetDelta};
 use crate::core::facts::FactId;
 use crate::core::matchers::ContextMatcher;
 use crate::core::projectors::TimeWake;
-use crate::core::schema::{CONTEXT_EDGES, PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
-use crate::core::store::{ColumnValue, Store, TableName};
+use crate::core::store::{Store, TableName};
+use rusqlite::params;
 
 /// The uncommitted output of projecting one pending fact.
 pub(super) struct ProjectionEffects {
@@ -64,7 +64,10 @@ pub(super) fn commit_projection_effects(
 ) -> Result<ProjectionCommit, String> {
     store
         .write_transaction(|tx| {
-            tx.delete_table_rows_in_tx(PENDING_PROJECTION, vec![effects.fact_id.to_vec()])?;
+            tx.conn().execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                params![effects.fact_id.as_slice()],
+            )?;
             delete_pending_time_ranges_for_owner_in_tx(tx, effects.fact_id)?;
             replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
             replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
@@ -86,9 +89,9 @@ fn delete_pending_time_ranges_for_owner_in_tx(
     store: &Store,
     owner: FactId,
 ) -> rusqlite::Result<usize> {
-    store.delete_typed_rows_where_in_tx(
-        PENDING_TIME_RANGES,
-        &[("owner", ColumnValue::Bytes(&owner))],
+    store.conn().execute(
+        "DELETE FROM pending_time_ranges WHERE owner = ?1",
+        params![owner.as_slice()],
     )
 }
 
@@ -101,7 +104,10 @@ fn replace_stored_context_owner_rows(
     owner: FactId,
     context: &ContextSet,
 ) -> rusqlite::Result<()> {
-    store.delete_typed_rows_where_in_tx(CONTEXT_EDGES, &[("owner", ColumnValue::Bytes(&owner))])?;
+    store.conn().execute(
+        "DELETE FROM context_edges WHERE owner = ?1",
+        params![owner.as_slice()],
+    )?;
     for need in &context.needs {
         insert_context_need_in_tx(store, need)?;
     }
@@ -121,16 +127,26 @@ fn replace_stored_time_wake_owner_rows(
     owner: FactId,
     wakes: &[TimeWake],
 ) -> rusqlite::Result<()> {
-    store.delete_typed_rows_where_in_tx(TIME_WAKES, &[("owner", ColumnValue::Bytes(&owner))])?;
+    store.conn().execute(
+        "DELETE FROM time_wakes WHERE owner = ?1",
+        params![owner.as_slice()],
+    )?;
     for wake in wakes {
-        store.insert_typed_row_in_tx(
-            TIME_WAKES,
-            &[
-                ("timeline", ColumnValue::Text(wake.timeline.as_str())),
-                ("at", ColumnValue::U64(wake.at)),
-                ("owner", ColumnValue::Bytes(&wake.owner)),
+        store.conn().execute(
+            "INSERT OR IGNORE INTO time_wakes (timeline, at, owner)
+             VALUES (?1, ?2, ?3)",
+            params![
+                wake.timeline.as_str(),
+                sqlite_u64(wake.at, "time wake")?,
+                wake.owner.as_slice()
             ],
         )?;
     }
     Ok(())
+}
+
+fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("{name} exceeds SQLite integer range"))
+    })
 }

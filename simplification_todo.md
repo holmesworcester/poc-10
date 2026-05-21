@@ -45,10 +45,10 @@ Accountable criteria:
    limited to fact payloads, intent payloads, opaque protocol row values, and
    transitional row encoding that cannot yet be represented by typed schema
    columns.
-5. `Store` stays generic. Any new SQL affordance is narrow and reusable, such
-   as typed bounded selects, delete-by-declared-filter, or checked
-   `INSERT OR IGNORE ... SELECT` helpers. Protocol modules still cannot issue
-   arbitrary writes through core.
+5. `Store` stays generic and small enough to justify its public surface. Core
+   pipeline modules that own typed runtime tables use `store.conn()` and direct
+   SQL. Protocol modules still use row-table helpers for opaque read-model
+   rows and cannot issue arbitrary writes through core.
 6. Projection replay has a simple ownership rule: a projection replaces exactly
    the context/time-wake rows owned by its `fact_id`, applies protocol
    `RowMutation`s through `PipelineEffects`, and is idempotent when inputs are
@@ -101,9 +101,16 @@ Accountable criteria:
 - Done in this branch: separate `context_needs` and `context_offers` storage
   was collapsed into one typed `context_edges` relation keyed by
   `(owner, direction, role, scope_key, selector)`.
-- Done in this branch: fact insertion, pending-projection marking, fact purge,
-  and fact reads use declared typed SQLite columns in `core::fact_store`;
-  `pipeline_storage.rs` is gone.
+- Done in this branch: `facts` stores only content-addressed fact bytes.
+  Scope and local receive time live in `local_fact_admissions`, an encoded
+  local-only admission fact about the actual fact. The Rust `Fact.timestamp`
+  field is still compatibility debt: core storage treats it as the local
+  `received_at` value for now, while protocol event timestamps belong inside
+  protocol fact bytes. Removing that overload requires moving sync/range
+  ordering to protocol-derived event-time indexes instead of `Fact.timestamp`.
+- Done in this branch: fact insertion, local-admission insertion,
+  pending-projection marking, fact purge, and fact reads use declared typed
+  SQLite columns in `core::fact_store`; `pipeline_storage.rs` is gone.
 - Done in this branch: context wake fanout runs inside projection commit with
   typed `INSERT OR IGNORE ... SELECT`; the `pending_context_changes` queue and
   table are gone.
@@ -137,6 +144,16 @@ Accountable criteria:
 - Done in this branch: the old `core::wake` module was renamed to
   `core::select`. It was already a checked SELECT descriptor plus
   `INSERT OR IGNORE ... SELECT` executor, not wake-specific policy.
+- Done in this branch: the explicit Rust `Schema`/`SCHEMAS` registration path
+  is gone. Core, network, fact, and intent tables are all declared through
+  p8sql schema sources.
+- Done in this branch: the local clock is a typed core table accessed through
+  direct SQL, not an opaque `TableRow`.
+- Done in this branch: the generic Store selected-row API is gone. Core
+  pipeline modules and protocol matchers prepare their own typed SQL instead
+  of routing through `ColumnValue`/`SelectedRow` adapters.
+- Done in this branch: `schema_dsl.rs` is a small line-oriented parser for the
+  declaration language we actually use, not a general token parser.
 
 ## 1. Store All Intents In SQLite Queues
 
@@ -237,8 +254,8 @@ Good candidates:
    ```sql
    SELECT p.owner
    FROM pending_projection p
-   JOIN facts f ON f.id = p.owner
-   ORDER BY f.timestamp, p.owner
+   JOIN local_fact_admissions a ON a.fact_id = p.owner
+   ORDER BY a.received_at, p.owner
    LIMIT :limit;
    ```
 
@@ -258,17 +275,16 @@ Good candidates:
    pending projection selection uses typed SQL; context wake fanout uses typed
    `INSERT OR IGNORE ... SELECT` during projection commit.
 
-Done in this branch: add narrow store helpers for bounded ordered selects,
-delete-by-filter, and checked insert-select fanout. Avoid scattering raw SQL
-through protocol code.
+Done in this branch: core pipeline reads/writes typed runtime tables directly
+with SQL. `Store` now provides connection/transaction ownership plus the
+remaining protocol-facing row-table adapter.
 
-Store cleanup note: `Store` is still large because it currently owns four
-responsibilities in one file: connection/transaction lifecycle, generic
-row-table operations, typed-table operations, and schema application/validation.
-`store/sql.rs` is a private helper module for SQL quoting, schema validation,
-wire-to-SQL conversion, and SELECT safety checks. The next safe split is to keep
-the public `Store` facade in `store.rs` and move private typed-table and schema
-application helpers behind narrower `store/*` modules without changing callers.
+Store cleanup note: `Store` is still large because it owns connection lifecycle,
+generic row-table operations, typed-table row encoding for protocol read
+models, and schema application/validation. The public Rust `Schema` path has
+been removed, so the next safe split is internal only: keep `Store` as the
+facade and move typed-table/schema helpers behind narrower private modules
+without changing callers.
 
 ## 6. Remove `pending_context_changes`
 

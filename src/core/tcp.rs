@@ -344,7 +344,8 @@ mod tests {
 
     #[test]
     fn accept_available_drains_ready_streams_up_to_limit() {
-        let store = Store::open_memory_with_schemas(network::SCHEMAS).expect("open store");
+        let store =
+            Store::open_memory_with_schema_sources(&[network::SCHEMA_SOURCE]).expect("open store");
         let listener = listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
         let addr = listener.local_addr();
         let writers = (0..3)

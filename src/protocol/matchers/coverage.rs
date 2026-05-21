@@ -11,7 +11,7 @@ use crate::core::matchers::{
     SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
 use crate::core::select;
-use crate::core::store::{ColumnValue, Store};
+use crate::core::store::Store;
 
 use super::exact::protocol_role;
 use super::sql;
@@ -212,7 +212,7 @@ ORDER BY owner, selector";
 pub const SECRET_COVERAGE_WAKE_FOR_OFFER_SQL: &str = "
 SELECT n.owner
 FROM context_edges n
-JOIN facts f ON f.id = n.owner
+JOIN local_fact_admissions a ON a.fact_id = n.owner
 WHERE n.direction = 'need'
   AND n.role = :role
   AND n.scope_key = :scope_key
@@ -223,7 +223,7 @@ WHERE n.direction = 'need'
   AND substr(n.selector, 66, 8) >= :start_minute
   AND substr(n.selector, 66, 8) <= :end_minute
   AND substr(n.selector, 74, :prefix_len) = :leaf_prefix
-ORDER BY f.timestamp, n.owner";
+ORDER BY a.received_at, n.owner";
 
 pub const SECRET_COVERAGE_CONTEXT_ROLE: ContextRoleDeclaration = ContextRoleDeclaration {
     role: SECRET_COVERAGE_ROLE,
@@ -442,13 +442,13 @@ impl ContextMatcher for SecretCoverageMatcher {
         };
         let scope_key = sql::scope_key_for_sql(&need.scope);
         let minute = selector.minute.to_be_bytes();
-        let params = [
-            (":role", ColumnValue::Text(self.role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
-            (":workspace_id", ColumnValue::Bytes(&selector.workspace_id)),
-            (":frontier_id", ColumnValue::Bytes(&selector.frontier_id)),
-            (":minute", ColumnValue::Bytes(&minute)),
-            (":leaf_id", ColumnValue::Bytes(&selector.leaf_id)),
+        let params = vec![
+            select::Param::text(":role", self.role.as_str()),
+            select::Param::bytes(":scope_key", scope_key),
+            select::Param::bytes(":workspace_id", selector.workspace_id),
+            select::Param::bytes(":frontier_id", selector.frontier_id),
+            select::Param::bytes(":minute", minute),
+            select::Param::bytes(":leaf_id", selector.leaf_id),
         ];
         sql::select_offers_for_need(store, SECRET_COVERAGE_OFFERS_FOR_NEED_SQL, &params, need)
             .map(Some)
@@ -473,15 +473,15 @@ impl ContextMatcher for SecretCoverageMatcher {
         let end_minute = selector.end_minute.to_be_bytes();
         let prefix_len = i64::from(selector.prefix_bytes);
         let leaf_prefix = selector.leaf_prefix[..usize::from(selector.prefix_bytes)].to_vec();
-        let params = [
-            (":role", ColumnValue::Text(self.role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
-            (":workspace_id", ColumnValue::Bytes(&selector.workspace_id)),
-            (":frontier_id", ColumnValue::Bytes(&selector.frontier_id)),
-            (":start_minute", ColumnValue::Bytes(&start_minute)),
-            (":end_minute", ColumnValue::Bytes(&end_minute)),
-            (":prefix_len", ColumnValue::I64(prefix_len)),
-            (":leaf_prefix", ColumnValue::Bytes(&leaf_prefix)),
+        let params = vec![
+            select::Param::text(":role", self.role.as_str()),
+            select::Param::bytes(":scope_key", scope_key),
+            select::Param::bytes(":workspace_id", selector.workspace_id),
+            select::Param::bytes(":frontier_id", selector.frontier_id),
+            select::Param::bytes(":start_minute", start_minute),
+            select::Param::bytes(":end_minute", end_minute),
+            select::Param::i64(":prefix_len", prefix_len),
+            select::Param::bytes(":leaf_prefix", leaf_prefix),
         ];
         sql::select_needs_for_offer(store, SECRET_COVERAGE_NEEDS_FOR_OFFER_SQL, &params, offer)
             .map(Some)

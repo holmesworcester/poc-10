@@ -4,7 +4,8 @@
 //! the destination queue table and columns; the select only describes the
 //! bounded source rows and bound parameters.
 
-use crate::core::store::{ColumnValue, Store, TableName};
+use crate::core::store::{Store, TableName};
+use rusqlite::types::Value as SqliteValue;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Select {
@@ -73,8 +74,8 @@ impl Param {
         }
     }
 
-    fn as_column_value(&self) -> ColumnValue<'_> {
-        self.value.as_column_value()
+    pub(crate) fn as_sqlite_value(&self) -> rusqlite::Result<SqliteValue> {
+        self.value.as_sqlite_value()
     }
 }
 
@@ -88,13 +89,19 @@ pub enum Value {
 }
 
 impl Value {
-    fn as_column_value(&self) -> ColumnValue<'_> {
+    fn as_sqlite_value(&self) -> rusqlite::Result<SqliteValue> {
         match self {
-            Self::Bytes(value) => ColumnValue::Bytes(value),
-            Self::Text(value) => ColumnValue::Text(value),
-            Self::U64(value) => ColumnValue::U64(*value),
-            Self::I64(value) => ColumnValue::I64(*value),
-            Self::Bool(value) => ColumnValue::Bool(*value),
+            Self::Bytes(value) => Ok(SqliteValue::Blob(value.clone())),
+            Self::Text(value) => Ok(SqliteValue::Text(value.clone())),
+            Self::U64(value) => i64::try_from(*value)
+                .map(SqliteValue::Integer)
+                .map_err(|_| {
+                    rusqlite::Error::InvalidParameterName(
+                        "select parameter exceeds SQLite integer range".to_string(),
+                    )
+                }),
+            Self::I64(value) => Ok(SqliteValue::Integer(*value)),
+            Self::Bool(value) => Ok(SqliteValue::Integer(i64::from(*value))),
         }
     }
 }
@@ -105,16 +112,105 @@ pub(crate) fn insert_select_in_tx(
     target_columns: &[&str],
     select: &Select,
 ) -> rusqlite::Result<usize> {
-    let params = select
-        .params
+    if target_columns.is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "insert-select requires at least one target column".to_string(),
+        ));
+    }
+    validate_select_sql(select.sql, select.allowed_tables)?;
+    let table_name = quoted_table_name(target_table)?;
+    let columns = target_columns
         .iter()
-        .map(|param| (param.name, param.as_column_value()))
-        .collect::<Vec<_>>();
-    store.insert_typed_rows_from_select_in_tx(
-        target_table,
-        target_columns,
-        select.sql,
-        select.allowed_tables,
-        &params,
-    )
+        .map(|column| quoted_identifier(column))
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .join(", ");
+    let sql = format!(
+        "INSERT OR IGNORE INTO {table_name} ({columns}) {}",
+        select.sql
+    );
+    let mut stmt = store.conn().prepare(&sql)?;
+    for param in &select.params {
+        let index = stmt.parameter_index(param.name)?.ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "insert-select SQL does not bind parameter {}",
+                param.name
+            ))
+        })?;
+        stmt.raw_bind_parameter(index, param.as_sqlite_value()?)?;
+    }
+    stmt.raw_execute()
+}
+
+fn validate_select_sql(sql: &str, allowed_tables: &[TableName]) -> rusqlite::Result<()> {
+    let trimmed = sql.trim_start();
+    if !trimmed
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("select"))
+    {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "select SQL must be SELECT-only".to_string(),
+        ));
+    }
+    if sql.contains(';') || sql.contains("--") || sql.contains("/*") {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "select SQL must be one comment-free SELECT statement".to_string(),
+        ));
+    }
+    let allowed = allowed_tables
+        .iter()
+        .map(|table| table.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for window in sql_identifier_tokens(sql).windows(2) {
+        let keyword = window[0].to_ascii_lowercase();
+        if matches!(keyword.as_str(), "from" | "join") && !allowed.contains(window[1].as_str()) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "select SQL reads undeclared table {}",
+                window[1]
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn sql_identifier_tokens(sql: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in sql.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
+    let name = table.as_str();
+    if name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+    {
+        Ok(format!("\"{name}\""))
+    } else {
+        Err(rusqlite::Error::InvalidParameterName(format!(
+            "invalid table name {name}"
+        )))
+    }
+}
+
+fn quoted_identifier(name: &str) -> rusqlite::Result<String> {
+    if name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        Ok(format!("\"{name}\""))
+    } else {
+        Err(rusqlite::Error::InvalidParameterName(format!(
+            "invalid identifier {name}"
+        )))
+    }
 }

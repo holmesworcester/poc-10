@@ -6,11 +6,10 @@
 //! backwards cannot make new shared events collide with old ones.
 
 use crate::core::cli::{CliArgs, CliOutput};
-use crate::core::store::{Store, TableName, TableRow};
+use crate::core::store::Store;
+use rusqlite::{params, OptionalExtension};
 
-const CLOCK_TABLE: TableName = TableName::new("clock");
-
-const CLOCK_KEY: &[u8] = b"now";
+const CLOCK_KEY: &str = "now";
 
 pub const CLOCK_USAGE: &str = "clock [set TIMESTAMP|advance DELTA|clear]";
 
@@ -23,17 +22,27 @@ pub struct ClockReport {
 
 pub fn logical_time(store: &Store) -> Result<Option<u64>, String> {
     store
-        .table_row(CLOCK_TABLE, CLOCK_KEY)
-        .map_err(|err| format!("load logical clock: {err}"))?
-        .map(|value| decode_value(&value))
-        .transpose()
+        .conn()
+        .query_row(
+            "SELECT timestamp FROM clock WHERE key = ?1 LIMIT 1",
+            params![CLOCK_KEY],
+            |row| u64_column(row.get::<_, i64>(0)?, "timestamp"),
+        )
+        .optional()
+        .map_err(|err| format!("load logical clock: {err}"))
 }
 
 pub fn set_logical_time(store: &Store, timestamp: u64) -> Result<u64, String> {
+    let timestamp = sqlite_u64(timestamp, "logical clock timestamp")?;
     store
-        .write_transaction(|store| store.replace_table_rows_in_tx(vec![clock_row(timestamp)]))
+        .write_transaction(|store| {
+            store.conn().execute(
+                "INSERT OR REPLACE INTO clock (key, timestamp) VALUES (?1, ?2)",
+                params![CLOCK_KEY, timestamp],
+            )
+        })
         .map_err(|err| format!("set logical clock: {err}"))?;
-    Ok(timestamp)
+    Ok(timestamp as u64)
 }
 
 pub fn advance_logical_time(store: &Store, delta: u64) -> Result<u64, String> {
@@ -46,7 +55,11 @@ pub fn advance_logical_time(store: &Store, delta: u64) -> Result<u64, String> {
 
 pub fn clear_logical_time(store: &Store) -> Result<(), String> {
     store
-        .delete_table_rows(CLOCK_TABLE, vec![CLOCK_KEY.to_vec()])
+        .write_transaction(|store| {
+            store
+                .conn()
+                .execute("DELETE FROM clock WHERE key = ?1", params![CLOCK_KEY])
+        })
         .map_err(|err| format!("clear logical clock: {err}"))?;
     Ok(())
 }
@@ -111,19 +124,13 @@ pub fn clock_report_output(report: &ClockReport) -> CliOutput {
     ])
 }
 
-fn clock_row(timestamp: u64) -> TableRow {
-    TableRow {
-        table: CLOCK_TABLE,
-        key: CLOCK_KEY.to_vec(),
-        value: timestamp.to_be_bytes().to_vec(),
-    }
+fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
+    u64::try_from(value)
+        .map_err(|_| rusqlite::Error::InvalidParameterName(format!("{name} is negative")))
 }
 
-fn decode_value(value: &[u8]) -> Result<u64, String> {
-    let bytes: [u8; 8] = value
-        .try_into()
-        .map_err(|_| format!("logical clock row should be 8 bytes, got {}", value.len()))?;
-    Ok(u64::from_be_bytes(bytes))
+fn sqlite_u64(value: u64, name: &str) -> Result<i64, String> {
+    i64::try_from(value).map_err(|_| format!("{name} exceeds SQLite integer range"))
 }
 
 #[cfg(test)]

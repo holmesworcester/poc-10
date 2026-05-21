@@ -1,12 +1,12 @@
-//! Intent queue row codec and writes.
+//! Intent queue SQL writes and idempotence keys.
 //!
-//! Queue tables own intent durability. The row format is shared by durable and
-//! restart-local queues; callers choose the destination table.
+//! Queue tables own intent durability. Durable and restart-local queues share
+//! the same typed SQLite shape.
 
-use crate::core::intents::{Intent, IntentKind};
-use crate::core::schema::INTENTS;
-use crate::core::store::{Store, TableName, TableRow};
-use crate::core::wire::{Reader, WireError, Writer};
+use crate::core::intents::Intent;
+use crate::core::schema::{INTENTS, LOCAL_INTENTS};
+use crate::core::store::{Store, TableName};
+use rusqlite::{params, OptionalExtension};
 
 /// Persist an intent to the durable queue, deduplicated by idempotence key.
 pub(crate) fn record_intent_in_tx(store: &Store, intent: &Intent) -> rusqlite::Result<bool> {
@@ -19,77 +19,50 @@ pub(crate) fn record_intent_in_table_in_tx(
     table: TableName,
     intent: &Intent,
 ) -> rusqlite::Result<bool> {
-    let mut row = intent_row(intent);
-    row.table = table;
-    store
-        .insert_table_rows_in_tx(vec![row])
-        .map(|count| count > 0)
-}
-
-/// Key layout for an intent queue row: `kind ++ idempotence-key`.
-///
-/// Two intents collide here exactly when they are idempotent duplicates of each
-/// other. The queue table determines durable versus restart-local storage.
-pub(crate) fn intent_row_key(intent: &Intent) -> Vec<u8> {
-    encoded_row(|key| {
-        key.string_u32be(intent.kind.as_str())
-            .expect("intent kind fits u32");
-        key.bytes_u32be(&intent.key)
-            .expect("intent idempotence key fits u32");
-    })
-}
-
-/// Decode an intent queue row: kind and idempotence key from the key, payload
-/// from the value.
-pub(crate) fn decode_intent_row(key: &[u8], value: &[u8]) -> Result<Intent, String> {
-    let mut key_reader = Reader::new(key);
-    let kind = IntentKind::new(key_reader.string_u32be().row()?)?;
-    let idempotence_key = key_reader.bytes_u32be().row()?.to_vec();
-    key_reader.finish().row()?;
-
-    let mut value_reader = Reader::new(value);
-    let payload = value_reader.bytes_u32be().row()?.to_vec();
-    value_reader.finish().row()?;
-    Ok(Intent::new(kind, idempotence_key, payload))
-}
-
-/// Return whether an intent queue key belongs to the given kind.
-///
-/// This reads only the leading kind field, so dispatch can route by declared
-/// handler kind without decoding every queued intent payload.
-pub(crate) fn intent_key_matches_kind(key: &[u8], kind: &str) -> Result<bool, String> {
-    let mut key_reader = Reader::new(key);
-    let stored = IntentKind::new(key_reader.string_u32be().row()?)?;
-    Ok(stored.as_str() == kind)
-}
-
-fn intent_row(intent: &Intent) -> TableRow {
-    TableRow {
-        table: INTENTS,
-        key: intent_row_key(intent),
-        value: typed_intent_value(intent),
+    let table_name = intent_table_name(table)?;
+    let changed = store.conn().execute(
+        &format!(
+            "INSERT OR IGNORE INTO {table_name} (kind, idempotence_key, payload)
+             VALUES (?1, ?2, ?3)"
+        ),
+        params![
+            intent.kind.as_str(),
+            intent.key.as_slice(),
+            intent.payload.as_slice()
+        ],
+    )?;
+    if changed == 0 {
+        let existing = store
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT payload
+                     FROM {table_name}
+                     WHERE kind = ?1 AND idempotence_key = ?2"
+                ),
+                params![intent.kind.as_str(), intent.key.as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        if existing.as_deref() != Some(intent.payload.as_slice()) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "conflicting intent row for {}",
+                intent.kind.as_str()
+            )));
+        }
     }
+    Ok(changed > 0)
 }
 
-fn typed_intent_value(intent: &Intent) -> Vec<u8> {
-    encoded_row(|out| {
-        out.bytes_u32be(&intent.payload)
-            .expect("intent payload fits u32");
-    })
-}
-
-fn encoded_row(write: impl FnOnce(&mut Writer)) -> Vec<u8> {
-    let mut out = Writer::new();
-    write(&mut out);
-    out.finish()
-}
-
-trait RowWireResult<T> {
-    fn row(self) -> Result<T, String>;
-}
-
-impl<T> RowWireResult<T> for Result<T, WireError> {
-    fn row(self) -> Result<T, String> {
-        self.map_err(|err| format!("invalid encoded row: {err}"))
+fn intent_table_name(table: TableName) -> rusqlite::Result<&'static str> {
+    if table == INTENTS {
+        Ok("\"intents\"")
+    } else if table == LOCAL_INTENTS {
+        Ok("\"local_intents\"")
+    } else {
+        Err(rusqlite::Error::InvalidParameterName(format!(
+            "table {} is not an intent queue",
+            table.as_str()
+        )))
     }
 }

@@ -1,8 +1,15 @@
-//! Parser skeleton for the poc-10 schema declaration files.
+//! Parser for the small schema declaration files used by the store.
 //!
-//! This module parses schema declarations into a small AST. `Store` applies
-//! these declarations as typed SQLite tables while protocol modules still own
-//! the semantic encoding of their rows.
+//! The grammar is intentionally line-oriented:
+//!
+//! ```text
+//! [memory] row_table name;
+//! [memory] table name {
+//!   column name bytes[(N)]|u64|i64|text|bool;
+//!   row_key (column, ...);
+//!   [unique] index name (column, ...);
+//! }
+//! ```
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -85,10 +92,10 @@ pub struct ParseError {
 }
 
 impl ParseError {
-    fn new(line: usize, column: usize, detail: impl Into<String>) -> Self {
+    fn new(line: usize, detail: impl Into<String>) -> Self {
         Self {
             line,
-            column,
+            column: 1,
             detail: detail.into(),
         }
     }
@@ -103,371 +110,333 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 pub fn parse_schema(source: &str) -> Result<SchemaDocument, ParseError> {
-    Parser::new(source)?.parse_document()
-}
+    let mut tables = Vec::new();
+    let mut seen_tables = BTreeSet::new();
+    let mut current: Option<TableBuilder> = None;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TokenKind {
-    Ident(String),
-    Number(u64),
-    Symbol(char),
-    Eof,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Token {
-    kind: TokenKind,
-    line: usize,
-    column: usize,
-}
-
-struct Parser<'a> {
-    lexer: Lexer<'a>,
-    lookahead: Token,
-}
-
-impl<'a> Parser<'a> {
-    fn new(source: &'a str) -> Result<Self, ParseError> {
-        let mut lexer = Lexer::new(source);
-        let lookahead = lexer.next_token()?;
-        Ok(Self { lexer, lookahead })
-    }
-
-    fn parse_document(mut self) -> Result<SchemaDocument, ParseError> {
-        let mut tables = Vec::new();
-        let mut table_names = BTreeSet::new();
-
-        while !matches!(self.lookahead.kind, TokenKind::Eof) {
-            let table = self.parse_table_declaration()?;
-            if !table_names.insert(table.name.clone()) {
-                return Err(self.error(format!("duplicate table declaration `{}`", table.name)));
-            }
-            tables.push(table);
+    for (index, raw) in source.lines().enumerate() {
+        let line_no = index + 1;
+        let line = strip_comment(raw).trim();
+        if line.is_empty() {
+            continue;
         }
 
-        Ok(SchemaDocument { tables })
-    }
-
-    fn parse_table_declaration(&mut self) -> Result<TableDeclaration, ParseError> {
-        let storage = if matches!(&self.lookahead.kind, TokenKind::Ident(keyword) if keyword == "memory")
-        {
-            self.expect_keyword("memory")?;
-            TableStorage::Memory
-        } else {
-            TableStorage::Durable
-        };
-
-        match &self.lookahead.kind {
-            TokenKind::Ident(keyword) if keyword == "row_table" => self.parse_row_table(storage),
-            _ => self.parse_table(storage),
-        }
-    }
-
-    fn parse_table(&mut self, storage: TableStorage) -> Result<TableDeclaration, ParseError> {
-        let table_token = self.expect_keyword("table")?;
-        let name = self.parse_name()?;
-        self.expect_symbol('{')?;
-
-        let mut columns = Vec::new();
-        let mut column_names = BTreeSet::new();
-        let mut row_key = None;
-        let mut indexes = Vec::new();
-        let mut index_names = BTreeSet::new();
-
-        loop {
-            if self.consume_symbol('}')? {
-                break;
-            }
-            if matches!(self.lookahead.kind, TokenKind::Eof) {
-                return Err(ParseError::new(
-                    table_token.line,
-                    table_token.column,
-                    format!("unterminated table declaration `{name}`"),
-                ));
-            }
-
-            let keyword = match &self.lookahead.kind {
-                TokenKind::Ident(keyword) => keyword.as_str(),
-                _ => {
-                    return Err(self.error(
-                        "expected table statement: `column`, `row_key`, `index`, or `unique`",
-                    ))
+        if current.is_some() {
+            if line == "}" {
+                let table = current.take().expect("current table").finish()?;
+                if !seen_tables.insert(table.name.clone()) {
+                    return Err(ParseError::new(
+                        line_no,
+                        format!("duplicate table declaration `{}`", table.name),
+                    ));
                 }
-            };
-
-            match keyword {
-                "column" => self.parse_column_statement(&mut columns, &mut column_names)?,
-                "row_key" => {
-                    let token = self.expect_keyword("row_key")?;
-                    if row_key.is_some() {
-                        return Err(ParseError::new(
-                            token.line,
-                            token.column,
-                            format!("duplicate row key declaration for table `{name}`"),
-                        ));
-                    }
-                    let columns = self.parse_ident_list()?;
-                    self.expect_symbol(';')?;
-                    row_key = Some(RowKeyDeclaration { columns });
-                }
-                "index" => {
-                    self.parse_index_statement(false, &mut indexes, &mut index_names)?;
-                }
-                "unique" => {
-                    self.expect_keyword("unique")?;
-                    self.parse_index_statement(true, &mut indexes, &mut index_names)?;
-                }
-                _ => {
-                    return Err(self.error(format!(
-                        "unknown table statement `{keyword}`; expected `column`, `row_key`, `index`, or `unique`"
-                    )));
-                }
-            }
-        }
-
-        let row_key = row_key.ok_or_else(|| {
-            ParseError::new(
-                table_token.line,
-                table_token.column,
-                format!("table `{name}` must declare a row key"),
-            )
-        })?;
-
-        validate_columns_exist(
-            &name,
-            "row key",
-            &row_key.columns,
-            &column_names,
-            table_token.line,
-        )?;
-        for index in &indexes {
-            validate_columns_exist(
-                &name,
-                &format!("index `{}`", index.name),
-                &index.columns,
-                &column_names,
-                table_token.line,
-            )?;
-        }
-
-        Ok(TableDeclaration {
-            name,
-            kind: TableKind::Typed,
-            storage,
-            columns,
-            row_key,
-            indexes,
-        })
-    }
-
-    fn parse_row_table(&mut self, storage: TableStorage) -> Result<TableDeclaration, ParseError> {
-        self.expect_keyword("row_table")?;
-        let name = self.parse_name()?;
-        self.expect_symbol(';')?;
-
-        Ok(TableDeclaration {
-            name,
-            kind: TableKind::Row,
-            storage,
-            columns: vec![
-                ColumnDeclaration {
-                    name: "key".to_string(),
-                    ty: ColumnType::Bytes { len: None },
-                },
-                ColumnDeclaration {
-                    name: "value".to_string(),
-                    ty: ColumnType::Bytes { len: None },
-                },
-            ],
-            row_key: RowKeyDeclaration {
-                columns: vec!["key".to_string()],
-            },
-            indexes: Vec::new(),
-        })
-    }
-
-    fn parse_column_statement(
-        &mut self,
-        columns: &mut Vec<ColumnDeclaration>,
-        column_names: &mut BTreeSet<String>,
-    ) -> Result<(), ParseError> {
-        self.expect_keyword("column")?;
-        let name_token = self.expect_identifier()?;
-        let name = identifier_text(&name_token);
-        if !column_names.insert(name.clone()) {
-            return Err(ParseError::new(
-                name_token.line,
-                name_token.column,
-                format!("duplicate column declaration `{name}`"),
-            ));
-        }
-        let ty = self.parse_column_type()?;
-        self.expect_symbol(';')?;
-        columns.push(ColumnDeclaration { name, ty });
-        Ok(())
-    }
-
-    fn parse_column_type(&mut self) -> Result<ColumnType, ParseError> {
-        let ty_token = self.expect_identifier()?;
-        let ty = identifier_text(&ty_token);
-        match ty.as_str() {
-            "bytes" => {
-                let len = if self.consume_symbol('(')? {
-                    let len_token = self.expect_number()?;
-                    let len = match len_token.kind {
-                        TokenKind::Number(value) => usize::try_from(value).map_err(|_| {
-                            ParseError::new(
-                                len_token.line,
-                                len_token.column,
-                                "byte length is too large",
-                            )
-                        })?,
-                        _ => unreachable!("expect_number returned a non-number token"),
-                    };
-                    if len == 0 {
-                        return Err(ParseError::new(
-                            len_token.line,
-                            len_token.column,
-                            "byte length must be greater than zero",
-                        ));
-                    }
-                    self.expect_symbol(')')?;
-                    Some(len)
-                } else {
-                    None
-                };
-                Ok(ColumnType::Bytes { len })
-            }
-            "u64" => Ok(ColumnType::U64),
-            "i64" => Ok(ColumnType::I64),
-            "text" => Ok(ColumnType::Text),
-            "bool" => Ok(ColumnType::Bool),
-            _ => Err(ParseError::new(
-                ty_token.line,
-                ty_token.column,
-                format!("unknown column type `{ty}`"),
-            )),
-        }
-    }
-
-    fn parse_index_statement(
-        &mut self,
-        unique: bool,
-        indexes: &mut Vec<IndexDeclaration>,
-        index_names: &mut BTreeSet<String>,
-    ) -> Result<(), ParseError> {
-        self.expect_keyword("index")?;
-        let name_token = self.expect_identifier()?;
-        let name = identifier_text(&name_token);
-        if !index_names.insert(name.clone()) {
-            return Err(ParseError::new(
-                name_token.line,
-                name_token.column,
-                format!("duplicate index declaration `{name}`"),
-            ));
-        }
-        let columns = self.parse_ident_list()?;
-        self.expect_symbol(';')?;
-        indexes.push(IndexDeclaration {
-            name,
-            unique,
-            columns,
-        });
-        Ok(())
-    }
-
-    fn parse_ident_list(&mut self) -> Result<Vec<String>, ParseError> {
-        self.expect_symbol('(')?;
-        let mut items = Vec::new();
-
-        loop {
-            if self.consume_symbol(')')? {
-                if items.is_empty() {
-                    return Err(self.error("identifier list cannot be empty"));
-                }
-                return Ok(items);
-            }
-
-            let item_token = self.expect_identifier()?;
-            items.push(identifier_text(&item_token));
-
-            if self.consume_symbol(',')? {
+                tables.push(table);
+                current = None;
                 continue;
             }
-            self.expect_symbol(')')?;
-            return Ok(items);
+            current
+                .as_mut()
+                .expect("current table")
+                .parse_statement(line_no, line)?;
+            continue;
         }
-    }
 
-    fn parse_name(&mut self) -> Result<String, ParseError> {
-        let mut parts = vec![identifier_text(&self.expect_identifier()?)];
-        while self.consume_symbol('.')? {
-            parts.push(identifier_text(&self.expect_identifier()?));
-        }
-        Ok(parts.join("."))
-    }
-
-    fn expect_keyword(&mut self, expected: &str) -> Result<Token, ParseError> {
-        match &self.lookahead.kind {
-            TokenKind::Ident(actual) if actual == expected => {
-                let token = self.lookahead.clone();
-                self.advance()?;
-                Ok(token)
+        let (storage, rest) = strip_memory(line);
+        if let Some(name) = rest
+            .strip_prefix("row_table ")
+            .and_then(|value| value.strip_suffix(';'))
+        {
+            let name = parse_name(line_no, name.trim())?;
+            if !seen_tables.insert(name.clone()) {
+                return Err(ParseError::new(
+                    line_no,
+                    format!("duplicate table declaration `{name}`"),
+                ));
             }
-            _ => Err(self.error(format!("expected `{expected}`"))),
+            tables.push(row_table(name, storage));
+            continue;
+        }
+        if let Some(header) = rest
+            .strip_prefix("table ")
+            .and_then(|value| value.strip_suffix('{'))
+        {
+            current = Some(TableBuilder::new(
+                parse_name(line_no, header.trim())?,
+                storage,
+                line_no,
+            ));
+            continue;
+        }
+        return Err(ParseError::new(line_no, "expected `table` or `row_table`"));
+    }
+
+    if let Some(builder) = current {
+        return Err(ParseError::new(
+            builder.line,
+            format!("unterminated table declaration `{}`", builder.name),
+        ));
+    }
+
+    Ok(SchemaDocument { tables })
+}
+
+struct TableBuilder {
+    name: String,
+    storage: TableStorage,
+    line: usize,
+    columns: Vec<ColumnDeclaration>,
+    column_names: BTreeSet<String>,
+    row_key: Option<RowKeyDeclaration>,
+    indexes: Vec<IndexDeclaration>,
+    index_names: BTreeSet<String>,
+}
+
+impl TableBuilder {
+    fn new(name: String, storage: TableStorage, line: usize) -> Self {
+        Self {
+            name,
+            storage,
+            line,
+            columns: Vec::new(),
+            column_names: BTreeSet::new(),
+            row_key: None,
+            indexes: Vec::new(),
+            index_names: BTreeSet::new(),
         }
     }
 
-    fn expect_identifier(&mut self) -> Result<Token, ParseError> {
-        match self.lookahead.kind {
-            TokenKind::Ident(_) => {
-                let token = self.lookahead.clone();
-                self.advance()?;
-                Ok(token)
+    fn parse_statement(&mut self, line_no: usize, line: &str) -> Result<(), ParseError> {
+        if let Some(rest) = line.strip_prefix("column ") {
+            let rest = rest
+                .strip_suffix(';')
+                .ok_or_else(|| ParseError::new(line_no, "column statement must end with `;`"))?;
+            let mut parts = rest.split_whitespace();
+            let name = parts
+                .next()
+                .ok_or_else(|| ParseError::new(line_no, "column statement missing name"))?;
+            let ty = parts
+                .next()
+                .ok_or_else(|| ParseError::new(line_no, "column statement missing type"))?;
+            if parts.next().is_some() {
+                return Err(ParseError::new(
+                    line_no,
+                    "column statement has extra tokens",
+                ));
             }
-            _ => Err(self.error("expected identifier")),
-        }
-    }
-
-    fn expect_number(&mut self) -> Result<Token, ParseError> {
-        match self.lookahead.kind {
-            TokenKind::Number(_) => {
-                let token = self.lookahead.clone();
-                self.advance()?;
-                Ok(token)
+            let name = parse_identifier(line_no, name)?;
+            if !self.column_names.insert(name.clone()) {
+                return Err(ParseError::new(
+                    line_no,
+                    format!("duplicate column declaration `{name}`"),
+                ));
             }
-            _ => Err(self.error("expected number")),
+            self.columns.push(ColumnDeclaration {
+                name,
+                ty: parse_type(line_no, ty)?,
+            });
+            return Ok(());
         }
-    }
 
-    fn expect_symbol(&mut self, expected: char) -> Result<Token, ParseError> {
-        match self.lookahead.kind {
-            TokenKind::Symbol(actual) if actual == expected => {
-                let token = self.lookahead.clone();
-                self.advance()?;
-                Ok(token)
+        if let Some(rest) = line.strip_prefix("row_key ") {
+            if self.row_key.is_some() {
+                return Err(ParseError::new(
+                    line_no,
+                    format!("duplicate row key declaration for table `{}`", self.name),
+                ));
             }
-            _ => Err(self.error(format!("expected `{expected}`"))),
+            let columns = parse_list_statement(line_no, rest, "row_key")?;
+            self.row_key = Some(RowKeyDeclaration { columns });
+            return Ok(());
         }
-    }
 
-    fn consume_symbol(&mut self, expected: char) -> Result<bool, ParseError> {
-        match self.lookahead.kind {
-            TokenKind::Symbol(actual) if actual == expected => {
-                self.advance()?;
-                Ok(true)
+        let (unique, rest) = if let Some(rest) = line.strip_prefix("unique ") {
+            (true, rest)
+        } else {
+            (false, line)
+        };
+        if let Some(rest) = rest.strip_prefix("index ") {
+            let (name, columns) = parse_named_list_statement(line_no, rest, "index")?;
+            if !self.index_names.insert(name.clone()) {
+                return Err(ParseError::new(
+                    line_no,
+                    format!("duplicate index declaration `{name}`"),
+                ));
             }
-            _ => Ok(false),
+            self.indexes.push(IndexDeclaration {
+                name,
+                unique,
+                columns,
+            });
+            return Ok(());
         }
+
+        Err(ParseError::new(
+            line_no,
+            "unknown table statement; expected `column`, `row_key`, `index`, or `unique`",
+        ))
     }
 
-    fn advance(&mut self) -> Result<(), ParseError> {
-        self.lookahead = self.lexer.next_token()?;
-        Ok(())
+    fn finish(self) -> Result<TableDeclaration, ParseError> {
+        let row_key = self.row_key.ok_or_else(|| {
+            ParseError::new(
+                self.line,
+                format!("table `{}` must declare a row key", self.name),
+            )
+        })?;
+        validate_columns_exist(
+            &self.name,
+            "row key",
+            &row_key.columns,
+            &self.column_names,
+            self.line,
+        )?;
+        for index in &self.indexes {
+            validate_columns_exist(
+                &self.name,
+                &format!("index `{}`", index.name),
+                &index.columns,
+                &self.column_names,
+                self.line,
+            )?;
+        }
+        Ok(TableDeclaration {
+            name: self.name,
+            kind: TableKind::Typed,
+            storage: self.storage,
+            columns: self.columns,
+            row_key,
+            indexes: self.indexes,
+        })
     }
+}
 
-    fn error(&self, detail: impl Into<String>) -> ParseError {
-        ParseError::new(self.lookahead.line, self.lookahead.column, detail)
+fn row_table(name: String, storage: TableStorage) -> TableDeclaration {
+    TableDeclaration {
+        name,
+        kind: TableKind::Row,
+        storage,
+        columns: vec![
+            ColumnDeclaration {
+                name: "key".to_string(),
+                ty: ColumnType::Bytes { len: None },
+            },
+            ColumnDeclaration {
+                name: "value".to_string(),
+                ty: ColumnType::Bytes { len: None },
+            },
+        ],
+        row_key: RowKeyDeclaration {
+            columns: vec!["key".to_string()],
+        },
+        indexes: Vec::new(),
+    }
+}
+
+fn strip_memory(line: &str) -> (TableStorage, &str) {
+    line.strip_prefix("memory ")
+        .map(|rest| (TableStorage::Memory, rest))
+        .unwrap_or((TableStorage::Durable, line))
+}
+
+fn strip_comment(line: &str) -> &str {
+    let hash = line.find('#');
+    let slash = line.find("//");
+    let end = match (hash, slash) {
+        (Some(left), Some(right)) => left.min(right),
+        (Some(index), None) | (None, Some(index)) => index,
+        (None, None) => line.len(),
+    };
+    &line[..end]
+}
+
+fn parse_type(line: usize, ty: &str) -> Result<ColumnType, ParseError> {
+    if ty == "bytes" {
+        return Ok(ColumnType::Bytes { len: None });
+    }
+    if let Some(len) = ty
+        .strip_prefix("bytes(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        let len = len
+            .parse::<usize>()
+            .map_err(|_| ParseError::new(line, "invalid byte length"))?;
+        if len == 0 {
+            return Err(ParseError::new(
+                line,
+                "byte length must be greater than zero",
+            ));
+        }
+        return Ok(ColumnType::Bytes { len: Some(len) });
+    }
+    match ty {
+        "u64" => Ok(ColumnType::U64),
+        "i64" => Ok(ColumnType::I64),
+        "text" => Ok(ColumnType::Text),
+        "bool" => Ok(ColumnType::Bool),
+        _ => Err(ParseError::new(line, format!("unknown column type `{ty}`"))),
+    }
+}
+
+fn parse_named_list_statement(
+    line: usize,
+    rest: &str,
+    label: &str,
+) -> Result<(String, Vec<String>), ParseError> {
+    let (name, list) = rest
+        .split_once(' ')
+        .ok_or_else(|| ParseError::new(line, format!("{label} statement missing columns")))?;
+    Ok((
+        parse_identifier(line, name)?,
+        parse_list_statement(line, list, label)?,
+    ))
+}
+
+fn parse_list_statement(line: usize, rest: &str, label: &str) -> Result<Vec<String>, ParseError> {
+    let rest = rest
+        .strip_suffix(';')
+        .ok_or_else(|| ParseError::new(line, format!("{label} statement must end with `;`")))?
+        .trim();
+    let inner = rest
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| ParseError::new(line, format!("{label} statement must use `(columns)`")))?;
+    let columns = inner
+        .split(',')
+        .map(str::trim)
+        .map(|name| parse_identifier(line, name))
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.is_empty() {
+        return Err(ParseError::new(line, "identifier list cannot be empty"));
+    }
+    Ok(columns)
+}
+
+fn parse_name(line: usize, name: &str) -> Result<String, ParseError> {
+    if !name.is_empty()
+        && name
+            .split('.')
+            .all(|part| parse_identifier(line, part).is_ok())
+    {
+        return Ok(name.to_string());
+    }
+    Err(ParseError::new(
+        line,
+        format!("invalid table name `{name}`"),
+    ))
+}
+
+fn parse_identifier(line: usize, name: &str) -> Result<String, ParseError> {
+    let mut bytes = name.bytes();
+    let valid_start = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+    if valid_start && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+        Ok(name.to_string())
+    } else {
+        Err(ParseError::new(
+            line,
+            format!("invalid identifier `{name}`"),
+        ))
     }
 }
 
@@ -482,157 +451,11 @@ fn validate_columns_exist(
         if !columns.contains(column) {
             return Err(ParseError::new(
                 line,
-                1,
                 format!("table `{table}` {owner} references unknown column `{column}`"),
             ));
         }
     }
     Ok(())
-}
-
-fn identifier_text(token: &Token) -> String {
-    match &token.kind {
-        TokenKind::Ident(value) => value.clone(),
-        _ => unreachable!("identifier_text called with non-identifier token"),
-    }
-}
-
-struct Lexer<'a> {
-    input: &'a [u8],
-    offset: usize,
-    line: usize,
-    column: usize,
-}
-
-impl<'a> Lexer<'a> {
-    fn new(source: &'a str) -> Self {
-        Self {
-            input: source.as_bytes(),
-            offset: 0,
-            line: 1,
-            column: 1,
-        }
-    }
-
-    fn next_token(&mut self) -> Result<Token, ParseError> {
-        self.skip_whitespace_and_comments();
-        let line = self.line;
-        let column = self.column;
-
-        let Some(byte) = self.peek() else {
-            return Ok(Token {
-                kind: TokenKind::Eof,
-                line,
-                column,
-            });
-        };
-
-        if is_ident_start(byte) {
-            return Ok(Token {
-                kind: TokenKind::Ident(self.read_identifier()),
-                line,
-                column,
-            });
-        }
-
-        if byte.is_ascii_digit() {
-            return Ok(Token {
-                kind: TokenKind::Number(self.read_number(line, column)?),
-                line,
-                column,
-            });
-        }
-
-        if matches!(byte, b'{' | b'}' | b'(' | b')' | b',' | b';' | b'.') {
-            self.bump();
-            return Ok(Token {
-                kind: TokenKind::Symbol(byte as char),
-                line,
-                column,
-            });
-        }
-
-        Err(ParseError::new(
-            line,
-            column,
-            format!("unexpected character `{}`", byte as char),
-        ))
-    }
-
-    fn skip_whitespace_and_comments(&mut self) {
-        loop {
-            while self.peek().is_some_and(|byte| byte.is_ascii_whitespace()) {
-                self.bump();
-            }
-
-            if self.peek() == Some(b'#')
-                || (self.peek() == Some(b'/') && self.peek_next() == Some(b'/'))
-            {
-                while let Some(byte) = self.bump() {
-                    if byte == b'\n' {
-                        break;
-                    }
-                }
-                continue;
-            }
-
-            break;
-        }
-    }
-
-    fn read_identifier(&mut self) -> String {
-        let start = self.offset;
-        while self.peek().is_some_and(is_ident_continue) {
-            self.bump();
-        }
-        std::str::from_utf8(&self.input[start..self.offset])
-            .expect("identifier contains only ASCII")
-            .to_string()
-    }
-
-    fn read_number(&mut self, line: usize, column: usize) -> Result<u64, ParseError> {
-        let mut value = 0u64;
-        while let Some(byte) = self.peek() {
-            if !byte.is_ascii_digit() {
-                break;
-            }
-            let digit = (byte - b'0') as u64;
-            value = value
-                .checked_mul(10)
-                .and_then(|value| value.checked_add(digit))
-                .ok_or_else(|| ParseError::new(line, column, "number literal is too large"))?;
-            self.bump();
-        }
-        Ok(value)
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.input.get(self.offset).copied()
-    }
-
-    fn peek_next(&self) -> Option<u8> {
-        self.input.get(self.offset + 1).copied()
-    }
-
-    fn bump(&mut self) -> Option<u8> {
-        let byte = self.peek()?;
-        self.offset += 1;
-        if byte == b'\n' {
-            self.line += 1;
-            self.column = 1;
-        } else {
-            self.column += 1;
-        }
-        Some(byte)
-    }
-}
-
-fn is_ident_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || byte == b'_'
-}
-
-fn is_ident_continue(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 #[cfg(test)]
@@ -696,6 +519,7 @@ mod tests {
             table_names(&core),
             vec![
                 "facts",
+                "local_fact_admissions",
                 "context_edges",
                 "time_wakes",
                 "pending_projection",
@@ -713,24 +537,10 @@ mod tests {
 
     #[test]
     fn rejects_missing_row_key_and_unknown_references() {
-        let missing_key = parse_schema(
-            r#"
-            table facts {
-              column key bytes;
-            }
-            "#,
+        assert!(parse_schema("table facts {\n  column key bytes;\n}").is_err());
+        assert!(
+            parse_schema("table facts {\n  column key bytes;\n  row_key (missing);\n}").is_err()
         );
-        assert!(missing_key.is_err());
-
-        let unknown_column = parse_schema(
-            r#"
-            table facts {
-              column key bytes;
-              row_key (missing);
-            }
-            "#,
-        );
-        assert!(unknown_column.is_err());
     }
 
     #[test]

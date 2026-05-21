@@ -10,7 +10,7 @@ use crate::core::matchers::{
     SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
 use crate::core::select;
-use crate::core::store::{ColumnValue, Store};
+use crate::core::store::Store;
 
 use super::exact::protocol_role;
 use super::sql;
@@ -95,14 +95,14 @@ ORDER BY owner, selector";
 pub const RANGE_FACT_WAKE_FOR_OFFER_SQL: &str = "
 SELECT n.owner
 FROM context_edges n
-JOIN facts f ON f.id = n.owner
+JOIN local_fact_admissions a ON a.fact_id = n.owner
 WHERE n.direction = 'need'
   AND n.role = :role
   AND n.scope_key = :scope_key
   AND length(n.selector) = 16
   AND substr(n.selector, 1, 8) <= :timestamp
   AND substr(n.selector, 9, 8) >= :timestamp
-ORDER BY f.timestamp, n.owner";
+ORDER BY a.received_at, n.owner";
 
 pub const RANGE_FACT_CONTEXT_ROLE: ContextRoleDeclaration = ContextRoleDeclaration {
     role: SYNC_RANGE_FACT_ROLE,
@@ -272,11 +272,11 @@ impl ContextMatcher for RangeFactMatcher {
         let scope_key = sql::scope_key_for_sql(&need.scope);
         let start = start.to_be_bytes();
         let end = end.to_be_bytes();
-        let params = [
-            (":role", ColumnValue::Text(self.role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
-            (":start", ColumnValue::Bytes(&start)),
-            (":end", ColumnValue::Bytes(&end)),
+        let params = vec![
+            select::Param::text(":role", self.role.as_str()),
+            select::Param::bytes(":scope_key", scope_key),
+            select::Param::bytes(":start", start),
+            select::Param::bytes(":end", end),
         ];
         sql::select_offers_for_need(store, RANGE_FACT_OFFERS_FOR_NEED_SQL, &params, need).map(Some)
     }
@@ -294,10 +294,10 @@ impl ContextMatcher for RangeFactMatcher {
         };
         let scope_key = sql::scope_key_for_sql(&offer.scope);
         let timestamp = selector.timestamp.to_be_bytes();
-        let params = [
-            (":role", ColumnValue::Text(self.role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
-            (":timestamp", ColumnValue::Bytes(&timestamp)),
+        let params = vec![
+            select::Param::text(":role", self.role.as_str()),
+            select::Param::bytes(":scope_key", scope_key),
+            select::Param::bytes(":timestamp", timestamp),
         ];
         sql::select_needs_for_offer(store, RANGE_FACT_NEEDS_FOR_OFFER_SQL, &params, offer).map(Some)
     }

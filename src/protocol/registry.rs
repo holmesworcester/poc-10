@@ -12,6 +12,7 @@ use crate::core::facts::Fact;
 use crate::core::matchers::{
     ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration, ExactSelectorMatcher,
 };
+use crate::core::network;
 use crate::core::projectors::{
     EnvelopeRoute, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
@@ -359,6 +360,10 @@ pub const SCHEMAS: &[SchemaRegistration] = &[
     SchemaRegistration {
         name: "core",
         source: CORE_SCHEMA_SOURCE,
+    },
+    SchemaRegistration {
+        name: "network",
+        source: network::SCHEMA_SOURCE,
     },
     SchemaRegistration {
         name: "facts",
@@ -846,7 +851,11 @@ pub const HANDLERS: &[HandlerRegistration] = &[
     },
 ];
 
-pub(crate) const SCHEMA_SOURCES: &[&str] = &[FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE];
+pub(crate) const SCHEMA_SOURCES: &[&str] = &[
+    network::SCHEMA_SOURCE,
+    FACTS_SCHEMA_SOURCE,
+    INTENTS_SCHEMA_SOURCE,
+];
 
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::cascade_fact::rows::CASCADE_STAGED_FACT_ROWS,

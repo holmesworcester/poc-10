@@ -67,12 +67,10 @@ mod tests {
 
     #[test]
     fn active_setting_follows_supersedes_chain_over_created_at_order() {
-        let store =
-            Store::open_memory_with_schemas(&[crate::core::store::Schema::durable_row_table(
-                "test.disappearing.rows",
-                rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
-            )])
-            .expect("store");
+        let store = Store::open_memory_with_schema_sources(&[
+            "row_table disappearing_messages_setting_rows;",
+        ])
+        .expect("store");
         let workspace_id = [1; 32];
         let old_id = [2; 32];
         let new_id = [3; 32];

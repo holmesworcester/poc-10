@@ -55,7 +55,11 @@ fn production_text_before_unit_tests(text: &str) -> &str {
 #[test]
 fn protocol_registry_names_the_target_surfaces() {
     assert_eq!(PROTOCOL.name, "match");
-    assert_eq!(PROTOCOL.schemas.len(), 3);
+    assert_eq!(PROTOCOL.schemas.len(), 4);
+    assert!(PROTOCOL
+        .schemas
+        .iter()
+        .any(|schema| schema.name == "network"));
 
     assert!(PROTOCOL
         .facts

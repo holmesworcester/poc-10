@@ -2,8 +2,8 @@ use crate::core::context::{ContextOffer, ContextSetDelta};
 use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
 use crate::core::facts::{Fact, FactId};
 use crate::core::matchers::ContextMatcher;
-use crate::core::schema::PENDING_PROJECTION;
 use crate::core::store::Store;
+use rusqlite::params;
 
 use super::context_rows::insert_context_offer_in_tx;
 use super::context_wakes::wake_context_matches_in_tx;
@@ -38,10 +38,12 @@ pub(crate) fn commit_projected_context_offers(
                 matchers,
             )
             .map_err(sqlite_string_error)?;
-            tx.delete_table_rows_in_tx(
-                PENDING_PROJECTION,
-                completed_fact_ids.iter().map(|id| id.to_vec()).collect(),
-            )?;
+            for id in completed_fact_ids {
+                tx.conn().execute(
+                    "DELETE FROM pending_projection WHERE owner = ?1",
+                    params![id.as_slice()],
+                )?;
+            }
             Ok(woken_facts)
         })
         .map_err(|err| format!("commit projected context offers: {err}"))

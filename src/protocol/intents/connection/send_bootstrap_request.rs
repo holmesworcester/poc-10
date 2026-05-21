@@ -150,14 +150,12 @@ mod tests {
             addr,
         })
         .expect("intent");
-        let store = Store::open_memory_with_schema_sources_and_schemas(
-            &[
-                CORE_SCHEMA_SOURCE,
-                FACTS_SCHEMA_SOURCE,
-                INTENTS_SCHEMA_SOURCE,
-            ],
-            network::SCHEMAS,
-        )
+        let store = Store::open_memory_with_schema_sources(&[
+            CORE_SCHEMA_SOURCE,
+            network::SCHEMA_SOURCE,
+            FACTS_SCHEMA_SOURCE,
+            INTENTS_SCHEMA_SOURCE,
+        ])
         .expect("store");
 
         let err = SendBootstrapConnectionRequestHandler::new()

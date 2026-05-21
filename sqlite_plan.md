@@ -27,11 +27,17 @@ Core-owned runtime tables are declared in `src/core/schema.p8sql`.
 ```text
 facts(
   id primary key,
+  bytes
+)
+
+local_fact_admissions(
+  id primary key,
+  fact_id unique,
   scope,
   scope_kind,
   scope_id,
-  timestamp,
-  bytes
+  received_at,
+  bytes -- encoded local-only admission fact
 )
 
 context_edges(
@@ -53,10 +59,17 @@ pending_time_ranges(
   end_inclusive
 )
 
-time_wakes(timeline, at, owner)
 intents(kind, idempotence_key, payload)
-local_intents -- SQLite TEMP row table
+local_intents(kind, idempotence_key, payload) -- SQLite TEMP table
+time_wakes(timeline, at, owner)
+clock(key, timestamp)
 ```
+
+`local_fact_admissions` is deliberately modeled as a local-only fact about the
+actual content-addressed fact. `received_at` is the node's admission time in the
+target model; the current Rust `Fact.timestamp` field remains compatibility
+debt until sync/range ordering reads protocol-derived event-time indexes. Event
+timestamps themselves remain inside the protocol fact bytes that need them.
 
 `context_edges` is the standing context relation. Needs and offers are not
 separate storage concepts; they are opposite directions in one indexed table.
@@ -87,12 +100,12 @@ For a new offer, projection commit wakes matching need owners:
 ```sql
 SELECT n.owner
 FROM context_edges n
-JOIN facts f ON f.id = n.owner
+JOIN local_fact_admissions a ON a.fact_id = n.owner
 WHERE n.direction = 'need'
   AND n.role = :role
   AND n.scope_key = :scope_key
   AND n.selector = :selector
-ORDER BY f.timestamp, n.owner;
+ORDER BY a.received_at, n.owner;
 ```
 
 Custom matcher roles also supply wake selects. Core executes those selects
@@ -113,14 +126,18 @@ during projection commit and inserts affected owners directly into
 ## Current Status
 
 - Durable and restart-local intent queues are both SQLite-backed.
+- Core, network, fact, and intent tables are all declared through p8sql schema
+  sources. The old Rust `Schema` registration path has been removed.
 - Context wake fanout uses typed `INSERT OR IGNORE ... SELECT` during
   projection commit.
 - Time wake admission uses the same checked insert-select pattern from
   `time_wakes` into `pending_projection` and `pending_time_ranges`.
-- `core::wake::Select` is the shared read-only SELECT shape for this fanout;
+- `core::select::Select` is the shared read-only SELECT shape for this fanout;
   pipeline workers still choose the target queue table and columns.
 - Custom matcher candidate lookup for range, coverage, and wrap-source roles is
   SELECT-only SQL over `context_edges`.
 - The runtime no longer rebuilds a whole scheduler graph in memory.
 - Fact storage and fact purge helpers now live in `core::fact_store`;
   `pipeline_storage.rs` is gone.
+- Core pipeline modules and protocol matchers now prepare direct SQL against
+  their owned tables instead of using a generic Store selected-row adapter.

@@ -8,7 +8,6 @@ use crate::core::app::ProtocolDescription;
 use crate::core::clock;
 use crate::core::daemon::{DaemonDescription, DaemonTimeWake, InboundNetworkFrame};
 use crate::core::intents::Intent;
-use crate::core::network;
 use crate::core::runtime::RuntimeDescription;
 use crate::core::store::Store;
 use crate::protocol::facts::{content, transport};
@@ -21,7 +20,6 @@ use crate::protocol::registry::{MatchCliContext, MATCH_COMMANDS};
 
 pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
     schema_sources: SCHEMA_SOURCES,
-    schemas: network::SCHEMAS,
     row_mutation_tables: ROW_MUTATION_TABLES,
     projector: protocol_projector,
     matchers: protocol_context_matchers,

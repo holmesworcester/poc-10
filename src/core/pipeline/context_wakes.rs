@@ -4,9 +4,10 @@ use super::context_rows::{stored_needs_for_role_scope, stored_offers_for_role_sc
 use crate::core::context::{scope_key, ContextSetDelta};
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
-use crate::core::schema::{CONTEXT_EDGES, FACTS, PENDING_PROJECTION};
+use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION};
 use crate::core::select;
-use crate::core::store::{ColumnValue, Store};
+use crate::core::store::Store;
+use rusqlite::params;
 use std::collections::HashSet;
 
 pub(super) fn wake_context_matches_in_tx(
@@ -64,14 +65,14 @@ fn exact_needs_for_offer_select(offer: &ContextOffer) -> select::Select {
         r#"
         SELECT n.owner
         FROM context_edges n
-        JOIN facts f ON f.id = n.owner
+        JOIN local_fact_admissions a ON a.fact_id = n.owner
         WHERE n.direction = 'need'
           AND n.role = :role
           AND n.scope_key = :scope_key
           AND n.selector = :selector
-        ORDER BY f.timestamp, n.owner
+        ORDER BY a.received_at, n.owner
         "#,
-        &[CONTEXT_EDGES, FACTS],
+        &[CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS],
         vec![
             select::Param::text(":role", offer.role.as_str()),
             select::Param::bytes(":scope_key", scope_key),
@@ -145,10 +146,10 @@ fn wake_matched_need_owners_in_tx(
     let mut seen = HashSet::new();
     for matched in matches {
         if seen.insert(matched.need_owner)
-            && store.insert_typed_row_in_tx(
-                PENDING_PROJECTION,
-                &[("owner", ColumnValue::Bytes(&matched.need_owner))],
-            )?
+            && store.conn().execute(
+                "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
+                params![matched.need_owner.as_slice()],
+            )? > 0
         {
             inserted += 1;
         }

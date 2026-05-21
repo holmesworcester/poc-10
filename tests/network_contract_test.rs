@@ -9,7 +9,7 @@ use topo::core::store::Store;
 fn network_rows_are_opaque_and_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("network-queues.db");
-    let store = Store::open_disk_with_schemas(&path, network::SCHEMAS).unwrap();
+    let store = Store::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
     let addr: SocketAddr = "127.0.0.1:41000".parse().unwrap();
     let other_addr: SocketAddr = "127.0.0.1:41001".parse().unwrap();
     let target = NetworkTarget::new(addr);
@@ -70,7 +70,7 @@ fn network_rows_are_opaque_and_idempotent() {
     );
     network::delete_inbound(&store, &[inbound]).expect("delete queued inbound bytes");
 
-    let reopened = Store::open_disk_with_schemas(&path, network::SCHEMAS).unwrap();
+    let reopened = Store::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
     assert!(
         network::claim_outbound_for_target(&reopened, target, 16)
             .unwrap()

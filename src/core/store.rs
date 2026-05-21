@@ -18,9 +18,9 @@
 //! parameters, and table names are accepted only from `TableName` after a
 //! conservative identifier check.
 
-use crate::core::schema_dsl::{ColumnType, TableDeclaration, TableStorage};
+use crate::core::schema_dsl::{TableDeclaration, TableStorage};
 use rusqlite::{params, params_from_iter, Connection as SqliteConnection, OptionalExtension};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -45,54 +45,6 @@ impl TableName {
     }
 }
 
-/// Where a declared row table is expected to live.
-///
-/// Durable rows are normal SQLite tables. Memory rows are SQLite `TEMP` tables:
-/// connection-local, never visible to a second store handle or another process,
-/// and discarded when the store is closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StorageClass {
-    Durable,
-    Memory,
-}
-
-/// One schema fragment owned by a core IO module or protocol module scope.
-///
-/// Most modules should use `Schema::durable_row_table`: the module owns the
-/// table name and persistence decision, while store supplies either the uniform
-/// `(row_key BLOB PRIMARY KEY, row_value BLOB)` shape or typed tables parsed
-/// from p8sql declarations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Schema {
-    pub id: &'static str,
-    pub storage: StorageClass,
-    pub definition: SchemaDefinition,
-}
-
-/// The concrete schema operation requested by a module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchemaDefinition {
-    RowTable(TableName),
-}
-
-impl Schema {
-    pub const fn row_table(id: &'static str, storage: StorageClass, table: TableName) -> Self {
-        Self {
-            id,
-            storage,
-            definition: SchemaDefinition::RowTable(table),
-        }
-    }
-
-    pub const fn durable_row_table(id: &'static str, table: TableName) -> Self {
-        Self::row_table(id, StorageClass::Durable, table)
-    }
-
-    pub const fn memory_row_table(id: &'static str, table: TableName) -> Self {
-        Self::row_table(id, StorageClass::Memory, table)
-    }
-}
-
 /// One opaque key/value row in one declared table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
@@ -100,32 +52,6 @@ pub struct TableRow {
     pub key: Vec<u8>,
     pub value: Vec<u8>,
 }
-
-#[derive(Debug, Clone, Copy)]
-pub enum ColumnValue<'a> {
-    Bytes(&'a [u8]),
-    Text(&'a str),
-    U64(u64),
-    I64(i64),
-    Bool(bool),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SelectColumn {
-    pub name: &'static str,
-    pub ty: ColumnType,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SelectedValue {
-    Bytes(Vec<u8>),
-    Text(String),
-    U64(u64),
-    I64(i64),
-    Bool(bool),
-}
-
-pub type SelectedRow = BTreeMap<String, SelectedValue>;
 
 /// The only durable substrate core offers protocol code.
 ///
@@ -138,13 +64,10 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open a disk store and apply the caller-declared schemas.
-    pub fn open_disk_with_schemas(
-        path: impl AsRef<Path>,
-        schemas: &[Schema],
-    ) -> rusqlite::Result<Self> {
-        let conn = SqliteConnection::open(path)?;
-        Self::from_connection(conn, schemas)
+    /// Expose the underlying SQLite connection to core modules that own their
+    /// table SQL directly.
+    pub(crate) fn conn(&self) -> &SqliteConnection {
+        &self.conn
     }
 
     /// Open a disk store and apply row-table declarations parsed from p8sql sources.
@@ -152,59 +75,28 @@ impl Store {
         path: impl AsRef<Path>,
         sources: &[&str],
     ) -> rusqlite::Result<Self> {
-        Self::open_disk_with_schema_sources_and_schemas(path, sources, &[])
-    }
-
-    /// Open a disk store and apply p8sql declarations plus explicit core schemas.
-    pub fn open_disk_with_schema_sources_and_schemas(
-        path: impl AsRef<Path>,
-        sources: &[&str],
-        schemas: &[Schema],
-    ) -> rusqlite::Result<Self> {
         let conn = SqliteConnection::open(path)?;
-        Self::from_connection_with_schema_sources_and_schemas(conn, sources, schemas)
+        Self::from_connection_with_schema_sources(conn, sources)
     }
 
     /// Open an in-memory store without creating any protocol tables.
     pub fn open_memory() -> rusqlite::Result<Self> {
-        Self::open_memory_with_schemas(&[])
-    }
-
-    /// Open an in-memory store and apply the caller-declared schemas.
-    pub fn open_memory_with_schemas(schemas: &[Schema]) -> rusqlite::Result<Self> {
-        let conn = SqliteConnection::open_in_memory()?;
-        Self::from_connection(conn, schemas)
+        Self::open_memory_with_schema_sources(&[])
     }
 
     /// Open an in-memory store and apply row-table declarations parsed from p8sql sources.
     pub fn open_memory_with_schema_sources(sources: &[&str]) -> rusqlite::Result<Self> {
-        Self::open_memory_with_schema_sources_and_schemas(sources, &[])
-    }
-
-    /// Open an in-memory store and apply p8sql declarations plus explicit core schemas.
-    pub fn open_memory_with_schema_sources_and_schemas(
-        sources: &[&str],
-        schemas: &[Schema],
-    ) -> rusqlite::Result<Self> {
         let conn = SqliteConnection::open_in_memory()?;
-        Self::from_connection_with_schema_sources_and_schemas(conn, sources, schemas)
+        Self::from_connection_with_schema_sources(conn, sources)
     }
 
-    fn from_connection(conn: SqliteConnection, schemas: &[Schema]) -> rusqlite::Result<Self> {
-        let store = Self::from_connection_parts(conn, HashMap::new())?;
-        store.apply_schemas(schemas)?;
-        Ok(store)
-    }
-
-    fn from_connection_with_schema_sources_and_schemas(
+    fn from_connection_with_schema_sources(
         conn: SqliteConnection,
         sources: &[&str],
-        schemas: &[Schema],
     ) -> rusqlite::Result<Self> {
         let tables = table_declarations_from_schema_sources(sources)?;
         let typed_tables = typed_table_map(&tables)?;
         let store = Self::from_connection_parts(conn, typed_tables)?;
-        store.apply_schemas(schemas)?;
         store.apply_schema_source_tables(&tables)?;
         Ok(store)
     }
@@ -294,86 +186,6 @@ impl Store {
         Ok(inserted)
     }
 
-    /// Insert one complete typed table row by declared column values.
-    ///
-    /// This is the SQL-first path for core-owned tables that already have a
-    /// typed schema. It preserves the row-store idempotence rule: an identical
-    /// duplicate is ignored, but a duplicate key with different column values
-    /// is rejected.
-    pub(crate) fn insert_typed_row_in_tx(
-        &self,
-        table: TableName,
-        values: &[(&str, ColumnValue<'_>)],
-    ) -> rusqlite::Result<bool> {
-        let declared = self.typed_table(table).ok_or_else(|| {
-            rusqlite::Error::InvalidParameterName(format!(
-                "table {} is not a typed table",
-                table.as_str()
-            ))
-        })?;
-
-        let table_columns = declared
-            .columns
-            .iter()
-            .map(|column| column.name.as_str())
-            .collect::<BTreeSet<_>>();
-        let provided = values
-            .iter()
-            .map(|(name, _)| *name)
-            .collect::<BTreeSet<_>>();
-        if values.len() != declared.columns.len() || provided != table_columns {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "typed row for {} does not match declared columns",
-                declared.name
-            )));
-        }
-
-        let sqlite_values = declared
-            .columns
-            .iter()
-            .map(|column| {
-                let value = values
-                    .iter()
-                    .find(|(name, _)| *name == column.name.as_str())
-                    .map(|(_, value)| *value)
-                    .expect("provided columns were checked against declared columns");
-                column_value_to_sqlite(&column.ty, value, &column.name)
-            })
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let key_values = declared
-            .row_key
-            .columns
-            .iter()
-            .map(|column_name| {
-                let index = declared
-                    .columns
-                    .iter()
-                    .position(|column| &column.name == column_name)
-                    .expect("schema row key columns are validated");
-                sqlite_values[index].clone()
-            })
-            .collect::<Vec<_>>();
-        let quoted = quoted_table_name_str(&declared.name)?;
-        let columns = table_column_list(declared)?;
-        let placeholders = placeholders(declared.columns.len());
-        let changed = self.conn.execute(
-            &format!("INSERT OR IGNORE INTO {quoted} ({columns}) VALUES ({placeholders})"),
-            params_from_iter(sqlite_values.iter()),
-        )?;
-        if changed == 0 {
-            match self.typed_values_by_key(declared, &key_values)? {
-                Some(existing) if existing == sqlite_values => {}
-                _ => {
-                    return Err(rusqlite::Error::InvalidParameterName(format!(
-                        "conflicting row for {}",
-                        table.as_str()
-                    )));
-                }
-            }
-        }
-        Ok(changed > 0)
-    }
-
     /// Replace rows in their declared tables.
     pub fn replace_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
         let mut replaced = 0;
@@ -427,46 +239,6 @@ impl Store {
         Ok(deleted)
     }
 
-    /// Delete typed rows matching declared column filters.
-    pub(crate) fn delete_typed_rows_where_in_tx(
-        &self,
-        table: TableName,
-        filters: &[(&str, ColumnValue<'_>)],
-    ) -> rusqlite::Result<usize> {
-        if filters.is_empty() {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "typed delete requires at least one filter".to_string(),
-            ));
-        }
-        let declared = self.typed_table(table).ok_or_else(|| {
-            rusqlite::Error::InvalidParameterName(format!(
-                "table {} is not a typed table",
-                table.as_str()
-            ))
-        })?;
-        let quoted = quoted_table_name_str(&declared.name)?;
-        let mut values = Vec::with_capacity(filters.len());
-        let mut clauses = Vec::with_capacity(filters.len());
-        for (index, (column_name, value)) in filters.iter().enumerate() {
-            let column = declared.column(column_name).ok_or_else(|| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "typed table {} has no column {}",
-                    declared.name, column_name
-                ))
-            })?;
-            values.push(column_value_to_sqlite(&column.ty, *value, column_name)?);
-            clauses.push(format!(
-                "{} = ?{}",
-                quoted_identifier(column_name)?,
-                index + 1
-            ));
-        }
-        self.conn.execute(
-            &format!("DELETE FROM {quoted} WHERE {}", clauses.join(" AND ")),
-            params_from_iter(values.iter()),
-        )
-    }
-
     // Row reads: exact lookup, count, full scan, bounded prefix scan, and
     // bounded key-range scan are the complete read surface core exposes.
     /// Fetch one row value by exact key.
@@ -508,26 +280,6 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT row_key, row_value FROM {table_name}
                  ORDER BY row_key"
-        ))?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect()
-    }
-
-    /// Scan an opaque row table in insertion order.
-    ///
-    /// This is intentionally limited to generic row tables. Typed tables have
-    /// declared primary keys and are always scanned in key order.
-    pub(crate) fn row_table_rows_in_insertion_order(
-        &self,
-        table: TableName,
-    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        if self.typed_table(table).is_some() {
-            return self.table_rows(table);
-        }
-        let table_name = quoted_table_name(table)?;
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT row_key, row_value FROM {table_name}
-                 ORDER BY rowid"
         ))?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
@@ -589,250 +341,13 @@ impl Store {
         rows.collect()
     }
 
-    pub fn table_rows_where(
-        &self,
-        table: TableName,
-        filters: &[(&str, ColumnValue<'_>)],
-    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.typed_rows_where(table, filters, None)
-    }
-
-    pub fn table_rows_where_in(
-        &self,
-        table: TableName,
-        filters: &[(&str, ColumnValue<'_>)],
-        in_column_name: &str,
-        in_values: &[ColumnValue<'_>],
-    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        if in_values.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.typed_rows_where(table, filters, Some((in_column_name, in_values)))
-    }
-
-    fn typed_rows_where(
-        &self,
-        table: TableName,
-        filters: &[(&str, ColumnValue<'_>)],
-        in_filter: Option<(&str, &[ColumnValue<'_>])>,
-    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let declared = self.typed_table(table).ok_or_else(|| {
-            rusqlite::Error::InvalidParameterName(format!(
-                "table {} is not a typed table",
-                table.as_str()
-            ))
-        })?;
-        if filters.is_empty() && in_filter.is_none() {
-            return self.typed_rows(declared);
-        }
-
-        let quoted = quoted_table_name_str(&declared.name)?;
-        let mut values = Vec::with_capacity(
-            filters.len() + in_filter.map(|(_, values)| values.len()).unwrap_or(0),
-        );
-        let mut clauses = Vec::with_capacity(filters.len() + usize::from(in_filter.is_some()));
-        for (index, (column_name, value)) in filters.iter().enumerate() {
-            let column = declared.column(column_name).ok_or_else(|| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "typed table {} has no column {}",
-                    declared.name, column_name
-                ))
-            })?;
-            values.push(column_value_to_sqlite(&column.ty, *value, column_name)?);
-            clauses.push(format!(
-                "{} = ?{}",
-                quoted_identifier(column_name)?,
-                index + 1
-            ));
-        }
-
-        if let Some((in_column_name, in_values)) = in_filter {
-            let in_column = declared.column(in_column_name).ok_or_else(|| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "typed table {} has no column {}",
-                    declared.name, in_column_name
-                ))
-            })?;
-            let in_start = values.len();
-            for value in in_values {
-                values.push(column_value_to_sqlite(
-                    &in_column.ty,
-                    *value,
-                    in_column_name,
-                )?);
-            }
-            let placeholders = (0..in_values.len())
-                .map(|index| format!("?{}", in_start + index + 1))
-                .collect::<Vec<_>>()
-                .join(", ");
-            clauses.push(format!(
-                "{} IN ({})",
-                quoted_identifier(in_column_name)?,
-                placeholders
-            ));
-        }
-
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM {quoted}
-             WHERE {}
-             ORDER BY {}",
-            table_column_list(declared)?,
-            clauses.join(" AND "),
-            quoted_identifier_list(&declared.row_key.columns)?
-        ))?;
-        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
-            sqlite_row_to_table_row(declared, row)
-        })?;
-        rows.collect()
-    }
-
-    pub fn select_only(
-        &self,
-        sql: &str,
-        allowed_tables: &[TableName],
-        params: &[(&str, ColumnValue<'_>)],
-        columns: &[SelectColumn],
-    ) -> rusqlite::Result<Vec<SelectedRow>> {
-        validate_select_only_sql(sql, allowed_tables)?;
-        let bound = params
-            .iter()
-            .map(|(name, value)| {
-                if !name.starts_with(':') {
-                    return Err(rusqlite::Error::InvalidParameterName(format!(
-                        "SELECT-only matcher parameter {name:?} must be named"
-                    )));
-                }
-                Ok((*name, column_value_to_untyped_sqlite(*value)?))
-            })
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-
-        let mut stmt = self.conn.prepare(sql)?;
-        for (name, value) in &bound {
-            let index = stmt.parameter_index(name)?.ok_or_else(|| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "SELECT-only matcher SQL does not bind parameter {name}"
-                ))
-            })?;
-            stmt.raw_bind_parameter(index, value)?;
-        }
-
-        let mut rows = stmt.raw_query();
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            let mut selected = BTreeMap::new();
-            for (index, column) in columns.iter().enumerate() {
-                let value = sqlite_selected_value(row, index, column)?;
-                selected.insert(column.name.to_string(), value);
-            }
-            out.push(selected);
-        }
-        Ok(out)
-    }
-
-    /// Insert rows into a typed table from a bounded SELECT expression.
-    ///
-    /// This is the write-side companion to `select_only` for core queue
-    /// fanout: callers choose a declared target table and columns, while the
-    /// source rows must be a single validated SELECT over declared tables.
-    pub(crate) fn insert_typed_rows_from_select_in_tx(
-        &self,
-        target_table: TableName,
-        target_columns: &[&str],
-        select_sql: &str,
-        allowed_select_tables: &[TableName],
-        params: &[(&str, ColumnValue<'_>)],
-    ) -> rusqlite::Result<usize> {
-        if target_columns.is_empty() {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "typed insert-select requires at least one target column".to_string(),
-            ));
-        }
-        let declared = self.typed_table(target_table).ok_or_else(|| {
-            rusqlite::Error::InvalidParameterName(format!(
-                "table {} is not a typed table",
-                target_table.as_str()
-            ))
-        })?;
-        for column_name in target_columns {
-            if declared.column(column_name).is_none() {
-                return Err(rusqlite::Error::InvalidParameterName(format!(
-                    "typed table {} has no column {}",
-                    declared.name, column_name
-                )));
-            }
-        }
-        validate_select_only_sql(select_sql, allowed_select_tables)?;
-        let bound = params
-            .iter()
-            .map(|(name, value)| {
-                if !name.starts_with(':') {
-                    return Err(rusqlite::Error::InvalidParameterName(format!(
-                        "insert-select parameter {name:?} must be named"
-                    )));
-                }
-                Ok((*name, column_value_to_untyped_sqlite(*value)?))
-            })
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-
-        let quoted = quoted_table_name_str(&declared.name)?;
-        let columns = target_columns
-            .iter()
-            .map(|column| column.to_string())
-            .collect::<Vec<_>>();
-        let columns = quoted_identifier_list(&columns)?;
-        let sql = format!("INSERT OR IGNORE INTO {quoted} ({columns}) {select_sql}");
-        let mut stmt = self.conn.prepare(&sql)?;
-        for (name, value) in &bound {
-            let index = stmt.parameter_index(name)?.ok_or_else(|| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "insert-select SQL does not bind parameter {name}"
-                ))
-            })?;
-            stmt.raw_bind_parameter(index, value)?;
-        }
-        stmt.raw_execute()
-    }
-
     // Schema helpers: core applies declarations from module scopes. It does not
     // build protocol tables from central knowledge.
-    fn apply_schemas(&self, schemas: &[Schema]) -> rusqlite::Result<()> {
-        validate_schema_ids(schemas)?;
-        for schema in schemas {
-            self.apply_schema(schema)?;
-        }
-        Ok(())
-    }
-
     fn apply_schema_source_tables(&self, tables: &[TableDeclaration]) -> rusqlite::Result<()> {
         for table in tables {
             self.apply_schema_source_table(table)?;
         }
         Ok(())
-    }
-
-    fn apply_schema(&self, schema: &Schema) -> rusqlite::Result<()> {
-        let SchemaDefinition::RowTable(table) = schema.definition;
-        self.apply_row_table_schema(schema.storage, table)
-    }
-
-    fn apply_row_table_schema(
-        &self,
-        storage: StorageClass,
-        table: TableName,
-    ) -> rusqlite::Result<()> {
-        let table_name = quoted_table_name(table)?;
-        // Memory tables are SQLite `TEMP` tables: connection-local, dropped when
-        // the store closes, and rolled back with the enclosing transaction.
-        let temp = match storage {
-            StorageClass::Durable => "",
-            StorageClass::Memory => "TEMP ",
-        };
-        self.conn.execute_batch(&format!(
-            "CREATE {temp}TABLE IF NOT EXISTS {table_name} (
-                row_key BLOB PRIMARY KEY NOT NULL,
-                row_value BLOB NOT NULL
-            );"
-        ))
     }
 
     fn apply_schema_source_table(&self, table: &TableDeclaration) -> rusqlite::Result<()> {
@@ -987,32 +502,6 @@ impl Store {
             .optional()
     }
 
-    fn typed_values_by_key(
-        &self,
-        table: &TableDeclaration,
-        key_values: &[rusqlite::types::Value],
-    ) -> rusqlite::Result<Option<Vec<rusqlite::types::Value>>> {
-        let quoted = quoted_table_name_str(&table.name)?;
-        self.conn
-            .query_row(
-                &format!(
-                    "SELECT {} FROM {quoted} WHERE {}",
-                    table_column_list(table)?,
-                    row_key_where_clause(table)?
-                ),
-                params_from_iter(key_values.iter()),
-                |row| {
-                    table
-                        .columns
-                        .iter()
-                        .enumerate()
-                        .map(|(index, column)| sqlite_column_value(row, index, &column.ty))
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                },
-            )
-            .optional()
-    }
-
     fn typed_row_count(&self, table: &TableDeclaration) -> rusqlite::Result<usize> {
         let quoted = quoted_table_name_str(&table.name)?;
         self.conn
@@ -1043,11 +532,8 @@ mod tests {
 
     #[test]
     fn duplicate_row_insert_is_idempotent_but_conflicting_value_rejects() {
-        let store = Store::open_memory_with_schemas(&[Schema::durable_row_table(
-            "test.rows.v1",
-            TEST_ROWS,
-        )])
-        .expect("open store");
+        let store =
+            Store::open_memory_with_schema_sources(&["row_table test.rows;"]).expect("open store");
         let row = TableRow {
             table: TEST_ROWS,
             key: b"k".to_vec(),
@@ -1079,9 +565,9 @@ mod tests {
     fn memory_rows_are_connection_local_temp_tables() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("memory-rows.db");
-        let schemas = [Schema::memory_row_table("test.memory_rows.v1", MEMORY_ROWS)];
+        let sources = ["memory row_table test.memory_rows;"];
 
-        let store_a = Store::open_disk_with_schemas(&path, &schemas).expect("open store a");
+        let store_a = Store::open_disk_with_schema_sources(&path, &sources).expect("open store a");
         store_a
             .insert_table_rows(vec![TableRow {
                 table: MEMORY_ROWS,
@@ -1091,7 +577,7 @@ mod tests {
             .expect("insert memory row");
         assert_eq!(store_a.table_row_count(MEMORY_ROWS).expect("count a"), 1);
 
-        let store_b = Store::open_disk_with_schemas(&path, &schemas).expect("open store b");
+        let store_b = Store::open_disk_with_schema_sources(&path, &sources).expect("open store b");
         assert_eq!(
             store_b.table_row_count(MEMORY_ROWS).expect("count b"),
             0,
@@ -1115,11 +601,8 @@ mod tests {
 
     #[test]
     fn memory_rows_roll_back_with_write_transaction() {
-        let store = Store::open_memory_with_schemas(&[Schema::memory_row_table(
-            "test.memory_rows.v1",
-            MEMORY_ROWS,
-        )])
-        .expect("open store");
+        let store = Store::open_memory_with_schema_sources(&["memory row_table test.memory_rows;"])
+            .expect("open store");
 
         let err = store
             .write_transaction(|store| {
@@ -1145,11 +628,8 @@ mod tests {
 
     #[test]
     fn memory_prefix_scan_is_key_ordered_and_limited() {
-        let store = Store::open_memory_with_schemas(&[Schema::memory_row_table(
-            "test.memory_rows.v1",
-            MEMORY_ROWS,
-        )])
-        .expect("open store");
+        let store = Store::open_memory_with_schema_sources(&["memory row_table test.memory_rows;"])
+            .expect("open store");
         store
             .insert_table_rows(vec![
                 TableRow {
@@ -1174,40 +654,5 @@ mod tests {
             .table_rows_with_key_prefix(MEMORY_ROWS, b"b/", 1)
             .expect("scan prefix");
         assert_eq!(rows, vec![(b"b/1".to_vec(), b"one".to_vec())]);
-    }
-
-    #[test]
-    fn row_table_insertion_order_scan_preserves_fifo_queue_order() {
-        let store = Store::open_memory_with_schemas(&[Schema::memory_row_table(
-            "test.memory_rows.v1",
-            MEMORY_ROWS,
-        )])
-        .expect("open store");
-        store
-            .insert_table_rows(vec![
-                TableRow {
-                    table: MEMORY_ROWS,
-                    key: b"z".to_vec(),
-                    value: b"first".to_vec(),
-                },
-                TableRow {
-                    table: MEMORY_ROWS,
-                    key: b"a".to_vec(),
-                    value: b"second".to_vec(),
-                },
-            ])
-            .expect("insert rows");
-
-        let rows = store
-            .row_table_rows_in_insertion_order(MEMORY_ROWS)
-            .expect("scan insertion order");
-
-        assert_eq!(
-            rows,
-            vec![
-                (b"z".to_vec(), b"first".to_vec()),
-                (b"a".to_vec(), b"second".to_vec())
-            ]
-        );
     }
 }

@@ -945,14 +945,14 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
     let core_schema = source_text(&root.join("src/core/schema.p8sql"));
     let intents_schema = source_text(&root.join("src/protocol/intents/schema.p8sql"));
     let network = source_text(&root.join("src/core/network.rs"));
-    let app = source_text(&root.join("src/protocol/app.rs"));
+    let registry = source_text(&root.join("src/protocol/registry.rs"));
 
     let durable_in_core_schema =
         core_schema.contains("table network_in {") || core_schema.contains("table network_out {");
     let memory_in_queue_module = network.contains("memory-local")
         || network.contains("restart-local")
-        || network.contains("Schema::memory_row_table");
-    let runtime_loads_queue_schema = app.contains("network::SCHEMAS");
+        || network.contains("memory row_table network_out");
+    let runtime_loads_queue_schema = registry.contains("network::SCHEMA_SOURCE");
 
     let mut offenders = Vec::new();
     if durable_in_core_schema && memory_in_queue_module {
@@ -961,8 +961,9 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
         );
     }
     if memory_in_queue_module && !runtime_loads_queue_schema {
-        offenders
-            .push("network declares memory schemas, but Runtime does not load network::SCHEMAS");
+        offenders.push(
+            "network declares memory schemas, but Runtime does not load network::SCHEMA_SOURCE",
+        );
     }
     if source_text(&root.join("src/protocol/intents/schema.p8sql"))
         .contains("send_network_frame_cursors")
@@ -1037,7 +1038,7 @@ fn cutover_network_io_intents_are_restart_local_queue_work() {
         }
     }
     if !pipeline.contains("LOCAL_INTENTS")
-        || !core_schema.contains("memory row_table local_intents")
+        || !core_schema.contains("memory table local_intents")
         || !pipeline.contains("submit_local_intent_to_store")
     {
         offenders.push(
