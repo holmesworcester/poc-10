@@ -6,11 +6,11 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::pipeline::{scope_key, CONTEXT_NEEDS, CONTEXT_OFFERS};
+use crate::core::pipeline::{scope_key, CONTEXT_EDGES};
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
 
-pub(crate) const CONTEXT_MATCHER_TABLES: &[TableName] = &[CONTEXT_NEEDS, CONTEXT_OFFERS];
+pub(crate) const CONTEXT_MATCHER_TABLES: &[TableName] = &[CONTEXT_EDGES];
 
 pub(crate) const OFFER_RESULT_COLUMNS: &[SelectColumn] = &[
     SelectColumn {

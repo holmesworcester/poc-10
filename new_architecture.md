@@ -92,10 +92,11 @@ fixtures and the deferred partial-download-progress content tests.
   binary, not through a demo command or demo source file.
 - The old source island has been removed; new behavior belongs in target
   modules only.
-- The runtime calls SQL-backed core pipelines:
-  `pending_fact_pipeline.rs` projects pending facts, `context_change_pipeline.rs`
-  matches need/offer changes and schedules affected facts, and
-  `intent_pipeline.rs` dispatches deferred and restart-local intents.
+- The runtime calls SQL-backed core pipeline workers under
+  `src/core/pipeline/`: `projection.rs` projects pending facts,
+  `context_wake.rs` handles custom matcher wakeups, `fact_context.rs` runs the
+  single-threaded fact/context loop and time wakes, and `dispatch.rs` dispatches
+  durable and restart-local intents.
 - Target fact modules under `src/protocol/facts/` are exercised by poc-10 tests
   and route production `match` behavior through the target runtime.
 - Target intent handlers under `src/protocol/intents/` are themed files and
@@ -186,10 +187,19 @@ src/
     matchers.rs
     projectors.rs
     intents.rs
-    pending_fact_pipeline.rs
-    context_change_pipeline.rs
-    intent_pipeline.rs
-    context_change_helpers.rs
+    pipeline.rs
+    pipeline/
+      admission.rs
+      fact_context.rs
+      projection.rs
+      projection_commit.rs
+      projection_queue.rs
+      context_rows.rs
+      context_matching.rs
+      context_wake.rs
+      dispatch.rs
+      effects.rs
+      intent_queue.rs
     store.rs
     store/
       sql.rs
@@ -523,23 +533,30 @@ model, not protocol helper files. A projector first inspects the supplied
 `ContextOffer`s only after the projector has validated that the fact is valid
 context for that role.
 
-Each projection pass owns the current context surface for its fact. The
-pending-fact pipeline replaces the projected fact's current needs/offers; the
-context-change pipeline diffs the new needs/offers against the old needs/offers
-for the same owner:
+Each projection pass owns the current context surface for its fact. Core stores
+that surface in one `context_edges` relation:
+
+```text
+context_edges(owner, direction, role, scope_key, selector)
+```
+
+`direction` is `need` or `offer`. The projection worker replaces the projected
+fact's current edges; exact selector roles wake facts with SQL immediately
+after the edge replacement; only custom matcher roles use the
+`pending_context_changes` queue:
 
 ```text
 unchanged need/offer
   keep it and do not wake
 
 new need
-  insert it, match existing offers, wake owner if matches exist
+  insert a need edge, wake owner if a matching offer edge exists
 
 new offer
-  insert it, match existing needs, wake matched owners
+  insert an offer edge, wake matched need-edge owners
 
 removed need/offer
-  delete it
+  delete the edge
 ```
 
 This keeps needs stable. Re-emitting the same need does not wake the owner
@@ -706,7 +723,7 @@ Projector rules:
 - Does not read the clock directly.
 - Does not admit nested facts.
 - Emits the full current need/offer surface on every pass.
-- Uses atomic intents for bounded row writes and deletes.
+- Emits row mutations for bounded row writes and deletes.
 ```
 
 Projectors validate protocol meaning. Core may supply candidate context; the
@@ -730,7 +747,7 @@ When implementing or reviewing a projector:
 4. Emit ContextOffers only after the fact is valid context for that role.
 5. If required context is missing, return stable needs and no materialized rows
    or intents for that branch.
-6. Convert bounded row writes/deletes to atomic intents.
+6. Emit bounded row writes/deletes as row mutations in projector output.
 7. Convert async, retryable, IO, purge, transit, sync, and key-healing work to
    explicit typed deferred intents owned by handlers.
 8. Keep helper functions small, local to the fact family, and named after the
@@ -811,21 +828,24 @@ NetworkSend
 WakeDaemon
 ```
 
-Core applies atomic intents during projection. Deferred intents go into
-`core.intents` and are claimed by registered handlers. Ephemeral intents stay in
-the in-process intent pipeline only; a restart drops them, so only regenerated or
-peer-redelivered IO belongs there.
+Core applies row mutations during projection. Durable intents go into the
+`intents` SQLite queue and are claimed by registered handlers. Restart-local
+intents go into the TEMP `local_intents` queue; a restart drops them, so only
+regenerated or peer-redelivered IO belongs there.
 
 ## Intent Handlers
 
-Handlers consume deferred or ephemeral intents:
+Handlers consume durable or restart-local intents:
 
 ```rust
 fn handle(intent: &Intent, ctx: &HandlerContext) -> Result<HandlerOutput, String>;
 
 struct HandlerOutput {
     facts: Vec<Fact>,
+    purged_facts: Vec<FactId>,
+    row_mutations: Vec<RowMutation>,
     intents: Vec<Intent>,
+    local_intents: Vec<Intent>,
 }
 ```
 
@@ -849,7 +869,7 @@ pub fn handle(intent: &Intent, ctx: &HandlerContext) -> HandlerOutput {
 Handler rules:
 
 ```text
-- One handler owns each deferred or ephemeral intent kind.
+- One handler owns each durable or restart-local intent kind.
 - Handlers are themed, self-contained files under src/protocol/intents/.
 - Handlers declare exact fact inputs when they need fact context.
 - Handlers do bounded work per call.
@@ -866,39 +886,43 @@ capabilities are precisely why the work is not projector work.
 
 ## Runtime Pipelines
 
-The runtime cycle is a readable composition of three SQL-backed pipelines:
+The runtime cycle is a readable composition of SQL-backed queue workers:
 
 ```text
 submit fact
   persist fact if new
   enqueue a pending fact
 
-pending fact pipeline
-  load matched context from current needs/offers
+pending projection worker
+  load matched context from current context_edges
   run projector
-  apply atomic intents
-  replace the fact's needs/offers
-  record context changes
-  persist deferred intents
-  keep ephemeral intents in memory only
+  apply row mutations
+  replace the fact's context_edges
+  wake exact matches with SQL
+  queue custom matcher context changes
+  persist durable intents
+  persist restart-local intents in TEMP local_intents
 
-context change pipeline
-  match new needs/offers
+context wake worker
+  match queued custom need/offer changes
   schedule affected pending facts
   process due time ranges as offer-like context changes
 
-intent pipeline: deferred intents
+intent pipeline: durable intents
   claim intent
   build handler context from declared fact ids
   run flat handler
   submit returned facts
-  persist returned intents
+  apply purges and row mutations
+  persist returned durable and restart-local intents
 
-intent pipeline: ephemeral intents
-  claim in-memory intent
+intent pipeline: restart-local intents
+  claim TEMP local_intents row
   build handler context from declared fact ids
   run flat handler
-  submit returned facts and follow-up intents
+  submit returned facts
+  apply purges and row mutations
+  persist returned durable and restart-local intents
 
 repeat until the work budget is exhausted
 ```
@@ -1294,10 +1318,11 @@ The final model is:
 
 ```text
 facts produce needs, offers, and intents
-needs and offers wake projection
+needs and offers are stored as context_edges
+context_edges wake projection
 context matchers find candidates
 projectors validate protocol meaning
-atomic intents commit exact state
+row mutations commit exact state
 deferred intents drive bounded handlers
 handlers produce more facts and intents
 transit moves bytes

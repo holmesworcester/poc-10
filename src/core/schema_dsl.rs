@@ -696,8 +696,7 @@ mod tests {
             table_names(&core),
             vec![
                 "facts",
-                "context_needs",
-                "context_offers",
+                "context_edges",
                 "time_wakes",
                 "pending_projection",
                 "pending_time_ranges",

@@ -573,7 +573,7 @@ fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
 
     assert!(
         offenders.is_empty(),
-        "poc-10 target projectors should emit only needs, offers, and intents; rows, deletes, and labels must go through atomic intents or context output:\n{}",
+        "poc-10 target projectors should emit only needs, offers, row mutations, and intents; rows, deletes, and labels must go through projector output helpers, not ad hoc fields:\n{}",
         offenders.join("\n")
     );
 }

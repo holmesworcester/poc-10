@@ -23,8 +23,8 @@ Sync should reason over context relationships, not hidden queues:
 - selector need/offer: a fact needs or offers context described by a selector,
   such as key coverage for a frontier/minute/leaf range.
 
-The same context tables that wake projection should be usable to discover what
-out-of-range facts matter for a range.
+The same `context_edges` relation that wakes projection should be usable to
+discover what out-of-range facts matter for a range.
 
 ## Range Closure
 

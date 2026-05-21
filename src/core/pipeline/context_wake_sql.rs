@@ -1,9 +1,9 @@
 //! SQL helpers for matching context changes against current rows.
 
-use super::context_codec::scope_key;
+use super::context_codec::{scope_key, CONTEXT_NEED_DIRECTION, CONTEXT_OFFER_DIRECTION};
 use crate::core::context::ContextSetDelta;
 use crate::core::context::{ContextNeed, ContextOffer, Role};
-use crate::core::pipeline::{CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, PENDING_PROJECTION};
+use crate::core::pipeline::{CONTEXT_EDGES, FACTS, PENDING_PROJECTION};
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, Store};
 use std::collections::BTreeSet;
@@ -103,13 +103,14 @@ fn wake_exact_offers_for_need_in_tx(store: &Store, need: &ContextNeed) -> rusqli
         SELECT :need_owner AS owner
         WHERE EXISTS (
             SELECT 1
-            FROM context_offers
-            WHERE role = :role
+            FROM context_edges
+            WHERE direction = 'offer'
+              AND role = :role
               AND scope_key = :scope_key
               AND selector = :selector
         )
         "#,
-        &[CONTEXT_OFFERS],
+        &[CONTEXT_EDGES],
         &[
             (":need_owner", ColumnValue::Bytes(&need.owner)),
             (":role", ColumnValue::Text(need.role.as_str())),
@@ -129,14 +130,15 @@ fn wake_exact_needs_for_offer_in_tx(
         &["owner"],
         r#"
         SELECT n.owner
-        FROM context_needs n
+        FROM context_edges n
         JOIN facts f ON f.id = n.owner
-        WHERE n.role = :role
+        WHERE n.direction = 'need'
+          AND n.role = :role
           AND n.scope_key = :scope_key
           AND n.selector = :selector
         ORDER BY f.timestamp, n.owner
         "#,
-        &[CONTEXT_NEEDS, FACTS],
+        &[CONTEXT_EDGES, FACTS],
         &[
             (":role", ColumnValue::Text(offer.role.as_str())),
             (":scope_key", ColumnValue::Bytes(&scope_key)),
@@ -148,17 +150,19 @@ fn wake_exact_needs_for_offer_in_tx(
 fn context_need_exists(store: &Store, need: &ContextNeed) -> rusqlite::Result<bool> {
     context_row_exists(
         store,
-        CONTEXT_NEEDS,
+        CONTEXT_EDGES,
         r#"
         SELECT owner
-        FROM context_needs
+        FROM context_edges
         WHERE owner = :owner
+          AND direction = :direction
           AND role = :role
           AND scope_key = :scope_key
           AND selector = :selector
         LIMIT 1
         "#,
         &need.owner,
+        CONTEXT_NEED_DIRECTION,
         &need.role,
         &scope_key(&need.scope),
         need.selector.as_bytes(),
@@ -168,17 +172,19 @@ fn context_need_exists(store: &Store, need: &ContextNeed) -> rusqlite::Result<bo
 fn context_offer_exists(store: &Store, offer: &ContextOffer) -> rusqlite::Result<bool> {
     context_row_exists(
         store,
-        CONTEXT_OFFERS,
+        CONTEXT_EDGES,
         r#"
         SELECT owner
-        FROM context_offers
+        FROM context_edges
         WHERE owner = :owner
+          AND direction = :direction
           AND role = :role
           AND scope_key = :scope_key
           AND selector = :selector
         LIMIT 1
         "#,
         &offer.owner,
+        CONTEXT_OFFER_DIRECTION,
         &offer.role,
         &scope_key(&offer.scope),
         offer.selector.as_bytes(),
@@ -190,6 +196,7 @@ fn context_row_exists(
     table: crate::core::store::TableName,
     sql: &str,
     owner: &[u8; 32],
+    direction: &str,
     role: &Role,
     scope_key: &[u8],
     selector: &[u8],
@@ -200,6 +207,7 @@ fn context_row_exists(
             &[table],
             &[
                 (":owner", ColumnValue::Bytes(owner)),
+                (":direction", ColumnValue::Text(direction)),
                 (":role", ColumnValue::Text(role.as_str())),
                 (":scope_key", ColumnValue::Bytes(scope_key)),
                 (":selector", ColumnValue::Bytes(selector)),

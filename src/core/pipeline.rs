@@ -32,8 +32,8 @@ mod report;
 
 pub(crate) use crate::core::pipeline_storage::{persisted_fact, persisted_facts};
 pub(crate) use crate::core::schema::{
-    CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, INTENTS, LOCAL_INTENTS, PENDING_CONTEXT_CHANGES,
-    PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
+    CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
+    PENDING_TIME_RANGES, TIME_WAKES,
 };
 pub(crate) use admission::{
     commit_projected_context_offers, purge_fact_from_store, submit_fact_to_store,

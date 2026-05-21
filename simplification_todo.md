@@ -12,7 +12,7 @@ queue.
 
 ```text
 fact admission -> pending_projection
-projection -> context rows, row mutations, intents, time wakes
+projection -> context_edges, row mutations, intents, time wakes
 context matching -> pending_projection
 time wakes -> pending_projection
 intent dispatch -> facts, purges, row mutations, follow-up intents
@@ -92,12 +92,15 @@ Accountable criteria:
 - Done in this branch: intent queue row encoding, decoding, and insertion live
   with the pipeline queue code in `pipeline/intent_queue.rs`, not in the
   generic fact/context storage module.
-- Done in this branch: context row reads, context matching, scope-key handling,
-  and pending context-change queue operations use declared typed SQLite rows
-  instead of byte-row scans.
+- Done in this branch: context edge reads, context matching, scope-key
+  handling, and pending context-change queue operations use declared typed
+  SQLite rows instead of byte-row scans.
 - Done in this branch: `context_store.rs` was removed as a sink. Standing
   context row access now lives in `pipeline/context_rows.rs`; matcher assembly
   and custom matcher fanout live in `pipeline/context_matching.rs`.
+- Done in this branch: separate `context_needs` and `context_offers` storage
+  was collapsed into one typed `context_edges` relation keyed by
+  `(owner, direction, role, scope_key, selector)`.
 - Done in this branch: fact insertion, pending-projection marking, and fact
   reads use declared typed SQLite columns; `pipeline_storage.rs` is now fact
   storage plus generic row-mutation helpers.
@@ -248,14 +251,15 @@ scheduling matters.
 
 Bias:
 
-- Done: insert exact wakes with SQL immediately after context rows are updated.
+- Done: insert exact wakes with SQL immediately after context edges are updated.
 - Done: stop tracking exact context changes as scheduler work.
 - Still true: stop tracking removed context as scheduler work unless a concrete
   use appears.
 
 ## 7. Make Context More Generic
 
-Possible target:
+Done in this branch: needs and offers are stored as opposite directions in one
+declared SQLite relation:
 
 ```text
 context_edges(
@@ -268,8 +272,10 @@ context_edges(
 )
 ```
 
-This would replace duplicated need/offer codecs and make exact matching a
-self-join over opposite directions.
+This replaced duplicated need/offer storage tables and makes exact matching a
+direction-filtered query over one relation. The in-memory Rust vocabulary still
+uses `ContextNeed` and `ContextOffer` because projectors and matchers benefit
+from the type distinction.
 
 ## 8. Treat Context As Mostly Monotonic
 

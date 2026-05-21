@@ -97,8 +97,9 @@ const SECRET_OFFER_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
 
 pub const SECRET_COVERAGE_OFFERS_FOR_NEED_SQL: &str = "
 SELECT owner, selector
-FROM context_offers
-WHERE role = :role
+FROM context_edges
+WHERE direction = 'offer'
+  AND role = :role
   AND scope_key = :scope_key
   AND length(selector) = 114
   AND substr(selector, 1, 1) = x'01'
@@ -145,8 +146,9 @@ ORDER BY owner, selector";
 
 pub const SECRET_COVERAGE_NEEDS_FOR_OFFER_SQL: &str = "
 SELECT owner, selector
-FROM context_needs
-WHERE role = :role
+FROM context_edges
+WHERE direction = 'need'
+  AND role = :role
   AND scope_key = :scope_key
   AND length(selector) = 105
   AND substr(selector, 1, 1) = x'01'

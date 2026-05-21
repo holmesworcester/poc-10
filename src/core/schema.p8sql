@@ -10,22 +10,14 @@ table facts {
   row_key (id);
   index by_scope_time (scope, scope_kind, scope_id, timestamp);
 }
-table context_needs {
+table context_edges {
   column owner bytes(32);
+  column direction text;
   column role text;
   column scope_key bytes;
   column selector bytes;
-  row_key (owner, role, scope_key, selector);
-  index by_match (role, scope_key, selector);
-  index by_owner (owner);
-}
-table context_offers {
-  column owner bytes(32);
-  column role text;
-  column scope_key bytes;
-  column selector bytes;
-  row_key (owner, role, scope_key, selector);
-  index by_match (role, scope_key, selector);
+  row_key (owner, direction, role, scope_key, selector);
+  index by_match (direction, role, scope_key, selector);
   index by_owner (owner);
 }
 table time_wakes {

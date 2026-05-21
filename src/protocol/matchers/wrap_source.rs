@@ -109,8 +109,9 @@ const WRAP_OFFER_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
 
 pub const WRAP_SOURCE_OFFERS_FOR_NEED_SQL: &str = "
 SELECT owner, selector
-FROM context_offers
-WHERE role = :role
+FROM context_edges
+WHERE direction = 'offer'
+  AND role = :role
   AND scope_key = :scope_key
   AND length(selector) = 156
   AND substr(selector, 1, 1) = x'03'
@@ -123,8 +124,9 @@ ORDER BY owner, selector";
 
 pub const WRAP_SOURCE_NEEDS_FOR_OFFER_SQL: &str = "
 SELECT owner, selector
-FROM context_needs
-WHERE role = :role
+FROM context_edges
+WHERE direction = 'need'
+  AND role = :role
   AND scope_key = :scope_key
   AND (
     (

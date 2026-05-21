@@ -1,7 +1,7 @@
 //! Atomic SQL writes for one completed projection.
 
-use super::context_codec::scope_key;
 use super::context_queue::insert_pending_context_changes_for_roles_in_tx;
+use super::context_rows::{insert_context_need_in_tx, insert_context_offer_in_tx};
 use super::context_wake_sql::{
     custom_role_delta, exact_role_delta, wake_exact_context_matches_in_tx,
 };
@@ -9,8 +9,8 @@ use crate::core::context::{ContextSet, ContextSetDelta};
 use crate::core::facts::FactId;
 use crate::core::matchers::ContextMatcher;
 use crate::core::pipeline::{
-    commit_pipeline_effects_in_tx, PipelineEffectCounts, PipelineEffects, CONTEXT_NEEDS,
-    CONTEXT_OFFERS, PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
+    commit_pipeline_effects_in_tx, PipelineEffectCounts, PipelineEffects, CONTEXT_EDGES,
+    PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
 };
 use crate::core::projectors::TimeWake;
 use crate::core::store::{ColumnValue, Store, TableName};
@@ -133,30 +133,12 @@ fn replace_stored_context_owner_rows(
     owner: FactId,
     context: &ContextSet,
 ) -> rusqlite::Result<()> {
-    store.delete_typed_rows_where_in_tx(CONTEXT_NEEDS, &[("owner", ColumnValue::Bytes(&owner))])?;
-    store
-        .delete_typed_rows_where_in_tx(CONTEXT_OFFERS, &[("owner", ColumnValue::Bytes(&owner))])?;
+    store.delete_typed_rows_where_in_tx(CONTEXT_EDGES, &[("owner", ColumnValue::Bytes(&owner))])?;
     for need in &context.needs {
-        store.insert_typed_row_in_tx(
-            CONTEXT_NEEDS,
-            &[
-                ("owner", ColumnValue::Bytes(&need.owner)),
-                ("role", ColumnValue::Text(need.role.as_str())),
-                ("scope_key", ColumnValue::Bytes(&scope_key(&need.scope))),
-                ("selector", ColumnValue::Bytes(need.selector.as_bytes())),
-            ],
-        )?;
+        insert_context_need_in_tx(store, need)?;
     }
     for offer in &context.offers {
-        store.insert_typed_row_in_tx(
-            CONTEXT_OFFERS,
-            &[
-                ("owner", ColumnValue::Bytes(&offer.owner)),
-                ("role", ColumnValue::Text(offer.role.as_str())),
-                ("scope_key", ColumnValue::Bytes(&scope_key(&offer.scope))),
-                ("selector", ColumnValue::Bytes(offer.selector.as_bytes())),
-            ],
-        )?;
+        insert_context_offer_in_tx(store, offer)?;
     }
     Ok(())
 }

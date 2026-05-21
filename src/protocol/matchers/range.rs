@@ -60,8 +60,9 @@ const RANGE_OFFER_SELECTOR_FIELDS: &[SelectorFieldDeclaration] = &[
 
 pub const RANGE_FACT_OFFERS_FOR_NEED_SQL: &str = "
 SELECT owner, selector
-FROM context_offers
-WHERE role = :role
+FROM context_edges
+WHERE direction = 'offer'
+  AND role = :role
   AND scope_key = :scope_key
   AND length(selector) = 104
   AND substr(selector, 1, 8) >= :start
@@ -70,8 +71,9 @@ ORDER BY owner, selector";
 
 pub const RANGE_FACT_NEEDS_FOR_OFFER_SQL: &str = "
 SELECT owner, selector
-FROM context_needs
-WHERE role = :role
+FROM context_edges
+WHERE direction = 'need'
+  AND role = :role
   AND scope_key = :scope_key
   AND length(selector) = 16
   AND substr(selector, 1, 8) <= :timestamp
