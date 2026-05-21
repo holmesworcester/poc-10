@@ -22,6 +22,54 @@ incoming frames / commands -> facts and intents
 Keep the scheduler single threaded for now. Parallel workers should wait until
 queues have explicit claim/lease state.
 
+## Ambitious Success Criteria
+
+This rewrite is successful when the runtime reads as queue workers plus
+declarative storage, not as one central storage module with pipeline-shaped
+branches.
+
+Accountable criteria:
+
+1. `pipeline_storage.rs` is gone, or reduced below 250 lines and renamed to a
+   codec-only module. It must not contain queue scheduling, context matching,
+   projection commit policy, or intent dispatch policy.
+2. Each pipeline worker owns the SQL for the tables it drains or updates:
+   `fact_context.rs` owns due time wake admission, `projection.rs` owns pending
+   projection selection and fact-owned context/time-wake replacement,
+   `context_wake.rs` owns context-match fanout, and `dispatch.rs` owns intent
+   queue claim/delete/ordering.
+3. Pipeline control flow no longer sorts or filters decoded table rows in Rust
+   when the same operation is an indexed SQLite query. In particular, pending
+   projection order, due time wake selection, and exact context wake insertion
+   should be SQL-first.
+4. Byte layout is not part of pipeline control flow. Remaining byte codecs are
+   limited to fact payloads, intent payloads, opaque protocol row values, and
+   transitional row encoding that cannot yet be represented by typed schema
+   columns.
+5. `Store` stays generic. Any new SQL affordance is narrow and reusable, such
+   as typed bounded selects, delete-by-declared-filter, or checked
+   `INSERT OR IGNORE ... SELECT` helpers. Protocol modules still cannot issue
+   arbitrary writes through core.
+6. Projection replay has a simple ownership rule: a projection replaces exactly
+   the context/time-wake rows owned by its `fact_id`, applies protocol
+   `RowMutation`s through `PipelineEffects`, and is idempotent when inputs are
+   unchanged.
+7. Commands, incoming frames, projection, and handlers all reduce committed
+   side effects through `PipelineEffects` or an equally small successor shape.
+   There must not be a second ad hoc effect path for row writes or emitted
+   intents.
+8. Runtime remains single threaded until queues have explicit claim/lease
+   columns. The code should nevertheless read as independent workers whose
+   outputs enqueue each other.
+9. Black-box behavior is unchanged. At minimum, every major step must pass
+   `cargo test --test black_box_sync_test -- --nocapture --test-threads=1`,
+   and the final rewrite must pass full `cargo test`.
+10. The end state should reduce complexity, not only relocate it. Track this
+    with rough thresholds: `src/core/pipeline/*.rs` should stay split by worker,
+    no single pipeline worker should grow into a new 1k-line sink, and the total
+    code for pipeline storage/query helpers should be materially smaller than
+    the current `pipeline_storage.rs` plus duplicated callers.
+
 ## Status
 
 - Done in this branch: restart-local intents now use a SQLite TEMP
