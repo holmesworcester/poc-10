@@ -10,23 +10,12 @@
 //! - `effects`: validation and SQL commit helpers for shared core effects.
 
 mod admission;
-#[cfg(test)]
-pub(crate) mod context_codec;
-#[cfg(not(test))]
-mod context_codec;
 mod context_matching;
 pub(crate) mod context_rows;
-mod context_wakes;
 mod dispatch;
 mod effects;
 mod fact_context;
-mod intent_queue;
 mod projection;
-mod projection_commit;
-mod projection_queue;
-mod projection_run;
-#[cfg(test)]
-mod projection_run_tests;
 
 /// Public outcome returned by runtime pipeline calls.
 ///

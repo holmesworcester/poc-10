@@ -4,7 +4,7 @@
 //! the destination queue table and columns; the select only describes the
 //! bounded source rows and bound parameters.
 
-use crate::core::sqlite_names::{quoted_identifier_list, quoted_table_name};
+use crate::core::store::{quoted_identifier_list, quoted_table_name};
 use crate::core::store::{Store, TableName};
 use rusqlite::types::Value as SqliteValue;
 

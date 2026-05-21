@@ -3,12 +3,13 @@ use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
 use crate::core::intents::{Intent, RowMutation, TableDelete, TableDeleteWhere, TableInsert};
 use crate::core::schema::LOCAL_INTENTS;
 use crate::core::select::Value as SqlValue;
-use crate::core::sqlite_names::{quoted_identifier, quoted_identifier_list, quoted_table_name};
-use crate::core::store::{Store, TableName, TableRow};
+use crate::core::store::{
+    quoted_identifier, quoted_identifier_list, quoted_table_name, Store, TableName, TableRow,
+};
 use rusqlite::{params_from_iter, OptionalExtension};
 use std::collections::BTreeMap;
 
-use super::intent_queue::{record_intent_in_table_in_tx, record_intent_in_tx};
+use super::dispatch::{record_intent_in_table_in_tx, record_intent_in_tx};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PipelineEffectCounts {

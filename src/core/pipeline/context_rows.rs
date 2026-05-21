@@ -1,10 +1,13 @@
 //! Typed SQL rows for standing fact context.
 
-use super::context_codec::{decode_scope_key, CONTEXT_NEED_DIRECTION, CONTEXT_OFFER_DIRECTION};
 use crate::core::context::{scope_key, ContextNeed, ContextOffer, ContextSet, Role, Selector};
-use crate::core::facts::{FactId, FactScope};
+use crate::core::facts::{FactId, FactScope, ScopeKind};
 use crate::core::store::Store;
+use crate::core::wire::{Reader, WireError};
 use rusqlite::params;
+
+const CONTEXT_NEED_DIRECTION: &str = "need";
+const CONTEXT_OFFER_DIRECTION: &str = "offer";
 
 /// Load a fact's standing context, returning `None` when it has none.
 pub(crate) fn persisted_context(
@@ -241,4 +244,34 @@ fn bytes(value: &[u8]) -> rusqlite::types::Value {
 
 fn text(value: &str) -> rusqlite::types::Value {
     rusqlite::types::Value::Text(value.to_string())
+}
+
+fn decode_scope_key(bytes: &[u8]) -> Result<FactScope, String> {
+    let mut reader = Reader::new(bytes);
+    let scope = decode_scope(&mut reader)?;
+    reader.finish().row()?;
+    Ok(scope)
+}
+
+fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {
+    match reader.u8().row()? {
+        0 => Ok(FactScope::Global),
+        1 => Ok(FactScope::Local),
+        2 => {
+            let kind = ScopeKind::new(reader.string_u16be().row()?)?;
+            let id = reader.array::<32>().row()?;
+            Ok(FactScope::Scoped { kind, id })
+        }
+        other => Err(format!("invalid fact scope tag {other}")),
+    }
+}
+
+trait RowWireResult<T> {
+    fn row(self) -> Result<T, String>;
+}
+
+impl<T> RowWireResult<T> for Result<T, WireError> {
+    fn row(self) -> Result<T, String> {
+        self.map_err(|err| format!("invalid encoded row: {err}"))
+    }
 }

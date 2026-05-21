@@ -6,7 +6,6 @@ use crate::core::store::{Store, TableName};
 use rusqlite::{params, params_from_iter, OptionalExtension};
 
 use super::effects::{commit_pipeline_effects_in_tx, validate_pipeline_effects};
-use super::intent_queue::{intent_table_name, record_intent_in_table_in_tx};
 use super::WorkStatus;
 
 // === Intent dispatch ===
@@ -189,4 +188,61 @@ fn delete_intent_in_tx(
         &format!("DELETE FROM {table_name} WHERE kind = ?1 AND idempotence_key = ?2"),
         params![kind, idempotence_key],
     )
+}
+
+pub(super) fn record_intent_in_tx(store: &Store, intent: &Intent) -> rusqlite::Result<bool> {
+    record_intent_in_table_in_tx(store, INTENTS, intent)
+}
+
+pub(super) fn record_intent_in_table_in_tx(
+    store: &Store,
+    table: TableName,
+    intent: &Intent,
+) -> rusqlite::Result<bool> {
+    let table_name = intent_table_name(table)?;
+    let changed = store.conn().execute(
+        &format!(
+            "INSERT OR IGNORE INTO {table_name} (kind, idempotence_key, payload)
+             VALUES (?1, ?2, ?3)"
+        ),
+        params![
+            intent.kind.as_str(),
+            intent.key.as_slice(),
+            intent.payload.as_slice()
+        ],
+    )?;
+    if changed == 0 {
+        let existing = store
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT payload
+                     FROM {table_name}
+                     WHERE kind = ?1 AND idempotence_key = ?2"
+                ),
+                params![intent.kind.as_str(), intent.key.as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        if existing.as_deref() != Some(intent.payload.as_slice()) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "conflicting intent row for {}",
+                intent.kind.as_str()
+            )));
+        }
+    }
+    Ok(changed > 0)
+}
+
+fn intent_table_name(table: TableName) -> rusqlite::Result<&'static str> {
+    if table == INTENTS {
+        Ok("\"intents\"")
+    } else if table == LOCAL_INTENTS {
+        Ok("\"local_intents\"")
+    } else {
+        Err(rusqlite::Error::InvalidParameterName(format!(
+            "table {} is not an intent queue",
+            table.as_str()
+        )))
+    }
 }

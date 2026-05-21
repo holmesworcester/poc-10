@@ -1,14 +1,24 @@
 //! Pending fact projection orchestration.
 
+use super::context_matching::stored_matching_context;
+use super::context_matching::wake_context_matches_in_tx;
+use super::context_rows::{
+    insert_context_need_in_tx, insert_context_offer_in_tx, stored_context_for_owner,
+};
 use super::effects::validate_pipeline_effects;
-use super::projection_commit::{commit_projection_effects, ProjectionEffects};
-use super::projection_queue::{load_pending_fact, pending_owner_batch, PendingFact};
-use super::projection_run::run_projection_with_context;
+use super::effects::{commit_pipeline_effects_in_tx, sqlite_string_error};
 use super::WorkStatus;
+use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
+use crate::core::effects::PipelineEffects;
+use crate::core::fact_store::persisted_fact;
 use crate::core::fact_store::purge_fact_in_tx;
+use crate::core::facts::{Fact, FactId};
 use crate::core::matchers::ContextMatchers;
-use crate::core::projectors::Projector;
+use crate::core::projectors::{
+    ProjectionContext, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
+};
 use crate::core::store::{Store, TableName};
+use rusqlite::params;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ProjectionProgress {
@@ -110,4 +120,482 @@ fn prepare_projection_effects(
         context_delta: run.context_delta,
         pipeline: run.pipeline,
     })
+}
+
+/// The uncommitted output of projecting one pending fact.
+struct ProjectionEffects {
+    fact_id: FactId,
+    next_context: ContextSet,
+    next_time_wakes: Vec<TimeWake>,
+    context_delta: ContextSetDelta,
+    pipeline: PipelineEffects,
+}
+
+/// Commit all durable projection effects in one SQLite transaction.
+///
+/// Transaction contents:
+///
+/// - Clear this fact's pending row.
+/// - Replace this fact's standing context.
+/// - Replace this fact's time wakes.
+/// - Wake context matches directly.
+/// - Apply row mutations.
+/// - Record durable intents.
+/// - Record restart-local intents in the temp local queue.
+fn commit_projection_effects(
+    store: &Store,
+    effects: &ProjectionEffects,
+    matchers: &ContextMatchers,
+    allowed_tables: &[TableName],
+) -> Result<(), String> {
+    store
+        .write_transaction(|tx| {
+            tx.conn().execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                params![effects.fact_id.as_slice()],
+            )?;
+            delete_pending_time_ranges_for_owner_in_tx(tx, effects.fact_id)?;
+            replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
+            replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
+
+            wake_context_matches_in_tx(tx, &effects.context_delta, matchers)
+                .map_err(sqlite_string_error)?;
+            commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables)?;
+            Ok(())
+        })
+        .map_err(|err| format!("commit projection effects: {err}"))
+}
+
+fn delete_pending_time_ranges_for_owner_in_tx(
+    store: &Store,
+    owner: FactId,
+) -> rusqlite::Result<usize> {
+    store.conn().execute(
+        "DELETE FROM pending_time_ranges WHERE owner = ?1",
+        params![owner.as_slice()],
+    )
+}
+
+/// Replace this fact's standing needs/offers by owner.
+///
+/// Projection owns the complete context set for its fact. The owner column is
+/// the fact id, so deleting by owner replaces exactly this fact's rows.
+fn replace_stored_context_owner_rows(
+    store: &Store,
+    owner: FactId,
+    context: &ContextSet,
+) -> rusqlite::Result<()> {
+    store.conn().execute(
+        "DELETE FROM context_edges WHERE owner = ?1",
+        params![owner.as_slice()],
+    )?;
+    for need in &context.needs {
+        insert_context_need_in_tx(store, need)?;
+    }
+    for offer in &context.offers {
+        insert_context_offer_in_tx(store, offer)?;
+    }
+    Ok(())
+}
+
+/// Replace all time wakes owned by this fact.
+///
+/// Time wakes are not appended: projection output is the complete current
+/// schedule for the owner, so old rows must disappear when the projection no
+/// longer emits them.
+fn replace_stored_time_wake_owner_rows(
+    store: &Store,
+    owner: FactId,
+    wakes: &[TimeWake],
+) -> rusqlite::Result<()> {
+    store.conn().execute(
+        "DELETE FROM time_wakes WHERE owner = ?1",
+        params![owner.as_slice()],
+    )?;
+    for wake in wakes {
+        store.conn().execute(
+            "INSERT OR IGNORE INTO time_wakes (timeline, at, owner)
+             VALUES (?1, ?2, ?3)",
+            params![
+                wake.timeline.as_str(),
+                sqlite_u64(wake.at, "time wake")?,
+                wake.owner.as_slice()
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("{name} exceeds SQLite integer range"))
+    })
+}
+
+/// A fact that has been claimed from the pending queue and is ready to project.
+struct PendingFact {
+    fact_id: FactId,
+    fact: Fact,
+    previous_context: ContextSet,
+    projection_context: ProjectionContext,
+}
+
+/// Read the next pending fact ids without mutating the queue.
+///
+/// The commit step removes the row only after projection succeeds. Missing
+/// facts are handled by the caller as stale pending rows and purged there.
+fn pending_owner_batch(store: &Store, limit: usize) -> Result<Vec<FactId>, String> {
+    let limit =
+        i64::try_from(limit).map_err(|_| "pending projection limit exceeds i64".to_string())?;
+    let mut stmt = store
+        .conn()
+        .prepare(
+            r#"
+            SELECT p.owner
+            FROM pending_projection p
+            LEFT JOIN local_fact_admissions m ON m.fact_id = p.owner
+            ORDER BY COALESCE(m.received_at, 9223372036854775807), p.owner
+            LIMIT ?1
+            "#,
+        )
+        .map_err(|err| format!("load pending projection: {err}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")
+        })
+        .map_err(|err| format!("load pending projection: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("load pending projection: {err}"))
+}
+
+/// Load everything projection needs for one fact.
+///
+/// `previous_context` is the fact's standing context before this run.
+/// `projection_context` is the matched input context exposed to the projector
+/// for this run, including any due time ranges.
+fn load_pending_fact(
+    store: &Store,
+    fact_id: FactId,
+    matchers: &ContextMatchers,
+) -> Result<Option<PendingFact>, String> {
+    let Some(fact) = persisted_fact(store, &fact_id)? else {
+        return Ok(None);
+    };
+    let previous_context = stored_context_for_owner(store, &fact_id)?;
+    let time_ranges = pending_time_ranges_for_owner(store, &fact_id)?;
+    let projection_context =
+        stored_matching_context(store, &previous_context, matchers)?.with_time_ranges(time_ranges);
+    Ok(Some(PendingFact {
+        fact_id,
+        fact,
+        previous_context,
+        projection_context,
+    }))
+}
+
+fn pending_time_ranges_for_owner(store: &Store, owner: &FactId) -> Result<Vec<TimeRange>, String> {
+    let mut stmt = store
+        .conn()
+        .prepare(
+            r#"
+            SELECT timeline, has_start, start_exclusive, end_inclusive
+            FROM pending_time_ranges
+            WHERE owner = ?1
+            ORDER BY timeline, has_start, start_exclusive, end_inclusive
+            "#,
+        )
+        .map_err(|err| format!("load pending time ranges: {err}"))?;
+    let rows = stmt
+        .query_map(params![owner.as_slice()], decode_pending_time_range)
+        .map_err(|err| format!("load pending time ranges: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("load pending time ranges: {err}"))
+}
+
+fn decode_pending_time_range(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimeRange> {
+    let timeline =
+        Timeline::new(row.get::<_, String>(0)?).map_err(rusqlite::Error::InvalidParameterName)?;
+    let has_start = match row.get::<_, i64>(1)? {
+        0 => false,
+        1 => true,
+        other => {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "pending time range has invalid bool {other}"
+            )));
+        }
+    };
+    let start = u64_column(row.get::<_, i64>(2)?, "start_exclusive")?;
+    let end_inclusive = u64_column(row.get::<_, i64>(3)?, "end_inclusive")?;
+    Ok(TimeRange {
+        timeline,
+        start_exclusive: has_start.then_some(start),
+        end_inclusive,
+    })
+}
+
+fn fact_id_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<FactId> {
+    bytes.try_into().map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("{name} is not a 32-byte fact id"))
+    })
+}
+
+fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
+    u64::try_from(value)
+        .map_err(|_| rusqlite::Error::InvalidParameterName(format!("{name} is negative")))
+}
+
+/// The pure result of running one projector before any SQL writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectionRun {
+    context: ContextSet,
+    context_delta: ContextSetDelta,
+    time_wakes: Vec<TimeWake>,
+    pipeline: PipelineEffects,
+}
+
+/// Call the protocol projector and normalize the output for the SQL pipeline.
+///
+/// Projection output is the complete replacement context for this fact. This
+/// helper enforces that projectors only own their own context/time rows, then
+/// computes the context delta that will wake dependent facts after commit.
+fn run_projection_with_context(
+    projector: &(impl Projector + ?Sized),
+    fact: &Fact,
+    previous_context: &ContextSet,
+    context: ProjectionContext,
+) -> Result<ProjectionRun, String> {
+    let output = projector.project(fact, &context)?;
+    enforce_owner_is_self(fact, &output)?;
+    let context = output.context_set();
+    let context_delta = diff_context_sets(previous_context, &context);
+    Ok(ProjectionRun {
+        context,
+        context_delta,
+        time_wakes: output.time_wakes,
+        pipeline: output.effects,
+    })
+}
+
+/// Reject any projected need, offer, or time wake whose `owner` is not the fact
+/// being projected.
+fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
+    if !output.effects.facts.is_empty() || !output.effects.purged_facts.is_empty() {
+        return Err("projector output cannot emit or purge facts".to_string());
+    }
+    for need in &output.needs {
+        if need.owner != fact.id {
+            return Err(format!(
+                "projector emitted need with owner {:x?} that is not the projected fact {:x?}",
+                need.owner, fact.id
+            ));
+        }
+    }
+    for offer in &output.offers {
+        if offer.owner != fact.id {
+            return Err(format!(
+                "projector emitted offer with owner {:x?} that is not the projected fact {:x?}",
+                offer.owner, fact.id
+            ));
+        }
+    }
+    for wake in &output.time_wakes {
+        if wake.owner != fact.id {
+            return Err(format!(
+                "projector emitted time wake with owner {:x?} that is not the projected fact {:x?}",
+                wake.owner, fact.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
+    use crate::core::facts::FactScope;
+    use crate::core::intents::{Intent, IntentKind};
+
+    #[test]
+    fn projection_run_rejects_offer_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = BadOfferOwnerProjector;
+
+        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect_err("projection should reject foreign offer owner");
+
+        assert!(err.contains("projector emitted offer with owner"));
+    }
+
+    #[test]
+    fn projection_run_rejects_need_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = BadNeedOwnerProjector;
+
+        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect_err("projection should reject foreign need owner");
+
+        assert!(err.contains("projector emitted need with owner"));
+    }
+
+    #[test]
+    fn projection_run_rejects_time_wake_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = BadTimeWakeOwnerProjector;
+
+        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect_err("projection should reject foreign time-wake owner");
+
+        assert!(err.contains("projector emitted time wake"));
+    }
+
+    #[test]
+    fn projection_run_diffs_standing_context_without_self_waking() {
+        let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
+        let role = Role::new("exact").unwrap();
+        let selector = Selector::from_bytes([9; 32]);
+        let projector = NeedUntilOffer {
+            role,
+            selector,
+            intent_kind: IntentKind::new("followup").unwrap(),
+        };
+
+        let first =
+            run_projection(&projector, &fact, &ContextSet::new(), Vec::new()).expect("first run");
+        assert_eq!(first.context_delta.added_needs.len(), 1);
+        assert_eq!(first.context_delta.removed_needs.len(), 0);
+
+        let second =
+            run_projection(&projector, &fact, &first.context, Vec::new()).expect("second run");
+        assert!(second.context_delta.is_empty());
+        assert_eq!(second.context, first.context);
+        assert!(second.pipeline.intents.is_empty());
+    }
+
+    #[test]
+    fn projection_run_replaces_need_with_intent_when_context_appears() {
+        let fact = Fact::new(FactScope::Global, 1, b"recoverable".to_vec());
+        let role = Role::new("exact").unwrap();
+        let selector = Selector::from_bytes([9; 32]);
+        let projector = NeedUntilOffer {
+            role: role.clone(),
+            selector: selector.clone(),
+            intent_kind: IntentKind::new("followup").unwrap(),
+        };
+        let previous = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect("previous projection")
+            .context;
+        let offer = ContextOffer {
+            owner: [2; 32],
+            role,
+            scope: FactScope::Global,
+            selector,
+        };
+
+        let next = run_projection(&projector, &fact, &previous, vec![offer])
+            .expect("projection with context");
+
+        assert!(next.context.needs.is_empty());
+        assert_eq!(next.context_delta.removed_needs, previous.needs);
+        assert_eq!(next.context_delta.added_needs.len(), 0);
+        assert_eq!(next.pipeline.intents.len(), 1);
+        assert_eq!(next.pipeline.intents[0].kind.as_str(), "followup");
+    }
+
+    fn run_projection(
+        projector: &impl Projector,
+        fact: &Fact,
+        previous_context: &ContextSet,
+        offers: Vec<ContextOffer>,
+    ) -> Result<ProjectionRun, String> {
+        run_projection_with_context(
+            projector,
+            fact,
+            previous_context,
+            ProjectionContext::new(offers),
+        )
+    }
+
+    struct NeedUntilOffer {
+        role: Role,
+        selector: Selector,
+        intent_kind: IntentKind,
+    }
+
+    impl Projector for NeedUntilOffer {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if context.offers().is_empty() {
+                Ok(ProjectionOutput::new().need(ContextNeed {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    selector: self.selector.clone(),
+                }))
+            } else {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    self.intent_kind.clone(),
+                    fact.id,
+                    context
+                        .offers()
+                        .first()
+                        .map(|offer| offer.owner)
+                        .unwrap_or(fact.id),
+                )))
+            }
+        }
+    }
+
+    struct BadOfferOwnerProjector;
+
+    impl Projector for BadOfferOwnerProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().offer(ContextOffer {
+                owner: [9; 32],
+                role: Role::new("exact").unwrap(),
+                scope: fact.scope.clone(),
+                selector: Selector::from_bytes(fact.id),
+            }))
+        }
+    }
+
+    struct BadNeedOwnerProjector;
+
+    impl Projector for BadNeedOwnerProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: [9; 32],
+                role: Role::new("exact").unwrap(),
+                scope: fact.scope.clone(),
+                selector: Selector::from_bytes(fact.id),
+            }))
+        }
+    }
+
+    struct BadTimeWakeOwnerProjector;
+
+    impl Projector for BadTimeWakeOwnerProjector {
+        fn project(
+            &self,
+            _fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().time_wake(TimeWake {
+                owner: [9; 32],
+                timeline: Timeline::new("test").unwrap(),
+                at: 1,
+            }))
+        }
+    }
 }

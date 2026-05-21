@@ -34,9 +34,9 @@ Accountable criteria:
    matching, projection commit policy, or intent dispatch policy.
 2. Each pipeline worker owns the SQL for the tables it drains or updates:
    `fact_context.rs` owns due time wake admission, `projection.rs` owns pending
-   projection selection, `projection_commit.rs` owns fact-owned context/time-wake
-   replacement and context-match fanout, and `dispatch.rs` owns intent queue
-   claim/delete/ordering.
+   projection selection, fact-owned context/time-wake replacement, and
+   context-match fanout, while `dispatch.rs` owns intent queue
+   insert/claim/delete/ordering.
 3. Pipeline control flow no longer sorts or filters decoded table rows in Rust
    when the same operation is an indexed SQLite query. In particular, pending
    projection order, due time wake selection, and context wake insertion should
@@ -89,15 +89,13 @@ Accountable criteria:
   context/time-wake replacement now use declared SQLite columns in their owning
   pipeline modules instead of byte-row scans in `pipeline_storage.rs`.
 - Done in this branch: intent queue row encoding, decoding, and insertion live
-  with the pipeline queue code in `pipeline/intent_queue.rs`, not in the
-  generic fact/context storage module.
+  with dispatch, not in the generic fact/context storage module.
 - Done in this branch: context edge reads, context matching, and scope-key
   handling use declared typed SQLite rows instead of byte-row scans.
 - Done in this branch: `context_store.rs` was removed as a sink. Standing
   context row access now lives in `pipeline/context_rows.rs`; matcher assembly
-  lives in `pipeline/context_matching.rs`; context wake assembly lives in
-  `pipeline/context_wakes.rs`; reusable checked insert-select execution lives
-  in `core::select`.
+  and context wake assembly live in `pipeline/context_matching.rs`; reusable
+  checked insert-select execution lives in `core::select`.
 - Done in this branch: separate `context_needs` and `context_offers` storage
   was collapsed into one typed `context_edges` relation keyed by
   `(owner, direction, role, scope_key, selector)`.
@@ -187,6 +185,9 @@ Accountable criteria:
 - Done in this branch: the remaining matcher declaration shell is gone. Exact
   context roles are a core SQL relation, and protocol registers only exact role
   names plus the real SQL-backed custom matchers.
+- Done in this branch: core pipeline file count was reduced by consolidating
+  projection, dispatch/intent queue, context row/codec, and context
+  match/wake modules. `sqlite_names.rs` was also folded into `core::store`.
 
 ## 1. Store All Intents In SQLite Queues
 
