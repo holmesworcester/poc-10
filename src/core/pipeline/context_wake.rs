@@ -2,17 +2,16 @@ use crate::core::context::ContextSetDelta;
 use crate::core::context::{ContextNeed, ContextOffer, Role};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
 use crate::core::pipeline::report::PipelineReport;
-use crate::core::pipeline::{
-    persisted_fact, CONTEXT_NEEDS, CONTEXT_OFFERS, PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
-};
-use crate::core::pipeline_storage::scope_key;
-use crate::core::pipeline_storage::{
-    context_need_row, context_offer_row, decode_pending_context_change_row, sqlite_string_error,
-    stored_context_matches,
-};
+use crate::core::pipeline::{persisted_fact, CONTEXT_NEEDS, CONTEXT_OFFERS, PENDING_PROJECTION};
+use crate::core::pipeline_storage::sqlite_string_error;
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store};
 use std::collections::BTreeSet;
+
+use super::context_store::{
+    delete_pending_context_change_in_tx, pending_context_change_batch, scope_key,
+    stored_context_matches, PendingContextChange,
+};
 
 /// Drain pending need/offer changes and wake newly matched facts.
 pub(super) fn process_context_changes(
@@ -25,21 +24,15 @@ pub(super) fn process_context_changes(
         return Ok(report);
     }
 
-    let rows = store
-        .table_rows(PENDING_CONTEXT_CHANGES)
-        .map_err(|err| format!("load pending context changes: {err}"))?;
-    let mut keys = Vec::new();
+    let changes = pending_context_change_batch(store, limit)?;
     let mut delta = ContextSetDelta::default();
-    for (key, value) in rows.into_iter().take(limit) {
-        let decoded = decode_pending_context_change_row(&key, &value)?;
-        keys.push(key);
-        delta.added_needs.extend(decoded.added_needs);
-        delta.added_offers.extend(decoded.added_offers);
+    for change in &changes {
+        change.add_to_delta(&mut delta);
     }
-    if keys.is_empty() {
+    if changes.is_empty() {
         return Ok(report);
     }
-    let commit = commit_context_change_matching(store, keys, &delta, matchers)?;
+    let commit = commit_context_change_matching(store, changes, &delta, matchers)?;
     report.context_matches += commit.context_matches.len();
     report.woken_facts += commit.woken_facts;
     Ok(report)
@@ -57,13 +50,15 @@ struct ContextChangeCommit {
 /// also preserving the wakeups they produced.
 fn commit_context_change_matching(
     store: &Store,
-    pending_keys: Vec<Vec<u8>>,
+    pending_changes: Vec<PendingContextChange>,
     delta: &ContextSetDelta,
     matchers: &[&dyn ContextMatcher],
 ) -> Result<ContextChangeCommit, String> {
     store
         .write_transaction(|tx| {
-            tx.delete_table_rows_in_tx(PENDING_CONTEXT_CHANGES, pending_keys)?;
+            for change in &pending_changes {
+                delete_pending_context_change_in_tx(tx, change)?;
+            }
             let current_delta = current_stored_context_delta(tx, delta)?;
             let mut context_matches = exact_context_matches(tx, &current_delta, matchers)?;
             let custom_matchers = matchers
@@ -236,16 +231,81 @@ fn current_stored_context_delta(
 ) -> rusqlite::Result<ContextSetDelta> {
     let mut current = ContextSetDelta::default();
     for need in &delta.added_needs {
-        let row = context_need_row(need);
-        if store.table_row(CONTEXT_NEEDS, &row.key)?.is_some() {
+        if context_need_exists(store, need)? {
             current.added_needs.push(need.clone());
         }
     }
     for offer in &delta.added_offers {
-        let row = context_offer_row(offer);
-        if store.table_row(CONTEXT_OFFERS, &row.key)?.is_some() {
+        if context_offer_exists(store, offer)? {
             current.added_offers.push(offer.clone());
         }
     }
     Ok(current)
+}
+
+fn context_need_exists(store: &Store, need: &ContextNeed) -> rusqlite::Result<bool> {
+    context_row_exists(
+        store,
+        CONTEXT_NEEDS,
+        r#"
+        SELECT owner
+        FROM context_needs
+        WHERE owner = :owner
+          AND role = :role
+          AND scope_key = :scope_key
+          AND selector = :selector
+        LIMIT 1
+        "#,
+        &need.owner,
+        &need.role,
+        &scope_key(&need.scope),
+        need.selector.as_bytes(),
+    )
+}
+
+fn context_offer_exists(store: &Store, offer: &ContextOffer) -> rusqlite::Result<bool> {
+    context_row_exists(
+        store,
+        CONTEXT_OFFERS,
+        r#"
+        SELECT owner
+        FROM context_offers
+        WHERE owner = :owner
+          AND role = :role
+          AND scope_key = :scope_key
+          AND selector = :selector
+        LIMIT 1
+        "#,
+        &offer.owner,
+        &offer.role,
+        &scope_key(&offer.scope),
+        offer.selector.as_bytes(),
+    )
+}
+
+fn context_row_exists(
+    store: &Store,
+    table: crate::core::store::TableName,
+    sql: &str,
+    owner: &[u8; 32],
+    role: &Role,
+    scope_key: &[u8],
+    selector: &[u8],
+) -> rusqlite::Result<bool> {
+    Ok(!store
+        .select_only(
+            sql,
+            &[table],
+            &[
+                (":owner", ColumnValue::Bytes(owner)),
+                (":role", ColumnValue::Text(role.as_str())),
+                (":scope_key", ColumnValue::Bytes(scope_key)),
+                (":selector", ColumnValue::Bytes(selector)),
+            ],
+            &[SelectColumn {
+                name: "owner",
+                ty: ColumnType::Bytes { len: Some(32) },
+            }],
+        )?
+        .is_empty())
 }

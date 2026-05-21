@@ -1,10 +1,10 @@
 use crate::core::context::ContextOffer;
 use crate::core::facts::{Fact, FactId};
 use crate::core::pipeline::PENDING_PROJECTION;
-use crate::core::pipeline_storage::{
-    context_offer_row, insert_fact_and_pending_in_tx, purge_fact_in_tx,
-};
+use crate::core::pipeline_storage::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
 use crate::core::store::Store;
+
+use super::context_store::insert_context_offer_in_tx;
 
 /// Commit externally projected offers and clear the completed pending facts.
 ///
@@ -19,7 +19,9 @@ pub(crate) fn commit_projected_context_offers(
 ) -> Result<(), String> {
     store
         .write_transaction(|tx| {
-            tx.insert_table_rows_in_tx(offers.iter().map(context_offer_row).collect())?;
+            for offer in offers {
+                insert_context_offer_in_tx(tx, offer)?;
+            }
             tx.delete_table_rows_in_tx(
                 PENDING_PROJECTION,
                 completed_fact_ids.iter().map(|id| id.to_vec()).collect(),

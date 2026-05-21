@@ -295,7 +295,7 @@ pub fn range_fact_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Cont
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::pipeline_storage::{context_need_row, context_offer_row};
+    use crate::core::pipeline::{context_need_row, context_offer_row};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::matchers::workspace_scope;

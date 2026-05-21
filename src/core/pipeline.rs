@@ -12,6 +12,7 @@
 //! - `effects`: shared pipeline side effects and commit helpers.
 
 mod admission;
+mod context_store;
 mod context_wake;
 mod dispatch;
 mod effects;
@@ -20,9 +21,7 @@ mod intent_queue;
 mod projection;
 mod report;
 
-pub(crate) use crate::core::pipeline_storage::{
-    persisted_context, persisted_fact, persisted_facts,
-};
+pub(crate) use crate::core::pipeline_storage::{persisted_fact, persisted_facts};
 pub(crate) use crate::core::schema::{
     CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, INTENTS, LOCAL_INTENTS, PENDING_CONTEXT_CHANGES,
     PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
@@ -31,6 +30,9 @@ pub(crate) use admission::{
     commit_projected_context_offers, purge_fact_from_store, submit_fact_to_store,
     submit_facts_to_store,
 };
+#[cfg(test)]
+pub(crate) use context_store::{context_need_row, context_offer_row};
+pub(crate) use context_store::{persisted_context, scope_key};
 pub use dispatch::DispatchReport;
 pub(crate) use dispatch::{
     dispatch_durable_intents, dispatch_local_intents, submit_intent_to_store,

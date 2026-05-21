@@ -6,8 +6,7 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::pipeline::{CONTEXT_NEEDS, CONTEXT_OFFERS};
-use crate::core::pipeline_storage::scope_key;
+use crate::core::pipeline::{scope_key, CONTEXT_NEEDS, CONTEXT_OFFERS};
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
 

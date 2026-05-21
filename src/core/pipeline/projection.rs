@@ -6,15 +6,17 @@ use crate::core::pipeline::{
     commit_pipeline_effects_in_tx, persisted_fact, PipelineEffectCounts, PipelineEffects,
     CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
 };
-use crate::core::pipeline_storage::{
-    pending_context_change_rows, purge_fact_in_tx, scope_key, stored_context_for_owner,
-    stored_matching_context,
-};
+use crate::core::pipeline_storage::purge_fact_in_tx;
 use crate::core::projectors::{
     ProjectionContext, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
 };
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
+
+use super::context_store::{
+    insert_pending_context_changes_in_tx, scope_key, stored_context_for_owner,
+    stored_matching_context,
+};
 
 // === Pending-fact projection ===
 
@@ -352,7 +354,7 @@ fn commit_projection_effects(
             replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
             replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
 
-            tx.insert_table_rows_in_tx(pending_context_change_rows(&effects.context_delta))?;
+            insert_pending_context_changes_in_tx(tx, &effects.context_delta)?;
 
             let counts = commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables)?;
 

@@ -92,6 +92,12 @@ Accountable criteria:
 - Done in this branch: intent queue row encoding, decoding, and insertion live
   with the pipeline queue code in `pipeline/intent_queue.rs`, not in the
   generic fact/context storage module.
+- Done in this branch: context row reads, context matching, scope-key handling,
+  and pending context-change queue operations live in `pipeline/context_store.rs`
+  and use declared typed SQLite rows instead of byte-row scans.
+- Done in this branch: fact insertion, pending-projection marking, and fact
+  reads use declared typed SQLite columns; `pipeline_storage.rs` is now fact
+  storage plus generic row-mutation helpers.
 - Done in this branch: row writes are `RowMutation` output, not `Intent`
   values. `IntentExecution::Atomic`, `AtomicIntent`, and the atomic dispatch
   pass are gone from production code.
