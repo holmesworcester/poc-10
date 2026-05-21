@@ -1,0 +1,147 @@
+//! Atomic SQL writes for one completed projection.
+
+use super::context_codec::scope_key;
+use super::context_queue::insert_pending_context_changes_in_tx;
+use crate::core::context::{ContextSet, ContextSetDelta};
+use crate::core::facts::FactId;
+use crate::core::pipeline::{
+    commit_pipeline_effects_in_tx, PipelineEffectCounts, PipelineEffects, CONTEXT_NEEDS,
+    CONTEXT_OFFERS, PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
+};
+use crate::core::projectors::TimeWake;
+use crate::core::store::{ColumnValue, Store, TableName};
+
+/// The uncommitted output of projecting one pending fact.
+pub(super) struct ProjectionEffects {
+    fact_id: FactId,
+    next_context: ContextSet,
+    next_time_wakes: Vec<TimeWake>,
+    context_delta: ContextSetDelta,
+    pipeline: PipelineEffects,
+}
+
+impl ProjectionEffects {
+    pub(super) fn new(
+        fact_id: FactId,
+        next_context: ContextSet,
+        next_time_wakes: Vec<TimeWake>,
+        context_delta: ContextSetDelta,
+        pipeline: PipelineEffects,
+    ) -> Self {
+        Self {
+            fact_id,
+            next_context,
+            next_time_wakes,
+            context_delta,
+            pipeline,
+        }
+    }
+}
+
+/// The committed SQL result needed to update memory and reporting.
+pub(super) struct ProjectionCommit {
+    pub(super) effects: PipelineEffectCounts,
+}
+
+/// Commit all durable projection effects in one SQLite transaction.
+///
+/// Transaction contents:
+///
+/// - Clear this fact's pending row.
+/// - Replace this fact's standing context.
+/// - Replace this fact's time wakes.
+/// - Record the pending context change.
+/// - Apply row mutations.
+/// - Record durable intents.
+/// - Record restart-local intents in the temp local queue.
+pub(super) fn commit_projection_effects(
+    store: &Store,
+    effects: &ProjectionEffects,
+    allowed_tables: &[TableName],
+) -> Result<ProjectionCommit, String> {
+    store
+        .write_transaction(|tx| {
+            tx.delete_table_rows_in_tx(PENDING_PROJECTION, vec![effects.fact_id.to_vec()])?;
+            delete_pending_time_ranges_for_owner_in_tx(tx, effects.fact_id)?;
+            replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
+            replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
+
+            insert_pending_context_changes_in_tx(tx, &effects.context_delta)?;
+
+            let counts = commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables)?;
+
+            Ok(ProjectionCommit { effects: counts })
+        })
+        .map_err(|err| format!("commit projection effects: {err}"))
+}
+
+fn delete_pending_time_ranges_for_owner_in_tx(
+    store: &Store,
+    owner: FactId,
+) -> rusqlite::Result<usize> {
+    store.delete_typed_rows_where_in_tx(
+        PENDING_TIME_RANGES,
+        &[("owner", ColumnValue::Bytes(&owner))],
+    )
+}
+
+/// Replace this fact's standing needs/offers by owner.
+///
+/// Projection owns the complete context set for its fact. The owner column is
+/// the fact id, so deleting by owner replaces exactly this fact's rows.
+fn replace_stored_context_owner_rows(
+    store: &Store,
+    owner: FactId,
+    context: &ContextSet,
+) -> rusqlite::Result<()> {
+    store.delete_typed_rows_where_in_tx(CONTEXT_NEEDS, &[("owner", ColumnValue::Bytes(&owner))])?;
+    store
+        .delete_typed_rows_where_in_tx(CONTEXT_OFFERS, &[("owner", ColumnValue::Bytes(&owner))])?;
+    for need in &context.needs {
+        store.insert_typed_row_in_tx(
+            CONTEXT_NEEDS,
+            &[
+                ("owner", ColumnValue::Bytes(&need.owner)),
+                ("role", ColumnValue::Text(need.role.as_str())),
+                ("scope_key", ColumnValue::Bytes(&scope_key(&need.scope))),
+                ("selector", ColumnValue::Bytes(need.selector.as_bytes())),
+            ],
+        )?;
+    }
+    for offer in &context.offers {
+        store.insert_typed_row_in_tx(
+            CONTEXT_OFFERS,
+            &[
+                ("owner", ColumnValue::Bytes(&offer.owner)),
+                ("role", ColumnValue::Text(offer.role.as_str())),
+                ("scope_key", ColumnValue::Bytes(&scope_key(&offer.scope))),
+                ("selector", ColumnValue::Bytes(offer.selector.as_bytes())),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Replace all time wakes owned by this fact.
+///
+/// Time wakes are not appended: projection output is the complete current
+/// schedule for the owner, so old rows must disappear when the projection no
+/// longer emits them.
+fn replace_stored_time_wake_owner_rows(
+    store: &Store,
+    owner: FactId,
+    wakes: &[TimeWake],
+) -> rusqlite::Result<()> {
+    store.delete_typed_rows_where_in_tx(TIME_WAKES, &[("owner", ColumnValue::Bytes(&owner))])?;
+    for wake in wakes {
+        store.insert_typed_row_in_tx(
+            TIME_WAKES,
+            &[
+                ("timeline", ColumnValue::Text(wake.timeline.as_str())),
+                ("at", ColumnValue::U64(wake.at)),
+                ("owner", ColumnValue::Bytes(&wake.owner)),
+            ],
+        )?;
+    }
+    Ok(())
+}

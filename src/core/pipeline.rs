@@ -21,6 +21,11 @@ mod effects;
 mod fact_context;
 mod intent_queue;
 mod projection;
+mod projection_commit;
+mod projection_queue;
+mod projection_run;
+#[cfg(test)]
+mod projection_run_tests;
 mod report;
 
 pub(crate) use crate::core::pipeline_storage::{persisted_fact, persisted_facts};
