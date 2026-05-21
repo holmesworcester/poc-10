@@ -1031,7 +1031,10 @@ fn cutover_network_io_intents_are_restart_local_queue_work() {
                 .to_string(),
         );
     }
-    if !send_facts_handler.contains("PipelineEffects::new().local_intent") {
+    let compact_send_facts_handler = send_facts_handler.split_whitespace().collect::<String>();
+    if !compact_send_facts_handler
+        .contains(".local_intent(send_network_frame::send_network_frame_intent")
+    {
         offenders.push(
             "send_facts_on_connection does not emit network frames as local intents".to_string(),
         );
