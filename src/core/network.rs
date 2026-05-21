@@ -1,4 +1,4 @@
-//! Core-owned opaque network IO boundary.
+//! Core-owned opaque network IO boundary and TCP frame pump.
 //!
 //! Protocol code hands opaque frame bytes to this module. Core stages those
 //! bytes in memory-local SQLite queue rows before TCP writes, and it records
@@ -15,14 +15,17 @@
 //! parsing payloads, naming protocol concepts, or deciding when a row should be
 //! produced, it has crossed out of core and into a fact module.
 
-use std::net::SocketAddr;
+use std::io::{Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use crate::core::store::{Store, TableName, TableRow};
-use crate::core::tcp;
 
 pub const OUTBOUND_TABLE: TableName = TableName::new("network_out");
 pub const INBOUND_TABLE: TableName = TableName::new("network_in");
+const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
+const WRITE_FRAME_BUDGET: Duration = Duration::from_millis(100);
 
 /// Store declarations for the two core-owned byte queues.
 ///
@@ -108,7 +111,7 @@ impl InboundNetworkRow {
 pub fn send(store: &Store, target: NetworkTarget, frame: OutboundFrame) -> Result<(), String> {
     let OutboundFrame { bytes } = frame;
     let row = OutboundNetworkRow::new(target, bytes);
-    tcp::send_once(store, target, vec![row], (), |_, _| Ok(())).map(|_| ())
+    send_once(store, target, vec![row], (), |_, _| Ok(())).map(|_| ())
 }
 
 /// Insert outbound rows idempotently.
@@ -289,4 +292,367 @@ fn queue_key(kind: &[u8], addr: SocketAddr, bytes: &[u8]) -> Vec<u8> {
     hasher.update(bytes);
     key.extend_from_slice(hasher.finalize().as_bytes());
     key
+}
+
+/// Counts observed while pumping one TCP stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamReport {
+    pub sent_frames: usize,
+    pub received_frames: usize,
+}
+
+/// Result of polling a reusable listener once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptReport<T> {
+    pub accepted_connections: usize,
+    pub value: T,
+}
+
+/// Bound TCP listener that can be polled by a caller-owned loop.
+pub struct Listener {
+    listener: TcpListener,
+    local_addr: SocketAddr,
+}
+
+impl Listener {
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Accept and pump available inbound streams up to `max_streams`.
+    ///
+    /// If no stream is ready, the returned report has zero accepted
+    /// connections. This gives higher-level schedulers a nonblocking accept
+    /// step without moving any byte interpretation into core. Draining more
+    /// than one stream matters because higher layers may intentionally send
+    /// many short streams as independent idempotent work items.
+    pub fn accept_available(
+        &self,
+        store: &Store,
+        max_streams: usize,
+    ) -> Result<AcceptReport<StreamReport>, String> {
+        let mut accepted_connections = 0;
+        let mut value = StreamReport::default();
+        for _ in 0..max_streams {
+            let (mut stream, source_addr) = match self.listener.accept() {
+                Ok(accepted) => accepted,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(err) => return Err(format!("accept tcp stream: {err}")),
+            };
+            stream
+                .set_nonblocking(false)
+                .map_err(|err| format!("set stream blocking: {err}"))?;
+            stream
+                .set_nodelay(true)
+                .map_err(|err| format!("set stream nodelay: {err}"))?;
+            let report = read_inbound_frames(store, &mut stream, NetworkSource::new(source_addr))?;
+            accepted_connections += 1;
+            value.sent_frames += report.sent_frames;
+            value.received_frames += report.received_frames;
+        }
+        Ok(AcceptReport {
+            accepted_connections,
+            value,
+        })
+    }
+}
+
+/// Bind a reusable TCP listener for caller-owned scheduling loops.
+pub fn listen(listen: SocketAddr) -> Result<Listener, String> {
+    let listener = TcpListener::bind(listen).map_err(|err| format!("listen: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("set listener nonblocking: {err}"))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|err| format!("listener local addr: {err}"))?;
+    Ok(Listener {
+        listener,
+        local_addr,
+    })
+}
+
+/// Open a TCP stream, send outbound rows for that target, and return.
+///
+/// This is the daemon-friendly shape for queued outbound work whose responses
+/// will arrive later as ordinary inbound streams. It stages bytes in the
+/// core outbound queue and calls `on_sent` only after bounded socket writes and
+/// queue deletion complete. If the remote side stops draining its socket, the
+/// write times out and the protocol send rows remain queued for a later pass.
+pub fn send_once<T>(
+    store: &Store,
+    target: NetworkTarget,
+    rows: Vec<OutboundNetworkRow>,
+    mut value: T,
+    mut on_sent: impl FnMut(&[OutboundNetworkRow], &mut T) -> Result<(), String>,
+) -> Result<T, String> {
+    let mut stream = connect(target.addr()).map_err(|err| format!("open tcp stream: {err}"))?;
+    let mut report = StreamReport::default();
+    write_outbound(
+        store,
+        &mut stream,
+        target,
+        rows,
+        &mut value,
+        &mut on_sent,
+        &mut report,
+    )?;
+    stream
+        .shutdown(Shutdown::Both)
+        .map_err(|err| format!("shutdown sent stream: {err}"))?;
+    Ok(value)
+}
+
+fn read_inbound_frames(
+    store: &Store,
+    stream: &mut TcpStream,
+    source: NetworkSource,
+) -> Result<StreamReport, String> {
+    let mut report = StreamReport::default();
+    loop {
+        let bytes = match read_frame(stream) {
+            Ok(bytes) => bytes,
+            Err(err) if is_stream_closed(&err) => break,
+            Err(err) => return Err(format!("read frame: {err}")),
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        report.received_frames += 1;
+
+        let inbound = InboundNetworkRow::new(source, bytes);
+        enqueue_inbound(store, std::slice::from_ref(&inbound))?;
+    }
+
+    Ok(report)
+}
+
+fn write_outbound<T>(
+    store: &Store,
+    stream: &mut TcpStream,
+    target: NetworkTarget,
+    rows: Vec<OutboundNetworkRow>,
+    value: &mut T,
+    on_sent: &mut impl FnMut(&[OutboundNetworkRow], &mut T) -> Result<(), String>,
+    report: &mut StreamReport,
+) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    ensure_target(target, &rows)?;
+    enqueue_outbound(store, &rows)?;
+    let claimed = claim_exact_outbound(store, &rows)?;
+    write_claimed_outbound(store, stream, target, claimed, value, on_sent, report)
+}
+
+fn write_claimed_outbound<T>(
+    store: &Store,
+    stream: &mut TcpStream,
+    target: NetworkTarget,
+    claimed: Vec<OutboundNetworkRow>,
+    value: &mut T,
+    on_sent: &mut impl FnMut(&[OutboundNetworkRow], &mut T) -> Result<(), String>,
+    report: &mut StreamReport,
+) -> Result<(), String> {
+    ensure_target(target, &claimed)?;
+    for row in &claimed {
+        write_frame(stream, &row.bytes).map_err(|err| format!("write frame: {err}"))?;
+    }
+    delete_outbound(store, &claimed)?;
+    on_sent(&claimed, value)?;
+    report.sent_frames += claimed.len();
+    Ok(())
+}
+
+fn ensure_target(target: NetworkTarget, rows: &[OutboundNetworkRow]) -> Result<(), String> {
+    if rows.iter().all(|row| row.target == target) {
+        return Ok(());
+    }
+    Err("outbound network row target does not match stream target".to_string())
+}
+
+fn connect(addr: SocketAddr) -> std::io::Result<TcpStream> {
+    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
+    stream.set_nodelay(true)?;
+    Ok(stream)
+}
+
+fn write_frame(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
+    write_frame_with_budget(stream, bytes, WRITE_FRAME_BUDGET)
+}
+
+fn write_frame_with_budget(
+    stream: &mut TcpStream,
+    bytes: &[u8],
+    budget: Duration,
+) -> std::io::Result<()> {
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "frame too large"))?;
+    stream.set_nonblocking(true)?;
+    let deadline = Instant::now() + budget;
+    let result = (|| {
+        write_all_until(stream, &len.to_be_bytes(), deadline)?;
+        write_all_until(stream, bytes, deadline)?;
+        stream.flush()
+    })();
+    let reset = stream.set_nonblocking(false);
+    match (result, reset) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(err), _) => Err(err),
+        (Ok(()), Err(err)) => Err(err),
+    }
+}
+
+fn write_all_until(
+    stream: &mut TcpStream,
+    mut bytes: &[u8],
+    deadline: Instant,
+) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "tcp frame write budget exhausted",
+            ));
+        }
+        match stream.write(bytes) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "tcp stream accepted zero bytes",
+                ));
+            }
+            Ok(n) => bytes = &bytes[n..],
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+fn read_frame(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len)?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
+    }
+    let mut bytes = vec![0; len];
+    stream.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn is_stream_closed(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::BrokenPipe
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    #[test]
+    fn write_frame_sends_length_prefixed_bytes_within_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let reader = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut len = [0; 4];
+            stream.read_exact(&mut len).expect("read len");
+            let mut body = vec![0; u32::from_be_bytes(len) as usize];
+            stream.read_exact(&mut body).expect("read body");
+            body
+        });
+
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        write_frame_with_budget(&mut stream, b"abc", Duration::from_secs(1)).expect("write frame");
+
+        assert_eq!(reader.join().expect("reader thread"), b"abc");
+    }
+
+    #[test]
+    fn write_frame_zero_budget_times_out_before_blocking() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let reader = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept");
+            thread::sleep(Duration::from_millis(20));
+        });
+
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        let err = write_frame_with_budget(&mut stream, b"abc", Duration::ZERO)
+            .expect_err("zero budget should time out");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        reader.join().expect("reader thread");
+    }
+
+    #[test]
+    fn accept_available_drains_ready_streams_up_to_limit() {
+        let store = Store::open_memory_with_schema_sources(&[SCHEMA_SOURCE]).expect("open store");
+        let listener = listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
+        let addr = listener.local_addr();
+        let writers = (0..3)
+            .map(|idx| {
+                thread::spawn(move || {
+                    let mut stream = TcpStream::connect(addr).expect("connect");
+                    let body = vec![idx as u8; idx + 1];
+                    write_frame_with_budget(&mut stream, &body, Duration::from_secs(1))
+                        .expect("write frame");
+                    stream.shutdown(Shutdown::Write).expect("shutdown write");
+                })
+            })
+            .collect::<Vec<_>>();
+        thread::sleep(Duration::from_millis(50));
+
+        let first = listener
+            .accept_available(&store, 2)
+            .expect("accept first batch");
+        let second = listener
+            .accept_available(&store, 2)
+            .expect("accept second batch");
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+
+        assert_eq!(first.accepted_connections, 2);
+        assert_eq!(first.value.received_frames, 2);
+        assert_eq!(second.accepted_connections, 1);
+        assert_eq!(second.value.received_frames, 1);
+        assert_eq!(claim_inbound(&store, 10).expect("claim inbound").len(), 3);
+    }
+
+    #[test]
+    fn empty_frame_is_tcp_heartbeat_not_protocol_input() {
+        let store = Store::open_memory_with_schema_sources(&[SCHEMA_SOURCE]).expect("open store");
+        let listener = listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
+        let addr = listener.local_addr();
+        let writer = thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            write_frame_with_budget(&mut stream, b"", Duration::from_secs(1))
+                .expect("write heartbeat");
+            stream.shutdown(Shutdown::Write).expect("shutdown write");
+        });
+        thread::sleep(Duration::from_millis(50));
+
+        let report = listener
+            .accept_available(&store, 1)
+            .expect("accept heartbeat");
+        writer.join().expect("writer thread");
+
+        assert_eq!(report.accepted_connections, 1);
+        assert_eq!(report.value.received_frames, 0);
+        assert_eq!(claim_inbound(&store, 10).expect("claim inbound").len(), 0);
+    }
 }

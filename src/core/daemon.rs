@@ -13,7 +13,6 @@ use crate::core::network;
 use crate::core::projectors::Timeline;
 use crate::core::runtime::{Runtime, WorkStatus};
 use crate::core::store::Store;
-use crate::core::tcp;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -65,7 +64,7 @@ pub struct DaemonTimeWake {
 pub fn tick(
     description: DaemonDescription,
     runtime: &mut Runtime,
-    listener: &tcp::Listener,
+    listener: &network::Listener,
     work_limit: usize,
 ) -> Result<WorkStatus, String> {
     let mut status = WorkStatus::idle();
@@ -88,7 +87,7 @@ pub fn tick(
 fn drain_inbound_listener(
     description: DaemonDescription,
     runtime: &Runtime,
-    listener: &tcp::Listener,
+    listener: &network::Listener,
     work_limit: usize,
 ) -> Result<WorkStatus, String> {
     if description.inbound_network_intent.is_none() {
@@ -166,14 +165,14 @@ impl DaemonReport {
 pub fn start(
     db_path: &Path,
     args: CliArgs<'_>,
-    mut tick: impl FnMut(&tcp::Listener, usize) -> Result<WorkStatus, String>,
+    mut tick: impl FnMut(&network::Listener, usize) -> Result<WorkStatus, String>,
 ) -> Result<CliOutput, String> {
     let options = parse_start_options(args)?;
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
     install_termination_handlers();
 
     let lock = DaemonLock::acquire(db_path)?;
-    let listener = tcp::listen(options.listen)?;
+    let listener = network::listen(options.listen)?;
     let local_addr = listener.local_addr();
     lock.record_listen_addr(local_addr)?;
     print_line_now(&format!("listening: {local_addr}"))?;

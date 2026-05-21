@@ -188,6 +188,8 @@ Accountable criteria:
 - Done in this branch: core pipeline file count was reduced by consolidating
   projection, dispatch/intent queue, context row/codec, and context
   match/wake modules. `sqlite_names.rs` was also folded into `core::store`.
+- Done in this branch: TCP frame pumping was folded into `core::network`, so
+  the opaque network row boundary and socket mechanics live in one file.
 
 ## 1. Store All Intents In SQLite Queues
 
