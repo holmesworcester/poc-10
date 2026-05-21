@@ -5,8 +5,8 @@ use crate::core::context::{scope_key, ContextSetDelta};
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
 use crate::core::schema::{CONTEXT_EDGES, FACTS, PENDING_PROJECTION};
+use crate::core::select;
 use crate::core::store::{ColumnValue, Store};
-use crate::core::wake;
 use std::collections::HashSet;
 
 pub(super) fn wake_context_matches_in_tx(
@@ -34,9 +34,9 @@ pub(super) fn wake_context_matches_in_tx(
     Ok(inserted)
 }
 
-fn exact_offers_for_need_select(need: &ContextNeed) -> wake::Select {
+fn exact_offers_for_need_select(need: &ContextNeed) -> select::Select {
     let scope_key = scope_key(&need.scope);
-    wake::Select::new(
+    select::Select::new(
         r#"
         SELECT :need_owner AS owner
         WHERE EXISTS (
@@ -50,17 +50,17 @@ fn exact_offers_for_need_select(need: &ContextNeed) -> wake::Select {
         "#,
         &[CONTEXT_EDGES],
         vec![
-            wake::Param::bytes(":need_owner", need.owner),
-            wake::Param::text(":role", need.role.as_str()),
-            wake::Param::bytes(":scope_key", scope_key),
-            wake::Param::bytes(":selector", need.selector.as_bytes()),
+            select::Param::bytes(":need_owner", need.owner),
+            select::Param::text(":role", need.role.as_str()),
+            select::Param::bytes(":scope_key", scope_key),
+            select::Param::bytes(":selector", need.selector.as_bytes()),
         ],
     )
 }
 
-fn exact_needs_for_offer_select(offer: &ContextOffer) -> wake::Select {
+fn exact_needs_for_offer_select(offer: &ContextOffer) -> select::Select {
     let scope_key = scope_key(&offer.scope);
-    wake::Select::new(
+    select::Select::new(
         r#"
         SELECT n.owner
         FROM context_edges n
@@ -73,9 +73,9 @@ fn exact_needs_for_offer_select(offer: &ContextOffer) -> wake::Select {
         "#,
         &[CONTEXT_EDGES, FACTS],
         vec![
-            wake::Param::text(":role", offer.role.as_str()),
-            wake::Param::bytes(":scope_key", scope_key),
-            wake::Param::bytes(":selector", offer.selector.as_bytes()),
+            select::Param::text(":role", offer.role.as_str()),
+            select::Param::bytes(":scope_key", scope_key),
+            select::Param::bytes(":selector", offer.selector.as_bytes()),
         ],
     )
 }
@@ -130,10 +130,10 @@ fn wake_offer_in_tx(
 
 fn insert_pending_projection_from_select_in_tx(
     store: &Store,
-    select: &wake::Select,
+    select: &select::Select,
     edge_kind: &str,
 ) -> Result<usize, String> {
-    wake::insert_select_in_tx(store, PENDING_PROJECTION, &["owner"], select)
+    select::insert_select_in_tx(store, PENDING_PROJECTION, &["owner"], select)
         .map_err(|err| format!("wake {edge_kind} from SELECT: {err}"))
 }
 

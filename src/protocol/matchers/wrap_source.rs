@@ -10,8 +10,8 @@ use crate::core::matchers::{
     ContextMatch, ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration,
     SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
+use crate::core::select;
 use crate::core::store::{ColumnValue, Store};
-use crate::core::wake;
 
 use super::exact::protocol_role;
 use super::sql;
@@ -572,9 +572,9 @@ impl ContextMatcher for WrapSourceMatcher {
     fn wake_select_for_added_need(
         &self,
         need: &ContextNeed,
-    ) -> Result<Option<wake::Select>, String> {
+    ) -> Result<Option<select::Select>, String> {
         if need.role != self.role {
-            return Ok(Some(wake::Select::empty()));
+            return Ok(Some(select::Select::empty()));
         }
         let (need_kind, workspace_id, frontier_id, min_frontier_created_at_ms) =
             if let Some((workspace_id, min_frontier_created_at_ms)) =
@@ -591,19 +591,19 @@ impl ContextMatcher for WrapSourceMatcher {
             {
                 (2, workspace_id, frontier_id, 0u64.to_be_bytes())
             } else {
-                return Ok(Some(wake::Select::empty()));
+                return Ok(Some(select::Select::empty()));
             };
         let scope_key = sql::scope_key_for_sql(&need.scope);
         Ok(Some(sql::wake_select(
             WRAP_SOURCE_WAKE_FOR_NEED_SQL,
             vec![
-                wake::Param::bytes(":need_owner", need.owner),
-                wake::Param::text(":role", self.role.as_str()),
-                wake::Param::bytes(":scope_key", scope_key),
-                wake::Param::i64(":need_kind", need_kind),
-                wake::Param::bytes(":workspace_id", workspace_id),
-                wake::Param::bytes(":frontier_id", frontier_id),
-                wake::Param::bytes(":min_frontier_created_at_ms", min_frontier_created_at_ms),
+                select::Param::bytes(":need_owner", need.owner),
+                select::Param::text(":role", self.role.as_str()),
+                select::Param::bytes(":scope_key", scope_key),
+                select::Param::i64(":need_kind", need_kind),
+                select::Param::bytes(":workspace_id", workspace_id),
+                select::Param::bytes(":frontier_id", frontier_id),
+                select::Param::bytes(":min_frontier_created_at_ms", min_frontier_created_at_ms),
             ],
         )))
     }
@@ -611,22 +611,22 @@ impl ContextMatcher for WrapSourceMatcher {
     fn wake_select_for_added_offer(
         &self,
         offer: &ContextOffer,
-    ) -> Result<Option<wake::Select>, String> {
+    ) -> Result<Option<select::Select>, String> {
         if offer.role != self.role {
-            return Ok(Some(wake::Select::empty()));
+            return Ok(Some(select::Select::empty()));
         }
         let Some(selector) = decode_wrap_source_selector(&offer.selector) else {
-            return Ok(Some(wake::Select::empty()));
+            return Ok(Some(select::Select::empty()));
         };
         let scope_key = sql::scope_key_for_sql(&offer.scope);
         Ok(Some(sql::wake_select(
             WRAP_SOURCE_WAKE_FOR_OFFER_SQL,
             vec![
-                wake::Param::text(":role", self.role.as_str()),
-                wake::Param::bytes(":scope_key", scope_key),
-                wake::Param::bytes(":workspace_id", selector.workspace_id),
-                wake::Param::bytes(":frontier_id", selector.frontier_id),
-                wake::Param::bytes(
+                select::Param::text(":role", self.role.as_str()),
+                select::Param::bytes(":scope_key", scope_key),
+                select::Param::bytes(":workspace_id", selector.workspace_id),
+                select::Param::bytes(":frontier_id", selector.frontier_id),
+                select::Param::bytes(
                     ":frontier_created_at_ms",
                     selector.frontier_created_at_ms.to_be_bytes(),
                 ),

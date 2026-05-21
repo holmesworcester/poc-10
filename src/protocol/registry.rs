@@ -1273,6 +1273,7 @@ fn exact_matcher(role: Role) -> Box<dyn ContextMatcher> {
 pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     HandlerRoute {
         name: "send_bootstrap_connection_request",
+        intent_kind: connection_intents::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST,
         factory: || {
             Box::new(
                 connection_intents::send_bootstrap_request::SendBootstrapConnectionRequestHandler::new(),
@@ -1281,40 +1282,48 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     },
     HandlerRoute {
         name: "create_connection_response",
+        intent_kind: connection_intents::create_response::CREATE_CONNECTION_RESPONSE,
         factory: || {
             Box::new(connection_intents::create_response::CreateConnectionResponseHandler::new())
         },
     },
     HandlerRoute {
         name: "send_sync_compare_response",
+        intent_kind: sync_intents::send_compare_response::SEND_SYNC_COMPARE_RESPONSE,
         factory: || {
             Box::new(sync_intents::send_compare_response::SendSyncCompareResponseHandler::new())
         },
     },
     HandlerRoute {
         name: "send_needed_fact_id",
+        intent_kind: sync_intents::send_needed_fact_id::SEND_NEEDED_FACT_ID,
         factory: || Box::new(sync_intents::send_needed_fact_id::SendNeededFactIdHandler::new()),
     },
     HandlerRoute {
         name: "send_requested_fact",
+        intent_kind: sync_intents::send_requested_fact::SEND_REQUESTED_FACT,
         factory: || Box::new(sync_intents::send_requested_fact::SendRequestedFactHandler::new()),
     },
     HandlerRoute {
         name: "share_fact_with_workspace",
+        intent_kind: sync_intents::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE,
         factory: || {
             Box::new(sync_intents::share_fact_with_workspace::ShareFactWithWorkspaceHandler::new())
         },
     },
     HandlerRoute {
         name: "seed_connection_sync",
+        intent_kind: sync_intents::seed_connection::SEED_CONNECTION_SYNC,
         factory: || Box::new(sync_intents::seed_connection::SeedConnectionSyncHandler::new()),
     },
     HandlerRoute {
         name: "create_key_wrap",
+        intent_kind: encryption::intent::CREATE_KEY_WRAP,
         factory: || Box::new(encryption_intents::create_key_wrap::CreateKeyWrapHandler::new()),
     },
     HandlerRoute {
         name: "purge_retired_recipient_material",
+        intent_kind: encryption::intent::PURGE_RETIRED_RECIPIENT_MATERIAL,
         factory: || {
             Box::new(
                 encryption_intents::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler::new(),
@@ -1323,26 +1332,31 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     },
     HandlerRoute {
         name: "unwrap_key_wrap",
+        intent_kind: encryption::intent::UNWRAP_KEY_WRAP,
         factory: || Box::new(encryption_intents::unwrap_key_wrap::UnwrapKeyWrapHandler::new()),
     },
     HandlerRoute {
         name: "purge_deleted_message",
+        intent_kind: content_intents::purge_deleted_message::PURGE_DELETED_MESSAGE,
         factory: || {
             Box::new(content_intents::purge_deleted_message::PurgeDeletedMessageHandler::new())
         },
     },
     HandlerRoute {
         name: "purge_message_child",
+        intent_kind: content_intents::purge_message_child::PURGE_MESSAGE_CHILD,
         factory: || Box::new(content_intents::purge_message_child::PurgeMessageChildHandler::new()),
     },
     HandlerRoute {
         name: "purge_expired_message",
+        intent_kind: content_intents::purge_expired_message::PURGE_EXPIRED_MESSAGE,
         factory: || {
             Box::new(content_intents::purge_expired_message::PurgeExpiredMessageHandler::new())
         },
     },
     HandlerRoute {
         name: "purge_below_retention_floor",
+        intent_kind: content_intents::purge_below_retention_floor::PURGE_BELOW_RETENTION_FLOOR,
         factory: || {
             Box::new(
                 content_intents::purge_below_retention_floor::PurgeBelowRetentionFloorHandler::new(
@@ -1352,6 +1366,7 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     },
     HandlerRoute {
         name: "send_facts_on_connection",
+        intent_kind: transport_intents::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
         factory: || {
             Box::new(
                 transport_intents::send_facts_on_connection::SendFactsOnConnectionHandler::new(),
@@ -1360,10 +1375,12 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     },
     HandlerRoute {
         name: "send_network_frame",
+        intent_kind: transport_intents::send_network_frame::SEND_NETWORK_FRAME,
         factory: || Box::new(transport_intents::send_network_frame::SendNetworkFrameHandler::new()),
     },
     HandlerRoute {
         name: "receive_transit_frame",
+        intent_kind: transport_intents::receive_transit_frame::RECEIVE_TRANSIT_FRAME,
         factory: || {
             Box::new(transport_intents::receive_transit_frame::ReceiveTransitFrameHandler::new())
         },

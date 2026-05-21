@@ -53,6 +53,16 @@ pub(crate) fn decode_intent_row(key: &[u8], value: &[u8]) -> Result<Intent, Stri
     Ok(Intent::new(kind, idempotence_key, payload))
 }
 
+/// Return whether an intent queue key belongs to the given kind.
+///
+/// This reads only the leading kind field, so dispatch can route by declared
+/// handler kind without decoding every queued intent payload.
+pub(crate) fn intent_key_matches_kind(key: &[u8], kind: &str) -> Result<bool, String> {
+    let mut key_reader = Reader::new(key);
+    let stored = IntentKind::new(key_reader.string_u32be().row()?)?;
+    Ok(stored.as_str() == kind)
+}
+
 fn intent_row(intent: &Intent) -> TableRow {
     TableRow {
         table: INTENTS,

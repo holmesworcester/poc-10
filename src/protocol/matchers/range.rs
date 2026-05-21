@@ -9,8 +9,8 @@ use crate::core::matchers::{
     ContextMatch, ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration,
     SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
+use crate::core::select;
 use crate::core::store::{ColumnValue, Store};
-use crate::core::wake;
 
 use super::exact::protocol_role;
 use super::sql;
@@ -305,22 +305,22 @@ impl ContextMatcher for RangeFactMatcher {
     fn wake_select_for_added_need(
         &self,
         need: &ContextNeed,
-    ) -> Result<Option<wake::Select>, String> {
+    ) -> Result<Option<select::Select>, String> {
         if need.role != self.role {
-            return Ok(Some(wake::Select::empty()));
+            return Ok(Some(select::Select::empty()));
         }
         let Some((start, end)) = decode_range_need_selector(&need.selector) else {
-            return Ok(Some(wake::Select::empty()));
+            return Ok(Some(select::Select::empty()));
         };
         let scope_key = sql::scope_key_for_sql(&need.scope);
         Ok(Some(sql::wake_select(
             RANGE_FACT_WAKE_FOR_NEED_SQL,
             vec![
-                wake::Param::bytes(":need_owner", need.owner),
-                wake::Param::text(":role", self.role.as_str()),
-                wake::Param::bytes(":scope_key", scope_key),
-                wake::Param::bytes(":start", start.to_be_bytes()),
-                wake::Param::bytes(":end", end.to_be_bytes()),
+                select::Param::bytes(":need_owner", need.owner),
+                select::Param::text(":role", self.role.as_str()),
+                select::Param::bytes(":scope_key", scope_key),
+                select::Param::bytes(":start", start.to_be_bytes()),
+                select::Param::bytes(":end", end.to_be_bytes()),
             ],
         )))
     }
@@ -328,20 +328,20 @@ impl ContextMatcher for RangeFactMatcher {
     fn wake_select_for_added_offer(
         &self,
         offer: &ContextOffer,
-    ) -> Result<Option<wake::Select>, String> {
+    ) -> Result<Option<select::Select>, String> {
         if offer.role != self.role {
-            return Ok(Some(wake::Select::empty()));
+            return Ok(Some(select::Select::empty()));
         }
         let Some(selector) = decode_range_offer_selector(&offer.selector) else {
-            return Ok(Some(wake::Select::empty()));
+            return Ok(Some(select::Select::empty()));
         };
         let scope_key = sql::scope_key_for_sql(&offer.scope);
         Ok(Some(sql::wake_select(
             RANGE_FACT_WAKE_FOR_OFFER_SQL,
             vec![
-                wake::Param::text(":role", self.role.as_str()),
-                wake::Param::bytes(":scope_key", scope_key),
-                wake::Param::bytes(":timestamp", selector.timestamp.to_be_bytes()),
+                select::Param::text(":role", self.role.as_str()),
+                select::Param::bytes(":scope_key", scope_key),
+                select::Param::bytes(":timestamp", selector.timestamp.to_be_bytes()),
             ],
         )))
     }

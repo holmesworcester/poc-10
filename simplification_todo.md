@@ -96,8 +96,8 @@ Accountable criteria:
 - Done in this branch: `context_store.rs` was removed as a sink. Standing
   context row access now lives in `pipeline/context_rows.rs`; matcher assembly
   lives in `pipeline/context_matching.rs`; context wake assembly lives in
-  `pipeline/context_wakes.rs`; reusable checked wake execution lives in
-  `core::wake`.
+  `pipeline/context_wakes.rs`; reusable checked insert-select execution lives
+  in `core::select`.
 - Done in this branch: separate `context_needs` and `context_offers` storage
   was collapsed into one typed `context_edges` relation keyed by
   `(owner, direction, role, scope_key, selector)`.
@@ -110,7 +110,7 @@ Accountable criteria:
 - Done in this branch: time wake admission now uses the same checked
   insert-select wake shape. The scheduler supplies the current timeline range
   instead of an incoming offer.
-- Done in this branch: context wakes and time wakes share `wake::Select` plus
+- Done in this branch: context wakes and time wakes share `select::Select` plus
   the same checked insert-select executor.
 - Done in this branch: row-mutation validation and splitting moved into
   `pipeline/effects.rs`, leaving fact storage separate from effect commit
@@ -131,6 +131,12 @@ Accountable criteria:
   intent validation no longer accepts an unused ignored key.
 - Important lesson: local intent dispatch must preserve FIFO insertion order.
   Lexicographic key order can starve multi-daemon bootstrap and receive work.
+- Done in this branch: handler routes now declare their `intent_kind`, and
+  dispatch looks for the next queued row of that kind before using the handler
+  as a guard. `handler.accepts()` is no longer the routing mechanism.
+- Done in this branch: the old `core::wake` module was renamed to
+  `core::select`. It was already a checked SELECT descriptor plus
+  `INSERT OR IGNORE ... SELECT` executor, not wake-specific policy.
 
 ## 1. Store All Intents In SQLite Queues
 
@@ -255,6 +261,14 @@ Good candidates:
 Done in this branch: add narrow store helpers for bounded ordered selects,
 delete-by-filter, and checked insert-select fanout. Avoid scattering raw SQL
 through protocol code.
+
+Store cleanup note: `Store` is still large because it currently owns four
+responsibilities in one file: connection/transaction lifecycle, generic
+row-table operations, typed-table operations, and schema application/validation.
+`store/sql.rs` is a private helper module for SQL quoting, schema validation,
+wire-to-SQL conversion, and SELECT safety checks. The next safe split is to keep
+the public `Store` facade in `store.rs` and move private typed-table and schema
+application helpers behind narrower `store/*` modules without changing callers.
 
 ## 6. Remove `pending_context_changes`
 

@@ -4,7 +4,9 @@ use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::{Store, TableName};
 
 use super::effects::{commit_pipeline_effects_in_tx, PipelineEffectCounts, PipelineEffects};
-use super::intent_queue::{decode_intent_row, record_intent_in_table_in_tx};
+use super::intent_queue::{
+    decode_intent_row, intent_key_matches_kind, record_intent_in_table_in_tx,
+};
 
 // === Intent dispatch ===
 
@@ -35,11 +37,12 @@ fn submit_intent_to_table(store: &Store, table: TableName, intent: Intent) -> Re
 /// for.
 pub(crate) fn dispatch_durable_intents(
     handler: &(impl IntentHandler + ?Sized),
+    intent_kind: &str,
     store: &Store,
     allowed_tables: &[TableName],
     limit: usize,
 ) -> Result<DispatchReport, String> {
-    dispatch_stored_intents(handler, store, INTENTS, allowed_tables, limit)
+    dispatch_stored_intents(handler, intent_kind, store, INTENTS, allowed_tables, limit)
 }
 
 /// Shared loop for dispatching queued intents.
@@ -50,6 +53,7 @@ pub(crate) fn dispatch_durable_intents(
 /// dispatcher claimed the intent first, so the loop simply moves to the next.
 fn dispatch_stored_intents(
     handler: &(impl IntentHandler + ?Sized),
+    intent_kind: &str,
     store: &Store,
     queue_table: TableName,
     allowed_tables: &[TableName],
@@ -57,9 +61,14 @@ fn dispatch_stored_intents(
 ) -> Result<DispatchReport, String> {
     let mut report = DispatchReport::default();
     while report.handled < limit {
-        let Some(stored) = next_accepted_intent(store, queue_table, handler)? else {
+        let Some(stored) = next_intent_for_kind(store, queue_table, intent_kind)? else {
             break;
         };
+        if !handler.accepts(&stored.intent) {
+            return Err(format!(
+                "handler route for intent kind {intent_kind} rejected queued intent"
+            ));
+        }
         let context = load_handler_context(store, handler, &stored.intent)?;
         let Some(output) = run_handler(handler, &stored.intent, &context, &mut report)? else {
             break;
@@ -80,18 +89,26 @@ fn dispatch_stored_intents(
 /// Dispatch restart-local intents from the temp local-intent queue.
 pub(crate) fn dispatch_local_intents(
     handler: &(impl IntentHandler + ?Sized),
+    intent_kind: &str,
     store: &Store,
     allowed_tables: &[TableName],
     limit: usize,
 ) -> Result<DispatchReport, String> {
-    dispatch_stored_intents(handler, store, LOCAL_INTENTS, allowed_tables, limit)
+    dispatch_stored_intents(
+        handler,
+        intent_kind,
+        store,
+        LOCAL_INTENTS,
+        allowed_tables,
+        limit,
+    )
 }
 
-/// Return the first queued intent accepted by this handler.
-fn next_accepted_intent(
+/// Return the first queued intent for a declared handler route.
+fn next_intent_for_kind(
     store: &Store,
     queue_table: TableName,
-    handler: &(impl IntentHandler + ?Sized),
+    intent_kind: &str,
 ) -> Result<Option<StoredIntent>, String> {
     let rows = if queue_table == LOCAL_INTENTS {
         store
@@ -103,10 +120,11 @@ fn next_accepted_intent(
             .map_err(|err| format!("load stored intents: {err}"))?
     };
     for (key, value) in rows {
-        let intent = decode_intent_row(&key, &value)?;
-        if handler.accepts(&intent) {
-            return Ok(Some(StoredIntent { key, intent }));
+        if !intent_key_matches_kind(&key, intent_kind)? {
+            continue;
         }
+        let intent = decode_intent_row(&key, &value)?;
+        return Ok(Some(StoredIntent { key, intent }));
     }
     Ok(None)
 }

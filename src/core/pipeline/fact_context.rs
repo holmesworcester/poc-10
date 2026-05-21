@@ -3,8 +3,8 @@ use crate::core::pipeline::projection::process_pending_projection_batch;
 use crate::core::pipeline::report::{add_pipeline_report, PipelineReport};
 use crate::core::projectors::{Projector, TimeRange, Timeline};
 use crate::core::schema::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
+use crate::core::select;
 use crate::core::store::{Store, TableName};
-use crate::core::wake;
 
 const TIME_WAKE_TABLES: &[TableName] = &[TIME_WAKES];
 
@@ -65,21 +65,21 @@ fn enqueue_due_time_wakes_in_tx(
     let has_start = range.start_exclusive.is_some();
     let start_exclusive = range.start_exclusive.unwrap_or(0);
     let params = vec![
-        wake::Param::text(":timeline", range.timeline.as_str()),
-        wake::Param::bool(":has_start", has_start),
-        wake::Param::u64(":start_exclusive", start_exclusive),
-        wake::Param::u64(":end_inclusive", range.end_inclusive),
-        wake::Param::u64(":limit", limit as u64),
+        select::Param::text(":timeline", range.timeline.as_str()),
+        select::Param::bool(":has_start", has_start),
+        select::Param::u64(":start_exclusive", start_exclusive),
+        select::Param::u64(":end_inclusive", range.end_inclusive),
+        select::Param::u64(":limit", limit as u64),
     ];
 
-    let inserted = wake::insert_select_in_tx(
+    let inserted = select::insert_select_in_tx(
         store,
         PENDING_PROJECTION,
         &["owner"],
-        &wake::Select::new(DUE_TIME_WAKE_OWNER_SQL, TIME_WAKE_TABLES, params.clone()),
+        &select::Select::new(DUE_TIME_WAKE_OWNER_SQL, TIME_WAKE_TABLES, params.clone()),
     )?;
 
-    wake::insert_select_in_tx(
+    select::insert_select_in_tx(
         store,
         PENDING_TIME_RANGES,
         &[
@@ -89,7 +89,7 @@ fn enqueue_due_time_wakes_in_tx(
             "start_exclusive",
             "end_inclusive",
         ],
-        &wake::Select::new(DUE_TIME_RANGE_SQL, TIME_WAKE_TABLES, params),
+        &select::Select::new(DUE_TIME_RANGE_SQL, TIME_WAKE_TABLES, params),
     )?;
 
     Ok(inserted)

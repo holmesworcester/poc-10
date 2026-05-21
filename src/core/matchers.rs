@@ -2,8 +2,8 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, ContextSetDelta, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
+use crate::core::select;
 use crate::core::store::Store;
-use crate::core::wake;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -110,14 +110,14 @@ pub trait ContextMatcher {
     fn wake_select_for_added_need(
         &self,
         _need: &ContextNeed,
-    ) -> Result<Option<wake::Select>, String> {
+    ) -> Result<Option<select::Select>, String> {
         Ok(None)
     }
 
     fn wake_select_for_added_offer(
         &self,
         _offer: &ContextOffer,
-    ) -> Result<Option<wake::Select>, String> {
+    ) -> Result<Option<select::Select>, String> {
         Ok(None)
     }
 

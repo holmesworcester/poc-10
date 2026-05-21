@@ -1,7 +1,7 @@
 //! Checked SQL SELECTs for queue fanout.
 //!
-//! A wake select is a read-only SELECT over declared tables. Pipeline workers
-//! choose the destination queue table and columns; the select only describes the
+//! A select is a read-only query over declared tables. Pipeline workers choose
+//! the destination queue table and columns; the select only describes the
 //! bounded source rows and bound parameters.
 
 use crate::core::store::{ColumnValue, Store, TableName};

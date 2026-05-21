@@ -79,26 +79,41 @@ pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
 #[derive(Debug, Clone, Copy)]
 pub struct HandlerRoute {
     pub name: &'static str,
+    pub intent_kind: &'static str,
     pub factory: HandlerFactory,
 }
 
 struct HandlerSet {
-    handlers: Vec<Box<dyn IntentHandler>>,
+    entries: Vec<HandlerEntry>,
+}
+
+struct HandlerEntry {
+    route: &'static HandlerRoute,
+    handler: Box<dyn IntentHandler>,
 }
 
 impl HandlerSet {
     pub fn new(routes: &'static [HandlerRoute]) -> Self {
         Self {
-            handlers: routes.iter().map(|route| (route.factory)()).collect(),
+            entries: routes
+                .iter()
+                .map(|route| HandlerEntry {
+                    route,
+                    handler: (route.factory)(),
+                })
+                .collect(),
         }
     }
 
     pub fn new_excluding(routes: &'static [HandlerRoute], excluded_names: &[&str]) -> Self {
         Self {
-            handlers: routes
+            entries: routes
                 .iter()
                 .filter(|route| !excluded_names.contains(&route.name))
-                .map(|route| (route.factory)())
+                .map(|route| HandlerEntry {
+                    route,
+                    handler: (route.factory)(),
+                })
                 .collect(),
         }
     }
@@ -109,9 +124,10 @@ impl HandlerSet {
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String> {
         let mut total = DispatchReport::default();
-        for handler in &self.handlers {
+        for entry in &self.entries {
             let report = pipeline::dispatch_durable_intents(
-                handler.as_ref(),
+                entry.handler.as_ref(),
+                entry.route.intent_kind,
                 store,
                 allowed_tables,
                 limit_per_handler,
@@ -125,7 +141,8 @@ impl HandlerSet {
             }
 
             let report = pipeline::dispatch_local_intents(
-                handler.as_ref(),
+                entry.handler.as_ref(),
+                entry.route.intent_kind,
                 store,
                 allowed_tables,
                 limit_per_handler,
