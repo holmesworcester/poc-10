@@ -18,17 +18,14 @@
 //! parameters, and table names are accepted only from `TableName` after a
 //! conservative identifier check.
 
-use crate::core::schema_dsl::{TableDeclaration, TableStorage};
+use crate::core::schema_dsl::{self, ColumnType, TableDeclaration, TableKind, TableStorage};
 use crate::core::sqlite_names::{
     quoted_identifier, quoted_identifier_list, quoted_table_name, quoted_table_name_str,
 };
 use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::time::Duration;
-
-mod sql;
-use self::sql::*;
 
 /// A static, trusted row-table name.
 ///
@@ -54,6 +51,107 @@ pub struct TableRow {
     pub table: TableName,
     pub key: Vec<u8>,
     pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqliteTableColumn {
+    name: String,
+    declared_type: String,
+    not_null: bool,
+    primary_key_position: i64,
+}
+
+fn store_error(message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(message.into())
+}
+
+fn table_declarations_from_schema_sources(
+    sources: &[&str],
+) -> rusqlite::Result<Vec<TableDeclaration>> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (source_index, source) in sources.iter().enumerate() {
+        let document = schema_dsl::parse_schema(source)
+            .map_err(|err| store_error(format!("schema source {}: {err}", source_index + 1)))?;
+        for table in document {
+            if !seen.insert(table.name.clone()) {
+                return Err(store_error(format!(
+                    "duplicate schema table {}",
+                    table.name
+                )));
+            }
+            out.push(table);
+        }
+    }
+    Ok(out)
+}
+
+fn sqlite_table_columns(
+    conn: &SqliteConnection,
+    quoted_table_name: &str,
+) -> rusqlite::Result<Vec<SqliteTableColumn>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({quoted_table_name})"))?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SqliteTableColumn {
+            name: row.get(1)?,
+            declared_type: row.get(2)?,
+            not_null: row.get::<_, i64>(3)? != 0,
+            primary_key_position: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn sqlite_table_indexes(
+    conn: &SqliteConnection,
+    quoted_table_name: &str,
+) -> rusqlite::Result<Vec<(String, bool, Vec<String>)>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA index_list({quoted_table_name})"))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? != 0,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut indexes = Vec::new();
+    for row in rows {
+        let (name, unique, origin) = row?;
+        if origin == "pk" {
+            continue;
+        }
+        let quoted_index_name = quoted_table_name_str(&name)?;
+        let mut info = conn.prepare(&format!("PRAGMA index_info({quoted_index_name})"))?;
+        let columns = info
+            .query_map([], |row| row.get::<_, String>(2))?
+            .collect::<Result<Vec<_>, _>>()?;
+        indexes.push((name, unique, columns));
+    }
+    Ok(indexes)
+}
+
+fn sqlite_type(ty: &ColumnType) -> &'static str {
+    match ty {
+        ColumnType::Bytes { .. } => "BLOB",
+        ColumnType::U64 => "INTEGER",
+        ColumnType::Text => "TEXT",
+        ColumnType::Bool => "INTEGER",
+    }
+}
+
+fn storage_prefix(storage: TableStorage) -> &'static str {
+    match storage {
+        TableStorage::Durable => "",
+        TableStorage::Memory => "TEMP ",
+    }
+}
+
+fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut upper = prefix.to_vec();
+    let idx = upper.iter().rposition(|byte| *byte != u8::MAX)?;
+    upper[idx] += 1;
+    upper.truncate(idx + 1);
+    Some(upper)
 }
 
 /// The only durable substrate core offers protocol code.
@@ -99,8 +197,12 @@ impl Store {
         sources: &[&str],
     ) -> rusqlite::Result<Self> {
         let tables = table_declarations_from_schema_sources(sources)?;
-        let declared_tables = declared_table_names(&tables);
-        let row_tables = row_table_names(&tables);
+        let declared_tables = tables.iter().map(|table| table.name.clone()).collect();
+        let row_tables = tables
+            .iter()
+            .filter(|table| table.kind == TableKind::Row)
+            .map(|table| table.name.clone())
+            .collect();
         let store = Self::from_connection_parts(conn, declared_tables, row_tables)?;
         store.apply_schema_source_tables(&tables)?;
         Ok(store)
@@ -125,7 +227,7 @@ impl Store {
 
     fn row_table_name(&self, table: TableName) -> rusqlite::Result<String> {
         if !self.row_tables.contains(table.as_str()) {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
+            return Err(store_error(format!(
                 "table {} is not an opaque row table",
                 table.as_str()
             )));
@@ -191,7 +293,7 @@ impl Store {
                     )
                     .optional()?;
                 if existing.as_deref() != Some(row.value.as_slice()) {
-                    return Err(rusqlite::Error::InvalidParameterName(format!(
+                    return Err(store_error(format!(
                         "conflicting row for {}",
                         row.table.as_str()
                     )));
@@ -245,7 +347,7 @@ impl Store {
     /// Count rows in one declared table.
     pub fn table_row_count(&self, table: TableName) -> rusqlite::Result<usize> {
         if !self.declared_tables.contains(table.as_str()) {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
+            return Err(store_error(format!(
                 "table {} is not declared",
                 table.as_str()
             )));
@@ -322,7 +424,7 @@ impl Store {
     }
 
     fn apply_schema_source_table(&self, table: &TableDeclaration) -> rusqlite::Result<()> {
-        if is_row_table_declaration(table) {
+        if table.kind == TableKind::Row {
             return self.apply_schema_source_row_table(table.storage, &table.name);
         }
         self.apply_schema_source_typed_table(table)
@@ -336,31 +438,42 @@ impl Store {
         let quoted = quoted_table_name_str(table_name)?;
         let existing = sqlite_table_columns(&self.conn, &quoted)?;
         if existing.is_empty() {
-            let temp = match storage {
-                TableStorage::Durable => "",
-                TableStorage::Memory => "TEMP ",
-            };
             return self.conn.execute_batch(&format!(
-                "CREATE {temp}TABLE {quoted} (
+                "CREATE {}TABLE {quoted} (
                     row_key BLOB PRIMARY KEY NOT NULL,
                     row_value BLOB NOT NULL
-                );"
+                );",
+                storage_prefix(storage)
             ));
         }
-        validate_sqlite_row_table(table_name, &existing)
+        let valid = existing.len() == 2
+            && existing[0].name == "row_key"
+            && existing[0].declared_type.eq_ignore_ascii_case("BLOB")
+            && existing[0].not_null
+            && existing[0].primary_key_position == 1
+            && existing[1].name == "row_value"
+            && existing[1].declared_type.eq_ignore_ascii_case("BLOB")
+            && existing[1].not_null
+            && existing[1].primary_key_position == 0;
+        if valid {
+            Ok(())
+        } else {
+            Err(store_error(format!(
+                "existing table {table_name} does not match store row-table shape"
+            )))
+        }
     }
 
     fn apply_schema_source_typed_table(&self, table: &TableDeclaration) -> rusqlite::Result<()> {
         let quoted = quoted_table_name_str(&table.name)?;
         let existing = sqlite_table_columns(&self.conn, &quoted)?;
         if !existing.is_empty() {
-            return validate_sqlite_typed_table(&self.conn, table, &existing);
+            return self.validate_existing_typed_table(table, &existing);
         }
-        let temp = match table.storage {
-            TableStorage::Durable => "",
-            TableStorage::Memory => "TEMP ",
-        };
+        self.create_typed_table(table, &quoted)
+    }
 
+    fn create_typed_table(&self, table: &TableDeclaration, quoted: &str) -> rusqlite::Result<()> {
         let mut declarations = table
             .columns
             .iter()
@@ -377,9 +490,10 @@ impl Store {
             quoted_identifier_list(table.row_key.columns.iter().map(String::as_str))?
         ));
         self.conn.execute_batch(&format!(
-            "CREATE {temp}TABLE {quoted} (
+            "CREATE {}TABLE {quoted} (
                 {}
             );",
+            storage_prefix(table.storage),
             declarations.join(",\n                ")
         ))?;
 
@@ -394,18 +508,79 @@ impl Store {
         }
         Ok(())
     }
-}
 
-fn declared_table_names(tables: &[TableDeclaration]) -> HashSet<String> {
-    tables.iter().map(|table| table.name.clone()).collect()
-}
+    fn validate_existing_typed_table(
+        &self,
+        table: &TableDeclaration,
+        columns: &[SqliteTableColumn],
+    ) -> rusqlite::Result<()> {
+        if columns.len() != table.columns.len() {
+            return Err(store_error(format!(
+                "existing table {} column count does not match declared shape",
+                table.name
+            )));
+        }
+        for (idx, declared) in table.columns.iter().enumerate() {
+            let existing = &columns[idx];
+            let expected_pk = table
+                .row_key
+                .columns
+                .iter()
+                .position(|column| column == &declared.name)
+                .map(|position| (position + 1) as i64)
+                .unwrap_or(0);
+            let shape_matches = existing.name == declared.name
+                && existing
+                    .declared_type
+                    .eq_ignore_ascii_case(sqlite_type(&declared.ty))
+                && existing.not_null
+                && existing.primary_key_position == expected_pk;
+            if !shape_matches {
+                return Err(store_error(format!(
+                    "existing table {} column {} does not match declared shape",
+                    table.name, declared.name
+                )));
+            }
+        }
 
-fn row_table_names(tables: &[TableDeclaration]) -> HashSet<String> {
-    tables
-        .iter()
-        .filter(|table| is_row_table_declaration(table))
-        .map(|table| table.name.clone())
-        .collect()
+        let quoted = quoted_table_name_str(&table.name)?;
+        let existing_indexes = sqlite_table_indexes(&self.conn, &quoted)?;
+        for declared in &table.indexes {
+            let name = format!("{}_{}", table.name, declared.name);
+            match existing_indexes
+                .iter()
+                .find(|(existing_name, _, _)| existing_name == &name)
+            {
+                Some((_, unique, columns))
+                    if *unique == declared.unique && columns == &declared.columns => {}
+                Some(_) => {
+                    return Err(store_error(format!(
+                        "existing table {} index {} does not match declared shape",
+                        table.name, name
+                    )));
+                }
+                None => {
+                    return Err(store_error(format!(
+                        "existing table {} is missing index {}",
+                        table.name, name
+                    )));
+                }
+            }
+        }
+        for (existing_name, _, _) in &existing_indexes {
+            if !table
+                .indexes
+                .iter()
+                .any(|declared| existing_name == &format!("{}_{}", table.name, declared.name))
+            {
+                return Err(store_error(format!(
+                    "existing table {} has undeclared index {}",
+                    table.name, existing_name
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
