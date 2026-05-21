@@ -15,14 +15,25 @@ use crate::core::daemon::{self, DaemonDescription};
 use crate::core::runtime::{Runtime, RuntimeDescription};
 use std::path::PathBuf;
 
+/// Complete protocol declaration needed by the generic CLI runner.
 pub struct ProtocolDescription<C: 'static> {
+    /// Program name used in usage output.
     pub name: &'static str,
+    /// Runtime schema, projection, matching, and handler declarations.
     pub runtime: RuntimeDescription,
+    /// Long-running daemon declarations.
     pub daemon: DaemonDescription,
+    /// Non-daemon command registry.
     pub commands: &'static [CliCommand<C>],
+    /// Convert an opened runtime into the protocol-owned command context.
     pub context: fn(Runtime, Option<PathBuf>) -> C,
 }
 
+/// Run one protocol CLI invocation.
+///
+/// `app` owns the generic command split: help, daemon lifecycle commands, and
+/// protocol command dispatch. Protocol modules still own their command parsers
+/// and output formatting through their registered `CliCommand`s.
 pub fn run<C: 'static>(
     description: &'static ProtocolDescription<C>,
     argv: Vec<String>,
@@ -47,6 +58,7 @@ pub fn run<C: 'static>(
     Ok(())
 }
 
+/// Build top-level usage with daemon commands plus protocol commands.
 pub fn usage<C: 'static>(description: &ProtocolDescription<C>, reason: &str) -> String {
     let mut lines = vec![reason.to_string(), "usage:".to_string()];
     lines.extend([

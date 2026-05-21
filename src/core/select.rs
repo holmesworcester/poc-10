@@ -3,6 +3,13 @@
 //! A select is a read-only query over declared tables. Pipeline workers choose
 //! the destination queue table and columns; the select only describes the
 //! bounded source rows and bound parameters.
+//!
+//! The mechanism is intentionally narrower than "run arbitrary SQL". The text
+//! must be a single comment-free `SELECT`, every `FROM` and `JOIN` table must be
+//! declared in `allowed_tables`, and all variable values must be supplied as
+//! bound parameters. If a caller needs richer validation, put it in the module
+//! that constructs the select and keep this file as the generic insert-select
+//! adapter.
 
 use crate::core::store::{quoted_identifier_list, quoted_table_name};
 use crate::core::store::{Store, TableName};
@@ -10,8 +17,11 @@ use rusqlite::types::Value as SqliteValue;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Select {
+    /// Static `SELECT` text that yields the columns expected by the caller.
     pub sql: &'static str,
+    /// Tables this select is allowed to read.
     pub allowed_tables: &'static [TableName],
+    /// Bound parameters used by `sql`.
     pub params: Vec<Param>,
 }
 
@@ -35,6 +45,7 @@ impl Select {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
+    /// SQLite parameter name, including its marker such as `:owner`.
     pub name: &'static str,
     pub value: Value,
 }
@@ -138,6 +149,7 @@ pub(crate) fn insert_select_in_tx(
     stmt.raw_execute()
 }
 
+/// Check the deliberately small SQL surface accepted by `insert_select_in_tx`.
 fn validate_select_sql(sql: &str, allowed_tables: &[TableName]) -> rusqlite::Result<()> {
     let trimmed = sql.trim_start();
     if !trimmed
@@ -169,6 +181,11 @@ fn validate_select_sql(sql: &str, allowed_tables: &[TableName]) -> rusqlite::Res
     Ok(())
 }
 
+/// Tokenize enough SQL to find `FROM` and `JOIN` table identifiers.
+///
+/// This is not a SQL parser. It is paired with the single-statement,
+/// comment-free validation above and exists only to enforce the table allowlist
+/// for the static selects core accepts.
 fn sql_identifier_tokens(sql: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();

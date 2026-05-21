@@ -3,6 +3,16 @@
 //! Facts are immutable, content-addressed rows. This module owns inserting,
 //! purging, and reading those rows; pipeline workers decide when those
 //! operations should happen.
+//!
+//! The important split is `facts` versus `local_fact_admissions`. `facts`
+//! stores bytes by content id. `local_fact_admissions` records how this store
+//! first admitted those bytes: scope, admission timestamp, and the derived
+//! local admission id used for ordering. That admission record is local
+//! runtime metadata, not a protocol fact to sync.
+//!
+//! If the content-addressing rule, admission ordering, or purge fanout changes,
+//! change it here. If a protocol wants to interpret the fact bytes, that logic
+//! belongs in the protocol fact module and its projector.
 
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
 use crate::core::store::Store;

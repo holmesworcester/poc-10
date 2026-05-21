@@ -1,7 +1,24 @@
-//! Protocol-neutral fact id and scope types.
+//! Protocol-neutral fact identity and visibility scope.
+//!
+//! Core treats a fact as immutable bytes plus local admission metadata. The id
+//! is the BLAKE3 hash of the bytes, so changing scope or timestamp does not
+//! change content identity; those fields describe how this store admitted and
+//! may expose the bytes. Protocol modules own the byte layout and validation
+//! rules for each fact kind.
+//!
+//! Scope is deliberately small. `Global` can be synced, `Local` is private to
+//! the store, and `Scoped` gives a protocol-defined namespace plus id for data
+//! that should only move inside that boundary. If a new kind of visibility is
+//! needed, change this file and the storage codecs together; do not smuggle it
+//! into protocol payload bytes.
 
+/// Content-addressed identity of immutable fact bytes.
 pub type FactId = [u8; 32];
 
+/// Protocol vocabulary for scoped facts.
+///
+/// The lowercase ASCII shape mirrors roles, timelines, and intent kinds: these
+/// identifiers are durable protocol names, not display strings.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ScopeKind(String);
 
@@ -25,6 +42,11 @@ impl ScopeKind {
     }
 }
 
+/// Local visibility attached to fact bytes at admission time.
+///
+/// Scope is not part of the hash. The same bytes admitted twice with different
+/// scopes still identify the same fact; `fact_store` keeps the first local
+/// admission record that made those bytes visible in this store.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FactScope {
     Global,
@@ -32,15 +54,21 @@ pub enum FactScope {
     Scoped { kind: ScopeKind, id: FactId },
 }
 
+/// Immutable fact bytes plus the local admission metadata core needs to route them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fact {
+    /// Content id, equal to `fact_id(bytes)`.
     pub id: FactId,
+    /// Local visibility attached when the fact was admitted.
     pub scope: FactScope,
+    /// Local admission timestamp used for deterministic ordering.
     pub timestamp: u64,
+    /// Immutable protocol-owned payload bytes.
     pub bytes: Vec<u8>,
 }
 
 impl Fact {
+    /// Construct a fact and derive its id from `bytes`.
     pub fn new(scope: FactScope, timestamp: u64, bytes: Vec<u8>) -> Self {
         let id = fact_id(&bytes);
         Self {
@@ -51,11 +79,13 @@ impl Fact {
         }
     }
 
+    /// Return the exact bytes whose hash is `id`.
     pub fn body(&self) -> &[u8] {
         &self.bytes
     }
 }
 
+/// Compute the stable content id for fact bytes.
 pub fn fact_id(bytes: &[u8]) -> FactId {
     *blake3::hash(bytes).as_bytes()
 }

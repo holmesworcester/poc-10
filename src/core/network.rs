@@ -22,7 +22,9 @@ use std::time::{Duration, Instant};
 
 use crate::core::store::{SchemaSource, Store, TableName, TableRow};
 
+/// Restart-local outbound network queue table.
 pub const OUTBOUND_TABLE: TableName = TableName::new("network_out");
+/// Restart-local inbound network queue table.
 pub const INBOUND_TABLE: TableName = TableName::new("network_in");
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const WRITE_FRAME_BUDGET: Duration = Duration::from_millis(100);
@@ -47,41 +49,52 @@ CREATE TEMP TABLE IF NOT EXISTS network_in (
     row_tables: &[OUTBOUND_TABLE, INBOUND_TABLE],
 };
 
+/// Destination for opaque outbound frame bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetworkTarget {
     addr: SocketAddr,
 }
 
 impl NetworkTarget {
+    /// Build a target from a socket address.
     pub fn new(addr: SocketAddr) -> Self {
         Self { addr }
     }
 
+    /// Return the socket address this target names.
     pub fn addr(self) -> SocketAddr {
         self.addr
     }
 }
 
+/// Address observed for an inbound frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetworkSource {
     addr: SocketAddr,
 }
 
 impl NetworkSource {
+    /// Build a source from a socket address.
     pub fn new(addr: SocketAddr) -> Self {
         Self { addr }
     }
 
+    /// Return the socket address this source names.
     pub fn addr(self) -> SocketAddr {
         self.addr
     }
 }
 
+/// Opaque protocol frame ready to write to a target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundFrame {
     pub bytes: Vec<u8>,
 }
 
+/// Memory-queued outbound frame.
+///
+/// The key is deterministic from direction, target, and frame bytes. The value
+/// is the exact frame bytes that will be length-prefixed on the TCP stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundNetworkRow {
     pub key: Vec<u8>,
@@ -90,6 +103,7 @@ pub struct OutboundNetworkRow {
 }
 
 impl OutboundNetworkRow {
+    /// Build a deterministic outbound queue row.
     pub fn new(target: NetworkTarget, bytes: Vec<u8>) -> Self {
         Self {
             key: queue_key(b"outbound", target.addr(), &bytes),
@@ -99,6 +113,7 @@ impl OutboundNetworkRow {
     }
 }
 
+/// Memory-queued inbound frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundNetworkRow {
     pub key: Vec<u8>,
@@ -107,6 +122,7 @@ pub struct InboundNetworkRow {
 }
 
 impl InboundNetworkRow {
+    /// Build a deterministic inbound queue row.
     pub fn new(source: NetworkSource, bytes: Vec<u8>) -> Self {
         Self {
             key: queue_key(b"inbound", source.addr(), &bytes),
@@ -306,14 +322,18 @@ fn queue_key(kind: &[u8], addr: SocketAddr, bytes: &[u8]) -> Vec<u8> {
 /// Counts observed while pumping one TCP stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamReport {
+    /// Frames written to a stream.
     pub sent_frames: usize,
+    /// Non-empty frames read from a stream and staged in the inbound queue.
     pub received_frames: usize,
 }
 
 /// Result of polling a reusable listener once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptReport<T> {
+    /// Number of streams accepted during this poll.
     pub accepted_connections: usize,
+    /// Caller-selected report value for accepted streams.
     pub value: T,
 }
 
@@ -324,6 +344,7 @@ pub struct Listener {
 }
 
 impl Listener {
+    /// Return the address actually bound by the listener.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }

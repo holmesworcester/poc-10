@@ -33,21 +33,30 @@ extern "C" fn handle_termination_signal(_signal: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
+/// Parsed daemon start options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartOptions {
+    /// Address the daemon should bind.
     pub listen: SocketAddr,
+    /// Sleep duration after an idle tick.
     pub quiet_ms: u64,
+    /// Maximum queued items one tick should process per stage.
     pub work_limit: usize,
 }
 
+/// Protocol declarations needed by the generic daemon tick.
 #[derive(Clone, Copy)]
 pub struct DaemonDescription {
+    /// Converter from inbound network bytes to a restart-local intent.
     pub inbound_network_intent: Option<InboundNetworkIntent>,
+    /// Time-wake schedules the daemon should admit each tick.
     pub time_wakes: &'static [DaemonTimeWake],
 }
 
+/// Function that turns an inbound frame into restart-local queued work.
 pub type InboundNetworkIntent = fn(InboundNetworkFrame) -> Result<Intent, String>;
 
+/// Opaque inbound TCP frame plus local receipt metadata.
 #[derive(Debug, Clone)]
 pub struct InboundNetworkFrame {
     pub frame: Vec<u8>,
@@ -55,12 +64,23 @@ pub struct InboundNetworkFrame {
     pub received_at_local_ms: u64,
 }
 
+/// One daemon-owned time wake declaration.
+///
+/// The protocol supplies both the timeline and the current high-water mark.
+/// Core turns due rows in that interval into pending projection.
 #[derive(Clone, Copy)]
 pub struct DaemonTimeWake {
+    /// Timeline namespace to process.
     pub timeline: fn() -> Timeline,
+    /// Current inclusive high-water mark for that timeline.
     pub end_inclusive: fn(&Store) -> Result<Option<u64>, String>,
 }
 
+/// Run one bounded daemon tick.
+///
+/// The order is fixed: accept TCP, translate inbound bytes to local intents,
+/// admit time wakes, then drain projection/intent/projection work. Protocols
+/// should change their declarations rather than reordering this loop.
 pub fn tick(
     description: DaemonDescription,
     runtime: &mut Runtime,
@@ -147,7 +167,9 @@ fn now_ms() -> u64 {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DaemonReport {
+    /// Bound listener address, including the assigned port for `:0`.
     pub local_addr: Option<SocketAddr>,
+    /// Number of loop ticks completed before shutdown.
     pub ticks: usize,
 }
 
@@ -162,6 +184,7 @@ impl DaemonReport {
     }
 }
 
+/// Run the long-lived daemon loop until SIGINT/SIGTERM or `stop`.
 pub fn start(
     db_path: &Path,
     args: CliArgs<'_>,
@@ -193,11 +216,13 @@ pub fn start(
     Ok(CliOutput::lines(report.lines()))
 }
 
+/// Ask the daemon for this database to stop, using its sibling lock file.
 pub fn stop(db_path: &Path, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(0, STOP_USAGE)?;
     Ok(CliOutput::lines(stop_daemon(db_path)?))
 }
 
+/// Stop the daemon if needed and remove the database, WAL, SHM, and lock files.
 pub fn reset(db_path: &Path, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(0, RESET_USAGE)?;
     let mut lines = stop_daemon(db_path)?;
@@ -205,6 +230,7 @@ pub fn reset(db_path: &Path, args: CliArgs<'_>) -> Result<CliOutput, String> {
     Ok(CliOutput::lines(lines))
 }
 
+/// Read the current daemon listen address from the sibling lock file.
 pub fn current_listen_addr(db_path: &Path) -> Result<Option<SocketAddr>, String> {
     let text = match fs::read_to_string(lock_path(db_path)) {
         Ok(text) => text,

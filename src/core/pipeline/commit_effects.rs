@@ -1,3 +1,15 @@
+//! Atomic commit path for `PipelineEffects`.
+//!
+//! Projection, command submission, and intent dispatch all arrive here after
+//! producing the same side-effect language. This module validates that row
+//! mutations target tables the runtime registered, then writes purges, new
+//! facts, row mutations, durable intents, and restart-local intents inside the
+//! caller's transaction.
+//!
+//! Add new effect kinds here only when they need the same atomicity as the
+//! existing pipeline effects. The module should stay unaware of protocol
+//! semantics: it validates table ownership and idempotence, not payload meaning.
+
 use crate::core::effects::PipelineEffects;
 use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
 use crate::core::intents::{Intent, RowMutation, TableDelete, TableDeleteWhere, TableInsert};
@@ -11,13 +23,21 @@ use std::collections::BTreeMap;
 
 use super::dispatch::{record_intent_in_table_in_tx, record_intent_in_tx};
 
+/// Counts of newly inserted work after an effect commit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PipelineEffectCounts {
+    /// Facts newly admitted.
     pub facts: usize,
+    /// Durable intents newly queued.
     pub intents: usize,
+    /// Restart-local intents newly queued.
     pub local_intents: usize,
 }
 
+/// Validate effect batches before opening a transaction.
+///
+/// This catches pure conflicts first, so callers fail with a useful error
+/// before any SQL writes are attempted.
 pub(crate) fn validate_pipeline_effects(
     effects: &PipelineEffects,
     allowed_tables: &[TableName],
@@ -110,6 +130,7 @@ pub(super) fn sqlite_string_error(err: String) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(err)
 }
 
+/// Validate and commit pipeline effects in a new transaction.
 pub(crate) fn commit_pipeline_effects_to_store(
     store: &Store,
     effects: &PipelineEffects,
@@ -122,6 +143,11 @@ pub(crate) fn commit_pipeline_effects_to_store(
         .map_err(|err| format!("{label}: {err}"))
 }
 
+/// Write all shared effects into an already-open transaction.
+///
+/// The order is intentional: purges remove stale core-owned rows first, new
+/// facts become pending, rows mutate, and follow-up intents are recorded last.
+/// If any step fails, the caller's transaction rolls the whole batch back.
 pub(crate) fn commit_pipeline_effects_in_tx(
     tx: &Store,
     effects: &PipelineEffects,
@@ -177,6 +203,11 @@ pub(crate) fn commit_pipeline_effects_in_tx(
     })
 }
 
+/// Insert a typed-table row idempotently.
+///
+/// Unlike row tables, typed tables do not have a generic key/value shape. The
+/// complete supplied column set is therefore both the insert data and the
+/// idempotence check.
 fn insert_values_in_tx(store: &Store, insert: &TableInsert) -> rusqlite::Result<usize> {
     validate_columns_and_values(insert.columns, &insert.values, "insert")?;
     let table = quoted_table_name(insert.table)?;
@@ -196,6 +227,7 @@ fn insert_values_in_tx(store: &Store, insert: &TableInsert) -> rusqlite::Result<
     Ok(changed)
 }
 
+/// Check whether an ignored typed insert was an exact duplicate.
 fn insert_values_match(
     store: &Store,
     insert: &TableInsert,
@@ -214,6 +246,7 @@ fn insert_values_match(
         .map(|row| row.is_some())
 }
 
+/// Delete typed-table rows by an exact column predicate.
 fn delete_where_in_tx(store: &Store, delete: &TableDeleteWhere) -> rusqlite::Result<usize> {
     validate_columns_and_values(delete.columns, &delete.values, "delete")?;
     let table = quoted_table_name(delete.table)?;

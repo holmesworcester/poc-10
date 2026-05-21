@@ -4,6 +4,10 @@
 //! metadata used as a lower bound when CLI commands choose the next event
 //! timestamp. Existing event timestamps still win, so setting the clock
 //! backwards cannot make new shared events collide with old ones.
+//!
+//! Change this file when the local CLI clock policy changes. Do not use it as
+//! a shared protocol clock: facts and projected rows must carry their own
+//! protocol-defined time semantics.
 
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::store::Store;
@@ -13,6 +17,7 @@ const CLOCK_KEY: &str = "now";
 
 pub const CLOCK_USAGE: &str = "clock [set TIMESTAMP|advance DELTA|clear]";
 
+/// Return the store-local logical clock, if one has been set.
 pub fn logical_time(store: &Store) -> Result<Option<u64>, String> {
     store
         .conn()
@@ -25,6 +30,10 @@ pub fn logical_time(store: &Store) -> Result<Option<u64>, String> {
         .map_err(|err| format!("load logical clock: {err}"))
 }
 
+/// Set the store-local logical clock and return the stored timestamp.
+///
+/// The value must fit SQLite's signed integer range because the table stores it
+/// as `INTEGER`.
 pub fn set_logical_time(store: &Store, timestamp: u64) -> Result<u64, String> {
     let timestamp = sqlite_u64(timestamp, "logical clock timestamp")?;
     store
@@ -38,6 +47,7 @@ pub fn set_logical_time(store: &Store, timestamp: u64) -> Result<u64, String> {
     Ok(timestamp as u64)
 }
 
+/// Advance the store-local logical clock from its current value or zero.
 pub fn advance_logical_time(store: &Store, delta: u64) -> Result<u64, String> {
     let current = logical_time(store)?.unwrap_or(0);
     let next = current
@@ -46,6 +56,7 @@ pub fn advance_logical_time(store: &Store, delta: u64) -> Result<u64, String> {
     set_logical_time(store, next)
 }
 
+/// Clear the store-local logical clock.
 pub fn clear_logical_time(store: &Store) -> Result<(), String> {
     store
         .write_transaction(|store| {
@@ -57,11 +68,17 @@ pub fn clear_logical_time(store: &Store) -> Result<(), String> {
     Ok(())
 }
 
+/// Compute the next timestamp a command should use.
+///
+/// The result is at least one greater than the observed event maximum and at
+/// least the local logical clock. This makes the clock a lower bound rather
+/// than a source of truth that can override already-observed events.
 pub fn next_timestamp(store: &Store, observed_max_timestamp: u64) -> Result<u64, String> {
     let from_events = observed_max_timestamp.saturating_add(1);
     Ok(from_events.max(logical_time(store)?.unwrap_or(0)))
 }
 
+/// Run the generic `clock` CLI command against a store.
 pub fn run_cli(
     store: &Store,
     args: CliArgs<'_>,

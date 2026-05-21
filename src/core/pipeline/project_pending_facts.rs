@@ -1,4 +1,15 @@
 //! Pending fact projection orchestration.
+//!
+//! This module owns the SQL-backed projection loop. It admits facts into the
+//! pending queue, turns due time wakes into pending projection with time-range
+//! context, loads each pending fact's previous context and matched inputs, runs
+//! the protocol projector, and commits the replacement context plus pipeline
+//! effects in one transaction.
+//!
+//! Projection is intentionally per fact. Everything before
+//! `commit_projection_effects` is calculation; that function is the single
+//! durable boundary. If scheduling or projection atomicity changes, make that
+//! change here rather than in individual protocol projectors.
 
 use super::commit_effects::validate_pipeline_effects;
 use super::commit_effects::{commit_pipeline_effects_in_tx, sqlite_string_error};
@@ -122,13 +133,17 @@ pub(crate) fn commit_projected_context_offers(
         .map_err(|err| format!("commit projected context offers: {err}"))
 }
 
+/// Projection progress from one bounded drain pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ProjectionProgress {
+    /// Number of facts that completed projection.
     pub(crate) projected: usize,
+    /// Whether the pass made progress or hit a retry.
     pub(crate) status: WorkStatus,
 }
 
 impl ProjectionProgress {
+    /// Accumulate another projection progress report.
     pub(super) fn merge(&mut self, other: Self) {
         self.projected += other.projected;
         self.status.merge(other.status);
@@ -367,6 +382,10 @@ fn commit_projection_effects(
         .map_err(|err| format!("commit projection effects: {err}"))
 }
 
+/// Clear due time ranges after the owner consumes them.
+///
+/// Time ranges are transient projection context, not standing schedule. The
+/// schedule lives in `time_wakes` and is replaced by each successful projection.
 fn delete_pending_time_ranges_for_owner_in_tx(
     store: &Store,
     owner: FactId,
@@ -513,6 +532,7 @@ fn pending_time_ranges_for_owner(store: &Store, owner: &FactId) -> Result<Vec<Ti
         .map_err(|err| format!("load pending time ranges: {err}"))
 }
 
+/// Decode one due time range row stored by `enqueue_due_time_wakes_in_tx`.
 fn decode_pending_time_range(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimeRange> {
     let timeline =
         Timeline::new(row.get::<_, String>(0)?).map_err(rusqlite::Error::InvalidParameterName)?;

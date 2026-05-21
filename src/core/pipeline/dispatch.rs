@@ -1,3 +1,15 @@
+//! Intent queue claiming, handler execution, and handler-output commit.
+//!
+//! Dispatch owns the lifecycle of one queued intent row. It claims the next
+//! row for a registered kind, loads only the facts requested by the handler,
+//! calls the handler, and commits the row deletion plus handler effects in one
+//! transaction. Retry errors deliberately leave the row queued.
+//!
+//! Durable and restart-local queues share the same row shape. Durable work wins
+//! when both queues contain the same kind, and handling a durable row removes a
+//! duplicate local row with the same identity so restart-local retries do not
+//! repeat work already accepted durably.
+
 use crate::core::effects::PipelineEffects;
 use crate::core::fact_store::persisted_fact;
 use crate::core::intents::{HandlerContext, HandlerError, Intent, IntentHandler, IntentKind};
@@ -8,16 +20,21 @@ use rusqlite::{params, params_from_iter, OptionalExtension};
 use super::commit_effects::{commit_pipeline_effects_in_tx, validate_pipeline_effects};
 use super::WorkStatus;
 
-// === Intent dispatch ===
-
+/// Queue durable idempotent handler work.
 pub(crate) fn submit_intent_to_store(store: &Store, intent: Intent) -> Result<bool, String> {
     submit_intent_to_table(store, INTENTS, intent)
 }
 
+/// Queue restart-local handler work on this SQLite connection.
 pub(crate) fn submit_local_intent_to_store(store: &Store, intent: Intent) -> Result<bool, String> {
     submit_intent_to_table(store, LOCAL_INTENTS, intent)
 }
 
+/// Insert one intent into the selected queue.
+///
+/// Queue identity is `(kind, idempotence_key)`. Re-inserting the same payload is
+/// a no-op; a different payload for the same identity rejects because dispatch
+/// would no longer know which work item the key names.
 fn submit_intent_to_table(store: &Store, table: TableName, intent: Intent) -> Result<bool, String> {
     let inserted = store
         .write_transaction(|tx| record_intent_in_table_in_tx(tx, table, &intent))
@@ -25,6 +42,11 @@ fn submit_intent_to_table(store: &Store, table: TableName, intent: Intent) -> Re
     Ok(inserted)
 }
 
+/// Load the next queued row for any registered handler kind.
+///
+/// Durable queue rows are ordered by stable identity for deterministic tests
+/// and replay. Local rows use insertion order so inbound network frames and
+/// other restart-local work preserve arrival order within one process.
 pub(crate) fn next_queued_intent(
     store: &Store,
     allowed_kinds: &[&str],
@@ -38,6 +60,11 @@ pub(crate) fn next_queued_intent(
     }
 }
 
+/// Run one claimed intent through its handler.
+///
+/// On success, the handled row and all emitted effects commit together. On
+/// retry, no SQL changes are made and the returned status records that dispatch
+/// should stop this bounded pass.
 pub(crate) fn dispatch_queued_intent(
     handler: &(impl IntentHandler + ?Sized),
     store: &Store,
@@ -166,6 +193,7 @@ fn commit_handler_output(
 }
 
 pub(crate) struct QueuedIntent {
+    /// Queue table from which this row was claimed.
     pub(crate) table: TableName,
     pub(crate) intent: Intent,
 }
@@ -194,6 +222,7 @@ pub(super) fn record_intent_in_tx(store: &Store, intent: &Intent) -> rusqlite::R
     record_intent_in_table_in_tx(store, INTENTS, intent)
 }
 
+/// Record an intent row in either queue inside the caller's transaction.
 pub(super) fn record_intent_in_table_in_tx(
     store: &Store,
     table: TableName,

@@ -1,8 +1,17 @@
-//! Small facade over real cryptographic primitives.
+//! Shared cryptographic primitives and verified-slice helpers.
 //!
 //! Callers pass semantic context and canonical bytes into this facade.
 //! The facade owns primitive selection and low-level library calls, keeping
 //! fact modules from growing their own hash or signature implementations.
+//!
+//! This module provides primitives, not authority. Callers must still choose
+//! canonical bytes, domain strings, associated data, and nonce/key lifetimes in
+//! the protocol module that owns the data being protected.
+//!
+//! Add code here when a primitive or proof format is reusable across protocol
+//! modules. Keep protocol-specific signing domains, encryption purposes,
+//! key-rotation rules, and payload validation in the module that owns those
+//! facts.
 
 use std::io::{Cursor, Read, Write};
 
@@ -33,6 +42,7 @@ pub type X25519PublicKey = [u8; X25519_PUBLIC_KEY_BYTES];
 pub type XChaCha20Poly1305Key = [u8; XCHACHA20_POLY1305_KEY_BYTES];
 pub type XChaCha20Poly1305Nonce = [u8; XCHACHA20_POLY1305_NONCE_BYTES];
 
+/// BLAKE3 hash for ordinary content addressing.
 pub fn hash(bytes: &[u8]) -> Hash {
     *blake3::hash(bytes).as_bytes()
 }
@@ -57,24 +67,29 @@ pub fn blake3_keyed_hash(key: &[u8; HASH_BYTES], domain: &[u8], info: &[u8]) -> 
     *blake3::keyed_hash(key, &input).as_bytes()
 }
 
+/// Generate 32 bytes with OS randomness.
 pub fn random_bytes_32() -> [u8; 32] {
     let mut out = [0; 32];
     OsRng.fill_bytes(&mut out);
     out
 }
 
+/// Derive the public Ed25519 key for a 32-byte private seed.
 pub fn ed25519_public_key(private_key: &Ed25519PrivateKey) -> Ed25519PublicKey {
     VerifyingKey::from(&SigningKey::from_bytes(private_key)).to_bytes()
 }
 
+/// Generate a new Ed25519 private key seed with OS randomness.
 pub fn random_ed25519_private_key() -> Ed25519PrivateKey {
     random_bytes_32()
 }
 
+/// Sign canonical bytes with Ed25519.
 pub fn ed25519_sign(private_key: &Ed25519PrivateKey, bytes: &[u8]) -> Ed25519Signature {
     SigningKey::from_bytes(private_key).sign(bytes).to_bytes()
 }
 
+/// Verify an Ed25519 signature over canonical bytes.
 pub fn ed25519_verify(
     public_key: &Ed25519PublicKey,
     bytes: &[u8],
@@ -87,14 +102,20 @@ pub fn ed25519_verify(
     public_key.verify(bytes, &signature).is_ok()
 }
 
+/// Generate a new X25519 private key with OS randomness.
 pub fn random_x25519_private_key() -> X25519PrivateKey {
     X25519Secret::random_from_rng(OsRng).to_bytes()
 }
 
+/// Derive the public X25519 key for a private key.
 pub fn x25519_public_key(private_key: &X25519PrivateKey) -> X25519PublicKey {
     X25519Public::from(&X25519Secret::from(*private_key)).to_bytes()
 }
 
+/// Compute the raw X25519 shared secret.
+///
+/// Callers should pass the output through a KDF with an explicit purpose before
+/// using it as an encryption key.
 pub fn x25519_diffie_hellman(
     local_secret: &X25519PrivateKey,
     remote_public_key: &X25519PublicKey,
@@ -104,16 +125,22 @@ pub fn x25519_diffie_hellman(
     *secret.diffie_hellman(&remote).as_bytes()
 }
 
+/// Generate a nonce for XChaCha20-Poly1305.
 pub fn random_xchacha20poly1305_nonce() -> XChaCha20Poly1305Nonce {
     let mut nonce = [0; XCHACHA20_POLY1305_NONCE_BYTES];
     OsRng.fill_bytes(&mut nonce);
     nonce
 }
 
+/// Generate a symmetric XChaCha20-Poly1305 key.
 pub fn random_xchacha20poly1305_key() -> XChaCha20Poly1305Key {
     random_bytes_32()
 }
 
+/// Derive an XChaCha20-Poly1305 key using HKDF-SHA256.
+///
+/// `purpose` is HKDF salt and `associated_data` is HKDF info. Protocol modules
+/// should use stable purpose strings for each distinct derivation.
 pub fn hkdf_sha256_key(
     input_key_material: &[u8],
     purpose: &[u8],
@@ -126,6 +153,7 @@ pub fn hkdf_sha256_key(
     Ok(key)
 }
 
+/// Encrypt bytes with XChaCha20-Poly1305 and caller-supplied associated data.
 pub fn xchacha20poly1305_encrypt(
     key: &XChaCha20Poly1305Key,
     associated_data: &[u8],
@@ -144,6 +172,7 @@ pub fn xchacha20poly1305_encrypt(
         .map_err(|_| "encrypt xchacha20poly1305 payload".to_string())
 }
 
+/// Decrypt bytes with XChaCha20-Poly1305 and caller-supplied associated data.
 pub fn xchacha20poly1305_decrypt(
     key: &XChaCha20Poly1305Key,
     associated_data: &[u8],
@@ -162,6 +191,7 @@ pub fn xchacha20poly1305_decrypt(
         .map_err(|_| "decrypt xchacha20poly1305 payload".to_string())
 }
 
+/// Derive a shared key from X25519 and encrypt with XChaCha20-Poly1305.
 pub fn x25519_xchacha20poly1305_encrypt(
     local_secret: &X25519PrivateKey,
     remote_public_key: &X25519PublicKey,
@@ -183,6 +213,7 @@ pub fn x25519_xchacha20poly1305_encrypt(
         .map_err(|_| "encrypt x25519 xchacha20poly1305 payload".to_string())
 }
 
+/// Derive a shared key from X25519 and decrypt with XChaCha20-Poly1305.
 pub fn x25519_xchacha20poly1305_decrypt(
     local_secret: &X25519PrivateKey,
     remote_public_key: &X25519PublicKey,

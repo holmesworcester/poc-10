@@ -1,4 +1,16 @@
-//! Projector contract for fact plus context to needs, offers, and intents.
+//! Projector contract from facts and context to runtime effects.
+//!
+//! Projection is core's deterministic reactive path. A projector receives one
+//! immutable fact plus the context rows core has matched for that fact, and it
+//! returns the complete replacement context owned by that fact together with
+//! row mutations and intents to commit. The pipeline enforces that a projector
+//! only owns context and time wakes for the fact being projected.
+//!
+//! Protocol projector implementations own admission policy: scope checks,
+//! context proof checks, derived rows, offers, needs, time wakes, and follow-up
+//! intents. This file defines the contract they implement. Keep byte decoding
+//! in the fact module's codec and keep user-facing workflows in command
+//! modules.
 
 use crate::core::context::{ContextNeed, ContextOffer, ContextSet};
 use crate::core::effects::PipelineEffects;
@@ -6,6 +18,10 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, RowMutation};
 use std::collections::BTreeMap;
 
+/// Matched context and due time ranges visible while projecting one fact.
+///
+/// Core builds this immediately before calling the projector. It is a snapshot
+/// of matched rows for this run, not a live storage handle.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionContext {
     offers: Vec<ContextOffer>,
@@ -14,14 +30,26 @@ pub struct ProjectionContext {
     time_ranges: Vec<TimeRange>,
 }
 
+/// One matched need/offer pair plus the offer owner's payload fact.
+///
+/// Core constructs this from standing context rows before calling the
+/// projector. A projector may inspect the payload, but it must not assume core
+/// has validated the protocol semantics of that payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchedContext {
+    /// The need owned by the fact currently being projected.
     pub need: ContextNeed,
+    /// The offer that satisfied the need.
     pub offer: ContextOffer,
+    /// Payload fact loaded from the offer owner.
     pub payload: Fact,
 }
 
 impl ProjectionContext {
+    /// Build context containing only unmatched standing offers.
+    ///
+    /// This shape is mainly used for facts with no needs; protocol code should
+    /// prefer the matched-payload helpers when a proof depends on a need.
     pub fn new(offers: Vec<ContextOffer>) -> Self {
         Self {
             offers,
@@ -31,6 +59,7 @@ impl ProjectionContext {
         }
     }
 
+    /// Build context from already matched need/offer/payload triples.
     pub fn from_matches(matched: Vec<MatchedContext>) -> Self {
         let mut offers = matched
             .iter()
@@ -47,15 +76,21 @@ impl ProjectionContext {
         }
     }
 
+    /// Return all distinct offers visible to this projection run.
     pub fn offers(&self) -> &[ContextOffer] {
         &self.offers
     }
 
+    /// Attach due time ranges selected by the daemon's time-wake pass.
     pub fn with_time_ranges(mut self, time_ranges: Vec<TimeRange>) -> Self {
         self.time_ranges = time_ranges;
         self
     }
 
+    /// Return the largest due time in a range containing `at`.
+    ///
+    /// This is a context check, not a clock read. The daemon already decided
+    /// which ranges were due and stored them for this projection pass.
     pub fn time_reached(&self, timeline: &Timeline, at: u64) -> Option<u64> {
         self.time_ranges
             .iter()
@@ -88,6 +123,7 @@ impl ProjectionContext {
         Ok(Some(&matched.payload))
     }
 
+    /// Decode the first payload for `need` using the owning fact codec.
     pub fn payload_as<C>(&self, need: &ContextNeed) -> Result<Option<C::Payload>, String>
     where
         C: FactCodec,
@@ -95,6 +131,7 @@ impl ProjectionContext {
         self.payload_for(need).map(C::decode_fact).transpose()
     }
 
+    /// Return every matched payload for a need, preserving its offer metadata.
     pub fn matched_payloads_for<'a>(
         &'a self,
         need: &'a ContextNeed,
@@ -103,6 +140,11 @@ impl ProjectionContext {
             .map(|matched| (&matched.offer, &matched.payload))
     }
 
+    /// Return every matched payload decoded through the owning fact codec.
+    ///
+    /// The owner check is deliberately here because context rows and fact rows
+    /// are separate storage records. A mismatch means the projected proof is
+    /// not the fact the offer claimed to provide.
     pub fn matched_payloads_as_checked<'a, C>(
         &'a self,
         need: &'a ContextNeed,
@@ -143,10 +185,12 @@ fn index_matches_by_need(matched: &[MatchedContext]) -> BTreeMap<ContextNeed, Ve
     matched_by_need
 }
 
+/// Protocol-defined time-wake namespace.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timeline(String);
 
 impl Timeline {
+    /// Build a stable time-wake namespace.
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let value = value.into();
         if value.is_empty() {
@@ -166,31 +210,52 @@ impl Timeline {
     }
 }
 
+/// A scheduled wake owned by one fact.
+///
+/// Projection output replaces all previous wakes for the owner. The daemon
+/// later turns due rows into pending projection plus `TimeRange` context.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TimeWake {
+    /// Fact whose projection owns this wake.
     pub owner: FactId,
+    /// Timeline namespace.
     pub timeline: Timeline,
+    /// Inclusive scheduled time.
     pub at: u64,
 }
 
+/// A due time interval handed to a projector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeRange {
+    /// Timeline namespace.
     pub timeline: Timeline,
+    /// Lower bound already processed for this daemon admission, if any.
     pub start_exclusive: Option<u64>,
+    /// Inclusive upper bound admitted for projection.
     pub end_inclusive: u64,
 }
 
 impl TimeRange {
+    /// Return whether a scheduled point is inside this due interval.
     pub fn contains(&self, at: u64) -> bool {
         self.start_exclusive.is_none_or(|start| at > start) && at <= self.end_inclusive
     }
 }
 
+/// Complete uncommitted output of projecting one fact.
+///
+/// `needs`, `offers`, and `time_wakes` are the replacement sets owned by the
+/// projected fact. `effects` are ordinary runtime effects that commit in the
+/// same transaction after ownership checks pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionOutput {
+    /// Complete replacement needs for the projected fact.
     pub needs: Vec<ContextNeed>,
+    /// Complete replacement offers for the projected fact.
     pub offers: Vec<ContextOffer>,
+    /// Complete replacement time wakes for the projected fact.
     pub time_wakes: Vec<TimeWake>,
+    /// Row mutations and intents to commit with this projection.
     pub effects: PipelineEffects,
 }
 
@@ -238,26 +303,43 @@ impl ProjectionOutput {
     }
 }
 
+/// The protocol-facing projection entry point.
+///
+/// Implement this when the projector wants to own decoding itself. Otherwise,
+/// prefer `FactCodec` plus `TypedProjector` so byte layout stays next to the
+/// fact module that owns it.
 pub trait Projector {
     fn project(&self, fact: &Fact, context: &ProjectionContext)
         -> Result<ProjectionOutput, String>;
 }
 
+/// Function pointer used by static projector route tables.
 pub type ProjectorFn = fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>;
+/// Function that maps an envelope fact to its semantic fact tag.
 pub type EffectiveTagFn = fn(&Fact) -> Result<u8, String>;
 
+/// Route from a fact tag to the projector that owns that tag.
 #[derive(Debug, Clone, Copy)]
 pub struct FactRoute {
+    /// Effective fact tag routed to this projector function.
     pub tag: u8,
     pub projector: ProjectorFn,
 }
 
+/// Route for envelope facts whose outer tag is not the semantic fact tag.
 #[derive(Debug, Clone, Copy)]
 pub struct EnvelopeRoute {
+    /// Outer fact tag identifying the envelope layout.
     pub outer_tag: u8,
+    /// Function that reads the envelope enough to choose the semantic route.
     pub effective_tag: EffectiveTagFn,
 }
 
+/// Tag router used by protocol registries.
+///
+/// Core reads only the first byte and any protocol-supplied envelope tag
+/// function. It does not know what a tag means beyond selecting the registered
+/// projector function.
 #[derive(Debug, Clone, Copy)]
 pub struct RouterProjector {
     routes: &'static [FactRoute],
@@ -324,6 +406,7 @@ pub trait TypedProjector<C: FactCodec> {
     ) -> Result<ProjectionOutput, String>;
 }
 
+/// Decode a fact through `C` and call the typed projector implementation.
 pub fn project_typed<C, P>(
     projector: &P,
     fact: &Fact,
