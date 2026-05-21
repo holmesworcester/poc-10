@@ -1,6 +1,5 @@
 use crate::core::matchers::ContextMatcher;
-use crate::core::pipeline::projection::process_pending_projection_batch;
-use crate::core::pipeline::report::{add_pipeline_report, PipelineReport};
+use crate::core::pipeline::projection::{process_pending_projection_batch, ProjectionProgress};
 use crate::core::projectors::{Projector, TimeRange, Timeline};
 use crate::core::schema::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
 use crate::core::select;
@@ -105,11 +104,11 @@ pub(crate) fn drain_pending_projection(
     store: &Store,
     allowed_tables: &[TableName],
     limit: usize,
-) -> Result<PipelineReport, String> {
-    let mut total = PipelineReport::default();
+) -> Result<ProjectionProgress, String> {
+    let mut total = ProjectionProgress::default();
 
     loop {
-        if total.projections >= limit {
+        if total.projected >= limit {
             break;
         }
 
@@ -118,10 +117,10 @@ pub(crate) fn drain_pending_projection(
             matchers,
             store,
             allowed_tables,
-            limit - total.projections,
+            limit - total.projected,
         )?;
-        let projected_facts = projection_report.projections > 0;
-        add_pipeline_report(&mut total, projection_report);
+        let projected_facts = projection_report.projected > 0;
+        total.merge(projection_report);
 
         if !projected_facts {
             break;

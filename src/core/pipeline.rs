@@ -27,17 +27,41 @@ mod projection_queue;
 mod projection_run;
 #[cfg(test)]
 mod projection_run_tests;
-mod report;
+
+/// Public outcome returned by runtime pipeline calls.
+///
+/// Runtime callers only need to know whether a bounded pass moved work forward
+/// and whether any handler asked to retry before irreversible cleanup, such as
+/// deleting claimed network input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkStatus {
+    pub progressed: bool,
+    pub retried: bool,
+}
+
+impl WorkStatus {
+    pub fn idle() -> Self {
+        Self::default()
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.progressed |= other.progressed;
+        self.retried |= other.retried;
+    }
+
+    pub fn is_idle(self) -> bool {
+        !self.progressed && !self.retried
+    }
+}
 
 pub(crate) use admission::{
     commit_projected_context_offers, purge_fact_from_store, submit_fact_to_store,
     submit_facts_to_store,
 };
-pub(crate) use dispatch::DispatchReport;
 pub(crate) use dispatch::{
     dispatch_durable_intents, dispatch_local_intents, submit_intent_to_store,
     submit_local_intent_to_store,
 };
 pub(crate) use effects::commit_pipeline_effects_to_store;
 pub(crate) use fact_context::{drain_pending_projection, process_due_time_range};
-pub(crate) use report::PipelineReport;
+pub(crate) use projection::ProjectionProgress;

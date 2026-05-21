@@ -5,20 +5,11 @@ use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::{Store, TableName};
 use rusqlite::{params, OptionalExtension};
 
-use super::effects::{
-    commit_pipeline_effects_in_tx, validate_pipeline_effects, PipelineEffectCounts,
-};
+use super::effects::{commit_pipeline_effects_in_tx, validate_pipeline_effects};
 use super::intent_queue::record_intent_in_table_in_tx;
+use super::WorkStatus;
 
 // === Intent dispatch ===
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DispatchReport {
-    pub handled: usize,
-    pub facts: usize,
-    pub intents: usize,
-    pub retries: usize,
-}
 
 pub(crate) fn submit_intent_to_store(store: &Store, intent: Intent) -> Result<bool, String> {
     submit_intent_to_table(store, INTENTS, intent)
@@ -43,7 +34,7 @@ pub(crate) fn dispatch_durable_intents(
     store: &Store,
     allowed_tables: &[TableName],
     limit: usize,
-) -> Result<DispatchReport, String> {
+) -> Result<WorkStatus, String> {
     dispatch_stored_intents(handler, intent_kind, store, INTENTS, allowed_tables, limit)
 }
 
@@ -60,28 +51,30 @@ fn dispatch_stored_intents(
     queue_table: TableName,
     allowed_tables: &[TableName],
     limit: usize,
-) -> Result<DispatchReport, String> {
-    let mut report = DispatchReport::default();
-    while report.handled < limit {
+) -> Result<WorkStatus, String> {
+    let mut status = WorkStatus::idle();
+    let mut handled = 0;
+    while handled < limit {
         let Some(stored) = next_intent_for_kind(store, queue_table, intent_kind)? else {
             break;
         };
         let context = load_handler_context(store, handler, &stored.intent)?;
-        let Some(output) = run_handler(handler, &stored.intent, &context, &mut report)? else {
+        let Some(output) = run_handler(handler, &stored.intent, &context, &mut status)? else {
             break;
         };
         validate_pipeline_effects(&output, allowed_tables)?;
-        let handled = HandledIntent {
+        let handled_intent = HandledIntent {
             table: queue_table,
             kind: stored.intent.kind.as_str(),
             idempotence_key: &stored.intent.key,
         };
-        let commit = commit_handler_output(store, handled, &output, allowed_tables)?;
-        if !finish_handler_output(commit, &mut report) {
+        if !commit_handler_output(store, handled_intent, &output, allowed_tables)? {
             continue;
         }
+        handled += 1;
+        status.progressed = true;
     }
-    Ok(report)
+    Ok(status)
 }
 
 /// Dispatch restart-local intents from the temp local-intent queue.
@@ -91,7 +84,7 @@ pub(crate) fn dispatch_local_intents(
     store: &Store,
     allowed_tables: &[TableName],
     limit: usize,
-) -> Result<DispatchReport, String> {
+) -> Result<WorkStatus, String> {
     dispatch_stored_intents(
         handler,
         intent_kind,
@@ -161,13 +154,13 @@ fn run_handler(
     handler: &(impl IntentHandler + ?Sized),
     intent: &Intent,
     context: &HandlerContext<'_>,
-    report: &mut DispatchReport,
+    status: &mut WorkStatus,
 ) -> Result<Option<PipelineEffects>, String> {
     match handler.handle(intent, context) {
         Ok(output) => Ok(Some(output)),
         Err(err) => {
             if matches!(err, HandlerError::Retry(_)) {
-                report.retries += 1;
+                status.retried = true;
                 Ok(None)
             } else {
                 Err(err.to_string())
@@ -187,40 +180,20 @@ fn commit_handler_output(
     handled: HandledIntent<'_>,
     effects: &PipelineEffects,
     allowed_tables: &[TableName],
-) -> Result<HandlerCommit, String> {
+) -> Result<bool, String> {
     store
         .write_transaction(|tx| {
             if delete_intent_in_tx(tx, handled.table, handled.kind, handled.idempotence_key)? == 0 {
-                return Ok(HandlerCommit::default());
+                return Ok(false);
             }
             if handled.table == INTENTS {
                 delete_intent_in_tx(tx, LOCAL_INTENTS, handled.kind, handled.idempotence_key)?;
             }
 
-            let counts = commit_pipeline_effects_in_tx(tx, effects, allowed_tables)?;
-
-            Ok(HandlerCommit {
-                handled: true,
-                effects: counts,
-            })
+            commit_pipeline_effects_in_tx(tx, effects, allowed_tables)?;
+            Ok(true)
         })
         .map_err(|err| format!("commit handler output: {err}"))
-}
-
-/// Apply the post-commit effects of a handled intent and update the report.
-///
-/// Runs only after [`commit_handler_output`] succeeds. Returns whether the commit
-/// took effect — `false` only when another dispatcher had already claimed the
-/// stored intent.
-fn finish_handler_output(commit: HandlerCommit, report: &mut DispatchReport) -> bool {
-    if !commit.handled {
-        return false;
-    }
-
-    report.handled += 1;
-    report.facts += commit.effects.facts;
-    report.intents += commit.effects.intents();
-    true
 }
 
 struct StoredIntent {
@@ -232,15 +205,6 @@ struct HandledIntent<'a> {
     table: TableName,
     kind: &'a str,
     idempotence_key: &'a [u8],
-}
-
-/// Counts from one committed handler transaction.
-#[derive(Debug, Default)]
-struct HandlerCommit {
-    /// Whether the transaction took effect. `false` only when the queued intent
-    /// row was already gone.
-    handled: bool,
-    effects: PipelineEffectCounts,
 }
 
 fn delete_intent_in_tx(

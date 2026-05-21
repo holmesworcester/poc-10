@@ -17,12 +17,6 @@ pub(crate) struct PipelineEffectCounts {
     pub local_intents: usize,
 }
 
-impl PipelineEffectCounts {
-    pub(crate) fn intents(self) -> usize {
-        self.intents + self.local_intents
-    }
-}
-
 pub(crate) fn validate_pipeline_effects(
     effects: &PipelineEffects,
     allowed_tables: &[TableName],

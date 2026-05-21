@@ -1,14 +1,27 @@
 //! Pending fact projection orchestration.
 
 use super::effects::validate_pipeline_effects;
-use super::projection_commit::{commit_projection_effects, ProjectionCommit, ProjectionEffects};
+use super::projection_commit::{commit_projection_effects, ProjectionEffects};
 use super::projection_queue::{load_pending_fact, pending_owner_batch, PendingFact};
 use super::projection_run::run_projection_with_context;
+use super::WorkStatus;
 use crate::core::fact_store::purge_fact_in_tx;
 use crate::core::matchers::ContextMatcher;
-use crate::core::pipeline::report::PipelineReport;
 use crate::core::projectors::Projector;
 use crate::core::store::{Store, TableName};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProjectionProgress {
+    pub(crate) projected: usize,
+    pub(crate) status: WorkStatus,
+}
+
+impl ProjectionProgress {
+    pub(super) fn merge(&mut self, other: Self) {
+        self.projected += other.projected;
+        self.status.merge(other.status);
+    }
+}
 
 /// Process pending facts from SQLite one at a time until there is no work or
 /// `limit` facts have completed projection.
@@ -21,19 +34,17 @@ use crate::core::store::{Store, TableName};
 /// 4. `prepare_projection_effects` runs protocol projection and groups the outputs.
 /// 5. `commit_projection_effects` commits every durable and restart-local effect in one
 ///    SQLite transaction.
-/// 6. `finish_pending_fact` refreshes compatibility memory and the report after
-///    the transaction has succeeded.
 pub(crate) fn process_pending_projection_batch(
     projector: &(impl Projector + ?Sized),
     matchers: &[&dyn ContextMatcher],
     store: &Store,
     allowed_tables: &[TableName],
     limit: usize,
-) -> Result<PipelineReport, String> {
-    let mut report = PipelineReport::default();
+) -> Result<ProjectionProgress, String> {
+    let mut progress = ProjectionProgress::default();
 
     for fact_id in pending_owner_batch(store, limit)? {
-        if report.projections >= limit {
+        if progress.projected >= limit {
             break;
         }
         let Some(pending_fact) = load_pending_fact(store, fact_id, matchers)? else {
@@ -48,11 +59,11 @@ pub(crate) fn process_pending_projection_batch(
             matchers,
             store,
             allowed_tables,
-            &mut report,
+            &mut progress,
         )?;
     }
 
-    Ok(report)
+    Ok(progress)
 }
 
 /// Complete all projection work for one pending fact.
@@ -66,11 +77,12 @@ fn process_pending_fact(
     matchers: &[&dyn ContextMatcher],
     store: &Store,
     allowed_tables: &[TableName],
-    report: &mut PipelineReport,
+    progress: &mut ProjectionProgress,
 ) -> Result<(), String> {
     let effects = prepare_projection_effects(projector, pending_fact, allowed_tables)?;
-    let commit = commit_projection_effects(store, &effects, matchers, allowed_tables)?;
-    finish_pending_fact(commit, report);
+    commit_projection_effects(store, &effects, matchers, allowed_tables)?;
+    progress.projected += 1;
+    progress.status.progressed = true;
     Ok(())
 }
 
@@ -98,14 +110,4 @@ fn prepare_projection_effects(
         context_delta: run.context_delta,
         pipeline: run.pipeline,
     })
-}
-
-/// Update compatibility memory and the report after a projection commit.
-///
-/// This function runs after SQLite has accepted the durable work and any
-/// restart-local temp rows.
-fn finish_pending_fact(commit: ProjectionCommit, report: &mut PipelineReport) {
-    report.projections += 1;
-    report.intents += commit.effects.intents();
-    report.woken_facts += commit.woken_facts;
 }

@@ -2,7 +2,7 @@
 
 use super::context_rows::{insert_context_need_in_tx, insert_context_offer_in_tx};
 use super::context_wakes::wake_context_matches_in_tx;
-use super::effects::{commit_pipeline_effects_in_tx, sqlite_string_error, PipelineEffectCounts};
+use super::effects::{commit_pipeline_effects_in_tx, sqlite_string_error};
 use crate::core::context::{ContextSet, ContextSetDelta};
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::FactId;
@@ -18,12 +18,6 @@ pub(super) struct ProjectionEffects {
     pub(super) next_time_wakes: Vec<TimeWake>,
     pub(super) context_delta: ContextSetDelta,
     pub(super) pipeline: PipelineEffects,
-}
-
-/// The committed SQL result needed to update memory and reporting.
-pub(super) struct ProjectionCommit {
-    pub(super) effects: PipelineEffectCounts,
-    pub(super) woken_facts: usize,
 }
 
 /// Commit all durable projection effects in one SQLite transaction.
@@ -42,7 +36,7 @@ pub(super) fn commit_projection_effects(
     effects: &ProjectionEffects,
     matchers: &[&dyn ContextMatcher],
     allowed_tables: &[TableName],
-) -> Result<ProjectionCommit, String> {
+) -> Result<(), String> {
     store
         .write_transaction(|tx| {
             tx.conn().execute(
@@ -53,15 +47,10 @@ pub(super) fn commit_projection_effects(
             replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
             replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
 
-            let woken_facts = wake_context_matches_in_tx(tx, &effects.context_delta, matchers)
+            wake_context_matches_in_tx(tx, &effects.context_delta, matchers)
                 .map_err(sqlite_string_error)?;
-
-            let counts = commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables)?;
-
-            Ok(ProjectionCommit {
-                effects: counts,
-                woken_facts,
-            })
+            commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables)?;
+            Ok(())
         })
         .map_err(|err| format!("commit projection effects: {err}"))
 }

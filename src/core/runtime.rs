@@ -12,11 +12,13 @@ use crate::core::fact_store::persisted_facts;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::matchers::ContextMatcher;
-use crate::core::pipeline::{self, DispatchReport, PipelineReport};
+use crate::core::pipeline;
 use crate::core::projectors::{Projector, Timeline};
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION};
 use crate::core::store::{Store, TableName};
 use std::path::Path;
+
+pub use crate::core::pipeline::WorkStatus;
 
 pub type ProjectorFactory = fn() -> Box<dyn Projector>;
 pub type MatchersFactory = fn() -> Vec<Box<dyn ContextMatcher>>;
@@ -30,47 +32,6 @@ pub struct RuntimeDescription {
     pub matchers: MatchersFactory,
     pub handlers: &'static [HandlerRoute],
     pub command_excluded_handlers: &'static [&'static str],
-}
-
-/// Public outcome returned by runtime pipeline calls.
-///
-/// Detailed counts stay inside the individual pipelines where they are useful
-/// for tests and local implementation. Runtime callers only need to know
-/// whether a bounded pass moved work forward and whether any handler asked to
-/// retry before irreversible cleanup, such as deleting claimed network input.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WorkStatus {
-    pub progressed: bool,
-    pub retried: bool,
-}
-
-impl WorkStatus {
-    pub fn idle() -> Self {
-        Self::default()
-    }
-
-    fn from_projection_report(report: &PipelineReport) -> Self {
-        Self {
-            progressed: report.projections > 0 || report.woken_facts > 0 || report.intents > 0,
-            retried: false,
-        }
-    }
-
-    fn from_dispatch_report(report: &DispatchReport) -> Self {
-        Self {
-            progressed: report.handled > 0 || report.facts > 0 || report.intents > 0,
-            retried: report.retries > 0,
-        }
-    }
-
-    pub fn merge(&mut self, other: Self) {
-        self.progressed |= other.progressed;
-        self.retried |= other.retried;
-    }
-
-    pub fn is_idle(self) -> bool {
-        !self.progressed && !self.retried
-    }
 }
 
 pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
@@ -121,35 +82,28 @@ impl HandlerSet {
         store: &Store,
         allowed_tables: &[TableName],
         limit_per_handler: usize,
-    ) -> Result<DispatchReport, String> {
-        let mut total = DispatchReport::default();
+    ) -> Result<WorkStatus, String> {
+        let mut total = WorkStatus::idle();
         for entry in &self.entries {
-            let report = pipeline::dispatch_durable_intents(
+            let status = pipeline::dispatch_durable_intents(
                 entry.handler.as_ref(),
                 entry.route.intent_kind,
                 store,
                 allowed_tables,
                 limit_per_handler,
             )?;
-            total.handled += report.handled;
-            total.facts += report.facts;
-            total.intents += report.intents;
-            total.retries += report.retries;
-            if report.handled > 0 || report.retries > 0 {
+            total.merge(status);
+            if status.progressed || status.retried {
                 continue;
             }
 
-            let report = pipeline::dispatch_local_intents(
+            total.merge(pipeline::dispatch_local_intents(
                 entry.handler.as_ref(),
                 entry.route.intent_kind,
                 store,
                 allowed_tables,
                 limit_per_handler,
-            )?;
-            total.handled += report.handled;
-            total.facts += report.facts;
-            total.intents += report.intents;
-            total.retries += report.retries;
+            )?);
         }
         Ok(total)
     }
@@ -279,7 +233,10 @@ impl Runtime {
         Ok(receipt)
     }
 
-    fn process_projection_work(&mut self, limit: usize) -> Result<PipelineReport, String> {
+    fn process_projection_work(
+        &mut self,
+        limit: usize,
+    ) -> Result<pipeline::ProjectionProgress, String> {
         let matcher_refs = self
             .matchers
             .iter()
@@ -301,13 +258,9 @@ impl Runtime {
     ) -> Result<WorkStatus, String> {
         let mut total = WorkStatus::idle();
         for _ in 0..max_rounds {
-            let report = self.process_projection_work(limit_per_round)?;
-            total.merge(WorkStatus::from_projection_report(&report));
-            if report.projections == 0
-                && report.woken_facts == 0
-                && report.intents == 0
-                && self.pending_fact_count() == 0
-            {
+            let progress = self.process_projection_work(limit_per_round)?;
+            total.merge(progress.status);
+            if progress.projected == 0 && self.pending_fact_count() == 0 {
                 return Ok(total);
             }
         }
@@ -335,12 +288,11 @@ impl Runtime {
         handlers: &HandlerSet,
         limit_per_handler: usize,
     ) -> Result<WorkStatus, String> {
-        let report = handlers.dispatch(
+        handlers.dispatch(
             &self.store,
             self.description.row_mutation_tables,
             limit_per_handler,
-        )?;
-        Ok(WorkStatus::from_dispatch_report(&report))
+        )
     }
 
     fn process_work_until_idle(
