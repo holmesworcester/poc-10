@@ -6,7 +6,7 @@ use super::effects::{commit_pipeline_effects_in_tx, sqlite_string_error};
 use crate::core::context::{ContextSet, ContextSetDelta};
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::FactId;
-use crate::core::matchers::ContextMatcher;
+use crate::core::matchers::ContextMatchers;
 use crate::core::projectors::TimeWake;
 use crate::core::store::{Store, TableName};
 use rusqlite::params;
@@ -34,7 +34,7 @@ pub(super) struct ProjectionEffects {
 pub(super) fn commit_projection_effects(
     store: &Store,
     effects: &ProjectionEffects,
-    matchers: &[&dyn ContextMatcher],
+    matchers: &ContextMatchers,
     allowed_tables: &[TableName],
 ) -> Result<(), String> {
     store

@@ -939,7 +939,8 @@ fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
         "pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>]",
         "pub(crate) const SCHEMA_SOURCES: &[&str]",
         "pub(crate) const ROW_MUTATION_TABLES: &[TableName]",
-        "pub const CONTEXT_MATCHERS: &[ContextRoleDeclaration]",
+        "pub const EXACT_CONTEXT_ROLES: &[&str]",
+        "pub const SQL_CONTEXT_ROLES: &[&str]",
         "pub(crate) const HANDLER_ROUTES: &[HandlerRoute]",
     ] {
         assert!(

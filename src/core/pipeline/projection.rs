@@ -6,7 +6,7 @@ use super::projection_queue::{load_pending_fact, pending_owner_batch, PendingFac
 use super::projection_run::run_projection_with_context;
 use super::WorkStatus;
 use crate::core::fact_store::purge_fact_in_tx;
-use crate::core::matchers::ContextMatcher;
+use crate::core::matchers::ContextMatchers;
 use crate::core::projectors::Projector;
 use crate::core::store::{Store, TableName};
 
@@ -36,7 +36,7 @@ impl ProjectionProgress {
 ///    SQLite transaction.
 pub(crate) fn process_pending_projection_batch(
     projector: &(impl Projector + ?Sized),
-    matchers: &[&dyn ContextMatcher],
+    matchers: &ContextMatchers,
     store: &Store,
     allowed_tables: &[TableName],
     limit: usize,
@@ -74,7 +74,7 @@ pub(crate) fn process_pending_projection_batch(
 fn process_pending_fact(
     pending_fact: PendingFact,
     projector: &(impl Projector + ?Sized),
-    matchers: &[&dyn ContextMatcher],
+    matchers: &ContextMatchers,
     store: &Store,
     allowed_tables: &[TableName],
     progress: &mut ProjectionProgress,

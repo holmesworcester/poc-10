@@ -1,7 +1,7 @@
 use crate::core::context::{ContextOffer, ContextSetDelta};
 use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
 use crate::core::facts::{Fact, FactId};
-use crate::core::matchers::ContextMatcher;
+use crate::core::matchers::ContextMatchers;
 use crate::core::store::Store;
 use rusqlite::params;
 
@@ -17,7 +17,7 @@ use super::effects::sqlite_string_error;
 /// together.
 pub(crate) fn commit_projected_context_offers(
     store: &Store,
-    matchers: &[&dyn ContextMatcher],
+    matchers: &ContextMatchers,
     offers: &[ContextOffer],
     completed_fact_ids: &[FactId],
 ) -> Result<usize, String> {

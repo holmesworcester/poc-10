@@ -1,4 +1,4 @@
-use crate::core::matchers::ContextMatcher;
+use crate::core::matchers::ContextMatchers;
 use crate::core::pipeline::projection::{process_pending_projection_batch, ProjectionProgress};
 use crate::core::projectors::{Projector, TimeRange, Timeline};
 use crate::core::schema::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
@@ -100,7 +100,7 @@ fn enqueue_due_time_wakes_in_tx(
 /// loop stops when no fact projected or the projection limit has been reached.
 pub(crate) fn drain_pending_projection(
     projector: &(impl Projector + ?Sized),
-    matchers: &[&dyn ContextMatcher],
+    matchers: &ContextMatchers,
     store: &Store,
     allowed_tables: &[TableName],
     limit: usize,

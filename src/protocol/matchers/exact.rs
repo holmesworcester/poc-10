@@ -5,7 +5,6 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
-pub use crate::core::matchers::ExactSelectorMatcher;
 
 pub const CONNECTION_EPHEMERAL_SECRET_ROLE: &str = "connection_ephemeral_secret";
 pub const CONNECTION_INVITE_SECRET_ROLE: &str = "connection_invite_secret";

@@ -184,6 +184,9 @@ Accountable criteria:
 - Done in this branch: stale context matcher declaration metadata was deleted.
   Matcher registry entries now declare only role plus exact-vs-SQL kind, while
   executable SQL lives with the matcher implementation.
+- Done in this branch: the remaining matcher declaration shell is gone. Exact
+  context roles are a core SQL relation, and protocol registers only exact role
+  names plus the real SQL-backed custom matchers.
 
 ## 1. Store All Intents In SQLite Queues
 

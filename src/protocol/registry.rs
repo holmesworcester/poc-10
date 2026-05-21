@@ -5,11 +5,8 @@
 //! of contents; behavior stays in the fact, intent, and core runtime modules.
 
 use crate::core::cli::CliCommand;
-use crate::core::context::Role;
 use crate::core::facts::Fact;
-use crate::core::matchers::{
-    ContextMatcher, ContextMatcherKind, ContextRoleDeclaration, ExactSelectorMatcher,
-};
+use crate::core::matchers::{ContextMatcher, ContextMatchers};
 use crate::core::network;
 use crate::core::projectors::{
     EnvelopeRoute, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
@@ -23,7 +20,6 @@ use crate::protocol::intents::{
 };
 use crate::protocol::matchers;
 use crate::protocol::{assertions, cli as command};
-use std::collections::BTreeSet;
 
 pub use crate::protocol::cli::MatchCliContext;
 
@@ -229,38 +225,41 @@ pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
     "receive_transit_frame",
 ];
 
-pub const CONTEXT_MATCHERS: &[ContextRoleDeclaration] = &[
-    ContextRoleDeclaration::exact(matchers::CONNECTION_EPHEMERAL_SECRET_ROLE),
-    ContextRoleDeclaration::exact(matchers::CONNECTION_INVITE_SECRET_ROLE),
-    ContextRoleDeclaration::exact(matchers::CONNECTION_REQUEST_ROLE),
-    ContextRoleDeclaration::exact(matchers::CONTENT_FILE_ROLE),
-    ContextRoleDeclaration::exact(matchers::CONTENT_MESSAGE_ROLE),
-    ContextRoleDeclaration::exact(matchers::CONTENT_MESSAGE_META_ROLE),
-    ContextRoleDeclaration::exact(matchers::CONTENT_DELETED_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_ADMIN_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_DEVICE_INVITE_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_DEVICE_INVITE_KEY_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_ENDPOINT_SHARED_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_INVITE_SECRET_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_INVITE_SERVER_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_INVITE_SERVER_KEY_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_USER_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_USER_INVITE_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_USER_INVITE_KEY_ROLE),
-    ContextRoleDeclaration::exact(matchers::IDENTITY_WORKSPACE_ROLE),
-    ContextRoleDeclaration::exact(matchers::LOCAL_RECIPIENT_KEY_ROLE),
-    ContextRoleDeclaration::exact(matchers::LOCAL_SECRET_SOURCE_ROLE),
-    ContextRoleDeclaration::exact(matchers::LOCAL_SIGNER_SECRET_ROLE),
-    ContextRoleDeclaration::exact(matchers::RECIPIENT_KEY_ROLE),
-    ContextRoleDeclaration::exact(matchers::RECIPIENT_SUPERSEDED_ROLE),
-    ContextRoleDeclaration::exact(matchers::REMOVAL_FRONTIER_ROLE),
-    matchers::SECRET_COVERAGE_CONTEXT_ROLE,
-    ContextRoleDeclaration::exact(matchers::CONTENT_SIGNER_ROLE),
-    ContextRoleDeclaration::exact(matchers::SYNC_EXACT_FACT_ROLE),
-    ContextRoleDeclaration::exact(matchers::SYNC_KEY_WRAP_ROLE),
-    matchers::RANGE_FACT_CONTEXT_ROLE,
-    ContextRoleDeclaration::exact(matchers::TRANSIT_RECEIVED_ROLE),
-    matchers::WRAP_SOURCE_CONTEXT_ROLE,
+pub const EXACT_CONTEXT_ROLES: &[&str] = &[
+    matchers::CONNECTION_EPHEMERAL_SECRET_ROLE,
+    matchers::CONNECTION_INVITE_SECRET_ROLE,
+    matchers::CONNECTION_REQUEST_ROLE,
+    matchers::CONTENT_FILE_ROLE,
+    matchers::CONTENT_MESSAGE_ROLE,
+    matchers::CONTENT_MESSAGE_META_ROLE,
+    matchers::CONTENT_DELETED_ROLE,
+    matchers::IDENTITY_ADMIN_ROLE,
+    matchers::IDENTITY_DEVICE_INVITE_ROLE,
+    matchers::IDENTITY_DEVICE_INVITE_KEY_ROLE,
+    matchers::IDENTITY_ENDPOINT_SHARED_ROLE,
+    matchers::IDENTITY_INVITE_SECRET_ROLE,
+    matchers::IDENTITY_INVITE_SERVER_ROLE,
+    matchers::IDENTITY_INVITE_SERVER_KEY_ROLE,
+    matchers::IDENTITY_USER_ROLE,
+    matchers::IDENTITY_USER_INVITE_ROLE,
+    matchers::IDENTITY_USER_INVITE_KEY_ROLE,
+    matchers::IDENTITY_WORKSPACE_ROLE,
+    matchers::LOCAL_RECIPIENT_KEY_ROLE,
+    matchers::LOCAL_SECRET_SOURCE_ROLE,
+    matchers::LOCAL_SIGNER_SECRET_ROLE,
+    matchers::RECIPIENT_KEY_ROLE,
+    matchers::RECIPIENT_SUPERSEDED_ROLE,
+    matchers::REMOVAL_FRONTIER_ROLE,
+    matchers::CONTENT_SIGNER_ROLE,
+    matchers::SYNC_EXACT_FACT_ROLE,
+    matchers::SYNC_KEY_WRAP_ROLE,
+    matchers::TRANSIT_RECEIVED_ROLE,
+];
+
+pub const SQL_CONTEXT_ROLES: &[&str] = &[
+    matchers::SECRET_COVERAGE_ROLE,
+    matchers::SYNC_RANGE_FACT_ROLE,
+    matchers::WRAP_SOURCE_ROLE,
 ];
 
 pub(crate) const SCHEMA_SOURCES: &[&str] = &[
@@ -309,8 +308,18 @@ pub(crate) fn protocol_projector() -> Box<dyn Projector> {
     Box::new(ProtocolProjector)
 }
 
-pub(crate) fn protocol_context_matchers() -> Vec<Box<dyn ContextMatcher>> {
-    ProtocolContextMatchers::new().into_matchers()
+pub(crate) fn protocol_context_matchers() -> ContextMatchers {
+    ContextMatchers::new(
+        EXACT_CONTEXT_ROLES
+            .iter()
+            .copied()
+            .map(matchers::protocol_role),
+        vec![
+            Box::new(matchers::SecretCoverageMatcher::new()) as Box<dyn ContextMatcher>,
+            Box::new(matchers::RangeFactMatcher::new()),
+            Box::new(matchers::WrapSourceMatcher::new()),
+        ],
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -398,63 +407,6 @@ const ENVELOPE_ROUTES: &[EnvelopeRoute] = &[EnvelopeRoute {
     outer_tag: identity::signed_fact::layout::TYPE_SIGNED_FACT,
     effective_tag: signed_effective_tag,
 }];
-
-pub struct ProtocolContextMatchers {
-    matchers: Vec<Box<dyn ContextMatcher>>,
-}
-
-impl ProtocolContextMatchers {
-    fn new() -> Self {
-        let mut exact_roles = BTreeSet::<Role>::new();
-        let mut custom_roles = BTreeSet::<&'static str>::new();
-        for declaration in CONTEXT_MATCHERS {
-            match declaration.kind {
-                ContextMatcherKind::Exact => {
-                    exact_roles.insert(
-                        Role::new(declaration.role).expect("registered exact matcher role"),
-                    );
-                }
-                ContextMatcherKind::Sql => {
-                    custom_roles.insert(declaration.role);
-                }
-            }
-        }
-
-        let mut matchers: Vec<Box<dyn ContextMatcher>> =
-            exact_roles.into_iter().map(exact_matcher).collect();
-        for role in custom_roles {
-            match role {
-                matchers::SYNC_RANGE_FACT_ROLE => {
-                    matchers.push(Box::new(matchers::RangeFactMatcher::new()));
-                }
-                matchers::SECRET_COVERAGE_ROLE => {
-                    matchers.push(Box::new(matchers::SecretCoverageMatcher::new()));
-                }
-                matchers::WRAP_SOURCE_ROLE => {
-                    matchers.push(Box::new(matchers::WrapSourceMatcher::new()));
-                }
-                other => panic!("unknown custom context matcher role {other}"),
-            }
-        }
-        Self { matchers }
-    }
-
-    #[cfg(test)]
-    fn matcher_refs(&self) -> Vec<&dyn ContextMatcher> {
-        self.matchers
-            .iter()
-            .map(|matcher| matcher.as_ref() as &dyn ContextMatcher)
-            .collect()
-    }
-
-    fn into_matchers(self) -> Vec<Box<dyn ContextMatcher>> {
-        self.matchers
-    }
-}
-
-fn exact_matcher(role: Role) -> Box<dyn ContextMatcher> {
-    Box::new(ExactSelectorMatcher::new(role))
-}
 
 macro_rules! handler_route {
     ($name:literal, $intent_kind:path, $handler:path) => {
@@ -557,26 +509,33 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn protocol_runtime_matchers_follow_registry_exact_roles() {
-        let runtime_matchers = ProtocolContextMatchers::new();
+        let runtime_matchers = protocol_context_matchers();
         let runtime_roles = runtime_matchers
-            .matcher_refs()
-            .into_iter()
-            .filter_map(|matcher| {
-                matcher
-                    .exact_selector_role()
-                    .map(|role| role.as_str().to_string())
-            })
-            .collect::<BTreeSet<_>>();
-        let registry_roles = CONTEXT_MATCHERS
+            .exact_roles()
             .iter()
-            .filter(|declaration| matches!(declaration.kind, ContextMatcherKind::Exact))
-            .map(|declaration| declaration.role.to_string())
+            .map(|role| role.as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        let registry_roles = EXACT_CONTEXT_ROLES
+            .iter()
+            .map(|role| role.to_string())
             .collect::<BTreeSet<_>>();
 
         assert_eq!(runtime_roles, registry_roles);
+
+        let custom_roles = runtime_matchers
+            .custom()
+            .map(|matcher| matcher.role().as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        let sql_roles = SQL_CONTEXT_ROLES
+            .iter()
+            .map(|role| role.to_string())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(custom_roles, sql_roles);
     }
 
     #[test]

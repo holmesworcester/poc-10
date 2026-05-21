@@ -11,7 +11,7 @@ use crate::core::context::ContextOffer;
 use crate::core::fact_store::persisted_facts;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
-use crate::core::matchers::ContextMatcher;
+use crate::core::matchers::ContextMatchers;
 use crate::core::pipeline;
 use crate::core::projectors::{Projector, Timeline};
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION};
@@ -21,7 +21,7 @@ use std::path::Path;
 pub use crate::core::pipeline::WorkStatus;
 
 pub type ProjectorFactory = fn() -> Box<dyn Projector>;
-pub type MatchersFactory = fn() -> Vec<Box<dyn ContextMatcher>>;
+pub type MatchersFactory = fn() -> ContextMatchers;
 
 /// Protocol-owned declarations needed by core's runtime engine.
 #[derive(Clone, Copy)]
@@ -120,7 +120,7 @@ pub struct Runtime {
     description: &'static RuntimeDescription,
     store: Store,
     projector: Box<dyn Projector>,
-    matchers: Vec<Box<dyn ContextMatcher>>,
+    matchers: ContextMatchers,
     handlers: HandlerSet,
 }
 
@@ -207,14 +207,9 @@ impl Runtime {
         offers: &[ContextOffer],
         completed_fact_ids: &[FactId],
     ) -> Result<usize, String> {
-        let matcher_refs = self
-            .matchers
-            .iter()
-            .map(|matcher| matcher.as_ref() as &dyn ContextMatcher)
-            .collect::<Vec<_>>();
         pipeline::commit_projected_context_offers(
             &self.store,
-            &matcher_refs,
+            &self.matchers,
             offers,
             completed_fact_ids,
         )
@@ -243,14 +238,9 @@ impl Runtime {
         &mut self,
         limit: usize,
     ) -> Result<pipeline::ProjectionProgress, String> {
-        let matcher_refs = self
-            .matchers
-            .iter()
-            .map(|matcher| matcher.as_ref() as &dyn ContextMatcher)
-            .collect::<Vec<_>>();
         pipeline::drain_pending_projection(
             self.projector.as_ref(),
-            &matcher_refs,
+            &self.matchers,
             &self.store,
             self.description.row_mutation_tables,
             limit,
@@ -390,8 +380,8 @@ mod tests {
         Box::new(NoopProjector)
     }
 
-    fn no_matchers() -> Vec<Box<dyn ContextMatcher>> {
-        Vec::new()
+    fn no_matchers() -> ContextMatchers {
+        ContextMatchers::empty()
     }
 
     const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {

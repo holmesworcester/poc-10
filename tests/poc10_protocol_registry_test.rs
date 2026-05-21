@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
-use topo::protocol::registry::CONTEXT_MATCHERS;
+use topo::protocol::registry::{EXACT_CONTEXT_ROLES, SQL_CONTEXT_ROLES};
 
 fn source_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
@@ -70,9 +70,9 @@ fn executable_protocol_tables_name_the_target_surfaces() {
         .commands
         .iter()
         .any(|command| command.name == "assert"));
-    assert!(CONTEXT_MATCHERS
+    assert!(SQL_CONTEXT_ROLES
         .iter()
-        .any(|matcher| matcher.role == "secret_coverage"));
+        .any(|role| *role == "secret_coverage"));
     assert!(MATCH_RUNTIME
         .handlers
         .iter()
@@ -89,9 +89,10 @@ fn target_context_roles_are_registered() {
             role_names_declared_in(production_text_before_unit_tests(&text))
         })
         .collect::<BTreeSet<_>>();
-    let registered_roles = CONTEXT_MATCHERS
+    let registered_roles = EXACT_CONTEXT_ROLES
         .iter()
-        .map(|matcher| matcher.role.to_string())
+        .chain(SQL_CONTEXT_ROLES.iter())
+        .map(|role| role.to_string())
         .collect::<BTreeSet<_>>();
 
     let missing = declared_roles

@@ -5,7 +5,6 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::matchers::ContextRoleDeclaration;
 use crate::core::select;
 
 use super::exact::protocol_role;
@@ -46,9 +45,6 @@ WHERE n.direction = 'need'
   AND substr(n.selector, 1, 8) <= :timestamp
   AND substr(n.selector, 9, 8) >= :timestamp
 ORDER BY a.received_at, n.owner";
-
-pub const RANGE_FACT_CONTEXT_ROLE: ContextRoleDeclaration =
-    ContextRoleDeclaration::sql(SYNC_RANGE_FACT_ROLE);
 
 pub fn range_fact_role() -> Role {
     protocol_role(SYNC_RANGE_FACT_ROLE)

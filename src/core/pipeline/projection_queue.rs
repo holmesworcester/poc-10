@@ -5,7 +5,7 @@ use super::context_rows::stored_context_for_owner;
 use crate::core::context::ContextSet;
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId};
-use crate::core::matchers::ContextMatcher;
+use crate::core::matchers::ContextMatchers;
 use crate::core::projectors::{ProjectionContext, TimeRange, Timeline};
 use crate::core::store::Store;
 use rusqlite::params;
@@ -54,7 +54,7 @@ pub(super) fn pending_owner_batch(store: &Store, limit: usize) -> Result<Vec<Fac
 pub(super) fn load_pending_fact(
     store: &Store,
     fact_id: FactId,
-    matchers: &[&dyn ContextMatcher],
+    matchers: &ContextMatchers,
 ) -> Result<Option<PendingFact>, String> {
     let Some(fact) = persisted_fact(store, &fact_id)? else {
         return Ok(None);

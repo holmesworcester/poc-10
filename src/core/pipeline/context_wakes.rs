@@ -2,7 +2,7 @@
 
 use crate::core::context::{scope_key, ContextSetDelta};
 use crate::core::context::{ContextNeed, ContextOffer};
-use crate::core::matchers::ContextMatcher;
+use crate::core::matchers::{ContextMatcher, ContextMatchers};
 use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION};
 use crate::core::select;
 use crate::core::store::Store;
@@ -10,10 +10,32 @@ use crate::core::store::Store;
 pub(super) fn wake_context_matches_in_tx(
     store: &Store,
     delta: &ContextSetDelta,
-    matchers: &[&dyn ContextMatcher],
+    matchers: &ContextMatchers,
 ) -> Result<usize, String> {
     let mut inserted = 0usize;
-    for matcher in matchers.iter().copied() {
+    for need in delta
+        .added_needs
+        .iter()
+        .filter(|need| matchers.has_exact_role(&need.role))
+    {
+        inserted += insert_pending_projection_from_select_in_tx(
+            store,
+            &exact_offers_for_need_select(need),
+            "need",
+        )?;
+    }
+    for offer in delta
+        .added_offers
+        .iter()
+        .filter(|offer| matchers.has_exact_role(&offer.role))
+    {
+        inserted += insert_pending_projection_from_select_in_tx(
+            store,
+            &exact_needs_for_offer_select(offer),
+            "offer",
+        )?;
+    }
+    for matcher in matchers.custom() {
         for need in delta
             .added_needs
             .iter()
@@ -83,11 +105,7 @@ fn wake_need_in_tx(
     matcher: &dyn ContextMatcher,
     need: &ContextNeed,
 ) -> Result<usize, String> {
-    let select = if matcher.exact_selector_role().is_some() {
-        exact_offers_for_need_select(need)
-    } else {
-        matcher.wake_select_for_added_need(need)?
-    };
+    let select = matcher.wake_select_for_added_need(need)?;
     insert_pending_projection_from_select_in_tx(store, &select, "need")
 }
 
@@ -96,11 +114,7 @@ fn wake_offer_in_tx(
     matcher: &dyn ContextMatcher,
     offer: &ContextOffer,
 ) -> Result<usize, String> {
-    let select = if matcher.exact_selector_role().is_some() {
-        exact_needs_for_offer_select(offer)
-    } else {
-        matcher.wake_select_for_added_offer(offer)?
-    };
+    let select = matcher.wake_select_for_added_offer(offer)?;
     insert_pending_projection_from_select_in_tx(store, &select, "offer")
 }
 

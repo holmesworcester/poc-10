@@ -6,7 +6,6 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::matchers::ContextRoleDeclaration;
 use crate::core::select;
 
 use super::exact::protocol_role;
@@ -127,9 +126,6 @@ WHERE n.direction = 'need'
   AND substr(n.selector, 66, 8) <= :end_minute
   AND substr(n.selector, 74, :prefix_len) = :leaf_prefix
 ORDER BY a.received_at, n.owner";
-
-pub const SECRET_COVERAGE_CONTEXT_ROLE: ContextRoleDeclaration =
-    ContextRoleDeclaration::sql(SECRET_COVERAGE_ROLE);
 
 pub fn secret_role() -> Role {
     protocol_role(SECRET_COVERAGE_ROLE)

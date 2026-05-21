@@ -3,41 +3,10 @@
 use crate::core::context::{ContextNeed, ContextOffer, Role};
 use crate::core::select;
 use crate::core::store::Store;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ContextRoleDeclaration {
-    pub role: &'static str,
-    pub kind: ContextMatcherKind,
-}
-
-impl ContextRoleDeclaration {
-    pub const fn exact(role: &'static str) -> Self {
-        Self {
-            role,
-            kind: ContextMatcherKind::Exact,
-        }
-    }
-
-    pub const fn sql(role: &'static str) -> Self {
-        Self {
-            role,
-            kind: ContextMatcherKind::Sql,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContextMatcherKind {
-    Exact,
-    Sql,
-}
+use std::collections::BTreeSet;
 
 pub trait ContextMatcher {
     fn role(&self) -> &Role;
-
-    fn exact_selector_role(&self) -> Option<&Role> {
-        None
-    }
 
     fn matching_offers_for_need_from_store(
         &self,
@@ -56,23 +25,47 @@ pub trait ContextMatcher {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExactSelectorMatcher {
-    role: Role,
+pub struct ContextMatchers {
+    exact_roles: BTreeSet<Role>,
+    custom: Vec<Box<dyn ContextMatcher>>,
 }
 
-impl ExactSelectorMatcher {
-    pub fn new(role: Role) -> Self {
-        Self { role }
-    }
-}
-
-impl ContextMatcher for ExactSelectorMatcher {
-    fn role(&self) -> &Role {
-        &self.role
+impl ContextMatchers {
+    pub fn empty() -> Self {
+        Self {
+            exact_roles: BTreeSet::new(),
+            custom: Vec::new(),
+        }
     }
 
-    fn exact_selector_role(&self) -> Option<&Role> {
-        Some(&self.role)
+    pub fn new(
+        exact_roles: impl IntoIterator<Item = Role>,
+        custom: Vec<Box<dyn ContextMatcher>>,
+    ) -> Self {
+        Self {
+            exact_roles: exact_roles.into_iter().collect(),
+            custom,
+        }
+    }
+
+    pub fn exact_roles(&self) -> &BTreeSet<Role> {
+        &self.exact_roles
+    }
+
+    pub fn has_exact_role(&self, role: &Role) -> bool {
+        self.exact_roles.contains(role)
+    }
+
+    pub fn custom(&self) -> impl Iterator<Item = &dyn ContextMatcher> {
+        self.custom
+            .iter()
+            .map(|matcher| matcher.as_ref() as &dyn ContextMatcher)
+    }
+
+    pub fn custom_for_role<'a>(
+        &'a self,
+        role: &'a Role,
+    ) -> impl Iterator<Item = &'a dyn ContextMatcher> + 'a {
+        self.custom().filter(move |matcher| matcher.role() == role)
     }
 }

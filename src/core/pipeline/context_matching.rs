@@ -4,7 +4,7 @@ use super::context_rows::stored_offers_for_exact_match;
 use crate::core::context::{scope_key, ContextNeed, ContextOffer, ContextSet, Role, Selector};
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::FactScope;
-use crate::core::matchers::ContextMatcher;
+use crate::core::matchers::ContextMatchers;
 use crate::core::projectors::{MatchedContext, ProjectionContext};
 use crate::core::store::Store;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,13 +15,13 @@ type ExactContextKey = (Role, FactScope, Selector);
 pub(super) fn stored_matching_context(
     store: &Store,
     context: &ContextSet,
-    matchers: &[&dyn ContextMatcher],
+    matchers: &ContextMatchers,
 ) -> Result<ProjectionContext, String> {
     if context.needs.is_empty() {
         return Ok(ProjectionContext::new(Vec::new()));
     }
 
-    let exact_roles = exact_matcher_roles(matchers);
+    let exact_roles = matchers.exact_roles();
     let exact_offers = stored_exact_offers_for_needs(
         store,
         context
@@ -29,18 +29,6 @@ pub(super) fn stored_matching_context(
             .iter()
             .filter(|need| exact_roles.contains(&need.role)),
     )?;
-    let custom_matchers = matchers
-        .iter()
-        .copied()
-        .filter(|matcher| {
-            matcher.exact_selector_role().is_none()
-                && context
-                    .needs
-                    .iter()
-                    .any(|need| &need.role == matcher.role())
-        })
-        .collect::<Vec<_>>();
-
     let mut matched = Vec::new();
     let mut seen = BTreeSet::new();
     for need in &context.needs {
@@ -55,11 +43,7 @@ pub(super) fn stored_matching_context(
             }
         }
 
-        for matcher in custom_matchers
-            .iter()
-            .copied()
-            .filter(|matcher| matcher.role() == &need.role)
-        {
+        for matcher in matchers.custom_for_role(&need.role) {
             let candidate_offers = matcher.matching_offers_for_need_from_store(store, need)?;
             for offer in candidate_offers {
                 push_stored_matched_context(store, need, offer, &mut seen, &mut matched)?;
@@ -71,13 +55,6 @@ pub(super) fn stored_matching_context(
 
 fn exact_context_key(role: &Role, scope: &FactScope, selector: &Selector) -> ExactContextKey {
     (role.clone(), scope.clone(), selector.clone())
-}
-
-fn exact_matcher_roles(matchers: &[&dyn ContextMatcher]) -> BTreeSet<Role> {
-    matchers
-        .iter()
-        .filter_map(|matcher| matcher.exact_selector_role().cloned())
-        .collect()
 }
 
 fn stored_exact_offers_for_needs<'a>(

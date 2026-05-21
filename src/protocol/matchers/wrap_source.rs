@@ -6,7 +6,6 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::matchers::ContextRoleDeclaration;
 use crate::core::select;
 
 use super::exact::protocol_role;
@@ -67,9 +66,6 @@ WHERE n.direction = 'need'
     )
   )
 ORDER BY a.received_at, n.owner";
-
-pub const WRAP_SOURCE_CONTEXT_ROLE: ContextRoleDeclaration =
-    ContextRoleDeclaration::sql(WRAP_SOURCE_ROLE);
 
 pub fn wrap_source_role() -> Role {
     protocol_role(WRAP_SOURCE_ROLE)
