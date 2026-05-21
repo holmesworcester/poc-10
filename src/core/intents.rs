@@ -1,6 +1,7 @@
 //! Intent and handler-output types.
 
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::select::Value as SqlValue;
 use crate::core::store::{Store, TableName, TableRow};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -52,9 +53,25 @@ pub struct TableDelete {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableInsert {
+    pub table: TableName,
+    pub columns: &'static [&'static str],
+    pub values: Vec<SqlValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableDeleteWhere {
+    pub table: TableName,
+    pub columns: &'static [&'static str],
+    pub values: Vec<SqlValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowMutation {
     PutRow(TableRow),
     DeleteRow(TableDelete),
+    InsertValues(TableInsert),
+    DeleteWhere(TableDeleteWhere),
 }
 
 // === Intent handler contract ===

@@ -165,6 +165,14 @@ Accountable criteria:
 - Done in this branch: Store no longer reconstructs typed SQLite tables back
   into opaque key/value rows for reads. Protocol read models query typed
   columns directly, and production-dead typed row decoders were removed.
+- Done in this branch: Store no longer writes typed SQLite tables through the
+  opaque key/value row adapter. Opaque row helpers are limited to declared row
+  tables; typed read-model writes now commit as `PipelineEffects` SQL value
+  inserts/deletes against schema columns.
+- Done in this branch: the protocol registry boilerplate was collapsed around
+  compact declaration macros for commands, facts, projector routes, and handler
+  routes. Tests now compare the runtime handler descriptor directly instead of
+  parsing source text.
 
 ## 1. Store All Intents In SQLite Queues
 

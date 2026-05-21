@@ -7,11 +7,12 @@
 //!      deletion, and author context; deleted targets remove the reaction row.
 //!   3. MATERIALIZE. Live reactions write one row and share the fact.
 
-use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::{RowMutation, TableDelete};
+use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
+use crate::core::select::Value;
 
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::content::{message, message_deletion};
@@ -20,7 +21,7 @@ use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 use crate::protocol::matchers as message_matchers;
 
-use super::rows::{reaction_key, reaction_row, ReactionRow, REACTION_ROWS};
+use super::rows::{reaction_row, ReactionRow, REACTION_KEY_COLUMNS, REACTION_ROWS};
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentReactionProjector;
@@ -145,7 +146,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             Some(target_deletion_need),
             Some(author_need),
         ])
-        .row_mutation(RowMutation::PutRow(row))
+        .row_mutation(RowMutation::InsertValues(row))
         .intent(share_fact_with_workspace_intent_for_fact(
             reaction.workspace_id,
             fact,
@@ -211,14 +212,22 @@ fn validate_author_user(
     Ok(())
 }
 
-fn delete_reaction_projection(
-    workspace_id: crate::core::facts::FactId,
-    reaction_id: crate::core::facts::FactId,
-) -> ProjectionOutput {
-    ProjectionOutput::new().row_mutation(RowMutation::DeleteRow(TableDelete {
+fn delete_reaction_projection(workspace_id: FactId, reaction_id: FactId) -> ProjectionOutput {
+    ProjectionOutput::new().row_mutation(RowMutation::DeleteWhere(reaction_delete(
+        workspace_id,
+        reaction_id,
+    )))
+}
+
+fn reaction_delete(workspace_id: FactId, reaction_id: FactId) -> TableDeleteWhere {
+    TableDeleteWhere {
         table: REACTION_ROWS,
-        key: reaction_key(workspace_id, reaction_id),
-    }))
+        columns: REACTION_KEY_COLUMNS,
+        values: vec![
+            Value::Bytes(workspace_id.to_vec()),
+            Value::Bytes(reaction_id.to_vec()),
+        ],
+    }
 }
 
 fn validate_message_deletion(

@@ -8,11 +8,12 @@
 //!   3. MATERIALIZE. Live files publish file/exact-fact offers, write the
 //!      descriptor row, and share the fact. File bytes remain slice facts.
 
-use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::{RowMutation, TableDelete};
+use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
+use crate::core::select::Value;
 
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::content::{file_deletion, message, message_deletion};
@@ -23,7 +24,7 @@ use crate::protocol::matchers;
 use crate::protocol::matchers as message_matchers;
 
 use super::fact::MAX_FILE_BYTES;
-use super::rows::{content_file_key, content_file_row, FILE_ROWS};
+use super::rows::{content_file_row, FILE_KEY_COLUMNS, FILE_ROWS};
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentFileProjector;
@@ -157,7 +158,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             message_matchers::workspace_scope(file.workspace_id),
             fact.id,
         ))
-        .row_mutation(RowMutation::PutRow(content_file_row(fact.id, &file)?))
+        .row_mutation(RowMutation::InsertValues(content_file_row(fact.id, &file)))
         .intent(share_fact_with_workspace_intent_for_fact(
             file.workspace_id,
             fact,
@@ -182,14 +183,22 @@ fn output_with_needs(
         .fold(ProjectionOutput::new(), |output, need| output.need(need))
 }
 
-fn delete_file_projection(
-    workspace_id: crate::core::facts::FactId,
-    file_fact_id: crate::core::facts::FactId,
-) -> ProjectionOutput {
-    ProjectionOutput::new().row_mutation(RowMutation::DeleteRow(TableDelete {
+fn delete_file_projection(workspace_id: FactId, file_fact_id: FactId) -> ProjectionOutput {
+    ProjectionOutput::new().row_mutation(RowMutation::DeleteWhere(content_file_delete(
+        workspace_id,
+        file_fact_id,
+    )))
+}
+
+fn content_file_delete(workspace_id: FactId, file_fact_id: FactId) -> TableDeleteWhere {
+    TableDeleteWhere {
         table: FILE_ROWS,
-        key: content_file_key(&workspace_id, &file_fact_id),
-    }))
+        columns: FILE_KEY_COLUMNS,
+        values: vec![
+            Value::Bytes(workspace_id.to_vec()),
+            Value::Bytes(file_fact_id.to_vec()),
+        ],
+    }
 }
 
 fn validate_file_fields(file: &super::fact::ContentFileFact) -> Result<(), String> {

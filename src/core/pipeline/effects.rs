@@ -1,9 +1,13 @@
 use crate::core::command_context::CommandOutput;
 use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{HandlerOutput, Intent, RowMutation, TableDelete};
+use crate::core::intents::{
+    HandlerOutput, Intent, RowMutation, TableDelete, TableDeleteWhere, TableInsert,
+};
 use crate::core::schema::LOCAL_INTENTS;
+use crate::core::select::Value as SqlValue;
 use crate::core::store::{Store, TableName, TableRow};
+use rusqlite::{params_from_iter, OptionalExtension};
 use std::collections::BTreeMap;
 
 use super::intent_queue::{record_intent_in_table_in_tx, record_intent_in_tx};
@@ -147,6 +151,7 @@ fn row_mutation_rows(
         match mutation {
             RowMutation::PutRow(row) => rows.push(row.clone()),
             RowMutation::DeleteRow(delete) => deletes.push(delete.clone()),
+            RowMutation::InsertValues(_) | RowMutation::DeleteWhere(_) => {}
         }
     }
     Ok((rows, deletes))
@@ -159,6 +164,8 @@ fn validate_row_mutation_table(
     let table = match mutation {
         RowMutation::PutRow(row) => row.table,
         RowMutation::DeleteRow(delete) => delete.table,
+        RowMutation::InsertValues(insert) => insert.table,
+        RowMutation::DeleteWhere(delete) => delete.table,
     };
     if allowed_tables.contains(&table) {
         Ok(())
@@ -210,6 +217,17 @@ pub(crate) fn commit_pipeline_effects_in_tx(
     for delete in deletes {
         tx.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
     }
+    for mutation in &effects.row_mutations {
+        match mutation {
+            RowMutation::InsertValues(insert) => {
+                insert_values_in_tx(tx, insert)?;
+            }
+            RowMutation::DeleteWhere(delete) => {
+                delete_where_in_tx(tx, delete)?;
+            }
+            RowMutation::PutRow(_) | RowMutation::DeleteRow(_) => {}
+        }
+    }
 
     let mut durable_intents = 0usize;
     for intent in &effects.durable_intents {
@@ -230,4 +248,125 @@ pub(crate) fn commit_pipeline_effects_in_tx(
         durable_intents,
         local_intents,
     })
+}
+
+fn insert_values_in_tx(store: &Store, insert: &TableInsert) -> rusqlite::Result<usize> {
+    validate_columns_and_values(insert.columns, &insert.values, "insert")?;
+    let table = quoted_table_name(insert.table)?;
+    let columns = quoted_identifier_list(insert.columns)?;
+    let placeholders = placeholders(insert.values.len());
+    let values = sqlite_values(&insert.values)?;
+    let changed = store.conn().execute(
+        &format!("INSERT OR IGNORE INTO {table} ({columns}) VALUES ({placeholders})"),
+        params_from_iter(values.iter()),
+    )?;
+    if changed == 0 && !insert_values_match(store, insert, &values)? {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "conflicting row for {}",
+            insert.table.as_str()
+        )));
+    }
+    Ok(changed)
+}
+
+fn insert_values_match(
+    store: &Store,
+    insert: &TableInsert,
+    values: &[rusqlite::types::Value],
+) -> rusqlite::Result<bool> {
+    let table = quoted_table_name(insert.table)?;
+    let predicate = where_clause(insert.columns)?;
+    store
+        .conn()
+        .query_row(
+            &format!("SELECT 1 FROM {table} WHERE {predicate} LIMIT 1"),
+            params_from_iter(values.iter()),
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+}
+
+fn delete_where_in_tx(store: &Store, delete: &TableDeleteWhere) -> rusqlite::Result<usize> {
+    validate_columns_and_values(delete.columns, &delete.values, "delete")?;
+    let table = quoted_table_name(delete.table)?;
+    let predicate = where_clause(delete.columns)?;
+    let values = sqlite_values(&delete.values)?;
+    store.conn().execute(
+        &format!("DELETE FROM {table} WHERE {predicate}"),
+        params_from_iter(values.iter()),
+    )
+}
+
+fn validate_columns_and_values(
+    columns: &[&str],
+    values: &[SqlValue],
+    label: &str,
+) -> rusqlite::Result<()> {
+    if columns.is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "{label} mutation requires at least one column"
+        )));
+    }
+    if columns.len() != values.len() {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "{label} mutation column/value count mismatch"
+        )));
+    }
+    Ok(())
+}
+
+fn sqlite_values(values: &[SqlValue]) -> rusqlite::Result<Vec<rusqlite::types::Value>> {
+    values.iter().map(SqlValue::as_sqlite_value).collect()
+}
+
+fn where_clause(columns: &[&str]) -> rusqlite::Result<String> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| Ok(format!("{} = ?{}", quoted_identifier(column)?, index + 1)))
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map(|columns| columns.join(" AND "))
+}
+
+fn placeholders(count: usize) -> String {
+    (1..=count)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn quoted_table_name(table: TableName) -> rusqlite::Result<String> {
+    let name = table.as_str();
+    if name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+    {
+        Ok(format!("\"{name}\""))
+    } else {
+        Err(rusqlite::Error::InvalidParameterName(format!(
+            "invalid table name {name}"
+        )))
+    }
+}
+
+fn quoted_identifier_list(columns: &[&str]) -> rusqlite::Result<String> {
+    columns
+        .iter()
+        .map(|column| quoted_identifier(column))
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map(|columns| columns.join(", "))
+}
+
+fn quoted_identifier(name: &str) -> rusqlite::Result<String> {
+    if name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        Ok(format!("\"{name}\""))
+    } else {
+        Err(rusqlite::Error::InvalidParameterName(format!(
+            "invalid identifier {name}"
+        )))
+    }
 }

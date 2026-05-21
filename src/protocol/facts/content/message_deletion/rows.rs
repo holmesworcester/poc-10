@@ -7,14 +7,21 @@
 //! walks) lives in a separate handler and is deferred.
 
 use crate::core::facts::FactId;
-use crate::core::store::{TableName, TableRow};
-use crate::core::wire;
+use crate::core::intents::TableInsert;
+use crate::core::select::Value;
+use crate::core::store::TableName;
 
 use super::fact::{AuthorId, WorkspaceId};
 
 pub const MESSAGE_DELETION_ROWS: TableName = TableName::new("message_deletion_rows");
 
-pub const ROW_VALUE_BYTES: usize = 32 + 8 + 32;
+const MESSAGE_DELETION_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "target_message_id",
+    "deletion_id",
+    "created_at_ms",
+    "author_user_id",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageDeletionRow {
@@ -25,49 +32,18 @@ pub struct MessageDeletionRow {
     pub author_user_id: AuthorId,
 }
 
-pub fn message_deletion_key(workspace_id: WorkspaceId, target_message_id: FactId) -> Vec<u8> {
-    let mut key = Vec::with_capacity(64);
-    key.extend_from_slice(&workspace_id);
-    key.extend_from_slice(&target_message_id);
-    key
-}
-
-pub fn message_deletion_row(input: MessageDeletionRow) -> Result<TableRow, String> {
-    let mut writer = wire::Writer::with_capacity(ROW_VALUE_BYTES);
-    writer.fixed(&input.deletion_id);
-    writer.u64be(input.created_at_ms);
-    writer.fixed(&input.author_user_id);
-    Ok(TableRow {
+pub fn message_deletion_row(input: MessageDeletionRow) -> TableInsert {
+    TableInsert {
         table: MESSAGE_DELETION_ROWS,
-        key: message_deletion_key(input.workspace_id, input.target_message_id),
-        value: writer.finish(),
-    })
-}
-
-pub fn decode_message_deletion_row(key: &[u8], value: &[u8]) -> Result<MessageDeletionRow, String> {
-    if key.len() != 64 {
-        return Err("message deletion row key is malformed".to_string());
+        columns: MESSAGE_DELETION_COLUMNS,
+        values: vec![
+            Value::Bytes(input.workspace_id.to_vec()),
+            Value::Bytes(input.target_message_id.to_vec()),
+            Value::Bytes(input.deletion_id.to_vec()),
+            Value::U64(input.created_at_ms),
+            Value::Bytes(input.author_user_id.to_vec()),
+        ],
     }
-    let mut key_reader = wire::Reader::new(key);
-    let workspace_id = key_reader.array().map_err(wire_err)?;
-    let target_message_id = key_reader.array().map_err(wire_err)?;
-    key_reader.finish().map_err(wire_err)?;
-    let mut value_reader = wire::Reader::new(value);
-    let deletion_id = value_reader.array().map_err(wire_err)?;
-    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
-    let author_user_id = value_reader.array().map_err(wire_err)?;
-    value_reader.finish().map_err(wire_err)?;
-    Ok(MessageDeletionRow {
-        workspace_id,
-        target_message_id,
-        deletion_id,
-        created_at_ms,
-        author_user_id,
-    })
-}
-
-fn wire_err(err: wire::WireError) -> String {
-    format!("{err:?}")
 }
 
 #[cfg(test)]
@@ -83,11 +59,13 @@ mod tests {
             created_at_ms: 7_777,
             author_user_id: [4; 32],
         };
-        let row = message_deletion_row(input.clone()).expect("row");
-        assert_eq!(row.key, message_deletion_key([1; 32], [2; 32]));
-        assert_eq!(
-            decode_message_deletion_row(&row.key, &row.value).expect("decode"),
-            input
-        );
+        let row = message_deletion_row(input);
+        assert_eq!(row.table, MESSAGE_DELETION_ROWS);
+        assert_eq!(row.columns, MESSAGE_DELETION_COLUMNS);
+        assert_eq!(row.values[0], Value::Bytes(vec![1; 32]));
+        assert_eq!(row.values[1], Value::Bytes(vec![2; 32]));
+        assert_eq!(row.values[2], Value::Bytes(vec![3; 32]));
+        assert_eq!(row.values[3], Value::U64(7_777));
+        assert_eq!(row.values[4], Value::Bytes(vec![4; 32]));
     }
 }

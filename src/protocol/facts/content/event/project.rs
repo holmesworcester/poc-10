@@ -72,7 +72,9 @@ impl TypedProjector<super::Codec> for ContentEventProjector {
 
         // 3. Materialize.
         Ok(output_with_signer_need(signer_need)
-            .row_mutation(RowMutation::PutRow(content_event_row(fact.id, &event)?))
+            .row_mutation(RowMutation::InsertValues(content_event_row(
+                fact.id, &event,
+            )))
             .intent(share_fact_with_workspace_intent_for_fact(
                 event.workspace_id,
                 fact,

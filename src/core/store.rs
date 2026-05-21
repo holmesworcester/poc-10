@@ -19,8 +19,8 @@
 //! conservative identifier check.
 
 use crate::core::schema_dsl::{TableDeclaration, TableStorage};
-use rusqlite::{params, params_from_iter, Connection as SqliteConnection, OptionalExtension};
-use std::collections::HashMap;
+use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -60,7 +60,8 @@ pub struct TableRow {
 /// single SQL path, and `write_transaction` rollback covers both classes.
 pub struct Store {
     conn: SqliteConnection,
-    typed_tables: HashMap<String, TableDeclaration>,
+    declared_tables: HashSet<String>,
+    row_tables: HashSet<String>,
 }
 
 impl Store {
@@ -95,28 +96,34 @@ impl Store {
         sources: &[&str],
     ) -> rusqlite::Result<Self> {
         let tables = table_declarations_from_schema_sources(sources)?;
-        let typed_tables = typed_table_map(&tables)?;
-        let store = Self::from_connection_parts(conn, typed_tables)?;
+        let declared_tables = declared_table_names(&tables);
+        let row_tables = row_table_names(&tables);
+        let store = Self::from_connection_parts(conn, declared_tables, row_tables)?;
         store.apply_schema_source_tables(&tables)?;
         Ok(store)
     }
 
     fn from_connection_parts(
         conn: SqliteConnection,
-        typed_tables: HashMap<String, TableDeclaration>,
+        declared_tables: HashSet<String>,
+        row_tables: HashSet<String>,
     ) -> rusqlite::Result<Self> {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;",
         )?;
-        Ok(Self { conn, typed_tables })
+        Ok(Self {
+            conn,
+            declared_tables,
+            row_tables,
+        })
     }
 
     fn row_table_name(&self, table: TableName) -> rusqlite::Result<String> {
-        if self.typed_table(table).is_some() {
+        if !self.row_tables.contains(table.as_str()) {
             return Err(rusqlite::Error::InvalidParameterName(format!(
-                "typed table {} must be queried through its declared columns",
+                "table {} is not an opaque row table",
                 table.as_str()
             )));
         }
@@ -162,11 +169,7 @@ impl Store {
     pub fn insert_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
         let mut inserted = 0;
         for row in rows {
-            if let Some(table) = self.typed_table(row.table) {
-                inserted += self.insert_typed_row(table, row)?;
-                continue;
-            }
-            let table_name = quoted_table_name(row.table)?;
+            let table_name = self.row_table_name(row.table)?;
             let changed = self.conn.execute(
                 &format!(
                     "INSERT OR IGNORE INTO {table_name}
@@ -212,13 +215,7 @@ impl Store {
         keys: Vec<Vec<u8>>,
     ) -> rusqlite::Result<usize> {
         let mut deleted = 0;
-        if let Some(declared) = self.typed_table(table) {
-            for key in keys {
-                deleted += self.delete_typed_row(declared, &key)?;
-            }
-            return Ok(deleted);
-        }
-        let table_name = quoted_table_name(table)?;
+        let table_name = self.row_table_name(table)?;
         for key in keys {
             deleted += self.conn.execute(
                 &format!("DELETE FROM {table_name} WHERE row_key = ?1"),
@@ -244,8 +241,11 @@ impl Store {
 
     /// Count rows in one declared table.
     pub fn table_row_count(&self, table: TableName) -> rusqlite::Result<usize> {
-        if let Some(declared) = self.typed_table(table) {
-            return self.typed_row_count(declared);
+        if !self.declared_tables.contains(table.as_str()) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "table {} is not declared",
+                table.as_str()
+            )));
         }
         let table_name = quoted_table_name(table)?;
         self.conn
@@ -391,81 +391,18 @@ impl Store {
         }
         Ok(())
     }
+}
 
-    fn typed_table(&self, table: TableName) -> Option<&TableDeclaration> {
-        self.typed_tables.get(table.as_str())
-    }
+fn declared_table_names(tables: &[TableDeclaration]) -> HashSet<String> {
+    tables.iter().map(|table| table.name.clone()).collect()
+}
 
-    fn insert_typed_row(&self, table: &TableDeclaration, row: TableRow) -> rusqlite::Result<usize> {
-        let values = decode_typed_row_values(table, &row)?;
-        let quoted = quoted_table_name_str(&table.name)?;
-        let columns = table_column_list(table)?;
-        let placeholders = placeholders(table.columns.len());
-        let changed = self.conn.execute(
-            &format!("INSERT OR IGNORE INTO {quoted} ({columns}) VALUES ({placeholders})"),
-            params_from_iter(values.iter()),
-        )?;
-
-        if changed == 0 {
-            if !self.typed_row_values_match(table, &values)? {
-                return Err(rusqlite::Error::InvalidParameterName(format!(
-                    "conflicting row for {}",
-                    row.table.as_str()
-                )));
-            }
-        }
-        Ok(changed)
-    }
-
-    fn delete_typed_row(&self, table: &TableDeclaration, key: &[u8]) -> rusqlite::Result<usize> {
-        let key_values = decode_typed_key_values(table, key)?;
-        let quoted = quoted_table_name_str(&table.name)?;
-        self.conn.execute(
-            &format!(
-                "DELETE FROM {quoted} WHERE {}",
-                row_key_where_clause(table)?
-            ),
-            params_from_iter(key_values.iter()),
-        )
-    }
-
-    fn typed_row_values_match(
-        &self,
-        table: &TableDeclaration,
-        values: &[rusqlite::types::Value],
-    ) -> rusqlite::Result<bool> {
-        let quoted = quoted_table_name_str(&table.name)?;
-        let predicate = table
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| {
-                Ok(format!(
-                    "{} = ?{}",
-                    quoted_identifier(&column.name)?,
-                    index + 1
-                ))
-            })
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .join(" AND ");
-        self.conn
-            .query_row(
-                &format!("SELECT 1 FROM {quoted} WHERE {predicate} LIMIT 1"),
-                params_from_iter(values.iter()),
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|row| row.is_some())
-    }
-
-    fn typed_row_count(&self, table: &TableDeclaration) -> rusqlite::Result<usize> {
-        let quoted = quoted_table_name_str(&table.name)?;
-        self.conn
-            .query_row(&format!("SELECT COUNT(*) FROM {quoted}"), [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map(|count| count as usize)
-    }
+fn row_table_names(tables: &[TableDeclaration]) -> HashSet<String> {
+    tables
+        .iter()
+        .filter(|table| is_row_table_declaration(table))
+        .map(|table| table.name.clone())
+        .collect()
 }
 
 #[cfg(test)]

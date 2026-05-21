@@ -7,15 +7,26 @@
 //! resolves the per-message decryption secret.
 
 use crate::core::facts::FactId;
-use crate::core::store::{Store, TableName, TableRow};
-use crate::core::wire;
+use crate::core::intents::TableInsert;
+use crate::core::select::Value;
+use crate::core::store::{Store, TableName};
 use rusqlite::params;
 
 use super::fact::{AuthorId, WorkspaceId, REACTION_CIPHERTEXT_BYTES, REACTION_NONCE_BYTES};
 
 pub const REACTION_ROWS: TableName = TableName::new("content_reactions");
 
-pub const ROW_PREFIX_BYTES: usize = 32 + 32 + 8 + REACTION_NONCE_BYTES + 4;
+pub(crate) const REACTION_KEY_COLUMNS: &[&str] = &["workspace_id", "reaction_id"];
+const REACTION_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "reaction_id",
+    "message_id",
+    "author_user_id",
+    "created_at_ms",
+    "nonce",
+    "ciphertext",
+    "deleted",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionRow {
@@ -28,29 +39,23 @@ pub struct ReactionRow {
     pub ciphertext: Vec<u8>,
 }
 
-pub fn reaction_key(workspace_id: WorkspaceId, reaction_id: FactId) -> Vec<u8> {
-    let mut key = Vec::with_capacity(64);
-    key.extend_from_slice(&workspace_id);
-    key.extend_from_slice(&reaction_id);
-    key
-}
-
-pub fn reaction_row(input: ReactionRow) -> Result<TableRow, String> {
+pub fn reaction_row(input: ReactionRow) -> Result<TableInsert, String> {
     if input.ciphertext.len() > REACTION_CIPHERTEXT_BYTES {
         return Err("reaction row ciphertext exceeds fixed slot".to_string());
     }
-    let mut writer = wire::Writer::with_capacity(ROW_PREFIX_BYTES + input.ciphertext.len() + 1);
-    writer.fixed(&input.target_message_id);
-    writer.fixed(&input.author_user_id);
-    writer.u64be(input.created_at_ms);
-    writer.fixed(&input.nonce);
-    writer.u32be(input.ciphertext.len() as u32);
-    writer.bytes(&input.ciphertext);
-    writer.u8(0);
-    Ok(TableRow {
+    Ok(TableInsert {
         table: REACTION_ROWS,
-        key: reaction_key(input.workspace_id, input.reaction_id),
-        value: writer.finish(),
+        columns: REACTION_COLUMNS,
+        values: vec![
+            Value::Bytes(input.workspace_id.to_vec()),
+            Value::Bytes(input.reaction_id.to_vec()),
+            Value::Bytes(input.target_message_id.to_vec()),
+            Value::Bytes(input.author_user_id.to_vec()),
+            Value::U64(input.created_at_ms),
+            Value::Bytes(input.nonce.to_vec()),
+            Value::Bytes(input.ciphertext),
+            Value::Bool(false),
+        ],
     })
 }
 
@@ -101,10 +106,14 @@ mod tests {
             ciphertext: b"r".to_vec(),
         };
         let row = reaction_row(input).expect("row");
-        assert_eq!(row.key, reaction_key([1; 32], [2; 32]));
-        assert_eq!(&row.value[..32], &[3; 32]);
-        assert_eq!(&row.value[32..64], &[4; 32]);
-        assert_eq!(&row.value[72..96], &[5; REACTION_NONCE_BYTES]);
-        assert!(row.value.ends_with(&[b'r', 0]));
+        assert_eq!(row.table, REACTION_ROWS);
+        assert_eq!(row.columns, REACTION_COLUMNS);
+        assert_eq!(row.values[0], Value::Bytes(vec![1; 32]));
+        assert_eq!(row.values[1], Value::Bytes(vec![2; 32]));
+        assert_eq!(row.values[2], Value::Bytes(vec![3; 32]));
+        assert_eq!(row.values[3], Value::Bytes(vec![4; 32]));
+        assert_eq!(row.values[5], Value::Bytes(vec![5; REACTION_NONCE_BYTES]));
+        assert_eq!(row.values[6], Value::Bytes(b"r".to_vec()));
+        assert_eq!(row.values[7], Value::Bool(false));
     }
 }

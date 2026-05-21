@@ -112,7 +112,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
             deletion_id: fact.id,
             created_at_ms: deletion.created_at_ms,
             author_user_id: deletion.author_user_id,
-        })?;
+        });
         Ok(
             output_with_needs([signer_need, Some(target_need), Some(author_need)])
                 .offer(message_matchers::deletion_offer(
@@ -121,7 +121,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
                     deletion.target_message_id,
                     deletion.author_user_id,
                 ))
-                .row_mutation(RowMutation::PutRow(row))
+                .row_mutation(RowMutation::InsertValues(row))
                 .intent(share_fact_with_workspace_intent_for_fact(
                     deletion.workspace_id,
                     fact,
@@ -247,16 +247,27 @@ mod projector_tests {
         assert_eq!(output.offers[0].role, message_context::deletion_role());
         assert_eq!(output.intents.len(), 1);
         assert_eq!(output.row_mutations.len(), 1);
-        let RowMutation::PutRow(stored) = &output.row_mutations[0] else {
-            panic!("expected put row mutation");
+        let RowMutation::InsertValues(stored) = &output.row_mutations[0] else {
+            panic!("expected insert values mutation");
         };
-        let row = rows::decode_message_deletion_row(&stored.key, &stored.value)
-            .expect("decode message deletion row");
-        assert_eq!(row.workspace_id, deletion.workspace_id);
-        assert_eq!(row.target_message_id, deletion.target_message_id);
-        assert_eq!(row.deletion_id, fact.id);
-        assert_eq!(row.created_at_ms, 12_345);
-        assert_eq!(row.author_user_id, deletion.author_user_id);
+        assert_eq!(stored.table, rows::MESSAGE_DELETION_ROWS);
+        assert_eq!(
+            stored.values[0],
+            topo::core::select::Value::Bytes(deletion.workspace_id.to_vec())
+        );
+        assert_eq!(
+            stored.values[1],
+            topo::core::select::Value::Bytes(deletion.target_message_id.to_vec())
+        );
+        assert_eq!(
+            stored.values[2],
+            topo::core::select::Value::Bytes(fact.id.to_vec())
+        );
+        assert_eq!(stored.values[3], topo::core::select::Value::U64(12_345));
+        assert_eq!(
+            stored.values[4],
+            topo::core::select::Value::Bytes(deletion.author_user_id.to_vec())
+        );
     }
 
     #[test]

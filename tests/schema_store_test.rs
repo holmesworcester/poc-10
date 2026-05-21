@@ -4,8 +4,7 @@ use rusqlite::{params, Connection};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::schema_dsl::{parse_schema, TableStorage};
 use topo::core::store::{Store, TableName, TableRow};
-use topo::core::wire::Writer;
-use topo::protocol::facts::content::{file, message, reaction};
+use topo::protocol::facts::content::{file, reaction};
 use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
 
 fn checked_schema_sources() -> [&'static str; 3] {
@@ -78,19 +77,11 @@ fn schema_source_memory_row_tables_are_temp() {
 
     let store = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
         .expect("open store with core schema");
-    store
-        .insert_table_rows(vec![typed_intent_row(
-            local_intents,
-            "local",
-            b"k",
-            b"intent",
-        )])
-        .expect("insert temp local intent row");
     assert_eq!(
         store
             .table_row_count(local_intents)
             .expect("count temp rows"),
-        1
+        0
     );
     assert!(
         !sqlite_table_names(&path).contains("local_intents"),
@@ -105,27 +96,6 @@ fn schema_source_memory_row_tables_are_temp() {
             .expect("count temp rows after reopen"),
         0
     );
-}
-
-fn typed_intent_row(table: TableName, kind: &str, key: &[u8], payload: &[u8]) -> TableRow {
-    TableRow {
-        table,
-        key: typed_intent_key(kind, key),
-        value: typed_intent_value(payload),
-    }
-}
-
-fn typed_intent_key(kind: &str, key: &[u8]) -> Vec<u8> {
-    let mut out = Writer::new();
-    out.string_u32be(kind).expect("kind fits");
-    out.bytes_u32be(key).expect("key fits");
-    out.finish()
-}
-
-fn typed_intent_value(payload: &[u8]) -> Vec<u8> {
-    let mut out = Writer::new();
-    out.bytes_u32be(payload).expect("payload fits");
-    out.finish()
 }
 
 #[test]
@@ -202,26 +172,29 @@ fn schema_sources_create_typed_table_declarations() {
 fn content_read_model_rows_materialize_into_typed_tables() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("content-read-models.db");
-    let store = Store::open_disk_with_schema_sources(&path, &[FACTS_SCHEMA_SOURCE])
+    Store::open_disk_with_schema_sources(&path, &[FACTS_SCHEMA_SOURCE])
         .expect("open content schema store");
+    let conn = Connection::open(&path).expect("open sqlite");
 
-    let message_fact = message::fact::ContentMessageFact {
-        workspace_id: [1; 32],
-        author_user_id: [2; 32],
-        created_at_ms: 60_000,
-        signer_id: [6; 32],
-        frontier_id: [3; 32],
-        local_history_node_secret_id: [0; 32],
-        expires_at_minute: u64::MAX,
-        disappearing_setting_id: [0; 32],
-        minute: 1,
-        leaf_id: [4; 32],
-        nonce: [5; message::fact::NONCE_BYTES],
-        ciphertext: vec![7; message::fact::CIPHERTEXT_BYTES],
-    };
-    let message_row = message::rows::content_message_row([9; 32], &message_fact);
+    conn.execute(
+        "INSERT INTO content_messages
+         (workspace_id, message_id, author_user_id, created_at_ms, signer_id, frontier_id,
+          minute, leaf_id, deleted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)",
+        params![
+            &[1u8; 32][..],
+            &[9u8; 32][..],
+            &[2u8; 32][..],
+            60_000_i64,
+            &[6u8; 32][..],
+            &[3u8; 32][..],
+            1_i64,
+            &[4u8; 32][..],
+        ],
+    )
+    .expect("insert content message row");
 
-    let reaction_row = reaction::rows::reaction_row(reaction::rows::ReactionRow {
+    let reaction_row = reaction::rows::ReactionRow {
         workspace_id: [1; 32],
         reaction_id: [10; 32],
         created_at_ms: 60_001,
@@ -229,8 +202,23 @@ fn content_read_model_rows_materialize_into_typed_tables() {
         author_user_id: [2; 32],
         nonce: [6; reaction::fact::REACTION_NONCE_BYTES],
         ciphertext: b"+1".to_vec(),
-    })
-    .expect("reaction row");
+    };
+    conn.execute(
+        "INSERT INTO content_reactions
+         (workspace_id, reaction_id, message_id, author_user_id, created_at_ms, nonce,
+          ciphertext, deleted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+        params![
+            reaction_row.workspace_id.as_slice(),
+            reaction_row.reaction_id.as_slice(),
+            reaction_row.target_message_id.as_slice(),
+            reaction_row.author_user_id.as_slice(),
+            reaction_row.created_at_ms as i64,
+            reaction_row.nonce.as_slice(),
+            reaction_row.ciphertext.as_slice(),
+        ],
+    )
+    .expect("insert reaction row");
 
     let file_fact = file::fact::ContentFileFact {
         workspace_id: [1; 32],
@@ -244,14 +232,26 @@ fn content_read_model_rows_materialize_into_typed_tables() {
         root_hash: [7; file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: b"meta".to_vec(),
     };
-    let file_row = file::rows::content_file_row([12; 32], &file_fact).expect("file row");
-
-    store
-        .insert_table_rows(vec![message_row, reaction_row, file_row])
-        .expect("insert typed content rows");
-    drop(store);
-
-    let conn = Connection::open(&path).expect("open sqlite");
+    conn.execute(
+        "INSERT INTO content_files
+         (workspace_id, file_fact_id, message_id, file_id, author_user_id, created_at_ms,
+          root_hash, byte_len, total_slices, slice_bytes, sealed_metadata, deleted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)",
+        params![
+            file_fact.workspace_id.as_slice(),
+            &[12u8; 32][..],
+            file_fact.message_id.as_slice(),
+            file_fact.file_id.as_slice(),
+            file_fact.author_user_id.as_slice(),
+            file_fact.created_at_ms as i64,
+            file_fact.root_hash.as_slice(),
+            file_fact.blob_bytes as i64,
+            i64::from(file_fact.total_slices),
+            i64::from(file_fact.slice_bytes),
+            file_fact.sealed_metadata.as_slice(),
+        ],
+    )
+    .expect("insert file row");
     let message_columns = conn
         .query_row(
             "SELECT author_user_id, created_at_ms, signer_id, deleted
@@ -351,7 +351,7 @@ fn content_read_model_rows_materialize_into_typed_tables() {
 }
 
 #[test]
-fn schema_source_typed_tables_are_written_as_queryable_columns() {
+fn schema_source_typed_tables_reject_opaque_row_helpers() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("typed-row-store.db");
     let source = r#"
@@ -365,38 +365,17 @@ fn schema_source_typed_tables_are_written_as_queryable_columns() {
         }
     "#;
     let store = Store::open_disk_with_schema_sources(&path, &[source]).expect("open store");
-    let workspace_id = [1u8; 32];
-    let message_id = [2u8; 32];
-    let key = [workspace_id.as_slice(), message_id.as_slice()].concat();
-    let mut value = 123u64.to_be_bytes().to_vec();
-    value.push(1);
-
-    assert_eq!(
-        store
-            .insert_table_rows(vec![TableRow {
-                table: TableName::new("typed_messages"),
-                key: key.clone(),
-                value: value.clone(),
-            }])
-            .expect("insert typed row"),
-        1
+    let err = store
+        .insert_table_rows(vec![TableRow {
+            table: TableName::new("typed_messages"),
+            key: vec![0; 64],
+            value: vec![0; 9],
+        }])
+        .expect_err("typed tables must not accept opaque row writes");
+    assert!(
+        err.to_string().contains("not an opaque row table"),
+        "unexpected error: {err}"
     );
-    let conn = Connection::open(&path).expect("open sqlite");
-    let row = conn
-        .query_row(
-            "SELECT workspace_id, message_id, created_at_ms, deleted FROM typed_messages",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            },
-        )
-        .expect("read typed sqlite row");
-    assert_eq!(row, (workspace_id.to_vec(), message_id.to_vec(), 123, 1));
 }
 
 #[test]

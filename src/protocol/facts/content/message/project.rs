@@ -14,7 +14,7 @@
 use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{RowMutation, TableDelete};
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
@@ -30,9 +30,10 @@ use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_w
 use crate::protocol::matchers;
 
 use super::authority::{self, DecodedPayload};
+use super::retention::message_row_delete;
 use super::rows::{
-    content_message_key, content_message_row, message_tombstone_row, opened_message_row,
-    OpenedMessageRow, CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
+    content_message_row, message_tombstone_row, opened_message_row, OpenedMessageRow,
+    CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -138,15 +139,19 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         // 3. Materialize.
         Ok(metadata_output
             .offer(matchers::message_offer(fact.id, scope, fact.id))
-            .row_mutation(RowMutation::PutRow(content_message_row(fact.id, &message)))
-            .row_mutation(RowMutation::PutRow(opened_message_row(OpenedMessageRow {
-                workspace_id: message.workspace_id,
-                message_id: fact.id,
-                created_at_ms: message.created_at_ms,
-                author_user_id: message.author_user_id,
-                signer_id: message.signer_id,
-                text,
-            }))))
+            .row_mutation(RowMutation::InsertValues(content_message_row(
+                fact.id, &message,
+            )))
+            .row_mutation(RowMutation::InsertValues(opened_message_row(
+                OpenedMessageRow {
+                    workspace_id: message.workspace_id,
+                    message_id: fact.id,
+                    created_at_ms: message.created_at_ms,
+                    author_user_id: message.author_user_id,
+                    signer_id: message.signer_id,
+                    text,
+                },
+            ))))
     }
 }
 
@@ -339,22 +344,23 @@ fn expired_output(
     message: &super::fact::ContentMessageFact,
     now_minute: u64,
 ) -> ProjectionOutput {
-    let row_key = content_message_key(message.workspace_id, message_id);
     ProjectionOutput::new()
-        .row_mutation(RowMutation::PutRow(message_tombstone_row(
+        .row_mutation(RowMutation::InsertValues(message_tombstone_row(
             message.workspace_id,
             message_id,
             message.author_user_id,
             message.created_at_ms,
         )))
-        .row_mutation(RowMutation::DeleteRow(TableDelete {
-            table: CONTENT_MESSAGE_ROWS,
-            key: content_message_key(message.workspace_id, message_id),
-        }))
-        .row_mutation(RowMutation::DeleteRow(TableDelete {
-            table: OPENED_MESSAGE_ROWS,
-            key: row_key,
-        }))
+        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            CONTENT_MESSAGE_ROWS,
+            message.workspace_id,
+            message_id,
+        )))
+        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            OPENED_MESSAGE_ROWS,
+            message.workspace_id,
+            message_id,
+        )))
         .intent(purge_expired_message::purge_expired_message_intent(
             PurgeExpiredMessage {
                 workspace_id: message.workspace_id,
@@ -369,22 +375,23 @@ fn author_deletion_output(
     message: &super::fact::ContentMessageFact,
     reason_fact_id: FactId,
 ) -> ProjectionOutput {
-    let row_key = content_message_key(message.workspace_id, message_id);
     ProjectionOutput::new()
-        .row_mutation(RowMutation::PutRow(message_tombstone_row(
+        .row_mutation(RowMutation::InsertValues(message_tombstone_row(
             message.workspace_id,
             message_id,
             message.author_user_id,
             message.created_at_ms,
         )))
-        .row_mutation(RowMutation::DeleteRow(TableDelete {
-            table: CONTENT_MESSAGE_ROWS,
-            key: content_message_key(message.workspace_id, message_id),
-        }))
-        .row_mutation(RowMutation::DeleteRow(TableDelete {
-            table: OPENED_MESSAGE_ROWS,
-            key: row_key,
-        }))
+        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            CONTENT_MESSAGE_ROWS,
+            message.workspace_id,
+            message_id,
+        )))
+        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            OPENED_MESSAGE_ROWS,
+            message.workspace_id,
+            message_id,
+        )))
         .intent(purge_deleted_message::purge_deleted_message_intent(
             PurgeDeletedMessage {
                 workspace_id: message.workspace_id,
@@ -449,7 +456,7 @@ mod projector_tests {
                 .row_mutations
                 .iter()
                 .find_map(|mutation| match mutation {
-                    RowMutation::PutRow(row) if row.table == $table => Some(row.clone()),
+                    RowMutation::InsertValues(row) if row.table == $table => Some(row.clone()),
                     _ => None,
                 })
         };
@@ -461,7 +468,7 @@ mod projector_tests {
                 .row_mutations
                 .iter()
                 .find_map(|mutation| match mutation {
-                    RowMutation::DeleteRow(delete) if delete.table == $table => {
+                    RowMutation::DeleteWhere(delete) if delete.table == $table => {
                         Some(delete.clone())
                     }
                     _ => None,
@@ -502,19 +509,35 @@ mod projector_tests {
 
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
         assert_eq!(
-            row.key,
-            rows::content_message_key(message.workspace_id, fact.id)
+            row.values[0],
+            topo::core::select::Value::Bytes(message.workspace_id.to_vec())
         );
-        assert_eq!(&row.value[..32], &message.author_user_id);
-        assert_eq!(&row.value[40..72], &message.signer_id);
-        assert_eq!(&row.value[72..104], &message.frontier_id);
+        assert_eq!(
+            row.values[1],
+            topo::core::select::Value::Bytes(fact.id.to_vec())
+        );
+        assert_eq!(
+            row.values[2],
+            topo::core::select::Value::Bytes(message.author_user_id.to_vec())
+        );
+        assert_eq!(
+            row.values[4],
+            topo::core::select::Value::Bytes(message.signer_id.to_vec())
+        );
+        assert_eq!(
+            row.values[5],
+            topo::core::select::Value::Bytes(message.frontier_id.to_vec())
+        );
 
         let opened = put_row!(output, rows::OPENED_MESSAGE_ROWS).expect("opened row");
         assert_eq!(
-            opened.key,
-            rows::content_message_key(message.workspace_id, fact.id)
+            opened.values[1],
+            topo::core::select::Value::Bytes(fact.id.to_vec())
         );
-        assert!(opened.value.ends_with(b"hello from content message"));
+        assert_eq!(
+            opened.values[5],
+            topo::core::select::Value::Bytes(b"hello from content message".to_vec())
+        );
     }
 
     #[test]

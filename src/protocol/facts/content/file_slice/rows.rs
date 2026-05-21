@@ -5,14 +5,23 @@
 //! stores the opaque ciphertext alongside the slice's fact id and timestamp.
 
 use crate::core::facts::FactId;
-use crate::core::store::{Store, TableName, TableRow};
-use crate::core::wire;
+use crate::core::intents::TableInsert;
+use crate::core::select::Value;
+use crate::core::store::{Store, TableName};
 use rusqlite::params;
 
 use super::fact::{ContentFileSliceFact, WorkspaceId};
 
 pub const FILE_SLICE_ROWS: TableName = TableName::new("file_slice_rows");
-pub const ROW_PREFIX_BYTES: usize = 32 + 8 + 4;
+pub(crate) const FILE_SLICE_KEY_COLUMNS: &[&str] = &["workspace_id", "file_id", "slice_index"];
+const FILE_SLICE_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "file_id",
+    "slice_index",
+    "slice_fact_id",
+    "created_at_ms",
+    "ciphertext",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentFileSliceRow {
@@ -24,37 +33,19 @@ pub struct ContentFileSliceRow {
     pub ciphertext: Vec<u8>,
 }
 
-pub fn content_file_slice_key(
-    workspace_id: &WorkspaceId,
-    file_id: &FactId,
-    slice_index: u32,
-) -> Vec<u8> {
-    let mut key = Vec::with_capacity(32 + 32 + 8);
-    key.extend_from_slice(workspace_id);
-    key.extend_from_slice(file_id);
-    key.extend_from_slice(&u64::from(slice_index).to_be_bytes());
-    key
-}
-
-pub fn content_file_slice_row(
-    slice_fact_id: FactId,
-    fact: &ContentFileSliceFact,
-) -> Result<TableRow, String> {
-    let ciphertext_len: u32 = fact
-        .ciphertext
-        .len()
-        .try_into()
-        .map_err(|_| "content file slice row ciphertext exceeds u32".to_string())?;
-    let mut writer = wire::Writer::with_capacity(ROW_PREFIX_BYTES + fact.ciphertext.len());
-    writer.fixed(&slice_fact_id);
-    writer.u64be(fact.created_at_ms);
-    writer.u32be(ciphertext_len);
-    writer.bytes(&fact.ciphertext);
-    Ok(TableRow {
+pub fn content_file_slice_row(slice_fact_id: FactId, fact: &ContentFileSliceFact) -> TableInsert {
+    TableInsert {
         table: FILE_SLICE_ROWS,
-        key: content_file_slice_key(&fact.workspace_id, &fact.file_id, fact.slice_index),
-        value: writer.finish(),
-    })
+        columns: FILE_SLICE_COLUMNS,
+        values: vec![
+            Value::Bytes(fact.workspace_id.to_vec()),
+            Value::Bytes(fact.file_id.to_vec()),
+            Value::U64(u64::from(fact.slice_index)),
+            Value::Bytes(slice_fact_id.to_vec()),
+            Value::U64(fact.created_at_ms),
+            Value::Bytes(fact.ciphertext.clone()),
+        ],
+    }
 }
 
 pub fn file_slice_rows_for_file(
@@ -101,9 +92,13 @@ mod tests {
             slice_index: 5,
             ciphertext: vec![0xcc; 16],
         };
-        let row = content_file_slice_row([9; 32], &fact).expect("row");
-        assert_eq!(row.key, content_file_slice_key(&[1; 32], &[2; 32], 5));
-        assert_eq!(&row.value[..32], &[9; 32]);
-        assert_eq!(&row.value[44..], &[0xcc; 16]);
+        let row = content_file_slice_row([9; 32], &fact);
+        assert_eq!(row.table, FILE_SLICE_ROWS);
+        assert_eq!(row.columns, FILE_SLICE_COLUMNS);
+        assert_eq!(row.values[0], Value::Bytes(vec![1; 32]));
+        assert_eq!(row.values[1], Value::Bytes(vec![2; 32]));
+        assert_eq!(row.values[2], Value::U64(5));
+        assert_eq!(row.values[3], Value::Bytes(vec![9; 32]));
+        assert_eq!(row.values[5], Value::Bytes(vec![0xcc; 16]));
     }
 }

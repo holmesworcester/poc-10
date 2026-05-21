@@ -582,7 +582,9 @@ fn prefix_matches(value: &FactId, prefix: &FactId, prefix_bytes: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::pipeline::context_codec::{context_need_row, context_offer_row};
+    use crate::core::pipeline::context_rows::{
+        insert_context_need_for_test, insert_context_offer_for_test,
+    };
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::matchers::workspace_scope;
@@ -664,13 +666,9 @@ mod tests {
             1,
             prefix,
         );
-        store
-            .insert_table_rows(vec![
-                context_need_row(&need),
-                context_need_row(&wrong_prefix_need),
-                context_offer_row(&offer),
-            ])
-            .expect("insert context rows");
+        insert_context_need_for_test(&store, &need).expect("insert matching need");
+        insert_context_need_for_test(&store, &wrong_prefix_need).expect("insert wrong-prefix need");
+        insert_context_offer_for_test(&store, &offer).expect("insert offer");
 
         let matcher = SecretCoverageMatcher::new();
         let offers = matcher

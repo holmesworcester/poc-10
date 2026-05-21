@@ -89,7 +89,7 @@ pub enum Value {
 }
 
 impl Value {
-    fn as_sqlite_value(&self) -> rusqlite::Result<SqliteValue> {
+    pub(crate) fn as_sqlite_value(&self) -> rusqlite::Result<SqliteValue> {
         match self {
             Self::Bytes(value) => Ok(SqliteValue::Blob(value.clone())),
             Self::Text(value) => Ok(SqliteValue::Text(value.clone())),

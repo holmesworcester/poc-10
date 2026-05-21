@@ -59,6 +59,26 @@ pub(super) fn insert_context_offer_in_tx(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn insert_context_need_for_test(
+    store: &Store,
+    need: &ContextNeed,
+) -> Result<(), String> {
+    store
+        .write_transaction(|tx| insert_context_need_in_tx(tx, need).map(|_| ()))
+        .map_err(|err| format!("insert context need: {err}"))
+}
+
+#[cfg(test)]
+pub(crate) fn insert_context_offer_for_test(
+    store: &Store,
+    offer: &ContextOffer,
+) -> Result<(), String> {
+    store
+        .write_transaction(|tx| insert_context_offer_in_tx(tx, offer).map(|_| ()))
+        .map_err(|err| format!("insert context offer: {err}"))
+}
+
 pub(super) fn stored_needs_for_role_scope(
     store: &Store,
     role: &Role,

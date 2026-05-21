@@ -7,6 +7,8 @@
 use crate::core::clock;
 use crate::core::command_context::CommandOutput;
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::intents::RowMutation;
+use crate::core::pipeline::{commit_pipeline_effects_to_store, PipelineEffects};
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use crate::protocol::facts::{content, identity};
@@ -278,29 +280,43 @@ pub fn apply_horizon_floor(
     if retired.is_empty() {
         return Ok(());
     }
-    let tombstones = retired
-        .iter()
-        .map(|row| {
-            content::message::rows::message_tombstone_row(
-                row.workspace_id,
-                row.message_id,
-                row.author_user_id,
-                row.created_at_ms,
-            )
-        })
-        .collect::<Vec<_>>();
-    let keys = retired
-        .iter()
-        .map(|row| content::message::rows::content_message_key(row.workspace_id, row.message_id))
-        .collect::<Vec<_>>();
-    store
-        .write_transaction(|tx| {
-            tx.insert_table_rows_in_tx(tombstones)?;
-            tx.delete_table_rows_in_tx(content::message::rows::CONTENT_MESSAGE_ROWS, keys.clone())?;
-            tx.delete_table_rows_in_tx(content::message::rows::OPENED_MESSAGE_ROWS, keys.clone())?;
-            Ok(())
-        })
-        .map_err(|err| format!("apply horizon floor: {err}"))
+    let mut effects = PipelineEffects::new();
+    for row in retired {
+        effects = effects
+            .row_mutation(RowMutation::InsertValues(
+                content::message::rows::message_tombstone_row(
+                    row.workspace_id,
+                    row.message_id,
+                    row.author_user_id,
+                    row.created_at_ms,
+                ),
+            ))
+            .row_mutation(RowMutation::DeleteWhere(
+                content::message::retention::message_row_delete(
+                    content::message::rows::CONTENT_MESSAGE_ROWS,
+                    row.workspace_id,
+                    row.message_id,
+                ),
+            ))
+            .row_mutation(RowMutation::DeleteWhere(
+                content::message::retention::message_row_delete(
+                    content::message::rows::OPENED_MESSAGE_ROWS,
+                    row.workspace_id,
+                    row.message_id,
+                ),
+            ));
+    }
+    commit_pipeline_effects_to_store(
+        store,
+        &effects,
+        &[
+            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
+            content::message::rows::CONTENT_MESSAGE_ROWS,
+            content::message::rows::OPENED_MESSAGE_ROWS,
+        ],
+        "apply horizon floor",
+    )?;
+    Ok(())
 }
 
 pub fn enqueue_floor_retention(

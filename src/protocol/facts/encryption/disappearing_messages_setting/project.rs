@@ -416,7 +416,7 @@ mod projector_tests {
         match mutation {
             RowMutation::PutRow(row) => rows::decode_setting_row(&row.key, &row.value)
                 .expect("decode disappearing setting row"),
-            RowMutation::DeleteRow(_) => panic!("expected put row"),
+            _ => panic!("expected opaque put row"),
         }
     }
 

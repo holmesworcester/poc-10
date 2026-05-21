@@ -1,7 +1,11 @@
 //! Helpers for bounded message retention purges.
 
 use crate::core::facts::{Fact, FactId};
+use crate::core::intents::{RowMutation, TableDeleteWhere};
+use crate::core::pipeline::{commit_pipeline_effects_to_store, PipelineEffects};
+use crate::core::select::Value;
 use crate::core::store::Store;
+use crate::core::store::TableName;
 use crate::protocol::facts::{content::message, identity::signed_fact};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,25 +72,51 @@ pub fn delete_message_projection(
     context: &str,
 ) -> Result<(), String> {
     let workspace_id = message.workspace_id();
-    let key = message::rows::content_message_key(workspace_id, message_id);
-    let tombstone = message::rows::message_tombstone_row(
-        workspace_id,
-        message_id,
-        message.author_user_id(),
-        message.created_at_ms(),
-    );
-    store
-        .write_transaction(|tx| {
-            tx.insert_table_rows_in_tx(vec![tombstone])?;
-            tx.delete_table_rows_in_tx(message::rows::OPENED_MESSAGE_ROWS, vec![key.clone()])?;
-            tx.delete_table_rows_in_tx(
-                message::rows::CONTENT_MESSAGE_ROWS,
-                vec![message::rows::content_message_key(workspace_id, message_id)],
-            )?;
-            Ok(())
-        })
-        .map_err(|err| format!("{context}: {err}"))?;
+    let effects = PipelineEffects::new()
+        .row_mutation(RowMutation::InsertValues(
+            message::rows::message_tombstone_row(
+                workspace_id,
+                message_id,
+                message.author_user_id(),
+                message.created_at_ms(),
+            ),
+        ))
+        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            message::rows::OPENED_MESSAGE_ROWS,
+            workspace_id,
+            message_id,
+        )))
+        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            message::rows::CONTENT_MESSAGE_ROWS,
+            workspace_id,
+            message_id,
+        )));
+    commit_pipeline_effects_to_store(
+        store,
+        &effects,
+        &[
+            message::rows::MESSAGE_TOMBSTONE_ROWS,
+            message::rows::OPENED_MESSAGE_ROWS,
+            message::rows::CONTENT_MESSAGE_ROWS,
+        ],
+        context,
+    )?;
     Ok(())
+}
+
+pub(crate) fn message_row_delete(
+    table: TableName,
+    workspace_id: FactId,
+    message_id: FactId,
+) -> TableDeleteWhere {
+    TableDeleteWhere {
+        table,
+        columns: message::rows::MESSAGE_KEY_COLUMNS,
+        values: vec![
+            Value::Bytes(workspace_id.to_vec()),
+            Value::Bytes(message_id.to_vec()),
+        ],
+    }
 }
 
 fn content_message_retention(

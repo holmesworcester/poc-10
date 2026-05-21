@@ -403,7 +403,7 @@ mod projector_tests {
                 rows::decode_local_history_node_secret_row(&row.key, &row.value)
                     .expect("decode row")
             }
-            RowMutation::DeleteRow(_) => panic!("expected put row"),
+            _ => panic!("expected opaque put row"),
         }
     }
 }

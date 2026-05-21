@@ -9,11 +9,12 @@
 //!      parents delete the slice row. AEAD opening stays in encryption code.
 
 use crate::core::context::ContextNeed;
-use crate::core::facts::Fact;
-use crate::core::intents::{RowMutation, TableDelete};
+use crate::core::facts::{Fact, FactId};
+use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
+use crate::core::select::Value;
 
 use crate::protocol::facts::content::file;
 use crate::protocol::facts::content::file_deletion;
@@ -21,7 +22,7 @@ use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_w
 use crate::protocol::matchers as file_matchers;
 use crate::protocol::matchers as message_matchers;
 
-use super::rows::{content_file_slice_key, content_file_slice_row, FILE_SLICE_ROWS};
+use super::rows::{content_file_slice_row, FILE_SLICE_KEY_COLUMNS, FILE_SLICE_ROWS};
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentFileSliceProjector;
@@ -81,23 +82,20 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
             return Ok(ProjectionOutput::new()
                 .need(file_need)
                 .need(file_deletion_need)
-                .row_mutation(RowMutation::DeleteRow(TableDelete {
-                    table: FILE_SLICE_ROWS,
-                    key: content_file_slice_key(
-                        &slice.workspace_id,
-                        &slice.file_id,
-                        slice.slice_index,
-                    ),
-                })));
+                .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
+                    slice.workspace_id,
+                    slice.file_id,
+                    slice.slice_index,
+                ))));
         }
 
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(file_need)
             .need(file_deletion_need)
-            .row_mutation(RowMutation::PutRow(content_file_slice_row(
+            .row_mutation(RowMutation::InsertValues(content_file_slice_row(
                 fact.id, &slice,
-            )?))
+            )))
             .intent(share_fact_with_workspace_intent_for_fact(
                 slice.workspace_id,
                 fact,
@@ -134,6 +132,22 @@ fn validate_file_deletion(
         );
     }
     Ok(())
+}
+
+fn content_file_slice_delete(
+    workspace_id: FactId,
+    file_id: FactId,
+    slice_index: u32,
+) -> TableDeleteWhere {
+    TableDeleteWhere {
+        table: FILE_SLICE_ROWS,
+        columns: FILE_SLICE_KEY_COLUMNS,
+        values: vec![
+            Value::Bytes(workspace_id.to_vec()),
+            Value::Bytes(file_id.to_vec()),
+            Value::U64(u64::from(slice_index)),
+        ],
+    }
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {

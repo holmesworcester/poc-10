@@ -6,8 +6,9 @@
 //! `opened_message_rows` is plaintext materialized only after local decryption.
 
 use crate::core::facts::FactId;
-use crate::core::store::{TableName, TableRow};
-use crate::core::wire;
+use crate::core::intents::TableInsert;
+use crate::core::select::Value;
+use crate::core::store::TableName;
 
 use super::fact::{
     AuthorId, ContentMessageFact, FrontierId, SignerId, WorkspaceId, UNIX_MINUTE_MS,
@@ -17,9 +18,32 @@ pub const CONTENT_MESSAGE_ROWS: TableName = TableName::new("content_messages");
 pub const OPENED_MESSAGE_ROWS: TableName = TableName::new("opened_message_rows");
 pub const MESSAGE_TOMBSTONE_ROWS: TableName = TableName::new("message_tombstone_rows");
 
-pub const ROW_VALUE_BYTES: usize = 32 + 8 + 32 + 32 + 8 + 32 + 1;
-pub const OPENED_MESSAGE_VALUE_PREFIX_BYTES: usize = 8 + 32 + 32 + 4;
-pub const MESSAGE_TOMBSTONE_VALUE_BYTES: usize = 32 + 8;
+pub(crate) const MESSAGE_KEY_COLUMNS: &[&str] = &["workspace_id", "message_id"];
+const CONTENT_MESSAGE_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "message_id",
+    "author_user_id",
+    "created_at_ms",
+    "signer_id",
+    "frontier_id",
+    "minute",
+    "leaf_id",
+    "deleted",
+];
+const OPENED_MESSAGE_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "message_id",
+    "created_at_ms",
+    "author_user_id",
+    "signer_id",
+    "text",
+];
+const MESSAGE_TOMBSTONE_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "message_id",
+    "author_user_id",
+    "authored_minute",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentMessageRow {
@@ -43,41 +67,36 @@ pub struct OpenedMessageRow {
     pub text: String,
 }
 
-pub fn content_message_key(workspace_id: WorkspaceId, message_id: FactId) -> Vec<u8> {
-    let mut key = Vec::with_capacity(64);
-    key.extend_from_slice(&workspace_id);
-    key.extend_from_slice(&message_id);
-    key
-}
-
-pub fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> TableRow {
-    let mut writer = wire::Writer::with_capacity(ROW_VALUE_BYTES);
-    writer.fixed(&fact.author_user_id);
-    writer.u64be(fact.created_at_ms);
-    writer.fixed(&fact.signer_id);
-    writer.fixed(&fact.frontier_id);
-    writer.u64be(fact.minute);
-    writer.fixed(&fact.leaf_id);
-    writer.u8(0);
-    TableRow {
+pub fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> TableInsert {
+    TableInsert {
         table: CONTENT_MESSAGE_ROWS,
-        key: content_message_key(fact.workspace_id, message_id),
-        value: writer.finish(),
+        columns: CONTENT_MESSAGE_COLUMNS,
+        values: vec![
+            Value::Bytes(fact.workspace_id.to_vec()),
+            Value::Bytes(message_id.to_vec()),
+            Value::Bytes(fact.author_user_id.to_vec()),
+            Value::U64(fact.created_at_ms),
+            Value::Bytes(fact.signer_id.to_vec()),
+            Value::Bytes(fact.frontier_id.to_vec()),
+            Value::U64(fact.minute),
+            Value::Bytes(fact.leaf_id.to_vec()),
+            Value::Bool(false),
+        ],
     }
 }
 
-pub fn opened_message_row(input: OpenedMessageRow) -> TableRow {
-    let text = input.text.as_bytes();
-    let mut writer = wire::Writer::with_capacity(OPENED_MESSAGE_VALUE_PREFIX_BYTES + text.len());
-    writer.u64be(input.created_at_ms);
-    writer.fixed(&input.author_user_id);
-    writer.fixed(&input.signer_id);
-    writer.u32be(text.len() as u32);
-    writer.bytes(text);
-    TableRow {
+pub fn opened_message_row(input: OpenedMessageRow) -> TableInsert {
+    TableInsert {
         table: OPENED_MESSAGE_ROWS,
-        key: content_message_key(input.workspace_id, input.message_id),
-        value: writer.finish(),
+        columns: OPENED_MESSAGE_COLUMNS,
+        values: vec![
+            Value::Bytes(input.workspace_id.to_vec()),
+            Value::Bytes(input.message_id.to_vec()),
+            Value::U64(input.created_at_ms),
+            Value::Bytes(input.author_user_id.to_vec()),
+            Value::Bytes(input.signer_id.to_vec()),
+            Value::Bytes(input.text.into_bytes()),
+        ],
     }
 }
 
@@ -86,14 +105,16 @@ pub fn message_tombstone_row(
     message_id: FactId,
     author_user_id: AuthorId,
     created_at_ms: u64,
-) -> TableRow {
-    let mut writer = wire::Writer::with_capacity(MESSAGE_TOMBSTONE_VALUE_BYTES);
-    writer.fixed(&author_user_id);
-    writer.u64be(created_at_ms / UNIX_MINUTE_MS);
-    TableRow {
+) -> TableInsert {
+    TableInsert {
         table: MESSAGE_TOMBSTONE_ROWS,
-        key: content_message_key(workspace_id, message_id),
-        value: writer.finish(),
+        columns: MESSAGE_TOMBSTONE_COLUMNS,
+        values: vec![
+            Value::Bytes(workspace_id.to_vec()),
+            Value::Bytes(message_id.to_vec()),
+            Value::Bytes(author_user_id.to_vec()),
+            Value::U64(created_at_ms / UNIX_MINUTE_MS),
+        ],
     }
 }
 
@@ -118,13 +139,15 @@ mod tests {
             ciphertext: b"sealed".to_vec(),
         };
         let row = content_message_row([9; 32], &fact);
-        assert_eq!(row.key, content_message_key([1; 32], [9; 32]));
-        assert_eq!(row.value.len(), ROW_VALUE_BYTES);
-        assert_eq!(&row.value[..32], &[2; 32]);
-        assert_eq!(&row.value[40..72], &[3; 32]);
-        assert_eq!(&row.value[72..104], &[4; 32]);
-        assert_eq!(&row.value[112..144], &[7; 32]);
-        assert_eq!(row.value[144], 0);
+        assert_eq!(row.table, CONTENT_MESSAGE_ROWS);
+        assert_eq!(row.columns, CONTENT_MESSAGE_COLUMNS);
+        assert_eq!(row.values[0], Value::Bytes(vec![1; 32]));
+        assert_eq!(row.values[1], Value::Bytes(vec![9; 32]));
+        assert_eq!(row.values[2], Value::Bytes(vec![2; 32]));
+        assert_eq!(row.values[4], Value::Bytes(vec![3; 32]));
+        assert_eq!(row.values[5], Value::Bytes(vec![4; 32]));
+        assert_eq!(row.values[7], Value::Bytes(vec![7; 32]));
+        assert_eq!(row.values[8], Value::Bool(false));
     }
 
     #[test]
@@ -137,12 +160,14 @@ mod tests {
             signer_id: [4; 32],
             text: "hello".to_string(),
         });
-        assert_eq!(opened.key, content_message_key([1; 32], [2; 32]));
-        assert!(opened.value.ends_with(b"hello"));
+        assert_eq!(opened.table, OPENED_MESSAGE_ROWS);
+        assert_eq!(opened.columns, OPENED_MESSAGE_COLUMNS);
+        assert_eq!(opened.values[5], Value::Bytes(b"hello".to_vec()));
 
         let tombstone = message_tombstone_row([1; 32], [2; 32], [3; 32], 120_000);
-        assert_eq!(tombstone.key, content_message_key([1; 32], [2; 32]));
-        assert_eq!(&tombstone.value[..32], &[3; 32]);
-        assert_eq!(&tombstone.value[32..], &2_u64.to_be_bytes());
+        assert_eq!(tombstone.table, MESSAGE_TOMBSTONE_ROWS);
+        assert_eq!(tombstone.columns, MESSAGE_TOMBSTONE_COLUMNS);
+        assert_eq!(tombstone.values[2], Value::Bytes(vec![3; 32]));
+        assert_eq!(tombstone.values[3], Value::U64(2));
     }
 }

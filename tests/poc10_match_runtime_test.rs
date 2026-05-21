@@ -1,6 +1,6 @@
 //! Target runtime facade tests.
 
-use std::{cell::Cell, collections::BTreeSet, path::Path};
+use std::{cell::Cell, collections::BTreeSet};
 
 use topo::core::command_context::{
     CommandClock, IdentityVault, LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
@@ -250,35 +250,9 @@ fn workspace_scope(workspace_id: [u8; 32]) -> FactScope {
 }
 
 fn runtime_dispatch_handler_routes() -> BTreeSet<String> {
-    let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol/registry.rs");
-    let source = std::fs::read_to_string(&runtime_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", runtime_path.display()));
-    let const_start = source
-        .find("const HANDLER_ROUTES")
-        .expect("HANDLER_ROUTES declaration");
-    let start = source[const_start..]
-        .find("&[")
-        .map(|offset| const_start + offset)
-        .expect("HANDLER_ROUTES body start");
-    let end = source[start..]
-        .find("];")
-        .map(|offset| start + offset)
-        .expect("HANDLER_ROUTES body end");
-    let body = &source[start..end];
-
-    let mut routes = BTreeSet::new();
-    let mut rest = body;
-    while let Some(index) = rest.find("name: \"") {
-        let after_prefix = &rest[index + "name: \"".len()..];
-        let field_len = after_prefix
-            .chars()
-            .take_while(|ch| *ch != '"')
-            .map(char::len_utf8)
-            .sum::<usize>();
-        if field_len > 0 {
-            routes.insert(after_prefix[..field_len].to_string());
-        }
-        rest = &after_prefix[field_len..];
-    }
-    routes
+    MATCH_RUNTIME
+        .handlers
+        .iter()
+        .map(|route| route.name.to_string())
+        .collect()
 }

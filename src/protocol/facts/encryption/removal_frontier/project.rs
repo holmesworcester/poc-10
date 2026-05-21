@@ -288,7 +288,7 @@ mod projector_tests {
             RowMutation::PutRow(row) => {
                 rows::decode_removal_frontier_row(&row.key, &row.value).expect("decode row")
             }
-            RowMutation::DeleteRow(_) => panic!("expected put row"),
+            _ => panic!("expected opaque put row"),
         }
     }
 

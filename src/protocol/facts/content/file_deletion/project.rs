@@ -113,7 +113,7 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
             deletion_id: fact.id,
             created_at_ms: deletion.created_at_ms,
             author_user_id: deletion.author_user_id,
-        })?;
+        });
         Ok(
             output_with_needs([signer_need, Some(target_need), Some(author_need)])
                 .offer(matchers::deletion_offer(
@@ -122,7 +122,7 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
                     deletion.target_file_id,
                     deletion.author_user_id,
                 ))
-                .row_mutation(RowMutation::PutRow(row))
+                .row_mutation(RowMutation::InsertValues(row))
                 .intent(share_fact_with_workspace_intent_for_fact(
                     deletion.workspace_id,
                     fact,

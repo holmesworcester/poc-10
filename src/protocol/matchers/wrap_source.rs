@@ -661,7 +661,9 @@ fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Context
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::pipeline::context_codec::{context_need_row, context_offer_row};
+    use crate::core::pipeline::context_rows::{
+        insert_context_need_for_test, insert_context_offer_for_test,
+    };
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::matchers::workspace_scope;
@@ -702,14 +704,11 @@ mod tests {
             frontier_root_wrap_source_offer([5; 32], scope.clone(), [1; 32], [3; 32], [6; 32], 50);
         let other_frontier =
             frontier_root_wrap_source_offer([7; 32], scope.clone(), [1; 32], [8; 32], [6; 32], 50);
-        store
-            .insert_table_rows(vec![
-                context_need_row(&requested),
-                context_need_row(&proactive),
-                context_offer_row(&matching),
-                context_offer_row(&other_frontier),
-            ])
-            .expect("insert context rows");
+        insert_context_need_for_test(&store, &requested).expect("insert requested need");
+        insert_context_need_for_test(&store, &proactive).expect("insert proactive need");
+        insert_context_offer_for_test(&store, &matching).expect("insert matching offer");
+        insert_context_offer_for_test(&store, &other_frontier)
+            .expect("insert other-frontier offer");
 
         let matcher = WrapSourceMatcher::new();
         let offers = matcher

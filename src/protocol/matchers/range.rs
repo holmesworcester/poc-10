@@ -365,7 +365,9 @@ pub fn range_fact_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Cont
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::pipeline::context_codec::{context_need_row, context_offer_row};
+    use crate::core::pipeline::context_rows::{
+        insert_context_need_for_test, insert_context_offer_for_test,
+    };
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::matchers::workspace_scope;
@@ -398,13 +400,9 @@ mod tests {
         let need = range_fact_need([2; 32], scope.clone(), 10, 20);
         let matching = range_fact_offer([3; 32], scope.clone(), 12, [4; 32], [5; 32], [6; 32]);
         let too_late = range_fact_offer([7; 32], scope.clone(), 21, [8; 32], [9; 32], [10; 32]);
-        store
-            .insert_table_rows(vec![
-                context_offer_row(&matching),
-                context_offer_row(&too_late),
-                context_need_row(&need),
-            ])
-            .expect("insert context rows");
+        insert_context_offer_for_test(&store, &matching).expect("insert matching offer");
+        insert_context_offer_for_test(&store, &too_late).expect("insert non-matching offer");
+        insert_context_need_for_test(&store, &need).expect("insert need");
 
         let matcher = RangeFactMatcher::new();
         let offers = matcher
