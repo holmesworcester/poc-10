@@ -1,14 +1,11 @@
 //! SQL helpers for waking facts after context edge additions.
 
-use super::context_rows::{stored_needs_for_role_scope, stored_offers_for_role_scope};
 use crate::core::context::{scope_key, ContextSetDelta};
 use crate::core::context::{ContextNeed, ContextOffer};
-use crate::core::matchers::{ContextMatch, ContextMatcher};
+use crate::core::matchers::ContextMatcher;
 use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION};
 use crate::core::select;
 use crate::core::store::Store;
-use rusqlite::params;
-use std::collections::HashSet;
 
 pub(super) fn wake_context_matches_in_tx(
     store: &Store,
@@ -87,22 +84,11 @@ fn wake_need_in_tx(
     need: &ContextNeed,
 ) -> Result<usize, String> {
     let select = if matcher.exact_selector_role().is_some() {
-        Some(exact_offers_for_need_select(need))
+        exact_offers_for_need_select(need)
     } else {
         matcher.wake_select_for_added_need(need)?
     };
-    if let Some(select) = select {
-        return insert_pending_projection_from_select_in_tx(store, &select, "need");
-    }
-
-    let offers = if let Some(offers) = matcher.matching_offers_for_need_from_store(store, need)? {
-        offers
-    } else {
-        stored_offers_for_role_scope(store, &need.role, &need.scope)?
-    };
-    let matches = matcher.match_new_need(need, &offers);
-    wake_matched_need_owners_in_tx(store, matches)
-        .map_err(|err| format!("wake need from Rust matcher: {err}"))
+    insert_pending_projection_from_select_in_tx(store, &select, "need")
 }
 
 fn wake_offer_in_tx(
@@ -111,22 +97,11 @@ fn wake_offer_in_tx(
     offer: &ContextOffer,
 ) -> Result<usize, String> {
     let select = if matcher.exact_selector_role().is_some() {
-        Some(exact_needs_for_offer_select(offer))
+        exact_needs_for_offer_select(offer)
     } else {
         matcher.wake_select_for_added_offer(offer)?
     };
-    if let Some(select) = select {
-        return insert_pending_projection_from_select_in_tx(store, &select, "offer");
-    }
-
-    let needs = if let Some(needs) = matcher.matching_needs_for_offer_from_store(store, offer)? {
-        needs
-    } else {
-        stored_needs_for_role_scope(store, &offer.role, &offer.scope)?
-    };
-    let matches = matcher.match_new_offer(offer, &needs);
-    wake_matched_need_owners_in_tx(store, matches)
-        .map_err(|err| format!("wake offer from Rust matcher: {err}"))
+    insert_pending_projection_from_select_in_tx(store, &select, "offer")
 }
 
 fn insert_pending_projection_from_select_in_tx(
@@ -136,23 +111,4 @@ fn insert_pending_projection_from_select_in_tx(
 ) -> Result<usize, String> {
     select::insert_select_in_tx(store, PENDING_PROJECTION, &["owner"], select)
         .map_err(|err| format!("wake {edge_kind} from SELECT: {err}"))
-}
-
-fn wake_matched_need_owners_in_tx(
-    store: &Store,
-    matches: Vec<ContextMatch>,
-) -> rusqlite::Result<usize> {
-    let mut inserted = 0usize;
-    let mut seen = HashSet::new();
-    for matched in matches {
-        if seen.insert(matched.need_owner)
-            && store.conn().execute(
-                "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
-                params![matched.need_owner.as_slice()],
-            )? > 0
-        {
-            inserted += 1;
-        }
-    }
-    Ok(inserted)
 }

@@ -79,52 +79,6 @@ pub(crate) fn insert_context_offer_for_test(
         .map_err(|err| format!("insert context offer: {err}"))
 }
 
-pub(super) fn stored_needs_for_role_scope(
-    store: &Store,
-    role: &Role,
-    scope: &FactScope,
-) -> Result<Vec<ContextNeed>, String> {
-    let scope_key = scope_key(scope);
-    select_context_needs(
-        store,
-        r#"
-        SELECT owner, role, scope_key, selector
-        FROM context_edges
-        WHERE direction = 'need'
-          AND role = :role
-          AND scope_key = :scope_key
-        ORDER BY owner, selector
-        "#,
-        &[
-            (":role", text(role.as_str())),
-            (":scope_key", bytes(&scope_key)),
-        ],
-    )
-}
-
-pub(super) fn stored_offers_for_role_scope(
-    store: &Store,
-    role: &Role,
-    scope: &FactScope,
-) -> Result<Vec<ContextOffer>, String> {
-    let scope_key = scope_key(scope);
-    select_context_offers(
-        store,
-        r#"
-        SELECT owner, role, scope_key, selector
-        FROM context_edges
-        WHERE direction = 'offer'
-          AND role = :role
-          AND scope_key = :scope_key
-        ORDER BY owner, selector
-        "#,
-        &[
-            (":role", text(role.as_str())),
-            (":scope_key", bytes(&scope_key)),
-        ],
-    )
-}
-
 pub(super) fn stored_offers_for_exact_match(
     store: &Store,
     role: &Role,

@@ -7,11 +7,10 @@
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
 use crate::core::matchers::{
-    ContextMatch, ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration,
-    SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
+    ContextMatcherDeclaration, ContextRoleDeclaration, SelectOnlyMatcherResult,
+    SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
 use crate::core::select;
-use crate::core::store::Store;
 
 use super::exact::protocol_role;
 use super::sql;
@@ -392,168 +391,74 @@ impl Default for SecretCoverageMatcher {
     }
 }
 
-impl ContextMatcher for SecretCoverageMatcher {
-    fn role(&self) -> &Role {
-        &self.role
+sql::sql_backed_matcher! {
+    SecretCoverageMatcher {
+        declaration: SECRET_COVERAGE_CONTEXT_ROLE,
+        offers_for_need: SECRET_COVERAGE_OFFERS_FOR_NEED_SQL => secret_need_query_params,
+        wake_for_need: SECRET_COVERAGE_WAKE_FOR_NEED_SQL => secret_need_wake_params,
+        wake_for_offer: SECRET_COVERAGE_WAKE_FOR_OFFER_SQL => secret_offer_wake_params,
     }
+}
 
-    fn declaration(&self) -> Option<ContextRoleDeclaration> {
-        Some(SECRET_COVERAGE_CONTEXT_ROLE)
-    }
+fn secret_need_query_params(role: &Role, need: &ContextNeed) -> Option<Vec<select::Param>> {
+    let selector = decode_secret_need_selector(&need.selector)?;
+    Some(secret_need_params(role, need, selector))
+}
 
-    fn match_new_need(
-        &self,
-        need: &ContextNeed,
-        existing_offers: &[ContextOffer],
-    ) -> Vec<ContextMatch> {
-        if need.role != self.role {
-            return Vec::new();
-        }
-        existing_offers
-            .iter()
-            .filter_map(|offer| secret_coverage_match(need, offer))
-            .collect()
-    }
+fn secret_need_wake_params(role: &Role, need: &ContextNeed) -> Option<Vec<select::Param>> {
+    let selector = decode_secret_need_selector(&need.selector)?;
+    let mut params = vec![select::Param::bytes(":need_owner", need.owner)];
+    params.extend(secret_need_params(role, need, selector));
+    Some(params)
+}
 
-    fn match_new_offer(
-        &self,
-        offer: &ContextOffer,
-        existing_needs: &[ContextNeed],
-    ) -> Vec<ContextMatch> {
-        if offer.role != self.role {
-            return Vec::new();
-        }
-        existing_needs
-            .iter()
-            .filter_map(|need| secret_coverage_match(need, offer))
-            .collect()
-    }
+fn secret_need_params(
+    role: &Role,
+    need: &ContextNeed,
+    selector: SecretNeedSelector,
+) -> Vec<select::Param> {
+    vec![
+        select::Param::text(":role", role.as_str()),
+        select::Param::bytes(":scope_key", sql::scope_key_for_sql(&need.scope)),
+        select::Param::bytes(":workspace_id", selector.workspace_id),
+        select::Param::bytes(":frontier_id", selector.frontier_id),
+        select::Param::bytes(":minute", selector.minute.to_be_bytes()),
+        select::Param::bytes(":leaf_id", selector.leaf_id),
+    ]
+}
 
-    fn matching_offers_for_need_from_store(
-        &self,
-        store: &Store,
-        need: &ContextNeed,
-    ) -> Result<Option<Vec<ContextOffer>>, String> {
-        if need.role != self.role {
-            return Ok(Some(Vec::new()));
-        }
-        let Some(selector) = decode_secret_need_selector(&need.selector) else {
-            return Ok(Some(Vec::new()));
-        };
-        let scope_key = sql::scope_key_for_sql(&need.scope);
-        let minute = selector.minute.to_be_bytes();
-        let params = vec![
-            select::Param::text(":role", self.role.as_str()),
-            select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":workspace_id", selector.workspace_id),
-            select::Param::bytes(":frontier_id", selector.frontier_id),
-            select::Param::bytes(":minute", minute),
-            select::Param::bytes(":leaf_id", selector.leaf_id),
-        ];
-        sql::select_offers_for_need(store, SECRET_COVERAGE_OFFERS_FOR_NEED_SQL, &params, need)
-            .map(Some)
+fn secret_offer_wake_params(role: &Role, offer: &ContextOffer) -> Option<Vec<select::Param>> {
+    let selector = decode_secret_offer_selector(&offer.selector)?;
+    if selector.start_minute > selector.end_minute {
+        return None;
     }
-
-    fn matching_needs_for_offer_from_store(
-        &self,
-        store: &Store,
-        offer: &ContextOffer,
-    ) -> Result<Option<Vec<ContextNeed>>, String> {
-        if offer.role != self.role {
-            return Ok(Some(Vec::new()));
-        }
-        let Some(selector) = decode_secret_offer_selector(&offer.selector) else {
-            return Ok(Some(Vec::new()));
-        };
-        if selector.start_minute > selector.end_minute {
-            return Ok(Some(Vec::new()));
-        }
-        let scope_key = sql::scope_key_for_sql(&offer.scope);
-        let start_minute = selector.start_minute.to_be_bytes();
-        let end_minute = selector.end_minute.to_be_bytes();
-        let prefix_len = i64::from(selector.prefix_bytes);
-        let leaf_prefix = selector.leaf_prefix[..usize::from(selector.prefix_bytes)].to_vec();
-        let params = vec![
-            select::Param::text(":role", self.role.as_str()),
-            select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":workspace_id", selector.workspace_id),
-            select::Param::bytes(":frontier_id", selector.frontier_id),
-            select::Param::bytes(":start_minute", start_minute),
-            select::Param::bytes(":end_minute", end_minute),
-            select::Param::i64(":prefix_len", prefix_len),
-            select::Param::bytes(":leaf_prefix", leaf_prefix),
-        ];
-        sql::select_needs_for_offer(store, SECRET_COVERAGE_NEEDS_FOR_OFFER_SQL, &params, offer)
-            .map(Some)
-    }
-
-    fn wake_select_for_added_need(
-        &self,
-        need: &ContextNeed,
-    ) -> Result<Option<select::Select>, String> {
-        if need.role != self.role {
-            return Ok(Some(select::Select::empty()));
-        }
-        let Some(selector) = decode_secret_need_selector(&need.selector) else {
-            return Ok(Some(select::Select::empty()));
-        };
-        let scope_key = sql::scope_key_for_sql(&need.scope);
-        Ok(Some(sql::wake_select(
-            SECRET_COVERAGE_WAKE_FOR_NEED_SQL,
-            vec![
-                select::Param::bytes(":need_owner", need.owner),
-                select::Param::text(":role", self.role.as_str()),
-                select::Param::bytes(":scope_key", scope_key),
-                select::Param::bytes(":workspace_id", selector.workspace_id),
-                select::Param::bytes(":frontier_id", selector.frontier_id),
-                select::Param::bytes(":minute", selector.minute.to_be_bytes()),
-                select::Param::bytes(":leaf_id", selector.leaf_id),
-            ],
-        )))
-    }
-
-    fn wake_select_for_added_offer(
-        &self,
-        offer: &ContextOffer,
-    ) -> Result<Option<select::Select>, String> {
-        if offer.role != self.role {
-            return Ok(Some(select::Select::empty()));
-        }
-        let Some(selector) = decode_secret_offer_selector(&offer.selector) else {
-            return Ok(Some(select::Select::empty()));
-        };
-        if selector.start_minute > selector.end_minute {
-            return Ok(Some(select::Select::empty()));
-        }
-        let scope_key = sql::scope_key_for_sql(&offer.scope);
-        let leaf_prefix = selector.leaf_prefix[..usize::from(selector.prefix_bytes)].to_vec();
-        Ok(Some(sql::wake_select(
-            SECRET_COVERAGE_WAKE_FOR_OFFER_SQL,
-            vec![
-                select::Param::text(":role", self.role.as_str()),
-                select::Param::bytes(":scope_key", scope_key),
-                select::Param::bytes(":workspace_id", selector.workspace_id),
-                select::Param::bytes(":frontier_id", selector.frontier_id),
-                select::Param::bytes(":start_minute", selector.start_minute.to_be_bytes()),
-                select::Param::bytes(":end_minute", selector.end_minute.to_be_bytes()),
-                select::Param::i64(":prefix_len", i64::from(selector.prefix_bytes)),
-                select::Param::bytes(":leaf_prefix", leaf_prefix),
-            ],
-        )))
-    }
+    let leaf_prefix = selector.leaf_prefix[..usize::from(selector.prefix_bytes)].to_vec();
+    Some(vec![
+        select::Param::text(":role", role.as_str()),
+        select::Param::bytes(":scope_key", sql::scope_key_for_sql(&offer.scope)),
+        select::Param::bytes(":workspace_id", selector.workspace_id),
+        select::Param::bytes(":frontier_id", selector.frontier_id),
+        select::Param::bytes(":start_minute", selector.start_minute.to_be_bytes()),
+        select::Param::bytes(":end_minute", selector.end_minute.to_be_bytes()),
+        select::Param::i64(":prefix_len", i64::from(selector.prefix_bytes)),
+        select::Param::bytes(":leaf_prefix", leaf_prefix),
+    ])
 }
 
 pub fn secret_offer_matches_need(need: &ContextNeed, offer: &ContextOffer) -> bool {
-    secret_coverage_match(need, offer).is_some()
+    secret_coverage_match(need, offer)
 }
 
-fn secret_coverage_match(need: &ContextNeed, offer: &ContextOffer) -> Option<ContextMatch> {
+fn secret_coverage_match(need: &ContextNeed, offer: &ContextOffer) -> bool {
     if need.role != offer.role || need.scope != offer.scope {
-        return None;
+        return false;
     }
-    let need_owner = need.owner;
-    let need = decode_secret_need_selector(&need.selector)?;
-    let offer_selector = decode_secret_offer_selector(&offer.selector)?;
+    let Some(need) = decode_secret_need_selector(&need.selector) else {
+        return false;
+    };
+    let Some(offer_selector) = decode_secret_offer_selector(&offer.selector) else {
+        return false;
+    };
     if need.workspace_id != offer_selector.workspace_id
         || need.frontier_id != offer_selector.frontier_id
         || offer_selector.start_minute > offer_selector.end_minute
@@ -565,13 +470,10 @@ fn secret_coverage_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Con
             offer_selector.prefix_bytes,
         )
     {
-        return None;
+        return false;
     }
 
-    Some(ContextMatch {
-        need_owner,
-        offer_owner: offer.owner,
-    })
+    true
 }
 
 fn prefix_matches(value: &FactId, prefix: &FactId, prefix_bytes: u8) -> bool {
@@ -582,6 +484,7 @@ fn prefix_matches(value: &FactId, prefix: &FactId, prefix_bytes: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::matchers::ContextMatcher;
     use crate::core::pipeline::context_rows::{
         insert_context_need_for_test, insert_context_offer_for_test,
     };
@@ -600,10 +503,8 @@ mod tests {
         leaf[0] = 0b1010_1111;
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, leaf);
         let offer = secret_offer([4; 32], scope, workspace, frontier, 40, 50, 1, prefix);
-        let matched = secret_coverage_match(&need, &offer).expect("match");
 
-        assert_eq!(matched.need_owner, [3; 32]);
-        assert_eq!(matched.offer_owner, [4; 32]);
+        assert!(secret_coverage_match(&need, &offer));
     }
 
     #[test]
@@ -618,7 +519,7 @@ mod tests {
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, leaf);
         let offer = secret_offer([4; 32], scope, workspace, frontier, 40, 50, 1, prefix);
 
-        assert!(secret_coverage_match(&need, &offer).is_none());
+        assert!(!secret_coverage_match(&need, &offer));
     }
 
     #[test]
@@ -629,7 +530,7 @@ mod tests {
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, [9; 32]);
         let offer = secret_offer([4; 32], scope, workspace, frontier, 50, 40, 0, [0; 32]);
 
-        assert!(secret_coverage_match(&need, &offer).is_none());
+        assert!(!secret_coverage_match(&need, &offer));
     }
 
     #[test]
@@ -673,14 +574,7 @@ mod tests {
         let matcher = SecretCoverageMatcher::new();
         let offers = matcher
             .matching_offers_for_need_from_store(&store, &need)
-            .expect("query offers")
-            .expect("sql query");
+            .expect("query offers");
         assert_eq!(offers, vec![offer.clone()]);
-
-        let needs = matcher
-            .matching_needs_for_offer_from_store(&store, &offer)
-            .expect("query needs")
-            .expect("sql query");
-        assert_eq!(needs, vec![need]);
     }
 }

@@ -6,11 +6,10 @@
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
 use crate::core::matchers::{
-    ContextMatch, ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration,
-    SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
+    ContextMatcherDeclaration, ContextRoleDeclaration, SelectOnlyMatcherResult,
+    SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
 use crate::core::select;
-use crate::core::store::Store;
 
 use super::exact::protocol_role;
 use super::sql;
@@ -221,150 +220,74 @@ impl Default for RangeFactMatcher {
     }
 }
 
-impl ContextMatcher for RangeFactMatcher {
-    fn role(&self) -> &Role {
-        &self.role
-    }
-
-    fn declaration(&self) -> Option<ContextRoleDeclaration> {
-        Some(RANGE_FACT_CONTEXT_ROLE)
-    }
-
-    fn match_new_need(
-        &self,
-        need: &ContextNeed,
-        existing_offers: &[ContextOffer],
-    ) -> Vec<ContextMatch> {
-        if need.role != self.role {
-            return Vec::new();
-        }
-        existing_offers
-            .iter()
-            .filter_map(|offer| range_fact_match(need, offer))
-            .collect()
-    }
-
-    fn match_new_offer(
-        &self,
-        offer: &ContextOffer,
-        existing_needs: &[ContextNeed],
-    ) -> Vec<ContextMatch> {
-        if offer.role != self.role {
-            return Vec::new();
-        }
-        existing_needs
-            .iter()
-            .filter_map(|need| range_fact_match(need, offer))
-            .collect()
-    }
-
-    fn matching_offers_for_need_from_store(
-        &self,
-        store: &Store,
-        need: &ContextNeed,
-    ) -> Result<Option<Vec<ContextOffer>>, String> {
-        if need.role != self.role {
-            return Ok(Some(Vec::new()));
-        }
-        let Some((start, end)) = decode_range_need_selector(&need.selector) else {
-            return Ok(Some(Vec::new()));
-        };
-        let scope_key = sql::scope_key_for_sql(&need.scope);
-        let start = start.to_be_bytes();
-        let end = end.to_be_bytes();
-        let params = vec![
-            select::Param::text(":role", self.role.as_str()),
-            select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":start", start),
-            select::Param::bytes(":end", end),
-        ];
-        sql::select_offers_for_need(store, RANGE_FACT_OFFERS_FOR_NEED_SQL, &params, need).map(Some)
-    }
-
-    fn matching_needs_for_offer_from_store(
-        &self,
-        store: &Store,
-        offer: &ContextOffer,
-    ) -> Result<Option<Vec<ContextNeed>>, String> {
-        if offer.role != self.role {
-            return Ok(Some(Vec::new()));
-        }
-        let Some(selector) = decode_range_offer_selector(&offer.selector) else {
-            return Ok(Some(Vec::new()));
-        };
-        let scope_key = sql::scope_key_for_sql(&offer.scope);
-        let timestamp = selector.timestamp.to_be_bytes();
-        let params = vec![
-            select::Param::text(":role", self.role.as_str()),
-            select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":timestamp", timestamp),
-        ];
-        sql::select_needs_for_offer(store, RANGE_FACT_NEEDS_FOR_OFFER_SQL, &params, offer).map(Some)
-    }
-
-    fn wake_select_for_added_need(
-        &self,
-        need: &ContextNeed,
-    ) -> Result<Option<select::Select>, String> {
-        if need.role != self.role {
-            return Ok(Some(select::Select::empty()));
-        }
-        let Some((start, end)) = decode_range_need_selector(&need.selector) else {
-            return Ok(Some(select::Select::empty()));
-        };
-        let scope_key = sql::scope_key_for_sql(&need.scope);
-        Ok(Some(sql::wake_select(
-            RANGE_FACT_WAKE_FOR_NEED_SQL,
-            vec![
-                select::Param::bytes(":need_owner", need.owner),
-                select::Param::text(":role", self.role.as_str()),
-                select::Param::bytes(":scope_key", scope_key),
-                select::Param::bytes(":start", start.to_be_bytes()),
-                select::Param::bytes(":end", end.to_be_bytes()),
-            ],
-        )))
-    }
-
-    fn wake_select_for_added_offer(
-        &self,
-        offer: &ContextOffer,
-    ) -> Result<Option<select::Select>, String> {
-        if offer.role != self.role {
-            return Ok(Some(select::Select::empty()));
-        }
-        let Some(selector) = decode_range_offer_selector(&offer.selector) else {
-            return Ok(Some(select::Select::empty()));
-        };
-        let scope_key = sql::scope_key_for_sql(&offer.scope);
-        Ok(Some(sql::wake_select(
-            RANGE_FACT_WAKE_FOR_OFFER_SQL,
-            vec![
-                select::Param::text(":role", self.role.as_str()),
-                select::Param::bytes(":scope_key", scope_key),
-                select::Param::bytes(":timestamp", selector.timestamp.to_be_bytes()),
-            ],
-        )))
+sql::sql_backed_matcher! {
+    RangeFactMatcher {
+        declaration: RANGE_FACT_CONTEXT_ROLE,
+        offers_for_need: RANGE_FACT_OFFERS_FOR_NEED_SQL => range_need_query_params,
+        wake_for_need: RANGE_FACT_WAKE_FOR_NEED_SQL => range_need_wake_params,
+        wake_for_offer: RANGE_FACT_WAKE_FOR_OFFER_SQL => range_offer_wake_params,
     }
 }
 
-pub fn range_fact_match(need: &ContextNeed, offer: &ContextOffer) -> Option<ContextMatch> {
+fn range_need_query_params(role: &Role, need: &ContextNeed) -> Option<Vec<select::Param>> {
+    let Some((start, end)) = decode_range_need_selector(&need.selector) else {
+        return None;
+    };
+    let scope_key = sql::scope_key_for_sql(&need.scope);
+    Some(vec![
+        select::Param::text(":role", role.as_str()),
+        select::Param::bytes(":scope_key", scope_key),
+        select::Param::bytes(":start", start.to_be_bytes()),
+        select::Param::bytes(":end", end.to_be_bytes()),
+    ])
+}
+
+fn range_need_wake_params(role: &Role, need: &ContextNeed) -> Option<Vec<select::Param>> {
+    let Some((start, end)) = decode_range_need_selector(&need.selector) else {
+        return None;
+    };
+    let scope_key = sql::scope_key_for_sql(&need.scope);
+    Some(vec![
+        select::Param::bytes(":need_owner", need.owner),
+        select::Param::text(":role", role.as_str()),
+        select::Param::bytes(":scope_key", scope_key),
+        select::Param::bytes(":start", start.to_be_bytes()),
+        select::Param::bytes(":end", end.to_be_bytes()),
+    ])
+}
+
+fn range_offer_wake_params(role: &Role, offer: &ContextOffer) -> Option<Vec<select::Param>> {
+    let Some(selector) = decode_range_offer_selector(&offer.selector) else {
+        return None;
+    };
+    let scope_key = sql::scope_key_for_sql(&offer.scope);
+    Some(vec![
+        select::Param::text(":role", role.as_str()),
+        select::Param::bytes(":scope_key", scope_key),
+        select::Param::bytes(":timestamp", selector.timestamp.to_be_bytes()),
+    ])
+}
+
+pub fn range_fact_match(need: &ContextNeed, offer: &ContextOffer) -> bool {
     if need.role != offer.role || need.scope != offer.scope {
-        return None;
+        return false;
     }
-    let (start, end) = decode_range_need_selector(&need.selector)?;
-    let offer_selector = decode_range_offer_selector(&offer.selector)?;
+    let Some((start, end)) = decode_range_need_selector(&need.selector) else {
+        return false;
+    };
+    let Some(offer_selector) = decode_range_offer_selector(&offer.selector) else {
+        return false;
+    };
     if offer_selector.timestamp < start || offer_selector.timestamp > end {
-        return None;
+        return false;
     }
-    Some(ContextMatch {
-        need_owner: need.owner,
-        offer_owner: offer.owner,
-    })
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::matchers::ContextMatcher;
     use crate::core::pipeline::context_rows::{
         insert_context_need_for_test, insert_context_offer_for_test,
     };
@@ -379,8 +302,8 @@ mod tests {
         let lower = range_fact_offer([3; 32], scope.clone(), 10, [4; 32], [5; 32], [6; 32]);
         let upper = range_fact_offer([7; 32], scope.clone(), 20, [8; 32], [9; 32], [10; 32]);
 
-        assert!(range_fact_match(&need, &lower).is_some());
-        assert!(range_fact_match(&need, &upper).is_some());
+        assert!(range_fact_match(&need, &lower));
+        assert!(range_fact_match(&need, &upper));
     }
 
     #[test]
@@ -389,7 +312,7 @@ mod tests {
         let need = range_fact_need([2; 32], scope.clone(), 10, 20);
         let offer = range_fact_offer([3; 32], scope, 21, [4; 32], [5; 32], [6; 32]);
 
-        assert!(range_fact_match(&need, &offer).is_none());
+        assert!(!range_fact_match(&need, &offer));
     }
 
     #[test]
@@ -407,14 +330,7 @@ mod tests {
         let matcher = RangeFactMatcher::new();
         let offers = matcher
             .matching_offers_for_need_from_store(&store, &need)
-            .expect("query offers")
-            .expect("sql query");
+            .expect("query offers");
         assert_eq!(offers, vec![matching.clone()]);
-
-        let needs = matcher
-            .matching_needs_for_offer_from_store(&store, &matching)
-            .expect("query needs")
-            .expect("sql query");
-        assert_eq!(needs, vec![need]);
     }
 }

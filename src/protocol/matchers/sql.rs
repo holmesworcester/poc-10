@@ -21,6 +21,69 @@ pub(crate) fn wake_select(sql: &'static str, params: Vec<select::Param>) -> sele
     select::Select::new(sql, CONTEXT_WAKE_TABLES, params)
 }
 
+macro_rules! sql_backed_matcher {
+    (
+        $matcher:ty {
+            declaration: $declaration:expr,
+            offers_for_need: $offers_for_need_sql:expr => $need_params:path,
+            wake_for_need: $wake_for_need_sql:expr => $wake_need_params:path,
+            wake_for_offer: $wake_for_offer_sql:expr => $wake_offer_params:path $(,)?
+        }
+    ) => {
+        impl $crate::core::matchers::ContextMatcher for $matcher {
+            fn role(&self) -> &$crate::core::context::Role {
+                &self.role
+            }
+
+            fn declaration(&self) -> Option<$crate::core::matchers::ContextRoleDeclaration> {
+                Some($declaration)
+            }
+
+            fn matching_offers_for_need_from_store(
+                &self,
+                store: &$crate::core::store::Store,
+                need: &$crate::core::context::ContextNeed,
+            ) -> Result<Vec<$crate::core::context::ContextOffer>, String> {
+                if need.role != self.role {
+                    return Ok(Vec::new());
+                }
+                let Some(params) = $need_params(&self.role, need) else {
+                    return Ok(Vec::new());
+                };
+                sql::select_offers_for_need(store, $offers_for_need_sql, &params, need)
+            }
+
+            fn wake_select_for_added_need(
+                &self,
+                need: &$crate::core::context::ContextNeed,
+            ) -> Result<$crate::core::select::Select, String> {
+                if need.role != self.role {
+                    return Ok($crate::core::select::Select::empty());
+                }
+                let Some(params) = $wake_need_params(&self.role, need) else {
+                    return Ok($crate::core::select::Select::empty());
+                };
+                Ok(sql::wake_select($wake_for_need_sql, params))
+            }
+
+            fn wake_select_for_added_offer(
+                &self,
+                offer: &$crate::core::context::ContextOffer,
+            ) -> Result<$crate::core::select::Select, String> {
+                if offer.role != self.role {
+                    return Ok($crate::core::select::Select::empty());
+                }
+                let Some(params) = $wake_offer_params(&self.role, offer) else {
+                    return Ok($crate::core::select::Select::empty());
+                };
+                Ok(sql::wake_select($wake_for_offer_sql, params))
+            }
+        }
+    };
+}
+
+pub(crate) use sql_backed_matcher;
+
 pub(crate) fn select_offers_for_need(
     store: &Store,
     sql: &str,
@@ -34,25 +97,6 @@ pub(crate) fn select_offers_for_need(
                 owner,
                 role: need.role.clone(),
                 scope: need.scope.clone(),
-                selector,
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn select_needs_for_offer(
-    store: &Store,
-    sql: &str,
-    params: &[select::Param],
-    offer: &ContextOffer,
-) -> Result<Vec<ContextNeed>, String> {
-    Ok(
-        select_context_edges(store, sql, params, "context-need matcher SQL")?
-            .into_iter()
-            .map(|(owner, selector)| ContextNeed {
-                owner,
-                role: offer.role.clone(),
-                scope: offer.scope.clone(),
                 selector,
             })
             .collect(),

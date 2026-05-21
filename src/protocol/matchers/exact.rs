@@ -5,7 +5,7 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
-pub use crate::core::matchers::{exact_selector_match, ExactSelectorMatcher};
+pub use crate::core::matchers::ExactSelectorMatcher;
 
 pub const CONNECTION_EPHEMERAL_SECRET_ROLE: &str = "connection_ephemeral_secret";
 pub const CONNECTION_INVITE_SECRET_ROLE: &str = "connection_invite_secret";
@@ -510,80 +510,6 @@ pub fn key_wrap_offer(owner: FactId, scope: FactScope, key_wrap_id: FactId) -> C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::matchers::ContextMatcher;
-
-    #[test]
-    fn exact_selector_match_requires_role_scope_and_selector() {
-        let role = Role::new("exact").unwrap();
-        let need = ContextNeed {
-            owner: [1; 32],
-            role: role.clone(),
-            scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
-        };
-        let offer = ContextOffer {
-            owner: [3; 32],
-            role,
-            scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
-        };
-
-        let matched = exact_selector_match(&need, &offer).unwrap();
-        assert_eq!(matched.need_owner, [1; 32]);
-        assert_eq!(matched.offer_owner, [3; 32]);
-    }
-
-    #[test]
-    fn exact_selector_matcher_finds_new_need_matches() {
-        let role = Role::new("exact").unwrap();
-        let matcher = ExactSelectorMatcher::new(role.clone());
-        let need = ContextNeed {
-            owner: [1; 32],
-            role: role.clone(),
-            scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
-        };
-        let offers = vec![
-            ContextOffer {
-                owner: [3; 32],
-                role: role.clone(),
-                scope: FactScope::Global,
-                selector: Selector::from_bytes([2; 32]),
-            },
-            ContextOffer {
-                owner: [5; 32],
-                role,
-                scope: FactScope::Local,
-                selector: Selector::from_bytes([2; 32]),
-            },
-        ];
-
-        let matches = matcher.match_new_need(&need, &offers);
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].offer_owner, [3; 32]);
-    }
-
-    #[test]
-    fn exact_selector_matcher_finds_new_offer_matches() {
-        let role = Role::new("exact").unwrap();
-        let matcher = ExactSelectorMatcher::new(role.clone());
-        let offer = ContextOffer {
-            owner: [3; 32],
-            role: role.clone(),
-            scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
-        };
-        let needs = vec![ContextNeed {
-            owner: [1; 32],
-            role,
-            scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
-        }];
-
-        let matches = matcher.match_new_offer(&offer, &needs);
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].need_owner, [1; 32]);
-    }
 
     #[test]
     fn exact_helpers_encode_only_role_scope_selector_and_owner() {

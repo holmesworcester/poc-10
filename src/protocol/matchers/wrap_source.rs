@@ -7,11 +7,10 @@
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
 use crate::core::matchers::{
-    ContextMatch, ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration,
-    SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
+    ContextMatcherDeclaration, ContextRoleDeclaration, SelectOnlyMatcherResult,
+    SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
 use crate::core::select;
-use crate::core::store::Store;
 
 use super::exact::protocol_role;
 use super::sql;
@@ -465,184 +464,91 @@ impl Default for WrapSourceMatcher {
     }
 }
 
-impl ContextMatcher for WrapSourceMatcher {
-    fn role(&self) -> &Role {
-        &self.role
+sql::sql_backed_matcher! {
+    WrapSourceMatcher {
+        declaration: WRAP_SOURCE_CONTEXT_ROLE,
+        offers_for_need: WRAP_SOURCE_OFFERS_FOR_NEED_SQL => wrap_need_query_params,
+        wake_for_need: WRAP_SOURCE_WAKE_FOR_NEED_SQL => wrap_need_wake_params,
+        wake_for_offer: WRAP_SOURCE_WAKE_FOR_OFFER_SQL => wrap_offer_wake_params,
     }
+}
 
-    fn declaration(&self) -> Option<ContextRoleDeclaration> {
-        Some(WRAP_SOURCE_CONTEXT_ROLE)
-    }
+fn wrap_need_query_params(role: &Role, need: &ContextNeed) -> Option<Vec<select::Param>> {
+    wrap_need_params(role, need, false)
+}
 
-    fn match_new_need(
-        &self,
-        need: &ContextNeed,
-        existing_offers: &[ContextOffer],
-    ) -> Vec<ContextMatch> {
-        if need.role != self.role {
-            return Vec::new();
-        }
-        existing_offers
-            .iter()
-            .filter_map(|offer| wrap_source_match(need, offer))
-            .collect()
-    }
+fn wrap_need_wake_params(role: &Role, need: &ContextNeed) -> Option<Vec<select::Param>> {
+    wrap_need_params(role, need, true)
+}
 
-    fn match_new_offer(
-        &self,
-        offer: &ContextOffer,
-        existing_needs: &[ContextNeed],
-    ) -> Vec<ContextMatch> {
-        if offer.role != self.role {
-            return Vec::new();
-        }
-        existing_needs
-            .iter()
-            .filter_map(|need| wrap_source_match(need, offer))
-            .collect()
+fn wrap_need_params(
+    role: &Role,
+    need: &ContextNeed,
+    include_owner: bool,
+) -> Option<Vec<select::Param>> {
+    let (need_kind, workspace_id, frontier_id, min_frontier_created_at_ms) =
+        wrap_need_selector_parts(&need.selector)?;
+    let mut params = Vec::new();
+    if include_owner {
+        params.push(select::Param::bytes(":need_owner", need.owner));
     }
+    params.extend([
+        select::Param::text(":role", role.as_str()),
+        select::Param::bytes(":scope_key", sql::scope_key_for_sql(&need.scope)),
+        select::Param::i64(":need_kind", need_kind),
+        select::Param::bytes(":workspace_id", workspace_id),
+        select::Param::bytes(":frontier_id", frontier_id),
+        select::Param::bytes(":min_frontier_created_at_ms", min_frontier_created_at_ms),
+    ]);
+    Some(params)
+}
 
-    fn matching_offers_for_need_from_store(
-        &self,
-        store: &Store,
-        need: &ContextNeed,
-    ) -> Result<Option<Vec<ContextOffer>>, String> {
-        if need.role != self.role {
-            return Ok(Some(Vec::new()));
-        }
-        let (need_kind, workspace_id, frontier_id, min_frontier_created_at_ms) =
-            if let Some((workspace_id, min_frontier_created_at_ms)) =
-                decode_proactive_wrap_need(&need.selector)
-            {
-                (
-                    1,
-                    workspace_id,
-                    [0; 32],
-                    min_frontier_created_at_ms.to_be_bytes(),
-                )
-            } else if let Some((workspace_id, frontier_id)) =
-                decode_requested_wrap_need(&need.selector)
-            {
-                (2, workspace_id, frontier_id, 0u64.to_be_bytes())
-            } else {
-                return Ok(Some(Vec::new()));
-            };
-        let scope_key = sql::scope_key_for_sql(&need.scope);
-        let params = vec![
-            select::Param::text(":role", self.role.as_str()),
-            select::Param::bytes(":scope_key", scope_key),
-            select::Param::i64(":need_kind", need_kind),
-            select::Param::bytes(":workspace_id", workspace_id),
-            select::Param::bytes(":frontier_id", frontier_id),
-            select::Param::bytes(":min_frontier_created_at_ms", min_frontier_created_at_ms),
-        ];
-        sql::select_offers_for_need(store, WRAP_SOURCE_OFFERS_FOR_NEED_SQL, &params, need).map(Some)
+fn wrap_need_selector_parts(selector: &Selector) -> Option<(i64, FactId, FactId, [u8; 8])> {
+    if let Some((workspace_id, min_frontier_created_at_ms)) = decode_proactive_wrap_need(selector) {
+        Some((
+            1,
+            workspace_id,
+            [0; 32],
+            min_frontier_created_at_ms.to_be_bytes(),
+        ))
+    } else {
+        decode_requested_wrap_need(selector)
+            .map(|(workspace_id, frontier_id)| (2, workspace_id, frontier_id, 0u64.to_be_bytes()))
     }
+}
 
-    fn matching_needs_for_offer_from_store(
-        &self,
-        store: &Store,
-        offer: &ContextOffer,
-    ) -> Result<Option<Vec<ContextNeed>>, String> {
-        if offer.role != self.role {
-            return Ok(Some(Vec::new()));
-        }
-        let Some(selector) = decode_wrap_source_selector(&offer.selector) else {
-            return Ok(Some(Vec::new()));
-        };
-        let scope_key = sql::scope_key_for_sql(&offer.scope);
-        let frontier_created_at_ms = selector.frontier_created_at_ms.to_be_bytes();
-        let params = vec![
-            select::Param::text(":role", self.role.as_str()),
-            select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":workspace_id", selector.workspace_id),
-            select::Param::bytes(":frontier_id", selector.frontier_id),
-            select::Param::bytes(":frontier_created_at_ms", frontier_created_at_ms),
-        ];
-        sql::select_needs_for_offer(store, WRAP_SOURCE_NEEDS_FOR_OFFER_SQL, &params, offer)
-            .map(Some)
-    }
-
-    fn wake_select_for_added_need(
-        &self,
-        need: &ContextNeed,
-    ) -> Result<Option<select::Select>, String> {
-        if need.role != self.role {
-            return Ok(Some(select::Select::empty()));
-        }
-        let (need_kind, workspace_id, frontier_id, min_frontier_created_at_ms) =
-            if let Some((workspace_id, min_frontier_created_at_ms)) =
-                decode_proactive_wrap_need(&need.selector)
-            {
-                (
-                    1,
-                    workspace_id,
-                    [0; 32],
-                    min_frontier_created_at_ms.to_be_bytes(),
-                )
-            } else if let Some((workspace_id, frontier_id)) =
-                decode_requested_wrap_need(&need.selector)
-            {
-                (2, workspace_id, frontier_id, 0u64.to_be_bytes())
-            } else {
-                return Ok(Some(select::Select::empty()));
-            };
-        let scope_key = sql::scope_key_for_sql(&need.scope);
-        Ok(Some(sql::wake_select(
-            WRAP_SOURCE_WAKE_FOR_NEED_SQL,
-            vec![
-                select::Param::bytes(":need_owner", need.owner),
-                select::Param::text(":role", self.role.as_str()),
-                select::Param::bytes(":scope_key", scope_key),
-                select::Param::i64(":need_kind", need_kind),
-                select::Param::bytes(":workspace_id", workspace_id),
-                select::Param::bytes(":frontier_id", frontier_id),
-                select::Param::bytes(":min_frontier_created_at_ms", min_frontier_created_at_ms),
-            ],
-        )))
-    }
-
-    fn wake_select_for_added_offer(
-        &self,
-        offer: &ContextOffer,
-    ) -> Result<Option<select::Select>, String> {
-        if offer.role != self.role {
-            return Ok(Some(select::Select::empty()));
-        }
-        let Some(selector) = decode_wrap_source_selector(&offer.selector) else {
-            return Ok(Some(select::Select::empty()));
-        };
-        let scope_key = sql::scope_key_for_sql(&offer.scope);
-        Ok(Some(sql::wake_select(
-            WRAP_SOURCE_WAKE_FOR_OFFER_SQL,
-            vec![
-                select::Param::text(":role", self.role.as_str()),
-                select::Param::bytes(":scope_key", scope_key),
-                select::Param::bytes(":workspace_id", selector.workspace_id),
-                select::Param::bytes(":frontier_id", selector.frontier_id),
-                select::Param::bytes(
-                    ":frontier_created_at_ms",
-                    selector.frontier_created_at_ms.to_be_bytes(),
-                ),
-            ],
-        )))
-    }
+fn wrap_offer_wake_params(role: &Role, offer: &ContextOffer) -> Option<Vec<select::Param>> {
+    let selector = decode_wrap_source_selector(&offer.selector)?;
+    Some(vec![
+        select::Param::text(":role", role.as_str()),
+        select::Param::bytes(":scope_key", sql::scope_key_for_sql(&offer.scope)),
+        select::Param::bytes(":workspace_id", selector.workspace_id),
+        select::Param::bytes(":frontier_id", selector.frontier_id),
+        select::Param::bytes(
+            ":frontier_created_at_ms",
+            selector.frontier_created_at_ms.to_be_bytes(),
+        ),
+    ])
 }
 
 pub fn wrap_source_offer_matches_need(
     need: &ContextNeed,
     offer: &ContextOffer,
 ) -> Option<WrapSourceSelector> {
-    wrap_source_match(need, offer)?;
+    if !wrap_source_match(need, offer) {
+        return None;
+    }
     decode_wrap_source_selector(&offer.selector)
 }
 
-fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> Option<ContextMatch> {
+fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> bool {
     if need.role != offer.role || need.scope != offer.scope {
-        return None;
+        return false;
     }
-    let source = decode_wrap_source_selector(&offer.selector)?;
-    let matches = if let Some((workspace_id, min_frontier_created_at_ms)) =
+    let Some(source) = decode_wrap_source_selector(&offer.selector) else {
+        return false;
+    };
+    if let Some((workspace_id, min_frontier_created_at_ms)) =
         decode_proactive_wrap_need(&need.selector)
     {
         source.workspace_id == workspace_id
@@ -651,16 +557,13 @@ fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> Option<Context
         source.workspace_id == workspace_id && source.frontier_id == frontier_id
     } else {
         false
-    };
-    matches.then_some(ContextMatch {
-        need_owner: need.owner,
-        offer_owner: offer.owner,
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::matchers::ContextMatcher;
     use crate::core::pipeline::context_rows::{
         insert_context_need_for_test, insert_context_offer_for_test,
     };
@@ -677,8 +580,8 @@ mod tests {
         let other_frontier =
             frontier_root_wrap_source_offer([6; 32], scope, [1; 32], [7; 32], [5; 32], 50);
 
-        assert!(wrap_source_match(&need, &matching).is_some());
-        assert!(wrap_source_match(&need, &other_frontier).is_none());
+        assert!(wrap_source_match(&need, &matching));
+        assert!(!wrap_source_match(&need, &other_frontier));
     }
 
     #[test]
@@ -689,8 +592,8 @@ mod tests {
             frontier_root_wrap_source_offer([3; 32], scope.clone(), [1; 32], [4; 32], [5; 32], 49);
         let new = frontier_root_wrap_source_offer([6; 32], scope, [1; 32], [7; 32], [8; 32], 50);
 
-        assert!(wrap_source_match(&need, &old).is_none());
-        assert!(wrap_source_match(&need, &new).is_some());
+        assert!(!wrap_source_match(&need, &old));
+        assert!(wrap_source_match(&need, &new));
     }
 
     #[test]
@@ -713,14 +616,7 @@ mod tests {
         let matcher = WrapSourceMatcher::new();
         let offers = matcher
             .matching_offers_for_need_from_store(&store, &requested)
-            .expect("query offers")
-            .expect("sql query");
+            .expect("query offers");
         assert_eq!(offers, vec![matching.clone()]);
-
-        let needs = matcher
-            .matching_needs_for_offer_from_store(&store, &matching)
-            .expect("query needs")
-            .expect("sql query");
-        assert_eq!(needs, vec![requested, proactive]);
     }
 }

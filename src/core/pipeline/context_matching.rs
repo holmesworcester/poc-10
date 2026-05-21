@@ -1,6 +1,6 @@
 //! Build projection context from stored context edges.
 
-use super::context_rows::{stored_offers_for_exact_match, stored_offers_for_role_scope};
+use super::context_rows::stored_offers_for_exact_match;
 use crate::core::context::{scope_key, ContextNeed, ContextOffer, ContextSet, Role, Selector};
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::FactScope;
@@ -60,12 +60,7 @@ pub(super) fn stored_matching_context(
             .copied()
             .filter(|matcher| matcher.role() == &need.role)
         {
-            let candidate_offers =
-                if let Some(offers) = matcher.matching_offers_for_need_from_store(store, need)? {
-                    offers
-                } else {
-                    stored_offers_for_role_scope(store, &need.role, &need.scope)?
-                };
+            let candidate_offers = matcher.matching_offers_for_need_from_store(store, need)?;
             for offer in candidate_offers {
                 push_stored_matched_context(store, need, offer, &mut seen, &mut matched)?;
             }

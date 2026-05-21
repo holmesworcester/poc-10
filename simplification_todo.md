@@ -119,6 +119,10 @@ Accountable criteria:
   instead of an incoming offer.
 - Done in this branch: context wakes and time wakes share `select::Select` plus
   the same checked insert-select executor.
+- Done in this branch: context matchers are SQL/store backed only. The old
+  `ContextMatch`, `match_new_need`, `match_new_offer`, and Rust wake fallback
+  path are gone; protocol range, coverage, and wrap-source matchers share a
+  small SQL-backed matcher helper.
 - Done in this branch: row-mutation validation and splitting moved into
   `pipeline/effects.rs`, leaving fact storage separate from effect commit
   policy.
