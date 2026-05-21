@@ -277,6 +277,14 @@ impl Runtime {
         self.dispatch_with_handlers(&self.handlers, limit)
     }
 
+    pub fn drain_daemon_queues_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
+        let mut total = WorkStatus::idle();
+        total.merge(self.process_projection_until_idle(4, limit)?);
+        total.merge(self.dispatch_intents(limit)?);
+        total.merge(self.process_projection_until_idle(4, limit)?);
+        Ok(total)
+    }
+
     /// Settle all projection and intent work using the protocol's full handler
     /// set. This is for internal runtime workflows; synchronous CLI commands
     /// should usually call `process_command_work_until_idle` so daemon/network

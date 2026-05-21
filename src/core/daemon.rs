@@ -4,15 +4,14 @@
 //! per-store lock, bind the TCP listener, publish the readiness line, react to
 //! stop/reset, and run a bounded tick from the selected protocol's declarative
 //! daemon description. The tick is protocol-agnostic: accept network bytes,
-//! admit declared inbound intents, process declared time wakes, run
-//! projection/intent/projection work, then delete claimed inbound bytes only
-//! after receive dispatch did not ask to retry.
+//! convert inbound bytes to restart-local intents, process declared time wakes,
+//! then drain projection/intent/projection work.
 
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::intents::Intent;
 use crate::core::network;
 use crate::core::projectors::Timeline;
-use crate::core::runtime::Runtime;
+use crate::core::runtime::{Runtime, WorkStatus};
 use crate::core::store::Store;
 use crate::core::tcp;
 use std::fs::{self, File, OpenOptions};
@@ -42,11 +41,6 @@ pub struct StartOptions {
     pub work_limit: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TickActivity {
-    pub active: bool,
-}
-
 #[derive(Clone, Copy)]
 pub struct DaemonDescription {
     pub inbound_network_intent: Option<InboundNetworkIntent>,
@@ -73,79 +67,68 @@ pub fn tick(
     runtime: &mut Runtime,
     listener: &tcp::Listener,
     work_limit: usize,
-) -> Result<TickActivity, String> {
-    let accepted = accept_inbound_network(description, runtime, listener, work_limit)?;
-    let inbound = claim_inbound_network(description, runtime, work_limit)?;
-    submit_inbound_network_intents(description, runtime, &inbound)?;
-
-    let due_time_wakes = process_declared_time_wakes(description, runtime, work_limit)?;
-    let projection_before_handlers = runtime.process_projection_until_idle(4, work_limit)?;
-    let dispatched = runtime.dispatch_intents(work_limit)?;
-    let projection_after_handlers = runtime.process_projection_until_idle(4, work_limit)?;
-    delete_claimed_inbound_after_successful_dispatch(runtime, &inbound, dispatched.retried)?;
-
-    Ok(TickActivity {
-        active: accepted.accepted_connections > 0
-            || accepted.value.sent_frames > 0
-            || accepted.value.received_frames > 0
-            || !inbound.is_empty()
-            || due_time_wakes > 0
-            || !projection_before_handlers.is_idle()
-            || !dispatched.is_idle()
-            || !projection_after_handlers.is_idle(),
-    })
+) -> Result<WorkStatus, String> {
+    let mut status = WorkStatus::idle();
+    status.merge(drain_inbound_listener(
+        description,
+        runtime,
+        listener,
+        work_limit,
+    )?);
+    status.merge(drain_inbound_network_intents(
+        description,
+        runtime,
+        work_limit,
+    )?);
+    status.merge(drain_time_wakes(description, runtime, work_limit)?);
+    status.merge(runtime.drain_daemon_queues_once(work_limit)?);
+    Ok(status)
 }
 
-fn accept_inbound_network(
+fn drain_inbound_listener(
     description: DaemonDescription,
     runtime: &Runtime,
     listener: &tcp::Listener,
     work_limit: usize,
-) -> Result<tcp::AcceptReport<tcp::StreamReport>, String> {
+) -> Result<WorkStatus, String> {
     if description.inbound_network_intent.is_none() {
-        return Ok(tcp::AcceptReport {
-            accepted_connections: 0,
-            value: tcp::StreamReport::default(),
-        });
+        return Ok(WorkStatus::idle());
     }
-    listener.accept_available(runtime.store(), work_limit)
+    let accepted = listener.accept_available(runtime.store(), work_limit)?;
+    Ok(WorkStatus::progressed(
+        accepted.accepted_connections > 0
+            || accepted.value.sent_frames > 0
+            || accepted.value.received_frames > 0,
+    ))
 }
 
-fn claim_inbound_network(
-    description: DaemonDescription,
-    runtime: &Runtime,
-    work_limit: usize,
-) -> Result<Vec<network::InboundNetworkRow>, String> {
-    if description.inbound_network_intent.is_none() {
-        return Ok(Vec::new());
-    }
-    network::claim_inbound(runtime.store(), work_limit)
-}
-
-fn submit_inbound_network_intents(
+fn drain_inbound_network_intents(
     description: DaemonDescription,
     runtime: &mut Runtime,
-    inbound: &[network::InboundNetworkRow],
-) -> Result<(), String> {
+    work_limit: usize,
+) -> Result<WorkStatus, String> {
     let Some(to_intent) = description.inbound_network_intent else {
-        return Ok(());
+        return Ok(WorkStatus::idle());
     };
+    let inbound = network::claim_inbound(runtime.store(), work_limit)?;
     let received_at_local_ms = now_ms();
-    for row in inbound {
+    for row in &inbound {
         runtime.submit_local_intent(to_intent(InboundNetworkFrame {
             frame: row.bytes.clone(),
             origin_addr: row.source.addr(),
             received_at_local_ms,
         })?)?;
     }
-    Ok(())
+    // This is not gated on `!retried`: once the local intent is stored, it owns retry.
+    network::delete_inbound(runtime.store(), &inbound)?;
+    Ok(WorkStatus::progressed(!inbound.is_empty()))
 }
 
-fn process_declared_time_wakes(
+fn drain_time_wakes(
     description: DaemonDescription,
     runtime: &mut Runtime,
     work_limit: usize,
-) -> Result<usize, String> {
+) -> Result<WorkStatus, String> {
     let mut due = 0;
     for wake in description.time_wakes {
         let Some(end_inclusive) = (wake.end_inclusive)(runtime.store())? else {
@@ -153,18 +136,7 @@ fn process_declared_time_wakes(
         };
         due += runtime.process_due_time_range((wake.timeline)(), None, end_inclusive, work_limit);
     }
-    Ok(due)
-}
-
-fn delete_claimed_inbound_after_successful_dispatch(
-    runtime: &Runtime,
-    inbound: &[network::InboundNetworkRow],
-    retried: bool,
-) -> Result<(), String> {
-    if !retried {
-        network::delete_inbound(runtime.store(), inbound)?;
-    }
-    Ok(())
+    Ok(WorkStatus::progressed(due > 0))
 }
 
 fn now_ms() -> u64 {
@@ -194,7 +166,7 @@ impl DaemonReport {
 pub fn start(
     db_path: &Path,
     args: CliArgs<'_>,
-    mut tick: impl FnMut(&tcp::Listener, usize) -> Result<TickActivity, String>,
+    mut tick: impl FnMut(&tcp::Listener, usize) -> Result<WorkStatus, String>,
 ) -> Result<CliOutput, String> {
     let options = parse_start_options(args)?;
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
@@ -295,8 +267,10 @@ fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
     })
 }
 
-fn sleep_after_tick(options: &StartOptions, tick: TickActivity) -> Option<Duration> {
-    (!tick.active).then(|| Duration::from_millis(options.quiet_ms))
+fn sleep_after_tick(options: &StartOptions, status: WorkStatus) -> Option<Duration> {
+    status
+        .is_idle()
+        .then(|| Duration::from_millis(options.quiet_ms))
 }
 
 fn parse_positive_u64(value: Option<&str>) -> Result<u64, String> {
@@ -597,11 +571,14 @@ mod tests {
             quiet_ms: 200,
             work_limit: 1,
         };
-        let active = TickActivity { active: true };
+        let active = WorkStatus {
+            progressed: true,
+            retried: false,
+        };
 
         assert_eq!(sleep_after_tick(&options, active), None);
         assert_eq!(
-            sleep_after_tick(&options, TickActivity { active: false }),
+            sleep_after_tick(&options, WorkStatus::idle()),
             Some(Duration::from_millis(200))
         );
     }

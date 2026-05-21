@@ -31,8 +31,7 @@ mod projection_run_tests;
 /// Public outcome returned by runtime pipeline calls.
 ///
 /// Runtime callers only need to know whether a bounded pass moved work forward
-/// and whether any handler asked to retry before irreversible cleanup, such as
-/// deleting claimed network input.
+/// and whether any handler asked to retry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkStatus {
     pub progressed: bool,
@@ -42,6 +41,13 @@ pub struct WorkStatus {
 impl WorkStatus {
     pub fn idle() -> Self {
         Self::default()
+    }
+
+    pub fn progressed(progressed: bool) -> Self {
+        Self {
+            progressed,
+            retried: false,
+        }
     }
 
     pub fn merge(&mut self, other: Self) {
