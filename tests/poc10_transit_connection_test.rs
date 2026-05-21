@@ -19,7 +19,7 @@ use topo::protocol::intents::transport::send_facts_on_connection::{
 use topo::protocol::intents::transport::send_network_frame::{
     decode_send_network_frame, send_network_frame_intent, SendNetworkFrame,
 };
-use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 fn connection_fact() -> (Fact, ConnectionResponseFact) {
     let local_endpoint = local_endpoint();
@@ -200,12 +200,8 @@ fn idempotence_keys_distinguish_parallel_batches_on_same_route() {
 }
 
 fn store_with_local_endpoint() -> Store {
-    let store = Store::open_memory_with_schema_sources(&[
-        CORE_SCHEMA_SOURCE,
-        FACTS_SCHEMA_SOURCE,
-        INTENTS_SCHEMA_SOURCE,
-    ])
-    .expect("store");
+    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+        .expect("store");
     store
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint()))
         .expect("seed local endpoint");

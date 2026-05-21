@@ -1,11 +1,10 @@
 //! Package exact facts into one connection transit frame.
 
-use crate::core::effects::PipelineEffects;
-use crate::core::facts::Fact;
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentKind};
+use crate::core::{effects::PipelineEffects, facts::Fact};
 use crate::protocol::facts::{
     connection::response,
     identity::endpoint,

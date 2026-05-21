@@ -61,11 +61,11 @@ The migration succeeds when:
 - There is no `mod.rs` anywhere in the repository.
 - End-state guardrail: `rows.rs`, `layout.rs`, and module-local `cli.rs` stay
   narrow and declarative. They must not become protocol logic sinks.
-- Schema declarations exist in exactly three visible places:
-  `src/core/schema.p8sql`, `src/protocol/facts/schema.p8sql`, and
-  `src/protocol/intents/schema.p8sql`.
-- The schema declaration surface is the source of truth for storage tables,
-  read-model row codecs, and canonical fact wire codecs.
+- Schema declarations are explicit SQL DDL in the owning Rust modules:
+  `src/core/schema.rs`, `src/core/network.rs`, and
+  `src/protocol/registry.rs`.
+- The schema declaration surface is the source of truth for storage tables and
+  read-model row codecs.
 - Wire layouts are declarative and fixed length. There are no variable payload
   slots.
 - Transit frames use the same fixed-layout wire machinery and support only the
@@ -177,7 +177,7 @@ src/
       wrap_source.rs
 
   core/
-    schema.p8sql
+    schema.rs
     app.rs
     command_context.rs
     cli.rs
@@ -203,10 +203,8 @@ src/
     store/
       sql.rs
     wake.rs
-    payload.rs
     wire.rs
     crypto.rs
-    schema_dsl.rs
 
   protocol/
     app.rs
@@ -214,7 +212,6 @@ src/
     facts.rs
     registry.rs
     facts/
-      schema.p8sql
       <module>.rs
       <module>/
         fact.rs
@@ -227,7 +224,6 @@ src/
         rows.rs
     intents.rs
     intents/
-      schema.p8sql
       payload.rs
       connection.rs
       connection/
@@ -429,36 +425,43 @@ or the object it builds.
 
 ### Schema Ownership
 
-There are exactly three durable schema DSL files:
+Schema is plain executable SQLite DDL declared in the modules that own the
+tables:
 
 ```text
-src/core/schema.p8sql
-src/protocol/facts/schema.p8sql
-src/protocol/intents/schema.p8sql
+src/core/schema.rs
+src/core/network.rs
+src/protocol/registry.rs
 ```
 
-`src/core/schema.p8sql` contains core mechanics:
+`src/core/schema.rs` contains durable core mechanics and local TEMP intent
+state:
 
 ```text
 facts
-inbox
-needs
-offers
+local_fact_admissions
+context_edges
+time_wakes
 pending_projection
+pending_time_ranges
 intents
+local_intents
 clock
 ```
 
-`src/protocol/facts/schema.p8sql` contains projection/read-model state.
-In the end state it also declares fact wire layouts and read-model row
-key/value layouts. Generated codecs use those declarations to produce
-fixed-length fact encoders/decoders and row key/value constructors.
+`src/core/network.rs` owns restart-local network queue DDL:
 
-`src/protocol/intents/schema.p8sql` contains handler checkpoint or operational state.
+```text
+network_out
+network_in
+```
 
-The schema DSL may declare opaque row tables, typed tables, indexes,
-uniqueness, byte lengths, and row keys. It should not contain Rust expressions,
-projection callbacks, or protocol validation logic.
+`src/protocol/registry.rs` contains protocol projection/read-model DDL and the
+allowlist of opaque row tables that may still use the generic `TableRow`
+helpers.
+
+Schema sources are SQL strings plus a small declared row-table list. There is no
+runtime schema DSL parser or schema-shape validation layer in the target PoC.
 
 ## Facts
 
@@ -947,10 +950,9 @@ Ciphertext<N>
 Padding<N>
 ```
 
-Fact modules declare fixed fact layouts in `src/protocol/facts/schema.p8sql`
-and should not hand-roll byte parsing loops. The current checkpoint still has
-per-module layout files; those files should remain declarative and converge on
-generated fixed-layout readers/writers.
+Fact modules declare fixed fact layouts in module-local `layout.rs` files and
+should not hand-roll byte parsing loops. Those files should remain declarative
+and converge on generated fixed-layout readers/writers if codegen returns.
 
 The declaration system should generate:
 

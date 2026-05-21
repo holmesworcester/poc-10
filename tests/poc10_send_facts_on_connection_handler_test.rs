@@ -16,7 +16,7 @@ use topo::protocol::intents::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
 use topo::protocol::intents::transport::send_network_frame;
-use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionResponseFact) {
     let connection = ConnectionResponseFact {
@@ -83,12 +83,8 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
 }
 
 fn store_with_local_endpoint() -> Store {
-    let store = Store::open_memory_with_schema_sources(&[
-        CORE_SCHEMA_SOURCE,
-        FACTS_SCHEMA_SOURCE,
-        INTENTS_SCHEMA_SOURCE,
-    ])
-    .expect("store");
+    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+        .expect("store");
     store
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint()))
         .expect("seed local endpoint");

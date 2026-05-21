@@ -1,6 +1,0 @@
-# Initial poc-10 handler checkpoint table inventory.
-# Handler scheduling remains outside this file and will stay in core intents.
-
-row_table purge_retire_coords;
-row_table sync_index_snapshots;
-row_table connection_attempt_checkpoints;

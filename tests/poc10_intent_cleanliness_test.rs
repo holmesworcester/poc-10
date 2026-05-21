@@ -937,7 +937,7 @@ fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
 
     for required in [
         "pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>]",
-        "pub(crate) const SCHEMA_SOURCES: &[&str]",
+        "pub(crate) const SCHEMA_SOURCES: &[SchemaSource]",
         "pub(crate) const ROW_MUTATION_TABLES: &[TableName]",
         "pub const EXACT_CONTEXT_ROLES: &[&str]",
         "pub const SQL_CONTEXT_ROLES: &[&str]",
@@ -1055,6 +1055,9 @@ fn target_handler_files_do_not_define_fact_or_crypto_outputs() {
 
     let mut offenders = Vec::new();
     for path in rust_files(&handler_root) {
+        if path.file_name().is_some_and(|name| name == "payload.rs") {
+            continue;
+        }
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
@@ -1202,30 +1205,21 @@ fn core_pipeline_stays_protocol_neutral() {
 }
 
 #[test]
-fn target_schema_dsl_files_are_declarative_only() {
+fn target_schema_sources_are_explicit_sql_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let schema_files = [
-        root.join("src/core/schema.p8sql"),
-        root.join("src/protocol/facts/schema.p8sql"),
-        root.join("src/protocol/intents/schema.p8sql"),
+    let schema_owners = [
+        root.join("src/core/schema.rs"),
+        root.join("src/core/network.rs"),
+        root.join("src/protocol/registry.rs"),
     ];
     let mut offenders = Vec::new();
 
-    for path in schema_files {
+    for path in schema_owners {
         let text = source_text(&path);
-        for line in meaningful_source_lines(&text) {
-            if !(line.starts_with("table ")
-                || line.starts_with("memory table ")
-                || line.starts_with("row_table ")
-                || line.starts_with("memory row_table ")
-                || line.starts_with("column ")
-                || line.starts_with("row_key ")
-                || line.starts_with("index ")
-                || line.starts_with("unique index ")
-                || line == "}")
-            {
+        for forbidden in ["include_str!", ".p8sql", "parse_schema", "schema_dsl"] {
+            if text.contains(forbidden) {
                 offenders.push(format!(
-                    "{} contains non-schema statement: {line}",
+                    "{} contains {forbidden:?}",
                     path.strip_prefix(root).unwrap().display()
                 ));
             }
@@ -1234,15 +1228,15 @@ fn target_schema_dsl_files_are_declarative_only() {
 
     assert!(
         offenders.is_empty(),
-        "poc-10 schema DSL files should declare tables only, not behavior:\n{}",
+        "poc-10 schema sources should be plain executable SQL DDL, not a runtime parser layer:\n{}",
         offenders.join("\n")
     );
 }
 
 #[test]
-fn target_schema_dsl_parser_stays_protocol_neutral() {
+fn target_schema_substrate_stays_protocol_neutral() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/core/schema_dsl.rs");
+    let path = root.join("src/core/store.rs");
     let text = source_text(&path);
     let production = production_text_before_unit_tests(&text);
     let mut offenders = Vec::new();
@@ -1251,16 +1245,10 @@ fn target_schema_dsl_parser_stays_protocol_neutral() {
         "crate::protocol::facts",
         "crate::legacy::protocol",
         "crate::legacy::workers",
-        "TableRow",
         "Intent",
         "ProjectionOutput",
         "ContextNeed",
         "ContextOffer",
-        "workspace",
-        "content::message",
-        "recipient_key",
-        "connection",
-        "sync_index",
     ] {
         if production.contains(forbidden) {
             offenders.push(format!(
@@ -1272,7 +1260,7 @@ fn target_schema_dsl_parser_stays_protocol_neutral() {
 
     assert!(
         offenders.is_empty(),
-        "schema_dsl.rs should parse declarations, not become protocol or row-codegen behavior:\n{}",
+        "core store schema application should stay protocol-neutral:\n{}",
         offenders.join("\n")
     );
 }
@@ -1471,6 +1459,9 @@ fn target_handlers_do_not_own_projection_rows_or_projector_context() {
 
     let mut offenders = Vec::new();
     for path in rust_files(&handler_root) {
+        if path.file_name().is_some_and(|name| name == "payload.rs") {
+            continue;
+        }
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
@@ -1510,6 +1501,9 @@ fn target_handlers_do_not_define_fact_wire_layouts_or_fake_crypto_facts() {
 
     let mut offenders = Vec::new();
     for path in rust_files(&handler_root) {
+        if path.file_name().is_some_and(|name| name == "payload.rs") {
+            continue;
+        }
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [

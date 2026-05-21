@@ -4,4 +4,6 @@
 //! adapter keeps those modules from depending on core's storage/wire namespace
 //! directly while still sharing the same length-prefix and integer mechanics.
 
-pub(crate) use crate::core::payload::{PayloadError, PayloadReader, PayloadWriter};
+pub(crate) use crate::core::wire::{
+    Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
+};

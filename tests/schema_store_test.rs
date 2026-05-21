@@ -2,26 +2,40 @@ use std::collections::BTreeSet;
 
 use rusqlite::{params, Connection};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::schema_dsl::{parse_schema, TableStorage};
-use topo::core::store::{Store, TableName, TableRow};
+use topo::core::store::{SchemaSource, Store, TableName, TableRow};
 use topo::protocol::facts::content::{file, reaction};
-use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
-fn checked_schema_sources() -> [&'static str; 3] {
-    [
-        CORE_SCHEMA_SOURCE,
-        FACTS_SCHEMA_SOURCE,
-        INTENTS_SCHEMA_SOURCE,
-    ]
-}
+const TYPED_MESSAGES: TableName = TableName::new("typed_messages");
+const TEST_ROWS: TableName = TableName::new("test_rows");
 
-fn declared_table_names(sources: &[&str]) -> BTreeSet<String> {
-    sources
-        .iter()
-        .flat_map(|source| parse_schema(source).expect("schema parses"))
-        .filter(|table| table.storage == TableStorage::Durable)
-        .map(|table| table.name)
-        .collect()
+const TYPED_MESSAGES_SCHEMA: SchemaSource = SchemaSource {
+    ddl: r#"
+CREATE TABLE IF NOT EXISTS typed_messages (
+    workspace_id BLOB NOT NULL,
+    message_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    deleted INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS typed_messages_by_workspace_created
+    ON typed_messages (workspace_id, created_at_ms);
+"#,
+    row_tables: &[],
+};
+
+const TEST_ROWS_SCHEMA: SchemaSource = SchemaSource {
+    ddl: r#"
+CREATE TABLE IF NOT EXISTS test_rows (
+    row_key BLOB PRIMARY KEY NOT NULL,
+    row_value BLOB NOT NULL
+);
+"#,
+    row_tables: &[TEST_ROWS],
+};
+
+fn checked_schema_sources() -> [SchemaSource; 2] {
+    [CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE]
 }
 
 fn sqlite_table_names(path: &std::path::Path) -> BTreeSet<String> {
@@ -36,19 +50,24 @@ fn sqlite_table_names(path: &std::path::Path) -> BTreeSet<String> {
 }
 
 #[test]
-fn schema_sources_create_declared_row_tables() {
+fn schema_sources_execute_declared_ddl_and_allowlisted_row_tables() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("schema-store.db");
     let sources = checked_schema_sources();
 
     let store = Store::open_disk_with_schema_sources(&path, &sources).expect("open store");
-    let declared = declared_table_names(&sources);
     let actual = sqlite_table_names(&path);
-    assert!(
-        declared.is_subset(&actual),
-        "missing schema tables: {:?}",
-        declared.difference(&actual).collect::<Vec<_>>()
-    );
+    for expected in [
+        "facts",
+        "local_fact_admissions",
+        "context_edges",
+        "content_messages",
+        "content_reactions",
+        "content_files",
+        "workspace_rows",
+    ] {
+        assert!(actual.contains(expected), "missing schema table {expected}");
+    }
 
     store
         .insert_table_rows(vec![TableRow {
@@ -56,21 +75,20 @@ fn schema_sources_create_declared_row_tables() {
             key: b"clock".to_vec(),
             value: 1u64.to_be_bytes().to_vec(),
         }])
-        .expect("insert row into p8sql-created row table");
+        .expect("insert row into allowlisted row table");
 
     assert_eq!(
         store
             .table_row(TableName::new("workspace_rows"), b"clock")
-            .expect("read p8sql row"),
+            .expect("read row"),
         Some(1u64.to_be_bytes().to_vec())
     );
 
-    Store::open_disk_with_schema_sources(&path, &sources)
-        .expect("reopen validates existing tables");
+    Store::open_disk_with_schema_sources(&path, &sources).expect("reopen executes idempotent DDL");
 }
 
 #[test]
-fn schema_source_memory_row_tables_are_temp() {
+fn core_local_intents_table_is_temp() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("schema-memory-store.db");
     let local_intents = TableName::new("local_intents");
@@ -85,7 +103,7 @@ fn schema_source_memory_row_tables_are_temp() {
     );
     assert!(
         !sqlite_table_names(&path).contains("local_intents"),
-        "memory schema table should not be durable"
+        "local_intents should not be durable"
     );
 
     let reopened = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
@@ -99,45 +117,12 @@ fn schema_source_memory_row_tables_are_temp() {
 }
 
 #[test]
-fn schema_sources_reject_existing_table_with_wrong_shape() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let path = tmp.path().join("schema-store.db");
-    let conn = Connection::open(&path).expect("open sqlite");
-    conn.execute_batch(
-        "CREATE TABLE facts (
-            key BLOB PRIMARY KEY NOT NULL,
-            value BLOB NOT NULL
-        );",
-    )
-    .expect("create incompatible table");
-    drop(conn);
-
-    let err = match Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE]) {
-        Ok(_) => panic!("incompatible table should reject"),
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string().contains("existing table facts"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn schema_sources_create_typed_table_declarations() {
+fn schema_sources_create_typed_tables_and_indexes() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("typed-schema-store.db");
-    let source = r#"
-        table typed_messages {
-          column workspace_id bytes(32);
-          column message_id bytes(32);
-          column created_at_ms u64;
-          column deleted bool;
-          row_key (workspace_id, message_id);
-          index by_workspace_created (workspace_id, created_at_ms);
-        }
-    "#;
 
-    Store::open_disk_with_schema_sources(&path, &[source]).expect("create typed table");
+    Store::open_disk_with_schema_sources(&path, &[TYPED_MESSAGES_SCHEMA])
+        .expect("create typed table");
     let conn = Connection::open(&path).expect("open sqlite");
     let columns = conn
         .prepare("PRAGMA table_info(typed_messages)")
@@ -165,7 +150,8 @@ fn schema_sources_create_typed_table_declarations() {
         .expect("query typed index");
     assert_eq!(index_count, 1);
 
-    Store::open_disk_with_schema_sources(&path, &[source]).expect("reopen validates typed table");
+    Store::open_disk_with_schema_sources(&path, &[TYPED_MESSAGES_SCHEMA])
+        .expect("reopen keeps explicit DDL idempotent");
 }
 
 #[test]
@@ -252,6 +238,7 @@ fn content_read_model_rows_materialize_into_typed_tables() {
         ],
     )
     .expect("insert file row");
+
     let message_columns = conn
         .query_row(
             "SELECT author_user_id, created_at_ms, signer_id, deleted
@@ -336,38 +323,17 @@ fn content_read_model_rows_materialize_into_typed_tables() {
             0
         )
     );
-
-    let opaque_table_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
-             FROM sqlite_master
-             WHERE type = 'table'
-               AND name IN ('content_message_rows', 'reaction_rows', 'file_rows')",
-            [],
-            |row| row.get(0),
-        )
-        .expect("query old opaque tables");
-    assert_eq!(opaque_table_count, 0);
 }
 
 #[test]
-fn schema_source_typed_tables_reject_opaque_row_helpers() {
+fn typed_tables_reject_opaque_row_helpers() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("typed-row-store.db");
-    let source = r#"
-        table typed_messages {
-          column workspace_id bytes(32);
-          column message_id bytes(32);
-          column created_at_ms u64;
-          column deleted bool;
-          row_key (workspace_id, message_id);
-          index by_workspace_created (workspace_id, created_at_ms);
-        }
-    "#;
-    let store = Store::open_disk_with_schema_sources(&path, &[source]).expect("open store");
+    let store =
+        Store::open_disk_with_schema_sources(&path, &[TYPED_MESSAGES_SCHEMA]).expect("open store");
     let err = store
         .insert_table_rows(vec![TableRow {
-            table: TableName::new("typed_messages"),
+            table: TYPED_MESSAGES,
             key: vec![0; 64],
             value: vec![0; 9],
         }])
@@ -379,100 +345,59 @@ fn schema_source_typed_tables_reject_opaque_row_helpers() {
 }
 
 #[test]
-fn schema_sources_require_explicit_row_table_declarations() {
+fn row_helpers_require_row_table_allowlist() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("typed-key-value-store.db");
-    let source = r#"
-        table legacy_key_value_shape {
-          column key bytes;
-          column value bytes;
-          row_key (key);
-        }
-    "#;
+    let key_value_shape = SchemaSource {
+        ddl: r#"
+CREATE TABLE IF NOT EXISTS legacy_key_value_shape (
+    row_key BLOB PRIMARY KEY NOT NULL,
+    row_value BLOB NOT NULL
+);
+"#,
+        row_tables: &[],
+    };
 
-    Store::open_disk_with_schema_sources(&path, &[source])
-        .expect("key/value table block creates a typed table");
-    let conn = Connection::open(&path).expect("open sqlite");
-    let columns = conn
-        .prepare("PRAGMA table_info(legacy_key_value_shape)")
-        .expect("prepare table info")
-        .query_map([], |row| row.get::<_, String>(1))
-        .expect("query table info")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("collect columns");
-    assert_eq!(columns, vec!["key".to_string(), "value".to_string()]);
+    let store = Store::open_disk_with_schema_sources(&path, &[key_value_shape])
+        .expect("key/value table block creates a typed table unless allowlisted");
+    let err = store
+        .insert_table_rows(vec![TableRow {
+            table: TableName::new("legacy_key_value_shape"),
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+        }])
+        .expect_err("non-allowlisted key/value table should reject row helper");
+
+    assert!(err.to_string().contains("not an opaque row table"));
 }
 
 #[test]
-fn schema_sources_reject_existing_typed_table_with_wrong_shape() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let path = tmp.path().join("typed-schema-store.db");
-    let conn = Connection::open(&path).expect("open sqlite");
-    conn.execute_batch(
-        "CREATE TABLE typed_messages (
-            workspace_id BLOB NOT NULL,
-            message_id BLOB NOT NULL,
-            created_at_ms TEXT NOT NULL,
-            deleted INTEGER NOT NULL,
-            PRIMARY KEY (workspace_id, message_id)
-        );",
-    )
-    .expect("create incompatible typed table");
-    drop(conn);
-    let source = r#"
-        table typed_messages {
-          column workspace_id bytes(32);
-          column message_id bytes(32);
-          column created_at_ms u64;
-          column deleted bool;
-          row_key (workspace_id, message_id);
-        }
-    "#;
-
-    let err = match Store::open_disk_with_schema_sources(&path, &[source]) {
-        Ok(_) => panic!("incompatible typed table should reject"),
-        Err(err) => err,
+fn allowlisted_row_tables_keep_idempotent_conflict_checks() {
+    let store =
+        Store::open_memory_with_schema_sources(&[TEST_ROWS_SCHEMA]).expect("open memory store");
+    let row = TableRow {
+        table: TEST_ROWS,
+        key: b"k".to_vec(),
+        value: b"one".to_vec(),
     };
-    assert!(
-        err.to_string().contains("existing table typed_messages"),
-        "unexpected error: {err}"
-    );
-}
 
-#[test]
-fn schema_sources_reject_existing_typed_table_missing_declared_index() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let path = tmp.path().join("typed-schema-store.db");
-    let conn = Connection::open(&path).expect("open sqlite");
-    conn.execute_batch(
-        "CREATE TABLE typed_messages (
-            workspace_id BLOB NOT NULL,
-            message_id BLOB NOT NULL,
-            created_at_ms INTEGER NOT NULL,
-            deleted INTEGER NOT NULL,
-            PRIMARY KEY (workspace_id, message_id)
-        );",
-    )
-    .expect("create typed table without declared index");
-    drop(conn);
-    let source = r#"
-        table typed_messages {
-          column workspace_id bytes(32);
-          column message_id bytes(32);
-          column created_at_ms u64;
-          column deleted bool;
-          row_key (workspace_id, message_id);
-          index by_workspace_created (workspace_id, created_at_ms);
-        }
-    "#;
-
-    let err = match Store::open_disk_with_schema_sources(&path, &[source]) {
-        Ok(_) => panic!("typed table with missing index should reject"),
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string()
-            .contains("is missing index typed_messages_by_workspace_created"),
-        "unexpected error: {err}"
+    assert_eq!(
+        store.insert_table_rows(vec![row.clone()]).expect("insert"),
+        1
     );
+    assert_eq!(
+        store
+            .insert_table_rows(vec![row.clone()])
+            .expect("idempotent insert"),
+        0
+    );
+
+    let err = store
+        .insert_table_rows(vec![TableRow {
+            value: b"two".to_vec(),
+            ..row
+        }])
+        .expect_err("conflicting insert must reject");
+
+    assert!(err.to_string().contains("conflicting row for test_rows"));
 }

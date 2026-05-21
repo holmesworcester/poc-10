@@ -826,15 +826,15 @@ fn cutover_content_wire_layouts_use_central_schema_codec() {
 #[test]
 fn cutover_content_read_models_have_normal_sqlite_tables() {
     fn table_body<'a>(schema: &'a str, table: &str) -> Option<&'a str> {
-        let marker = format!("table {table} {{");
+        let marker = format!("CREATE TABLE IF NOT EXISTS {table} (");
         let start = schema.find(&marker)?;
         let rest = &schema[start + marker.len()..];
-        let end = rest.find("\n}")?;
+        let end = rest.find("\n);")?;
         Some(&rest[..end])
     }
 
     let root = root();
-    let schema = source_text(&root.join("src/protocol/facts/schema.p8sql"));
+    let schema = source_text(&root.join("src/protocol/registry.rs"));
     let required = [
         (
             "content_messages",
@@ -865,7 +865,7 @@ fn cutover_content_read_models_have_normal_sqlite_tables() {
         match table_body(&schema, table) {
             Some(body) => {
                 for column in columns {
-                    if !body.contains(&format!("column {column} ")) {
+                    if !body.contains(&format!("{column} ")) {
                         missing.push(format!("missing {table}.{column}"));
                     }
                 }
@@ -942,16 +942,15 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
 #[test]
 fn cutover_network_row_storage_class_is_not_ambiguous() {
     let root = root();
-    let core_schema = source_text(&root.join("src/core/schema.p8sql"));
-    let intents_schema = source_text(&root.join("src/protocol/intents/schema.p8sql"));
+    let core_schema = source_text(&root.join("src/core/schema.rs"));
     let network = source_text(&root.join("src/core/network.rs"));
     let registry = source_text(&root.join("src/protocol/registry.rs"));
 
     let durable_in_core_schema =
-        core_schema.contains("table network_in {") || core_schema.contains("table network_out {");
+        core_schema.contains("network_in") || core_schema.contains("network_out");
     let memory_in_queue_module = network.contains("memory-local")
         || network.contains("restart-local")
-        || network.contains("memory row_table network_out");
+        || network.contains("CREATE TEMP TABLE IF NOT EXISTS network_out");
     let runtime_loads_queue_schema = registry.contains("network::SCHEMA_SOURCE");
 
     let mut offenders = Vec::new();
@@ -963,13 +962,6 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
     if memory_in_queue_module && !runtime_loads_queue_schema {
         offenders.push(
             "network declares memory schemas, but Runtime does not load network::SCHEMA_SOURCE",
-        );
-    }
-    if source_text(&root.join("src/protocol/intents/schema.p8sql"))
-        .contains("send_network_frame_cursors")
-    {
-        offenders.push(
-            "send_network_frame_cursors reintroduces protocol-level network ACK/cursor state; deferred send intents plus idempotent fact admission are the durable boundary",
         );
     }
     if source_text(&root.join("src/protocol/intents/transport/send_network_frame.rs"))
@@ -984,12 +976,6 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
             "network rows should have exactly one explicit storage contract: durable schema table or restart-local memory table",
         );
     }
-    if intents_schema.contains("send_network_frame_cursors") {
-        offenders.push(
-            "send_network_frame_cursors is durable cursor/ack scaffolding; network send should be regenerated from facts/context instead",
-        );
-    }
-
     assert!(
         offenders.is_empty(),
         "network row persistence is ambiguous; choose one storage contract and make runtime/schema/docs/tests agree:\n{}",
@@ -1004,7 +990,7 @@ fn cutover_network_io_intents_are_restart_local_queue_work() {
     for path in rust_files_under(&root.join("src/core/pipeline")) {
         pipeline.push_str(&source_text(&path));
     }
-    let core_schema = source_text(&root.join("src/core/schema.p8sql"));
+    let core_schema = source_text(&root.join("src/core/schema.rs"));
     let request_projector =
         source_text(&root.join("src/protocol/facts/connection/request/project.rs"));
     let send_facts_handler =
@@ -1044,7 +1030,7 @@ fn cutover_network_io_intents_are_restart_local_queue_work() {
             .push("daemon inbound network frames are not submitted as local intents".to_string());
     }
     if !pipeline.contains("LOCAL_INTENTS")
-        || !core_schema.contains("memory table local_intents")
+        || !core_schema.contains("CREATE TEMP TABLE IF NOT EXISTS local_intents")
         || !pipeline.contains("submit_local_intent_to_store")
     {
         offenders.push(

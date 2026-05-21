@@ -20,7 +20,7 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use crate::core::store::{Store, TableName, TableRow};
+use crate::core::store::{SchemaSource, Store, TableName, TableRow};
 
 pub const OUTBOUND_TABLE: TableName = TableName::new("network_out");
 pub const INBOUND_TABLE: TableName = TableName::new("network_in");
@@ -33,10 +33,19 @@ const WRITE_FRAME_BUDGET: Duration = Duration::from_millis(100);
 /// queue code and the concrete runtime includes it like any other declaration.
 /// The rows are memory-only so a restart never turns stale socket staging into
 /// protocol-visible work.
-pub const SCHEMA_SOURCE: &str = r#"
-memory row_table network_out;
-memory row_table network_in;
-"#;
+pub const SCHEMA_SOURCE: SchemaSource = SchemaSource {
+    ddl: r#"
+CREATE TEMP TABLE IF NOT EXISTS network_out (
+    row_key BLOB PRIMARY KEY NOT NULL,
+    row_value BLOB NOT NULL
+);
+CREATE TEMP TABLE IF NOT EXISTS network_in (
+    row_key BLOB PRIMARY KEY NOT NULL,
+    row_value BLOB NOT NULL
+);
+"#,
+    row_tables: &[OUTBOUND_TABLE, INBOUND_TABLE],
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetworkTarget {

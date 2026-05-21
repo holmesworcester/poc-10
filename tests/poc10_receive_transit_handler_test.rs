@@ -32,7 +32,7 @@ use topo::protocol::intents::transport::receive_transit_frame::{
     receive_transit_frame_intent, ReceiveTransitFrame, ReceiveTransitFrameHandler,
     RECEIVE_TRANSIT_FRAME,
 };
-use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 const ORIGIN: &[u8] = b"127.0.0.1:41001";
 const RECEIVED_AT: u64 = 1_700_000_222;
@@ -346,10 +346,6 @@ fn local_endpoint() -> EndpointFact {
 }
 
 fn test_store() -> Store {
-    Store::open_memory_with_schema_sources(&[
-        CORE_SCHEMA_SOURCE,
-        FACTS_SCHEMA_SOURCE,
-        INTENTS_SCHEMA_SOURCE,
-    ])
-    .expect("store")
+    Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+        .expect("store")
 }

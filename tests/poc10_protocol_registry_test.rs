@@ -56,11 +56,11 @@ fn production_text_before_unit_tests(text: &str) -> &str {
 #[test]
 fn executable_protocol_tables_name_the_target_surfaces() {
     assert_eq!(MATCH_PROTOCOL.name, "match");
-    assert_eq!(MATCH_RUNTIME.schema_sources.len(), 3);
+    assert_eq!(MATCH_RUNTIME.schema_sources.len(), 2);
     assert!(MATCH_RUNTIME
         .schema_sources
         .iter()
-        .any(|source| source.contains("network_out")));
+        .any(|source| source.ddl.contains("network_out")));
 
     assert!(MATCH_PROTOCOL
         .commands

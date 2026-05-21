@@ -15,7 +15,7 @@ use crate::core::matchers::ContextMatchers;
 use crate::core::pipeline;
 use crate::core::projectors::{Projector, Timeline};
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION};
-use crate::core::store::{Store, TableName};
+use crate::core::store::{SchemaSource, Store, TableName};
 use std::path::Path;
 
 pub use crate::core::pipeline::WorkStatus;
@@ -26,7 +26,7 @@ pub type MatchersFactory = fn() -> ContextMatchers;
 /// Protocol-owned declarations needed by core's runtime engine.
 #[derive(Clone, Copy)]
 pub struct RuntimeDescription {
-    pub schema_sources: &'static [&'static str],
+    pub schema_sources: &'static [SchemaSource],
     pub row_mutation_tables: &'static [TableName],
     pub projector: ProjectorFactory,
     pub matchers: MatchersFactory,
@@ -351,7 +351,7 @@ impl Runtime {
     }
 }
 
-fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<&'static str> {
+fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<SchemaSource> {
     let mut sources = Vec::with_capacity(1 + description.schema_sources.len());
     sources.push(CORE_SCHEMA_SOURCE);
     sources.extend_from_slice(description.schema_sources);

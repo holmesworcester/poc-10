@@ -152,9 +152,9 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         "src/protocol/intents.rs",
         "There is no product `demo` or `smoke` command",
         "generic runtime/app mechanics",
-        "src/core/schema.p8sql",
-        "src/protocol/facts/schema.p8sql",
-        "src/protocol/intents/schema.p8sql",
+        "src/core/schema.rs",
+        "src/core/network.rs",
+        "src/protocol/registry.rs",
         "### Projector Style",
         "### Intent Handler Style",
         "### Wire And Codec Style",
@@ -736,21 +736,8 @@ fn poc10_protocol_cli_files_do_not_touch_filesystem_directly() {
 }
 
 #[test]
-fn poc10_target_has_exactly_three_schema_dsl_files() {
+fn poc10_target_uses_explicit_schema_sources_not_schema_dsl_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let expected = [
-        "src/core/schema.p8sql",
-        "src/protocol/facts/schema.p8sql",
-        "src/protocol/intents/schema.p8sql",
-    ];
-
-    for path in expected {
-        assert!(
-            root.join(path).exists(),
-            "missing required schema file {path}"
-        );
-    }
-
     let mut pending = vec![root.join("src")];
     let mut found = Vec::new();
     while let Some(dir) = pending.pop() {
@@ -765,10 +752,38 @@ fn poc10_target_has_exactly_three_schema_dsl_files() {
     }
     found.sort();
 
-    assert_eq!(
-        found, expected,
-        "poc-10 target keeps every durable table visible in exactly three schema files"
+    assert!(
+        found.is_empty(),
+        "poc-10 keeps storage visible as explicit SQL DDL in SchemaSource constants, not separate schema DSL files:\n{}",
+        found.join("\n")
     );
+    assert!(
+        !root.join("src/core/schema_dsl.rs").exists(),
+        "the runtime schema DSL parser should not come back"
+    );
+
+    let core_schema = source_text(&root.join("src/core/schema.rs"));
+    let network = source_text(&root.join("src/core/network.rs"));
+    let registry = source_text(&root.join("src/protocol/registry.rs"));
+    for (path, text, required) in [
+        (
+            "src/core/schema.rs",
+            core_schema,
+            "pub const CORE_SCHEMA_SOURCE: SchemaSource",
+        ),
+        (
+            "src/core/network.rs",
+            network,
+            "pub const SCHEMA_SOURCE: SchemaSource",
+        ),
+        (
+            "src/protocol/registry.rs",
+            registry,
+            "pub const FACTS_SCHEMA_SOURCE: SchemaSource",
+        ),
+    ] {
+        assert!(text.contains(required), "{path} missing {required}");
+    }
 }
 
 #[test]

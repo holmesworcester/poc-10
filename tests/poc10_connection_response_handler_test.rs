@@ -30,7 +30,7 @@ use topo::protocol::facts::transport::transit_received::layout as received_layou
 use topo::protocol::intents::connection::create_response::{
     create_connection_response_intent, CreateConnectionResponse, CreateConnectionResponseHandler,
 };
-use topo::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
 fn handler_emits_responder_material_response_fact_and_sends_response_bytes() {
@@ -237,7 +237,6 @@ fn test_store() -> Store {
         CORE_SCHEMA_SOURCE,
         network::SCHEMA_SOURCE,
         FACTS_SCHEMA_SOURCE,
-        INTENTS_SCHEMA_SOURCE,
     ])
     .expect("store")
 }

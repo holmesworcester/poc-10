@@ -60,6 +60,7 @@ pub fn settings_for_scope(
 #[cfg(test)]
 mod tests {
     use crate::core::store::Store;
+    use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
     use super::super::fact::{DisappearingMessagesSettingFact, SCOPE_KIND_WORKSPACE};
     use super::super::rows;
@@ -67,10 +68,7 @@ mod tests {
 
     #[test]
     fn active_setting_follows_supersedes_chain_over_created_at_order() {
-        let store = Store::open_memory_with_schema_sources(&[
-            "row_table disappearing_messages_setting_rows;",
-        ])
-        .expect("store");
+        let store = Store::open_memory_with_schema_sources(&[FACTS_SCHEMA_SOURCE]).expect("store");
         let workspace_id = [1; 32];
         let old_id = [2; 32];
         let new_id = [3; 32];

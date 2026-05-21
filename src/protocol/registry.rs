@@ -12,7 +12,7 @@ use crate::core::projectors::{
     EnvelopeRoute, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
 use crate::core::runtime::HandlerRoute;
-use crate::core::store::TableName;
+use crate::core::store::{SchemaSource, TableName};
 use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
 use crate::protocol::intents::{
     connection as connection_intents, content as content_intents, encryption as encryption_intents,
@@ -23,8 +23,180 @@ use crate::protocol::{assertions, cli as command};
 
 pub use crate::protocol::cli::MatchCliContext;
 
-pub const FACTS_SCHEMA_SOURCE: &str = include_str!("facts/schema.p8sql");
-pub const INTENTS_SCHEMA_SOURCE: &str = include_str!("intents/schema.p8sql");
+pub const FACTS_SCHEMA_SOURCE: SchemaSource = SchemaSource {
+    ddl: r#"
+CREATE TABLE IF NOT EXISTS opened_message_rows (
+    workspace_id BLOB NOT NULL,
+    message_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    author_user_id BLOB NOT NULL,
+    signer_id BLOB NOT NULL,
+    text BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS opened_message_rows_by_workspace_created
+    ON opened_message_rows (workspace_id, created_at_ms);
+
+CREATE TABLE IF NOT EXISTS message_tombstone_rows (
+    workspace_id BLOB NOT NULL,
+    message_id BLOB NOT NULL,
+    author_user_id BLOB NOT NULL,
+    authored_minute INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS message_tombstone_rows_by_workspace_minute
+    ON message_tombstone_rows (workspace_id, authored_minute);
+
+CREATE TABLE IF NOT EXISTS file_slice_rows (
+    workspace_id BLOB NOT NULL,
+    file_id BLOB NOT NULL,
+    slice_index INTEGER NOT NULL,
+    slice_fact_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    ciphertext BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, file_id, slice_index)
+);
+CREATE INDEX IF NOT EXISTS file_slice_rows_by_fact
+    ON file_slice_rows (slice_fact_id);
+
+CREATE TABLE IF NOT EXISTS workspace_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS key_wrap_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS user_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS local_endpoint_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS local_endpoint_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS local_endpoint_signing_public_key_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS local_endpoint_signing_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS identity_endpoint_shared_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+
+CREATE TABLE IF NOT EXISTS content_event_rows (
+    workspace_id BLOB NOT NULL,
+    fact_id BLOB NOT NULL,
+    timestamp INTEGER NOT NULL,
+    payload_bytes INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, fact_id)
+);
+CREATE INDEX IF NOT EXISTS content_event_rows_by_workspace_time
+    ON content_event_rows (workspace_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS cascade_staged_fact_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS admin_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+
+CREATE TABLE IF NOT EXISTS content_messages (
+    workspace_id BLOB NOT NULL,
+    message_id BLOB NOT NULL,
+    author_user_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    signer_id BLOB NOT NULL,
+    frontier_id BLOB NOT NULL,
+    minute INTEGER NOT NULL,
+    leaf_id BLOB NOT NULL,
+    deleted INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS content_messages_by_workspace_created
+    ON content_messages (workspace_id, created_at_ms);
+
+CREATE TABLE IF NOT EXISTS content_reactions (
+    workspace_id BLOB NOT NULL,
+    reaction_id BLOB NOT NULL,
+    message_id BLOB NOT NULL,
+    author_user_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    nonce BLOB NOT NULL,
+    ciphertext BLOB NOT NULL,
+    deleted INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, reaction_id)
+);
+CREATE INDEX IF NOT EXISTS content_reactions_by_message
+    ON content_reactions (workspace_id, message_id, created_at_ms);
+
+CREATE TABLE IF NOT EXISTS content_files (
+    workspace_id BLOB NOT NULL,
+    file_fact_id BLOB NOT NULL,
+    message_id BLOB NOT NULL,
+    file_id BLOB NOT NULL,
+    author_user_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    root_hash BLOB NOT NULL,
+    byte_len INTEGER NOT NULL,
+    total_slices INTEGER NOT NULL,
+    slice_bytes INTEGER NOT NULL,
+    sealed_metadata BLOB NOT NULL,
+    deleted INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, file_fact_id)
+);
+CREATE INDEX IF NOT EXISTS content_files_by_message
+    ON content_files (workspace_id, message_id, created_at_ms);
+CREATE INDEX IF NOT EXISTS content_files_by_file_id
+    ON content_files (workspace_id, file_id);
+
+CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS connection_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS connection_response_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS invite_accepted_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS invite_server_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS user_invite_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS device_invite_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS invite_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_compare_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_have_id_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_need_id_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_shareable_fact_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+
+CREATE TABLE IF NOT EXISTS message_deletion_rows (
+    workspace_id BLOB NOT NULL,
+    target_message_id BLOB NOT NULL,
+    deletion_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    author_user_id BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, target_message_id)
+);
+CREATE INDEX IF NOT EXISTS message_deletion_rows_by_deletion
+    ON message_deletion_rows (deletion_id);
+
+CREATE TABLE IF NOT EXISTS file_deletion_rows (
+    workspace_id BLOB NOT NULL,
+    target_file_id BLOB NOT NULL,
+    deletion_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    author_user_id BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, target_file_id)
+);
+CREATE INDEX IF NOT EXISTS file_deletion_rows_by_deletion
+    ON file_deletion_rows (deletion_id);
+
+CREATE TABLE IF NOT EXISTS removal_frontier_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS local_history_node_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS disappearing_messages_setting_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+"#,
+    row_tables: &[
+        identity::workspace::rows::WORKSPACE_ROWS,
+        encryption::rows::KEY_WRAP_ROWS,
+        identity::user::rows::USER_ROWS,
+        identity::endpoint::rows::LOCAL_ENDPOINT_ROWS,
+        identity::endpoint::rows::LOCAL_ENDPOINT_SECRET_ROWS,
+        identity::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
+        identity::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
+        identity::endpoint_shared::rows::ENDPOINT_SHARED_ROWS,
+        sync::cascade_fact::rows::CASCADE_STAGED_FACT_ROWS,
+        identity::admin::rows::ADMIN_ROWS,
+        connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
+        connection::request::rows::CONNECTION_REQUEST_ROWS,
+        connection::response::rows::CONNECTION_RESPONSE_ROWS,
+        identity::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
+        identity::invite_server::rows::INVITE_SERVER_ROWS,
+        identity::user_invite::rows::USER_INVITE_ROWS,
+        identity::device_invite::rows::DEVICE_INVITE_ROWS,
+        identity::invite::rows::INVITE_SECRET_ROWS,
+        sync::compare::rows::SYNC_COMPARE_ROWS,
+        sync::have_id::rows::SYNC_HAVE_ID_ROWS,
+        sync::need_id::rows::SYNC_NEED_ID_ROWS,
+        sync::shared_fact::rows::SHAREABLE_FACT_ROWS,
+        encryption::removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
+        encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
+        encryption::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
+    ],
+};
 
 macro_rules! cli_command {
     ($name:literal, $usage:path, $run:path) => {
@@ -262,11 +434,7 @@ pub const SQL_CONTEXT_ROLES: &[&str] = &[
     matchers::WRAP_SOURCE_ROLE,
 ];
 
-pub(crate) const SCHEMA_SOURCES: &[&str] = &[
-    network::SCHEMA_SOURCE,
-    FACTS_SCHEMA_SOURCE,
-    INTENTS_SCHEMA_SOURCE,
-];
+pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE];
 
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::cascade_fact::rows::CASCADE_STAGED_FACT_ROWS,

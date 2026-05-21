@@ -116,7 +116,7 @@ mod tests {
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::facts::connection::request::fact::ConnectionRequestFact;
-    use crate::protocol::registry::{FACTS_SCHEMA_SOURCE, INTENTS_SCHEMA_SOURCE};
+    use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
     #[test]
     fn unreachable_bootstrap_peer_requests_retry_without_consuming_intent() {
@@ -151,7 +151,6 @@ mod tests {
             CORE_SCHEMA_SOURCE,
             network::SCHEMA_SOURCE,
             FACTS_SCHEMA_SOURCE,
-            INTENTS_SCHEMA_SOURCE,
         ])
         .expect("store");
 
