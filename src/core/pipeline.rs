@@ -16,6 +16,7 @@ mod context_wake;
 mod dispatch;
 mod effects;
 mod fact_context;
+mod intent_queue;
 mod projection;
 mod report;
 

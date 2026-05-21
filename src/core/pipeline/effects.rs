@@ -3,11 +3,13 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{HandlerOutput, Intent, RowMutation};
 use crate::core::pipeline::LOCAL_INTENTS;
 use crate::core::pipeline_storage::{
-    insert_fact_and_pending_in_tx, intent_row_key, purge_fact_in_tx, record_intent_in_table_in_tx,
-    record_intent_in_tx, row_mutation_rows, sqlite_string_error, validate_row_mutations,
+    insert_fact_and_pending_in_tx, purge_fact_in_tx, row_mutation_rows, sqlite_string_error,
+    validate_row_mutations,
 };
 use crate::core::store::{Store, TableName};
 use std::collections::BTreeMap;
+
+use super::intent_queue::{intent_row_key, record_intent_in_table_in_tx, record_intent_in_tx};
 
 /// Durable effects produced by one pipeline step.
 ///

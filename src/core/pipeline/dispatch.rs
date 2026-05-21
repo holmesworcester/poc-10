@@ -3,8 +3,9 @@ use crate::core::pipeline::{
     commit_pipeline_effects_in_tx, persisted_fact, PipelineEffectCounts, PipelineEffects, INTENTS,
     LOCAL_INTENTS,
 };
-use crate::core::pipeline_storage::{decode_intent_row, record_intent_in_table_in_tx};
 use crate::core::store::{Store, TableName};
+
+use super::intent_queue::{decode_intent_row, record_intent_in_table_in_tx};
 
 // === Intent dispatch ===
 

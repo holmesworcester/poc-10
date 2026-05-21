@@ -89,6 +89,9 @@ Accountable criteria:
   exact context wake fanout, pending time range load/delete, and projection
   context/time-wake replacement now use declared SQLite columns in their owning
   pipeline modules instead of byte-row scans in `pipeline_storage.rs`.
+- Done in this branch: intent queue row encoding, decoding, and insertion live
+  with the pipeline queue code in `pipeline/intent_queue.rs`, not in the
+  generic fact/context storage module.
 - Done in this branch: row writes are `RowMutation` output, not `Intent`
   values. `IntentExecution::Atomic`, `AtomicIntent`, and the atomic dispatch
   pass are gone from production code.

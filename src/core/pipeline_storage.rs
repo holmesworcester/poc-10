@@ -6,31 +6,31 @@
 //! in SQLite. It owns three things:
 //!
 //! - **Durable mutations** — [`insert_fact_and_pending_in_tx`],
-//!   [`purge_fact_in_tx`], [`record_intent_in_tx`], and the pending-queue
-//!   helpers: the in-transaction building blocks the pipeline commits with.
+//!   [`purge_fact_in_tx`], and the pending-queue helpers: the in-transaction
+//!   building blocks the pipeline commits with.
 //! - **Context reads** — loading a fact's standing context back out of SQLite
 //!   and matching needs against offers ([`stored_matching_context`],
 //!   [`stored_context_matches`]).
-//! - **Row encoding** — turning facts, context needs and offers, time wakes,
-//!   and intents into rows and back: the `*_row` builders, the `typed_*`
-//!   encoders, and the `decode_*` decoders.
+//! - **Row encoding** — turning facts, context needs and offers, and time
+//!   wakes into rows and back: the `*_row` builders, the `typed_*` encoders,
+//!   and the `decode_*` decoders.
 //!
 //! # Row model
 //!
 //! Every runtime row is a key/value pair of [`wire`](crate::core::wire)-encoded
 //! bytes. Most rows carry all of their fields in the *key* and leave the value
 //! empty, so the store can look a row up by any named column of its key. Facts
-//! and intents are the exception: they hold a variable-length payload, which
-//! lives in the value.
+//! are the exception: they hold a variable-length payload, which lives in the
+//! value.
 
 use crate::core::context::{
     ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
 };
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
-use crate::core::intents::{Intent, IntentKind, RowMutation, TableDelete};
+use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
 use crate::core::pipeline::{
-    CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, INTENTS, PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
+    CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
     PENDING_TIME_RANGES, TIME_WAKES,
 };
 use crate::core::projectors::{MatchedContext, ProjectionContext};
@@ -147,26 +147,6 @@ fn delete_rows_owned_by(store: &Store, table: TableName, owner: &FactId) -> rusq
     Ok(removed)
 }
 
-/// Persist an intent, deduplicated by its idempotence key.
-///
-/// Returns whether the intent was newly recorded; an intent whose key already
-/// exists is left in place.
-pub(crate) fn record_intent_in_tx(store: &Store, intent: &Intent) -> rusqlite::Result<bool> {
-    record_intent_in_table_in_tx(store, INTENTS, intent)
-}
-
-pub(crate) fn record_intent_in_table_in_tx(
-    store: &Store,
-    table: TableName,
-    intent: &Intent,
-) -> rusqlite::Result<bool> {
-    let mut row = intent_row(intent);
-    row.table = table;
-    store
-        .insert_table_rows_in_tx(vec![row])
-        .map(|count| count > 0)
-}
-
 // === Row builders ===
 
 /// Encode a fact as its [`FACTS`] row.
@@ -193,15 +173,6 @@ pub(crate) fn context_offer_row(offer: &ContextOffer) -> TableRow {
         table: CONTEXT_OFFERS,
         key: typed_context_key(&offer.owner, &offer.role, &offer.scope, &offer.selector),
         value: Vec::new(),
-    }
-}
-
-/// Encode an intent as its [`INTENTS`] row.
-pub(crate) fn intent_row(intent: &Intent) -> TableRow {
-    TableRow {
-        table: INTENTS,
-        key: intent_row_key(intent),
-        value: typed_intent_value(intent),
     }
 }
 
@@ -630,17 +601,6 @@ pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
     out.finish()
 }
 
-/// Key layout for an [`INTENTS`] row: `kind ++ idempotence-key`. Two intents
-/// collide here exactly when they are idempotent duplicates of each other.
-pub(crate) fn intent_row_key(intent: &Intent) -> Vec<u8> {
-    encoded_row(|key| {
-        key.string_u32be(intent.kind.as_str())
-            .expect("intent kind fits u32");
-        key.bytes_u32be(&intent.key)
-            .expect("intent idempotence key fits u32");
-    })
-}
-
 /// Encode the value half of a [`FACTS`] row: scope columns, timestamp, payload.
 fn typed_fact_value(fact: &Fact) -> Vec<u8> {
     encoded_row(|out| {
@@ -653,14 +613,6 @@ fn typed_fact_value(fact: &Fact) -> Vec<u8> {
         }
         out.u64be(fact.timestamp);
         out.bytes_u32be(&fact.bytes).expect("fact bytes fit u32");
-    })
-}
-
-/// Encode the value half of an [`INTENTS`] row: payload bytes.
-fn typed_intent_value(intent: &Intent) -> Vec<u8> {
-    encoded_row(|out| {
-        out.bytes_u32be(&intent.payload)
-            .expect("intent payload fits u32");
     })
 }
 
@@ -822,21 +774,6 @@ pub(crate) fn decode_pending_context_change_row(
         other => return Err(format!("invalid pending context change kind {other}")),
     }
     Ok(delta)
-}
-
-/// Decode an [`INTENTS`] row: kind and idempotence key from the key, payload
-/// from the value. Durability is determined by the queue table that owns the
-/// row.
-pub(crate) fn decode_intent_row(key: &[u8], value: &[u8]) -> Result<Intent, String> {
-    let mut key_reader = Reader::new(key);
-    let kind = IntentKind::new(key_reader.string_u32be().row()?)?;
-    let idempotence_key = key_reader.bytes_u32be().row()?.to_vec();
-    key_reader.finish().row()?;
-
-    let mut value_reader = Reader::new(value);
-    let payload = value_reader.bytes_u32be().row()?.to_vec();
-    value_reader.finish().row()?;
-    Ok(Intent::new(kind, idempotence_key, payload))
 }
 
 // === Scope codec and wire helpers ===
