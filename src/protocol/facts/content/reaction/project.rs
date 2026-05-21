@@ -8,7 +8,7 @@
 //!   3. MATERIALIZE. Live reactions write one row and share the fact.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::{AtomicIntent, TableDelete};
+use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -145,7 +145,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             Some(target_deletion_need),
             Some(author_need),
         ])
-        .intent(AtomicIntent::PutRow(row).into_intent())
+        .row_mutation(RowMutation::PutRow(row))
         .intent(share_fact_with_workspace_intent_for_fact(
             reaction.workspace_id,
             fact,
@@ -215,13 +215,10 @@ fn delete_reaction_projection(
     workspace_id: crate::core::facts::FactId,
     reaction_id: crate::core::facts::FactId,
 ) -> ProjectionOutput {
-    ProjectionOutput::new().intent(
-        AtomicIntent::DeleteRow(TableDelete {
-            table: REACTION_ROWS,
-            key: reaction_key(workspace_id, reaction_id),
-        })
-        .into_intent(),
-    )
+    ProjectionOutput::new().row_mutation(RowMutation::DeleteRow(TableDelete {
+        table: REACTION_ROWS,
+        key: reaction_key(workspace_id, reaction_id),
+    }))
 }
 
 fn validate_message_deletion(

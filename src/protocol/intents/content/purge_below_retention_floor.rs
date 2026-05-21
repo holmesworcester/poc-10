@@ -7,7 +7,7 @@
 use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::{
     content::message::retention, encryption::disappearing_messages_setting,
 };
@@ -25,7 +25,6 @@ pub fn purge_below_retention_floor_intent(input: PurgeBelowRetentionFloor) -> In
     Intent::new(
         IntentKind::new(PURGE_BELOW_RETENTION_FLOOR)
             .expect("valid purge_below_retention_floor kind"),
-        IntentExecution::Deferred,
         purge_below_retention_floor_key(&input),
         encode_purge_below_retention_floor(&input),
     )
@@ -34,9 +33,7 @@ pub fn purge_below_retention_floor_intent(input: PurgeBelowRetentionFloor) -> In
 pub fn decode_purge_below_retention_floor(
     intent: &Intent,
 ) -> Result<PurgeBelowRetentionFloor, String> {
-    if intent.kind.as_str() != PURGE_BELOW_RETENTION_FLOOR
-        || intent.execution != IntentExecution::Deferred
-    {
+    if intent.kind.as_str() != PURGE_BELOW_RETENTION_FLOOR {
         return Err("expected purge_below_retention_floor deferred intent".into());
     }
     let input = decode_purge_below_retention_floor_payload(&intent.payload)?;

@@ -7,7 +7,7 @@
 use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::content::{file, message_deletion, reaction};
 
 pub const PURGE_MESSAGE_CHILD: &str = "purge_message_child";
@@ -27,15 +27,13 @@ pub struct PurgeMessageChild {
 pub fn purge_message_child_intent(input: PurgeMessageChild) -> Intent {
     Intent::new(
         IntentKind::new(PURGE_MESSAGE_CHILD).expect("valid purge_message_child kind"),
-        IntentExecution::Deferred,
         purge_message_child_key(&input),
         encode_purge_message_child(&input),
     )
 }
 
 pub fn decode_purge_message_child(intent: &Intent) -> Result<PurgeMessageChild, String> {
-    if intent.kind.as_str() != PURGE_MESSAGE_CHILD || intent.execution != IntentExecution::Deferred
-    {
+    if intent.kind.as_str() != PURGE_MESSAGE_CHILD {
         return Err("expected purge_message_child deferred intent".into());
     }
     let input = decode_purge_message_child_payload(&intent.payload)?;

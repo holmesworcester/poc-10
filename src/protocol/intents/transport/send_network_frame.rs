@@ -1,6 +1,6 @@
 //! Outbound network-send handler.
 //!
-//! Owns the ephemeral intent that asks the runtime to push an already-packaged
+//! Owns the local-queue intent that asks the runtime to push an already-packaged
 //! transport::transit frame onto a connection's TCP socket. The handler resolves the
 //! connection route from the fact context, hands the opaque frame to core's
 //! network boundary, and attempts one bounded TCP write. If route
@@ -17,7 +17,7 @@
 //! frame bytes that the runtime should push onto that connection's socket.
 //! Payload bytes remain opaque to this handler.
 
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::intents::payload::{PayloadError, PayloadReader, PayloadWriter};
 
 /// Stable intent kind for outbound network frame sends.
@@ -49,7 +49,6 @@ pub fn send_network_frame_intent(input: SendNetworkFrame) -> Intent {
         .expect("send_network_frame payload fits u32");
     Intent::new(
         IntentKind::new(SEND_NETWORK_FRAME).expect("valid send network frame intent kind"),
-        IntentExecution::Ephemeral,
         send_network_frame_key(&input),
         payload.finish(),
     )
@@ -58,9 +57,6 @@ pub fn send_network_frame_intent(input: SendNetworkFrame) -> Intent {
 pub fn decode_send_network_frame(intent: &Intent) -> Result<SendNetworkFrame, String> {
     if intent.kind.as_str() != SEND_NETWORK_FRAME {
         return Err("expected send_network_frame intent".into());
-    }
-    if intent.execution != IntentExecution::Ephemeral {
-        return Err("send_network_frame intent must be ephemeral".into());
     }
 
     let mut reader = PayloadReader::new(&intent.payload);
@@ -77,7 +73,7 @@ pub fn decode_send_network_frame(intent: &Intent) -> Result<SendNetworkFrame, St
 
 /// Per-(routing_key, frame) idempotence key. Two intents for the same routing
 /// key carrying the same frame bytes produce the same intent key, which lets
-/// the deferred-intent layer collapse duplicates before the handler runs.
+/// the intent queue collapse duplicates before the handler runs.
 pub fn send_network_frame_key(input: &SendNetworkFrame) -> Vec<u8> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"topo:send-network-frame:v1:");

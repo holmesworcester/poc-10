@@ -9,7 +9,7 @@
 //!      context, and share the frontier fact with the workspace.
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -106,7 +106,9 @@ impl TypedProjector<super::Codec> for RemovalFrontierProjector {
                 expected_scope,
                 fact.id,
             ))
-            .intent(AtomicIntent::PutRow(removal_frontier_row(fact.id, &frontier)?).into_intent())
+            .row_mutation(RowMutation::PutRow(removal_frontier_row(
+                fact.id, &frontier,
+            )?))
             .intent(share_fact_with_workspace_intent_for_fact(
                 frontier.workspace_id,
                 fact,
@@ -134,7 +136,7 @@ mod projector_tests {
     use crate as topo;
 
     use topo::core::facts::{Fact, FactScope, ScopeKind};
-    use topo::core::intents::AtomicIntent;
+    use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::identity::admin;
     use topo::protocol::facts::identity::admin::fact::AdminFact;
@@ -218,11 +220,12 @@ mod projector_tests {
         let projected = projector
             .project(&fact, &context)
             .expect("matched context projects");
-        assert_eq!(projected.intents.len(), 2);
+        assert_eq!(projected.intents.len(), 1);
+        assert_eq!(projected.row_mutations.len(), 1);
         assert_eq!(projected.offers.len(), 1);
         assert_share_intent(&projected.intents, frontier.workspace_id, fact.id);
 
-        let row = decode_single_put_row(&projected.intents[0]);
+        let row = decode_single_put_row(&projected.row_mutations[0]);
         assert_eq!(row.workspace_id, [1; 32]);
         assert_eq!(row.removal_frontier_id, fact.id);
         assert_eq!(row.created_at_ms, 1234);
@@ -280,13 +283,12 @@ mod projector_tests {
         }
     }
 
-    fn decode_single_put_row(intent: &topo::core::intents::Intent) -> rows::RemovalFrontierRow {
-        match AtomicIntent::from_intent(intent, &[rows::REMOVAL_FRONTIER_ROWS]).expect("row intent")
-        {
-            AtomicIntent::PutRow(row) => {
+    fn decode_single_put_row(mutation: &RowMutation) -> rows::RemovalFrontierRow {
+        match mutation {
+            RowMutation::PutRow(row) => {
                 rows::decode_removal_frontier_row(&row.key, &row.value).expect("decode row")
             }
-            AtomicIntent::DeleteRow(_) => panic!("expected put row"),
+            RowMutation::DeleteRow(_) => panic!("expected put row"),
         }
     }
 

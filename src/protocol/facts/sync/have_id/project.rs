@@ -7,7 +7,7 @@
 //!   3. MATERIALIZE. Write the have-id row and emit deferred need-id work.
 
 use crate::core::facts::Fact;
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -46,7 +46,7 @@ impl TypedProjector<super::Codec> for SyncHaveIdProjector {
         // 1. Structural.
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .intent(AtomicIntent::PutRow(sync_have_id_row(fact.id, &have)?).into_intent())
+            .row_mutation(RowMutation::PutRow(sync_have_id_row(fact.id, &have)?))
             .intent(send_needed_fact_id_intent(SendNeededFactId {
                 have_fact_id: fact.id,
             })))

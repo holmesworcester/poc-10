@@ -10,7 +10,7 @@
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
-use crate::core::intents::{AtomicIntent, TableDelete};
+use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -81,24 +81,23 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
             return Ok(ProjectionOutput::new()
                 .need(file_need)
                 .need(file_deletion_need)
-                .intent(
-                    AtomicIntent::DeleteRow(TableDelete {
-                        table: FILE_SLICE_ROWS,
-                        key: content_file_slice_key(
-                            &slice.workspace_id,
-                            &slice.file_id,
-                            slice.slice_index,
-                        ),
-                    })
-                    .into_intent(),
-                ));
+                .row_mutation(RowMutation::DeleteRow(TableDelete {
+                    table: FILE_SLICE_ROWS,
+                    key: content_file_slice_key(
+                        &slice.workspace_id,
+                        &slice.file_id,
+                        slice.slice_index,
+                    ),
+                })));
         }
 
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(file_need)
             .need(file_deletion_need)
-            .intent(AtomicIntent::PutRow(content_file_slice_row(fact.id, &slice)?).into_intent())
+            .row_mutation(RowMutation::PutRow(content_file_slice_row(
+                fact.id, &slice,
+            )?))
             .intent(share_fact_with_workspace_intent_for_fact(
                 slice.workspace_id,
                 fact,

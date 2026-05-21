@@ -8,7 +8,7 @@
 //!      work.
 
 use crate::core::facts::Fact;
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -47,7 +47,7 @@ impl TypedProjector<super::Codec> for SyncNeedIdProjector {
         // 1. Structural.
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .intent(AtomicIntent::PutRow(sync_need_id_row(fact.id, &need)?).into_intent())
+            .row_mutation(RowMutation::PutRow(sync_need_id_row(fact.id, &need)?))
             .intent(send_requested_fact_intent(SendRequestedFact {
                 need_fact_id: fact.id,
             })))

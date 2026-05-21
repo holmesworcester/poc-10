@@ -11,7 +11,7 @@
 mod secret_path;
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -140,9 +140,9 @@ impl TypedProjector<super::Codec> for LocalHistoryNodeSecretProjector {
                 prefix_bytes(node.bit_depth)?,
                 node.fact_id_prefix,
             ))
-            .intent(
-                AtomicIntent::PutRow(local_history_node_secret_row(fact.id, &node)?).into_intent(),
-            ))
+            .row_mutation(RowMutation::PutRow(local_history_node_secret_row(
+                fact.id, &node,
+            )?)))
     }
 }
 
@@ -161,7 +161,7 @@ mod projector_tests {
     use crate as topo;
 
     use topo::core::facts::{Fact, FactScope, ScopeKind};
-    use topo::core::intents::AtomicIntent;
+    use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::encryption::fact::LocalKeySecretFact;
     use topo::protocol::facts::encryption::layout as encryption_layout;
@@ -221,13 +221,14 @@ mod projector_tests {
                 ]),
             )
             .expect("matched context projects history node");
-        assert_eq!(projected.intents.len(), 1);
+        assert!(projected.intents.is_empty());
+        assert_eq!(projected.row_mutations.len(), 1);
         assert!(projected
             .offers
             .iter()
             .any(|offer| offer.role == matchers::source_secret_role()));
 
-        let row = decode_single_put_row(&projected.intents[0]);
+        let row = decode_single_put_row(&projected.row_mutations[0]);
         assert_eq!(row.workspace_id, [1; 32]);
         assert_eq!(row.removal_frontier_id, node.removal_frontier_id);
         assert_eq!(row.local_history_node_secret_id, fact.id);
@@ -277,7 +278,7 @@ mod projector_tests {
             )
             .expect("project leaf");
 
-        let row = decode_single_put_row(&projected.intents[0]);
+        let row = decode_single_put_row(&projected.row_mutations[0]);
         assert_eq!(row.bit_depth, TRIE_LEAF_BIT_DEPTH);
         assert_eq!(row.fact_id_prefix, [9; 32]);
         assert_eq!(row.node_secret, [7; NODE_SECRET_BYTES]);
@@ -396,17 +397,13 @@ mod projector_tests {
         }
     }
 
-    fn decode_single_put_row(
-        intent: &topo::core::intents::Intent,
-    ) -> rows::LocalHistoryNodeSecretRow {
-        match AtomicIntent::from_intent(intent, &[rows::LOCAL_HISTORY_NODE_SECRET_ROWS])
-            .expect("row intent")
-        {
-            AtomicIntent::PutRow(row) => {
+    fn decode_single_put_row(mutation: &RowMutation) -> rows::LocalHistoryNodeSecretRow {
+        match mutation {
+            RowMutation::PutRow(row) => {
                 rows::decode_local_history_node_secret_row(&row.key, &row.value)
                     .expect("decode row")
             }
-            AtomicIntent::DeleteRow(_) => panic!("expected put row"),
+            RowMutation::DeleteRow(_) => panic!("expected put row"),
         }
     }
 }

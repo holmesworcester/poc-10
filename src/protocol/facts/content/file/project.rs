@@ -9,7 +9,7 @@
 //!      descriptor row, and share the fact. File bytes remain slice facts.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::{AtomicIntent, TableDelete};
+use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -157,7 +157,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             message_matchers::workspace_scope(file.workspace_id),
             fact.id,
         ))
-        .intent(AtomicIntent::PutRow(content_file_row(fact.id, &file)?).into_intent())
+        .row_mutation(RowMutation::PutRow(content_file_row(fact.id, &file)?))
         .intent(share_fact_with_workspace_intent_for_fact(
             file.workspace_id,
             fact,
@@ -186,13 +186,10 @@ fn delete_file_projection(
     workspace_id: crate::core::facts::FactId,
     file_fact_id: crate::core::facts::FactId,
 ) -> ProjectionOutput {
-    ProjectionOutput::new().intent(
-        AtomicIntent::DeleteRow(TableDelete {
-            table: FILE_ROWS,
-            key: content_file_key(&workspace_id, &file_fact_id),
-        })
-        .into_intent(),
-    )
+    ProjectionOutput::new().row_mutation(RowMutation::DeleteRow(TableDelete {
+        table: FILE_ROWS,
+        key: content_file_key(&workspace_id, &file_fact_id),
+    }))
 }
 
 fn validate_file_fields(file: &super::fact::ContentFileFact) -> Result<(), String> {

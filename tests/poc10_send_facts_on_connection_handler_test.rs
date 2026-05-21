@@ -66,9 +66,10 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
         .expect("transport::transit packaging succeeds");
 
     assert!(output.facts.is_empty());
-    assert_eq!(output.intents.len(), 1);
-    let send =
-        send_network_frame::decode_send_network_frame(&output.intents[0]).expect("network send");
+    assert!(output.intents.is_empty());
+    assert_eq!(output.local_intents.len(), 1);
+    let send = send_network_frame::decode_send_network_frame(&output.local_intents[0])
+        .expect("network send");
     assert_eq!(send.routing_key, connection_fact.id);
     let opened = transit_frame::open_connection_frame(&send.frame, &connection.connection_secret)
         .expect("open fixed transport::transit frame");

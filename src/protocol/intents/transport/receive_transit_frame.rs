@@ -5,7 +5,7 @@
 //! The intent payload carries the opaque outer frame bytes plus normalized local
 //! receive metadata; cryptographic material is loaded from fact context.
 
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::transport::transit_received::addr::normalize_origin_addr_bytes;
 use crate::protocol::intents::payload::{PayloadError, PayloadReader, PayloadWriter};
 
@@ -36,7 +36,6 @@ pub fn receive_transit_frame_intent(input: ReceiveTransitFrame) -> Result<Intent
         .expect("transit frame fits u32");
     Ok(Intent::new(
         IntentKind::new(RECEIVE_TRANSIT_FRAME).expect("valid receive_transit_frame intent kind"),
-        IntentExecution::Ephemeral,
         receive_transit_key(&input),
         payload.finish(),
     ))
@@ -45,9 +44,6 @@ pub fn receive_transit_frame_intent(input: ReceiveTransitFrame) -> Result<Intent
 pub fn decode_receive_transit_frame(intent: &Intent) -> Result<ReceiveTransitFrame, String> {
     if intent.kind.as_str() != RECEIVE_TRANSIT_FRAME {
         return Err("expected receive_transit_frame intent".into());
-    }
-    if intent.execution != IntentExecution::Ephemeral {
-        return Err("receive_transit_frame intent must be ephemeral".into());
     }
 
     let mut reader = PayloadReader::new(&intent.payload);

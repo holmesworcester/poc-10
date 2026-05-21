@@ -8,7 +8,7 @@
 //!      mark the workspace fact shareable with itself.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -49,7 +49,7 @@ impl TypedProjector<super::Codec> for WorkspaceProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .offer(crate::protocol::matchers::workspace_offer(fact.id))
-            .intent(AtomicIntent::PutRow(workspace_row(fact.id, &workspace)?).into_intent())
+            .row_mutation(RowMutation::PutRow(workspace_row(fact.id, &workspace)?))
             .intent(share_fact_with_workspace_intent_for_fact(fact.id, fact)))
     }
 }

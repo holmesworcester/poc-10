@@ -9,7 +9,7 @@
 //!      connection invite-secret context offers.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -52,6 +52,6 @@ impl TypedProjector<super::Codec> for InviteSecretProjector {
             .offer(crate::protocol::matchers::connection_invite_secret_offer(
                 fact.id, fact.id,
             ))
-            .intent(AtomicIntent::PutRow(invite_secret_row(&invite_secret)?).into_intent()))
+            .row_mutation(RowMutation::PutRow(invite_secret_row(&invite_secret)?)))
     }
 }

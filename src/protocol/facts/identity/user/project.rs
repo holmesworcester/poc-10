@@ -9,7 +9,7 @@
 //!      fact with the workspace.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -96,7 +96,11 @@ impl TypedProjector<super::Codec> for UserProjector {
                 fact.id,
                 crate::protocol::matchers::user_role(),
             ))
-            .intent(AtomicIntent::PutRow(user_row(fact.id, user_invite_id, &user)?).into_intent())
+            .row_mutation(RowMutation::PutRow(user_row(
+                fact.id,
+                user_invite_id,
+                &user,
+            )?))
             .intent(share_fact_with_workspace_intent_for_fact(
                 user.workspace_id,
                 fact,

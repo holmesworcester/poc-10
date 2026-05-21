@@ -7,7 +7,7 @@
 use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::content::message::retention;
 
 pub const PURGE_EXPIRED_MESSAGE: &str = "purge_expired_message";
@@ -22,16 +22,13 @@ pub struct PurgeExpiredMessage {
 pub fn purge_expired_message_intent(input: PurgeExpiredMessage) -> Intent {
     Intent::new(
         IntentKind::new(PURGE_EXPIRED_MESSAGE).expect("valid purge_expired_message kind"),
-        IntentExecution::Deferred,
         purge_expired_message_key(&input),
         encode_purge_expired_message(&input),
     )
 }
 
 pub fn decode_purge_expired_message(intent: &Intent) -> Result<PurgeExpiredMessage, String> {
-    if intent.kind.as_str() != PURGE_EXPIRED_MESSAGE
-        || intent.execution != IntentExecution::Deferred
-    {
+    if intent.kind.as_str() != PURGE_EXPIRED_MESSAGE {
         return Err("expected purge_expired_message deferred intent".into());
     }
     let input = decode_purge_expired_message_payload(&intent.payload)?;

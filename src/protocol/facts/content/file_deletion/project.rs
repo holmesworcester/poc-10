@@ -9,7 +9,7 @@
 //!      content_deleted offer, and share the deletion fact.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -122,7 +122,7 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
                     deletion.target_file_id,
                     deletion.author_user_id,
                 ))
-                .intent(AtomicIntent::PutRow(row).into_intent())
+                .row_mutation(RowMutation::PutRow(row))
                 .intent(share_fact_with_workspace_intent_for_fact(
                     deletion.workspace_id,
                     fact,

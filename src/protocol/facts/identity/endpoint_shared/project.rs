@@ -11,7 +11,7 @@
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -87,7 +87,7 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
                 fact.id,
                 crate::protocol::matchers::endpoint_shared_role(),
             ))
-            .intent(AtomicIntent::PutRow(endpoint_shared_row(fact.id, &event)?).into_intent())
+            .row_mutation(RowMutation::PutRow(endpoint_shared_row(fact.id, &event)?))
             .intent(share_fact_with_workspace_intent_for_fact(
                 event.workspace_id,
                 fact,

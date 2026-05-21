@@ -9,7 +9,7 @@
 //!      remain explicit intent-handler work.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -86,6 +86,8 @@ impl TypedProjector<super::Codec> for InviteAcceptedProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(secret_need)
-            .intent(AtomicIntent::PutRow(invite_accepted_row(fact.id, &accepted)?).into_intent()))
+            .row_mutation(RowMutation::PutRow(invite_accepted_row(
+                fact.id, &accepted,
+            )?)))
     }
 }

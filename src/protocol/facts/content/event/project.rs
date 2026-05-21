@@ -8,7 +8,7 @@
 //!   3. MATERIALIZE. Once valid, write the content_event row and share the
 //!      fact with the workspace.
 use crate::core::facts::Fact;
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -72,7 +72,7 @@ impl TypedProjector<super::Codec> for ContentEventProjector {
 
         // 3. Materialize.
         Ok(output_with_signer_need(signer_need)
-            .intent(AtomicIntent::PutRow(content_event_row(fact.id, &event)?).into_intent())
+            .row_mutation(RowMutation::PutRow(content_event_row(fact.id, &event)?))
             .intent(share_fact_with_workspace_intent_for_fact(
                 event.workspace_id,
                 fact,

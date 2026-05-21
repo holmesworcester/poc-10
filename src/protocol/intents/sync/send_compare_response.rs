@@ -3,7 +3,7 @@
 use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::intents::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
@@ -23,7 +23,6 @@ pub fn send_sync_compare_response_intent(input: SendSyncCompareResponse) -> Inte
     payload.extend_from_slice(&input.compare_fact_id);
     Intent::new(
         IntentKind::new(SEND_SYNC_COMPARE_RESPONSE).expect("valid send_sync_compare_response kind"),
-        IntentExecution::Deferred,
         send_sync_compare_response_key(&input),
         payload,
     )
@@ -34,9 +33,6 @@ pub fn decode_send_sync_compare_response(
 ) -> Result<SendSyncCompareResponse, String> {
     if intent.kind.as_str() != SEND_SYNC_COMPARE_RESPONSE {
         return Err("expected send_sync_compare_response intent".into());
-    }
-    if intent.execution != IntentExecution::Deferred {
-        return Err("send_sync_compare_response intent must be deferred".into());
     }
     if intent.payload.len() != 33 || intent.payload[0] != 1 {
         return Err("send_sync_compare_response payload is malformed".into());

@@ -2,7 +2,7 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, ContextSet};
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::Intent;
+use crate::core::intents::{Intent, RowMutation};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -244,7 +244,9 @@ pub struct ProjectionOutput {
     pub needs: Vec<ContextNeed>,
     pub offers: Vec<ContextOffer>,
     pub time_wakes: Vec<TimeWake>,
+    pub row_mutations: Vec<RowMutation>,
     pub intents: Vec<Intent>,
+    pub local_intents: Vec<Intent>,
 }
 
 impl ProjectionOutput {
@@ -267,8 +269,18 @@ impl ProjectionOutput {
         self
     }
 
+    pub fn row_mutation(mut self, mutation: RowMutation) -> Self {
+        self.row_mutations.push(mutation);
+        self
+    }
+
     pub fn intent(mut self, intent: Intent) -> Self {
         self.intents.push(intent);
+        self
+    }
+
+    pub fn local_intent(mut self, intent: Intent) -> Self {
+        self.local_intents.push(intent);
         self
     }
 

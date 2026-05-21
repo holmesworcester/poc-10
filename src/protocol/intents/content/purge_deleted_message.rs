@@ -3,7 +3,7 @@
 use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::content::{message::retention, message_deletion};
 
 pub const PURGE_DELETED_MESSAGE: &str = "purge_deleted_message";
@@ -29,16 +29,13 @@ pub fn purge_deleted_message_intent(input: PurgeDeletedMessage) -> Intent {
     );
     Intent::new(
         IntentKind::new(PURGE_DELETED_MESSAGE).expect("valid purge_deleted_message intent kind"),
-        IntentExecution::Deferred,
         key,
         encode_purge_deleted_message_payload(&input),
     )
 }
 
 pub fn decode_purge_deleted_message_intent(intent: &Intent) -> Result<PurgeDeletedMessage, String> {
-    if intent.kind.as_str() != PURGE_DELETED_MESSAGE
-        || intent.execution != IntentExecution::Deferred
-    {
+    if intent.kind.as_str() != PURGE_DELETED_MESSAGE {
         return Err("expected purge_deleted_message deferred intent".into());
     }
     let decoded = decode_purge_deleted_message_payload(&intent.payload)?;

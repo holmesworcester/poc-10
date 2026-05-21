@@ -9,7 +9,7 @@
 //!      publish exact-fact context, and share the fact with the workspace.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -110,7 +110,7 @@ impl TypedProjector<super::Codec> for DisappearingMessagesSettingProjector {
                 FactScope::Global,
                 fact.id,
             ))
-            .intent(AtomicIntent::PutRow(row).into_intent())
+            .row_mutation(RowMutation::PutRow(row))
             .intent(share_fact_with_workspace_intent_for_fact(
                 setting.workspace_id,
                 fact,
@@ -183,7 +183,7 @@ mod projector_tests {
     use crate as topo;
 
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::intents::AtomicIntent;
+    use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::encryption::disappearing_messages_setting::fact::{
         DisappearingMessagesSettingFact, SCOPE_KIND_CHANNEL, SCOPE_KIND_WORKSPACE,
@@ -229,14 +229,15 @@ mod projector_tests {
                 )]),
             )
             .expect("project setting");
-        assert_eq!(projected.intents.len(), 2);
+        assert_eq!(projected.intents.len(), 1);
+        assert_eq!(projected.row_mutations.len(), 1);
         assert!(projected
             .offers
             .iter()
             .any(|offer| offer.role == sync_matchers::exact_fact_role()));
         assert_share_intent(&projected.intents, setting.workspace_id, fact.id);
 
-        let row = decode_single_put_row(&projected.intents[0]);
+        let row = decode_single_put_row(&projected.row_mutations[0]);
         assert_eq!(row.workspace_id, setting.workspace_id);
         assert_eq!(row.setting_id, fact.id);
         assert_eq!(row.scope_kind, SCOPE_KIND_WORKSPACE);
@@ -289,7 +290,7 @@ mod projector_tests {
             )
             .expect("matched previous projects");
         assert_share_intent(&projected.intents, setting.workspace_id, fact.id);
-        let row = decode_single_put_row(&projected.intents[0]);
+        let row = decode_single_put_row(&projected.row_mutations[0]);
         assert_eq!(row.scope_kind, SCOPE_KIND_CHANNEL);
         assert_eq!(row.scope_id, [9; 32]);
         assert_eq!(row.supersedes_setting_id, Some(previous_fact.id));
@@ -411,15 +412,11 @@ mod projector_tests {
         }
     }
 
-    fn decode_single_put_row(
-        intent: &topo::core::intents::Intent,
-    ) -> rows::DisappearingMessagesSettingRow {
-        match AtomicIntent::from_intent(intent, &[rows::DISAPPEARING_MESSAGES_SETTING_ROWS])
-            .expect("row intent")
-        {
-            AtomicIntent::PutRow(row) => rows::decode_setting_row(&row.key, &row.value)
+    fn decode_single_put_row(mutation: &RowMutation) -> rows::DisappearingMessagesSettingRow {
+        match mutation {
+            RowMutation::PutRow(row) => rows::decode_setting_row(&row.key, &row.value)
                 .expect("decode disappearing setting row"),
-            AtomicIntent::DeleteRow(_) => panic!("expected put row"),
+            RowMutation::DeleteRow(_) => panic!("expected put row"),
         }
     }
 

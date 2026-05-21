@@ -1,5 +1,5 @@
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::intent::{unwrap_key_wrap_intent, UnwrapKeyWrapIntent};
 use crate::protocol::facts::encryption::layout;
@@ -72,14 +72,11 @@ pub(super) fn signed_key_wrap(
     }
 
     output = output
-        .intent(
-            AtomicIntent::PutRow(key_wrap_row(KeyWrapRow {
-                key_wrap_id: fact.id,
-                signer_public_key: envelope.signer_public_key,
-                wrap: wrap.clone(),
-            })?)
-            .into_intent(),
-        )
+        .row_mutation(RowMutation::PutRow(key_wrap_row(KeyWrapRow {
+            key_wrap_id: fact.id,
+            signer_public_key: envelope.signer_public_key,
+            wrap: wrap.clone(),
+        })?))
         .offer(crate::protocol::matchers::exact_fact_offer(
             fact.id,
             scope.clone(),

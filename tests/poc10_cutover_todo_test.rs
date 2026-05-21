@@ -997,9 +997,12 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
 }
 
 #[test]
-fn cutover_network_io_intents_are_restart_local_ephemeral() {
+fn cutover_network_io_intents_are_restart_local_queue_work() {
     let root = root();
-    let pipeline = source_text(&root.join("src/core/pipeline.rs"));
+    let mut pipeline = source_text(&root.join("src/core/pipeline.rs"));
+    for path in rust_files_under(&root.join("src/core/pipeline")) {
+        pipeline.push_str(&source_text(&path));
+    }
     let protocol = source_text(&root.join("src/protocol/registry.rs"));
     let network_io_files = [
         "src/protocol/intents/connection/send_bootstrap_request.rs",
@@ -1010,14 +1013,9 @@ fn cutover_network_io_intents_are_restart_local_ephemeral() {
     let mut offenders = Vec::new();
     for relative in network_io_files {
         let source = source_text(&root.join(relative));
-        if source.contains("IntentExecution::Deferred") {
+        if source.contains("IntentExecution") {
             offenders.push(format!(
-                "{relative} still marks direct network IO as a durable deferred intent"
-            ));
-        }
-        if !source.contains("IntentExecution::Ephemeral") {
-            offenders.push(format!(
-                "{relative} does not use the restart-local ephemeral intent lane"
+                "{relative} still stores queue durability inside the intent value"
             ));
         }
     }
@@ -1031,15 +1029,18 @@ fn cutover_network_io_intents_are_restart_local_ephemeral() {
             .nth(1)
             .and_then(|tail| tail.split("},").next())
             .unwrap_or("");
-        if !registration.contains("IntentExecutionKind::Ephemeral") {
+        if !registration.contains("IntentQueueKind::Local") {
             offenders.push(format!(
-                "protocol registry does not mark {kind} as ephemeral"
+                "protocol registry does not mark {kind} for the local queue"
             ));
         }
     }
-    if !pipeline.contains("intent.execution == IntentExecution::Ephemeral") {
+    if !pipeline.contains("LOCAL_INTENTS")
+        || !pipeline.contains("Schema::memory_row_table")
+        || !pipeline.contains("submit_local_intent_to_store")
+    {
         offenders.push(
-            "IntentPipeline does not visibly keep ephemeral intents out of durable intent rows"
+            "core pipeline does not visibly route restart-local intents to a TEMP local intent queue"
                 .to_string(),
         );
     }

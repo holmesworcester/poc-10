@@ -27,7 +27,7 @@ use crate::core::context::{
     ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
 };
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
-use crate::core::intents::{AtomicIntent, Intent, IntentExecution, IntentKind, TableDelete};
+use crate::core::intents::{Intent, IntentKind, RowMutation, TableDelete};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
 use crate::core::pipeline::{
     CONTEXT_NEEDS, CONTEXT_OFFERS, FACTS, INTENTS, PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
@@ -136,11 +136,7 @@ pub(crate) fn purge_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result
 ///
 /// This is the "remove all of one fact's rows from a side table" step that
 /// [`purge_fact_in_tx`] repeats for each table. Returns whether any row matched.
-fn delete_rows_owned_by(
-    store: &Store,
-    table: TableName,
-    owner: &FactId,
-) -> rusqlite::Result<bool> {
+fn delete_rows_owned_by(store: &Store, table: TableName, owner: &FactId) -> rusqlite::Result<bool> {
     let keys = store
         .table_rows_where(table, &[("owner", ColumnValue::Bytes(owner))])?
         .into_iter()
@@ -156,8 +152,18 @@ fn delete_rows_owned_by(
 /// Returns whether the intent was newly recorded; an intent whose key already
 /// exists is left in place.
 pub(crate) fn record_intent_in_tx(store: &Store, intent: &Intent) -> rusqlite::Result<bool> {
+    record_intent_in_table_in_tx(store, INTENTS, intent)
+}
+
+pub(crate) fn record_intent_in_table_in_tx(
+    store: &Store,
+    table: TableName,
+    intent: &Intent,
+) -> rusqlite::Result<bool> {
+    let mut row = intent_row(intent);
+    row.table = table;
     store
-        .insert_table_rows_in_tx(vec![intent_row(intent)])
+        .insert_table_rows_in_tx(vec![row])
         .map(|count| count > 0)
 }
 
@@ -217,42 +223,52 @@ pub(crate) fn intent_row(intent: &Intent) -> TableRow {
     }
 }
 
-// === Atomic-intent rows ===
+// === Row mutations ===
 
-/// Reject any atomic intent that does not decode into a valid row mutation.
-///
-/// Run before a transaction so a malformed atomic intent fails the projection
-/// or handler rather than the commit.
-pub(crate) fn validate_atomic_row_intents(
-    intents: &[Intent],
+/// Reject any row mutation targeting a table this runtime has not registered.
+pub(crate) fn validate_row_mutations(
+    mutations: &[RowMutation],
     allowed_tables: &[TableName],
 ) -> Result<(), String> {
-    for intent in intents {
-        if intent.execution == IntentExecution::Atomic {
-            AtomicIntent::from_intent(intent, allowed_tables)?;
-        }
+    for mutation in mutations {
+        validate_row_mutation_table(mutation, allowed_tables)?;
     }
     Ok(())
 }
 
-/// Decode atomic intents into the concrete row inserts and deletes they stand
-/// for, so a commit can apply them directly.
-pub(crate) fn atomic_row_mutations(
-    intents: &[Intent],
+/// Split row mutations into inserts and deletes so a commit can apply them.
+pub(crate) fn row_mutation_rows(
+    mutations: &[RowMutation],
     allowed_tables: &[TableName],
 ) -> Result<(Vec<TableRow>, Vec<TableDelete>), String> {
     let mut rows = Vec::new();
     let mut deletes = Vec::<TableDelete>::new();
-    for intent in intents {
-        if intent.execution != IntentExecution::Atomic {
-            continue;
-        }
-        match AtomicIntent::from_intent(intent, allowed_tables)? {
-            AtomicIntent::PutRow(row) => rows.push(row),
-            AtomicIntent::DeleteRow(delete) => deletes.push(delete),
+    for mutation in mutations {
+        validate_row_mutation_table(mutation, allowed_tables)?;
+        match mutation {
+            RowMutation::PutRow(row) => rows.push(row.clone()),
+            RowMutation::DeleteRow(delete) => deletes.push(delete.clone()),
         }
     }
     Ok((rows, deletes))
+}
+
+fn validate_row_mutation_table(
+    mutation: &RowMutation,
+    allowed_tables: &[TableName],
+) -> Result<(), String> {
+    let table = match mutation {
+        RowMutation::PutRow(row) => row.table,
+        RowMutation::DeleteRow(delete) => delete.table,
+    };
+    if allowed_tables.contains(&table) {
+        Ok(())
+    } else {
+        Err(format!(
+            "row mutation table {} is not registered",
+            table.as_str()
+        ))
+    }
 }
 
 /// Adapt a `String` error into the [`rusqlite::Error`] a transaction closure
@@ -787,22 +803,12 @@ fn typed_fact_value(fact: &Fact) -> Vec<u8> {
     })
 }
 
-/// Encode the value half of an [`INTENTS`] row: execution class and payload.
+/// Encode the value half of an [`INTENTS`] row: payload bytes.
 fn typed_intent_value(intent: &Intent) -> Vec<u8> {
     encoded_row(|out| {
-        out.u64be(intent_execution_code(intent.execution));
         out.bytes_u32be(&intent.payload)
             .expect("intent payload fits u32");
     })
-}
-
-/// Stable on-disk tag for an [`IntentExecution`] (decoded by [`decode_intent_row`]).
-fn intent_execution_code(execution: IntentExecution) -> u64 {
-    match execution {
-        IntentExecution::Atomic => 0,
-        IntentExecution::Deferred => 1,
-        IntentExecution::Ephemeral => 2,
-    }
 }
 
 // === Reading and decoding rows ===
@@ -997,8 +1003,9 @@ fn decode_pending_time_range_row(key: &[u8], value: &[u8]) -> Result<TimeRange, 
     })
 }
 
-/// Decode an [`INTENTS`] row: kind and idempotence key from the key, execution
-/// class and payload from the value.
+/// Decode an [`INTENTS`] row: kind and idempotence key from the key, payload
+/// from the value. Durability is determined by the queue table that owns the
+/// row.
 pub(crate) fn decode_intent_row(key: &[u8], value: &[u8]) -> Result<Intent, String> {
     let mut key_reader = Reader::new(key);
     let kind = IntentKind::new(key_reader.string_u32be().row()?)?;
@@ -1006,15 +1013,9 @@ pub(crate) fn decode_intent_row(key: &[u8], value: &[u8]) -> Result<Intent, Stri
     key_reader.finish().row()?;
 
     let mut value_reader = Reader::new(value);
-    let execution = match value_reader.u64be().row()? {
-        0 => IntentExecution::Atomic,
-        1 => IntentExecution::Deferred,
-        2 => IntentExecution::Ephemeral,
-        other => return Err(format!("invalid intent execution tag {other}")),
-    };
     let payload = value_reader.bytes_u32be().row()?.to_vec();
     value_reader.finish().row()?;
-    Ok(Intent::new(kind, execution, idempotence_key, payload))
+    Ok(Intent::new(kind, idempotence_key, payload))
 }
 
 // === Scope codec and wire helpers ===

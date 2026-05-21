@@ -60,15 +60,14 @@ pub struct FactRegistration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IntentRegistration {
     pub kind: &'static str,
-    pub execution: IntentExecutionKind,
+    pub queue: IntentQueueKind,
     pub declared_by: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntentExecutionKind {
-    Atomic,
-    Deferred,
-    Ephemeral,
+pub enum IntentQueueKind {
+    Durable,
+    Local,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -650,98 +649,88 @@ pub const CONTEXT_MATCHERS: &[ContextRoleDeclaration] = &[
 
 pub const INTENTS: &[IntentRegistration] = &[
     IntentRegistration {
-        kind: "put_row",
-        execution: IntentExecutionKind::Atomic,
-        declared_by: "core",
-    },
-    IntentRegistration {
-        kind: "delete_row",
-        execution: IntentExecutionKind::Atomic,
-        declared_by: "core",
-    },
-    IntentRegistration {
         kind: connection_intents::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST,
-        execution: IntentExecutionKind::Ephemeral,
+        queue: IntentQueueKind::Local,
         declared_by: "intents::connection::send_bootstrap_request",
     },
     IntentRegistration {
         kind: connection_intents::create_response::CREATE_CONNECTION_RESPONSE,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::connection::create_response",
     },
     IntentRegistration {
         kind: encryption::intent::CREATE_KEY_WRAP,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::encryption::create_key_wrap",
     },
     IntentRegistration {
         kind: encryption::intent::PURGE_RETIRED_RECIPIENT_MATERIAL,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::encryption::purge_retired_recipient_material",
     },
     IntentRegistration {
         kind: encryption::intent::UNWRAP_KEY_WRAP,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::encryption::unwrap_key_wrap",
     },
     IntentRegistration {
         kind: sync_intents::send_compare_response::SEND_SYNC_COMPARE_RESPONSE,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::sync::send_compare_response",
     },
     IntentRegistration {
         kind: sync_intents::send_needed_fact_id::SEND_NEEDED_FACT_ID,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::sync::send_needed_fact_id",
     },
     IntentRegistration {
         kind: sync_intents::send_requested_fact::SEND_REQUESTED_FACT,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::sync::send_requested_fact",
     },
     IntentRegistration {
         kind: sync_intents::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::sync::share_fact_with_workspace",
     },
     IntentRegistration {
         kind: sync_intents::seed_connection::SEED_CONNECTION_SYNC,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::sync::seed_connection",
     },
     IntentRegistration {
         kind: transport_intents::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::transport::send_facts_on_connection",
     },
     IntentRegistration {
         kind: transport_intents::send_network_frame::SEND_NETWORK_FRAME,
-        execution: IntentExecutionKind::Ephemeral,
+        queue: IntentQueueKind::Local,
         declared_by: "intents::transport::send_network_frame",
     },
     IntentRegistration {
         kind: transport_intents::receive_transit_frame::RECEIVE_TRANSIT_FRAME,
-        execution: IntentExecutionKind::Ephemeral,
+        queue: IntentQueueKind::Local,
         declared_by: "intents::transport::receive_transit_frame",
     },
     IntentRegistration {
         kind: content_intents::purge_deleted_message::PURGE_DELETED_MESSAGE,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::content::purge_deleted_message",
     },
     IntentRegistration {
         kind: content_intents::purge_message_child::PURGE_MESSAGE_CHILD,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::content::purge_message_child",
     },
     IntentRegistration {
         kind: content_intents::purge_expired_message::PURGE_EXPIRED_MESSAGE,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::content::purge_expired_message",
     },
     IntentRegistration {
         kind: content_intents::purge_below_retention_floor::PURGE_BELOW_RETENTION_FLOOR,
-        execution: IntentExecutionKind::Deferred,
+        queue: IntentQueueKind::Durable,
         declared_by: "intents::content::purge_below_retention_floor",
     },
 ];
@@ -857,7 +846,7 @@ pub(crate) const SCHEMA_SOURCES: &[&str] = &[
     INTENTS_SCHEMA_SOURCE,
 ];
 
-pub(crate) const ATOMIC_ROW_TABLES: &[TableName] = &[
+pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::cascade_fact::rows::CASCADE_STAGED_FACT_ROWS,
     connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::request::rows::CONNECTION_REQUEST_ROWS,

@@ -3,7 +3,7 @@
 use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::sync::need_id;
 use crate::protocol::intents::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -24,7 +24,6 @@ pub fn send_requested_fact_intent(input: SendRequestedFact) -> Intent {
     payload.extend_from_slice(&input.need_fact_id);
     Intent::new(
         IntentKind::new(SEND_REQUESTED_FACT).expect("valid send_requested_fact kind"),
-        IntentExecution::Deferred,
         send_requested_fact_key(&input),
         payload,
     )
@@ -33,9 +32,6 @@ pub fn send_requested_fact_intent(input: SendRequestedFact) -> Intent {
 pub fn decode_send_requested_fact(intent: &Intent) -> Result<SendRequestedFact, String> {
     if intent.kind.as_str() != SEND_REQUESTED_FACT {
         return Err("expected send_requested_fact intent".into());
-    }
-    if intent.execution != IntentExecution::Deferred {
-        return Err("send_requested_fact intent must be deferred".into());
     }
     if intent.payload.len() != 33 || intent.payload[0] != 1 {
         return Err("send_requested_fact payload is malformed".into());

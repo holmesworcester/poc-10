@@ -7,7 +7,7 @@
 //!      when the peer explicitly requested an answer.
 
 use crate::core::facts::Fact;
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -46,7 +46,7 @@ impl TypedProjector<super::Codec> for SyncCompareProjector {
         // 1. Structural.
         // 3. Materialize.
         let mut output = ProjectionOutput::new()
-            .intent(AtomicIntent::PutRow(sync_compare_row(fact.id, &compare)?).into_intent());
+            .row_mutation(RowMutation::PutRow(sync_compare_row(fact.id, &compare)?));
         if compare.response_requested {
             output = output.intent(send_sync_compare_response_intent(SendSyncCompareResponse {
                 compare_fact_id: fact.id,

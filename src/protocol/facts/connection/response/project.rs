@@ -10,7 +10,7 @@
 //!      effects stay in intent handlers.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -315,7 +315,10 @@ fn materialized_output(
     response: &ConnectionResponseFact,
 ) -> Result<ProjectionOutput, String> {
     Ok(ProjectionOutput::new()
-        .intent(AtomicIntent::PutRow(connection_response_row(response_id, response)?).into_intent())
+        .row_mutation(RowMutation::PutRow(connection_response_row(
+            response_id,
+            response,
+        )?))
         .intent(seed_connection_sync_intent(SeedConnectionSync {
             connection_id: response_id,
         })))
@@ -337,7 +340,7 @@ mod projector_tests {
 
     use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::intents::AtomicIntent;
+    use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
@@ -534,12 +537,10 @@ mod projector_tests {
             .project(&scenario.response_fact, &context)
             .expect("project response");
 
-        assert_eq!(output.intents.len(), 2);
-        let AtomicIntent::PutRow(row) =
-            AtomicIntent::from_intent(&output.intents[0], &[rows::CONNECTION_RESPONSE_ROWS])
-                .expect("row intent")
-        else {
-            panic!("expected put_row intent");
+        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.row_mutations.len(), 1);
+        let RowMutation::PutRow(row) = &output.row_mutations[0] else {
+            panic!("expected put row mutation");
         };
         let response = layout::decode_fact(&scenario.response_fact.bytes).expect("decode response");
         let row = rows::decode_connection_response_row(&row.key, &row.value)
@@ -579,12 +580,10 @@ mod projector_tests {
             .project(&scenario.response_fact, &context)
             .expect("project received response");
 
-        assert_eq!(output.intents.len(), 2);
-        let AtomicIntent::PutRow(row) =
-            AtomicIntent::from_intent(&output.intents[0], &[rows::CONNECTION_RESPONSE_ROWS])
-                .expect("row intent")
-        else {
-            panic!("expected put_row intent");
+        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.row_mutations.len(), 1);
+        let RowMutation::PutRow(row) = &output.row_mutations[0] else {
+            panic!("expected put row mutation");
         };
         let row = rows::decode_connection_response_row(&row.key, &row.value)
             .expect("decode connection response row");

@@ -393,6 +393,26 @@ impl Store {
         rows.collect()
     }
 
+    /// Scan an opaque row table in insertion order.
+    ///
+    /// This is intentionally limited to generic row tables. Typed tables have
+    /// declared primary keys and are always scanned in key order.
+    pub(crate) fn row_table_rows_in_insertion_order(
+        &self,
+        table: TableName,
+    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if self.typed_table(table).is_some() {
+            return self.table_rows(table);
+        }
+        let table_name = quoted_table_name(table)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT row_key, row_value FROM {table_name}
+                 ORDER BY rowid"
+        ))?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
     /// Scan one declared table by lexicographic key prefix.
     pub fn table_rows_with_key_prefix(
         &self,
@@ -924,5 +944,40 @@ mod tests {
             .table_rows_with_key_prefix(MEMORY_ROWS, b"b/", 1)
             .expect("scan prefix");
         assert_eq!(rows, vec![(b"b/1".to_vec(), b"one".to_vec())]);
+    }
+
+    #[test]
+    fn row_table_insertion_order_scan_preserves_fifo_queue_order() {
+        let store = Store::open_memory_with_schemas(&[Schema::memory_row_table(
+            "test.memory_rows.v1",
+            MEMORY_ROWS,
+        )])
+        .expect("open store");
+        store
+            .insert_table_rows(vec![
+                TableRow {
+                    table: MEMORY_ROWS,
+                    key: b"z".to_vec(),
+                    value: b"first".to_vec(),
+                },
+                TableRow {
+                    table: MEMORY_ROWS,
+                    key: b"a".to_vec(),
+                    value: b"second".to_vec(),
+                },
+            ])
+            .expect("insert rows");
+
+        let rows = store
+            .row_table_rows_in_insertion_order(MEMORY_ROWS)
+            .expect("scan insertion order");
+
+        assert_eq!(
+            rows,
+            vec![
+                (b"z".to_vec(), b"first".to_vec()),
+                (b"a".to_vec(), b"second".to_vec())
+            ]
+        );
     }
 }

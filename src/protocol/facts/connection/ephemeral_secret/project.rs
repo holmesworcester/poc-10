@@ -10,7 +10,7 @@
 
 use crate::core::crypto;
 use crate::core::facts::Fact;
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -54,9 +54,8 @@ impl TypedProjector<super::Codec> for ConnectionEphemeralSecretProjector {
             .offer(matchers::connection_ephemeral_secret_offer(
                 fact.id, fact.id,
             ))
-            .intent(
-                AtomicIntent::PutRow(connection_ephemeral_secret_row(fact.id, &secret)?)
-                    .into_intent(),
-            ))
+            .row_mutation(RowMutation::PutRow(connection_ephemeral_secret_row(
+                fact.id, &secret,
+            )?)))
     }
 }

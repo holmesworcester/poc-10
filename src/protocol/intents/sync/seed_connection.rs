@@ -8,7 +8,7 @@ use crate::core::{
     facts::{Fact, FactId},
     intents::{
         HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, Intent,
-        IntentExecution, IntentHandler, IntentKind,
+        IntentHandler, IntentKind,
     },
     store::Store,
 };
@@ -25,7 +25,6 @@ pub struct SeedConnectionSync {
 pub fn seed_connection_sync_intent(input: SeedConnectionSync) -> Intent {
     Intent::new(
         IntentKind::new(SEED_CONNECTION_SYNC).expect("valid seed_connection_sync kind"),
-        IntentExecution::Deferred,
         seed_connection_sync_key(input.connection_id),
         encode_seed_connection_sync(&input),
     )
@@ -34,9 +33,6 @@ pub fn seed_connection_sync_intent(input: SeedConnectionSync) -> Intent {
 pub fn decode_seed_connection_sync(intent: &Intent) -> Result<SeedConnectionSync, String> {
     if intent.kind.as_str() != SEED_CONNECTION_SYNC {
         return Err("expected seed_connection_sync intent".into());
-    }
-    if intent.execution != IntentExecution::Deferred {
-        return Err("seed_connection_sync intent must be deferred".into());
     }
     if intent.payload.len() != 33 || intent.payload[0] != 1 {
         return Err("invalid seed_connection_sync payload".into());

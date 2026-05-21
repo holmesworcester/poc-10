@@ -1,7 +1,7 @@
 //! Deferred encryption intent layouts.
 
 use crate::core::facts::FactId;
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 use crate::core::wire::{FixedLayout, U16be, U64be};
 
 use super::fact::{RecipientKeyId, WorkspaceId};
@@ -53,14 +53,13 @@ pub fn create_key_wrap_intent(
     };
     Intent::new(
         IntentKind::new(CREATE_KEY_WRAP).expect("valid create_key_wrap intent kind"),
-        IntentExecution::Deferred,
         create_key_wrap_key(&input),
         encode_create_key_wrap_payload(&input),
     )
 }
 
 pub fn decode_create_key_wrap_intent(intent: &Intent) -> Result<CreateKeyWrapIntent, String> {
-    if intent.kind.as_str() != CREATE_KEY_WRAP || intent.execution != IntentExecution::Deferred {
+    if intent.kind.as_str() != CREATE_KEY_WRAP {
         return Err("expected create_key_wrap deferred intent".to_string());
     }
     let input = decode_create_key_wrap_payload(&intent.payload)?;
@@ -73,14 +72,13 @@ pub fn decode_create_key_wrap_intent(intent: &Intent) -> Result<CreateKeyWrapInt
 pub fn unwrap_key_wrap_intent(input: UnwrapKeyWrapIntent) -> Intent {
     Intent::new(
         IntentKind::new(UNWRAP_KEY_WRAP).expect("valid unwrap_key_wrap intent kind"),
-        IntentExecution::Deferred,
         unwrap_key(&input),
         encode_unwrap_payload(&input),
     )
 }
 
 pub fn decode_unwrap_key_wrap_intent(intent: &Intent) -> Result<UnwrapKeyWrapIntent, String> {
-    if intent.kind.as_str() != UNWRAP_KEY_WRAP || intent.execution != IntentExecution::Deferred {
+    if intent.kind.as_str() != UNWRAP_KEY_WRAP {
         return Err("expected unwrap_key_wrap deferred intent".to_string());
     }
     let input = decode_unwrap_payload(&intent.payload)?;
@@ -96,7 +94,6 @@ pub fn purge_retired_recipient_material_intent(
     Intent::new(
         IntentKind::new(PURGE_RETIRED_RECIPIENT_MATERIAL)
             .expect("valid purge_retired_recipient_material intent kind"),
-        IntentExecution::Deferred,
         retired_recipient_key(
             input.workspace_id,
             input.recipient_key_id,
@@ -109,9 +106,7 @@ pub fn purge_retired_recipient_material_intent(
 pub fn decode_purge_retired_recipient_material_intent(
     intent: &Intent,
 ) -> Result<PurgeRetiredRecipientMaterialIntent, String> {
-    if intent.kind.as_str() != PURGE_RETIRED_RECIPIENT_MATERIAL
-        || intent.execution != IntentExecution::Deferred
-    {
+    if intent.kind.as_str() != PURGE_RETIRED_RECIPIENT_MATERIAL {
         return Err("expected purge_retired_recipient_material deferred intent".to_string());
     }
     let workspace_id = decode_workspace_from_retired_key(&intent.key)?;

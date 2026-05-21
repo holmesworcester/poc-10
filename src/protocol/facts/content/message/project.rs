@@ -14,7 +14,7 @@
 use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{AtomicIntent, TableDelete};
+use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
@@ -138,18 +138,15 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         // 3. Materialize.
         Ok(metadata_output
             .offer(matchers::message_offer(fact.id, scope, fact.id))
-            .intent(AtomicIntent::PutRow(content_message_row(fact.id, &message)).into_intent())
-            .intent(
-                AtomicIntent::PutRow(opened_message_row(OpenedMessageRow {
-                    workspace_id: message.workspace_id,
-                    message_id: fact.id,
-                    created_at_ms: message.created_at_ms,
-                    author_user_id: message.author_user_id,
-                    signer_id: message.signer_id,
-                    text,
-                }))
-                .into_intent(),
-            ))
+            .row_mutation(RowMutation::PutRow(content_message_row(fact.id, &message)))
+            .row_mutation(RowMutation::PutRow(opened_message_row(OpenedMessageRow {
+                workspace_id: message.workspace_id,
+                message_id: fact.id,
+                created_at_ms: message.created_at_ms,
+                author_user_id: message.author_user_id,
+                signer_id: message.signer_id,
+                text,
+            }))))
     }
 }
 
@@ -344,29 +341,20 @@ fn expired_output(
 ) -> ProjectionOutput {
     let row_key = content_message_key(message.workspace_id, message_id);
     ProjectionOutput::new()
-        .intent(
-            AtomicIntent::PutRow(message_tombstone_row(
-                message.workspace_id,
-                message_id,
-                message.author_user_id,
-                message.created_at_ms,
-            ))
-            .into_intent(),
-        )
-        .intent(
-            AtomicIntent::DeleteRow(TableDelete {
-                table: CONTENT_MESSAGE_ROWS,
-                key: content_message_key(message.workspace_id, message_id),
-            })
-            .into_intent(),
-        )
-        .intent(
-            AtomicIntent::DeleteRow(TableDelete {
-                table: OPENED_MESSAGE_ROWS,
-                key: row_key,
-            })
-            .into_intent(),
-        )
+        .row_mutation(RowMutation::PutRow(message_tombstone_row(
+            message.workspace_id,
+            message_id,
+            message.author_user_id,
+            message.created_at_ms,
+        )))
+        .row_mutation(RowMutation::DeleteRow(TableDelete {
+            table: CONTENT_MESSAGE_ROWS,
+            key: content_message_key(message.workspace_id, message_id),
+        }))
+        .row_mutation(RowMutation::DeleteRow(TableDelete {
+            table: OPENED_MESSAGE_ROWS,
+            key: row_key,
+        }))
         .intent(purge_expired_message::purge_expired_message_intent(
             PurgeExpiredMessage {
                 workspace_id: message.workspace_id,
@@ -383,29 +371,20 @@ fn author_deletion_output(
 ) -> ProjectionOutput {
     let row_key = content_message_key(message.workspace_id, message_id);
     ProjectionOutput::new()
-        .intent(
-            AtomicIntent::PutRow(message_tombstone_row(
-                message.workspace_id,
-                message_id,
-                message.author_user_id,
-                message.created_at_ms,
-            ))
-            .into_intent(),
-        )
-        .intent(
-            AtomicIntent::DeleteRow(TableDelete {
-                table: CONTENT_MESSAGE_ROWS,
-                key: content_message_key(message.workspace_id, message_id),
-            })
-            .into_intent(),
-        )
-        .intent(
-            AtomicIntent::DeleteRow(TableDelete {
-                table: OPENED_MESSAGE_ROWS,
-                key: row_key,
-            })
-            .into_intent(),
-        )
+        .row_mutation(RowMutation::PutRow(message_tombstone_row(
+            message.workspace_id,
+            message_id,
+            message.author_user_id,
+            message.created_at_ms,
+        )))
+        .row_mutation(RowMutation::DeleteRow(TableDelete {
+            table: CONTENT_MESSAGE_ROWS,
+            key: content_message_key(message.workspace_id, message_id),
+        }))
+        .row_mutation(RowMutation::DeleteRow(TableDelete {
+            table: OPENED_MESSAGE_ROWS,
+            key: row_key,
+        }))
         .intent(purge_deleted_message::purge_deleted_message_intent(
             PurgeDeletedMessage {
                 workspace_id: message.workspace_id,
@@ -447,7 +426,7 @@ mod projector_tests {
 
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::intents::AtomicIntent;
+    use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::content::message::fact::ContentMessageFact;
     use topo::protocol::facts::content::message::{layout, project, rows};
@@ -466,25 +445,27 @@ mod projector_tests {
 
     macro_rules! put_row {
         ($output:expr, $table:expr) => {
-            $output.intents.iter().find_map(|intent| {
-                let atomic = AtomicIntent::from_intent(intent, &[$table]).ok()?;
-                match atomic {
-                    AtomicIntent::PutRow(row) => Some(row),
-                    AtomicIntent::DeleteRow(_) => None,
-                }
-            })
+            $output
+                .row_mutations
+                .iter()
+                .find_map(|mutation| match mutation {
+                    RowMutation::PutRow(row) if row.table == $table => Some(row.clone()),
+                    _ => None,
+                })
         };
     }
 
     macro_rules! put_delete {
         ($output:expr, $table:expr) => {
-            $output.intents.iter().find_map(|intent| {
-                let atomic = AtomicIntent::from_intent(intent, &[$table]).ok()?;
-                match atomic {
-                    AtomicIntent::DeleteRow(delete) => Some(delete),
-                    AtomicIntent::PutRow(_) => None,
-                }
-            })
+            $output
+                .row_mutations
+                .iter()
+                .find_map(|mutation| match mutation {
+                    RowMutation::DeleteRow(delete) if delete.table == $table => {
+                        Some(delete.clone())
+                    }
+                    _ => None,
+                })
         };
     }
 
@@ -516,7 +497,8 @@ mod projector_tests {
             .offers
             .iter()
             .any(|offer| offer.role == message_context::message_role()));
-        assert_eq!(output.intents.len(), 3);
+        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.row_mutations.len(), 2);
 
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
         let row = rows::decode_content_message_row(&row.key, &row.value).expect("decode row");

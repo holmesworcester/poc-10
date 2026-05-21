@@ -11,7 +11,7 @@
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -197,9 +197,11 @@ fn materialized_output(
 ) -> Result<ProjectionOutput, String> {
     let mut output = ProjectionOutput::new()
         .offer(matchers::connection_request_offer(request_id, request_id))
-        .intent(AtomicIntent::PutRow(connection_request_row(request_id, request)?).into_intent());
+        .row_mutation(RowMutation::PutRow(connection_request_row(
+            request_id, request,
+        )?));
     if let Some(addr) = request.to_listen_addr {
-        output = output.intent(send_bootstrap_connection_request_intent(
+        output = output.local_intent(send_bootstrap_connection_request_intent(
             SendBootstrapConnectionRequest { request_id, addr },
         )?);
     }
@@ -277,7 +279,7 @@ mod projector_tests {
 
     use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use topo::core::facts::{Fact, FactScope};
-    use topo::core::intents::AtomicIntent;
+    use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::facts::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
@@ -456,17 +458,15 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project request");
 
-        assert_eq!(output.intents.len(), 1);
+        assert!(output.intents.is_empty());
+        assert_eq!(output.row_mutations.len(), 1);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(
             output.offers[0].role.as_str(),
             request_matchers::CONNECTION_REQUEST_ROLE
         );
-        let AtomicIntent::PutRow(row) =
-            AtomicIntent::from_intent(&output.intents[0], &[rows::CONNECTION_REQUEST_ROWS])
-                .expect("row intent")
-        else {
-            panic!("expected put_row intent");
+        let RowMutation::PutRow(row) = &output.row_mutations[0] else {
+            panic!("expected put row mutation");
         };
         let row = rows::decode_connection_request_row(&row.key, &row.value)
             .expect("decode connection request row");
@@ -493,7 +493,8 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project received request");
 
-        assert_eq!(output.intents.len(), 2);
+        assert_eq!(output.intents.len(), 1);
+        assert_eq!(output.row_mutations.len(), 1);
         assert_eq!(
             output.offers[0].role.as_str(),
             request_matchers::CONNECTION_REQUEST_ROLE

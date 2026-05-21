@@ -269,26 +269,34 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
         needs,
         offers,
         time_wakes,
+        row_mutations,
         intents,
+        local_intents,
     } = topo::core::projectors::ProjectionOutput::default();
 
     assert!(needs.is_empty());
     assert!(offers.is_empty());
     assert!(time_wakes.is_empty());
+    assert!(row_mutations.is_empty());
     assert!(intents.is_empty());
+    assert!(local_intents.is_empty());
 }
 
 #[test]
-fn poc10_handler_output_contract_emits_only_facts_purges_and_intents() {
+fn poc10_handler_output_contract_emits_facts_purges_rows_and_intents() {
     let topo::core::intents::HandlerOutput {
         facts,
         purged_facts,
+        row_mutations,
         intents,
+        local_intents,
     } = topo::core::intents::HandlerOutput::default();
 
     assert!(facts.is_empty());
     assert!(purged_facts.is_empty());
+    assert!(row_mutations.is_empty());
     assert!(intents.is_empty());
+    assert!(local_intents.is_empty());
 }
 
 #[test]
@@ -300,7 +308,10 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
         "missing src/core/pipeline.rs; when introduced, it must expose protocol-neutral terms for pending projection, context delta matching, and intent output"
     );
 
-    let text = source_text(&pipeline_path);
+    let mut text = source_text(&pipeline_path);
+    for path in source_files(&root.join("src/core/pipeline")) {
+        text.push_str(&source_text(&path));
+    }
     let required_terms = [
         (
             "pending projection",
@@ -609,7 +620,7 @@ fn poc10_target_projectors_do_not_write_store_rows_directly() {
 
     assert!(
         offenders.is_empty(),
-        "poc-10 target projectors must not write store rows directly; emit AtomicIntent row mutations through ProjectionOutput::intents instead:\n{}",
+        "poc-10 target projectors must not write store rows directly; emit RowMutation values through ProjectionOutput::row_mutations instead:\n{}",
         offenders.join("\n")
     );
 }

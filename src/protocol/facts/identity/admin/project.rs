@@ -11,7 +11,7 @@
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -231,7 +231,7 @@ fn materialized_output(
             admin.workspace_id,
             admin.user_fact_id.to_vec(),
         ))
-        .intent(AtomicIntent::PutRow(admin_row(fact.id, admin)?).into_intent())
+        .row_mutation(RowMutation::PutRow(admin_row(fact.id, admin)?))
         .intent(share_fact_with_workspace_intent_for_fact(
             admin.workspace_id,
             fact,

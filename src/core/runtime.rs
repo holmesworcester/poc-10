@@ -1,18 +1,18 @@
 //! Generic target runtime.
 //!
 //! Core owns the mechanics: open the store, submit facts and intents, run
-//! pending-fact/context-change pipelines, and dispatch handler work through the
-//! intent pipeline.
+//! pending-fact/context-change pipelines, and dispatch handler work through
+//! SQLite-backed intent queues.
 //! Protocol code supplies the projector router, context matchers, handler
-//! registry, schema sources, and atomic row tables.
+//! registry, schema sources, and row mutation tables.
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
 use crate::core::facts::Fact;
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::matchers::ContextMatcher;
 use crate::core::pipeline::{
-    self, persisted_facts, DispatchReport, IntentPipeline, PipelineReport, INTENTS,
-    PENDING_CONTEXT_CHANGES, PENDING_PROJECTION,
+    self, persisted_facts, DispatchReport, PipelineReport, INTENTS, PENDING_CONTEXT_CHANGES,
+    PENDING_PROJECTION,
 };
 use crate::core::projectors::{Projector, Timeline};
 use crate::core::store::{Schema, Store, TableName};
@@ -26,7 +26,7 @@ pub type MatchersFactory = fn() -> Vec<Box<dyn ContextMatcher>>;
 pub struct RuntimeDescription {
     pub schema_sources: &'static [&'static str],
     pub schemas: &'static [Schema],
-    pub atomic_row_tables: &'static [TableName],
+    pub row_mutation_tables: &'static [TableName],
     pub projector: ProjectorFactory,
     pub matchers: MatchersFactory,
     pub handlers: &'static [HandlerRoute],
@@ -107,15 +107,13 @@ impl HandlerSet {
     }
     pub(crate) fn dispatch(
         &self,
-        intent_pipeline: &mut IntentPipeline,
         store: &Store,
         allowed_tables: &[TableName],
         limit_per_handler: usize,
     ) -> Result<DispatchReport, String> {
         let mut total = DispatchReport::default();
         for handler in &self.handlers {
-            let report = pipeline::dispatch_deferred_intents(
-                intent_pipeline,
+            let report = pipeline::dispatch_durable_intents(
                 handler.as_ref(),
                 store,
                 allowed_tables,
@@ -129,23 +127,7 @@ impl HandlerSet {
                 continue;
             }
 
-            let report = pipeline::dispatch_atomic_intents(
-                intent_pipeline,
-                handler.as_ref(),
-                store,
-                allowed_tables,
-                limit_per_handler,
-            )?;
-            total.handled += report.handled;
-            total.facts += report.facts;
-            total.intents += report.intents;
-            total.retries += report.retries;
-            if report.handled > 0 || report.retries > 0 {
-                continue;
-            }
-
-            let report = pipeline::dispatch_ephemeral_intents(
-                intent_pipeline,
+            let report = pipeline::dispatch_local_intents(
                 handler.as_ref(),
                 store,
                 allowed_tables,
@@ -164,7 +146,6 @@ impl HandlerSet {
 pub struct Runtime {
     description: &'static RuntimeDescription,
     store: Store,
-    intent_pipeline: IntentPipeline,
     projector: Box<dyn Projector>,
     matchers: Vec<Box<dyn ContextMatcher>>,
     handlers: HandlerSet,
@@ -172,9 +153,10 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn open_memory(description: &'static RuntimeDescription) -> Result<Self, String> {
+        let schemas = runtime_schemas(description);
         let store = Store::open_memory_with_schema_sources_and_schemas(
             description.schema_sources,
-            description.schemas,
+            &schemas,
         )
         .map_err(|err| format!("open target memory store: {err}"))?;
         Self::from_store(description, store)
@@ -184,10 +166,11 @@ impl Runtime {
         description: &'static RuntimeDescription,
         path: impl AsRef<Path>,
     ) -> Result<Self, String> {
+        let schemas = runtime_schemas(description);
         let store = Store::open_disk_with_schema_sources_and_schemas(
             path,
             description.schema_sources,
-            description.schemas,
+            &schemas,
         )
         .map_err(|err| format!("open target disk store: {err}"))?;
         Self::from_store(description, store)
@@ -197,7 +180,6 @@ impl Runtime {
         Ok(Self {
             description,
             store,
-            intent_pipeline: IntentPipeline::new(),
             projector: (description.projector)(),
             matchers: (description.matchers)(),
             handlers: HandlerSet::new(description.handlers),
@@ -233,11 +215,11 @@ impl Runtime {
             .store
             .table_row_count(INTENTS)
             .expect("runtime intent count should load from store");
-        stored + self.intent_pipeline.ephemeral_intents().len()
-    }
-
-    pub fn ephemeral_intents(&self) -> &[Intent] {
-        self.intent_pipeline.ephemeral_intents()
+        let local = self
+            .store
+            .table_row_count(pipeline::LOCAL_INTENTS)
+            .expect("runtime local intent count should load from store");
+        stored + local
     }
 
     pub fn command_context<'a>(
@@ -249,35 +231,25 @@ impl Runtime {
     }
 
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
-        let inserted = pipeline::submit_fact_to_store(&self.store, fact.clone())
-            .expect("runtime fact submission should persist");
-        if inserted {
-            self.intent_pipeline.remember_fact(fact);
-        }
-        inserted
+        pipeline::submit_fact_to_store(&self.store, fact)
+            .expect("runtime fact submission should persist")
     }
 
     pub fn submit_facts(&mut self, facts: impl IntoIterator<Item = Fact>) -> Result<usize, String> {
-        let facts = facts.into_iter().collect::<Vec<_>>();
-        let inserted = pipeline::submit_facts_to_store(&self.store, facts.clone())?;
-        for fact in facts {
-            self.intent_pipeline.remember_fact(fact);
-        }
-        Ok(inserted)
+        pipeline::submit_facts_to_store(&self.store, facts)
     }
 
     pub fn purge_fact(&mut self, fact_id: crate::core::facts::FactId) -> bool {
-        let changed = pipeline::purge_fact_from_store(&self.store, fact_id)
-            .expect("runtime fact purge should persist");
-        if changed {
-            self.intent_pipeline.forget_purged_fact(fact_id);
-        }
-        changed
+        pipeline::purge_fact_from_store(&self.store, fact_id)
+            .expect("runtime fact purge should persist")
     }
 
     pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
-        self.intent_pipeline
-            .submit_intent_to_store(&self.store, intent)
+        pipeline::submit_intent_to_store(&self.store, intent)
+    }
+
+    pub fn submit_local_intent(&mut self, intent: Intent) -> Result<bool, String> {
+        pipeline::submit_local_intent_to_store(&self.store, intent)
     }
 
     pub fn submit_command_output<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
@@ -286,6 +258,9 @@ impl Runtime {
         }
         for intent in output.intents {
             self.submit_intent(intent)?;
+        }
+        for intent in output.local_intents {
+            self.submit_local_intent(intent)?;
         }
         Ok(output.receipt)
     }
@@ -297,11 +272,10 @@ impl Runtime {
             .map(|matcher| matcher.as_ref() as &dyn ContextMatcher)
             .collect::<Vec<_>>();
         pipeline::process_pending_facts_and_context_changes(
-            &mut self.intent_pipeline,
             self.projector.as_ref(),
             &matcher_refs,
             &self.store,
-            self.description.atomic_row_tables,
+            self.description.row_mutation_tables,
             limit,
         )
     }
@@ -328,9 +302,8 @@ impl Runtime {
 
     pub fn dispatch_intents(&mut self, limit_per_handler: usize) -> Result<WorkStatus, String> {
         let report = self.handlers.dispatch(
-            &mut self.intent_pipeline,
             &self.store,
-            self.description.atomic_row_tables,
+            self.description.row_mutation_tables,
             limit_per_handler,
         )?;
         Ok(WorkStatus::from_dispatch_report(&report))
@@ -373,9 +346,8 @@ impl Runtime {
         limit_per_handler: usize,
     ) -> Result<WorkStatus, String> {
         let report = handlers.dispatch(
-            &mut self.intent_pipeline,
             &self.store,
-            self.description.atomic_row_tables,
+            self.description.row_mutation_tables,
             limit_per_handler,
         )?;
         Ok(WorkStatus::from_dispatch_report(&report))
@@ -426,6 +398,13 @@ impl Runtime {
     }
 }
 
+fn runtime_schemas(description: &RuntimeDescription) -> Vec<Schema> {
+    let mut schemas = Vec::with_capacity(pipeline::SCHEMAS.len() + description.schemas.len());
+    schemas.extend_from_slice(pipeline::SCHEMAS);
+    schemas.extend_from_slice(description.schemas);
+    schemas
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,7 +435,7 @@ mod tests {
     const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[CORE_SCHEMA_SOURCE],
         schemas: &[],
-        atomic_row_tables: &[],
+        row_mutation_tables: &[],
         projector: noop_projector,
         matchers: no_matchers,
         handlers: &[],

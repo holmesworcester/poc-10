@@ -147,7 +147,7 @@ fn submit_inbound_network_intents(
     };
     let received_at_local_ms = now_ms();
     for row in inbound {
-        runtime.submit_intent(to_intent(InboundNetworkFrame {
+        runtime.submit_local_intent(to_intent(InboundNetworkFrame {
             frame: row.bytes.clone(),
             origin_addr: row.source.addr(),
             received_at_local_ms,

@@ -11,7 +11,7 @@
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -263,7 +263,7 @@ fn materialized_output(
     output: ProjectionOutput,
 ) -> Result<ProjectionOutput, String> {
     Ok(output
-        .intent(AtomicIntent::PutRow(device_invite_row(fact.id, invite)?).into_intent())
+        .row_mutation(RowMutation::PutRow(device_invite_row(fact.id, invite)?))
         .offer(matchers::exact_offer(
             fact.id,
             matchers::device_invite_role(),

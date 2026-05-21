@@ -7,10 +7,7 @@
 
 use crate::core::{
     facts::{Fact, FactId},
-    intents::{
-        HandlerContext, HandlerFactId, HandlerResult, Intent, IntentExecution, IntentHandler,
-        IntentKind,
-    },
+    intents::{HandlerContext, HandlerFactId, HandlerResult, Intent, IntentHandler, IntentKind},
 };
 use crate::protocol::facts::sync::shared_fact;
 use crate::protocol::intents::payload::{PayloadError, PayloadReader, PayloadWriter};
@@ -35,7 +32,6 @@ pub fn share_fact_with_workspace_intent(input: ShareFactWithWorkspace) -> Intent
     payload.u64be(input.timestamp_ms);
     Intent::new(
         IntentKind::new(SHARE_FACT_WITH_WORKSPACE).expect("valid share_fact_with_workspace kind"),
-        IntentExecution::Deferred,
         share_fact_with_workspace_key(&input),
         payload.finish(),
     )
@@ -52,9 +48,6 @@ pub fn share_fact_with_workspace_intent_for_fact(workspace_id: HandlerId, fact: 
 pub fn decode_share_fact_with_workspace(intent: &Intent) -> Result<ShareFactWithWorkspace, String> {
     if intent.kind.as_str() != SHARE_FACT_WITH_WORKSPACE {
         return Err("expected share_fact_with_workspace intent".into());
-    }
-    if intent.execution != IntentExecution::Deferred {
-        return Err("share_fact_with_workspace intent must be deferred".into());
     }
     let mut reader = PayloadReader::new(&intent.payload);
     reader.expect_u8(1).map_err(payload_error)?;

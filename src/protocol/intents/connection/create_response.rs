@@ -22,7 +22,7 @@
 //! This module intentionally does not pull in the core wire vocabulary:
 //! the layout is a simple concatenation of fixed-width 32-byte ids.
 
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 
 /// 32-byte fact id, named locally to avoid pulling fact module types into
 /// the handler intent file.
@@ -47,7 +47,6 @@ pub fn create_connection_response_intent(input: CreateConnectionResponse) -> Int
     Intent::new(
         IntentKind::new(CREATE_CONNECTION_RESPONSE)
             .expect("valid create connection response intent kind"),
-        IntentExecution::Deferred,
         key,
         payload,
     )
@@ -58,9 +57,6 @@ pub fn decode_create_connection_response_intent(
 ) -> Result<CreateConnectionResponse, String> {
     if intent.kind.as_str() != CREATE_CONNECTION_RESPONSE {
         return Err("expected create_connection_response intent".into());
-    }
-    if intent.execution != IntentExecution::Deferred {
-        return Err("create_connection_response intent must be deferred".into());
     }
     if intent.payload.len() != PAYLOAD_BYTES {
         return Err("create_connection_response payload has wrong length".into());
@@ -135,9 +131,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_atomic_execution() {
+    fn rejects_tampered_key() {
         let mut intent = create_connection_response_intent(sample());
-        intent.execution = IntentExecution::Atomic;
+        intent.key[0] ^= 0xff;
         assert!(decode_create_connection_response_intent(&intent).is_err());
     }
 

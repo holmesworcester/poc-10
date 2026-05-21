@@ -138,8 +138,9 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
         .handle(&intent, &context)
         .expect("normal shared fact packages for transport");
 
-    assert_eq!(output.intents.len(), 1);
-    let send = decode_send_network_frame(&output.intents[0]).unwrap();
+    assert!(output.intents.is_empty());
+    assert_eq!(output.local_intents.len(), 1);
+    let send = decode_send_network_frame(&output.local_intents[0]).unwrap();
     assert_eq!(send.routing_key, connection_fact.id);
     let opened = transit_frame::open_connection_frame(&send.frame, &connection.connection_secret)
         .expect("open packaged transport frame");

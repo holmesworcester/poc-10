@@ -9,7 +9,7 @@
 //!      signing public/secret material.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::AtomicIntent;
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -50,7 +50,7 @@ impl TypedProjector<super::Codec> for EndpointProjector {
         // 3. Materialize.
         let mut output = ProjectionOutput::new();
         for row in endpoint_rows(&endpoint) {
-            output = output.intent(AtomicIntent::PutRow(row).into_intent());
+            output = output.row_mutation(RowMutation::PutRow(row));
         }
         Ok(output)
     }

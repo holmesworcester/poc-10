@@ -14,15 +14,15 @@ use crate::core::store::Store;
 use crate::protocol::facts::{content, transport};
 use crate::protocol::intents::transport as transport_intents;
 use crate::protocol::registry::{
-    protocol_context_matchers, protocol_projector, ATOMIC_ROW_TABLES,
-    COMMAND_EXCLUDED_HANDLER_ROUTES, HANDLER_ROUTES, SCHEMA_SOURCES,
+    protocol_context_matchers, protocol_projector, COMMAND_EXCLUDED_HANDLER_ROUTES, HANDLER_ROUTES,
+    ROW_MUTATION_TABLES, SCHEMA_SOURCES,
 };
 use crate::protocol::registry::{MatchCliContext, MATCH_COMMANDS};
 
 pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
     schema_sources: SCHEMA_SOURCES,
     schemas: network::SCHEMAS,
-    atomic_row_tables: ATOMIC_ROW_TABLES,
+    row_mutation_tables: ROW_MUTATION_TABLES,
     projector: protocol_projector,
     matchers: protocol_context_matchers,
     handlers: HANDLER_ROUTES,

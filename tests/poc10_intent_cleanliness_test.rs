@@ -451,6 +451,7 @@ fn context_matcher_logic_lives_under_protocol_matchers() {
         let relative = path.strip_prefix(root).unwrap();
         if relative.starts_with("src/core/matchers.rs")
             || relative.starts_with("src/core/pipeline.rs")
+            || relative.starts_with("src/core/pipeline/")
             || relative.starts_with("src/core/pipeline_storage.rs")
             || relative.starts_with("src/protocol/matchers")
         {
@@ -939,7 +940,7 @@ fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
         "pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>]",
         "pub const SCHEMAS: &[SchemaRegistration]",
         "pub(crate) const SCHEMA_SOURCES: &[&str]",
-        "pub(crate) const ATOMIC_ROW_TABLES: &[TableName]",
+        "pub(crate) const ROW_MUTATION_TABLES: &[TableName]",
         "pub const FACTS: &[FactRegistration]",
         "pub const CONTEXT_MATCHERS: &[ContextRoleDeclaration]",
         "pub const INTENTS: &[IntentRegistration]",

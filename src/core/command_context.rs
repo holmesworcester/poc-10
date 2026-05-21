@@ -151,17 +151,18 @@ impl<'a> CommandContext<'a> {
 
 /// A small command output bundle.
 ///
-/// Commands return zero or more proposed facts, zero or more deferred
+/// Commands return zero or more proposed facts, zero or more durable/local
 /// intents, and a typed receipt. The receipt is intentionally limited to ids,
 /// scope ids, and deterministic timestamps that later commands can chain from.
 /// Display data comes from `queries.rs` after the runtime has processed the
-/// output. The bundle is intentionally narrow: it
-/// cannot carry handler callbacks, worker handles, or registry references.
+/// output. The bundle is intentionally narrow: it cannot carry handler
+/// callbacks, worker handles, or registry references.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput<T> {
     pub receipt: T,
     pub facts: Vec<crate::core::facts::Fact>,
     pub intents: Vec<crate::core::intents::Intent>,
+    pub local_intents: Vec<crate::core::intents::Intent>,
 }
 
 impl<T> CommandOutput<T> {
@@ -170,6 +171,7 @@ impl<T> CommandOutput<T> {
             receipt,
             facts: Vec::new(),
             intents: Vec::new(),
+            local_intents: Vec::new(),
         }
     }
 
@@ -180,6 +182,11 @@ impl<T> CommandOutput<T> {
 
     pub fn with_intents(mut self, intents: Vec<crate::core::intents::Intent>) -> Self {
         self.intents = intents;
+        self
+    }
+
+    pub fn with_local_intents(mut self, intents: Vec<crate::core::intents::Intent>) -> Self {
+        self.local_intents = intents;
         self
     }
 }

@@ -3,7 +3,7 @@
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerOutput, HandlerResult, IntentHandler,
 };
-use crate::core::intents::{Intent, IntentExecution, IntentKind};
+use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::facts::{
     connection::response,
     identity::endpoint,
@@ -44,7 +44,6 @@ pub fn send_facts_on_connection_intent(input: SendFactsOnConnection) -> Intent {
 
     Intent::new(
         IntentKind::new(SEND_FACTS_ON_CONNECTION).expect("valid send_facts_on_connection kind"),
-        IntentExecution::Deferred,
         connection_fact_ids_key(input.connection_id, &input.fact_ids),
         payload.finish(),
     )
@@ -53,9 +52,6 @@ pub fn send_facts_on_connection_intent(input: SendFactsOnConnection) -> Intent {
 pub fn decode_send_facts_on_connection(intent: &Intent) -> Result<SendFactsOnConnection, String> {
     if intent.kind.as_str() != SEND_FACTS_ON_CONNECTION {
         return Err("expected send_facts_on_connection intent".into());
-    }
-    if intent.execution != IntentExecution::Deferred {
-        return Err("send_facts_on_connection intent must be deferred".into());
     }
     let mut reader = PayloadReader::new(&intent.payload);
     reader.expect_u8(1).map_err(payload_error)?;
@@ -152,7 +148,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         )?;
 
         Ok(
-            HandlerOutput::new().intent(send_network_frame::send_network_frame_intent(
+            HandlerOutput::new().local_intent(send_network_frame::send_network_frame_intent(
                 SendNetworkFrame {
                     routing_key: input.connection_id,
                     frame,
