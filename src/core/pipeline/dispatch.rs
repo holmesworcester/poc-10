@@ -5,7 +5,7 @@ use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::{Store, TableName};
 use rusqlite::{params, params_from_iter, OptionalExtension};
 
-use super::effects::{commit_pipeline_effects_in_tx, validate_pipeline_effects};
+use super::commit_effects::{commit_pipeline_effects_in_tx, validate_pipeline_effects};
 use super::WorkStatus;
 
 // === Intent dispatch ===

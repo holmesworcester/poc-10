@@ -3,18 +3,15 @@
 //! Core's runtime is a set of SQLite-backed queues. This facade exposes the
 //! queue entry points; concrete modules own their storage dependencies.
 //!
-//! - `admission`: submit and purge facts, plus externally projected context.
-//! - `fact_context`: wake due facts and run the fact/context fixed-point loop.
-//! - `projection`: claim one pending fact and commit projection effects.
+//! - `project_pending_facts`: enqueue facts, admit due time wakes, drain
+//!   pending facts, and commit projection effects.
 //! - `dispatch`: claim one intent and commit handler intent output.
-//! - `effects`: validation and SQL commit helpers for shared core effects.
+//! - `commit_effects`: validation and SQL commit helpers for shared core effects.
 
-mod admission;
+mod commit_effects;
 pub(crate) mod context;
 mod dispatch;
-mod effects;
-mod fact_context;
-mod projection;
+mod project_pending_facts;
 
 /// Public outcome returned by runtime pipeline calls.
 ///
@@ -48,14 +45,12 @@ impl WorkStatus {
     }
 }
 
-pub(crate) use admission::{
-    commit_projected_context_offers, purge_fact_from_store, submit_fact_to_store,
-    submit_facts_to_store,
-};
+pub(crate) use commit_effects::commit_pipeline_effects_to_store;
 pub(crate) use dispatch::{
     dispatch_queued_intent, next_queued_intent, submit_intent_to_store,
     submit_local_intent_to_store,
 };
-pub(crate) use effects::commit_pipeline_effects_to_store;
-pub(crate) use fact_context::{drain_pending_projection, process_due_time_range};
-pub(crate) use projection::ProjectionProgress;
+pub(crate) use project_pending_facts::{
+    commit_projected_context_offers, drain_pending_projection, process_due_time_range,
+    purge_fact_from_store, submit_fact_to_store, submit_facts_to_store, ProjectionProgress,
+};

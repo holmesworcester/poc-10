@@ -33,8 +33,8 @@ Accountable criteria:
    `src/core/fact_store.rs`, and it must not contain queue scheduling, context
    matching, projection commit policy, or intent dispatch policy.
 2. Each pipeline worker owns the SQL for the tables it drains or updates:
-   `fact_context.rs` owns due time wake admission, `projection.rs` owns pending
-   projection selection, fact-owned context/time-wake replacement, and
+   `project_pending_facts.rs` owns fact enqueue, due time wake admission,
+   pending projection selection, fact-owned context/time-wake replacement, and
    context-match fanout, while `dispatch.rs` owns intent queue
    insert/claim/delete/ordering.
 3. Pipeline control flow no longer sorts or filters decoded table rows in Rust
@@ -82,8 +82,9 @@ Accountable criteria:
 - Done in this branch: common commit work now flows through `PipelineEffects`.
 - Done in this branch: core pipeline table names moved to `core::schema`, and
   `local_intents` is declared as a memory row table in `src/core/schema.p8sql`.
-- Done in this branch: `driver.rs` is now `fact_context.rs`, and due time
-  wakes live with the fact/context fixed-point loop.
+- Done in this branch: `driver.rs` and then `fact_context.rs` were folded into
+  `project_pending_facts.rs`; due time wakes now live with the pending
+  projection worker.
 - Done in this branch: due time wake admission, pending projection selection,
   context wake fanout, pending time range load/delete, and projection
   context/time-wake replacement now use declared SQLite columns in their owning
@@ -122,7 +123,7 @@ Accountable criteria:
   path are gone; protocol range, coverage, and wrap-source matchers share a
   small SQL-backed matcher helper.
 - Done in this branch: row-mutation validation and splitting moved into
-  `pipeline/effects.rs`, leaving fact storage separate from effect commit
+  `pipeline/commit_effects.rs`, leaving fact storage separate from effect commit
   policy.
 - Done in this branch: row writes are `RowMutation` output, not `Intent`
   values. `IntentExecution::Atomic`, `AtomicIntent`, and the atomic dispatch
@@ -186,8 +187,13 @@ Accountable criteria:
   context roles are a core SQL relation, and protocol registers only exact role
   names plus the real SQL-backed custom matchers.
 - Done in this branch: core pipeline file count was reduced by consolidating
-  projection, dispatch/intent queue, context row/codec, and context
-  match/wake modules. `sqlite_names.rs` was also folded into `core::store`.
+  project-pending-facts/fact-context/admission, dispatch/intent queue, context
+  row/codec, and context match/wake modules. `sqlite_names.rs` was also folded
+  into `core::store`.
+- Done in this branch: the private pipeline SQL interpreter for
+  `PipelineEffects` was renamed from `pipeline/effects.rs` to
+  `pipeline/commit_effects.rs`, leaving `core/effects.rs` as the public effect
+  data model.
 - Done in this branch: TCP frame pumping was folded into `core::network`, so
   the opaque network row boundary and socket mechanics live in one file.
 
@@ -247,18 +253,16 @@ Target modules:
 
 ```text
 src/core/pipeline.rs              facade / runtime entry points
-src/core/pipeline/admission.rs    submit facts, bulk submit, purge
-src/core/pipeline/fact_context.rs fact/context loop, due time wake admission
 src/core/pipeline/context.rs      context rows, matching, and wake fanout
-src/core/pipeline/projection.rs   pending_projection worker
+src/core/pipeline/project_pending_facts.rs fact enqueue, time wake admission, pending fact projection
 src/core/pipeline/dispatch.rs     intent queue worker
-src/core/pipeline/effects.rs      common commit helpers
+src/core/pipeline/commit_effects.rs common SQL commit helpers
 ```
 
-The current split is intentionally conservative and keeps behavior unchanged.
-Further cleanup should simplify module internals. `core::fact_store` owns fact
-storage and fact purge helpers; context row access, matching, and wake fanout
-now live with the context/projection pipeline modules.
+The current split is intentionally queue-shaped. `core::fact_store` owns fact
+storage and fact purge helpers; projection owns pending-projection scheduling
+and completion; context row access, matching, and wake fanout now live with the
+context/projection pipeline modules.
 
 ## 4. Process One Queue Item At A Time
 

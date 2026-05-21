@@ -1,23 +1,126 @@
 //! Pending fact projection orchestration.
 
+use super::commit_effects::validate_pipeline_effects;
+use super::commit_effects::{commit_pipeline_effects_in_tx, sqlite_string_error};
 use super::context::{
     insert_context_need_in_tx, insert_context_offer_in_tx, stored_context_for_owner,
     stored_matching_context, wake_context_matches_in_tx,
 };
-use super::effects::validate_pipeline_effects;
-use super::effects::{commit_pipeline_effects_in_tx, sqlite_string_error};
 use super::WorkStatus;
-use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
+use crate::core::context::{diff_context_sets, ContextOffer, ContextSet, ContextSetDelta};
 use crate::core::effects::PipelineEffects;
-use crate::core::fact_store::persisted_fact;
-use crate::core::fact_store::purge_fact_in_tx;
+use crate::core::fact_store::{insert_fact_and_pending_in_tx, persisted_fact, purge_fact_in_tx};
 use crate::core::facts::{Fact, FactId};
 use crate::core::matchers::ContextMatchers;
 use crate::core::projectors::{
     ProjectionContext, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
 };
+use crate::core::schema::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
+use crate::core::select;
 use crate::core::store::{Store, TableName};
 use rusqlite::params;
+
+const TIME_WAKE_TABLES: &[TableName] = &[TIME_WAKES];
+
+const DUE_TIME_WAKE_OWNER_SQL: &str = r#"
+SELECT owner
+FROM time_wakes
+WHERE timeline = :timeline
+  AND (:has_start = 0 OR at > :start_exclusive)
+  AND at <= :end_inclusive
+ORDER BY at, owner
+LIMIT :limit
+"#;
+
+const DUE_TIME_RANGE_SQL: &str = r#"
+SELECT owner,
+       :timeline AS timeline,
+       :has_start AS has_start,
+       :start_exclusive AS start_exclusive,
+       :end_inclusive AS end_inclusive
+FROM time_wakes
+WHERE timeline = :timeline
+  AND (:has_start = 0 OR at > :start_exclusive)
+  AND at <= :end_inclusive
+ORDER BY at, owner
+LIMIT :limit
+"#;
+
+/// Insert a fact and mark it pending in the same transaction.
+pub(crate) fn submit_fact_to_store(store: &Store, fact: Fact) -> Result<bool, String> {
+    let inserted = store
+        .write_transaction(|tx| insert_fact_and_pending_in_tx(tx, &fact))
+        .map_err(|err| format!("submit fact: {err}"))?;
+    Ok(inserted)
+}
+
+/// Bulk insert facts with one transaction and one pending row per insert.
+pub(crate) fn submit_facts_to_store(
+    store: &Store,
+    facts: impl IntoIterator<Item = Fact>,
+) -> Result<usize, String> {
+    let facts = facts.into_iter().collect::<Vec<_>>();
+    let inserted = store
+        .write_transaction(|tx| {
+            let mut inserted = Vec::new();
+            for fact in &facts {
+                if insert_fact_and_pending_in_tx(tx, fact)? {
+                    inserted.push(fact.id);
+                }
+            }
+            Ok(inserted)
+        })
+        .map_err(|err| format!("submit facts: {err}"))?;
+    Ok(inserted.len())
+}
+
+/// Remove a fact and all durable runtime state derived from it.
+pub(crate) fn purge_fact_from_store(store: &Store, owner: FactId) -> Result<bool, String> {
+    let changed = store
+        .write_transaction(|tx| purge_fact_in_tx(tx, owner))
+        .map_err(|err| format!("purge fact: {err}"))?;
+    Ok(changed)
+}
+
+/// Commit externally projected offers and clear the completed pending facts.
+///
+/// This is used by bounded sync commands that materialize context offers
+/// directly from already-verified rows. It keeps the same transaction rule as
+/// fact projection: newly visible context and completed pending work commit
+/// together.
+pub(crate) fn commit_projected_context_offers(
+    store: &Store,
+    matchers: &ContextMatchers,
+    offers: &[ContextOffer],
+    completed_fact_ids: &[FactId],
+) -> Result<usize, String> {
+    store
+        .write_transaction(|tx| {
+            let mut added_offers = Vec::new();
+            for offer in offers {
+                if insert_context_offer_in_tx(tx, offer)? {
+                    added_offers.push(offer.clone());
+                }
+            }
+            let woken_facts = wake_context_matches_in_tx(
+                tx,
+                &ContextSetDelta {
+                    added_offers,
+                    ..ContextSetDelta::default()
+                },
+                matchers,
+            )
+            .map_err(sqlite_string_error)?;
+            for id in completed_fact_ids {
+                tx.conn().execute(
+                    "DELETE FROM pending_projection WHERE owner = ?1",
+                    params![id.as_slice()],
+                )?;
+            }
+            Ok(woken_facts)
+        })
+        .map_err(|err| format!("commit projected context offers: {err}"))
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ProjectionProgress {
@@ -32,6 +135,105 @@ impl ProjectionProgress {
     }
 }
 
+/// Turn due time wakes into pending facts plus projection time context.
+///
+/// Time is modeled as another source of context: the fact is marked pending
+/// and receives the triggering `TimeRange` when it projects.
+pub(crate) fn process_due_time_range(
+    store: &Store,
+    timeline: Timeline,
+    start_exclusive: Option<u64>,
+    end_inclusive: u64,
+    limit: usize,
+) -> Result<usize, String> {
+    if limit == 0 {
+        return Ok(0);
+    }
+    let range = TimeRange {
+        timeline,
+        start_exclusive,
+        end_inclusive,
+    };
+
+    store
+        .write_transaction(|tx| enqueue_due_time_wakes_in_tx(tx, &range, limit))
+        .map_err(|err| format!("process due time range: {err}"))
+}
+
+fn enqueue_due_time_wakes_in_tx(
+    store: &Store,
+    range: &TimeRange,
+    limit: usize,
+) -> rusqlite::Result<usize> {
+    let has_start = range.start_exclusive.is_some();
+    let start_exclusive = range.start_exclusive.unwrap_or(0);
+    let params = vec![
+        select::Param::text(":timeline", range.timeline.as_str()),
+        select::Param::bool(":has_start", has_start),
+        select::Param::u64(":start_exclusive", start_exclusive),
+        select::Param::u64(":end_inclusive", range.end_inclusive),
+        select::Param::u64(":limit", limit as u64),
+    ];
+
+    let inserted = select::insert_select_in_tx(
+        store,
+        PENDING_PROJECTION,
+        &["owner"],
+        &select::Select::new(DUE_TIME_WAKE_OWNER_SQL, TIME_WAKE_TABLES, params.clone()),
+    )?;
+
+    select::insert_select_in_tx(
+        store,
+        PENDING_TIME_RANGES,
+        &[
+            "owner",
+            "timeline",
+            "has_start",
+            "start_exclusive",
+            "end_inclusive",
+        ],
+        &select::Select::new(DUE_TIME_RANGE_SQL, TIME_WAKE_TABLES, params),
+    )?;
+
+    Ok(inserted)
+}
+
+/// Drive fact projection until no more work is found.
+///
+/// Projection commits context edges and immediately wakes matching facts. The
+/// loop stops when no fact projected or the projection limit has been reached.
+pub(crate) fn drain_pending_projection(
+    projector: &(impl Projector + ?Sized),
+    matchers: &ContextMatchers,
+    store: &Store,
+    allowed_tables: &[TableName],
+    limit: usize,
+) -> Result<ProjectionProgress, String> {
+    let mut total = ProjectionProgress::default();
+
+    loop {
+        if total.projected >= limit {
+            break;
+        }
+
+        let projection_report = process_pending_projection_batch(
+            projector,
+            matchers,
+            store,
+            allowed_tables,
+            limit - total.projected,
+        )?;
+        let projected_facts = projection_report.projected > 0;
+        total.merge(projection_report);
+
+        if !projected_facts {
+            break;
+        }
+    }
+
+    Ok(total)
+}
+
 /// Process pending facts from SQLite one at a time until there is no work or
 /// `limit` facts have completed projection.
 ///
@@ -43,7 +245,7 @@ impl ProjectionProgress {
 /// 4. `prepare_projection_effects` runs protocol projection and groups the outputs.
 /// 5. `commit_projection_effects` commits every durable and restart-local effect in one
 ///    SQLite transaction.
-pub(crate) fn process_pending_projection_batch(
+fn process_pending_projection_batch(
     projector: &(impl Projector + ?Sized),
     matchers: &ContextMatchers,
     store: &Store,
