@@ -2,7 +2,8 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, ContextSetDelta, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::store::{ColumnValue, Store, TableName};
+use crate::core::store::Store;
+use crate::core::wake::WakePlan;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -67,67 +68,6 @@ pub enum SelectOnlyMatcherResult {
     NeedsForOffer,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContextWakeSql {
-    pub sql: &'static str,
-    pub allowed_tables: &'static [TableName],
-    pub params: Vec<ContextSqlParam>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContextSqlParam {
-    pub name: &'static str,
-    pub value: ContextSqlValue,
-}
-
-impl ContextSqlParam {
-    pub fn bytes(name: &'static str, value: impl Into<Vec<u8>>) -> Self {
-        Self {
-            name,
-            value: ContextSqlValue::Bytes(value.into()),
-        }
-    }
-
-    pub fn text(name: &'static str, value: impl Into<String>) -> Self {
-        Self {
-            name,
-            value: ContextSqlValue::Text(value.into()),
-        }
-    }
-
-    pub fn i64(name: &'static str, value: i64) -> Self {
-        Self {
-            name,
-            value: ContextSqlValue::I64(value),
-        }
-    }
-
-    pub fn as_column_value(&self) -> ColumnValue<'_> {
-        self.value.as_column_value()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContextSqlValue {
-    Bytes(Vec<u8>),
-    Text(String),
-    U64(u64),
-    I64(i64),
-    Bool(bool),
-}
-
-impl ContextSqlValue {
-    fn as_column_value(&self) -> ColumnValue<'_> {
-        match self {
-            Self::Bytes(value) => ColumnValue::Bytes(value),
-            Self::Text(value) => ColumnValue::Text(value),
-            Self::U64(value) => ColumnValue::U64(*value),
-            Self::I64(value) => ColumnValue::I64(*value),
-            Self::Bool(value) => ColumnValue::Bool(*value),
-        }
-    }
-}
-
 pub trait ContextMatcher {
     fn role(&self) -> &Role;
 
@@ -167,17 +107,11 @@ pub trait ContextMatcher {
         Ok(None)
     }
 
-    fn wake_sql_for_added_need(
-        &self,
-        _need: &ContextNeed,
-    ) -> Result<Option<ContextWakeSql>, String> {
+    fn wake_plan_for_added_need(&self, _need: &ContextNeed) -> Result<Option<WakePlan>, String> {
         Ok(None)
     }
 
-    fn wake_sql_for_added_offer(
-        &self,
-        _offer: &ContextOffer,
-    ) -> Result<Option<ContextWakeSql>, String> {
+    fn wake_plan_for_added_offer(&self, _offer: &ContextOffer) -> Result<Option<WakePlan>, String> {
         Ok(None)
     }
 

@@ -26,4 +26,5 @@ pub mod schema;
 pub mod schema_dsl;
 pub mod store;
 pub mod tcp;
+pub mod wake;
 pub mod wire;

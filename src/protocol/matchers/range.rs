@@ -7,10 +7,10 @@ use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
 use crate::core::matchers::{
     ContextMatch, ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration,
-    ContextSqlParam, ContextWakeSql, SelectOnlyMatcherResult, SelectOnlyMatcherSql,
-    SelectorFieldDeclaration, SelectorFieldType,
+    SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
 use crate::core::store::{ColumnValue, Store};
+use crate::core::wake::{WakeParam, WakePlan};
 
 use super::exact::protocol_role;
 use super::sql;
@@ -302,53 +302,47 @@ impl ContextMatcher for RangeFactMatcher {
         sql::select_needs_for_offer(store, RANGE_FACT_NEEDS_FOR_OFFER_SQL, &params, offer).map(Some)
     }
 
-    fn wake_sql_for_added_need(
-        &self,
-        need: &ContextNeed,
-    ) -> Result<Option<ContextWakeSql>, String> {
+    fn wake_plan_for_added_need(&self, need: &ContextNeed) -> Result<Option<WakePlan>, String> {
         if need.role != self.role {
-            return Ok(Some(empty_wake_sql()));
+            return Ok(Some(empty_wake_plan()));
         }
         let Some((start, end)) = decode_range_need_selector(&need.selector) else {
-            return Ok(Some(empty_wake_sql()));
+            return Ok(Some(empty_wake_plan()));
         };
         let scope_key = sql::scope_key_for_sql(&need.scope);
-        Ok(Some(sql::wake_sql(
+        Ok(Some(sql::wake_plan(
             RANGE_FACT_WAKE_FOR_NEED_SQL,
             vec![
-                ContextSqlParam::bytes(":need_owner", need.owner),
-                ContextSqlParam::text(":role", self.role.as_str()),
-                ContextSqlParam::bytes(":scope_key", scope_key),
-                ContextSqlParam::bytes(":start", start.to_be_bytes()),
-                ContextSqlParam::bytes(":end", end.to_be_bytes()),
+                WakeParam::bytes(":need_owner", need.owner),
+                WakeParam::text(":role", self.role.as_str()),
+                WakeParam::bytes(":scope_key", scope_key),
+                WakeParam::bytes(":start", start.to_be_bytes()),
+                WakeParam::bytes(":end", end.to_be_bytes()),
             ],
         )))
     }
 
-    fn wake_sql_for_added_offer(
-        &self,
-        offer: &ContextOffer,
-    ) -> Result<Option<ContextWakeSql>, String> {
+    fn wake_plan_for_added_offer(&self, offer: &ContextOffer) -> Result<Option<WakePlan>, String> {
         if offer.role != self.role {
-            return Ok(Some(empty_wake_sql()));
+            return Ok(Some(empty_wake_plan()));
         }
         let Some(selector) = decode_range_offer_selector(&offer.selector) else {
-            return Ok(Some(empty_wake_sql()));
+            return Ok(Some(empty_wake_plan()));
         };
         let scope_key = sql::scope_key_for_sql(&offer.scope);
-        Ok(Some(sql::wake_sql(
+        Ok(Some(sql::wake_plan(
             RANGE_FACT_WAKE_FOR_OFFER_SQL,
             vec![
-                ContextSqlParam::text(":role", self.role.as_str()),
-                ContextSqlParam::bytes(":scope_key", scope_key),
-                ContextSqlParam::bytes(":timestamp", selector.timestamp.to_be_bytes()),
+                WakeParam::text(":role", self.role.as_str()),
+                WakeParam::bytes(":scope_key", scope_key),
+                WakeParam::bytes(":timestamp", selector.timestamp.to_be_bytes()),
             ],
         )))
     }
 }
 
-fn empty_wake_sql() -> ContextWakeSql {
-    sql::wake_sql("SELECT NULL AS owner WHERE 0", Vec::new())
+fn empty_wake_plan() -> WakePlan {
+    sql::wake_plan("SELECT NULL AS owner WHERE 0", Vec::new())
 }
 
 pub fn range_fact_match(need: &ContextNeed, offer: &ContextOffer) -> Option<ContextMatch> {

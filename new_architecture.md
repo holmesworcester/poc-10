@@ -202,6 +202,7 @@ src/
     store.rs
     store/
       sql.rs
+    wake.rs
     payload.rs
     wire.rs
     crypto.rs

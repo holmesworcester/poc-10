@@ -8,10 +8,10 @@ use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
 use crate::core::matchers::{
     ContextMatch, ContextMatcher, ContextMatcherDeclaration, ContextRoleDeclaration,
-    ContextSqlParam, ContextWakeSql, SelectOnlyMatcherResult, SelectOnlyMatcherSql,
-    SelectorFieldDeclaration, SelectorFieldType,
+    SelectOnlyMatcherResult, SelectOnlyMatcherSql, SelectorFieldDeclaration, SelectorFieldType,
 };
 use crate::core::store::{ColumnValue, Store};
+use crate::core::wake::{WakeParam, WakePlan};
 
 use super::exact::protocol_role;
 use super::sql;
@@ -487,64 +487,58 @@ impl ContextMatcher for SecretCoverageMatcher {
             .map(Some)
     }
 
-    fn wake_sql_for_added_need(
-        &self,
-        need: &ContextNeed,
-    ) -> Result<Option<ContextWakeSql>, String> {
+    fn wake_plan_for_added_need(&self, need: &ContextNeed) -> Result<Option<WakePlan>, String> {
         if need.role != self.role {
-            return Ok(Some(empty_wake_sql()));
+            return Ok(Some(empty_wake_plan()));
         }
         let Some(selector) = decode_secret_need_selector(&need.selector) else {
-            return Ok(Some(empty_wake_sql()));
+            return Ok(Some(empty_wake_plan()));
         };
         let scope_key = sql::scope_key_for_sql(&need.scope);
-        Ok(Some(sql::wake_sql(
+        Ok(Some(sql::wake_plan(
             SECRET_COVERAGE_WAKE_FOR_NEED_SQL,
             vec![
-                ContextSqlParam::bytes(":need_owner", need.owner),
-                ContextSqlParam::text(":role", self.role.as_str()),
-                ContextSqlParam::bytes(":scope_key", scope_key),
-                ContextSqlParam::bytes(":workspace_id", selector.workspace_id),
-                ContextSqlParam::bytes(":frontier_id", selector.frontier_id),
-                ContextSqlParam::bytes(":minute", selector.minute.to_be_bytes()),
-                ContextSqlParam::bytes(":leaf_id", selector.leaf_id),
+                WakeParam::bytes(":need_owner", need.owner),
+                WakeParam::text(":role", self.role.as_str()),
+                WakeParam::bytes(":scope_key", scope_key),
+                WakeParam::bytes(":workspace_id", selector.workspace_id),
+                WakeParam::bytes(":frontier_id", selector.frontier_id),
+                WakeParam::bytes(":minute", selector.minute.to_be_bytes()),
+                WakeParam::bytes(":leaf_id", selector.leaf_id),
             ],
         )))
     }
 
-    fn wake_sql_for_added_offer(
-        &self,
-        offer: &ContextOffer,
-    ) -> Result<Option<ContextWakeSql>, String> {
+    fn wake_plan_for_added_offer(&self, offer: &ContextOffer) -> Result<Option<WakePlan>, String> {
         if offer.role != self.role {
-            return Ok(Some(empty_wake_sql()));
+            return Ok(Some(empty_wake_plan()));
         }
         let Some(selector) = decode_secret_offer_selector(&offer.selector) else {
-            return Ok(Some(empty_wake_sql()));
+            return Ok(Some(empty_wake_plan()));
         };
         if selector.start_minute > selector.end_minute {
-            return Ok(Some(empty_wake_sql()));
+            return Ok(Some(empty_wake_plan()));
         }
         let scope_key = sql::scope_key_for_sql(&offer.scope);
         let leaf_prefix = selector.leaf_prefix[..usize::from(selector.prefix_bytes)].to_vec();
-        Ok(Some(sql::wake_sql(
+        Ok(Some(sql::wake_plan(
             SECRET_COVERAGE_WAKE_FOR_OFFER_SQL,
             vec![
-                ContextSqlParam::text(":role", self.role.as_str()),
-                ContextSqlParam::bytes(":scope_key", scope_key),
-                ContextSqlParam::bytes(":workspace_id", selector.workspace_id),
-                ContextSqlParam::bytes(":frontier_id", selector.frontier_id),
-                ContextSqlParam::bytes(":start_minute", selector.start_minute.to_be_bytes()),
-                ContextSqlParam::bytes(":end_minute", selector.end_minute.to_be_bytes()),
-                ContextSqlParam::i64(":prefix_len", i64::from(selector.prefix_bytes)),
-                ContextSqlParam::bytes(":leaf_prefix", leaf_prefix),
+                WakeParam::text(":role", self.role.as_str()),
+                WakeParam::bytes(":scope_key", scope_key),
+                WakeParam::bytes(":workspace_id", selector.workspace_id),
+                WakeParam::bytes(":frontier_id", selector.frontier_id),
+                WakeParam::bytes(":start_minute", selector.start_minute.to_be_bytes()),
+                WakeParam::bytes(":end_minute", selector.end_minute.to_be_bytes()),
+                WakeParam::i64(":prefix_len", i64::from(selector.prefix_bytes)),
+                WakeParam::bytes(":leaf_prefix", leaf_prefix),
             ],
         )))
     }
 }
 
-fn empty_wake_sql() -> ContextWakeSql {
-    sql::wake_sql("SELECT NULL AS owner WHERE 0", Vec::new())
+fn empty_wake_plan() -> WakePlan {
+    sql::wake_plan("SELECT NULL AS owner WHERE 0", Vec::new())
 }
 
 pub fn secret_offer_matches_need(need: &ContextNeed, offer: &ContextOffer) -> bool {

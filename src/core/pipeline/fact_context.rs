@@ -3,7 +3,10 @@ use crate::core::pipeline::projection::process_pending_facts;
 use crate::core::pipeline::report::{add_pipeline_report, PipelineReport};
 use crate::core::pipeline::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
 use crate::core::projectors::{Projector, TimeRange, Timeline};
-use crate::core::store::{ColumnValue, Store, TableName};
+use crate::core::store::{Store, TableName};
+use crate::core::wake::{execute_wake_plan_in_tx, WakeParam, WakePlan};
+
+const TIME_WAKE_TABLES: &[TableName] = &[TIME_WAKES];
 
 const DUE_TIME_WAKE_OWNER_SQL: &str = r#"
 SELECT owner
@@ -61,23 +64,23 @@ fn enqueue_due_time_wakes_in_tx(
 ) -> rusqlite::Result<usize> {
     let has_start = range.start_exclusive.is_some();
     let start_exclusive = range.start_exclusive.unwrap_or(0);
-    let params = [
-        (":timeline", ColumnValue::Text(range.timeline.as_str())),
-        (":has_start", ColumnValue::Bool(has_start)),
-        (":start_exclusive", ColumnValue::U64(start_exclusive)),
-        (":end_inclusive", ColumnValue::U64(range.end_inclusive)),
-        (":limit", ColumnValue::U64(limit as u64)),
+    let params = vec![
+        WakeParam::text(":timeline", range.timeline.as_str()),
+        WakeParam::bool(":has_start", has_start),
+        WakeParam::u64(":start_exclusive", start_exclusive),
+        WakeParam::u64(":end_inclusive", range.end_inclusive),
+        WakeParam::u64(":limit", limit as u64),
     ];
 
-    let inserted = store.insert_typed_rows_from_select_in_tx(
+    let inserted = execute_wake_plan_in_tx(
+        store,
         PENDING_PROJECTION,
         &["owner"],
-        DUE_TIME_WAKE_OWNER_SQL,
-        &[TIME_WAKES],
-        &params,
+        &WakePlan::new(DUE_TIME_WAKE_OWNER_SQL, TIME_WAKE_TABLES, params.clone()),
     )?;
 
-    store.insert_typed_rows_from_select_in_tx(
+    execute_wake_plan_in_tx(
+        store,
         PENDING_TIME_RANGES,
         &[
             "owner",
@@ -86,9 +89,7 @@ fn enqueue_due_time_wakes_in_tx(
             "start_exclusive",
             "end_inclusive",
         ],
-        DUE_TIME_RANGE_SQL,
-        &[TIME_WAKES],
-        &params,
+        &WakePlan::new(DUE_TIME_RANGE_SQL, TIME_WAKE_TABLES, params),
     )?;
 
     Ok(inserted)

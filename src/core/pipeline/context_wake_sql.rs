@@ -4,9 +4,10 @@ use super::context_codec::scope_key;
 use super::context_rows::{stored_needs_for_role_scope, stored_offers_for_role_scope};
 use crate::core::context::ContextSetDelta;
 use crate::core::context::{ContextNeed, ContextOffer, Role};
-use crate::core::matchers::{ContextMatch, ContextMatcher, ContextWakeSql};
+use crate::core::matchers::{ContextMatch, ContextMatcher};
 use crate::core::pipeline::{CONTEXT_EDGES, FACTS, PENDING_PROJECTION};
 use crate::core::store::{ColumnValue, Store};
+use crate::core::wake::{execute_wake_plan_in_tx, WakeParam, WakePlan};
 use std::collections::{BTreeSet, HashSet};
 
 pub(super) fn wake_exact_context_matches_in_tx(
@@ -79,9 +80,7 @@ pub(super) fn exact_role_delta(
 
 fn wake_exact_offers_for_need_in_tx(store: &Store, need: &ContextNeed) -> rusqlite::Result<usize> {
     let scope_key = scope_key(&need.scope);
-    store.insert_typed_rows_from_select_in_tx(
-        PENDING_PROJECTION,
-        &["owner"],
+    let plan = WakePlan::new(
         r#"
         SELECT :need_owner AS owner
         WHERE EXISTS (
@@ -94,13 +93,14 @@ fn wake_exact_offers_for_need_in_tx(store: &Store, need: &ContextNeed) -> rusqli
         )
         "#,
         &[CONTEXT_EDGES],
-        &[
-            (":need_owner", ColumnValue::Bytes(&need.owner)),
-            (":role", ColumnValue::Text(need.role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
-            (":selector", ColumnValue::Bytes(need.selector.as_bytes())),
+        vec![
+            WakeParam::bytes(":need_owner", need.owner),
+            WakeParam::text(":role", need.role.as_str()),
+            WakeParam::bytes(":scope_key", scope_key),
+            WakeParam::bytes(":selector", need.selector.as_bytes()),
         ],
-    )
+    );
+    execute_wake_plan_in_tx(store, PENDING_PROJECTION, &["owner"], &plan)
 }
 
 fn wake_exact_needs_for_offer_in_tx(
@@ -108,9 +108,7 @@ fn wake_exact_needs_for_offer_in_tx(
     offer: &ContextOffer,
 ) -> rusqlite::Result<usize> {
     let scope_key = scope_key(&offer.scope);
-    store.insert_typed_rows_from_select_in_tx(
-        PENDING_PROJECTION,
-        &["owner"],
+    let plan = WakePlan::new(
         r#"
         SELECT n.owner
         FROM context_edges n
@@ -122,12 +120,13 @@ fn wake_exact_needs_for_offer_in_tx(
         ORDER BY f.timestamp, n.owner
         "#,
         &[CONTEXT_EDGES, FACTS],
-        &[
-            (":role", ColumnValue::Text(offer.role.as_str())),
-            (":scope_key", ColumnValue::Bytes(&scope_key)),
-            (":selector", ColumnValue::Bytes(offer.selector.as_bytes())),
+        vec![
+            WakeParam::text(":role", offer.role.as_str()),
+            WakeParam::bytes(":scope_key", scope_key),
+            WakeParam::bytes(":selector", offer.selector.as_bytes()),
         ],
-    )
+    );
+    execute_wake_plan_in_tx(store, PENDING_PROJECTION, &["owner"], &plan)
 }
 
 fn wake_custom_need_in_tx(
@@ -135,8 +134,8 @@ fn wake_custom_need_in_tx(
     matcher: &dyn ContextMatcher,
     need: &ContextNeed,
 ) -> Result<usize, String> {
-    if let Some(plan) = matcher.wake_sql_for_added_need(need)? {
-        return execute_context_wake_sql_in_tx(store, &plan)
+    if let Some(plan) = matcher.wake_plan_for_added_need(need)? {
+        return execute_wake_plan_in_tx(store, PENDING_PROJECTION, &["owner"], &plan)
             .map_err(|err| format!("wake custom need from SQL: {err}"));
     }
 
@@ -155,8 +154,8 @@ fn wake_custom_offer_in_tx(
     matcher: &dyn ContextMatcher,
     offer: &ContextOffer,
 ) -> Result<usize, String> {
-    if let Some(plan) = matcher.wake_sql_for_added_offer(offer)? {
-        return execute_context_wake_sql_in_tx(store, &plan)
+    if let Some(plan) = matcher.wake_plan_for_added_offer(offer)? {
+        return execute_wake_plan_in_tx(store, PENDING_PROJECTION, &["owner"], &plan)
             .map_err(|err| format!("wake custom offer from SQL: {err}"));
     }
 
@@ -168,21 +167,6 @@ fn wake_custom_offer_in_tx(
     let matches = matcher.match_new_offer(offer, &needs);
     wake_matched_need_owners_in_tx(store, matches)
         .map_err(|err| format!("wake custom offer from Rust matcher: {err}"))
-}
-
-fn execute_context_wake_sql_in_tx(store: &Store, plan: &ContextWakeSql) -> rusqlite::Result<usize> {
-    let params = plan
-        .params
-        .iter()
-        .map(|param| (param.name, param.as_column_value()))
-        .collect::<Vec<_>>();
-    store.insert_typed_rows_from_select_in_tx(
-        PENDING_PROJECTION,
-        &["owner"],
-        plan.sql,
-        plan.allowed_tables,
-        &params,
-    )
 }
 
 fn wake_matched_need_owners_in_tx(

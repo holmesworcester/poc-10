@@ -117,6 +117,8 @@ plans during projection commit and inserts affected owners directly into
   during projection commit.
 - Time wake admission uses the same checked insert-select pattern from
   `time_wakes` into `pending_projection` and `pending_time_ranges`.
+- `core::wake::WakePlan` is the shared read-only SELECT shape for this fanout;
+  pipeline workers still choose the target queue table and columns.
 - Custom matcher candidate lookup for range, coverage, and wrap-source roles is
   SELECT-only SQL over `context_edges`.
 - The runtime no longer rebuilds a whole scheduler graph in memory.

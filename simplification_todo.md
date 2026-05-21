@@ -95,8 +95,9 @@ Accountable criteria:
   handling use declared typed SQLite rows instead of byte-row scans.
 - Done in this branch: `context_store.rs` was removed as a sink. Standing
   context row access now lives in `pipeline/context_rows.rs`; matcher assembly
-  lives in `pipeline/context_matching.rs`; context wake SQL lives in
-  `pipeline/context_wake_sql.rs`.
+  lives in `pipeline/context_matching.rs`; context wake assembly lives in
+  `pipeline/context_wake_sql.rs`; reusable checked wake execution lives in
+  `core::wake`.
 - Done in this branch: separate `context_needs` and `context_offers` storage
   was collapsed into one typed `context_edges` relation keyed by
   `(owner, direction, role, scope_key, selector)`.
@@ -109,6 +110,8 @@ Accountable criteria:
 - Done in this branch: time wake admission now uses the same checked
   insert-select wake shape. The scheduler supplies the current timeline range
   instead of an incoming offer.
+- Done in this branch: custom context wakes and time wakes share `WakePlan`
+  plus the same checked insert-select executor.
 - Done in this branch: row-mutation validation and splitting moved into
   `pipeline/effects.rs`; `pipeline_storage.rs` is below the 250-line target and
   is limited to fact storage and fact purge helpers.
