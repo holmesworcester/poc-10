@@ -162,6 +162,9 @@ Accountable criteria:
 - Done in this branch: `core::wire` no longer has scalar fixed-layout wrapper
   structs (`U8`, `U16be`, `U32be`, `U64be`, `Bool8`) or unused crypto-size
   aliases. Callers use direct `put_*`/`take_*` helpers for primitive fields.
+- Done in this branch: Store no longer reconstructs typed SQLite tables back
+  into opaque key/value rows for reads. Protocol read models query typed
+  columns directly, and production-dead typed row decoders were removed.
 
 ## 1. Store All Intents In SQLite Queues
 

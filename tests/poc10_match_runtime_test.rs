@@ -113,17 +113,13 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
 
     assert!(status.progressed);
     assert!(
-        runtime
-            .store()
-            .table_rows(content_message::rows::CONTENT_MESSAGE_ROWS)
+        content_message::queries::content_message_rows(runtime.store(), workspace_id)
             .expect("content message rows")
             .is_empty(),
         "content rows wait until author context is available"
     );
     assert!(
-        runtime
-            .store()
-            .table_rows(content_message::rows::OPENED_MESSAGE_ROWS)
+        content_message::queries::opened_messages(runtime.store(), workspace_id)
             .expect("opened message rows")
             .is_empty(),
         "opened rows wait until author context is available"

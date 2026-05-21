@@ -557,25 +557,11 @@ fn resolve_message_selector(
         });
     }
     let message_id = decode_id(selector)?;
-    let key = super::rows::content_message_key(workspace_id, message_id);
-    if let Some(value) = store
-        .table_row(super::rows::OPENED_MESSAGE_ROWS, &key)
-        .map_err(|err| format!("read opened message row: {err}"))?
+    if let Some(author_user_id) = queries::message_author_user_id(store, workspace_id, message_id)?
     {
-        let row = super::rows::decode_opened_message_row(&key, &value)?;
         return Ok(MessageSelection {
             message_id,
-            author_user_id: row.author_user_id,
-        });
-    }
-    if let Some(value) = store
-        .table_row(super::rows::CONTENT_MESSAGE_ROWS, &key)
-        .map_err(|err| format!("read content message row: {err}"))?
-    {
-        let row = super::rows::decode_content_message_row(&key, &value)?;
-        return Ok(MessageSelection {
-            message_id,
-            author_user_id: row.author_user_id,
+            author_user_id,
         });
     }
     Err("message selector did not match a visible message".to_string())
@@ -652,11 +638,7 @@ fn reactions_by_message(
     workspace_id: FactId,
 ) -> Result<BTreeMap<FactId, Vec<ReactionDisplayRow>>, String> {
     let mut grouped: BTreeMap<FactId, Vec<ReactionDisplayRow>> = BTreeMap::new();
-    for (key, value) in store
-        .table_rows_with_key_prefix(reaction::rows::REACTION_ROWS, &workspace_id, usize::MAX)
-        .map_err(|err| format!("load reaction rows: {err}"))?
-    {
-        let row = reaction::rows::decode_reaction_row(&key, &value)?;
+    for row in reaction::rows::reaction_rows_for_workspace(store, workspace_id)? {
         let emoji = String::from_utf8(row.ciphertext.clone())
             .map_err(|err| format!("reaction emoji is not utf8: {err}"))?;
         grouped
@@ -691,12 +673,9 @@ fn files_by_message(
 }
 
 fn visible_files(store: &Store, workspace_id: FactId) -> Result<Vec<FileDisplayRow>, String> {
-    let mut rows = store
-        .table_rows_with_key_prefix(file::rows::FILE_ROWS, &workspace_id, usize::MAX)
-        .map_err(|err| format!("load file rows: {err}"))?
+    let mut rows = file::queries::content_file_rows(store, workspace_id)?
         .into_iter()
-        .map(|(key, value)| {
-            let row = file::rows::decode_content_file_row(&key, &value)?;
+        .map(|row| {
             if !message_is_visible(store, workspace_id, row.message_id)? {
                 return Ok(None);
             }
@@ -730,15 +709,7 @@ fn message_is_visible(
     workspace_id: FactId,
     message_id: FactId,
 ) -> Result<bool, String> {
-    let key = super::rows::content_message_key(workspace_id, message_id);
-    Ok(store
-        .table_row(super::rows::OPENED_MESSAGE_ROWS, &key)
-        .map_err(|err| format!("read opened message row: {err}"))?
-        .is_some()
-        || store
-            .table_row(super::rows::CONTENT_MESSAGE_ROWS, &key)
-            .map_err(|err| format!("read content message row: {err}"))?
-            .is_some())
+    queries::message_exists(store, workspace_id, message_id)
 }
 
 fn file_slices(
@@ -746,17 +717,7 @@ fn file_slices(
     workspace_id: FactId,
     file_id: FactId,
 ) -> Result<Vec<file_slice::rows::ContentFileSliceRow>, String> {
-    let mut prefix = Vec::with_capacity(64);
-    prefix.extend_from_slice(&workspace_id);
-    prefix.extend_from_slice(&file_id);
-    let mut rows = store
-        .table_rows_with_key_prefix(file_slice::rows::FILE_SLICE_ROWS, &prefix, usize::MAX)
-        .map_err(|err| format!("load file slices: {err}"))?
-        .into_iter()
-        .map(|(key, value)| file_slice::rows::decode_content_file_slice_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?;
-    rows.sort_by_key(|row| row.slice_index);
-    Ok(rows)
+    file_slice::rows::file_slice_rows_for_file(store, workspace_id, file_id)
 }
 
 fn resolve_file_selector(

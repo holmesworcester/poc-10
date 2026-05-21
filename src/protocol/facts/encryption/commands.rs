@@ -10,6 +10,7 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::runtime::Runtime;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::{content, encryption};
+use rusqlite::params;
 use std::collections::BTreeSet;
 
 use super::fact::{
@@ -358,18 +359,14 @@ pub fn key_status_report(
             usize::MAX,
         )
         .map_err(|err| format!("load local history rows: {err}"))?;
-    let message_tombstones = store
-        .table_rows_with_key_prefix(
-            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load message tombstones: {err}"))?;
+    let message_tombstones =
+        content::message::queries::message_tombstone_count(store, workspace_id)?;
     let file_tombstones = store
-        .table_rows_with_key_prefix(
-            content::file_deletion::rows::FILE_DELETION_ROWS,
-            &workspace_id,
-            usize::MAX,
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM file_deletion_rows WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get::<_, i64>(0).map(|value| value as usize),
         )
         .map_err(|err| format!("load file deletion rows: {err}"))?;
     let local_key_secret_frontiers = local_key_secret_frontiers(runtime, workspace_id);
@@ -407,36 +404,19 @@ pub fn key_status_report(
         local_key_secrets: local_key_secret_frontiers.len(),
         local_history_node_secrets: local_history_rows.len() + leaves.len(),
         local_history_leaves: leaves.len(),
-        local_history_node_tombstones: message_tombstones.len() + file_tombstones.len(),
-        message_tombstones: message_tombstones.len(),
+        local_history_node_tombstones: message_tombstones + file_tombstones,
+        message_tombstones,
         cover_summary,
         history_leaves: leaves,
     })
 }
 
 fn workspace_retired_from_access(runtime: &Runtime, workspace_id: FactId) -> Result<bool, String> {
-    let tombstones = runtime
-        .store()
-        .table_rows_with_key_prefix(
-            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load message tombstones for key access: {err}"))?;
-    if !tombstones.is_empty() {
+    if content::message::queries::message_tombstone_count(runtime.store(), workspace_id)? > 0 {
         return Ok(true);
     }
-    let live_messages = runtime
-        .store()
-        .table_rows_with_key_prefix(
-            content::message::rows::CONTENT_MESSAGE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load message rows for key access: {err}"))?
-        .into_iter()
-        .map(|(key, value)| content::message::rows::decode_content_message_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?;
+    let live_messages =
+        content::message::queries::content_message_rows(runtime.store(), workspace_id)?;
     let horizon_floor = clock::logical_time(runtime.store())?
         .map(|ms| (ms / 60_000).saturating_sub(30 * 24 * 60))
         .unwrap_or(0);

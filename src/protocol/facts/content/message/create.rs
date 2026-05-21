@@ -12,7 +12,7 @@ use crate::protocol::facts::content::message::fact::{
     ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
 };
 use crate::protocol::facts::content::message::layout;
-use crate::protocol::facts::content::message::rows;
+use crate::protocol::facts::content::message::queries;
 use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::signed_fact::{self, create as signed_fact_create};
@@ -141,16 +141,7 @@ fn retained_floor_from_tombstones(
     ctx: &CommandContext<'_>,
     workspace_id: WorkspaceId,
 ) -> Result<u64, String> {
-    let tombstones = ctx
-        .store()
-        .table_rows_with_key_prefix(rows::MESSAGE_TOMBSTONE_ROWS, &workspace_id, usize::MAX)
-        .map_err(|err| format!("load message tombstones for send: {err}"))?;
-    tombstones
-        .into_iter()
-        .map(|(key, value)| rows::decode_message_tombstone_row(&key, &value))
-        .try_fold(0, |floor, row| {
-            row.map(|row| floor.max(row.authored_minute.saturating_add(1)))
-        })
+    queries::retained_floor_from_tombstones(ctx.store(), workspace_id)
 }
 
 pub fn pad_plaintext(text: &[u8]) -> Result<Vec<u8>, String> {

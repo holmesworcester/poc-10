@@ -7,8 +7,9 @@
 //! resolves the per-message decryption secret.
 
 use crate::core::facts::FactId;
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{Store, TableName, TableRow};
 use crate::core::wire;
+use rusqlite::params;
 
 use super::fact::{AuthorId, WorkspaceId, REACTION_CIPHERTEXT_BYTES, REACTION_NONCE_BYTES};
 
@@ -53,52 +54,35 @@ pub fn reaction_row(input: ReactionRow) -> Result<TableRow, String> {
     })
 }
 
-pub fn decode_reaction_row(key: &[u8], value: &[u8]) -> Result<ReactionRow, String> {
-    if key.len() != 64 {
-        return Err("reaction row key is malformed".to_string());
-    }
-    if value.len() < ROW_PREFIX_BYTES + 1 {
-        return Err("reaction row value is malformed".to_string());
-    }
-    let mut key_reader = wire::Reader::new(key);
-    let workspace_id = key_reader.array().map_err(wire_err)?;
-    let reaction_id = key_reader.array().map_err(wire_err)?;
-    key_reader.finish().map_err(wire_err)?;
-    let mut value_reader = wire::Reader::new(value);
-    let target_message_id = value_reader.array().map_err(wire_err)?;
-    let author_user_id = value_reader.array().map_err(wire_err)?;
-    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
-    let nonce = value_reader.array().map_err(wire_err)?;
-    let ciphertext_len = value_reader.u32be().map_err(wire_err)? as usize;
-    if ciphertext_len > REACTION_CIPHERTEXT_BYTES {
-        return Err("reaction row ciphertext exceeds fixed slot".to_string());
-    }
-    if value.len() != ROW_PREFIX_BYTES + ciphertext_len + 1 {
-        return Err("reaction row value is malformed".to_string());
-    }
-    let ciphertext = value_reader
-        .bytes(ciphertext_len)
-        .map_err(wire_err)?
-        .to_vec();
-    let deleted = value_reader.u8().map_err(wire_err)?;
-    if deleted > 1 {
-        return Err("reaction row deleted flag is malformed".to_string());
-    }
-    let row = ReactionRow {
-        workspace_id,
-        reaction_id,
-        created_at_ms,
-        target_message_id,
-        author_user_id,
-        nonce,
-        ciphertext,
-    };
-    value_reader.finish().map_err(wire_err)?;
-    Ok(row)
-}
-
-fn wire_err(err: wire::WireError) -> String {
-    format!("{err:?}")
+pub fn reaction_rows_for_workspace(
+    store: &Store,
+    workspace_id: WorkspaceId,
+) -> Result<Vec<ReactionRow>, String> {
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT reaction_id, message_id, author_user_id, created_at_ms, nonce, ciphertext
+             FROM content_reactions
+             WHERE workspace_id = ?1 AND deleted = 0
+             ORDER BY created_at_ms, reaction_id",
+        )
+        .map_err(|err| format!("load reaction rows: {err}"))?;
+    let rows = stmt
+        .query_map(params![workspace_id], |row| {
+            Ok(ReactionRow {
+                workspace_id,
+                reaction_id: row.get(0)?,
+                target_message_id: row.get(1)?,
+                author_user_id: row.get(2)?,
+                created_at_ms: row.get::<_, i64>(3)? as u64,
+                nonce: row.get(4)?,
+                ciphertext: row.get(5)?,
+            })
+        })
+        .map_err(|err| format!("load reaction rows: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("decode reaction rows: {err}"))?;
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -116,11 +100,11 @@ mod tests {
             nonce: [5; REACTION_NONCE_BYTES],
             ciphertext: b"r".to_vec(),
         };
-        let row = reaction_row(input.clone()).expect("row");
+        let row = reaction_row(input).expect("row");
         assert_eq!(row.key, reaction_key([1; 32], [2; 32]));
-        assert_eq!(
-            decode_reaction_row(&row.key, &row.value).expect("decode"),
-            input
-        );
+        assert_eq!(&row.value[..32], &[3; 32]);
+        assert_eq!(&row.value[32..64], &[4; 32]);
+        assert_eq!(&row.value[72..96], &[5; REACTION_NONCE_BYTES]);
+        assert!(row.value.ends_with(&[b'r', 0]));
     }
 }

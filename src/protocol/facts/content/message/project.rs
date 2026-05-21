@@ -501,18 +501,20 @@ mod projector_tests {
         assert_eq!(output.row_mutations.len(), 2);
 
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
-        let row = rows::decode_content_message_row(&row.key, &row.value).expect("decode row");
-        assert_eq!(row.workspace_id, message.workspace_id);
-        assert_eq!(row.message_id, fact.id);
-        assert_eq!(row.author_user_id, message.author_user_id);
-        assert_eq!(row.signer_id, message.signer_id);
-        assert_eq!(row.frontier_id, message.frontier_id);
+        assert_eq!(
+            row.key,
+            rows::content_message_key(message.workspace_id, fact.id)
+        );
+        assert_eq!(&row.value[..32], &message.author_user_id);
+        assert_eq!(&row.value[40..72], &message.signer_id);
+        assert_eq!(&row.value[72..104], &message.frontier_id);
 
         let opened = put_row!(output, rows::OPENED_MESSAGE_ROWS).expect("opened row");
-        let opened =
-            rows::decode_opened_message_row(&opened.key, &opened.value).expect("decode opened row");
-        assert_eq!(opened.message_id, fact.id);
-        assert_eq!(opened.text, "hello from content message");
+        assert_eq!(
+            opened.key,
+            rows::content_message_key(message.workspace_id, fact.id)
+        );
+        assert!(opened.value.ends_with(b"hello from content message"));
     }
 
     #[test]

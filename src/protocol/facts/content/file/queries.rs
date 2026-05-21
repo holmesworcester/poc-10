@@ -2,19 +2,42 @@
 
 use crate::core::facts::FactId;
 use crate::core::store::Store;
+use rusqlite::params;
 
-use super::rows::{self, ContentFileRow};
+use super::rows::ContentFileRow;
 
 pub fn content_file_rows(
     store: &Store,
     workspace_id: FactId,
 ) -> Result<Vec<ContentFileRow>, String> {
-    let mut rows = store
-        .table_rows_with_key_prefix(rows::FILE_ROWS, &workspace_id, usize::MAX)
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT file_fact_id, message_id, file_id, author_user_id, created_at_ms,
+                    root_hash, byte_len, total_slices, slice_bytes, sealed_metadata
+             FROM content_files
+             WHERE workspace_id = ?1 AND deleted = 0
+             ORDER BY created_at_ms, file_fact_id",
+        )
+        .map_err(|err| format!("load file rows: {err}"))?;
+    let rows = stmt
+        .query_map(params![workspace_id], |row| {
+            Ok(ContentFileRow {
+                workspace_id,
+                file_fact_id: row.get(0)?,
+                message_id: row.get(1)?,
+                file_id: row.get(2)?,
+                author_user_id: row.get(3)?,
+                created_at_ms: row.get::<_, i64>(4)? as u64,
+                root_hash: row.get(5)?,
+                blob_bytes: row.get::<_, i64>(6)? as u64,
+                total_slices: row.get::<_, i64>(7)? as u32,
+                slice_bytes: row.get::<_, i64>(8)? as u32,
+                sealed_metadata: row.get(9)?,
+            })
+        })
         .map_err(|err| format!("load file rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| rows::decode_content_file_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?;
-    rows.sort_by_key(|row| (row.created_at_ms, row.file_fact_id));
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("decode file rows: {err}"))?;
     Ok(rows)
 }

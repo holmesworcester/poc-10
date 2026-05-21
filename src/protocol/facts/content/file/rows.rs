@@ -62,63 +62,6 @@ pub fn content_file_row(file_fact_id: FactId, fact: &ContentFileFact) -> Result<
     })
 }
 
-pub fn decode_content_file_row(key: &[u8], value: &[u8]) -> Result<ContentFileRow, String> {
-    if key.len() != 64 {
-        return Err("content file row key is malformed".to_string());
-    }
-    if value.len() < ROW_PREFIX_BYTES + 1 {
-        return Err("content file row value is malformed".to_string());
-    }
-    let mut value_reader = wire::Reader::new(value);
-    let message_id = value_reader.array().map_err(wire_err)?;
-    let file_id = value_reader.array().map_err(wire_err)?;
-    let author_user_id = value_reader.array().map_err(wire_err)?;
-    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
-    let root_hash = value_reader.array().map_err(wire_err)?;
-    let blob_bytes = value_reader.u64be().map_err(wire_err)?;
-    let total_slices = value_reader
-        .u64be()
-        .map_err(wire_err)?
-        .try_into()
-        .map_err(|_| "content file row total_slices exceeds u32".to_string())?;
-    let slice_bytes = value_reader
-        .u64be()
-        .map_err(wire_err)?
-        .try_into()
-        .map_err(|_| "content file row slice_bytes exceeds u32".to_string())?;
-    let sealed_len = value_reader.u32be().map_err(wire_err)? as usize;
-    if value.len() != ROW_PREFIX_BYTES + sealed_len + 1 {
-        return Err("content file row value length does not match metadata".to_string());
-    }
-    let sealed_metadata = value_reader.bytes(sealed_len).map_err(wire_err)?.to_vec();
-    let deleted = value_reader.u8().map_err(wire_err)?;
-    if deleted > 1 {
-        return Err("content file row deleted flag is malformed".to_string());
-    }
-    value_reader.finish().map_err(wire_err)?;
-    let mut key_reader = wire::Reader::new(key);
-    let workspace_id = key_reader.array().map_err(wire_err)?;
-    let file_fact_id = key_reader.array().map_err(wire_err)?;
-    key_reader.finish().map_err(wire_err)?;
-    Ok(ContentFileRow {
-        workspace_id,
-        file_fact_id,
-        created_at_ms,
-        message_id,
-        author_user_id,
-        file_id,
-        blob_bytes,
-        total_slices,
-        slice_bytes,
-        root_hash,
-        sealed_metadata,
-    })
-}
-
-fn wire_err(err: wire::WireError) -> String {
-    format!("{err:?}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,12 +82,10 @@ mod tests {
         };
         let row = content_file_row([7; 32], &fact).expect("row");
         assert_eq!(row.key, content_file_key(&[1; 32], &[7; 32]));
-        let decoded = decode_content_file_row(&row.key, &row.value).expect("decode");
-        assert_eq!(decoded.file_fact_id, [7; 32]);
-        assert_eq!(decoded.sealed_metadata, b"meta");
-        assert_eq!(decoded.blob_bytes, 4096);
-        assert_eq!(decoded.total_slices, 1);
-        assert_eq!(decoded.slice_bytes, 4096);
-        assert_eq!(decoded.root_hash, [5; FILE_ROOT_HASH_BYTES]);
+        assert_eq!(&row.value[..32], &[2; 32]);
+        assert_eq!(&row.value[32..64], &[4; 32]);
+        assert_eq!(&row.value[64..96], &[3; 32]);
+        assert_eq!(&row.value[104..136], &[5; FILE_ROOT_HASH_BYTES]);
+        assert!(row.value.ends_with(&[b'm', b'e', b't', b'a', 0]));
     }
 }

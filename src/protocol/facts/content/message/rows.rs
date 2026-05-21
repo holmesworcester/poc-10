@@ -43,14 +43,6 @@ pub struct OpenedMessageRow {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MessageTombstoneRow {
-    pub workspace_id: WorkspaceId,
-    pub message_id: FactId,
-    pub author_user_id: AuthorId,
-    pub authored_minute: u64,
-}
-
 pub fn content_message_key(workspace_id: WorkspaceId, message_id: FactId) -> Vec<u8> {
     let mut key = Vec::with_capacity(64);
     key.extend_from_slice(&workspace_id);
@@ -74,36 +66,6 @@ pub fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> Tab
     }
 }
 
-pub fn decode_content_message_row(key: &[u8], value: &[u8]) -> Result<ContentMessageRow, String> {
-    if key.len() != 64 {
-        return Err("content message row key is malformed".to_string());
-    }
-    if value.len() != ROW_VALUE_BYTES {
-        return Err("content message row value is malformed".to_string());
-    }
-    let mut key_reader = wire::Reader::new(key);
-    let workspace_id = key_reader.array().map_err(wire_err)?;
-    let message_id = key_reader.array().map_err(wire_err)?;
-    key_reader.finish().map_err(wire_err)?;
-    let mut value_reader = wire::Reader::new(value);
-    let row = ContentMessageRow {
-        workspace_id,
-        message_id,
-        author_user_id: value_reader.array().map_err(wire_err)?,
-        created_at_ms: value_reader.u64be().map_err(wire_err)?,
-        signer_id: value_reader.array().map_err(wire_err)?,
-        frontier_id: value_reader.array().map_err(wire_err)?,
-        minute: value_reader.u64be().map_err(wire_err)?,
-        leaf_id: value_reader.array().map_err(wire_err)?,
-    };
-    let deleted = value_reader.u8().map_err(wire_err)?;
-    if deleted != 0 {
-        return Err("content message row deleted flag is malformed".to_string());
-    }
-    value_reader.finish().map_err(wire_err)?;
-    Ok(row)
-}
-
 pub fn opened_message_row(input: OpenedMessageRow) -> TableRow {
     let text = input.text.as_bytes();
     let mut writer = wire::Writer::with_capacity(OPENED_MESSAGE_VALUE_PREFIX_BYTES + text.len());
@@ -117,26 +79,6 @@ pub fn opened_message_row(input: OpenedMessageRow) -> TableRow {
         key: content_message_key(input.workspace_id, input.message_id),
         value: writer.finish(),
     }
-}
-
-pub fn decode_opened_message_row(key: &[u8], value: &[u8]) -> Result<OpenedMessageRow, String> {
-    let (workspace_id, message_id) = decode_message_key(key, "opened message row key")?;
-    let mut reader = wire::Reader::new(value);
-    let created_at_ms = reader.u64be().map_err(wire_err)?;
-    let author_user_id = reader.array().map_err(wire_err)?;
-    let signer_id = reader.array().map_err(wire_err)?;
-    let text_len = reader.u32be().map_err(wire_err)? as usize;
-    let text = String::from_utf8(reader.bytes(text_len).map_err(wire_err)?.to_vec())
-        .map_err(|err| format!("opened message text is not utf8: {err}"))?;
-    reader.finish().map_err(wire_err)?;
-    Ok(OpenedMessageRow {
-        workspace_id,
-        message_id,
-        created_at_ms,
-        author_user_id,
-        signer_id,
-        text,
-    })
 }
 
 pub fn message_tombstone_row(
@@ -153,37 +95,6 @@ pub fn message_tombstone_row(
         key: content_message_key(workspace_id, message_id),
         value: writer.finish(),
     }
-}
-
-pub fn decode_message_tombstone_row(
-    key: &[u8],
-    value: &[u8],
-) -> Result<MessageTombstoneRow, String> {
-    let (workspace_id, message_id) = decode_message_key(key, "message tombstone key")?;
-    let mut reader = wire::Reader::new(value);
-    let row = MessageTombstoneRow {
-        workspace_id,
-        message_id,
-        author_user_id: reader.array().map_err(wire_err)?,
-        authored_minute: reader.u64be().map_err(wire_err)?,
-    };
-    reader.finish().map_err(wire_err)?;
-    Ok(row)
-}
-
-fn decode_message_key(key: &[u8], label: &str) -> Result<(WorkspaceId, FactId), String> {
-    if key.len() != 64 {
-        return Err(format!("{label} must be workspace id plus message id"));
-    }
-    let mut reader = wire::Reader::new(key);
-    let workspace_id = reader.array().map_err(wire_err)?;
-    let message_id = reader.array().map_err(wire_err)?;
-    reader.finish().map_err(wire_err)?;
-    Ok((workspace_id, message_id))
-}
-
-fn wire_err(err: wire::WireError) -> String {
-    format!("{err:?}")
 }
 
 #[cfg(test)]
@@ -208,15 +119,12 @@ mod tests {
         };
         let row = content_message_row([9; 32], &fact);
         assert_eq!(row.key, content_message_key([1; 32], [9; 32]));
-        let decoded = decode_content_message_row(&row.key, &row.value).expect("decode");
-        assert_eq!(decoded.workspace_id, [1; 32]);
-        assert_eq!(decoded.message_id, [9; 32]);
-        assert_eq!(decoded.created_at_ms, 60_000);
-        assert_eq!(decoded.author_user_id, [2; 32]);
-        assert_eq!(decoded.signer_id, [3; 32]);
-        assert_eq!(decoded.frontier_id, [4; 32]);
-        assert_eq!(decoded.minute, 1);
-        assert_eq!(decoded.leaf_id, [7; 32]);
+        assert_eq!(row.value.len(), ROW_VALUE_BYTES);
+        assert_eq!(&row.value[..32], &[2; 32]);
+        assert_eq!(&row.value[40..72], &[3; 32]);
+        assert_eq!(&row.value[72..104], &[4; 32]);
+        assert_eq!(&row.value[112..144], &[7; 32]);
+        assert_eq!(row.value[144], 0);
     }
 
     #[test]
@@ -229,15 +137,12 @@ mod tests {
             signer_id: [4; 32],
             text: "hello".to_string(),
         });
-        let decoded_opened =
-            decode_opened_message_row(&opened.key, &opened.value).expect("decode opened");
-        assert_eq!(decoded_opened.text, "hello");
-        assert_eq!(decoded_opened.message_id, [2; 32]);
+        assert_eq!(opened.key, content_message_key([1; 32], [2; 32]));
+        assert!(opened.value.ends_with(b"hello"));
 
         let tombstone = message_tombstone_row([1; 32], [2; 32], [3; 32], 120_000);
-        let decoded_tombstone = decode_message_tombstone_row(&tombstone.key, &tombstone.value)
-            .expect("decode tombstone");
-        assert_eq!(decoded_tombstone.authored_minute, 2);
-        assert_eq!(decoded_tombstone.author_user_id, [3; 32]);
+        assert_eq!(tombstone.key, content_message_key([1; 32], [2; 32]));
+        assert_eq!(&tombstone.value[..32], &[3; 32]);
+        assert_eq!(&tombstone.value[32..], &2_u64.to_be_bytes());
     }
 }

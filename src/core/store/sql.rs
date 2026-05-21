@@ -1,6 +1,6 @@
 use super::*;
 use crate::core::schema_dsl::{self, ColumnType, TableDeclaration, TableKind};
-use crate::core::wire::{Reader, WireError, Writer};
+use crate::core::wire::{Reader, WireError};
 use rusqlite::{types::Value, Connection as SqliteConnection};
 use std::collections::{BTreeSet, HashMap};
 
@@ -119,28 +119,6 @@ pub(super) fn decode_typed_key_values_named(
     Ok(values)
 }
 
-pub(super) fn sqlite_row_to_table_row(
-    table: &TableDeclaration,
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(Vec<u8>, Vec<u8>)> {
-    let mut key = Writer::new();
-    let mut value = Writer::new();
-    for (index, column) in table.columns.iter().enumerate() {
-        let column_value = sqlite_column_value(row, index, &column.ty)?;
-        if table
-            .row_key
-            .columns
-            .iter()
-            .any(|name| name == &column.name)
-        {
-            encode_column_value(&column.ty, &column_value, &mut key, &column.name)?;
-        } else {
-            encode_column_value(&column.ty, &column_value, &mut value, &column.name)?;
-        }
-    }
-    Ok((key.finish(), value.finish()))
-}
-
 pub(super) fn decode_column_value(
     ty: &ColumnType,
     reader: &mut Reader<'_>,
@@ -178,66 +156,6 @@ pub(super) fn decode_column_value(
             let value = reader.bool8().map_err(|err| typed_wire_error(label, err))?;
             Ok(Value::Integer(i64::from(value)))
         }
-    }
-}
-
-pub(super) fn encode_column_value(
-    ty: &ColumnType,
-    value: &Value,
-    out: &mut Writer,
-    label: &str,
-) -> rusqlite::Result<()> {
-    match (ty, value) {
-        (ColumnType::Bytes { len: Some(len) }, Value::Blob(bytes)) => {
-            if bytes.len() != *len {
-                return Err(rusqlite::Error::InvalidParameterName(format!(
-                    "typed column {label} has {} bytes, expected {len}",
-                    bytes.len()
-                )));
-            }
-            out.bytes(bytes);
-        }
-        (ColumnType::Bytes { len: None }, Value::Blob(bytes)) => {
-            out.bytes_u32be(bytes)
-                .map_err(|err| typed_wire_error(label, err))?;
-        }
-        (ColumnType::U64, Value::Integer(value)) => {
-            let value = u64::try_from(*value).map_err(|_| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "typed column {label} has negative u64 value"
-                ))
-            })?;
-            out.u64be(value);
-        }
-        (ColumnType::Text, Value::Text(text)) => {
-            out.string_u32be(text)
-                .map_err(|err| typed_wire_error(label, err))?;
-        }
-        (ColumnType::Bool, Value::Integer(0)) => out.bool8(false),
-        (ColumnType::Bool, Value::Integer(1)) => out.bool8(true),
-        (ColumnType::Bool, Value::Integer(value)) => {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "typed column {label} has invalid bool integer {value}"
-            )));
-        }
-        _ => {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "typed column {label} value does not match declared type"
-            )));
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn sqlite_column_value(
-    row: &rusqlite::Row<'_>,
-    index: usize,
-    ty: &ColumnType,
-) -> rusqlite::Result<Value> {
-    match ty {
-        ColumnType::Bytes { .. } => row.get::<_, Vec<u8>>(index).map(Value::Blob),
-        ColumnType::U64 | ColumnType::Bool => row.get::<_, i64>(index).map(Value::Integer),
-        ColumnType::Text => row.get::<_, String>(index).map(Value::Text),
     }
 }
 

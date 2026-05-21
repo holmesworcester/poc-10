@@ -213,32 +213,15 @@ pub fn count_messages_below_minute(
 ) -> Result<usize, String> {
     let mut message_ids = BTreeSet::new();
 
-    let content_rows = store
-        .table_rows_with_key_prefix(
-            content::message::rows::CONTENT_MESSAGE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("read content message rows: {err}"))?;
-    for (key, value) in content_rows {
-        let row = content::message::rows::decode_content_message_row(&key, &value)?;
+    for row in content::message::queries::content_message_rows(store, workspace_id)? {
         if row.minute < floor_minute {
             message_ids.insert(row.message_id);
         }
     }
-
-    let tombstone_rows = store
-        .table_rows_with_key_prefix(
-            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("read message tombstone rows: {err}"))?;
-    for (key, value) in tombstone_rows {
-        let row = content::message::rows::decode_message_tombstone_row(&key, &value)?;
-        if row.authored_minute < floor_minute {
-            message_ids.insert(row.message_id);
-        }
+    for message_id in
+        content::message::queries::message_tombstone_ids_below(store, workspace_id, floor_minute)?
+    {
+        message_ids.insert(message_id);
     }
 
     Ok(message_ids.len())
@@ -257,20 +240,11 @@ pub fn status_report(store: &Store, workspace_id: FactId) -> Result<StatusReport
     if horizon_floor > 0 {
         apply_horizon_floor(store, workspace_id, horizon_floor)?;
     }
-    let raw_message_tombstones = store
-        .table_rows_with_key_prefix(
-            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load message tombstones: {err}"))?;
-    let message_tombstones = raw_message_tombstones
-        .into_iter()
-        .map(|(key, value)| content::message::rows::decode_message_tombstone_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|row| row.authored_minute >= horizon_floor)
-        .count();
+    let message_tombstones = content::message::queries::message_tombstone_count_at_or_after(
+        store,
+        workspace_id,
+        horizon_floor,
+    )?;
     let live_messages = content::message::queries::content_message_rows(store, workspace_id)?
         .into_iter()
         .filter(|row| row.minute >= horizon_floor)

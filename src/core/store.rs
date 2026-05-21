@@ -10,8 +10,8 @@
 //! 1. Open a store with the schemas declared by core IO and the selected
 //!    protocol's module scopes.
 //! 2. Use `write_transaction` to group rows that must become visible together.
-//! 3. Use the row helpers to insert, replace, delete, and scan by key prefix or
-//!    by an explicit key range.
+//! 3. Use row helpers for opaque row tables. Query typed tables directly by
+//!    their declared SQLite columns.
 //!
 //! The only dynamic SQL in this file is generic row-table creation and
 //! table-name interpolation for row operations. Values are always bound
@@ -111,6 +111,16 @@ impl Store {
              PRAGMA synchronous = NORMAL;",
         )?;
         Ok(Self { conn, typed_tables })
+    }
+
+    fn row_table_name(&self, table: TableName) -> rusqlite::Result<String> {
+        if self.typed_table(table).is_some() {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "typed table {} must be queried through its declared columns",
+                table.as_str()
+            )));
+        }
+        quoted_table_name(table)
     }
 
     // Critical path: callers put every atomic row mutation
@@ -222,12 +232,7 @@ impl Store {
     // bounded key-range scan are the complete read surface core exposes.
     /// Fetch one row value by exact key.
     pub fn table_row(&self, table: TableName, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
-        if let Some(declared) = self.typed_table(table) {
-            return self
-                .typed_row_by_key(declared, key)
-                .map(|row| row.map(|(_, value)| value));
-        }
-        let table_name = quoted_table_name(table)?;
+        let table_name = self.row_table_name(table)?;
         self.conn
             .query_row(
                 &format!("SELECT row_value FROM {table_name} WHERE row_key = ?1"),
@@ -252,13 +257,10 @@ impl Store {
 
     /// Scan one declared table in key order.
     pub fn table_rows(&self, table: TableName) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        if let Some(declared) = self.typed_table(table) {
-            return self.typed_rows(declared);
-        }
-        let table_name = quoted_table_name(table)?;
+        let table_name = self.row_table_name(table)?;
         let mut stmt = self.conn.prepare(&format!(
             "SELECT row_key, row_value FROM {table_name}
-                 ORDER BY row_key"
+                ORDER BY row_key"
         ))?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
@@ -274,20 +276,7 @@ impl Store {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        if let Some(declared) = self.typed_table(table) {
-            let mut out = Vec::new();
-            for row in self.typed_rows(declared)? {
-                if !row.0.starts_with(prefix) {
-                    continue;
-                }
-                out.push(row);
-                if out.len() == limit {
-                    break;
-                }
-            }
-            return Ok(out);
-        }
-        let table_name = quoted_table_name(table)?;
+        let table_name = self.row_table_name(table)?;
         let Some(upper) = prefix_upper_bound(prefix) else {
             let mut stmt = self.conn.prepare(&format!(
                 "SELECT row_key, row_value FROM {table_name}
@@ -418,14 +407,11 @@ impl Store {
         )?;
 
         if changed == 0 {
-            match self.typed_row_by_key(table, &row.key)? {
-                Some((_, existing)) if existing == row.value => {}
-                _ => {
-                    return Err(rusqlite::Error::InvalidParameterName(format!(
-                        "conflicting row for {}",
-                        row.table.as_str()
-                    )));
-                }
+            if !self.typed_row_values_match(table, &values)? {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "conflicting row for {}",
+                    row.table.as_str()
+                )));
             }
         }
         Ok(changed)
@@ -443,32 +429,33 @@ impl Store {
         )
     }
 
-    fn typed_row_by_key(
+    fn typed_row_values_match(
         &self,
         table: &TableDeclaration,
-        key: &[u8],
-    ) -> rusqlite::Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let key_values = decode_typed_key_values(table, key)?;
-        self.typed_row_by_decoded_key(table, &key_values)
-    }
-
-    fn typed_row_by_decoded_key(
-        &self,
-        table: &TableDeclaration,
-        key_values: &[rusqlite::types::Value],
-    ) -> rusqlite::Result<Option<(Vec<u8>, Vec<u8>)>> {
+        values: &[rusqlite::types::Value],
+    ) -> rusqlite::Result<bool> {
         let quoted = quoted_table_name_str(&table.name)?;
+        let predicate = table
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                Ok(format!(
+                    "{} = ?{}",
+                    quoted_identifier(&column.name)?,
+                    index + 1
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .join(" AND ");
         self.conn
             .query_row(
-                &format!(
-                    "SELECT {} FROM {quoted} WHERE {}",
-                    table_column_list(table)?,
-                    row_key_where_clause(table)?
-                ),
-                params_from_iter(key_values.iter()),
-                |row| sqlite_row_to_table_row(table, row),
+                &format!("SELECT 1 FROM {quoted} WHERE {predicate} LIMIT 1"),
+                params_from_iter(values.iter()),
+                |_| Ok(()),
             )
             .optional()
+            .map(|row| row.is_some())
     }
 
     fn typed_row_count(&self, table: &TableDeclaration) -> rusqlite::Result<usize> {
@@ -478,17 +465,6 @@ impl Store {
                 row.get::<_, i64>(0)
             })
             .map(|count| count as usize)
-    }
-
-    fn typed_rows(&self, table: &TableDeclaration) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let quoted = quoted_table_name_str(&table.name)?;
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM {quoted} ORDER BY {}",
-            table_column_list(table)?,
-            quoted_identifier_list(&table.row_key.columns)?
-        ))?;
-        let rows = stmt.query_map([], |row| sqlite_row_to_table_row(table, row))?;
-        rows.collect()
     }
 }
 

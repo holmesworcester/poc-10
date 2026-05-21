@@ -88,9 +88,9 @@ fn schema_source_memory_row_tables_are_temp() {
         .expect("insert temp local intent row");
     assert_eq!(
         store
-            .table_row(local_intents, &typed_intent_key("local", b"k"))
-            .expect("read temp row"),
-        Some(typed_intent_value(b"intent"))
+            .table_row_count(local_intents)
+            .expect("count temp rows"),
+        1
     );
     assert!(
         !sqlite_table_names(&path).contains("local_intents"),
@@ -101,9 +101,9 @@ fn schema_source_memory_row_tables_are_temp() {
         .expect("reopen store with core schema");
     assert_eq!(
         reopened
-            .table_row(local_intents, &typed_intent_key("local", b"k"))
-            .expect("read temp row after reopen"),
-        None
+            .table_row_count(local_intents)
+            .expect("count temp rows after reopen"),
+        0
     );
 }
 
@@ -247,30 +247,8 @@ fn content_read_model_rows_materialize_into_typed_tables() {
     let file_row = file::rows::content_file_row([12; 32], &file_fact).expect("file row");
 
     store
-        .insert_table_rows(vec![
-            message_row.clone(),
-            reaction_row.clone(),
-            file_row.clone(),
-        ])
+        .insert_table_rows(vec![message_row, reaction_row, file_row])
         .expect("insert typed content rows");
-    assert_eq!(
-        store
-            .table_row(message::rows::CONTENT_MESSAGE_ROWS, &message_row.key)
-            .expect("read message row"),
-        Some(message_row.value.clone())
-    );
-    assert_eq!(
-        store
-            .table_row(reaction::rows::REACTION_ROWS, &reaction_row.key)
-            .expect("read reaction row"),
-        Some(reaction_row.value.clone())
-    );
-    assert_eq!(
-        store
-            .table_row(file::rows::FILE_ROWS, &file_row.key)
-            .expect("read file row"),
-        Some(file_row.value.clone())
-    );
     drop(store);
 
     let conn = Connection::open(&path).expect("open sqlite");
@@ -403,19 +381,6 @@ fn schema_source_typed_tables_are_written_as_queryable_columns() {
             .expect("insert typed row"),
         1
     );
-    assert_eq!(
-        store
-            .table_row(TableName::new("typed_messages"), &key)
-            .expect("read typed row"),
-        Some(value.clone())
-    );
-    assert_eq!(
-        store
-            .table_rows_with_key_prefix(TableName::new("typed_messages"), &workspace_id, 10)
-            .expect("scan typed rows"),
-        vec![(key.clone(), value)]
-    );
-
     let conn = Connection::open(&path).expect("open sqlite");
     let row = conn
         .query_row(

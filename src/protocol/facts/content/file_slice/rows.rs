@@ -5,8 +5,9 @@
 //! stores the opaque ciphertext alongside the slice's fact id and timestamp.
 
 use crate::core::facts::FactId;
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{Store, TableName, TableRow};
 use crate::core::wire;
+use rusqlite::params;
 
 use super::fact::{ContentFileSliceFact, WorkspaceId};
 
@@ -56,46 +57,35 @@ pub fn content_file_slice_row(
     })
 }
 
-pub fn decode_content_file_slice_row(
-    key: &[u8],
-    value: &[u8],
-) -> Result<ContentFileSliceRow, String> {
-    if key.len() != 32 + 32 + 8 {
-        return Err("content file slice row key is malformed".to_string());
-    }
-    let mut value_reader = wire::Reader::new(value);
-    let slice_fact_id = value_reader.array().map_err(wire_err)?;
-    let created_at_ms = value_reader.u64be().map_err(wire_err)?;
-    let ciphertext_len = value_reader.u32be().map_err(wire_err)? as usize;
-    if value.len() != ROW_PREFIX_BYTES + ciphertext_len {
-        return Err("content file slice row value length does not match ciphertext".to_string());
-    }
-    let ciphertext = value_reader
-        .bytes(ciphertext_len)
-        .map_err(wire_err)?
-        .to_vec();
-    value_reader.finish().map_err(wire_err)?;
-    let mut key_reader = wire::Reader::new(key);
-    let workspace_id = key_reader.array().map_err(wire_err)?;
-    let file_id = key_reader.array().map_err(wire_err)?;
-    let slice_index = key_reader
-        .u64be()
-        .map_err(wire_err)?
-        .try_into()
-        .map_err(|_| "content file slice row index exceeds u32".to_string())?;
-    key_reader.finish().map_err(wire_err)?;
-    Ok(ContentFileSliceRow {
-        workspace_id,
-        file_id,
-        slice_index,
-        slice_fact_id,
-        created_at_ms,
-        ciphertext,
-    })
-}
-
-fn wire_err(err: wire::WireError) -> String {
-    format!("{err:?}")
+pub fn file_slice_rows_for_file(
+    store: &Store,
+    workspace_id: WorkspaceId,
+    file_id: FactId,
+) -> Result<Vec<ContentFileSliceRow>, String> {
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT slice_index, slice_fact_id, created_at_ms, ciphertext
+             FROM file_slice_rows
+             WHERE workspace_id = ?1 AND file_id = ?2
+             ORDER BY slice_index",
+        )
+        .map_err(|err| format!("load file slices: {err}"))?;
+    let rows = stmt
+        .query_map(params![workspace_id, file_id], |row| {
+            Ok(ContentFileSliceRow {
+                workspace_id,
+                file_id,
+                slice_index: row.get::<_, i64>(0)? as u32,
+                slice_fact_id: row.get(1)?,
+                created_at_ms: row.get::<_, i64>(2)? as u64,
+                ciphertext: row.get(3)?,
+            })
+        })
+        .map_err(|err| format!("load file slices: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("decode file slices: {err}"))?;
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -113,12 +103,7 @@ mod tests {
         };
         let row = content_file_slice_row([9; 32], &fact).expect("row");
         assert_eq!(row.key, content_file_slice_key(&[1; 32], &[2; 32], 5));
-        let decoded = decode_content_file_slice_row(&row.key, &row.value).expect("decode");
-        assert_eq!(decoded.workspace_id, [1; 32]);
-        assert_eq!(decoded.file_id, [2; 32]);
-        assert_eq!(decoded.slice_index, 5);
-        assert_eq!(decoded.slice_fact_id, [9; 32]);
-        assert_eq!(decoded.created_at_ms, 77);
-        assert_eq!(decoded.ciphertext, vec![0xcc; 16]);
+        assert_eq!(&row.value[..32], &[9; 32]);
+        assert_eq!(&row.value[44..], &[0xcc; 16]);
     }
 }
