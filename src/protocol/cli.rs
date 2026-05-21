@@ -672,6 +672,13 @@ pub(crate) fn content_count(
     Ok(content::event::cli::content_count_output(output))
 }
 
+pub(crate) fn assert_cli(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    crate::protocol::assertions::run(ctx.runtime(), args)
+}
+
 pub(crate) fn clock(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let observed_max = content::event::queries::max_timestamp(ctx.runtime().store())?;
     clock::run_cli(ctx.runtime().store(), args, observed_max)

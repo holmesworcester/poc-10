@@ -1,7 +1,7 @@
 //! Durable sync shareable-fact index rows and queries.
 
+use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline;
 use crate::core::store::{Store, TableName, TableRow};
 use crate::protocol::facts::{connection, identity};
 use std::collections::BTreeSet;
@@ -219,7 +219,7 @@ fn connection_workspaces(
     let Some(invite_secret_id) = connection_invite_secret_id(store, connection)? else {
         return Ok(workspace_ids);
     };
-    if let Some(invite_secret) = pipeline::persisted_fact(store, &invite_secret_id)? {
+    if let Some(invite_secret) = persisted_fact(store, &invite_secret_id)? {
         let invite = identity::invite::layout::decode_fact(&invite_secret.bytes)
             .map_err(|_| "connection invite context is not an invite secret".to_string())?;
         if let Some(workspace_id) = invite.workspace_id {
@@ -233,7 +233,7 @@ fn connection_invite_secret_id(
     store: &Store,
     connection: &connection::response::rows::ConnectionResponseRow,
 ) -> Result<Option<FactId>, String> {
-    if let Some(response_fact) = pipeline::persisted_fact(store, &connection.connection_id)? {
+    if let Some(response_fact) = persisted_fact(store, &connection.connection_id)? {
         let response = connection::response::layout::decode_fact(&response_fact.bytes)
             .map_err(|_| "connection response fact row is not a connection response".to_string())?;
         return Ok(Some(response.invite_secret_fact_id));
@@ -261,7 +261,7 @@ pub fn shareable_fact_rows(store: &Store) -> Result<Vec<ShareableFactRow>, Strin
 }
 
 fn fact_for_shareable_row(store: &Store, row: &ShareableFactRow) -> Result<Option<Fact>, String> {
-    let Some(fact) = pipeline::persisted_fact(store, &row.fact_id)? else {
+    let Some(fact) = persisted_fact(store, &row.fact_id)? else {
         return Ok(None);
     };
     if fact.timestamp != row.timestamp_ms {

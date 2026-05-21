@@ -3,10 +3,11 @@
 use super::context_matching::stored_matching_context;
 use super::context_rows::stored_context_for_owner;
 use crate::core::context::ContextSet;
+use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId};
 use crate::core::matchers::ContextMatcher;
-use crate::core::pipeline::{persisted_fact, FACTS, PENDING_PROJECTION, PENDING_TIME_RANGES};
 use crate::core::projectors::{ProjectionContext, TimeRange, Timeline};
+use crate::core::schema::{FACTS, PENDING_PROJECTION, PENDING_TIME_RANGES};
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store};
 

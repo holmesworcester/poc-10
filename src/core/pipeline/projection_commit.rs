@@ -2,15 +2,14 @@
 
 use super::context_rows::{insert_context_need_in_tx, insert_context_offer_in_tx};
 use super::context_wakes::wake_context_matches_in_tx;
-use super::effects::sqlite_string_error;
+use super::effects::{
+    commit_pipeline_effects_in_tx, sqlite_string_error, PipelineEffectCounts, PipelineEffects,
+};
 use crate::core::context::{ContextSet, ContextSetDelta};
 use crate::core::facts::FactId;
 use crate::core::matchers::ContextMatcher;
-use crate::core::pipeline::{
-    commit_pipeline_effects_in_tx, PipelineEffectCounts, PipelineEffects, CONTEXT_EDGES,
-    PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
-};
 use crate::core::projectors::TimeWake;
+use crate::core::schema::{CONTEXT_EDGES, PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
 use crate::core::store::{ColumnValue, Store, TableName};
 
 /// The uncommitted output of projecting one pending fact.

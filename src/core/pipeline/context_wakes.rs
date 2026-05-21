@@ -1,11 +1,10 @@
 //! SQL helpers for waking facts after context edge additions.
 
-use super::context_codec::scope_key;
 use super::context_rows::{stored_needs_for_role_scope, stored_offers_for_role_scope};
-use crate::core::context::ContextSetDelta;
+use crate::core::context::{scope_key, ContextSetDelta};
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::matchers::{ContextMatch, ContextMatcher};
-use crate::core::pipeline::{CONTEXT_EDGES, FACTS, PENDING_PROJECTION};
+use crate::core::schema::{CONTEXT_EDGES, FACTS, PENDING_PROJECTION};
 use crate::core::store::{ColumnValue, Store};
 use crate::core::wake;
 use std::collections::HashSet;

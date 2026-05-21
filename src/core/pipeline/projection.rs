@@ -3,10 +3,10 @@
 use super::projection_commit::{commit_projection_effects, ProjectionCommit, ProjectionEffects};
 use super::projection_queue::{load_pending_fact, pending_owner_batch, PendingFact};
 use super::projection_run::{run_projection_with_context, ProjectionRun};
+use crate::core::fact_store::purge_fact_in_tx;
 use crate::core::facts::FactId;
 use crate::core::matchers::ContextMatcher;
 use crate::core::pipeline::report::PipelineReport;
-use crate::core::pipeline_storage::purge_fact_in_tx;
 use crate::core::projectors::Projector;
 use crate::core::store::{Store, TableName};
 
@@ -23,7 +23,7 @@ use crate::core::store::{Store, TableName};
 ///    SQLite transaction.
 /// 6. `finish_pending_fact` refreshes compatibility memory and the report after
 ///    the transaction has succeeded.
-pub(crate) fn process_pending_facts(
+pub(crate) fn process_pending_projection_batch(
     projector: &(impl Projector + ?Sized),
     matchers: &[&dyn ContextMatcher],
     store: &Store,

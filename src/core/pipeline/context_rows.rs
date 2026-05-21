@@ -1,12 +1,12 @@
 //! Typed SQL rows for standing fact context.
 
 use super::context_codec::{
-    scope_key, selected_fact_id, selected_role, selected_scope, selected_selector,
-    CONTEXT_EDGE_VALUE_COLUMNS, CONTEXT_NEED_DIRECTION, CONTEXT_OFFER_DIRECTION,
+    selected_fact_id, selected_role, selected_scope, selected_selector, CONTEXT_EDGE_VALUE_COLUMNS,
+    CONTEXT_NEED_DIRECTION, CONTEXT_OFFER_DIRECTION,
 };
-use crate::core::context::{ContextNeed, ContextOffer, ContextSet, Role};
+use crate::core::context::{scope_key, ContextNeed, ContextOffer, ContextSet, Role};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::pipeline::CONTEXT_EDGES;
+use crate::core::schema::CONTEXT_EDGES;
 use crate::core::store::{ColumnValue, SelectedRow, Store};
 
 /// Load a fact's standing context, returning `None` when it has none.

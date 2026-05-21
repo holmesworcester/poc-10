@@ -6,8 +6,8 @@
 //! already authorized to use it.
 
 use crate::core::crypto;
+use crate::core::fact_store::persisted_facts;
 use crate::core::facts::FactScope;
-use crate::core::pipeline::persisted_facts;
 use crate::core::store::Store;
 
 use super::fact::EndpointFact;

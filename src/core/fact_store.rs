@@ -1,16 +1,11 @@
-//! Fact storage and generic row-mutation helpers for the runtime
-//! [`pipeline`](crate::core::pipeline).
+//! Fact storage for the runtime.
 //!
-//! [`pipeline`](crate::core::pipeline) decides *what* the runtime does with
-//! facts, context, and intents. This module owns the pieces that are still
-//! shared across pipeline workers:
-//!
-//! - **Durable mutations** — [`insert_fact_and_pending_in_tx`],
-//!   [`purge_fact_in_tx`], and the pending-projection helper.
-//! - **Fact reads** — loading immutable facts from the declared `facts` table.
+//! Facts are immutable, content-addressed rows. This module owns inserting,
+//! purging, and reading those rows; pipeline workers decide when those
+//! operations should happen.
 
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
-use crate::core::pipeline::{
+use crate::core::schema::{
     CONTEXT_EDGES, FACTS, PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
 };
 use crate::core::schema_dsl::ColumnType;

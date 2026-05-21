@@ -122,4 +122,5 @@ during projection commit and inserts affected owners directly into
 - Custom matcher candidate lookup for range, coverage, and wrap-source roles is
   SELECT-only SQL over `context_edges`.
 - The runtime no longer rebuilds a whole scheduler graph in memory.
-- `pipeline_storage.rs` is narrowed to fact storage and fact purge helpers.
+- Fact storage and fact purge helpers now live in `core::fact_store`;
+  `pipeline_storage.rs` is gone.

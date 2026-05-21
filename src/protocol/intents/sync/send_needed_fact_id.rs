@@ -74,7 +74,7 @@ impl IntentHandler for SendNeededFactIdHandler {
         let input = decode_send_needed_fact_id(raw)?;
         let have_fact = context.require_fact(&input.have_fact_id)?;
         let have = have_id::layout::decode_fact(&have_fact.bytes)?;
-        if crate::core::pipeline::persisted_fact(context.store()?, &have.fact_id)?.is_some() {
+        if crate::core::fact_store::persisted_fact(context.store()?, &have.fact_id)?.is_some() {
             return Ok(HandlerOutput::new());
         }
         let need = need_id::fact::SyncNeedIdFact {

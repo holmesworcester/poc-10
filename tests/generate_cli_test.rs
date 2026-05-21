@@ -54,6 +54,63 @@ fn clock_cli_sets_logical_timestamp_lower_bound_for_generated_facts() {
     assert_eq!(line_value(&cleared, "next_timestamp"), "5101");
 }
 
+#[test]
+fn assert_eventually_cli_reports_true_when_condition_is_met() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "assert-eventually.db");
+    let workspace_id = create_workspace(&db);
+
+    assert_success(topo(&["--db", &db, "generate", &workspace_id, "2", "64"]));
+    let out = assert_success(topo(&[
+        "--db",
+        &db,
+        "assert",
+        "eventually",
+        "content-count",
+        &workspace_id,
+        "content_events",
+        ">=",
+        "2",
+        "--timeout-ms",
+        "1000",
+        "--poll-ms",
+        "10",
+    ]));
+
+    assert_eq!(line_value(&out, "ok"), "true");
+    assert_eq!(line_value(&out, "target"), "content-count");
+    assert_eq!(line_value(&out, "field"), "content_events");
+    assert_eq!(line_value(&out, "observed"), "2");
+}
+
+#[test]
+fn assert_eventually_cli_times_out_when_condition_is_not_met() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "assert-eventually-timeout.db");
+    let workspace_id = create_workspace(&db);
+
+    let out = topo(&[
+        "--db",
+        &db,
+        "assert",
+        "eventually",
+        "content-count",
+        &workspace_id,
+        "content_events",
+        ">=",
+        "1",
+        "--timeout-ms",
+        "10",
+        "--poll-ms",
+        "1",
+    ]);
+
+    assert!(!out.status.success(), "assertion should time out");
+    let err = stderr(&out);
+    assert!(err.contains("assert eventually timed out"), "{err}");
+    assert!(err.contains("last observed 0"), "{err}");
+}
+
 fn create_workspace(db: &str) -> String {
     let out = assert_success(topo(&[
         "--db",

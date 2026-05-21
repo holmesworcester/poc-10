@@ -150,7 +150,7 @@ fn resolve_target(
     let connection = connection::response::layout::decode_fact(connection_fact.body())?;
     let request_fact = match context.fact(&connection.request_id).cloned() {
         Some(fact) => fact,
-        None => crate::core::pipeline::persisted_fact(context.store()?, &connection.request_id)?
+        None => crate::core::fact_store::persisted_fact(context.store()?, &connection.request_id)?
             .ok_or_else(|| {
                 retry_intent(
                     "send_network_frame route: send_network_frame missing connection request fact",

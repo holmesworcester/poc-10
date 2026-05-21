@@ -4,9 +4,9 @@
 //! queries. Core owns the store, validation, and transaction timing; these
 //! helpers only adapt query result rows back into generic need/offer values.
 
-use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
+use crate::core::context::{scope_key, ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::pipeline::{scope_key, CONTEXT_EDGES, FACTS};
+use crate::core::schema::{CONTEXT_EDGES, FACTS};
 use crate::core::schema_dsl::ColumnType;
 use crate::core::store::{ColumnValue, SelectColumn, SelectedRow, SelectedValue, Store, TableName};
 use crate::core::wake;

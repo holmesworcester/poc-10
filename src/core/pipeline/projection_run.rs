@@ -1,8 +1,8 @@
 //! Pure projector execution for one fact.
 
+use super::effects::PipelineEffects;
 use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
 use crate::core::facts::Fact;
-use crate::core::pipeline::PipelineEffects;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput, Projector, TimeWake};
 
 /// The pure result of running one projector before any SQL writes.

@@ -1,5 +1,4 @@
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::commit_projected_context_offers;
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use std::collections::BTreeSet;
@@ -89,7 +88,7 @@ pub fn replay_deps_reverse(runtime: &mut Runtime) -> Result<ReplayDepsReceipt, S
         .submit_facts(rows.iter().map(|(_, timestamp, bytes)| {
             Fact::new(FactScope::Global, *timestamp, bytes.clone())
         }))?;
-    materialize_replayed_cascade_offers(runtime.store(), &rows)?;
+    materialize_replayed_cascade_offers(runtime, &rows)?;
 
     Ok(ReplayDepsReceipt {
         replayed_facts: rows.len(),
@@ -98,7 +97,7 @@ pub fn replay_deps_reverse(runtime: &mut Runtime) -> Result<ReplayDepsReceipt, S
 }
 
 fn materialize_replayed_cascade_offers(
-    store: &Store,
+    runtime: &Runtime,
     rows: &[(u64, u64, Vec<u8>)],
 ) -> Result<usize, String> {
     let mut ordered = rows.iter().collect::<Vec<_>>();
@@ -129,7 +128,7 @@ fn materialize_replayed_cascade_offers(
         applied.insert(fact.id);
     }
 
-    commit_projected_context_offers(store, &offers, &completed_fact_ids)?;
+    runtime.commit_projected_context_offers(&offers, &completed_fact_ids)?;
 
     Ok(applied.len())
 }
@@ -140,7 +139,7 @@ fn applied_cascade_fact_count(runtime: &Runtime) -> usize {
         .facts()
         .filter(|fact| layout::decode_fact(fact.body()).is_ok())
         .filter(|fact| {
-            crate::core::pipeline::persisted_context(runtime.store(), &fact.id)
+            crate::core::pipeline::context_rows::persisted_context(runtime.store(), &fact.id)
                 .ok()
                 .flatten()
                 .is_some_and(|context| {

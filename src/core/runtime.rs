@@ -7,14 +7,14 @@
 //! registry, schema sources, and row mutation tables.
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
-use crate::core::facts::Fact;
+use crate::core::context::ContextOffer;
+use crate::core::fact_store::persisted_facts;
+use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::matchers::ContextMatcher;
-use crate::core::pipeline::{
-    self, persisted_facts, DispatchReport, PipelineReport, INTENTS, PENDING_PROJECTION,
-};
+use crate::core::pipeline::{self, DispatchReport, PipelineReport};
 use crate::core::projectors::{Projector, Timeline};
-use crate::core::schema::CORE_SCHEMA_SOURCE;
+use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION};
 use crate::core::store::{Schema, Store, TableName};
 use std::path::Path;
 
@@ -52,10 +52,7 @@ impl WorkStatus {
 
     fn from_projection_report(report: &PipelineReport) -> Self {
         Self {
-            progressed: report.projections > 0
-                || report.context_matches > 0
-                || report.woken_facts > 0
-                || report.intents > 0,
+            progressed: report.projections > 0 || report.woken_facts > 0 || report.intents > 0,
             retried: false,
         }
     }
@@ -209,7 +206,7 @@ impl Runtime {
             .expect("runtime intent count should load from store");
         let local = self
             .store
-            .table_row_count(pipeline::LOCAL_INTENTS)
+            .table_row_count(LOCAL_INTENTS)
             .expect("runtime local intent count should load from store");
         stored + local
     }
@@ -234,6 +231,24 @@ impl Runtime {
     pub fn purge_fact(&mut self, fact_id: crate::core::facts::FactId) -> bool {
         pipeline::purge_fact_from_store(&self.store, fact_id)
             .expect("runtime fact purge should persist")
+    }
+
+    pub(crate) fn commit_projected_context_offers(
+        &self,
+        offers: &[ContextOffer],
+        completed_fact_ids: &[FactId],
+    ) -> Result<usize, String> {
+        let matcher_refs = self
+            .matchers
+            .iter()
+            .map(|matcher| matcher.as_ref() as &dyn ContextMatcher)
+            .collect::<Vec<_>>();
+        pipeline::commit_projected_context_offers(
+            &self.store,
+            &matcher_refs,
+            offers,
+            completed_fact_ids,
+        )
     }
 
     pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
@@ -261,7 +276,7 @@ impl Runtime {
             .iter()
             .map(|matcher| matcher.as_ref() as &dyn ContextMatcher)
             .collect::<Vec<_>>();
-        pipeline::process_pending_facts_and_context_changes(
+        pipeline::drain_pending_projection(
             self.projector.as_ref(),
             &matcher_refs,
             &self.store,

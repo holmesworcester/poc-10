@@ -12,6 +12,7 @@
 //! offer matches a need.
 
 use crate::core::facts::{FactId, FactScope};
+use crate::core::wire::Writer;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -83,6 +84,12 @@ pub struct ContextOffer {
     pub role: Role,
     pub scope: FactScope,
     pub selector: Selector,
+}
+
+pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
+    let mut out = Writer::new();
+    encode_scope(&mut out, scope);
+    out.finish()
 }
 
 /// The complete standing context emitted by a single projection owner.
@@ -161,6 +168,19 @@ pub fn diff_context_sets(previous: &ContextSet, next: &ContextSet) -> ContextSet
         removed_needs: previous_needs.difference(&next_needs).cloned().collect(),
         added_offers: next_offers.difference(&previous_offers).cloned().collect(),
         removed_offers: previous_offers.difference(&next_offers).cloned().collect(),
+    }
+}
+
+fn encode_scope(out: &mut Writer, scope: &FactScope) {
+    match scope {
+        FactScope::Global => out.u8(0),
+        FactScope::Local => out.u8(1),
+        FactScope::Scoped { kind, id } => {
+            out.u8(2);
+            out.string_u16be(kind.as_str())
+                .expect("scope kind fits u16");
+            out.fixed(id);
+        }
     }
 }
 

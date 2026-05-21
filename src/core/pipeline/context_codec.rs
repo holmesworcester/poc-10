@@ -1,16 +1,18 @@
 //! Encoding and decoding helpers for context-related SQL rows.
 
 #[cfg(test)]
-use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::context::{scope_key, ContextNeed, ContextOffer};
 use crate::core::context::{Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
 #[cfg(test)]
-use crate::core::pipeline::CONTEXT_EDGES;
+use crate::core::schema::CONTEXT_EDGES;
 use crate::core::schema_dsl::ColumnType;
 #[cfg(test)]
 use crate::core::store::TableRow;
 use crate::core::store::{SelectColumn, SelectedRow, SelectedValue};
-use crate::core::wire::{Reader, WireError, Writer};
+#[cfg(test)]
+use crate::core::wire::Writer;
+use crate::core::wire::{Reader, WireError};
 
 pub(super) const CONTEXT_NEED_DIRECTION: &str = "need";
 pub(super) const CONTEXT_OFFER_DIRECTION: &str = "offer";
@@ -33,12 +35,6 @@ pub(super) const CONTEXT_EDGE_VALUE_COLUMNS: &[SelectColumn] = &[
         ty: ColumnType::Bytes { len: None },
     },
 ];
-
-pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
-    let mut out = Writer::new();
-    encode_scope(&mut out, scope);
-    out.finish()
-}
 
 pub(super) fn selected_fact_id(row: &SelectedRow, name: &str) -> Result<FactId, String> {
     selected_bytes(row, name)?
@@ -121,19 +117,6 @@ fn typed_context_key(
         key.bytes_u32be(selector.as_bytes())
             .expect("selector fits u32");
     })
-}
-
-fn encode_scope(out: &mut Writer, scope: &FactScope) {
-    match scope {
-        FactScope::Global => out.u8(0),
-        FactScope::Local => out.u8(1),
-        FactScope::Scoped { kind, id } => {
-            out.u8(2);
-            out.string_u16be(kind.as_str())
-                .expect("scope kind fits u16");
-            out.fixed(id);
-        }
-    }
 }
 
 fn decode_scope(reader: &mut Reader<'_>) -> Result<FactScope, String> {

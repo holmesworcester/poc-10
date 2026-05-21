@@ -1,10 +1,13 @@
-use crate::core::context::ContextOffer;
+use crate::core::context::{ContextOffer, ContextSetDelta};
+use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
 use crate::core::facts::{Fact, FactId};
-use crate::core::pipeline::PENDING_PROJECTION;
-use crate::core::pipeline_storage::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
+use crate::core::matchers::ContextMatcher;
+use crate::core::schema::PENDING_PROJECTION;
 use crate::core::store::Store;
 
 use super::context_rows::insert_context_offer_in_tx;
+use super::context_wakes::wake_context_matches_in_tx;
+use super::effects::sqlite_string_error;
 
 /// Commit externally projected offers and clear the completed pending facts.
 ///
@@ -14,19 +17,32 @@ use super::context_rows::insert_context_offer_in_tx;
 /// together.
 pub(crate) fn commit_projected_context_offers(
     store: &Store,
+    matchers: &[&dyn ContextMatcher],
     offers: &[ContextOffer],
     completed_fact_ids: &[FactId],
-) -> Result<(), String> {
+) -> Result<usize, String> {
     store
         .write_transaction(|tx| {
+            let mut added_offers = Vec::new();
             for offer in offers {
-                insert_context_offer_in_tx(tx, offer)?;
+                if insert_context_offer_in_tx(tx, offer)? {
+                    added_offers.push(offer.clone());
+                }
             }
+            let woken_facts = wake_context_matches_in_tx(
+                tx,
+                &ContextSetDelta {
+                    added_offers,
+                    ..ContextSetDelta::default()
+                },
+                matchers,
+            )
+            .map_err(sqlite_string_error)?;
             tx.delete_table_rows_in_tx(
                 PENDING_PROJECTION,
                 completed_fact_ids.iter().map(|id| id.to_vec()).collect(),
             )?;
-            Ok(())
+            Ok(woken_facts)
         })
         .map_err(|err| format!("commit projected context offers: {err}"))
 }

@@ -1,8 +1,8 @@
 use crate::core::matchers::ContextMatcher;
-use crate::core::pipeline::projection::process_pending_facts;
+use crate::core::pipeline::projection::process_pending_projection_batch;
 use crate::core::pipeline::report::{add_pipeline_report, PipelineReport};
-use crate::core::pipeline::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
 use crate::core::projectors::{Projector, TimeRange, Timeline};
+use crate::core::schema::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
 use crate::core::store::{Store, TableName};
 use crate::core::wake;
 
@@ -99,7 +99,7 @@ fn enqueue_due_time_wakes_in_tx(
 ///
 /// Projection commits context edges and immediately wakes matching facts. The
 /// loop stops when no fact projected or the projection limit has been reached.
-pub(crate) fn process_pending_facts_and_context_changes(
+pub(crate) fn drain_pending_projection(
     projector: &(impl Projector + ?Sized),
     matchers: &[&dyn ContextMatcher],
     store: &Store,
@@ -113,7 +113,7 @@ pub(crate) fn process_pending_facts_and_context_changes(
             break;
         }
 
-        let projection_report = process_pending_facts(
+        let projection_report = process_pending_projection_batch(
             projector,
             matchers,
             store,

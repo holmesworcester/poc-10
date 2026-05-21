@@ -18,13 +18,13 @@ use crate::core::projectors::{
 use crate::core::runtime::HandlerRoute;
 use crate::core::schema::CORE_SCHEMA_SOURCE;
 use crate::core::store::TableName;
-use crate::protocol::cli as command;
 use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
 use crate::protocol::intents::{
     connection as connection_intents, content as content_intents, encryption as encryption_intents,
     sync as sync_intents, transport as transport_intents,
 };
 use crate::protocol::matchers;
+use crate::protocol::{assertions, cli as command};
 use std::collections::BTreeSet;
 
 pub use crate::protocol::cli::MatchCliContext;
@@ -328,6 +328,12 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         usage: content::event::cli::CONTENT_COUNT_USAGE,
         help: "",
         run: command::content_count,
+    },
+    CliCommand {
+        name: "assert",
+        usage: assertions::ASSERT_USAGE,
+        help: "",
+        run: command::assert_cli,
     },
     CliCommand {
         name: "clock",

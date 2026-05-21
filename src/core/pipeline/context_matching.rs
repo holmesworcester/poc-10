@@ -1,11 +1,10 @@
 //! Build projection context from stored context edges.
 
-use super::context_codec::scope_key;
 use super::context_rows::{stored_offers_for_exact_match, stored_offers_for_role_scope};
-use crate::core::context::{ContextNeed, ContextOffer, ContextSet, Role, Selector};
+use crate::core::context::{scope_key, ContextNeed, ContextOffer, ContextSet, Role, Selector};
+use crate::core::fact_store::persisted_fact;
 use crate::core::facts::FactScope;
 use crate::core::matchers::ContextMatcher;
-use crate::core::pipeline_storage::persisted_fact;
 use crate::core::projectors::{MatchedContext, ProjectionContext};
 use crate::core::store::Store;
 use std::collections::{BTreeMap, BTreeSet};

@@ -452,7 +452,7 @@ fn context_matcher_logic_lives_under_protocol_matchers() {
         if relative.starts_with("src/core/matchers.rs")
             || relative.starts_with("src/core/pipeline.rs")
             || relative.starts_with("src/core/pipeline/")
-            || relative.starts_with("src/core/pipeline_storage.rs")
+            || relative.starts_with("src/core/fact_store.rs")
             || relative.starts_with("src/protocol/matchers")
         {
             continue;

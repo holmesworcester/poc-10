@@ -1,10 +1,9 @@
+use crate::core::fact_store::persisted_fact;
 use crate::core::intents::{HandlerContext, HandlerError, HandlerOutput, Intent, IntentHandler};
-use crate::core::pipeline::{
-    commit_pipeline_effects_in_tx, persisted_fact, PipelineEffectCounts, PipelineEffects, INTENTS,
-    LOCAL_INTENTS,
-};
+use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::{Store, TableName};
 
+use super::effects::{commit_pipeline_effects_in_tx, PipelineEffectCounts, PipelineEffects};
 use super::intent_queue::{decode_intent_row, record_intent_in_table_in_tx};
 
 // === Intent dispatch ===
@@ -40,14 +39,7 @@ pub(crate) fn dispatch_durable_intents(
     allowed_tables: &[TableName],
     limit: usize,
 ) -> Result<DispatchReport, String> {
-    dispatch_stored_intents(
-        handler,
-        store,
-        INTENTS,
-        HandlerContextMode::InputFacts,
-        allowed_tables,
-        limit,
-    )
+    dispatch_stored_intents(handler, store, INTENTS, allowed_tables, limit)
 }
 
 /// Shared loop for dispatching queued intents.
@@ -60,25 +52,24 @@ fn dispatch_stored_intents(
     handler: &(impl IntentHandler + ?Sized),
     store: &Store,
     queue_table: TableName,
-    context_mode: HandlerContextMode,
     allowed_tables: &[TableName],
     limit: usize,
 ) -> Result<DispatchReport, String> {
     let mut report = DispatchReport::default();
     while report.handled < limit {
-        let Some(stored) = claim_stored_intent(store, queue_table, handler)? else {
+        let Some(stored) = next_accepted_intent(store, queue_table, handler)? else {
             break;
         };
-        let context = load_handler_context(store, handler, &stored.intent, context_mode)?;
+        let context = load_handler_context(store, handler, &stored.intent)?;
         let Some(output) = run_handler(handler, &stored.intent, &context, &mut report)? else {
             break;
         };
-        let effects = prepare_handler_output(output, Some(&stored.key), allowed_tables)?;
+        let effects = prepare_handler_output(output, allowed_tables)?;
         let handled = HandledIntent {
             table: queue_table,
             key: &stored.key,
         };
-        let commit = commit_handler_output(store, Some(handled), &effects, allowed_tables)?;
+        let commit = commit_handler_output(store, handled, &effects, allowed_tables)?;
         if !finish_handler_output(commit, &mut report)? {
             continue;
         }
@@ -93,18 +84,11 @@ pub(crate) fn dispatch_local_intents(
     allowed_tables: &[TableName],
     limit: usize,
 ) -> Result<DispatchReport, String> {
-    dispatch_stored_intents(
-        handler,
-        store,
-        LOCAL_INTENTS,
-        HandlerContextMode::InputFacts,
-        allowed_tables,
-        limit,
-    )
+    dispatch_stored_intents(handler, store, LOCAL_INTENTS, allowed_tables, limit)
 }
 
 /// Return the first queued intent accepted by this handler.
-fn claim_stored_intent(
+fn next_accepted_intent(
     store: &Store,
     queue_table: TableName,
     handler: &(impl IntentHandler + ?Sized),
@@ -132,19 +116,14 @@ fn load_handler_context<'a>(
     store: &'a Store,
     handler: &(impl IntentHandler + ?Sized),
     intent: &Intent,
-    mode: HandlerContextMode,
 ) -> Result<HandlerContext<'a>, String> {
-    let context = match mode {
-        HandlerContextMode::InputFacts => {
-            let mut facts = Vec::new();
-            for id in handler.input_fact_ids(intent)? {
-                if let Some(fact) = persisted_fact(store, &id)? {
-                    facts.push(fact);
-                }
-            }
-            HandlerContext::with_facts(facts)
+    let mut facts = Vec::new();
+    for id in handler.input_fact_ids(intent)? {
+        if let Some(fact) = persisted_fact(store, &id)? {
+            facts.push(fact);
         }
-    };
+    }
+    let context = HandlerContext::with_facts(facts);
     Ok(context.with_store(store))
 }
 
@@ -168,18 +147,12 @@ fn run_handler(
     }
 }
 
-/// Validate and split handler output before the commit transaction.
-///
-/// `handled_intent_key` is the queued intent being consumed, if any. It is kept
-/// in the signature while the validation surface is simplified around stored
-/// queues.
 fn prepare_handler_output(
     output: HandlerOutput,
-    handled_intent_key: Option<&[u8]>,
     allowed_tables: &[TableName],
 ) -> Result<PipelineEffects, String> {
     let effects = PipelineEffects::from(output);
-    effects.validate_ignoring_intent_key(handled_intent_key, allowed_tables)?;
+    effects.validate(allowed_tables)?;
     Ok(effects)
 }
 
@@ -191,19 +164,17 @@ fn prepare_handler_output(
 /// nothing commits and the returned [`HandlerCommit::handled`] is `false`.
 fn commit_handler_output(
     store: &Store,
-    handled_intent: Option<HandledIntent<'_>>,
+    handled: HandledIntent<'_>,
     effects: &PipelineEffects,
     allowed_tables: &[TableName],
 ) -> Result<HandlerCommit, String> {
     store
         .write_transaction(|tx| {
-            if let Some(handled) = handled_intent {
-                if tx.delete_table_rows_in_tx(handled.table, vec![handled.key.to_vec()])? == 0 {
-                    return Ok(HandlerCommit::default());
-                }
-                if handled.table == INTENTS {
-                    tx.delete_table_rows_in_tx(LOCAL_INTENTS, vec![handled.key.to_vec()])?;
-                }
+            if tx.delete_table_rows_in_tx(handled.table, vec![handled.key.to_vec()])? == 0 {
+                return Ok(HandlerCommit::default());
+            }
+            if handled.table == INTENTS {
+                tx.delete_table_rows_in_tx(LOCAL_INTENTS, vec![handled.key.to_vec()])?;
             }
 
             let counts = commit_pipeline_effects_in_tx(tx, effects, allowed_tables)?;
@@ -237,11 +208,6 @@ fn finish_handler_output(
 
 fn is_retryable_handler_error(err: &HandlerError) -> bool {
     matches!(err, HandlerError::Retry(_))
-}
-
-#[derive(Debug, Clone, Copy)]
-enum HandlerContextMode {
-    InputFacts,
 }
 
 struct StoredIntent {

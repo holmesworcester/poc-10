@@ -582,7 +582,7 @@ fn prefix_matches(value: &FactId, prefix: &FactId, prefix_bytes: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::pipeline::{context_need_row, context_offer_row};
+    use crate::core::pipeline::context_codec::{context_need_row, context_offer_row};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::matchers::workspace_scope;

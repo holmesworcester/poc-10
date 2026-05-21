@@ -1,8 +1,8 @@
 use crate::core::command_context::CommandOutput;
+use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{HandlerOutput, Intent, RowMutation, TableDelete};
-use crate::core::pipeline::LOCAL_INTENTS;
-use crate::core::pipeline_storage::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
+use crate::core::schema::LOCAL_INTENTS;
 use crate::core::store::{Store, TableName, TableRow};
 use std::collections::BTreeMap;
 
@@ -70,17 +70,6 @@ impl PipelineEffects {
         validate_row_mutations(&self.row_mutations, allowed_tables)?;
         Ok(())
     }
-
-    pub(crate) fn validate_ignoring_intent_key(
-        &self,
-        ignored_key: Option<&[u8]>,
-        allowed_tables: &[TableName],
-    ) -> Result<(), String> {
-        validate_intents_ignoring_key(&self.durable_intents, ignored_key)?;
-        validate_intents_ignoring_key(&self.local_intents, ignored_key)?;
-        validate_row_mutations(&self.row_mutations, allowed_tables)?;
-        Ok(())
-    }
 }
 
 impl From<HandlerOutput> for PipelineEffects {
@@ -113,7 +102,19 @@ impl PipelineEffectCounts {
 /// Intent durability is owned by the destination table. This check only rejects
 /// conflicting duplicates within one destination queue.
 fn validate_intents(intents: &[Intent]) -> Result<(), String> {
-    validate_intents_ignoring_key(intents, None)
+    let mut proposed = BTreeMap::<Vec<u8>, &Intent>::new();
+    for intent in intents {
+        let key = intent_row_key(intent);
+        if let Some(existing) = proposed.insert(key, intent) {
+            if existing != intent {
+                return Err(format!(
+                    "pipeline emitted conflicting intents for {}",
+                    intent.kind.as_str()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reject any row mutation targeting a table this runtime has not registered.
@@ -166,27 +167,6 @@ fn validate_row_mutation_table(
 /// must return, so a non-SQL failure can still abort a commit.
 pub(super) fn sqlite_string_error(err: String) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(err)
-}
-
-/// As [`validate_intents`], with the handled row key reserved for the intent
-/// currently being consumed.
-fn validate_intents_ignoring_key(
-    intents: &[Intent],
-    _ignored_key: Option<&[u8]>,
-) -> Result<(), String> {
-    let mut proposed = BTreeMap::<Vec<u8>, &Intent>::new();
-    for intent in intents {
-        let key = intent_row_key(intent);
-        if let Some(existing) = proposed.insert(key, intent) {
-            if existing != intent {
-                return Err(format!(
-                    "pipeline emitted conflicting intents for {}",
-                    intent.kind.as_str()
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn commit_pipeline_effects_to_store(
