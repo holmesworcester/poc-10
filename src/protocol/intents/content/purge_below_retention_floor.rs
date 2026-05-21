@@ -83,10 +83,6 @@ impl PurgeBelowRetentionFloorHandler {
 }
 
 impl IntentHandler for PurgeBelowRetentionFloorHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == PURGE_BELOW_RETENTION_FLOOR
-    }
-
     fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_purge_below_retention_floor(raw_intent)?;
         Ok(vec![input.setting_id, input.target_id])

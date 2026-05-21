@@ -10,7 +10,7 @@
 //! - decoders and encoders operate on the exact byte lengths declared by their
 //!   layout type;
 //! - integer byte order is stable and big-endian;
-//! - `Bool8` accepts only `0` and `1`;
+//! - one-byte booleans accept only `0` and `1`;
 //! - `FixedSlot` stores an explicit length and rejects non-zero padding after
 //!   the logical payload;
 //! - `Reader::finish` rejects trailing bytes when a caller asks for complete
@@ -22,10 +22,6 @@
 //! Owning fact and intent modules must layer those checks on top of these
 //! primitives after decoding.
 
-use crate::core::crypto::{
-    ED25519_PUBLIC_KEY_BYTES, ED25519_SIGNATURE_BYTES, HASH_BYTES, XCHACHA20_POLY1305_KEY_BYTES,
-    XCHACHA20_POLY1305_NONCE_BYTES,
-};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,171 +83,13 @@ impl<const N: usize> FixedLayout for FixedBytes<N> {
 }
 
 pub type Tag<const N: usize> = FixedBytes<N>;
-pub type Padding<const N: usize> = FixedBytes<N>;
 pub type Id32 = FixedBytes<32>;
-pub type Hash32 = FixedBytes<HASH_BYTES>;
-pub type PublicKey32 = FixedBytes<ED25519_PUBLIC_KEY_BYTES>;
-pub type SymmetricKey32 = FixedBytes<XCHACHA20_POLY1305_KEY_BYTES>;
-pub type Signature64 = FixedBytes<ED25519_SIGNATURE_BYTES>;
-pub type Nonce24 = FixedBytes<XCHACHA20_POLY1305_NONCE_BYTES>;
+pub type Nonce24 = FixedBytes<24>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct U8(pub u8);
-
-impl FixedLayout for U8 {
-    const LEN: usize = 1;
-
-    fn encode(&self, out: &mut [u8]) -> Result<(), WireError> {
-        expect_len(out, Self::LEN)?;
-        out[0] = self.0;
-        Ok(())
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        expect_len(bytes, Self::LEN)?;
-        Ok(Self(bytes[0]))
-    }
-}
-
-impl From<u8> for U8 {
-    fn from(value: u8) -> Self {
-        Self(value)
-    }
-}
-
-impl From<U8> for u8 {
-    fn from(value: U8) -> Self {
-        value.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct U16be(pub u16);
-
-impl FixedLayout for U16be {
-    const LEN: usize = 2;
-
-    fn encode(&self, out: &mut [u8]) -> Result<(), WireError> {
-        expect_len(out, Self::LEN)?;
-        out.copy_from_slice(&self.0.to_be_bytes());
-        Ok(())
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        expect_len(bytes, Self::LEN)?;
-        let mut array = [0; Self::LEN];
-        array.copy_from_slice(bytes);
-        Ok(Self(u16::from_be_bytes(array)))
-    }
-}
-
-impl From<u16> for U16be {
-    fn from(value: u16) -> Self {
-        Self(value)
-    }
-}
-
-impl From<U16be> for u16 {
-    fn from(value: U16be) -> Self {
-        value.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct U32be(pub u32);
-
-impl FixedLayout for U32be {
-    const LEN: usize = 4;
-
-    fn encode(&self, out: &mut [u8]) -> Result<(), WireError> {
-        expect_len(out, Self::LEN)?;
-        out.copy_from_slice(&self.0.to_be_bytes());
-        Ok(())
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        expect_len(bytes, Self::LEN)?;
-        let mut array = [0; Self::LEN];
-        array.copy_from_slice(bytes);
-        Ok(Self(u32::from_be_bytes(array)))
-    }
-}
-
-impl From<u32> for U32be {
-    fn from(value: u32) -> Self {
-        Self(value)
-    }
-}
-
-impl From<U32be> for u32 {
-    fn from(value: U32be) -> Self {
-        value.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct U64be(pub u64);
-
-impl FixedLayout for U64be {
-    const LEN: usize = 8;
-
-    fn encode(&self, out: &mut [u8]) -> Result<(), WireError> {
-        expect_len(out, Self::LEN)?;
-        out.copy_from_slice(&self.0.to_be_bytes());
-        Ok(())
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        expect_len(bytes, Self::LEN)?;
-        let mut array = [0; Self::LEN];
-        array.copy_from_slice(bytes);
-        Ok(Self(u64::from_be_bytes(array)))
-    }
-}
-
-impl From<u64> for U64be {
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-impl From<U64be> for u64 {
-    fn from(value: U64be) -> Self {
-        value.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Bool8(pub bool);
-
-impl FixedLayout for Bool8 {
-    const LEN: usize = U8::LEN;
-
-    fn encode(&self, out: &mut [u8]) -> Result<(), WireError> {
-        U8(u8::from(self.0)).encode(out)
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        let value = U8::decode(bytes)?.0;
-        match value {
-            0 => Ok(Self(false)),
-            1 => Ok(Self(true)),
-            actual => Err(WireError::InvalidBool { actual }),
-        }
-    }
-}
-
-impl From<bool> for Bool8 {
-    fn from(value: bool) -> Self {
-        Self(value)
-    }
-}
-
-impl From<Bool8> for bool {
-    fn from(value: Bool8) -> Self {
-        value.0
-    }
-}
+pub const U8_BYTES: usize = 1;
+pub const U16_BYTES: usize = 2;
+pub const U32_BYTES: usize = 4;
+pub const U64_BYTES: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FixedSlot<const N: usize> {
@@ -324,7 +162,7 @@ impl<const N: usize> AsRef<[u8]> for FixedSlot<N> {
 }
 
 impl<const N: usize> FixedLayout for FixedSlot<N> {
-    const LEN: usize = U32be::LEN + N;
+    const LEN: usize = U32_BYTES + N;
 
     fn encode(&self, out: &mut [u8]) -> Result<(), WireError> {
         expect_len(out, Self::LEN)?;
@@ -332,15 +170,15 @@ impl<const N: usize> FixedLayout for FixedSlot<N> {
             max: u32::MAX as usize,
             actual: self.len,
         })?;
-        U32be(len).encode(&mut out[..U32be::LEN])?;
-        out[U32be::LEN..].fill(0);
-        out[U32be::LEN..U32be::LEN + self.len].copy_from_slice(self.bytes());
+        put_u32be(len, &mut out[..U32_BYTES])?;
+        out[U32_BYTES..].fill(0);
+        out[U32_BYTES..U32_BYTES + self.len].copy_from_slice(self.bytes());
         Ok(())
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         expect_len(bytes, Self::LEN)?;
-        let len = U32be::decode(&bytes[..U32be::LEN])?.0 as usize;
+        let len = take_u32be(&bytes[..U32_BYTES])? as usize;
         if len > N {
             return Err(WireError::ValueTooLarge {
                 max: N,
@@ -349,7 +187,7 @@ impl<const N: usize> FixedLayout for FixedSlot<N> {
         }
 
         let mut padded = [0; N];
-        padded.copy_from_slice(&bytes[U32be::LEN..]);
+        padded.copy_from_slice(&bytes[U32_BYTES..]);
         validate_zero_padding(&padded, len)?;
         Ok(Self { len, bytes: padded })
     }
@@ -381,43 +219,65 @@ fn validate_zero_padding(bytes: &[u8], len: usize) -> Result<(), WireError> {
 }
 
 pub fn put_u8(value: u8, out: &mut [u8]) -> Result<(), WireError> {
-    U8(value).encode(out)
+    expect_len(out, U8_BYTES)?;
+    out[0] = value;
+    Ok(())
 }
 
 pub fn take_u8(bytes: &[u8]) -> Result<u8, WireError> {
-    Ok(U8::decode(bytes)?.0)
+    expect_len(bytes, U8_BYTES)?;
+    Ok(bytes[0])
 }
 
 pub fn put_u16be(value: u16, out: &mut [u8]) -> Result<(), WireError> {
-    U16be(value).encode(out)
+    expect_len(out, U16_BYTES)?;
+    out.copy_from_slice(&value.to_be_bytes());
+    Ok(())
 }
 
 pub fn take_u16be(bytes: &[u8]) -> Result<u16, WireError> {
-    Ok(U16be::decode(bytes)?.0)
+    expect_len(bytes, U16_BYTES)?;
+    let mut out = [0; U16_BYTES];
+    out.copy_from_slice(bytes);
+    Ok(u16::from_be_bytes(out))
 }
 
 pub fn put_u32be(value: u32, out: &mut [u8]) -> Result<(), WireError> {
-    U32be(value).encode(out)
+    expect_len(out, U32_BYTES)?;
+    out.copy_from_slice(&value.to_be_bytes());
+    Ok(())
 }
 
 pub fn take_u32be(bytes: &[u8]) -> Result<u32, WireError> {
-    Ok(U32be::decode(bytes)?.0)
+    expect_len(bytes, U32_BYTES)?;
+    let mut out = [0; U32_BYTES];
+    out.copy_from_slice(bytes);
+    Ok(u32::from_be_bytes(out))
 }
 
 pub fn put_u64be(value: u64, out: &mut [u8]) -> Result<(), WireError> {
-    U64be(value).encode(out)
+    expect_len(out, U64_BYTES)?;
+    out.copy_from_slice(&value.to_be_bytes());
+    Ok(())
 }
 
 pub fn take_u64be(bytes: &[u8]) -> Result<u64, WireError> {
-    Ok(U64be::decode(bytes)?.0)
+    expect_len(bytes, U64_BYTES)?;
+    let mut out = [0; U64_BYTES];
+    out.copy_from_slice(bytes);
+    Ok(u64::from_be_bytes(out))
 }
 
 pub fn put_bool8(value: bool, out: &mut [u8]) -> Result<(), WireError> {
-    Bool8(value).encode(out)
+    put_u8(u8::from(value), out)
 }
 
 pub fn take_bool8(bytes: &[u8]) -> Result<bool, WireError> {
-    Ok(Bool8::decode(bytes)?.0)
+    match take_u8(bytes)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        actual => Err(WireError::InvalidBool { actual }),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -527,20 +387,16 @@ impl<'a> Reader<'a> {
         Self { bytes, offset: 0 }
     }
 
-    pub fn remaining_len(&self) -> usize {
-        self.bytes.len().saturating_sub(self.offset)
-    }
-
     pub fn expect_len(&self, expected: usize) -> Result<(), WireError> {
         expect_len(self.bytes, expected)
     }
 
     pub fn u8(&mut self) -> Result<u8, WireError> {
-        Ok(U8::decode(self.take(U8::LEN)?)?.0)
+        take_u8(self.take(U8_BYTES)?)
     }
 
     pub fn bool8(&mut self) -> Result<bool, WireError> {
-        Ok(Bool8::decode(self.take(Bool8::LEN)?)?.0)
+        take_bool8(self.take(U8_BYTES)?)
     }
 
     pub fn expect_u8(&mut self, expected: u8) -> Result<(), WireError> {
@@ -553,15 +409,15 @@ impl<'a> Reader<'a> {
     }
 
     pub fn u16be(&mut self) -> Result<u16, WireError> {
-        Ok(U16be::decode(self.take(U16be::LEN)?)?.0)
+        take_u16be(self.take(U16_BYTES)?)
     }
 
     pub fn u32be(&mut self) -> Result<u32, WireError> {
-        Ok(U32be::decode(self.take(U32be::LEN)?)?.0)
+        take_u32be(self.take(U32_BYTES)?)
     }
 
     pub fn u64be(&mut self) -> Result<u64, WireError> {
-        Ok(U64be::decode(self.take(U64be::LEN)?)?.0)
+        take_u64be(self.take(U64_BYTES)?)
     }
 
     pub fn array<const N: usize>(&mut self) -> Result<[u8; N], WireError> {
@@ -654,11 +510,11 @@ mod tests {
 
     #[test]
     fn fixed_layout_types_reject_wrong_lengths() {
-        assert!(U8::decode(&[]).is_err());
-        assert!(U16be::decode(&[0]).is_err());
-        assert!(U32be::decode(&[0; 3]).is_err());
-        assert!(U64be::decode(&[0; 7]).is_err());
-        assert!(Bool8::decode(&[0, 0]).is_err());
+        assert!(take_u8(&[]).is_err());
+        assert!(take_u16be(&[0]).is_err());
+        assert!(take_u32be(&[0; 3]).is_err());
+        assert!(take_u64be(&[0; 7]).is_err());
+        assert!(take_bool8(&[0, 0]).is_err());
 
         let slot = FixedSlot::<3>::new(b"abc").unwrap();
         let mut short = [0; FixedSlot::<3>::LEN - 1];
@@ -668,35 +524,19 @@ mod tests {
 
     #[test]
     fn big_endian_values_round_trip() {
-        let cases = [
-            (U16be::LEN, 0x1234_u64),
-            (U32be::LEN, 0x1234_5678_u64),
-            (U64be::LEN, 0x1234_5678_9abc_def0_u64),
-        ];
+        let mut out = [0; U64_BYTES];
 
-        let mut out = [0; U64be::LEN];
+        put_u16be(0x1234, &mut out[..U16_BYTES]).unwrap();
+        assert_eq!(&out[..U16_BYTES], &[0x12, 0x34]);
+        assert_eq!(take_u16be(&out[..U16_BYTES]).unwrap(), 0x1234);
 
-        U16be(cases[0].1 as u16)
-            .encode(&mut out[..cases[0].0])
-            .unwrap();
-        assert_eq!(&out[..cases[0].0], &[0x12, 0x34]);
-        assert_eq!(U16be::decode(&out[..cases[0].0]).unwrap().0, 0x1234);
+        put_u32be(0x1234_5678, &mut out[..U32_BYTES]).unwrap();
+        assert_eq!(&out[..U32_BYTES], &[0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(take_u32be(&out[..U32_BYTES]).unwrap(), 0x1234_5678);
 
-        U32be(cases[1].1 as u32)
-            .encode(&mut out[..cases[1].0])
-            .unwrap();
-        assert_eq!(&out[..cases[1].0], &[0x12, 0x34, 0x56, 0x78]);
-        assert_eq!(U32be::decode(&out[..cases[1].0]).unwrap().0, 0x1234_5678);
-
-        U64be(cases[2].1).encode(&mut out[..cases[2].0]).unwrap();
-        assert_eq!(
-            &out[..cases[2].0],
-            &[0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]
-        );
-        assert_eq!(
-            U64be::decode(&out[..cases[2].0]).unwrap().0,
-            0x1234_5678_9abc_def0
-        );
+        put_u64be(0x1234_5678_9abc_def0, &mut out).unwrap();
+        assert_eq!(&out, &[0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]);
+        assert_eq!(take_u64be(&out).unwrap(), 0x1234_5678_9abc_def0);
 
         put_u64be(42, &mut out).unwrap();
         assert_eq!(take_u64be(&out).unwrap(), 42);
@@ -704,7 +544,7 @@ mod tests {
 
     #[test]
     fn u8_and_bool8_round_trip() {
-        let mut out = [0; U8::LEN];
+        let mut out = [0; U8_BYTES];
 
         put_u8(7, &mut out).unwrap();
         assert_eq!(take_u8(&out).unwrap(), 7);
@@ -718,7 +558,7 @@ mod tests {
         assert!(!take_bool8(&out).unwrap());
 
         assert_eq!(
-            Bool8::decode(&[2]).unwrap_err(),
+            take_bool8(&[2]).unwrap_err(),
             WireError::InvalidBool { actual: 2 }
         );
     }
@@ -745,14 +585,14 @@ mod tests {
         );
 
         let mut out = [0; FixedSlot::<4>::LEN];
-        U32be(2).encode(&mut out[..U32be::LEN]).unwrap();
-        out[U32be::LEN..].copy_from_slice(&[b'a', b'b', 0, 1]);
+        put_u32be(2, &mut out[..U32_BYTES]).unwrap();
+        out[U32_BYTES..].copy_from_slice(&[b'a', b'b', 0, 1]);
         assert_eq!(
             FixedSlot::<4>::decode(&out).unwrap_err(),
             WireError::NonZeroPadding { index: 3 }
         );
 
-        U32be(5).encode(&mut out[..U32be::LEN]).unwrap();
+        put_u32be(5, &mut out[..U32_BYTES]).unwrap();
         assert_eq!(
             FixedSlot::<4>::decode(&out).unwrap_err(),
             WireError::ValueTooLarge { max: 4, actual: 5 }

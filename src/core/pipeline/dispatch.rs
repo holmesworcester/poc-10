@@ -65,11 +65,6 @@ fn dispatch_stored_intents(
         let Some(stored) = next_intent_for_kind(store, queue_table, intent_kind)? else {
             break;
         };
-        if !handler.accepts(&stored.intent) {
-            return Err(format!(
-                "handler route for intent kind {intent_kind} rejected queued intent"
-            ));
-        }
         let context = load_handler_context(store, handler, &stored.intent)?;
         let Some(output) = run_handler(handler, &stored.intent, &context, &mut report)? else {
             break;

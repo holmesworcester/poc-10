@@ -106,10 +106,6 @@ impl SendNetworkFrameHandler {
 }
 
 impl IntentHandler for SendNetworkFrameHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == SEND_NETWORK_FRAME
-    }
-
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_send_network_frame(intent)?;
         Ok(vec![input.routing_key])

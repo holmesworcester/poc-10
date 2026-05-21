@@ -76,10 +76,6 @@ impl PurgeExpiredMessageHandler {
 }
 
 impl IntentHandler for PurgeExpiredMessageHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == PURGE_EXPIRED_MESSAGE
-    }
-
     fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_purge_expired_message(raw_intent)?;
         Ok(vec![input.target_id])

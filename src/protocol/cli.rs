@@ -19,6 +19,9 @@ use crate::protocol::facts::sync;
 use crate::protocol::facts::{content, encryption, identity};
 use std::path::PathBuf;
 
+const COMMAND_SETTLE_ROUNDS: usize = 4;
+const COMMAND_SETTLE_LIMIT: usize = 4096;
+
 pub struct MatchCliContext {
     db: Option<PathBuf>,
     runtime: Runtime,
@@ -45,7 +48,7 @@ impl MatchCliContext {
 
     fn settle_local_command_work(&mut self) -> Result<(), String> {
         self.runtime
-            .process_command_work_until_idle(4, 512)
+            .process_command_work_until_idle(COMMAND_SETTLE_ROUNDS, COMMAND_SETTLE_LIMIT)
             .map(|_| ())
     }
 

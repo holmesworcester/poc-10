@@ -61,10 +61,6 @@ impl SendNeededFactIdHandler {
 }
 
 impl IntentHandler for SendNeededFactIdHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == SEND_NEEDED_FACT_ID
-    }
-
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_send_needed_fact_id(intent)?;
         Ok(vec![input.have_fact_id])

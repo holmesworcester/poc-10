@@ -89,10 +89,6 @@ impl ShareFactWithWorkspaceHandler {
 }
 
 impl IntentHandler for ShareFactWithWorkspaceHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == SHARE_FACT_WITH_WORKSPACE
-    }
-
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_share_fact_with_workspace(intent)?;
         Ok(vec![input.fact_id])

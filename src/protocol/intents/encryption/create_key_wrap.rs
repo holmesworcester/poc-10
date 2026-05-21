@@ -22,10 +22,6 @@ impl CreateKeyWrapHandler {
 }
 
 impl IntentHandler for CreateKeyWrapHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == intent::CREATE_KEY_WRAP
-    }
-
     fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = intent::decode_create_key_wrap_intent(raw_intent)?;
         // These inputs are the whole authority surface for key-wrap creation.

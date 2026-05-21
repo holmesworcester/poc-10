@@ -232,10 +232,6 @@ impl HandlerOutput {
 
 /// A protocol handler for one or more intent kinds.
 pub trait IntentHandler {
-    fn accepts(&self, _intent: &Intent) -> bool {
-        true
-    }
-
     fn input_fact_ids(&self, _intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         Ok(Vec::new())
     }

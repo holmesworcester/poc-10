@@ -113,10 +113,6 @@ impl ReceiveTransitFrameHandler {
 }
 
 impl IntentHandler for ReceiveTransitFrameHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == RECEIVE_TRANSIT_FRAME
-    }
-
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_receive_transit_frame(intent)?;
         match receive::bootstrap_frame_kind(&input.frame)? {

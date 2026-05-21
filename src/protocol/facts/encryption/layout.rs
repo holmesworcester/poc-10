@@ -5,9 +5,6 @@ use crate::core::crypto::{
     XCHACHA20_POLY1305_NONCE_BYTES,
 };
 use crate::core::wire;
-use crate::core::wire::FixedLayout;
-use crate::core::wire::U16be;
-use crate::core::wire::U64be;
 
 use super::fact::{
     KeyRequestFact, KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact,
@@ -460,15 +457,11 @@ fn validate_history_node_coordinate(
 }
 
 fn encode_u64(value: u64) -> [u8; 8] {
-    let mut buf = [0; 8];
-    U64be(value).encode(&mut buf).expect("u64 fixed layout");
-    buf
+    value.to_be_bytes()
 }
 
 fn encode_u16(value: u16) -> [u8; 2] {
-    let mut buf = [0; 2];
-    U16be(value).encode(&mut buf).expect("u16 fixed layout");
-    buf
+    value.to_be_bytes()
 }
 
 fn mask_prefix_to_depth(mut prefix: [u8; 32], bit_depth: u16) -> [u8; 32] {

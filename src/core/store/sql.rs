@@ -16,7 +16,7 @@ pub(super) fn table_declarations_from_schema_sources(
                 source_index + 1
             ))
         })?;
-        for table in document.tables {
+        for table in document {
             if !seen.insert(table.name.clone()) {
                 return Err(rusqlite::Error::InvalidParameterName(format!(
                     "duplicate schema table {}",
@@ -168,12 +168,6 @@ pub(super) fn decode_column_value(
             })?;
             Ok(Value::Integer(value))
         }
-        ColumnType::I64 => {
-            let raw = reader
-                .array::<8>()
-                .map_err(|err| typed_wire_error(label, err))?;
-            Ok(Value::Integer(i64::from_be_bytes(raw)))
-        }
         ColumnType::Text => {
             let text = reader
                 .string_u32be()
@@ -215,9 +209,6 @@ pub(super) fn encode_column_value(
             })?;
             out.u64be(value);
         }
-        (ColumnType::I64, Value::Integer(value)) => {
-            out.bytes(&value.to_be_bytes());
-        }
         (ColumnType::Text, Value::Text(text)) => {
             out.string_u32be(text)
                 .map_err(|err| typed_wire_error(label, err))?;
@@ -245,9 +236,7 @@ pub(super) fn sqlite_column_value(
 ) -> rusqlite::Result<Value> {
     match ty {
         ColumnType::Bytes { .. } => row.get::<_, Vec<u8>>(index).map(Value::Blob),
-        ColumnType::U64 | ColumnType::I64 | ColumnType::Bool => {
-            row.get::<_, i64>(index).map(Value::Integer)
-        }
+        ColumnType::U64 | ColumnType::Bool => row.get::<_, i64>(index).map(Value::Integer),
         ColumnType::Text => row.get::<_, String>(index).map(Value::Text),
     }
 }
@@ -465,7 +454,7 @@ pub(super) fn validate_sqlite_typed_table(
 pub(super) fn sqlite_type(ty: &ColumnType) -> &'static str {
     match ty {
         ColumnType::Bytes { .. } => "BLOB",
-        ColumnType::U64 | ColumnType::I64 => "INTEGER",
+        ColumnType::U64 => "INTEGER",
         ColumnType::Text => "TEXT",
         ColumnType::Bool => "INTEGER",
     }

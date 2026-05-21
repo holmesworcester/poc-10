@@ -19,7 +19,7 @@ fn checked_schema_sources() -> [&'static str; 3] {
 fn declared_table_names(sources: &[&str]) -> BTreeSet<String> {
     sources
         .iter()
-        .flat_map(|source| parse_schema(source).expect("schema parses").tables)
+        .flat_map(|source| parse_schema(source).expect("schema parses"))
         .filter(|table| table.storage == TableStorage::Durable)
         .map(|table| table.name)
         .collect()

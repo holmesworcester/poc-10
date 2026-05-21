@@ -154,6 +154,14 @@ Accountable criteria:
   of routing through `ColumnValue`/`SelectedRow` adapters.
 - Done in this branch: `schema_dsl.rs` is a small line-oriented parser for the
   declaration language we actually use, not a general token parser.
+- Done in this branch: the generic store surface no longer has an unused
+  replace-row path. `PutRow` commits are idempotent inserts, while replacement
+  is modeled explicitly as delete plus put when a protocol needs it.
+- Done in this branch: the schema DSL no longer accepts an unused `i64` column
+  type, and `parse_schema` returns the table declarations directly.
+- Done in this branch: `core::wire` no longer has scalar fixed-layout wrapper
+  structs (`U8`, `U16be`, `U32be`, `U64be`, `Bool8`) or unused crypto-size
+  aliases. Callers use direct `put_*`/`take_*` helpers for primitive fields.
 
 ## 1. Store All Intents In SQLite Queues
 

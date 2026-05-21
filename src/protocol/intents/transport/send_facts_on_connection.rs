@@ -98,10 +98,6 @@ impl SendFactsOnConnectionHandler {
 }
 
 impl IntentHandler for SendFactsOnConnectionHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == SEND_FACTS_ON_CONNECTION
-    }
-
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_send_facts_on_connection(intent)?;
         let mut ids = Vec::with_capacity(1 + input.fact_ids.len());

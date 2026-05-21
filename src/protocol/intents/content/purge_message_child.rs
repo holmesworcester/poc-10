@@ -87,10 +87,6 @@ impl PurgeMessageChildHandler {
 }
 
 impl IntentHandler for PurgeMessageChildHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == PURGE_MESSAGE_CHILD
-    }
-
     fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_purge_message_child(raw_intent)?;
         Ok(vec![input.parent_deletion_id, input.child_id])

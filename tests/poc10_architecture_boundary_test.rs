@@ -624,7 +624,6 @@ fn poc10_target_projectors_do_not_write_store_rows_directly() {
         ".write_transaction(",
         ".insert_table_rows(",
         ".insert_table_rows_in_tx(",
-        ".replace_table_rows_in_tx(",
         ".delete_table_rows(",
         ".delete_table_rows_in_tx(",
         ".execute(",

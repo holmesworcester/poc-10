@@ -62,10 +62,6 @@ impl SendSyncCompareResponseHandler {
 }
 
 impl IntentHandler for SendSyncCompareResponseHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == SEND_SYNC_COMPARE_RESPONSE
-    }
-
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_send_sync_compare_response(intent)?;
         Ok(vec![input.compare_fact_id])

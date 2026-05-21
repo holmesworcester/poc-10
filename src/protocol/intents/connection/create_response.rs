@@ -189,10 +189,6 @@ impl CreateConnectionResponseHandler {
 }
 
 impl IntentHandler for CreateConnectionResponseHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == CREATE_CONNECTION_RESPONSE
-    }
-
     fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_create_connection_response_intent(raw_intent)?;
         Ok(vec![

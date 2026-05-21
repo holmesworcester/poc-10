@@ -10,15 +10,22 @@
 //! coordinates encode equal bytes.
 
 use crate::core::wire;
-use crate::core::wire::{FixedLayout, U16be, U64be};
 
 use super::fact::{
     mask_prefix_to_depth, LocalHistoryNodeSecretFact, NODE_SECRET_BYTES, TRIE_LEAF_BIT_DEPTH,
 };
 
 pub const TYPE_LOCAL_HISTORY_NODE_SECRET: u8 = 31;
-pub const FACT_BYTES: usize =
-    1 + 32 + 32 + 32 + U64be::LEN + U64be::LEN + U16be::LEN + 32 + 32 + NODE_SECRET_BYTES;
+pub const FACT_BYTES: usize = 1
+    + 32
+    + 32
+    + 32
+    + wire::U64_BYTES
+    + wire::U64_BYTES
+    + wire::U16_BYTES
+    + 32
+    + 32
+    + NODE_SECRET_BYTES;
 pub const ROW_VALUE_BYTES: usize = 32 + 32 + NODE_SECRET_BYTES;
 
 pub fn encode_fact(fact: &LocalHistoryNodeSecretFact) -> Result<Vec<u8>, String> {

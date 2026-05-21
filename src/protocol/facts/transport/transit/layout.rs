@@ -6,9 +6,7 @@
 //! the size class; per-batch sizing is hidden inside the ciphertext.
 
 use crate::core::crypto::{XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES};
-use crate::core::wire::{
-    self, fixed_tag, Ciphertext, FixedLayout, Id32, Nonce24, Tag, WireError, U8,
-};
+use crate::core::wire::{self, fixed_tag, Ciphertext, FixedLayout, Id32, Nonce24, Tag, WireError};
 
 /// Public tag prefix shared by both transport::transit frame variants.
 pub const TRANSIT_FRAME_TAG: Tag<4> = fixed_tag(b"TRNS");
@@ -44,8 +42,13 @@ pub const TRANSIT_LARGE_CIPHERTEXT_BYTES: usize =
     TRANSIT_LARGE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
 
 /// Fixed public header size (tag + version + size class + 3 ids + nonce).
-pub const TRANSIT_HEADER_BYTES: usize =
-    Tag::<4>::LEN + U8::LEN + U8::LEN + Id32::LEN + Id32::LEN + Id32::LEN + Nonce24::LEN;
+pub const TRANSIT_HEADER_BYTES: usize = Tag::<4>::LEN
+    + wire::U8_BYTES
+    + wire::U8_BYTES
+    + Id32::LEN
+    + Id32::LEN
+    + Id32::LEN
+    + Nonce24::LEN;
 
 /// Outer wire length for a [`TransitSmallV1`] frame.
 pub const TRANSIT_SMALL_WIRE_BYTES: usize =
@@ -56,8 +59,8 @@ pub const TRANSIT_LARGE_WIRE_BYTES: usize =
     TRANSIT_HEADER_BYTES + Ciphertext::<TRANSIT_LARGE_CIPHERTEXT_BYTES>::LEN;
 
 const VERSION_OFFSET: usize = Tag::<4>::LEN;
-const SIZE_CLASS_OFFSET: usize = VERSION_OFFSET + U8::LEN;
-const SENDER_OFFSET: usize = SIZE_CLASS_OFFSET + U8::LEN;
+const SIZE_CLASS_OFFSET: usize = VERSION_OFFSET + wire::U8_BYTES;
+const SENDER_OFFSET: usize = SIZE_CLASS_OFFSET + wire::U8_BYTES;
 const RECEIVER_OFFSET: usize = SENDER_OFFSET + Id32::LEN;
 const CONNECTION_OFFSET: usize = RECEIVER_OFFSET + Id32::LEN;
 const NONCE_OFFSET: usize = CONNECTION_OFFSET + Id32::LEN;
@@ -179,11 +182,11 @@ pub fn peek_frame_header(bytes: &[u8]) -> Result<TransitFrameHeader, WireError> 
     if tag != TRANSIT_FRAME_TAG {
         return Err(WireError::NonZeroPadding { index: 0 });
     }
-    let version = U8::decode(&bytes[VERSION_OFFSET..SIZE_CLASS_OFFSET])?.0;
+    let version = wire::take_u8(&bytes[VERSION_OFFSET..SIZE_CLASS_OFFSET])?;
     if version != TRANSIT_FRAME_VERSION {
         return Err(WireError::InvalidBool { actual: version });
     }
-    let size_class = U8::decode(&bytes[SIZE_CLASS_OFFSET..SENDER_OFFSET])?.0;
+    let size_class = wire::take_u8(&bytes[SIZE_CLASS_OFFSET..SENDER_OFFSET])?;
     let sender_endpoint_id = Id32::decode(&bytes[SENDER_OFFSET..RECEIVER_OFFSET])?;
     let receiver_endpoint_id = Id32::decode(&bytes[RECEIVER_OFFSET..CONNECTION_OFFSET])?;
     let connection_id = Id32::decode(&bytes[CONNECTION_OFFSET..NONCE_OFFSET])?;
@@ -281,8 +284,11 @@ fn encode_header(
         });
     }
     TRANSIT_FRAME_TAG.encode(&mut out[..VERSION_OFFSET])?;
-    U8(TRANSIT_FRAME_VERSION).encode(&mut out[VERSION_OFFSET..SIZE_CLASS_OFFSET])?;
-    U8(size_class).encode(&mut out[SIZE_CLASS_OFFSET..SENDER_OFFSET])?;
+    wire::put_u8(
+        TRANSIT_FRAME_VERSION,
+        &mut out[VERSION_OFFSET..SIZE_CLASS_OFFSET],
+    )?;
+    wire::put_u8(size_class, &mut out[SIZE_CLASS_OFFSET..SENDER_OFFSET])?;
     sender.encode(&mut out[SENDER_OFFSET..RECEIVER_OFFSET])?;
     receiver.encode(&mut out[RECEIVER_OFFSET..CONNECTION_OFFSET])?;
     connection.encode(&mut out[CONNECTION_OFFSET..NONCE_OFFSET])?;
@@ -305,11 +311,11 @@ fn decode_header(
     if tag != TRANSIT_FRAME_TAG {
         return Err(WireError::NonZeroPadding { index: 0 });
     }
-    let version = U8::decode(&bytes[VERSION_OFFSET..SIZE_CLASS_OFFSET])?.0;
+    let version = wire::take_u8(&bytes[VERSION_OFFSET..SIZE_CLASS_OFFSET])?;
     if version != TRANSIT_FRAME_VERSION {
         return Err(WireError::InvalidBool { actual: version });
     }
-    let size_class = U8::decode(&bytes[SIZE_CLASS_OFFSET..SENDER_OFFSET])?.0;
+    let size_class = wire::take_u8(&bytes[SIZE_CLASS_OFFSET..SENDER_OFFSET])?;
     if size_class != expected_size_class {
         return Err(WireError::InvalidBool { actual: size_class });
     }

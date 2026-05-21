@@ -71,10 +71,6 @@ impl SendBootstrapConnectionRequestHandler {
 }
 
 impl IntentHandler for SendBootstrapConnectionRequestHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == SEND_BOOTSTRAP_CONNECTION_REQUEST
-    }
-
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         Ok(vec![
             decode_send_bootstrap_connection_request(intent)?.request_id,

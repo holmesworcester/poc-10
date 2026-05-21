@@ -69,10 +69,6 @@ impl SeedConnectionSyncHandler {
 }
 
 impl IntentHandler for SeedConnectionSyncHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == SEED_CONNECTION_SYNC
-    }
-
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = decode_seed_connection_sync(intent)?;
         Ok(vec![input.connection_id])

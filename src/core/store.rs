@@ -153,7 +153,7 @@ impl Store {
         let mut inserted = 0;
         for row in rows {
             if let Some(table) = self.typed_table(row.table) {
-                inserted += self.insert_typed_row(table, row, false)?;
+                inserted += self.insert_typed_row(table, row)?;
                 continue;
             }
             let table_name = quoted_table_name(row.table)?;
@@ -184,27 +184,6 @@ impl Store {
             inserted += changed;
         }
         Ok(inserted)
-    }
-
-    /// Replace rows in their declared tables.
-    pub fn replace_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
-        let mut replaced = 0;
-        for row in rows {
-            if let Some(table) = self.typed_table(row.table) {
-                replaced += self.insert_typed_row(table, row, true)?;
-                continue;
-            }
-            let table_name = quoted_table_name(row.table)?;
-            replaced += self.conn.execute(
-                &format!(
-                    "INSERT OR REPLACE INTO {table_name}
-                        (row_key, row_value)
-                     VALUES (?1, ?2)"
-                ),
-                params![row.key, row.value],
-            )?;
-        }
-        Ok(replaced)
     }
 
     /// Delete rows by key from one declared table.
@@ -428,27 +407,17 @@ impl Store {
         self.typed_tables.get(table.as_str())
     }
 
-    fn insert_typed_row(
-        &self,
-        table: &TableDeclaration,
-        row: TableRow,
-        replace: bool,
-    ) -> rusqlite::Result<usize> {
+    fn insert_typed_row(&self, table: &TableDeclaration, row: TableRow) -> rusqlite::Result<usize> {
         let values = decode_typed_row_values(table, &row)?;
         let quoted = quoted_table_name_str(&table.name)?;
         let columns = table_column_list(table)?;
         let placeholders = placeholders(table.columns.len());
-        let insert = if replace {
-            "INSERT OR REPLACE"
-        } else {
-            "INSERT OR IGNORE"
-        };
         let changed = self.conn.execute(
-            &format!("{insert} INTO {quoted} ({columns}) VALUES ({placeholders})"),
+            &format!("INSERT OR IGNORE INTO {quoted} ({columns}) VALUES ({placeholders})"),
             params_from_iter(values.iter()),
         )?;
 
-        if !replace && changed == 0 {
+        if changed == 0 {
             match self.typed_row_by_key(table, &row.key)? {
                 Some((_, existing)) if existing == row.value => {}
                 _ => {

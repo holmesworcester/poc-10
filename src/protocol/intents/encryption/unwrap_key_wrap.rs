@@ -22,10 +22,6 @@ impl UnwrapKeyWrapHandler {
 }
 
 impl IntentHandler for UnwrapKeyWrapHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == intent::UNWRAP_KEY_WRAP
-    }
-
     fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = intent::decode_unwrap_key_wrap_intent(raw_intent)?;
         // Loading is intentionally exact. A local device may hold several

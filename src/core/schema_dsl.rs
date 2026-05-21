@@ -5,7 +5,7 @@
 //! ```text
 //! [memory] row_table name;
 //! [memory] table name {
-//!   column name bytes[(N)]|u64|i64|text|bool;
+//!   column name bytes[(N)]|u64|text|bool;
 //!   row_key (column, ...);
 //!   [unique] index name (column, ...);
 //! }
@@ -13,17 +13,6 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SchemaDocument {
-    pub tables: Vec<TableDeclaration>,
-}
-
-impl SchemaDocument {
-    pub fn table(&self, name: &str) -> Option<&TableDeclaration> {
-        self.tables.iter().find(|table| table.name == name)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableDeclaration {
@@ -38,10 +27,6 @@ pub struct TableDeclaration {
 impl TableDeclaration {
     pub fn column(&self, name: &str) -> Option<&ColumnDeclaration> {
         self.columns.iter().find(|column| column.name == name)
-    }
-
-    pub fn index(&self, name: &str) -> Option<&IndexDeclaration> {
-        self.indexes.iter().find(|index| index.name == name)
     }
 }
 
@@ -67,7 +52,6 @@ pub struct ColumnDeclaration {
 pub enum ColumnType {
     Bytes { len: Option<usize> },
     U64,
-    I64,
     Text,
     Bool,
 }
@@ -109,7 +93,7 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-pub fn parse_schema(source: &str) -> Result<SchemaDocument, ParseError> {
+pub fn parse_schema(source: &str) -> Result<Vec<TableDeclaration>, ParseError> {
     let mut tables = Vec::new();
     let mut seen_tables = BTreeSet::new();
     let mut current: Option<TableBuilder> = None;
@@ -177,7 +161,7 @@ pub fn parse_schema(source: &str) -> Result<SchemaDocument, ParseError> {
         ));
     }
 
-    Ok(SchemaDocument { tables })
+    Ok(tables)
 }
 
 struct TableBuilder {
@@ -370,7 +354,6 @@ fn parse_type(line: usize, ty: &str) -> Result<ColumnType, ParseError> {
     }
     match ty {
         "u64" => Ok(ColumnType::U64),
-        "i64" => Ok(ColumnType::I64),
         "text" => Ok(ColumnType::Text),
         "bool" => Ok(ColumnType::Bool),
         _ => Err(ParseError::new(line, format!("unknown column type `{ty}`"))),
@@ -482,7 +465,7 @@ mod tests {
         )
         .expect("schema parses");
 
-        let opaque_facts = schema.table("facts").expect("row table");
+        let opaque_facts = table(&schema, "facts").expect("row table");
         assert_eq!(opaque_facts.kind, TableKind::Row);
         assert_eq!(opaque_facts.row_key.columns, vec!["key"]);
         assert_eq!(
@@ -490,7 +473,7 @@ mod tests {
             Some(&ColumnType::Bytes { len: None })
         );
 
-        let typed_facts = schema.table("facts_typed").expect("typed facts table");
+        let typed_facts = table(&schema, "facts_typed").expect("typed facts table");
         assert_eq!(typed_facts.kind, TableKind::Typed);
         assert_eq!(typed_facts.row_key.columns, vec!["id"]);
         assert_eq!(
@@ -498,7 +481,7 @@ mod tests {
             Some(&ColumnType::Bytes { len: Some(32) })
         );
         assert_eq!(
-            typed_facts.index("by_scope_time"),
+            index(typed_facts, "by_scope_time"),
             Some(&IndexDeclaration {
                 name: "by_scope_time".to_string(),
                 unique: false,
@@ -506,7 +489,7 @@ mod tests {
             })
         );
         assert_eq!(
-            typed_facts.index("by_scope_id").map(|index| index.unique),
+            index(typed_facts, "by_scope_id").map(|index| index.unique),
             Some(true)
         );
     }
@@ -530,7 +513,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            core.table("local_intents").map(|table| table.storage),
+            table(&core, "local_intents").map(|table| table.storage),
             Some(TableStorage::Memory)
         );
     }
@@ -559,11 +542,15 @@ mod tests {
         assert!(err.detail.contains("unknown table statement"));
     }
 
-    fn table_names(document: &SchemaDocument) -> Vec<&str> {
-        document
-            .tables
-            .iter()
-            .map(|table| table.name.as_str())
-            .collect()
+    fn table<'a>(tables: &'a [TableDeclaration], name: &str) -> Option<&'a TableDeclaration> {
+        tables.iter().find(|table| table.name == name)
+    }
+
+    fn index<'a>(table: &'a TableDeclaration, name: &str) -> Option<&'a IndexDeclaration> {
+        table.indexes.iter().find(|index| index.name == name)
+    }
+
+    fn table_names(tables: &[TableDeclaration]) -> Vec<&str> {
+        tables.iter().map(|table| table.name.as_str()).collect()
     }
 }

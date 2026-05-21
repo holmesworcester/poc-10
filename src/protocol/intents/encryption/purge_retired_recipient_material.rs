@@ -16,10 +16,6 @@ impl PurgeRetiredRecipientMaterialHandler {
 }
 
 impl IntentHandler for PurgeRetiredRecipientMaterialHandler {
-    fn accepts(&self, intent: &Intent) -> bool {
-        intent.kind.as_str() == intent::PURGE_RETIRED_RECIPIENT_MATERIAL
-    }
-
     fn input_fact_ids(&self, raw_intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         let input = intent::decode_purge_retired_recipient_material_intent(raw_intent)?;
         Ok(vec![input.local_recipient_key_id])

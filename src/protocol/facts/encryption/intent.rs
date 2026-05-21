@@ -2,7 +2,7 @@
 
 use crate::core::facts::FactId;
 use crate::core::intents::{Intent, IntentKind};
-use crate::core::wire::{FixedLayout, U16be, U64be};
+use crate::core::wire;
 
 use super::fact::{RecipientKeyId, WorkspaceId};
 use crate::protocol::matchers::{WrapSourceKind, WrapSourceSelector};
@@ -319,25 +319,17 @@ fn decode_retired_recipient_payload(payload: &[u8]) -> Result<(RecipientKeyId, F
 }
 
 fn encode_u64(value: u64) -> [u8; 8] {
-    let mut buf = [0; 8];
-    U64be(value).encode(&mut buf).expect("u64 fixed layout");
-    buf
+    value.to_be_bytes()
 }
 
 fn encode_u16(value: u16) -> [u8; 2] {
-    let mut buf = [0; 2];
-    U16be(value).encode(&mut buf).expect("u16 fixed layout");
-    buf
+    value.to_be_bytes()
 }
 
 fn decode_u64(bytes: &[u8]) -> Result<u64, String> {
-    U64be::decode(bytes)
-        .map(|value| value.0)
-        .map_err(|err| format!("invalid u64 field: {err:?}"))
+    wire::take_u64be(bytes).map_err(|err| format!("invalid u64 field: {err:?}"))
 }
 
 fn decode_u16(bytes: &[u8]) -> Result<u16, String> {
-    U16be::decode(bytes)
-        .map(|value| value.0)
-        .map_err(|err| format!("invalid u16 field: {err:?}"))
+    wire::take_u16be(bytes).map_err(|err| format!("invalid u16 field: {err:?}"))
 }

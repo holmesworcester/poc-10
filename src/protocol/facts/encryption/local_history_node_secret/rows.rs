@@ -8,7 +8,7 @@
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};
-use crate::core::wire::{FixedLayout, U16be, U64be};
+use crate::core::wire;
 
 use super::fact::{
     mask_prefix_to_depth, LocalHistoryNodeSecretFact, LocalHistoryNodeSecretId, RemovalFrontierId,
@@ -19,7 +19,7 @@ use super::layout;
 pub const LOCAL_HISTORY_NODE_SECRET_ROWS: TableName =
     TableName::new("local_history_node_secret_rows");
 
-pub const ROW_KEY_BYTES: usize = 32 + 32 + U64be::LEN + U64be::LEN + U16be::LEN + 32;
+pub const ROW_KEY_BYTES: usize = 32 + 32 + wire::U64_BYTES + wire::U64_BYTES + wire::U16_BYTES + 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalHistoryNodeSecretRow {
