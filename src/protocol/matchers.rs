@@ -6,7 +6,6 @@
 pub mod coverage;
 pub mod exact;
 pub mod range;
-mod sql;
 pub mod wrap_source;
 
 pub use coverage::*;

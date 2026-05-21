@@ -5,8 +5,8 @@
 //! stores the opaque ciphertext alongside the slice's fact id and timestamp.
 
 use crate::core::facts::FactId;
+use crate::core::intents::SqlValue as Value;
 use crate::core::intents::TableInsert;
-use crate::core::select::Value;
 use crate::core::store::{Store, TableName};
 use rusqlite::params;
 

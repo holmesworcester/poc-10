@@ -4,8 +4,8 @@
 //! single workspace's content without decoding the fact store. The value
 //! stores the timestamp and the original payload byte count.
 
+use crate::core::intents::SqlValue as Value;
 use crate::core::intents::TableInsert;
-use crate::core::select::Value;
 use crate::core::store::TableName;
 
 use super::fact::{ContentEventFact, WorkspaceId};

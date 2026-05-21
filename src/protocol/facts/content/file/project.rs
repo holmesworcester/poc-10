@@ -9,11 +9,11 @@
 //!      descriptor row, and share the fact. File bytes remain slice facts.
 
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::intents::SqlValue as Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::core::select::Value;
 
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::content::{file_deletion, message, message_deletion};

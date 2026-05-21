@@ -7,8 +7,8 @@
 //! per-file decryption secret.
 
 use crate::core::facts::FactId;
+use crate::core::intents::SqlValue as Value;
 use crate::core::intents::TableInsert;
-use crate::core::select::Value;
 use crate::core::store::TableName;
 
 use super::fact::{AuthorId, ContentFileFact, RootHash, WorkspaceId};

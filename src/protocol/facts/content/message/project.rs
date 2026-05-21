@@ -512,33 +512,33 @@ mod projector_tests {
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
         assert_eq!(
             row.values[0],
-            topo::core::select::Value::Bytes(message.workspace_id.to_vec())
+            topo::core::intents::SqlValue::Bytes(message.workspace_id.to_vec())
         );
         assert_eq!(
             row.values[1],
-            topo::core::select::Value::Bytes(fact.id.to_vec())
+            topo::core::intents::SqlValue::Bytes(fact.id.to_vec())
         );
         assert_eq!(
             row.values[2],
-            topo::core::select::Value::Bytes(message.author_user_id.to_vec())
+            topo::core::intents::SqlValue::Bytes(message.author_user_id.to_vec())
         );
         assert_eq!(
             row.values[4],
-            topo::core::select::Value::Bytes(message.signer_id.to_vec())
+            topo::core::intents::SqlValue::Bytes(message.signer_id.to_vec())
         );
         assert_eq!(
             row.values[5],
-            topo::core::select::Value::Bytes(message.frontier_id.to_vec())
+            topo::core::intents::SqlValue::Bytes(message.frontier_id.to_vec())
         );
 
         let opened = put_row!(output, rows::OPENED_MESSAGE_ROWS).expect("opened row");
         assert_eq!(
             opened.values[1],
-            topo::core::select::Value::Bytes(fact.id.to_vec())
+            topo::core::intents::SqlValue::Bytes(fact.id.to_vec())
         );
         assert_eq!(
             opened.values[5],
-            topo::core::select::Value::Bytes(b"hello from content message".to_vec())
+            topo::core::intents::SqlValue::Bytes(b"hello from content message".to_vec())
         );
     }
 

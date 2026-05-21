@@ -5,10 +5,8 @@ use crate::core::context::{
 };
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{FactId, FactScope, ScopeKind};
-use crate::core::matchers::{ContextMatcher, ContextMatchers};
+use crate::core::matchers::ContextMatchers;
 use crate::core::projectors::{MatchedContext, ProjectionContext};
-use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION};
-use crate::core::select;
 use crate::core::store::Store;
 use crate::core::wire::{Reader, WireError};
 use rusqlite::params;
@@ -70,26 +68,6 @@ pub(super) fn insert_context_offer_in_tx(
     )
 }
 
-#[cfg(test)]
-pub(crate) fn insert_context_need_for_test(
-    store: &Store,
-    need: &ContextNeed,
-) -> Result<(), String> {
-    store
-        .write_transaction(|tx| insert_context_need_in_tx(tx, need).map(|_| ()))
-        .map_err(|err| format!("insert context need: {err}"))
-}
-
-#[cfg(test)]
-pub(crate) fn insert_context_offer_for_test(
-    store: &Store,
-    offer: &ContextOffer,
-) -> Result<(), String> {
-    store
-        .write_transaction(|tx| insert_context_offer_in_tx(tx, offer).map(|_| ()))
-        .map_err(|err| format!("insert context offer: {err}"))
-}
-
 pub(super) fn stored_offers_for_exact_match(
     store: &Store,
     role: &Role,
@@ -140,6 +118,52 @@ fn stored_offers_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextO
         ORDER BY owner, role, scope_key, selector
         "#,
         &[(":owner", bytes(owner))],
+    )
+}
+
+fn stored_needs_for_role_scope(
+    store: &Store,
+    role: &Role,
+    scope: &FactScope,
+) -> Result<Vec<ContextNeed>, String> {
+    let scope_key = scope_key(scope);
+    select_context_needs(
+        store,
+        r#"
+        SELECT owner, role, scope_key, selector
+        FROM context_edges
+        WHERE direction = 'need'
+          AND role = :role
+          AND scope_key = :scope_key
+        ORDER BY owner, selector
+        "#,
+        &[
+            (":role", text(role.as_str())),
+            (":scope_key", bytes(&scope_key)),
+        ],
+    )
+}
+
+fn stored_offers_for_role_scope(
+    store: &Store,
+    role: &Role,
+    scope: &FactScope,
+) -> Result<Vec<ContextOffer>, String> {
+    let scope_key = scope_key(scope);
+    select_context_offers(
+        store,
+        r#"
+        SELECT owner, role, scope_key, selector
+        FROM context_edges
+        WHERE direction = 'offer'
+          AND role = :role
+          AND scope_key = :scope_key
+        ORDER BY owner, selector
+        "#,
+        &[
+            (":role", text(role.as_str())),
+            (":scope_key", bytes(&scope_key)),
+        ],
     )
 }
 
@@ -319,8 +343,11 @@ pub(super) fn stored_matching_context(
         }
 
         for matcher in matchers.custom_for_role(&need.role) {
-            let candidate_offers = matcher.matching_offers_for_need_from_store(store, need)?;
-            for offer in candidate_offers {
+            let candidate_offers = stored_offers_for_role_scope(store, &need.role, &need.scope)?;
+            for offer in candidate_offers
+                .into_iter()
+                .filter(|offer| matcher.matches(need, offer))
+            {
                 push_stored_matched_context(store, need, offer, &mut seen, &mut matched)?;
             }
         }
@@ -393,22 +420,14 @@ pub(super) fn wake_context_matches_in_tx(
         .iter()
         .filter(|need| matchers.has_exact_role(&need.role))
     {
-        inserted += insert_pending_projection_from_select_in_tx(
-            store,
-            &exact_offers_for_need_select(need),
-            "need",
-        )?;
+        inserted += wake_exact_need_in_tx(store, need)?;
     }
     for offer in delta
         .added_offers
         .iter()
         .filter(|offer| matchers.has_exact_role(&offer.role))
     {
-        inserted += insert_pending_projection_from_select_in_tx(
-            store,
-            &exact_needs_for_offer_select(offer),
-            "offer",
-        )?;
+        inserted += wake_exact_offer_in_tx(store, offer)?;
     }
     for matcher in matchers.custom() {
         for need in delta
@@ -416,88 +435,91 @@ pub(super) fn wake_context_matches_in_tx(
             .iter()
             .filter(|need| matcher.role() == &need.role)
         {
-            inserted += wake_need_in_tx(store, matcher, need)?;
+            let has_match = stored_offers_for_role_scope(store, &need.role, &need.scope)?
+                .iter()
+                .any(|offer| matcher.matches(need, offer));
+            if has_match {
+                inserted += insert_pending_owners_in_tx(store, &[need.owner])?;
+            }
         }
         for offer in delta
             .added_offers
             .iter()
             .filter(|offer| matcher.role() == &offer.role)
         {
-            inserted += wake_offer_in_tx(store, matcher, offer)?;
+            let owners = stored_needs_for_role_scope(store, &offer.role, &offer.scope)?
+                .into_iter()
+                .filter(|need| matcher.matches(need, offer))
+                .map(|need| need.owner)
+                .collect::<Vec<_>>();
+            inserted += insert_pending_owners_in_tx(store, &owners)?;
         }
     }
     Ok(inserted)
 }
 
-fn exact_offers_for_need_select(need: &ContextNeed) -> select::Select {
+fn wake_exact_need_in_tx(store: &Store, need: &ContextNeed) -> Result<usize, String> {
     let scope_key = scope_key(&need.scope);
-    select::Select::new(
-        r#"
-        SELECT :need_owner AS owner
-        WHERE EXISTS (
+    store
+        .conn()
+        .execute(
+            r#"
+            INSERT OR IGNORE INTO pending_projection (owner)
+            SELECT ?1
+            WHERE EXISTS (
             SELECT 1
             FROM context_edges
             WHERE direction = 'offer'
-              AND role = :role
-              AND scope_key = :scope_key
-              AND selector = :selector
+              AND role = ?2
+              AND scope_key = ?3
+              AND selector = ?4
         )
         "#,
-        &[CONTEXT_EDGES],
-        vec![
-            select::Param::bytes(":need_owner", need.owner),
-            select::Param::text(":role", need.role.as_str()),
-            select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":selector", need.selector.as_bytes()),
-        ],
-    )
+            params![
+                need.owner.as_slice(),
+                need.role.as_str(),
+                scope_key.as_slice(),
+                need.selector.as_bytes(),
+            ],
+        )
+        .map_err(|err| format!("wake exact need: {err}"))
 }
 
-fn exact_needs_for_offer_select(offer: &ContextOffer) -> select::Select {
+fn wake_exact_offer_in_tx(store: &Store, offer: &ContextOffer) -> Result<usize, String> {
     let scope_key = scope_key(&offer.scope);
-    select::Select::new(
-        r#"
-        SELECT n.owner
-        FROM context_edges n
-        JOIN local_fact_admissions a ON a.fact_id = n.owner
-        WHERE n.direction = 'need'
-          AND n.role = :role
-          AND n.scope_key = :scope_key
-          AND n.selector = :selector
-        ORDER BY a.received_at, n.owner
-        "#,
-        &[CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS],
-        vec![
-            select::Param::text(":role", offer.role.as_str()),
-            select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":selector", offer.selector.as_bytes()),
-        ],
-    )
+    store
+        .conn()
+        .execute(
+            r#"
+            INSERT OR IGNORE INTO pending_projection (owner)
+            SELECT n.owner
+            FROM context_edges n
+            JOIN local_fact_admissions a ON a.fact_id = n.owner
+            WHERE n.direction = 'need'
+              AND n.role = ?1
+              AND n.scope_key = ?2
+              AND n.selector = ?3
+            ORDER BY a.received_at, n.owner
+            "#,
+            params![
+                offer.role.as_str(),
+                scope_key.as_slice(),
+                offer.selector.as_bytes(),
+            ],
+        )
+        .map_err(|err| format!("wake exact offer: {err}"))
 }
 
-fn wake_need_in_tx(
-    store: &Store,
-    matcher: &dyn ContextMatcher,
-    need: &ContextNeed,
-) -> Result<usize, String> {
-    let select = matcher.wake_select_for_added_need(need)?;
-    insert_pending_projection_from_select_in_tx(store, &select, "need")
-}
-
-fn wake_offer_in_tx(
-    store: &Store,
-    matcher: &dyn ContextMatcher,
-    offer: &ContextOffer,
-) -> Result<usize, String> {
-    let select = matcher.wake_select_for_added_offer(offer)?;
-    insert_pending_projection_from_select_in_tx(store, &select, "offer")
-}
-
-fn insert_pending_projection_from_select_in_tx(
-    store: &Store,
-    select: &select::Select,
-    edge_kind: &str,
-) -> Result<usize, String> {
-    select::insert_select_in_tx(store, PENDING_PROJECTION, &["owner"], select)
-        .map_err(|err| format!("wake {edge_kind} from SELECT: {err}"))
+fn insert_pending_owners_in_tx(store: &Store, owners: &[FactId]) -> Result<usize, String> {
+    let mut stmt = store
+        .conn()
+        .prepare("INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)")
+        .map_err(|err| format!("wake custom context: {err}"))?;
+    let mut inserted = 0usize;
+    for owner in owners {
+        inserted += stmt
+            .execute(params![owner.as_slice()])
+            .map_err(|err| format!("wake custom context: {err}"))?;
+    }
+    Ok(inserted)
 }

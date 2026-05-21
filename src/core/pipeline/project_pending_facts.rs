@@ -15,14 +15,11 @@ use crate::core::matchers::ContextMatchers;
 use crate::core::projectors::{
     ProjectionContext, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
 };
-use crate::core::schema::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
-use crate::core::select;
 use crate::core::store::{Store, TableName};
-use rusqlite::params;
+use rusqlite::{named_params, params};
 
-const TIME_WAKE_TABLES: &[TableName] = &[TIME_WAKES];
-
-const DUE_TIME_WAKE_OWNER_SQL: &str = r#"
+const INSERT_DUE_TIME_WAKE_OWNER_SQL: &str = r#"
+INSERT OR IGNORE INTO pending_projection (owner)
 SELECT owner
 FROM time_wakes
 WHERE timeline = :timeline
@@ -32,7 +29,9 @@ ORDER BY at, owner
 LIMIT :limit
 "#;
 
-const DUE_TIME_RANGE_SQL: &str = r#"
+const INSERT_DUE_TIME_RANGE_SQL: &str = r#"
+INSERT OR IGNORE INTO pending_time_ranges
+    (owner, timeline, has_start, start_exclusive, end_inclusive)
 SELECT owner,
        :timeline AS timeline,
        :has_start AS has_start,
@@ -167,32 +166,33 @@ fn enqueue_due_time_wakes_in_tx(
 ) -> rusqlite::Result<usize> {
     let has_start = range.start_exclusive.is_some();
     let start_exclusive = range.start_exclusive.unwrap_or(0);
-    let params = vec![
-        select::Param::text(":timeline", range.timeline.as_str()),
-        select::Param::bool(":has_start", has_start),
-        select::Param::u64(":start_exclusive", start_exclusive),
-        select::Param::u64(":end_inclusive", range.end_inclusive),
-        select::Param::u64(":limit", limit as u64),
-    ];
+    let has_start = i64::from(has_start);
+    let start_exclusive = sqlite_u64(start_exclusive, "start_exclusive")?;
+    let end_inclusive = sqlite_u64(range.end_inclusive, "end_inclusive")?;
+    let limit = i64::try_from(limit).map_err(|_| {
+        rusqlite::Error::InvalidParameterName("time wake limit exceeds i64".to_string())
+    })?;
 
-    let inserted = select::insert_select_in_tx(
-        store,
-        PENDING_PROJECTION,
-        &["owner"],
-        &select::Select::new(DUE_TIME_WAKE_OWNER_SQL, TIME_WAKE_TABLES, params.clone()),
+    let inserted = store.conn().execute(
+        INSERT_DUE_TIME_WAKE_OWNER_SQL,
+        named_params! {
+            ":timeline": range.timeline.as_str(),
+            ":has_start": has_start,
+            ":start_exclusive": start_exclusive,
+            ":end_inclusive": end_inclusive,
+            ":limit": limit,
+        },
     )?;
 
-    select::insert_select_in_tx(
-        store,
-        PENDING_TIME_RANGES,
-        &[
-            "owner",
-            "timeline",
-            "has_start",
-            "start_exclusive",
-            "end_inclusive",
-        ],
-        &select::Select::new(DUE_TIME_RANGE_SQL, TIME_WAKE_TABLES, params),
+    store.conn().execute(
+        INSERT_DUE_TIME_RANGE_SQL,
+        named_params! {
+            ":timeline": range.timeline.as_str(),
+            ":has_start": has_start,
+            ":start_exclusive": start_exclusive,
+            ":end_inclusive": end_inclusive,
+            ":limit": limit,
+        },
     )?;
 
     Ok(inserted)

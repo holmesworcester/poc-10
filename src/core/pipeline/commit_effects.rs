@@ -1,8 +1,9 @@
 use crate::core::effects::PipelineEffects;
 use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
-use crate::core::intents::{Intent, RowMutation, TableDelete, TableDeleteWhere, TableInsert};
+use crate::core::intents::{
+    Intent, RowMutation, SqlValue, TableDelete, TableDeleteWhere, TableInsert,
+};
 use crate::core::schema::LOCAL_INTENTS;
-use crate::core::select::Value as SqlValue;
 use crate::core::store::{
     quoted_identifier, quoted_identifier_list, quoted_table_name, Store, TableName, TableRow,
 };

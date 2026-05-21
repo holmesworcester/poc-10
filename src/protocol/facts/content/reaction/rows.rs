@@ -7,8 +7,8 @@
 //! resolves the per-message decryption secret.
 
 use crate::core::facts::FactId;
+use crate::core::intents::SqlValue as Value;
 use crate::core::intents::TableInsert;
-use crate::core::select::Value;
 use crate::core::store::{Store, TableName};
 use rusqlite::params;
 

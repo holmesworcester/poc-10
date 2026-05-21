@@ -5,46 +5,11 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::select;
+use crate::core::matchers::ContextMatcher;
 
 use super::exact::protocol_role;
-use super::sql;
 
 pub const SYNC_RANGE_FACT_ROLE: &str = "sync_range_fact";
-
-pub const RANGE_FACT_OFFERS_FOR_NEED_SQL: &str = "
-SELECT owner, selector
-FROM context_edges
-WHERE direction = 'offer'
-  AND role = :role
-  AND scope_key = :scope_key
-  AND length(selector) = 104
-  AND substr(selector, 1, 8) >= :start
-  AND substr(selector, 1, 8) <= :end
-ORDER BY owner, selector";
-
-pub const RANGE_FACT_WAKE_FOR_NEED_SQL: &str = "
-SELECT :need_owner AS owner
-FROM context_edges
-WHERE direction = 'offer'
-  AND role = :role
-  AND scope_key = :scope_key
-  AND length(selector) = 104
-  AND substr(selector, 1, 8) >= :start
-  AND substr(selector, 1, 8) <= :end
-ORDER BY owner, selector";
-
-pub const RANGE_FACT_WAKE_FOR_OFFER_SQL: &str = "
-SELECT n.owner
-FROM context_edges n
-JOIN local_fact_admissions a ON a.fact_id = n.owner
-WHERE n.direction = 'need'
-  AND n.role = :role
-  AND n.scope_key = :scope_key
-  AND length(n.selector) = 16
-  AND substr(n.selector, 1, 8) <= :timestamp
-  AND substr(n.selector, 9, 8) >= :timestamp
-ORDER BY a.received_at, n.owner";
 
 pub fn range_fact_role() -> Role {
     protocol_role(SYNC_RANGE_FACT_ROLE)
@@ -147,51 +112,14 @@ impl Default for RangeFactMatcher {
     }
 }
 
-sql::sql_backed_matcher! {
-    RangeFactMatcher {
-        offers_for_need: RANGE_FACT_OFFERS_FOR_NEED_SQL => range_need_query_params,
-        wake_for_need: RANGE_FACT_WAKE_FOR_NEED_SQL => range_need_wake_params,
-        wake_for_offer: RANGE_FACT_WAKE_FOR_OFFER_SQL => range_offer_wake_params,
+impl ContextMatcher for RangeFactMatcher {
+    fn role(&self) -> &Role {
+        &self.role
     }
-}
 
-fn range_need_query_params(role: &Role, need: &ContextNeed) -> Option<Vec<select::Param>> {
-    let Some((start, end)) = decode_range_need_selector(&need.selector) else {
-        return None;
-    };
-    let scope_key = sql::scope_key_for_sql(&need.scope);
-    Some(vec![
-        select::Param::text(":role", role.as_str()),
-        select::Param::bytes(":scope_key", scope_key),
-        select::Param::bytes(":start", start.to_be_bytes()),
-        select::Param::bytes(":end", end.to_be_bytes()),
-    ])
-}
-
-fn range_need_wake_params(role: &Role, need: &ContextNeed) -> Option<Vec<select::Param>> {
-    let Some((start, end)) = decode_range_need_selector(&need.selector) else {
-        return None;
-    };
-    let scope_key = sql::scope_key_for_sql(&need.scope);
-    Some(vec![
-        select::Param::bytes(":need_owner", need.owner),
-        select::Param::text(":role", role.as_str()),
-        select::Param::bytes(":scope_key", scope_key),
-        select::Param::bytes(":start", start.to_be_bytes()),
-        select::Param::bytes(":end", end.to_be_bytes()),
-    ])
-}
-
-fn range_offer_wake_params(role: &Role, offer: &ContextOffer) -> Option<Vec<select::Param>> {
-    let Some(selector) = decode_range_offer_selector(&offer.selector) else {
-        return None;
-    };
-    let scope_key = sql::scope_key_for_sql(&offer.scope);
-    Some(vec![
-        select::Param::text(":role", role.as_str()),
-        select::Param::bytes(":scope_key", scope_key),
-        select::Param::bytes(":timestamp", selector.timestamp.to_be_bytes()),
-    ])
+    fn matches(&self, need: &ContextNeed, offer: &ContextOffer) -> bool {
+        range_fact_match(need, offer)
+    }
 }
 
 pub fn range_fact_match(need: &ContextNeed, offer: &ContextOffer) -> bool {
@@ -213,12 +141,6 @@ pub fn range_fact_match(need: &ContextNeed, offer: &ContextOffer) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::matchers::ContextMatcher;
-    use crate::core::pipeline::context::{
-        insert_context_need_for_test, insert_context_offer_for_test,
-    };
-    use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::core::store::Store;
     use crate::protocol::matchers::workspace_scope;
 
     #[test]
@@ -239,24 +161,5 @@ mod tests {
         let offer = range_fact_offer([3; 32], scope, 21, [4; 32], [5; 32], [6; 32]);
 
         assert!(!range_fact_match(&need, &offer));
-    }
-
-    #[test]
-    fn range_fact_matcher_uses_declared_sql_candidate_queries() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
-        let scope = workspace_scope([1; 32]);
-        let need = range_fact_need([2; 32], scope.clone(), 10, 20);
-        let matching = range_fact_offer([3; 32], scope.clone(), 12, [4; 32], [5; 32], [6; 32]);
-        let too_late = range_fact_offer([7; 32], scope.clone(), 21, [8; 32], [9; 32], [10; 32]);
-        insert_context_offer_for_test(&store, &matching).expect("insert matching offer");
-        insert_context_offer_for_test(&store, &too_late).expect("insert non-matching offer");
-        insert_context_need_for_test(&store, &need).expect("insert need");
-
-        let matcher = RangeFactMatcher::new();
-        let offers = matcher
-            .matching_offers_for_need_from_store(&store, &need)
-            .expect("query offers");
-        assert_eq!(offers, vec![matching.clone()]);
     }
 }

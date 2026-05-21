@@ -2,10 +2,36 @@
 
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::select::Value as SqlValue;
 use crate::core::store::{Store, TableName, TableRow};
 use std::collections::BTreeMap;
 use std::fmt;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlValue {
+    Bytes(Vec<u8>),
+    Text(String),
+    U64(u64),
+    I64(i64),
+    Bool(bool),
+}
+
+impl SqlValue {
+    pub(crate) fn as_sqlite_value(&self) -> rusqlite::Result<rusqlite::types::Value> {
+        match self {
+            Self::Bytes(value) => Ok(rusqlite::types::Value::Blob(value.clone())),
+            Self::Text(value) => Ok(rusqlite::types::Value::Text(value.clone())),
+            Self::U64(value) => i64::try_from(*value)
+                .map(rusqlite::types::Value::Integer)
+                .map_err(|_| {
+                    rusqlite::Error::InvalidParameterName(
+                        "SQL value exceeds SQLite integer range".to_string(),
+                    )
+                }),
+            Self::I64(value) => Ok(rusqlite::types::Value::Integer(*value)),
+            Self::Bool(value) => Ok(rusqlite::types::Value::Integer(i64::from(*value))),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IntentKind(String);

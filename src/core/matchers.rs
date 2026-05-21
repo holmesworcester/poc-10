@@ -1,28 +1,12 @@
 //! Core context matching.
 
 use crate::core::context::{ContextNeed, ContextOffer, Role};
-use crate::core::select;
-use crate::core::store::Store;
 use std::collections::BTreeSet;
 
 pub trait ContextMatcher {
     fn role(&self) -> &Role;
 
-    fn matching_offers_for_need_from_store(
-        &self,
-        _store: &Store,
-        _need: &ContextNeed,
-    ) -> Result<Vec<ContextOffer>, String> {
-        Ok(Vec::new())
-    }
-
-    fn wake_select_for_added_need(&self, _need: &ContextNeed) -> Result<select::Select, String> {
-        Ok(select::Select::empty())
-    }
-
-    fn wake_select_for_added_offer(&self, _offer: &ContextOffer) -> Result<select::Select, String> {
-        Ok(select::Select::empty())
-    }
+    fn matches(&self, need: &ContextNeed, offer: &ContextOffer) -> bool;
 }
 
 pub struct ContextMatchers {
